@@ -132,3 +132,92 @@ class TestLoop:
         first = chat.calls[0]["messages"][0]
         assert first["role"] == "system"
         assert "read_docs" in first["content"]
+
+
+class TestContextCompaction:
+    def big_output_agent(self, responses, monkeypatch, **kwargs):
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(agent_module.tools, "run_command", lambda cmd, **_kw: "X" * 5000)
+        return make_agent(responses, **kwargs)
+
+    def test_previous_task_tool_output_trimmed_on_new_task(self, monkeypatch):
+        agent, _ = self.big_output_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="big")]),
+                model_says("task 1 done"),
+                model_says("task 2 done"),
+            ],
+            monkeypatch,
+        )
+        agent.run_task("first")
+        assert len(tool_messages(agent.messages)[0]["content"]) == 5000
+        agent.run_task("second")
+        old = tool_messages(agent.messages)[0]["content"]
+        assert "[trimmed" in old
+        assert len(old) < 300
+
+    def test_system_prompt_never_trimmed(self, monkeypatch):
+        agent, _ = self.big_output_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="big")]),
+                model_says("done"),
+                model_says("done again"),
+            ],
+            monkeypatch,
+        )
+        agent.run_task("first")
+        agent.run_task("second")
+        assert "read_docs" in agent.messages[0]["content"]
+
+    def test_budget_trims_oldest_within_task_keeps_recent_two(self, monkeypatch):
+        run = model_says(tool_calls=[tool_call("run_command", command="big")])
+        agent, _ = self.big_output_agent(
+            [run, run, run, run, model_says("done")],
+            monkeypatch,
+            num_ctx=100,  # tiny budget: forces trimming mid-task
+        )
+        agent.run_task("lots of output")
+        contents = [m["content"] for m in tool_messages(agent.messages)]
+        assert len(contents) == 4
+        assert "[trimmed" in contents[0]
+        assert "[trimmed" in contents[1]
+        assert contents[2] == "X" * 5000
+        assert contents[3] == "X" * 5000
+
+    def test_topic_passed_through_to_read_docs(self, monkeypatch):
+        import aish.agent as agent_module
+
+        seen = {}
+
+        def fake_read_docs(command, topic=None):
+            seen.update(command=command, topic=topic)
+            return "docs"
+
+        monkeypatch.setattr(agent_module.tools, "read_docs", fake_read_docs)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="find", topic="maxdepth")]),
+                model_says("done"),
+            ]
+        )
+        agent.run_task("check find docs")
+        assert seen == {"command": "find", "topic": "maxdepth"}
+
+
+def test_tool_exception_becomes_result_not_crash(monkeypatch):
+    """Regression: an exception inside a tool must not kill the session."""
+    import aish.agent as agent_module
+
+    def boom(cmd, **_kw):
+        raise UnicodeDecodeError("utf-8", b"\xdf", 0, 1, "invalid continuation byte")
+
+    monkeypatch.setattr(agent_module.tools, "run_command", boom)
+    agent, _ = make_agent(
+        [
+            model_says(tool_calls=[tool_call("run_command", command="cat binary.plist")]),
+            model_says("recovered"),
+        ]
+    )
+    assert agent.run_task("read the plist") == "recovered"
+    assert "failed internally" in tool_messages(agent.messages)[0]["content"]

@@ -26,6 +26,12 @@ def truncate(text: str, head: int = HEAD_CHARS, tail: int = TAIL_CHARS) -> str:
     return f"{text[:head]}\n[... {omitted} characters omitted ...]\n{text[-tail:]}"
 
 
+def _decode(data: bytes | None) -> str:
+    """Commands can emit arbitrary bytes (binary plists, etc.) — never let
+    decoding crash the agent."""
+    return (data or b"").decode("utf-8", errors="replace")
+
+
 def run_command(command: str, timeout: float = 120) -> str:
     """Execute a shell command; return combined output and exit status."""
     try:
@@ -33,24 +39,35 @@ def run_command(command: str, timeout: float = 120) -> str:
             command,
             shell=True,
             capture_output=True,
-            text=True,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return f"ERROR: command timed out after {timeout}s"
 
+    stdout, stderr = _decode(result.stdout), _decode(result.stderr)
     parts = []
-    if result.stdout:
-        parts.append(result.stdout.rstrip("\n"))
-    if result.stderr:
-        parts.append(f"[stderr]\n{result.stderr.rstrip()}")
+    if stdout:
+        parts.append(stdout.rstrip("\n"))
+    if stderr:
+        parts.append(f"[stderr]\n{stderr.rstrip()}")
     parts.append(f"[exit code: {result.returncode}]")
     return truncate("\n".join(parts))
 
 
-def read_docs(command: str) -> str:
-    """Look up documentation for a command: man page, then --help, then -h."""
+TOPIC_CONTEXT_LINES = 4
+TRUNCATION_HINT = (
+    "\n[docs truncated — call read_docs again with a 'topic' (e.g. a flag name) "
+    "to search the full text]"
+)
+
+
+def read_docs(command: str, topic: str | None = None) -> str:
+    """Look up documentation for a command: man page, then --help, then -h.
+
+    With a topic, returns only the lines matching it (plus context) from the
+    FULL documentation — the way past the truncation limit on big man pages.
+    """
     name = command.strip()
     if not COMMAND_NAME_RE.match(name):
         return (
@@ -58,41 +75,90 @@ def read_docs(command: str) -> str:
             "Pass a single command name with no arguments or shell syntax."
         )
 
+    found = _fetch_docs(name)
+    if found is None:
+        if shutil.which(name) is None:
+            return f"ERROR: '{name}' not found on this system (no man page, not in PATH)."
+        return (
+            f"NO DOCUMENTATION FOUND for '{name}' (tried man, --help, -h). "
+            "Proceed with maximum caution: use only flags you are certain of, "
+            "or tell the user documentation is unavailable."
+        )
+    text, source = found
+
+    if topic:
+        matched = _filter_topic(text, topic)
+        if matched:
+            return truncate(
+                f"[{source} — lines matching {topic!r}]\n{matched}", head=DOCS_MAX_CHARS, tail=0
+            )
+        return truncate(
+            f"[{source}] NO LINES MATCH {topic!r}; start of docs instead:\n{text}",
+            head=DOCS_MAX_CHARS,
+            tail=0,
+        )
+
+    result = f"[{source}]\n{text}"
+    if len(result) > DOCS_MAX_CHARS:
+        return truncate(result, head=DOCS_MAX_CHARS, tail=0) + TRUNCATION_HINT
+    return result
+
+
+def _fetch_docs(name: str) -> tuple[str, str] | None:
+    """Full documentation text and its source label, or None if none exists."""
     quoted = shlex.quote(name)
     man = subprocess.run(
         f"man {quoted} 2>/dev/null | col -b",
         shell=True,
         capture_output=True,
-        text=True,
         timeout=15,
         stdin=subprocess.DEVNULL,
     )
-    if man.stdout.strip():
-        return truncate(f"[man {name}]\n{man.stdout.strip()}", head=DOCS_MAX_CHARS, tail=0)
+    man_text = _decode(man.stdout).strip()
+    if man_text:
+        return man_text, f"man {name}"
 
     if shutil.which(name) is None:
-        return f"ERROR: '{name}' not found on this system (no man page, not in PATH)."
+        return None
 
     for flag in ("--help", "-h"):
         try:
             help_run = subprocess.run(
                 [name, flag],
                 capture_output=True,
-                text=True,
                 timeout=10,
                 stdin=subprocess.DEVNULL,
             )
         except (subprocess.TimeoutExpired, OSError):
             continue
-        output = (help_run.stdout + help_run.stderr).strip()
+        output = (_decode(help_run.stdout) + _decode(help_run.stderr)).strip()
         if output:
-            return truncate(f"[{name} {flag}]\n{output}", head=DOCS_MAX_CHARS, tail=0)
+            return output, f"{name} {flag}"
+    return None
 
-    return (
-        f"NO DOCUMENTATION FOUND for '{name}' (tried man, --help, -h). "
-        "Proceed with maximum caution: use only flags you are certain of, "
-        "or tell the user documentation is unavailable."
-    )
+
+def _filter_topic(text: str, topic: str) -> str:
+    """Lines matching topic (case-insensitive) with surrounding context,
+    overlapping regions merged, gaps marked."""
+    lines = text.splitlines()
+    needle = topic.lower()
+    keep: set[int] = set()
+    for i, line in enumerate(lines):
+        if needle in line.lower():
+            keep.update(
+                range(max(0, i - TOPIC_CONTEXT_LINES), min(len(lines), i + TOPIC_CONTEXT_LINES + 1))
+            )
+    if not keep:
+        return ""
+
+    out: list[str] = []
+    previous = None
+    for i in sorted(keep):
+        if previous is not None and i > previous + 1:
+            out.append("  [...]")
+        out.append(lines[i])
+        previous = i
+    return "\n".join(out)
 
 
 TOOL_SCHEMAS = [
@@ -103,7 +169,9 @@ TOOL_SCHEMAS = [
             "description": (
                 "Read the documentation for a CLI command (man page, falling back to "
                 "--help / -h). ALWAYS call this before using a command whose flags you "
-                "are not completely certain about, and after any usage/unknown-flag error."
+                "are not completely certain about, and after any usage/unknown-flag error. "
+                "If docs come back truncated, call again with a 'topic' to search the "
+                "full text."
             ),
             "parameters": {
                 "type": "object",
@@ -111,7 +179,14 @@ TOOL_SCHEMAS = [
                     "command": {
                         "type": "string",
                         "description": "Bare command name only, e.g. 'tar' — no arguments.",
-                    }
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": (
+                            "Optional search term (e.g. a flag name like 'maxdepth'): "
+                            "returns only matching lines with context from the full docs."
+                        ),
+                    },
                 },
                 "required": ["command"],
             },

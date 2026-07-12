@@ -12,6 +12,16 @@ Two design pillars:
   command without approval. `read_docs` is the only auto-approved tool and accepts a
   validated bare command name, never a shell string.
 
+Quality-of-life on top of the pillars:
+
+- Positively-identified read-only commands (`ls`, `grep`, `find` without `-exec`, …)
+  auto-approve to avoid prompt fatigue; anything the conservative parser doesn't fully
+  understand still prompts. Disable with `--ask-all`.
+- `read_docs` takes an optional `topic` to search full man pages past the truncation
+  limit (the model is told about this whenever docs come back truncated).
+- Old tool outputs are compacted between tasks and under context pressure, so long
+  REPL sessions never silently evict the system prompt.
+
 ## Usage
 
 ```sh

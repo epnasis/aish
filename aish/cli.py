@@ -5,6 +5,7 @@ import os
 import sys
 
 from .agent import Agent
+from .approval import is_read_only
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -15,13 +16,19 @@ RESET = "\033[0m"
 ECHO_PREVIEW_LINES = 12
 
 
-def ask_approval(command: str) -> bool:
-    print(f"\n{YELLOW}{BOLD}▶ run command?{RESET}\n  {BOLD}{command}{RESET}")
-    try:
-        answer = input(f"{YELLOW}[y/N]{RESET} ").strip().lower()
-    except EOFError:
-        return False
-    return answer in ("y", "yes")
+def make_approver(ask_all: bool):
+    def ask_approval(command: str) -> bool:
+        if not ask_all and is_read_only(command):
+            print(f"\n{GREEN}✓ read-only, auto-approved:{RESET} {BOLD}{command}{RESET}")
+            return True
+        print(f"\n{YELLOW}{BOLD}▶ run command?{RESET}\n  {BOLD}{command}{RESET}")
+        try:
+            answer = input(f"{YELLOW}[y/N]{RESET} ").strip().lower()
+        except EOFError:
+            return False
+        return answer in ("y", "yes")
+
+    return ask_approval
 
 
 def echo(text: str) -> None:
@@ -46,11 +53,16 @@ def main() -> int:
     parser.add_argument("--num-ctx", type=int, default=32768, help="context window tokens")
     parser.add_argument("--max-steps", type=int, default=25, help="max model turns per task")
     parser.add_argument("--think", action="store_true", help="enable model thinking (slow)")
+    parser.add_argument(
+        "--ask-all",
+        action="store_true",
+        help="prompt for every command, including read-only ones",
+    )
     args = parser.parse_args()
 
     agent = Agent(
         model=args.model,
-        approve=ask_approval,
+        approve=make_approver(args.ask_all),
         echo=echo,
         num_ctx=args.num_ctx,
         max_steps=args.max_steps,

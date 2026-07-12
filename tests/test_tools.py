@@ -110,3 +110,48 @@ def test_subprocess_gets_no_stdin():
     """Interactive commands must not hang waiting for input."""
     result = tools.run_command("read line; echo got:$line", timeout=5)
     assert "timed out" not in result
+
+
+class TestReadDocsTopic:
+    def test_topic_filters_real_man_page(self):
+        result = tools.read_docs("find", topic="maxdepth")
+        assert "lines matching 'maxdepth'" in result
+        assert "-maxdepth" in result
+        assert len(result) < 6500
+
+    def test_no_topic_match_falls_back_to_head(self):
+        result = tools.read_docs("ls", topic="zzznotinthedocs")
+        assert "NO LINES MATCH" in result
+
+    def test_big_man_page_gets_truncation_hint(self):
+        result = tools.read_docs("find")
+        assert "docs truncated" in result
+        assert "'topic'" in result
+
+    def test_topic_on_help_fallback(self, fake_path):
+        body = "\\n".join(f"line {i}" for i in range(50)) + "\\n--frob does the thing"
+        make_fake_command(fake_path, "helpme2", f'printf "{body}\\n"')
+        result = tools.read_docs("helpme2", topic="frob")
+        assert "--frob does the thing" in result
+        assert "line 0" not in result
+
+    def test_gap_marker_between_matches(self):
+        text = "\n".join(f"row {i}" for i in range(100))
+        text = text.replace("row 10", "needle A").replace("row 90", "needle B")
+        filtered = tools._filter_topic(text, "needle")
+        assert "[...]" in filtered
+        assert "needle A" in filtered and "needle B" in filtered
+
+
+class TestBinaryOutput:
+    def test_non_utf8_output_does_not_crash(self):
+        """Regression: cat on a binary plist emitted 0xdf and killed the REPL."""
+        result = tools.run_command(r"printf 'ok\337end'")
+        assert "ok" in result and "end" in result
+        assert "�" in result  # replacement char, not an exception
+        assert "[exit code: 0]" in result
+
+    def test_binary_help_output_does_not_crash(self, fake_path):
+        make_fake_command(fake_path, "binhelp", r"printf 'usage\337: binhelp\n'")
+        result = tools.read_docs("binhelp")
+        assert "usage" in result
