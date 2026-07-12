@@ -79,3 +79,57 @@ def test_load_context_files_empty_when_absent(tmp_path, monkeypatch):
 
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "no-home")
     assert load_context_files(str(tmp_path)) == []
+
+
+class TestConfig:
+    def test_load_config_parses_toml(self, tmp_path):
+        from aish.cli import load_config
+
+        path = tmp_path / "config.toml"
+        path.write_text('vi_mode = true\nmodel = "qwen3:8b"\nnum_ctx = 8192\n')
+        config = load_config(path)
+        assert config["vi_mode"] is True
+        assert config["model"] == "qwen3:8b"
+        assert config["num_ctx"] == 8192
+
+    def test_missing_config_is_empty(self, tmp_path):
+        from aish.cli import load_config
+
+        assert load_config(tmp_path / "nope.toml") == {}
+
+    def test_invalid_toml_warns_and_ignores(self, tmp_path, capsys):
+        from aish.cli import load_config
+
+        path = tmp_path / "config.toml"
+        path.write_text("vi_mode = [unclosed")
+        assert load_config(path) == {}
+        assert "ignoring invalid config" in capsys.readouterr().err
+
+
+class TestUsageContext:
+    def test_mentions_all_self_knowledge(self, tmp_path):
+        from aish.cli import usage_context
+
+        text = usage_context(
+            "qwen3.6:35b-a3b", False, tmp_path / "allow.txt", tmp_path / "state",
+            tmp_path / "config.toml",
+        )
+        for needle in (
+            "--resume",
+            "!<command>",
+            "!cd",
+            "always allow",
+            "vi_mode = true",
+            "AISH.md",
+            str(tmp_path / "allow.txt"),
+            str(tmp_path / "config.toml"),
+            "currently false",
+            "qwen3.6:35b-a3b",
+        ):
+            assert needle in text, needle
+
+    def test_reflects_vi_mode_state(self, tmp_path):
+        from aish.cli import usage_context
+
+        text = usage_context("m", True, tmp_path, tmp_path, tmp_path)
+        assert "currently true" in text

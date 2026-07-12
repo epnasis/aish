@@ -4,6 +4,7 @@ import argparse
 import os
 import shutil
 import sys
+import tomllib
 from pathlib import Path
 
 from .agent import Agent, environment_context
@@ -25,10 +26,60 @@ RESET = "\033[0m"
 
 ECHO_PREVIEW_LINES = 12
 
+# Interactive prompt session (prompt_toolkit); None when stdin is piped.
+_prompt_session = None
+
+
+def load_config(path: Path) -> dict:
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+    except tomllib.TOMLDecodeError as exc:
+        print(f"{YELLOW}warning: ignoring invalid config {path}: {exc}{RESET}", file=sys.stderr)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def make_prompt_session(vi_mode: bool, state_dir: Path):
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.cursor_shapes import ModalCursorShapeConfig
+    from prompt_toolkit.history import FileHistory
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    kwargs = {"history": FileHistory(str(state_dir / "history")), "vi_mode": vi_mode}
+    if vi_mode:
+        kwargs["cursor"] = ModalCursorShapeConfig()
+    return PromptSession(**kwargs)
+
+
+def _bottom_rule(vi_mode: bool) -> str:
+    width = shutil.get_terminal_size((80, 24)).columns
+    if not vi_mode:
+        return "─" * width
+    from prompt_toolkit.application.current import get_app
+    from prompt_toolkit.key_binding.vi_state import InputMode
+
+    mode = get_app().vi_state.input_mode
+    if mode == InputMode.NAVIGATION:
+        label = " NORMAL "
+    elif mode == InputMode.REPLACE:
+        label = " REPLACE "
+    else:
+        label = " INSERT "
+    return "─" * 3 + label + "─" * max(0, width - len(label) - 3)
+
+
+def _toolbar_style():
+    from prompt_toolkit.styles import Style
+
+    return Style.from_dict({"bottom-toolbar": "noreverse fg:ansibrightblack"})
+
 
 def edit_line(initial: str) -> str:
-    """Line editing with the command pre-filled (falls back to blank input
-    where readline can't pre-fill)."""
+    """Line editing with the command pre-filled."""
+    if _prompt_session is not None:
+        return _prompt_session.prompt("edit> ", default=initial).strip()
     try:
         import readline
 
@@ -106,29 +157,52 @@ def stream_line(line: str) -> None:
     print(f"{DIM}  {line}{RESET}")
 
 
-def read_task(cwd: str) -> str:
+def read_task(cwd: str, vi_mode: bool = False) -> str:
     """Boxed prompt: cwd on its own line, input between full-width rules.
-
-    Cursor trick: draw both rules first, then move back up one line so the
-    input line sits between them (a wrapped long input pushes past the bottom
-    rule — cosmetic only). Piped stdin gets a plain prompt instead.
-    """
+    The bottom rule is a prompt_toolkit toolbar (shows NORMAL/INSERT in vi
+    mode) and tracks the input properly even when it wraps. Piped stdin gets
+    a plain prompt instead."""
     home = str(Path.home())
     display = "~" + cwd[len(home):] if cwd.startswith(home) else cwd
-    if not sys.stdin.isatty():
+    if _prompt_session is None:
         return input(f"\naish:{display}> ")
 
     width = shutil.get_terminal_size((80, 24)).columns
-    rule = f"{DIM}{'─' * width}{RESET}"
     print(f"\n{DIM}{display}{RESET}")
-    print(rule)
-    print()  # placeholder: the input line
-    print(rule, end="", flush=True)
-    sys.stdout.write("\x1b[1A\r")  # up to the placeholder, column 0
-    try:
-        return input(f"{BOLD}❯{RESET} ")
-    finally:
-        print()  # step below the bottom rule without erasing it
+    print(f"{DIM}{'─' * width}{RESET}")
+    return _prompt_session.prompt(
+        [("bold", "❯ ")],
+        bottom_toolbar=lambda: _bottom_rule(vi_mode),
+        style=_toolbar_style(),
+    )
+
+
+def usage_context(
+    model: str, vi_mode: bool, allow_path: Path, state_dir: Path, config_path: Path
+) -> str:
+    """Self-knowledge for the system prompt: aish should be able to explain
+    and (via approved commands) reconfigure itself."""
+    return f"""\
+About aish (you) — use this to answer questions about your own usage:
+- Approval prompt keys: y=run once, n=deny, a=always allow (saves command \
+prefixes to {allow_path}; chained |/&&/|| segments are vetted and allowlisted \
+independently; read-only commands auto-approve), e=edit the command first.
+- REPL escapes: `!<command>` runs directly without you (no approval); \
+`!cd <dir>` changes the shared working directory. Ctrl-C cancels only the \
+running command. Ctrl-D or `exit` quits.
+- Sessions: conversation + command audit trail logged to {state_dir}; \
+`aish --resume` continues the most recent session.
+- Config file: {config_path} (TOML). Keys: vi_mode, model, num_ctx, \
+max_steps. vi_mode (prompt vi editing) is currently {str(vi_mode).lower()}; \
+enable it with the line `vi_mode = true`. Config is read at startup only — \
+changes take effect on the next aish start. CLI flags override config; \
+$AISH_MODEL overrides the model key.
+- Durable context: an AISH.md file in the working directory or \
+~/.config/aish/AISH.md is loaded into your system prompt — the right place \
+for host facts and user preferences.
+- Current model: {model} (change via --model, $AISH_MODEL, or config).
+When the user asks you to change one of your settings, edit the config file \
+with a normal shell command (it goes through approval like any command)."""
 
 
 def load_context_files(cwd: str) -> list[str]:
@@ -143,6 +217,11 @@ def load_context_files(cwd: str) -> list[str]:
 
 
 def main() -> int:
+    config_path = Path(
+        os.environ.get("AISH_CONFIG", str(Path.home() / ".config" / "aish" / "config.toml"))
+    )
+    config = load_config(config_path)
+
     parser = argparse.ArgumentParser(
         prog="aish",
         description="Local LLM agent that runs CLI commands (with your approval).",
@@ -150,12 +229,24 @@ def main() -> int:
     parser.add_argument("task", nargs="*", help="task to perform; omit for interactive mode")
     parser.add_argument(
         "--model",
-        default=os.environ.get("AISH_MODEL", "qwen3.6:35b-a3b"),
-        help="Ollama model (default: $AISH_MODEL or qwen3.6:35b-a3b)",
+        default=os.environ.get("AISH_MODEL") or config.get("model") or "qwen3.6:35b-a3b",
+        help="Ollama model (default: $AISH_MODEL, config, or qwen3.6:35b-a3b)",
     )
-    parser.add_argument("--num-ctx", type=int, default=32768, help="context window tokens")
-    parser.add_argument("--max-steps", type=int, default=25, help="max model turns per task")
+    parser.add_argument(
+        "--num-ctx", type=int, default=int(config.get("num_ctx", 32768)),
+        help="context window tokens",
+    )
+    parser.add_argument(
+        "--max-steps", type=int, default=int(config.get("max_steps", 25)),
+        help="max model turns per task",
+    )
     parser.add_argument("--think", action="store_true", help="enable model thinking (slow)")
+    parser.add_argument(
+        "--vi-mode", "--vi",
+        action=argparse.BooleanOptionalAction,
+        default=bool(config.get("vi_mode", False)),
+        help="vi editing in the prompt (config key: vi_mode)",
+    )
     parser.add_argument(
         "--ask-all",
         action="store_true",
@@ -184,7 +275,17 @@ def main() -> int:
     else:
         log = SessionLog.new(state_dir)
 
-    context = "\n\n".join([environment_context(cwd), *load_context_files(cwd)])
+    global _prompt_session
+    if sys.stdin.isatty():
+        _prompt_session = make_prompt_session(args.vi_mode, state_dir)
+
+    context = "\n\n".join(
+        [
+            environment_context(cwd),
+            usage_context(args.model, args.vi_mode, allow_path, state_dir, config_path),
+            *load_context_files(cwd),
+        ]
+    )
     agent = Agent(
         model=args.model,
         approve=make_approver(args.ask_all, allow_path, log),
@@ -208,7 +309,7 @@ def main() -> int:
     print(f"{DIM}aish — model {args.model} · session {log.path.name} · Ctrl-D to quit{RESET}")
     while True:
         try:
-            task = read_task(agent.cwd).strip()
+            task = read_task(agent.cwd, args.vi_mode).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0

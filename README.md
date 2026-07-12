@@ -24,13 +24,12 @@ Quality-of-life on top of the pillars:
 
 ## Install (macOS / Linux)
 
-Needs SSH access to this private repo (key added to GitHub), plus
-[Ollama](https://ollama.com) with a tool-calling-capable model.
+Needs [Ollama](https://ollama.com) with a tool-calling-capable model.
 
 ```sh
-uv tool install git+ssh://git@github.com/epnasis/aish.git
-# or, without uv installed yet:
-gh repo clone epnasis/aish && sh aish/install.sh
+curl -fsSL https://raw.githubusercontent.com/epnasis/aish/main/install.sh | sh
+# or, with uv already installed:
+uv tool install git+https://github.com/epnasis/aish.git
 ```
 
 ## Usage
@@ -44,9 +43,15 @@ aish --resume               # continue the most recent session
 At the approval prompt: `y` run once · `n` deny · `a` always allow (asks per
 chained segment, saved to `~/.config/aish/allow.txt`) · `e` edit the command
 before running. Ctrl-C during a running command cancels the command, not the
-session. Put persistent context (host facts, preferences) in `./AISH.md` or
-`~/.config/aish/AISH.md`. Sessions and a command audit trail are logged to
-`~/.local/state/aish/`.
+session. `!<command>` runs a command directly (no model, no approval); `!cd`
+moves the persistent working directory. Put persistent context (host facts,
+preferences) in `./AISH.md` or `~/.config/aish/AISH.md`. Sessions and a
+command audit trail are logged to `~/.local/state/aish/`.
+
+Config lives in `~/.config/aish/config.toml` (keys: `vi_mode`, `model`,
+`num_ctx`, `max_steps`); CLI flags override it. Vi editing in the prompt:
+`vi_mode = true`, or `--vi` / `--no-vi-mode` per run — or just ask aish to
+enable it for you; it knows its own configuration.
 
 Model defaults to `qwen3.6:35b-a3b` (override with `--model` or `$AISH_MODEL`).
 Requires a tool-calling-capable Ollama model. `--think` enables model thinking

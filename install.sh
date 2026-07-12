@@ -1,11 +1,9 @@
 #!/bin/sh
-# aish installer for macOS & Linux.
-# The repo is private, so this needs SSH access to github.com/epnasis/aish
-# (an ssh key added to your GitHub account). Run it either after cloning,
-# or directly:  gh repo clone epnasis/aish && sh aish/install.sh
+# aish installer for macOS & Linux:
+#   curl -fsSL https://raw.githubusercontent.com/epnasis/aish/main/install.sh | sh
 set -eu
 
-REPO="git+ssh://git@github.com/epnasis/aish.git"
+REPO="git+https://github.com/epnasis/aish.git"
 MODEL="${AISH_MODEL:-qwen3.6:35b-a3b}"
 
 if ! command -v uv >/dev/null 2>&1; then
