@@ -40,27 +40,10 @@ input: Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
 without the model · !cd <dir> moves the working directory · Ctrl-C cancels a
 running command{RESET}"""
 
-# Opencode-style panel: off-white background, dark warm-gray glyphs.
-# i-dot is ▀ (gap below, so it reads as a dot, not part of the stem);
-# h-ascender is ▄ (merges into the stem below, so the stem reads taller).
-_BG = "\033[48;2;241;236;236m"
-_FG = "\033[38;2;75;70;70m"
-_ACCENT = "\033[38;2;0;135;0m"
-_LOGO_ROWS = (
-    f"      {_ACCENT}▀{_FG}        {_ACCENT}▄{_FG}    ",
-    "▀▀▀█  █  █▀▀▀  █▀▀▄  ",
-    "█▀▀█  █  ▀▀▀█  █  █  ",
-    "▀▀▀▀  ▀  ▀▀▀▀  ▀▀▀▀  ",
-)
-LOGO = "\n".join(f"{_BG}{_FG}  {row}{RESET}" for row in _LOGO_ROWS)
+LOGO = f"\033[1;97maish{RESET}"  # bright white bold
 
 # BoxPrompt instance when stdin is a TTY; None means plain input() fallback.
 _box = None
-
-
-def print_logo() -> None:
-    if _box is not None:
-        print(LOGO)
 
 
 class LogRef:
@@ -209,8 +192,7 @@ def handle_slash(
         agent.reset()
         logref.log = SessionLog.new(state_dir)
         print("\033[2J\033[3J\033[H", end="")  # clear screen + scrollback
-        print_logo()
-        print(f"{DIM}fresh conversation — session {logref.log.path.name}{RESET}")
+        print(f"{LOGO} {DIM}· fresh conversation — session {logref.log.path.name}{RESET}")
         return "handled"
     if command == "/resume":
         sessions = SessionLog.list_sessions(state_dir, exclude=resumed | {logref.log.path})
@@ -422,9 +404,9 @@ def main() -> int:
         print(f"{GREEN}{agent.run_task(' '.join(args.task))}{RESET}")
         return 0
 
-    print_logo()
     print(
-        f"{DIM}aish — model {args.model} · session {log.path.name} · /help · Ctrl-D quits{RESET}"
+        f"{LOGO} {DIM}· model {args.model} · session {log.path.name}"
+        f" · /help · Ctrl-D quits{RESET}"
     )
     while True:
         try:
