@@ -366,3 +366,13 @@ class TestBangCommands:
         assert agent.cwd == str(tmp_path)
         result = agent.run_user_command("pwd")
         assert tmp_path.name in result
+
+
+def test_failed_cd_is_echoed_not_silent(tmp_path):
+    """Regression: !cd to a missing dir looked like a no-op because only
+    successful cd echoed."""
+    echoed = []
+    agent, _ = make_agent([], cwd=str(tmp_path), echo=echoed.append)
+    agent.run_user_command("cd nope-xyz")
+    assert agent.cwd == str(tmp_path)
+    assert any("ERROR: no such directory" in line for line in echoed)

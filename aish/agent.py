@@ -257,7 +257,9 @@ class Agent:
         if not os.path.isabs(path):
             path = os.path.normpath(os.path.join(self.cwd, path))
         if not os.path.isdir(path):
-            return f"ERROR: no such directory: {path}"
+            note = f"ERROR: no such directory: {path}"
+            self.echo(note)
+            return note
         self.cwd = path
         note = f"[working directory is now {path}]"
         self.echo(note)
