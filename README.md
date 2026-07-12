@@ -1,5 +1,12 @@
 # aish
 
+```
+      ▄        ▄
+▀▀▀█  █  █▀▀▀  █▀▀▄
+█▀▀█  █  ▀▀▀█  █  █
+▀▀▀▀  ▀  ▀▀▀▀  ▀▀▀▀
+```
+
 Local LLM agent that runs CLI commands — like a minimal Claude Code powered by Ollama.
 
 Two design pillars:

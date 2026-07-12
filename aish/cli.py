@@ -39,8 +39,19 @@ input: Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
 without the model · !cd <dir> moves the working directory · Ctrl-C cancels a
 running command{RESET}"""
 
+LOGO = f"""\
+      {GREEN}▄{RESET}        {GREEN}▄{RESET}
+▀▀▀█  █  █▀▀▀  █▀▀▄
+█▀▀█  █  ▀▀▀█  █  █
+▀▀▀▀  ▀  ▀▀▀▀  ▀▀▀▀"""
+
 # BoxPrompt instance when stdin is a TTY; None means plain input() fallback.
 _box = None
+
+
+def print_logo() -> None:
+    if _box is not None:
+        print(LOGO)
 
 
 class LogRef:
@@ -189,6 +200,7 @@ def handle_slash(
         agent.reset()
         logref.log = SessionLog.new(state_dir)
         print("\033[2J\033[3J\033[H", end="")  # clear screen + scrollback
+        print_logo()
         print(f"{DIM}fresh conversation — session {logref.log.path.name}{RESET}")
         return "handled"
     if command == "/resume":
@@ -380,6 +392,7 @@ def main() -> int:
         print(f"{GREEN}{agent.run_task(' '.join(args.task))}{RESET}")
         return 0
 
+    print_logo()
     print(
         f"{DIM}aish — model {args.model} · session {log.path.name} · /help · Ctrl-D quits{RESET}"
     )
