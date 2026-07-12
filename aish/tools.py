@@ -238,6 +238,28 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "read_skill",
+            "description": (
+                "Read a skill — a task-specific playbook with workflows and safety "
+                "rules for a tool. ALWAYS read the relevant skill (they are listed "
+                "in your context) before first using that tool in a session; "
+                "--help shows flags but not how the tool is meant to be used."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name as listed in your context, e.g. 'sweepy'.",
+                    }
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command",
             "description": (
                 "Run a shell command on the user's machine. The user sees the exact "

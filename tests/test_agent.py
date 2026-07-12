@@ -376,3 +376,22 @@ def test_failed_cd_is_echoed_not_silent(tmp_path):
     agent.run_user_command("cd nope-xyz")
     assert agent.cwd == str(tmp_path)
     assert any("ERROR: no such directory" in line for line in echoed)
+
+
+def test_read_skill_dispatch_no_approval(tmp_path):
+    skills_dir = tmp_path / ".aish" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "demo.md").write_text("# demo skill\nuse it wisely")
+    call = SimpleNamespace(
+        function=SimpleNamespace(name="read_skill", arguments={"name": "demo"})
+    )
+    agent, _ = make_agent(
+        [
+            model_says(tool_calls=[call]),
+            model_says("done"),
+        ],
+        approve=lambda _c: pytest.fail("read_skill must not hit the approval gate"),
+        cwd=str(tmp_path),
+    )
+    agent.run_task("how do I use demo?")
+    assert "use it wisely" in tool_messages(agent.messages)[0]["content"]

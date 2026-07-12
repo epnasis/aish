@@ -16,6 +16,7 @@ from .approval import (
     unvetted_segments,
 )
 from .session import SessionLog
+from .skills import GLOBAL_SKILLS_DIR, list_skills, skill_dirs
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -39,11 +40,19 @@ input: Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
 without the model · !cd <dir> moves the working directory · Ctrl-C cancels a
 running command{RESET}"""
 
-LOGO = f"""\
-      {GREEN}▄{RESET}        {GREEN}▄{RESET}
-▀▀▀█  █  █▀▀▀  █▀▀▄
-█▀▀█  █  ▀▀▀█  █  █
-▀▀▀▀  ▀  ▀▀▀▀  ▀▀▀▀"""
+# Opencode-style panel: off-white background, dark warm-gray glyphs.
+# i-dot is ▀ (gap below, so it reads as a dot, not part of the stem);
+# h-ascender is ▄ (merges into the stem below, so the stem reads taller).
+_BG = "\033[48;2;241;236;236m"
+_FG = "\033[38;2;75;70;70m"
+_ACCENT = "\033[38;2;0;135;0m"
+_LOGO_ROWS = (
+    f"      {_ACCENT}▀{_FG}        {_ACCENT}▄{_FG}    ",
+    "▀▀▀█  █  █▀▀▀  █▀▀▄  ",
+    "█▀▀█  █  ▀▀▀█  █  █  ",
+    "▀▀▀▀  ▀  ▀▀▀▀  ▀▀▀▀  ",
+)
+LOGO = "\n".join(f"{_BG}{_FG}  {row}{RESET}" for row in _LOGO_ROWS)
 
 # BoxPrompt instance when stdin is a TTY; None means plain input() fallback.
 _box = None
@@ -278,9 +287,27 @@ $AISH_MODEL overrides the model key.
 - Durable context: an AISH.md file in the working directory or \
 ~/.config/aish/AISH.md is loaded into your system prompt — the right place \
 for host facts and user preferences.
+- Skills: markdown playbooks in {GLOBAL_SKILLS_DIR} (global) or \
+./.aish/skills/ (project; wins on name clash), listed in your context and \
+read via the read_skill tool. To create one when the user asks, write \
+<name>.md there with optional frontmatter lines (name:, description:) \
+between --- markers, then a body of workflows, exact commands, and safety \
+rules; it is picked up on the next aish start.
 - Current model: {model} (change via --model, $AISH_MODEL, or config).
 When the user asks you to change one of your settings, edit the config file \
 with a normal shell command (it goes through approval like any command)."""
+
+
+def skills_context(cwd: str) -> str:
+    found = list_skills(skill_dirs(cwd))
+    if not found:
+        return ""
+    lines = "\n".join(f"- {name}: {description}" for name, description in found)
+    return (
+        "Skills — task-specific playbooks with workflows and safety rules. "
+        "ALWAYS call read_skill for the relevant one BEFORE first using that "
+        "tool in a session:\n" + lines
+    )
 
 
 def load_context_files(cwd: str) -> list[str]:
@@ -365,11 +392,14 @@ def main() -> int:
         _box = BoxPrompt(args.vi_mode, state_dir, SLASH_COMMANDS)
 
     context = "\n\n".join(
-        [
+        part
+        for part in [
             environment_context(cwd),
             usage_context(args.model, args.vi_mode, allow_path, state_dir, config_path),
+            skills_context(cwd),
             *load_context_files(cwd),
         ]
+        if part
     )
     agent = Agent(
         model=args.model,

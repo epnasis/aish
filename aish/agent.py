@@ -17,7 +17,7 @@ from typing import Any
 
 import ollama
 
-from . import tools
+from . import skills, tools
 
 _PLATFORM_NOTES = {
     "darwin": (
@@ -222,6 +222,11 @@ class Agent:
             label = f"→ read_docs: {command}" + (f" (topic: {topic})" if topic else "")
             self.echo(label)
             return tools.read_docs(command, topic=str(topic) if topic else None)
+
+        if name == "read_skill":
+            skill = str(args.get("name", ""))
+            self.echo(f"→ read_skill: {skill}")
+            return skills.load_skill(skill, skills.skill_dirs(self.cwd))
 
         if name == "run_command":
             command = str(args.get("command", ""))

@@ -1,7 +1,7 @@
 # aish
 
 ```
-      ▄        ▄
+      ▀        ▄
 ▀▀▀█  █  █▀▀▀  █▀▀▄
 █▀▀█  █  ▀▀▀█  █  █
 ▀▀▀▀  ▀  ▀▀▀▀  ▀▀▀▀
@@ -64,6 +64,14 @@ sends that if "Left Option key" is set to "Esc+"). Pasted newlines are kept.
 Put persistent context (host facts,
 preferences) in `./AISH.md` or `~/.config/aish/AISH.md`. Sessions and a
 command audit trail are logged to `~/.local/state/aish/`.
+
+**Skills** teach aish how to use tools that `--help` alone can't explain
+(workflows, conventions, safety rules): drop a markdown file in
+`~/.config/aish/skills/<name>.md` (global) or `./.aish/skills/` (project),
+optionally with `name:`/`description:` frontmatter between `---` markers.
+Skills are listed in the model's context and it reads the relevant one before
+first use. You can also just ask aish to write a skill for a tool — it knows
+the format and location.
 
 Config lives in `~/.config/aish/config.toml` (keys: `vi_mode`, `model`,
 `num_ctx`, `max_steps`); CLI flags override it. Vi editing in the prompt:

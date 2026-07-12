@@ -373,3 +373,18 @@ def test_clear_clears_screen(tmp_path, capsys):
     logref = LogRef(SessionLog.new(tmp_path))
     handle_slash("/clear", agent, logref, tmp_path)
     assert "\033[2J" in capsys.readouterr().out
+
+
+def test_skills_context_lists_skills(tmp_path, monkeypatch):
+    from aish import skills as skills_module
+    from aish.cli import skills_context
+
+    monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "none")
+    assert skills_context(str(tmp_path)) == ""
+
+    local = tmp_path / ".aish" / "skills"
+    local.mkdir(parents=True)
+    (local / "demo.md").write_text("---\nname: demo\ndescription: demo things\n---\nbody")
+    text = skills_context(str(tmp_path))
+    assert "read_skill" in text
+    assert "- demo: demo things" in text
