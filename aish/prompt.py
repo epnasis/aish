@@ -18,14 +18,13 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.cursor_shapes import ModalCursorShapeConfig
 from prompt_toolkit.enums import EditingMode
-from prompt_toolkit.filters import Condition, has_completions
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.key_binding.defaults import load_key_bindings
 from prompt_toolkit.key_binding.vi_state import InputMode
-from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, Window
+from prompt_toolkit.layout import HSplit, Layout, VerticalAlign, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
-from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.shortcuts import PromptSession
 
@@ -62,20 +61,11 @@ class BoxPrompt:
         """Show the boxed prompt and return the submitted text."""
         return self._build_app(cwd_display).run()
 
-    def _bottom_rule(self) -> str:
-        width = get_app().output.get_size().columns
-        if not self.vi_mode:
-            return "─" * width
-        mode = get_app().vi_state.input_mode
-        if mode == InputMode.NAVIGATION:
-            label = " NORMAL "
-        elif mode == InputMode.REPLACE:
-            label = " REPLACE "
-        else:
-            label = " INSERT "
-        return "─" * 3 + label + "─" * max(0, width - len(label) - 3)
+    def read_with_io(self, cwd_display: str, input, output) -> str:
+        """read() with injected I/O — for tests driving keystrokes."""
+        return self._build_app(cwd_display, input=input, output=output).run()
 
-    def _build_app(self, cwd_display: str) -> Application:
+    def _build_app(self, cwd_display: str, input=None, output=None) -> Application:
         buffer = Buffer(
             history=self._history,
             completer=self._completer,
@@ -84,6 +74,37 @@ class BoxPrompt:
             accept_handler=lambda buff: get_app().exit(result=buff.text) or True,
         )
 
+        vi_mode = self.vi_mode
+
+        def bottom_bar():
+            """The bottom rule doubles as completion bar and vi-mode indicator.
+            On the final render after submit (app.is_done) it goes back to a
+            plain rule so no stale mode label lingers on screen."""
+            app = get_app()
+            width = app.output.get_size().columns
+            state = buffer.complete_state
+            if not app.is_done and state and state.completions:
+                fragments = [(RULE_STYLE, "─── ")]
+                for i, completion in enumerate(state.completions):
+                    current = completion is state.current_completion
+                    fragments.append(("reverse" if current else RULE_STYLE, completion.text))
+                    if i < len(state.completions) - 1:
+                        fragments.append((RULE_STYLE, " · "))
+                fragments.append((RULE_STYLE, " "))
+                used = sum(len(text) for _, text in fragments)
+                fragments.append((RULE_STYLE, "─" * max(0, width - used)))
+                return fragments
+            if app.is_done or not vi_mode:
+                return [(RULE_STYLE, "─" * width)]
+            mode = app.vi_state.input_mode
+            if mode == InputMode.NAVIGATION:
+                label = " NORMAL "
+            elif mode == InputMode.REPLACE:
+                label = " REPLACE "
+            else:
+                label = " INSERT "
+            return [(RULE_STYLE, "─" * 3 + label + "─" * max(0, width - len(label) - 3))]
+
         keys = KeyBindings()
 
         @keys.add("enter")
@@ -91,16 +112,27 @@ class BoxPrompt:
             buff = event.current_buffer
             if buff.complete_state and buff.complete_state.current_completion:
                 buff.apply_completion(buff.complete_state.current_completion)
+            elif buff.document.text_before_cursor.endswith("\\"):
+                # backslash continuation: works in any terminal
+                buff.delete_before_cursor()
+                buff.insert_text("\n")
             else:
                 buff.validate_and_handle()
 
-        @keys.add("escape", "enter")  # Alt/Option+Enter
+        # Alt/Option+Enter (iTerm2 needs Option=Esc+) — and Ctrl+J, which is a
+        # distinct control code in every terminal, no configuration needed.
+        @keys.add("escape", "enter")
+        @keys.add("c-j")
         def _newline(event):
             event.current_buffer.insert_text("\n")
 
         @keys.add("tab")
         def _complete(event):
             event.current_buffer.complete_next()
+
+        @keys.add("s-tab")
+        def _complete_back(event):
+            event.current_buffer.complete_previous()
 
         @keys.add("c-c")
         def _abort(event):
@@ -122,15 +154,13 @@ class BoxPrompt:
                         input_processors=[BeforeInput([("bold", "❯ ")])],
                     ),
                     wrap_lines=True,
+                    dont_extend_height=True,
                 ),
-                Window(
-                    FormattedTextControl(self._bottom_rule), height=1, style=RULE_STYLE
-                ),
-                ConditionalContainer(
-                    CompletionsMenu(max_height=6, scroll_offset=0),
-                    filter=has_completions,
-                ),
-            ]
+                Window(FormattedTextControl(bottom_bar), height=1, style=RULE_STYLE),
+            ],
+            # TOP: never justify rows apart on a tall empty screen — the box
+            # must hug the input regardless of space below the cursor.
+            align=VerticalAlign.TOP,
         )
 
         return Application(
@@ -139,4 +169,6 @@ class BoxPrompt:
             editing_mode=EditingMode.VI if self.vi_mode else EditingMode.EMACS,
             cursor=ModalCursorShapeConfig() if self.vi_mode else None,
             full_screen=False,
+            input=input,
+            output=output,
         )

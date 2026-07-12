@@ -29,13 +29,15 @@ REPLAY_TOOL_LINES = 4
 SLASH_COMMANDS = ("/clear", "/exit", "/help", "/new", "/quit", "/resume")
 
 SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
-  /resume        load the previous session into this one (replays it on screen)
-  /new, /clear   fresh conversation in a new session file
+  /resume        load the previous session into this one (replays it on
+                 screen; repeat to load progressively older sessions)
+  /new, /clear   fresh conversation in a new session file (clears the screen)
   /help          this help
   /quit, /exit   quit (plain 'exit' works too)
-input: Enter submits · Option/Alt+Enter (or Esc,Enter) adds a newline · pasted
-newlines are kept · !<cmd> runs directly without the model · !cd <dir> moves
-the working directory · Ctrl-C cancels a running command{RESET}"""
+input: Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
+(iTerm2: set Option=Esc+) · pasted newlines are kept · !<cmd> runs directly
+without the model · !cd <dir> moves the working directory · Ctrl-C cancels a
+running command{RESET}"""
 
 # BoxPrompt instance when stdin is a TTY; None means plain input() fallback.
 _box = None
@@ -175,22 +177,31 @@ def replay_history(messages: list[dict]) -> None:
                 print(f"{DIM}  … ({len(lines) - REPLAY_TOOL_LINES} more lines){RESET}")
 
 
-def handle_slash(task: str, agent: Agent, logref: LogRef, state_dir: Path) -> str:
+def handle_slash(
+    task: str, agent: Agent, logref: LogRef, state_dir: Path, resumed: set | None = None
+) -> str:
     """Dispatch a /command; returns 'exit' or 'handled'."""
+    resumed = resumed if resumed is not None else set()
     command = task.split()[0].lower()
     if command in ("/quit", "/exit"):
         return "exit"
     if command in ("/new", "/clear"):
         agent.reset()
         logref.log = SessionLog.new(state_dir)
+        print("\033[2J\033[3J\033[H", end="")  # clear screen + scrollback
         print(f"{DIM}fresh conversation — session {logref.log.path.name}{RESET}")
         return "handled"
     if command == "/resume":
         candidates = [
-            f for f in sorted(state_dir.glob("session-*.jsonl")) if f != logref.log.path
+            f
+            for f in sorted(state_dir.glob("session-*.jsonl"))
+            if f != logref.log.path and f not in resumed
         ]
-        for candidate in reversed(candidates):  # newest session that has content
+        # newest not-yet-loaded session with content; repeating /resume walks
+        # further back through history
+        for candidate in reversed(candidates):
             messages = SessionLog.load_messages(candidate)
+            resumed.add(candidate)
             if not messages:
                 continue
             agent.load_history(messages)
@@ -199,7 +210,7 @@ def handle_slash(task: str, agent: Agent, logref: LogRef, state_dir: Path) -> st
             print(f"{DIM}resumed {len(messages)} messages from {candidate.name}:{RESET}")
             replay_history(messages)
             return "handled"
-        print(f"{DIM}no previous session to resume{RESET}")
+        print(f"{DIM}no earlier session to resume{RESET}")
         return "handled"
     if command == "/help":
         print(SLASH_HELP)
@@ -222,10 +233,12 @@ independently; read-only commands auto-approve), e=edit the command first.
 `!cd <dir>` changes the shared working directory. Ctrl-C cancels only the \
 running command. Ctrl-D or `exit` quits.
 - REPL slash commands (Tab autocompletes them): /resume loads and replays the \
-previous session into this one; /new or /clear starts a fresh conversation; \
+previous session into this one (repeat it to load progressively older \
+sessions); /new or /clear starts a fresh conversation and clears the screen; \
 /help lists commands; /quit or /exit quits.
-- Multiline input: Enter submits; Option/Alt+Enter (or Esc then Enter) \
-inserts a newline; pasted text keeps its newlines.
+- Multiline input: Enter submits; a newline is inserted by Ctrl+J, by ending \
+the line with a backslash then Enter, or by Option/Alt+Enter (in iTerm2 only \
+with "Left Option key: Esc+"); pasted text keeps its newlines.
 - Sessions: conversation + command audit trail logged to {state_dir}; \
 `aish --resume` continues the most recent session.
 - Config file: {config_path} (TOML). Keys: vi_mode, model, num_ctx, \
@@ -278,7 +291,8 @@ def main() -> int:
     )
     parser.add_argument("--think", action="store_true", help="enable model thinking (slow)")
     parser.add_argument(
-        "--vi-mode", "--vi",
+        "--vi",
+        dest="vi_mode",
         action=argparse.BooleanOptionalAction,
         default=bool(config.get("vi_mode", False)),
         help="vi editing in the prompt (config key: vi_mode)",
@@ -300,8 +314,11 @@ def main() -> int:
     allow_path = Path(os.environ.get("AISH_ALLOWLIST", str(DEFAULT_ALLOWLIST)))
 
     history: list[dict] = []
+    resumed: set[Path] = set()
     if args.resume:
         latest = SessionLog.latest(state_dir)
+        if latest is not None:
+            resumed.add(latest)
         if latest is None:
             print(f"{DIM}no previous session found — starting fresh{RESET}")
             log = SessionLog.new(state_dir)
@@ -363,7 +380,7 @@ def main() -> int:
         if not task:
             continue
         if task.startswith("/"):
-            if handle_slash(task, agent, logref, state_dir) == "exit":
+            if handle_slash(task, agent, logref, state_dir, resumed) == "exit":
                 return 0
             continue
         if task.startswith("!"):

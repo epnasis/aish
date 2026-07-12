@@ -213,7 +213,7 @@ class TestSlashCommands:
 
         agent, logref = self.fake_agent(), self.logref(tmp_path)
         assert handle_slash("/resume", agent, logref, tmp_path) == "handled"
-        assert "no previous session" in capsys.readouterr().out
+        assert "no earlier session" in capsys.readouterr().out
 
     def test_unknown_command_suggests_help(self, tmp_path, capsys):
         from aish.cli import handle_slash
@@ -262,3 +262,36 @@ def test_resume_skips_empty_sessions(tmp_path, capsys):
     logref = LogRef(SessionLog.new(tmp_path))
     handle_slash("/resume", agent, logref, tmp_path)
     assert "real content" in capsys.readouterr().out
+
+
+def test_repeated_resume_walks_back_through_sessions(tmp_path, capsys):
+    from aish.agent import Agent
+    from aish.cli import LogRef, handle_slash
+    from aish.session import SessionLog
+
+    older = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+    older.message({"role": "user", "content": "from january"})
+    newer = SessionLog(tmp_path / "session-20260201-000000-000000.jsonl")
+    newer.message({"role": "user", "content": "from february"})
+
+    agent = Agent(model="fake", approve=lambda _c: None, client_chat=lambda **_k: None)
+    logref = LogRef(SessionLog.new(tmp_path))
+    resumed = set()
+
+    handle_slash("/resume", agent, logref, tmp_path, resumed)
+    assert "from february" in capsys.readouterr().out
+    handle_slash("/resume", agent, logref, tmp_path, resumed)
+    assert "from january" in capsys.readouterr().out
+    handle_slash("/resume", agent, logref, tmp_path, resumed)
+    assert "no earlier session" in capsys.readouterr().out
+
+
+def test_clear_clears_screen(tmp_path, capsys):
+    from aish.agent import Agent
+    from aish.cli import LogRef, handle_slash
+    from aish.session import SessionLog
+
+    agent = Agent(model="fake", approve=lambda _c: None, client_chat=lambda **_k: None)
+    logref = LogRef(SessionLog.new(tmp_path))
+    handle_slash("/clear", agent, logref, tmp_path)
+    assert "\033[2J" in capsys.readouterr().out

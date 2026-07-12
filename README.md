@@ -48,9 +48,9 @@ moves the persistent working directory.
 
 REPL slash commands (Tab autocompletes): `/resume` loads and replays the
 previous session, `/new`/`/clear` start a fresh conversation, `/help`,
-`/quit`/`/exit`. Multiline input: Enter submits, Option/Alt+Enter (or Esc,
-Enter) adds a newline, pasted newlines are kept. (In iTerm2 enable
-"Left Option key: Esc+" for Option+Enter.)
+`/quit`/`/exit`. Multiline input: Enter submits; insert a newline with Ctrl+J,
+by ending the line with `\` then Enter, or with Option/Alt+Enter (iTerm2 only
+sends that if "Left Option key" is set to "Esc+"). Pasted newlines are kept.
 
 Put persistent context (host facts,
 preferences) in `./AISH.md` or `~/.config/aish/AISH.md`. Sessions and a
@@ -58,7 +58,7 @@ command audit trail are logged to `~/.local/state/aish/`.
 
 Config lives in `~/.config/aish/config.toml` (keys: `vi_mode`, `model`,
 `num_ctx`, `max_steps`); CLI flags override it. Vi editing in the prompt:
-`vi_mode = true`, or `--vi` / `--no-vi-mode` per run — or just ask aish to
+`vi_mode = true`, or `--vi` / `--no-vi` per run — or just ask aish to
 enable it for you; it knows its own configuration.
 
 Model defaults to `qwen3.6:35b-a3b` (override with `--model` or `$AISH_MODEL`).
