@@ -3,7 +3,20 @@ audit trail of every command decision, in one file per session."""
 
 import datetime
 import json
+import re
+from dataclasses import dataclass
 from pathlib import Path
+
+TITLE_MAX = 60
+_BANG_RE = re.compile(r"^\[I ran `(.+?)` myself")
+
+
+@dataclass
+class SessionInfo:
+    path: Path
+    when: str
+    count: int
+    title: str
 
 
 class SessionLog:
@@ -38,6 +51,46 @@ class SessionLog:
                     {k: v for k, v in record.items() if k in ("role", "content", "tool_name")}
                 )
         return messages
+
+    @staticmethod
+    def info(path: Path) -> SessionInfo | None:
+        """Summary line for a session picker; None for empty sessions.
+        The title is the first user message — cheap, deterministic, and it
+        almost always names the task."""
+        messages = SessionLog.load_messages(path)
+        if not messages:
+            return None
+        title = "(no user input)"
+        for message in messages:
+            if message.get("role") == "user":
+                content = " ".join((message.get("content") or "").split())
+                bang = _BANG_RE.match(content)
+                title = f"! {bang.group(1)}" if bang else content
+                break
+        if len(title) > TITLE_MAX:
+            title = title[: TITLE_MAX - 1] + "…"
+
+        try:  # session-YYYYmmdd-HHMMSS[-ffffff].jsonl
+            _, day, clock = path.stem.split("-")[:3]
+            when = datetime.datetime.strptime(f"{day}-{clock}", "%Y%m%d-%H%M%S")
+        except ValueError:
+            when = datetime.datetime.fromtimestamp(path.stat().st_mtime)
+        return SessionInfo(
+            path=path, when=when.strftime("%b %d %H:%M"), count=len(messages), title=title
+        )
+
+    @staticmethod
+    def list_sessions(state_dir: Path, exclude: set | None = None) -> list[SessionInfo]:
+        """Non-empty sessions, newest first, minus excluded paths."""
+        exclude = exclude or set()
+        infos = []
+        for path in sorted(state_dir.glob("session-*.jsonl"), reverse=True):
+            if path in exclude:
+                continue
+            info = SessionLog.info(path)
+            if info:
+                infos.append(info)
+        return infos
 
     def _record(self, kind: str, **fields) -> None:
         record = {

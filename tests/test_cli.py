@@ -264,9 +264,9 @@ def test_resume_skips_empty_sessions(tmp_path, capsys):
     assert "real content" in capsys.readouterr().out
 
 
-def test_repeated_resume_walks_back_through_sessions(tmp_path, capsys):
+def two_session_setup(tmp_path):
     from aish.agent import Agent
-    from aish.cli import LogRef, handle_slash
+    from aish.cli import LogRef
     from aish.session import SessionLog
 
     older = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
@@ -275,15 +275,93 @@ def test_repeated_resume_walks_back_through_sessions(tmp_path, capsys):
     newer.message({"role": "user", "content": "from february"})
 
     agent = Agent(model="fake", approve=lambda _c: None, client_chat=lambda **_k: None)
-    logref = LogRef(SessionLog.new(tmp_path))
+    return agent, LogRef(SessionLog.new(tmp_path))
+
+
+def test_repeated_resume_walks_back_through_sessions(tmp_path, capsys, monkeypatch):
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
     resumed = set()
 
+    scripted_input(monkeypatch, [""])  # Enter = latest
     handle_slash("/resume", agent, logref, tmp_path, resumed)
     assert "from february" in capsys.readouterr().out
-    handle_slash("/resume", agent, logref, tmp_path, resumed)
+    handle_slash("/resume", agent, logref, tmp_path, resumed)  # one left: auto-loads
     assert "from january" in capsys.readouterr().out
     handle_slash("/resume", agent, logref, tmp_path, resumed)
     assert "no earlier session" in capsys.readouterr().out
+
+
+def test_resume_picker_lists_slugs_and_selects_by_number(tmp_path, capsys, monkeypatch):
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+    scripted_input(monkeypatch, ["2"])
+    handle_slash("/resume", agent, logref, tmp_path, set())
+    out = capsys.readouterr().out
+    assert "1." in out and "2." in out  # numbered picker
+    assert "from february" in out and "from january" in out  # slugs listed
+    assert "resumed" in out and "session-20260101" in out  # picked #2 = older
+
+
+def test_resume_with_numeric_arg_skips_picker(tmp_path, capsys):
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+    handle_slash("/resume 2", agent, logref, tmp_path, set())
+    out = capsys.readouterr().out
+    assert "resume which?" not in out
+    assert "session-20260101" in out
+
+
+def test_resume_picker_cancel(tmp_path, capsys, monkeypatch):
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+    scripted_input(monkeypatch, ["q"])
+    handle_slash("/resume", agent, logref, tmp_path, set())
+    assert "cancelled" in capsys.readouterr().out
+    assert len(agent.messages) == 1  # nothing loaded
+
+
+def test_resume_invalid_number(tmp_path, capsys):
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+    handle_slash("/resume 9", agent, logref, tmp_path, set())
+    assert "no such session" in capsys.readouterr().out
+
+
+def test_session_info_slug_and_time(tmp_path):
+    from aish.session import SessionLog
+
+    log = SessionLog(tmp_path / "session-20260712-232744-000000.jsonl")
+    log.message({"role": "user", "content": "  count the .py   files\nunder ~/dev  "})
+    info = SessionLog.info(log.path)
+    assert info.title == "count the .py files under ~/dev"
+    assert info.when == "Jul 12 23:27"
+    assert info.count == 1
+
+
+def test_session_info_bang_first_and_truncation(tmp_path):
+    from aish.session import SessionLog
+
+    log = SessionLog(tmp_path / "session-20260712-000000-000000.jsonl")
+    log.message({"role": "user", "content": "[I ran `git status` myself; output:]\nclean"})
+    assert SessionLog.info(log.path).title == "! git status"
+
+    long_log = SessionLog(tmp_path / "session-20260712-000001-000000.jsonl")
+    long_log.message({"role": "user", "content": "x" * 200})
+    title = SessionLog.info(long_log.path).title
+    assert len(title) == 60 and title.endswith("…")
+
+
+def test_session_info_none_for_empty(tmp_path):
+    from aish.session import SessionLog
+
+    empty = SessionLog(tmp_path / "session-20260712-000002-000000.jsonl")
+    assert SessionLog.info(empty.path) is None
 
 
 def test_clear_clears_screen(tmp_path, capsys):

@@ -46,8 +46,10 @@ before running. Ctrl-C during a running command cancels the command, not the
 session. `!<command>` runs a command directly (no model, no approval); `!cd`
 moves the persistent working directory.
 
-REPL slash commands (Tab autocompletes): `/resume` loads and replays the
-previous session, `/new`/`/clear` start a fresh conversation, `/help`,
+REPL slash commands (Tab autocompletes): `/resume` shows a numbered picker of
+earlier sessions (each summarized by its first prompt; Enter=latest,
+`/resume N` picks directly) and replays the chosen one into the current
+conversation, `/new`/`/clear` start a fresh conversation, `/help`,
 `/quit`/`/exit`. Multiline input: Enter submits; insert a newline with Ctrl+J,
 by ending the line with `\` then Enter, or with Option/Alt+Enter (iTerm2 only
 sends that if "Left Option key" is set to "Esc+"). Pasted newlines are kept.

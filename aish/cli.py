@@ -29,8 +29,8 @@ REPLAY_TOOL_LINES = 4
 SLASH_COMMANDS = ("/clear", "/exit", "/help", "/new", "/quit", "/resume")
 
 SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
-  /resume        load the previous session into this one (replays it on
-                 screen; repeat to load progressively older sessions)
+  /resume [n]    pick an earlier session to load (lists recent sessions with
+                 a summary; Enter=latest, repeat to reach older ones)
   /new, /clear   fresh conversation in a new session file (clears the screen)
   /help          this help
   /quit, /exit   quit (plain 'exit' works too)
@@ -192,25 +192,41 @@ def handle_slash(
         print(f"{DIM}fresh conversation — session {logref.log.path.name}{RESET}")
         return "handled"
     if command == "/resume":
-        candidates = [
-            f
-            for f in sorted(state_dir.glob("session-*.jsonl"))
-            if f != logref.log.path and f not in resumed
-        ]
-        # newest not-yet-loaded session with content; repeating /resume walks
-        # further back through history
-        for candidate in reversed(candidates):
-            messages = SessionLog.load_messages(candidate)
-            resumed.add(candidate)
-            if not messages:
-                continue
-            agent.load_history(messages)
-            for message in messages:  # keep the current session file self-contained
-                logref.message(message)
-            print(f"{DIM}resumed {len(messages)} messages from {candidate.name}:{RESET}")
-            replay_history(messages)
+        sessions = SessionLog.list_sessions(state_dir, exclude=resumed | {logref.log.path})
+        if not sessions:
+            print(f"{DIM}no earlier session to resume{RESET}")
             return "handled"
-        print(f"{DIM}no earlier session to resume{RESET}")
+
+        parts = task.split()
+        if len(parts) > 1 and parts[1].isdigit():
+            choice = int(parts[1])
+        elif len(sessions) == 1:
+            choice = 1
+        else:
+            for i, info in enumerate(sessions[:10], 1):
+                print(f"{DIM}{i:>3}. {info.when} · {info.count:>3} msgs ·{RESET} {info.title}")
+            try:
+                answer = input(
+                    f"{YELLOW}resume which?{RESET} [1=latest] (number, q=cancel) "
+                ).strip().lower()
+            except EOFError:
+                answer = "q"
+            if answer in ("q", "quit"):
+                print(f"{DIM}cancelled{RESET}")
+                return "handled"
+            choice = int(answer) if answer.isdigit() else 1
+        if not 1 <= choice <= len(sessions):
+            print(f"{DIM}no such session number{RESET}")
+            return "handled"
+
+        selected = sessions[choice - 1]
+        messages = SessionLog.load_messages(selected.path)
+        resumed.add(selected.path)
+        agent.load_history(messages)
+        for message in messages:  # keep the current session file self-contained
+            logref.message(message)
+        print(f"{DIM}resumed {len(messages)} messages from {selected.path.name}:{RESET}")
+        replay_history(messages)
         return "handled"
     if command == "/help":
         print(SLASH_HELP)
@@ -232,10 +248,11 @@ independently; read-only commands auto-approve), e=edit the command first.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` changes the shared working directory. Ctrl-C cancels only the \
 running command. Ctrl-D or `exit` quits.
-- REPL slash commands (Tab autocompletes them): /resume loads and replays the \
-previous session into this one (repeat it to load progressively older \
-sessions); /new or /clear starts a fresh conversation and clears the screen; \
-/help lists commands; /quit or /exit quits.
+- REPL slash commands (Tab autocompletes them): /resume shows a numbered \
+picker of earlier sessions (summary = the session's first user message; \
+Enter picks the latest, /resume N picks directly) and replays the chosen \
+one into this conversation; /new or /clear starts a fresh conversation and \
+clears the screen; /help lists commands; /quit or /exit quits.
 - Multiline input: Enter submits; a newline is inserted by Ctrl+J, by ending \
 the line with a backslash then Enter, or by Option/Alt+Enter (in iTerm2 only \
 with "Left Option key: Esc+"); pasted text keeps its newlines.
