@@ -1,6 +1,14 @@
 import pytest
 
-from aish.approval import is_read_only
+from aish.approval import (
+    is_auto_approvable,
+    is_read_only,
+    load_prefixes,
+    save_prefix,
+    split_chain,
+    suggest_prefix,
+    unvetted_segments,
+)
 
 SAFE = [
     "ls -la",
@@ -52,3 +60,60 @@ def test_unsafe_commands_require_prompt(command):
 def test_quoted_pipe_falls_back_to_prompt():
     """Raw '|' split breaks quoting — must fail closed, not approve blindly."""
     assert not is_read_only('grep "a|b" file.txt')
+
+
+class TestChaining:
+    def test_and_chain_of_safe_commands_is_read_only(self):
+        assert is_read_only("ls -la && du -sh /tmp")
+        assert is_read_only("ls || echo none")
+        assert is_read_only("ls | wc -l && date")
+
+    def test_chain_with_one_unsafe_segment_fails(self):
+        assert not is_read_only("ls && rm -rf /")
+        assert not is_read_only("date || curl http://evil")
+
+    def test_single_ampersand_background_fails_closed(self):
+        assert split_chain("sleep 100 &") is None
+        assert split_chain("ls & rm x") is None
+
+    def test_semicolon_still_forbidden(self):
+        assert split_chain("ls; rm x") is None
+
+
+class TestUserAllowlist:
+    def test_prefix_match_per_segment(self, tmp_path):
+        assert is_auto_approvable("git status", ["git status"])
+        assert is_auto_approvable("git status --short", ["git status"])
+        assert not is_auto_approvable("git stash drop", ["git status"])
+
+    def test_every_segment_evaluated_independently(self):
+        prefixes = ["git status", "git log"]
+        assert is_auto_approvable("git status && git log -5", prefixes)
+        assert is_auto_approvable("git log | head -3", prefixes)  # head is read-only
+        assert not is_auto_approvable("git status && rm -rf /", prefixes)
+        assert not is_auto_approvable("git status | xargs rm", prefixes)
+
+    def test_allowed_prefix_with_forbidden_chars_still_prompts(self):
+        assert not is_auto_approvable("git status > /etc/passwd", ["git status"])
+        assert not is_auto_approvable("git status; rm x", ["git status"])
+
+    def test_unvetted_segments_lists_only_unknown_parts(self):
+        segs = unvetted_segments("git status && cargo build | wc -l", ["git status"])
+        assert segs == ["cargo build"]
+
+    def test_suggest_prefix_two_tokens_for_subcommands(self):
+        assert suggest_prefix("git status --short") == "git status"
+        assert suggest_prefix("brew list") == "brew list"
+        assert suggest_prefix("ls -la /tmp") == "ls"
+        assert suggest_prefix("cat /etc/hosts") == "cat"
+
+    def test_save_and_load_roundtrip_with_dedupe(self, tmp_path):
+        path = tmp_path / "allow.txt"
+        save_prefix(path, "git status")
+        save_prefix(path, "git status")  # dedupe
+        save_prefix(path, "  brew list  ")  # stripped
+        save_prefix(path, "")  # ignored
+        assert load_prefixes(path) == ["git status", "brew list"]
+
+    def test_missing_file_loads_empty(self, tmp_path):
+        assert load_prefixes(tmp_path / "nope.txt") == []

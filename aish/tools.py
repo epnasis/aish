@@ -10,6 +10,8 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
+from collections.abc import Callable
 
 # Enough for the model to work with without blowing a 32k context on one result.
 HEAD_CHARS = 4000
@@ -32,26 +34,67 @@ def _decode(data: bytes | None) -> str:
     return (data or b"").decode("utf-8", errors="replace")
 
 
-def run_command(command: str, timeout: float = 120) -> str:
-    """Execute a shell command; return combined output and exit status."""
+def run_command(
+    command: str,
+    timeout: float = 120,
+    cwd: str | None = None,
+    on_line: Callable[[str], None] | None = None,
+) -> str:
+    """Execute a shell command, streaming output lines via on_line as they
+    arrive (stderr merged into stdout so ordering is preserved live).
+
+    Ctrl-C cancels the command — not the session — and returns partial output.
+    """
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
-            timeout=timeout,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
         )
-    except subprocess.TimeoutExpired:
-        return f"ERROR: command timed out after {timeout}s"
+    except OSError as exc:
+        return f"ERROR: failed to start command: {exc}"
 
-    stdout, stderr = _decode(result.stdout), _decode(result.stderr)
+    timed_out = threading.Event()
+
+    def _on_timeout() -> None:
+        timed_out.set()
+        proc.kill()
+
+    timer = threading.Timer(timeout, _on_timeout)
+    timer.start()
+    lines: list[str] = []
+    cancelled = False
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = _decode(raw).rstrip("\n")
+            lines.append(line)
+            if on_line:
+                on_line(line)
+        proc.wait()
+    except KeyboardInterrupt:
+        cancelled = True
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    finally:
+        timer.cancel()
+
     parts = []
-    if stdout:
-        parts.append(stdout.rstrip("\n"))
-    if stderr:
-        parts.append(f"[stderr]\n{stderr.rstrip()}")
-    parts.append(f"[exit code: {result.returncode}]")
+    output = "\n".join(lines)
+    if output.strip():
+        parts.append(output)
+    if timed_out.is_set():
+        parts.append(f"ERROR: command timed out after {timeout}s (any partial output is above)")
+    elif cancelled:
+        parts.append("[cancelled by user with Ctrl-C — any partial output is above]")
+    parts.append(f"[exit code: {proc.returncode}]")
     return truncate("\n".join(parts))
 
 

@@ -41,8 +41,8 @@ class TestRunCommand:
         assert "[exit code: 0]" in result
 
     def test_captures_stderr_and_nonzero_exit(self):
+        # stderr is merged into stdout so live streaming preserves ordering
         result = tools.run_command("echo oops >&2; exit 3")
-        assert "[stderr]" in result
         assert "oops" in result
         assert "[exit code: 3]" in result
 
@@ -155,3 +155,32 @@ class TestBinaryOutput:
         make_fake_command(fake_path, "binhelp", r"printf 'usage\337: binhelp\n'")
         result = tools.read_docs("binhelp")
         assert "usage" in result
+
+
+class TestStreamingAndCwd:
+    def test_on_line_receives_lines_in_order(self):
+        seen = []
+        tools.run_command(r"printf 'one\ntwo\nthree\n'", on_line=seen.append)
+        assert seen == ["one", "two", "three"]
+
+    def test_cwd_is_respected(self, tmp_path):
+        result = tools.run_command("pwd", cwd=str(tmp_path))
+        assert tmp_path.name in result
+
+    def test_keyboard_interrupt_cancels_command_returns_partial(self):
+        """Ctrl-C mid-stream (simulated via on_line) kills the process and
+        reports partial output instead of propagating out of the tool."""
+        def interrupt(_line):
+            raise KeyboardInterrupt
+
+        result = tools.run_command(
+            'sh -c \'echo first; sleep 30; echo never\'', timeout=60, on_line=interrupt
+        )
+        assert "first" in result
+        assert "cancelled by user" in result
+        assert "never" not in result
+
+    def test_timeout_includes_partial_output(self):
+        result = tools.run_command("echo early; sleep 5", timeout=0.5)
+        assert "early" in result
+        assert "timed out" in result

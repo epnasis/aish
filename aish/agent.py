@@ -2,10 +2,16 @@
 
 The model never executes anything itself — Ollama only returns structured
 tool_call requests. _dispatch() is the single execution point, and
-run_command cannot be reached there without the approve() callback
-returning True.
+run_command cannot be reached there unless the approve() callback returns
+the command to run (possibly edited by the user).
 """
 
+import datetime
+import getpass
+import os
+import platform
+import shlex
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -13,22 +19,33 @@ import ollama
 
 from . import tools
 
-SYSTEM_PROMPT = """\
-You are aish, a CLI agent on macOS (BSD userland, zsh — NOT GNU/Linux).
+_PLATFORM_NOTES = {
+    "darwin": (
+        "macOS (BSD userland, zsh — NOT GNU/Linux). Your memorized flag "
+        "knowledge is often wrong here: BSD sed/date/stat/find differ from GNU."
+    ),
+    "linux": "Linux (GNU userland). Flag details still vary by distro and version.",
+}
+
+SYSTEM_PROMPT_TEMPLATE = """\
+You are aish, a CLI agent on {platform_note}
 
 Rules:
 1. GROUNDING: before running any command whose flags you are not 100% certain
-   of, call read_docs for it first. Your memorized flag knowledge is often
-   wrong on macOS (BSD sed/date/stat/find differ from GNU). Never guess flags.
+   of, call read_docs for it first. Never guess flags.
 2. If a command fails with a usage or unknown-flag error, call read_docs
    before retrying. If docs come back truncated, call read_docs again with a
    topic (e.g. the flag name) to search the full text.
-3. Every command is shown to the user for approval before it runs. If the
+3. Every command is shown to the user for approval before it runs. The user
+   may edit a command before approving; the edited form is what ran. If the
    user denies a command, do not retry it — change approach or ask.
 4. After running commands, analyze the output and answer concisely.
 5. Prefer read-only commands. Never bundle destructive operations
    (rm, mv, overwrite redirects) into a command unless the user explicitly
    asked for that operation.
+6. You have a persistent working directory. To change it, run exactly
+   `cd <dir>` as its own command — the new directory is echoed back and all
+   later commands run there.
 """
 
 DENIED_RESULT = (
@@ -43,25 +60,71 @@ TRIMMED_NOTE = "\n[trimmed: full output dropped to save context]"
 CHARS_PER_TOKEN_BUDGET = 3
 
 
+def system_prompt() -> str:
+    note = _PLATFORM_NOTES.get(sys.platform, f"{sys.platform} (verify userland conventions).")
+    return SYSTEM_PROMPT_TEMPLATE.format(platform_note=note)
+
+
+def environment_context(cwd: str) -> str:
+    if sys.platform == "darwin":
+        os_desc = f"macOS {platform.mac_ver()[0]}"
+    else:
+        os_desc = platform.platform(terse=True)
+    return (
+        "Environment:\n"
+        f"- today's date: {datetime.date.today().isoformat()}\n"
+        f"- initial working directory: {cwd}\n"
+        f"- user: {getpass.getuser()}\n"
+        f"- OS: {os_desc} ({platform.machine()})"
+    )
+
+
+def _serialize(message: Any) -> dict:
+    if isinstance(message, dict):
+        return {k: message[k] for k in ("role", "content", "tool_name") if k in message}
+    return {
+        "role": getattr(message, "role", "assistant"),
+        "content": getattr(message, "content", None) or "",
+    }
+
+
 class Agent:
     def __init__(
         self,
         model: str,
-        approve: Callable[[str], bool],
+        approve: Callable[[str], Any],
         echo: Callable[[str], None] = lambda _: None,
+        stream: Callable[[str], None] | None = None,
         client_chat: Callable[..., Any] = ollama.chat,
         num_ctx: int = 32768,
         max_steps: int = 25,
         think: bool = False,
+        cwd: str | None = None,
+        context: str = "",
+        on_message: Callable[[dict], None] | None = None,
     ):
         self.model = model
         self.approve = approve
         self.echo = echo
+        self.stream = stream
         self.chat = client_chat
         self.num_ctx = num_ctx
         self.max_steps = max_steps
         self.think = think
-        self.messages: list[Any] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.cwd = cwd or os.getcwd()
+        self.on_message = on_message
+        content = system_prompt() + (f"\n{context}" if context else "")
+        self.messages: list[Any] = [{"role": "system", "content": content}]
+
+    def load_history(self, messages: list[dict]) -> None:
+        """Adopt messages from a previous session (already logged — appended
+        directly so they are not re-recorded)."""
+        self.messages.extend(m for m in messages if m.get("role") != "system")
+
+    def _append(self, message: Any) -> None:
+        self.messages.append(message)
+        if self.on_message:
+            self.on_message(_serialize(message))
 
     def run_task(self, task: str) -> str:
         # Old tasks' raw tool outputs are rarely needed verbatim again;
@@ -70,7 +133,7 @@ class Agent:
         for message in self.messages[1:task_start]:
             self._trim_tool_message(message)
 
-        self.messages.append({"role": "user", "content": task})
+        self._append({"role": "user", "content": task})
 
         for _ in range(self.max_steps):
             self._enforce_budget(task_start)
@@ -82,7 +145,7 @@ class Agent:
                 think=self.think,
             )
             message = response.message
-            self.messages.append(message)
+            self._append(message)
 
             if not message.tool_calls:
                 return message.content or "(model returned an empty response)"
@@ -98,9 +161,7 @@ class Agent:
                 except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
                     result = f"ERROR: tool '{name}' failed internally: {exc!r}"
                     self.echo(result)
-                self.messages.append(
-                    {"role": "tool", "tool_name": name, "content": result}
-                )
+                self._append({"role": "tool", "tool_name": name, "content": result})
 
         return "(stopped: hit the max-steps limit without finishing — try a narrower task)"
 
@@ -137,6 +198,19 @@ class Agent:
             if self._trim_tool_message(self.messages[i]) and self._total_chars() <= budget:
                 return
 
+    def run_user_command(self, command: str) -> str:
+        """A command the user typed directly (! prefix): no approval needed,
+        but recorded in the conversation so the model has the context."""
+        cd_target = self._parse_cd(command)
+        if cd_target is not None:
+            result = self._change_dir(cd_target)
+        else:
+            result = tools.run_command(command, cwd=self.cwd, on_line=self.stream)
+        self._append(
+            {"role": "user", "content": f"[I ran `{command}` myself; output:]\n{result}"}
+        )
+        return result
+
     def _dispatch(self, name: str, args: dict) -> str:
         if name == "read_docs":
             command = str(args.get("command", ""))
@@ -147,10 +221,44 @@ class Agent:
 
         if name == "run_command":
             command = str(args.get("command", ""))
-            if not self.approve(command):
+
+            cd_target = self._parse_cd(command)
+            if cd_target is not None:
+                return self._change_dir(cd_target)
+
+            decision = self.approve(command)
+            if decision is None or decision is False:
                 return DENIED_RESULT
-            result = tools.run_command(command)
-            self.echo(result)
+            final = command if decision is True else str(decision)
+            result = tools.run_command(final, cwd=self.cwd, on_line=self.stream)
+            if self.stream is None:
+                self.echo(result)
+            if final != command:
+                result = f"[user edited the command to: {final}]\n{result}"
             return result
 
         return f"ERROR: unknown tool '{name}'"
+
+    def _parse_cd(self, command: str) -> str | None:
+        """A bare `cd <dir>` changes agent state instead of spawning a shell
+        (where it would be a no-op). Compound forms (cd x && ...) run normally."""
+        if any(ch in command for ch in ";&|<>`$(){}"):
+            return None
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return None
+        if not tokens or tokens[0] != "cd" or len(tokens) > 2:
+            return None
+        return tokens[1] if len(tokens) == 2 else "~"
+
+    def _change_dir(self, target: str) -> str:
+        path = os.path.expanduser(target)
+        if not os.path.isabs(path):
+            path = os.path.normpath(os.path.join(self.cwd, path))
+        if not os.path.isdir(path):
+            return f"ERROR: no such directory: {path}"
+        self.cwd = path
+        note = f"[working directory is now {path}]"
+        self.echo(note)
+        return note

@@ -221,3 +221,148 @@ def test_tool_exception_becomes_result_not_crash(monkeypatch):
     )
     assert agent.run_task("read the plist") == "recovered"
     assert "failed internally" in tool_messages(agent.messages)[0]["content"]
+
+
+class TestCwdAndCd:
+    def test_bare_cd_changes_cwd_without_approval(self, tmp_path):
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"cd {tmp_path}")]),
+                model_says("done"),
+            ],
+            approve=lambda _cmd: pytest.fail("bare cd must not hit the approval gate"),
+        )
+        agent.run_task("go there")
+        assert agent.cwd == str(tmp_path)
+        assert "working directory is now" in tool_messages(agent.messages)[0]["content"]
+
+    def test_relative_cd_resolves_against_agent_cwd(self, tmp_path):
+        (tmp_path / "sub").mkdir()
+        agent, _ = make_agent([model_says("hi")], cwd=str(tmp_path))
+        assert "sub" in agent._change_dir("sub")
+        assert agent.cwd == str(tmp_path / "sub")
+
+    def test_cd_to_missing_dir_errors_and_keeps_cwd(self, tmp_path):
+        agent, _ = make_agent([model_says("hi")], cwd=str(tmp_path))
+        result = agent._change_dir("nope-xyz")
+        assert result.startswith("ERROR")
+        assert agent.cwd == str(tmp_path)
+
+    def test_compound_cd_goes_through_approval(self, tmp_path):
+        seen = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="cd /tmp && ls")]),
+                model_says("done"),
+            ],
+            approve=lambda cmd: (seen.append(cmd), cmd)[1],
+        )
+        agent.run_task("list tmp")
+        assert seen == ["cd /tmp && ls"]
+
+    def test_commands_run_in_agent_cwd(self, tmp_path):
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="pwd")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("where am I")
+        assert tmp_path.name in tool_messages(agent.messages)[0]["content"]
+
+
+class TestApproveContract:
+    def test_edited_command_runs_and_is_noted(self):
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo wrong")]),
+                model_says("done"),
+            ],
+            approve=lambda _cmd: "echo edited-version",
+        )
+        agent.run_task("say it")
+        content = tool_messages(agent.messages)[0]["content"]
+        assert "[user edited the command to: echo edited-version]" in content
+        assert "edited-version" in content
+        assert "wrong" not in content.split("]", 1)[1]
+
+    def test_none_denies(self):
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo hi")]),
+                model_says("ok"),
+            ],
+            approve=lambda _cmd: None,
+        )
+        agent.run_task("hi")
+        assert tool_messages(agent.messages)[0]["content"] == DENIED_RESULT
+
+
+class TestContextAndHistory:
+    def test_context_lands_in_system_prompt(self):
+        agent, _ = make_agent([model_says("hi")], context="MAGIC-CONTEXT-42")
+        assert "MAGIC-CONTEXT-42" in agent.messages[0]["content"]
+        assert "read_docs" in agent.messages[0]["content"]
+
+    def test_environment_context_has_date_and_cwd(self):
+        from aish.agent import environment_context
+
+        text = environment_context("/some/dir")
+        import datetime
+
+        assert datetime.date.today().isoformat() in text
+        assert "/some/dir" in text
+
+    def test_on_message_records_serialized_messages(self):
+        records = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo hi")]),
+                model_says("done"),
+            ],
+            on_message=records.append,
+        )
+        agent.run_task("say hi")
+        roles = [r["role"] for r in records]
+        assert roles == ["user", "assistant", "tool", "assistant"]
+        assert all(isinstance(r["content"], str) for r in records)
+
+    def test_load_history_extends_without_rerecording(self):
+        records = []
+        agent, chat = make_agent([model_says("hi")], on_message=records.append)
+        agent.load_history(
+            [
+                {"role": "system", "content": "stale — must be skipped"},
+                {"role": "user", "content": "old question"},
+                {"role": "assistant", "content": "old answer"},
+            ]
+        )
+        assert records == []
+        agent.run_task("new question")
+        sent = chat.calls[0]["messages"]
+        assert sent[1]["content"] == "old question"
+        dicts = [m for m in sent if isinstance(m, dict)]
+        assert all(m.get("content") != "stale — must be skipped" for m in dicts)
+
+
+class TestBangCommands:
+    def test_user_command_skips_approval_and_records_context(self):
+        records = []
+        agent, _ = make_agent(
+            [],
+            approve=lambda _cmd: pytest.fail("! commands must not hit the approval gate"),
+            on_message=records.append,
+        )
+        result = agent.run_user_command("echo direct-hit")
+        assert "direct-hit" in result
+        assert records[0]["role"] == "user"
+        assert "I ran `echo direct-hit` myself" in records[0]["content"]
+        assert "direct-hit" in records[0]["content"]
+
+    def test_user_cd_changes_persistent_cwd(self, tmp_path):
+        agent, _ = make_agent([], approve=lambda _cmd: pytest.fail("no approval for !cd"))
+        agent.run_user_command(f"cd {tmp_path}")
+        assert agent.cwd == str(tmp_path)
+        result = agent.run_user_command("pwd")
+        assert tmp_path.name in result
