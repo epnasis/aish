@@ -2,7 +2,6 @@
 
 import argparse
 import os
-import shutil
 import sys
 import tomllib
 from pathlib import Path
@@ -25,9 +24,34 @@ GREEN = "\033[32m"
 RESET = "\033[0m"
 
 ECHO_PREVIEW_LINES = 12
+REPLAY_TOOL_LINES = 4
 
-# Interactive prompt session (prompt_toolkit); None when stdin is piped.
-_prompt_session = None
+SLASH_COMMANDS = ("/clear", "/exit", "/help", "/new", "/quit", "/resume")
+
+SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
+  /resume        load the previous session into this one (replays it on screen)
+  /new, /clear   fresh conversation in a new session file
+  /help          this help
+  /quit, /exit   quit (plain 'exit' works too)
+input: Enter submits · Option/Alt+Enter (or Esc,Enter) adds a newline · pasted
+newlines are kept · !<cmd> runs directly without the model · !cd <dir> moves
+the working directory · Ctrl-C cancels a running command{RESET}"""
+
+# BoxPrompt instance when stdin is a TTY; None means plain input() fallback.
+_box = None
+
+
+class LogRef:
+    """Mutable indirection so /new can swap the session log everywhere at once."""
+
+    def __init__(self, log: SessionLog):
+        self.log = log
+
+    def message(self, message: dict) -> None:
+        self.log.message(message)
+
+    def command(self, command: str, decision: str) -> None:
+        self.log.command(command, decision)
 
 
 def load_config(path: Path) -> dict:
@@ -41,45 +65,10 @@ def load_config(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def make_prompt_session(vi_mode: bool, state_dir: Path):
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.cursor_shapes import ModalCursorShapeConfig
-    from prompt_toolkit.history import FileHistory
-
-    state_dir.mkdir(parents=True, exist_ok=True)
-    kwargs = {"history": FileHistory(str(state_dir / "history")), "vi_mode": vi_mode}
-    if vi_mode:
-        kwargs["cursor"] = ModalCursorShapeConfig()
-    return PromptSession(**kwargs)
-
-
-def _bottom_rule(vi_mode: bool) -> str:
-    width = shutil.get_terminal_size((80, 24)).columns
-    if not vi_mode:
-        return "─" * width
-    from prompt_toolkit.application.current import get_app
-    from prompt_toolkit.key_binding.vi_state import InputMode
-
-    mode = get_app().vi_state.input_mode
-    if mode == InputMode.NAVIGATION:
-        label = " NORMAL "
-    elif mode == InputMode.REPLACE:
-        label = " REPLACE "
-    else:
-        label = " INSERT "
-    return "─" * 3 + label + "─" * max(0, width - len(label) - 3)
-
-
-def _toolbar_style():
-    from prompt_toolkit.styles import Style
-
-    return Style.from_dict({"bottom-toolbar": "noreverse fg:ansibrightblack"})
-
-
 def edit_line(initial: str) -> str:
     """Line editing with the command pre-filled."""
-    if _prompt_session is not None:
-        return _prompt_session.prompt("edit> ", default=initial).strip()
+    if _box is not None:
+        return _box.edit(initial)
     try:
         import readline
 
@@ -107,7 +96,7 @@ def allow_segments_flow(command: str, allow_path: Path) -> None:
         print(f"{DIM}  saved: {answer or suggestion} → {allow_path}{RESET}")
 
 
-def make_approver(ask_all: bool, allow_path: Path, log: SessionLog | None):
+def make_approver(ask_all: bool, allow_path: Path, log):
     def record(command: str, decision: str) -> None:
         if log:
             log.command(command, decision)
@@ -157,24 +146,66 @@ def stream_line(line: str) -> None:
     print(f"{DIM}  {line}{RESET}")
 
 
-def read_task(cwd: str, vi_mode: bool = False) -> str:
-    """Boxed prompt: cwd on its own line, input between full-width rules.
-    The bottom rule is a prompt_toolkit toolbar (shows NORMAL/INSERT in vi
-    mode) and tracks the input properly even when it wraps. Piped stdin gets
-    a plain prompt instead."""
+def read_task(cwd: str) -> str:
+    """Boxed prompt (rules hugging the input, expanding with multiline entry);
+    plain prompt when stdin is piped."""
     home = str(Path.home())
     display = "~" + cwd[len(home):] if cwd.startswith(home) else cwd
-    if _prompt_session is None:
+    if _box is None:
         return input(f"\naish:{display}> ")
+    print()
+    return _box.read(display)
 
-    width = shutil.get_terminal_size((80, 24)).columns
-    print(f"\n{DIM}{display}{RESET}")
-    print(f"{DIM}{'─' * width}{RESET}")
-    return _prompt_session.prompt(
-        [("bold", "❯ ")],
-        bottom_toolbar=lambda: _bottom_rule(vi_mode),
-        style=_toolbar_style(),
-    )
+
+def replay_history(messages: list[dict]) -> None:
+    """Print a loaded conversation so the user sees what they resumed."""
+    for message in messages:
+        role = message.get("role")
+        content = (message.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "user":
+            print(f"\n{BOLD}❯{RESET} {content}")
+        elif role == "assistant":
+            print(f"{GREEN}{content}{RESET}")
+        else:
+            lines = content.splitlines()
+            print(DIM + "\n".join(f"  {line}" for line in lines[:REPLAY_TOOL_LINES]) + RESET)
+            if len(lines) > REPLAY_TOOL_LINES:
+                print(f"{DIM}  … ({len(lines) - REPLAY_TOOL_LINES} more lines){RESET}")
+
+
+def handle_slash(task: str, agent: Agent, logref: LogRef, state_dir: Path) -> str:
+    """Dispatch a /command; returns 'exit' or 'handled'."""
+    command = task.split()[0].lower()
+    if command in ("/quit", "/exit"):
+        return "exit"
+    if command in ("/new", "/clear"):
+        agent.reset()
+        logref.log = SessionLog.new(state_dir)
+        print(f"{DIM}fresh conversation — session {logref.log.path.name}{RESET}")
+        return "handled"
+    if command == "/resume":
+        candidates = [
+            f for f in sorted(state_dir.glob("session-*.jsonl")) if f != logref.log.path
+        ]
+        for candidate in reversed(candidates):  # newest session that has content
+            messages = SessionLog.load_messages(candidate)
+            if not messages:
+                continue
+            agent.load_history(messages)
+            for message in messages:  # keep the current session file self-contained
+                logref.message(message)
+            print(f"{DIM}resumed {len(messages)} messages from {candidate.name}:{RESET}")
+            replay_history(messages)
+            return "handled"
+        print(f"{DIM}no previous session to resume{RESET}")
+        return "handled"
+    if command == "/help":
+        print(SLASH_HELP)
+        return "handled"
+    print(f"{DIM}unknown command {command} — try /help{RESET}")
+    return "handled"
 
 
 def usage_context(
@@ -190,6 +221,11 @@ independently; read-only commands auto-approve), e=edit the command first.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` changes the shared working directory. Ctrl-C cancels only the \
 running command. Ctrl-D or `exit` quits.
+- REPL slash commands (Tab autocompletes them): /resume loads and replays the \
+previous session into this one; /new or /clear starts a fresh conversation; \
+/help lists commands; /quit or /exit quits.
+- Multiline input: Enter submits; Option/Alt+Enter (or Esc then Enter) \
+inserts a newline; pasted text keeps its newlines.
 - Sessions: conversation + command audit trail logged to {state_dir}; \
 `aish --resume` continues the most recent session.
 - Config file: {config_path} (TOML). Keys: vi_mode, model, num_ctx, \
@@ -274,10 +310,13 @@ def main() -> int:
             log = SessionLog(latest)
     else:
         log = SessionLog.new(state_dir)
+    logref = LogRef(log)
 
-    global _prompt_session
+    global _box
     if sys.stdin.isatty():
-        _prompt_session = make_prompt_session(args.vi_mode, state_dir)
+        from .prompt import BoxPrompt
+
+        _box = BoxPrompt(args.vi_mode, state_dir, SLASH_COMMANDS)
 
     context = "\n\n".join(
         [
@@ -288,7 +327,7 @@ def main() -> int:
     )
     agent = Agent(
         model=args.model,
-        approve=make_approver(args.ask_all, allow_path, log),
+        approve=make_approver(args.ask_all, allow_path, logref),
         echo=echo,
         stream=stream_line,
         num_ctx=args.num_ctx,
@@ -296,31 +335,41 @@ def main() -> int:
         think=args.think,
         cwd=cwd,
         context=context,
-        on_message=log.message,
+        on_message=logref.message,
     )
     if history:
         agent.load_history(history)
-        print(f"{DIM}resumed {len(history)} messages from {log.path.name}{RESET}")
+        print(f"{DIM}resumed {len(history)} messages from {log.path.name}:{RESET}")
+        replay_history(history)
 
     if args.task:
         print(f"{GREEN}{agent.run_task(' '.join(args.task))}{RESET}")
         return 0
 
-    print(f"{DIM}aish — model {args.model} · session {log.path.name} · Ctrl-D to quit{RESET}")
+    print(
+        f"{DIM}aish — model {args.model} · session {log.path.name} · /help · Ctrl-D quits{RESET}"
+    )
     while True:
         try:
-            task = read_task(agent.cwd, args.vi_mode).strip()
-        except (EOFError, KeyboardInterrupt):
+            task = read_task(agent.cwd).strip()
+        except EOFError:
             print()
             return 0
+        except KeyboardInterrupt:
+            print(f"{DIM}(input cleared — Ctrl-D or /quit to exit){RESET}")
+            continue
         if task in ("exit", "quit"):
             return 0
         if not task:
             continue
+        if task.startswith("/"):
+            if handle_slash(task, agent, logref, state_dir) == "exit":
+                return 0
+            continue
         if task.startswith("!"):
             command = task[1:].strip()
             if command:
-                log.command(command, "user-direct")
+                logref.command(command, "user-direct")
                 try:
                     agent.run_user_command(command)
                 except KeyboardInterrupt:

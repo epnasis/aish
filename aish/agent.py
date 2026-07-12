@@ -116,6 +116,10 @@ class Agent:
         content = system_prompt() + (f"\n{context}" if context else "")
         self.messages: list[Any] = [{"role": "system", "content": content}]
 
+    def reset(self) -> None:
+        """Drop the conversation, keep the system prompt."""
+        del self.messages[1:]
+
     def load_history(self, messages: list[dict]) -> None:
         """Adopt messages from a previous session (already logged — appended
         directly so they are not re-recorded)."""

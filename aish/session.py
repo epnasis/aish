@@ -14,7 +14,8 @@ class SessionLog:
 
     @classmethod
     def new(cls, state_dir: Path) -> "SessionLog":
-        name = datetime.datetime.now().strftime("session-%Y%m%d-%H%M%S.jsonl")
+        # Microseconds: /new within the same second must not reuse the file.
+        name = datetime.datetime.now().strftime("session-%Y%m%d-%H%M%S-%f.jsonl")
         return cls(state_dir / name)
 
     @staticmethod

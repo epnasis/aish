@@ -133,3 +133,132 @@ class TestUsageContext:
 
         text = usage_context("m", True, tmp_path, tmp_path, tmp_path)
         assert "currently true" in text
+
+
+class TestSlashCompleter:
+    def completions(self, text):
+        from prompt_toolkit.document import Document
+
+        from aish.cli import SLASH_COMMANDS
+        from aish.prompt import SlashCompleter
+
+        completer = SlashCompleter(SLASH_COMMANDS)
+        return [c.text for c in completer.get_completions(Document(text), None)]
+
+    def test_prefix_completes(self):
+        assert self.completions("/r") == ["/resume"]
+        assert self.completions("/q") == ["/quit"]
+
+    def test_bare_slash_lists_all(self):
+        from aish.cli import SLASH_COMMANDS
+
+        assert self.completions("/") == list(SLASH_COMMANDS)
+
+    def test_only_at_line_start_first_word(self):
+        assert self.completions("hello /r") == []
+        assert self.completions("/resume extra") == []
+
+
+class TestSlashCommands:
+    def fake_agent(self):
+        from aish.agent import Agent
+
+        return Agent(model="fake", approve=lambda _c: None, client_chat=lambda **_k: None)
+
+    def logref(self, tmp_path):
+        from aish.cli import LogRef
+        from aish.session import SessionLog
+
+        return LogRef(SessionLog.new(tmp_path))
+
+    def test_quit_and_exit(self, tmp_path):
+        from aish.cli import handle_slash
+
+        agent, logref = self.fake_agent(), self.logref(tmp_path)
+        assert handle_slash("/quit", agent, logref, tmp_path) == "exit"
+        assert handle_slash("/exit", agent, logref, tmp_path) == "exit"
+
+    def test_clear_resets_conversation_and_swaps_log(self, tmp_path):
+        from aish.cli import handle_slash
+
+        agent, logref = self.fake_agent(), self.logref(tmp_path)
+        old_path = logref.log.path
+        agent.messages.append({"role": "user", "content": "old"})
+        assert handle_slash("/clear", agent, logref, tmp_path) == "handled"
+        assert len(agent.messages) == 1
+        assert agent.messages[0]["role"] == "system"
+        assert logref.log.path != old_path
+
+    def test_resume_loads_previous_replays_and_relogs(self, tmp_path, capsys):
+        from aish.cli import handle_slash
+        from aish.session import SessionLog
+
+        previous = SessionLog(tmp_path / "session-20260101-000000.jsonl")
+        previous.message({"role": "user", "content": "old question"})
+        previous.message({"role": "assistant", "content": "old answer"})
+
+        agent, logref = self.fake_agent(), self.logref(tmp_path)
+        assert handle_slash("/resume", agent, logref, tmp_path) == "handled"
+        assert any(
+            isinstance(m, dict) and m.get("content") == "old question"
+            for m in agent.messages
+        )
+        out = capsys.readouterr().out
+        assert "old question" in out and "old answer" in out  # replayed on screen
+        # re-logged: current session file is self-contained
+        assert "old question" in logref.log.path.read_text()
+
+    def test_resume_with_no_previous(self, tmp_path, capsys):
+        from aish.cli import handle_slash
+
+        agent, logref = self.fake_agent(), self.logref(tmp_path)
+        assert handle_slash("/resume", agent, logref, tmp_path) == "handled"
+        assert "no previous session" in capsys.readouterr().out
+
+    def test_unknown_command_suggests_help(self, tmp_path, capsys):
+        from aish.cli import handle_slash
+
+        agent, logref = self.fake_agent(), self.logref(tmp_path)
+        assert handle_slash("/bogus", agent, logref, tmp_path) == "handled"
+        assert "/help" in capsys.readouterr().out
+
+    def test_help_lists_commands(self, tmp_path, capsys):
+        from aish.cli import handle_slash
+
+        agent, logref = self.fake_agent(), self.logref(tmp_path)
+        handle_slash("/help", agent, logref, tmp_path)
+        out = capsys.readouterr().out
+        for cmd in ("/resume", "/new", "/clear", "/quit"):
+            assert cmd in out
+
+
+def test_replay_history_shows_roles_and_truncates_tools(capsys):
+    from aish.cli import replay_history
+
+    replay_history(
+        [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": ""},  # tool-call-only: skipped
+            {"role": "tool", "content": "\n".join(f"l{i}" for i in range(10))},
+            {"role": "assistant", "content": "answer"},
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "question" in out and "answer" in out
+    assert "l0" in out and "l9" not in out
+    assert "more lines" in out
+
+
+def test_resume_skips_empty_sessions(tmp_path, capsys):
+    from aish.agent import Agent
+    from aish.cli import LogRef, handle_slash
+    from aish.session import SessionLog
+
+    old = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+    old.message({"role": "user", "content": "real content"})
+    SessionLog(tmp_path / "session-20260102-000000-000000.jsonl")  # newer but empty
+
+    agent = Agent(model="fake", approve=lambda _c: None, client_chat=lambda **_k: None)
+    logref = LogRef(SessionLog.new(tmp_path))
+    handle_slash("/resume", agent, logref, tmp_path)
+    assert "real content" in capsys.readouterr().out

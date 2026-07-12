@@ -44,7 +44,15 @@ At the approval prompt: `y` run once · `n` deny · `a` always allow (asks per
 chained segment, saved to `~/.config/aish/allow.txt`) · `e` edit the command
 before running. Ctrl-C during a running command cancels the command, not the
 session. `!<command>` runs a command directly (no model, no approval); `!cd`
-moves the persistent working directory. Put persistent context (host facts,
+moves the persistent working directory.
+
+REPL slash commands (Tab autocompletes): `/resume` loads and replays the
+previous session, `/new`/`/clear` start a fresh conversation, `/help`,
+`/quit`/`/exit`. Multiline input: Enter submits, Option/Alt+Enter (or Esc,
+Enter) adds a newline, pasted newlines are kept. (In iTerm2 enable
+"Left Option key: Esc+" for Option+Enter.)
+
+Put persistent context (host facts,
 preferences) in `./AISH.md` or `~/.config/aish/AISH.md`. Sessions and a
 command audit trail are logged to `~/.local/state/aish/`.
 
