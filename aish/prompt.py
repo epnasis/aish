@@ -163,7 +163,7 @@ class BoxPrompt:
             align=VerticalAlign.TOP,
         )
 
-        return Application(
+        app = Application(
             layout=Layout(body, focused_element=buffer),
             key_bindings=merge_key_bindings([load_key_bindings(), keys]),
             editing_mode=EditingMode.VI if self.vi_mode else EditingMode.EMACS,
@@ -172,3 +172,9 @@ class BoxPrompt:
             input=input,
             output=output,
         )
+        # Vim-style ttimeoutlen: flush a lone Esc after 50ms instead of the
+        # 500ms default, so NORMAL mode (indicator + cursor shape) reacts
+        # instantly. Terminal-sent Alt+Enter arrives as an atomic Esc+CR
+        # burst, far faster than 50ms, so it still parses as one key.
+        app.ttimeoutlen = 0.05
+        return app
