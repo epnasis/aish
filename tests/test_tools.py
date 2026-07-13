@@ -35,6 +35,15 @@ class TestTruncate:
         assert "characters omitted" in result
         assert len(result) < len(text)
 
+    def test_tail_zero_actually_truncates(self):
+        """Regression: text[-0:] is the whole string, so tail=0 callers
+        (read_docs, read_url) got the full text appended after the cap."""
+        result = tools.truncate("A" * 10000, head=100, tail=0)
+        assert len(result) < 200
+
+    def test_big_man_page_is_actually_capped(self):
+        assert len(tools.read_docs("find")) < tools.DOCS_MAX_CHARS + 200
+
 
 class TestRunCommand:
     def test_captures_stdout_and_exit_code(self):

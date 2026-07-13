@@ -576,6 +576,52 @@ class TestFileTools:
         assert "not found" in tool_messages(agent.messages)[0]["content"]
 
 
+class TestWebTools:
+    def call(self, name, **args):
+        return SimpleNamespace(function=SimpleNamespace(name=name, arguments=args))
+
+    def test_web_search_no_approval_and_query_passed(self, monkeypatch):
+        import aish.agent as agent_module
+
+        seen = {}
+
+        def fake_search(query):
+            seen["query"] = query
+            return "1. Result\n   https://x.example\n   snippet"
+
+        monkeypatch.setattr(agent_module.web, "web_search", fake_search)
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self.call("web_search", query="latest uv release")]),
+             model_says("done")],
+            approve=lambda _c: pytest.fail("web_search must not hit approval"),
+        )
+        agent.run_task("what's new in uv?")
+        assert seen["query"] == "latest uv release"
+        assert "https://x.example" in tool_messages(agent.messages)[0]["content"]
+
+    def test_read_url_topic_passed_through_and_echoed(self, monkeypatch):
+        import aish.agent as agent_module
+
+        seen = {}
+
+        def fake_read(url, topic=None):
+            seen.update(url=url, topic=topic)
+            return "[page] matching lines"
+
+        monkeypatch.setattr(agent_module.web, "read_url", fake_read)
+        echoed = []
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self.call("read_url", url="https://x.example/doc",
+                                              topic="install")]),
+             model_says("done")],
+            approve=lambda _c: pytest.fail("read_url must not hit approval"),
+            echo=echoed.append,
+        )
+        agent.run_task("read the doc")
+        assert seen == {"url": "https://x.example/doc", "topic": "install"}
+        assert any("read_url: https://x.example/doc (topic: install)" in e for e in echoed)
+
+
 class TestRememberTool:
     def test_remember_auto_approved_and_appends(self, tmp_path):
         lessons = tmp_path / "lessons.md"

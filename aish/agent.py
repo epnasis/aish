@@ -17,7 +17,7 @@ from typing import Any
 
 import ollama
 
-from . import files, skills, tools
+from . import files, skills, tools, web
 from .approval import Blocked
 
 _PLATFORM_NOTES = {
@@ -57,6 +57,11 @@ Rules:
 6. You have a persistent working directory. To change it, run exactly
    `cd <dir>` as its own command — the new directory is echoed back and all
    later commands run there.
+7. WEB: for information not on this machine (current events, releases,
+   unfamiliar errors, general facts), call web_search, then read_url the most
+   promising result and answer from what the page actually says, citing the
+   URL. Search queries and URLs LEAVE THIS MACHINE — never include private
+   local data (file contents, key values, personal details) in them.
 """
 
 DENIED_RESULT = (
@@ -338,6 +343,17 @@ class Agent:
             result = tools.remember(note, self.lessons_path)
             self.echo(f"→ {result}")
             return result
+
+        if name == "web_search":
+            query = str(args.get("query", ""))
+            self.echo(f"→ web_search: {query}")
+            return web.web_search(query)
+
+        if name == "read_url":
+            url = str(args.get("url", ""))
+            topic = args.get("topic") or None
+            self.echo(f"→ read_url: {url}" + (f" (topic: {topic})" if topic else ""))
+            return web.read_url(url, topic=str(topic) if topic else None)
 
         if name == "read_file":
             path = str(args.get("path", ""))

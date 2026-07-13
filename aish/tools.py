@@ -41,7 +41,8 @@ def truncate(text: str, head: int = HEAD_CHARS, tail: int = TAIL_CHARS) -> str:
     if len(text) <= head + tail:
         return text
     omitted = len(text) - head - tail
-    return f"{text[:head]}\n[... {omitted} characters omitted ...]\n{text[-tail:]}"
+    tail_text = text[-tail:] if tail else ""  # text[-0:] is the WHOLE string
+    return f"{text[:head]}\n[... {omitted} characters omitted ...]\n{tail_text}"
 
 
 def _decode(data: bytes | None) -> str:
@@ -486,6 +487,59 @@ TOOL_SCHEMAS = [
                     "new_str": {"type": "string", "description": "Replacement text."},
                 },
                 "required": ["path", "old_str", "new_str"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the web (DuckDuckGo); returns titles, URLs, and snippets. "
+                "Use for information NOT on this machine: current events, software "
+                "releases, unfamiliar error messages, general facts. Snippets alone "
+                "are rarely enough — follow up with read_url on the best result. "
+                "Queries leave this machine: NEVER include private local data "
+                "(file contents, key values, personal details) in a query."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search keywords, like you would type into a search engine.",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_url",
+            "description": (
+                "Fetch a web page and return its readable text. Use after web_search "
+                "to read a promising result, or on any URL the user gives you. If the "
+                "page comes back truncated, call again with a 'topic' to search the "
+                "full page text (works like read_docs topics)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Full http(s) URL of the page to read.",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": (
+                            "Optional word or phrase: returns only matching lines "
+                            "with context from the full page text."
+                        ),
+                    },
+                },
+                "required": ["url"],
             },
         },
     },

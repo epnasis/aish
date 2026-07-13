@@ -338,6 +338,10 @@ independently; read-only commands auto-approve), e=edit the command first.
 working with files. write_file creates or overwrites; edit_file replaces an \
 exact UNIQUE string (include context lines if needed). The user approves a \
 colored diff before any write. Do NOT use sed -i or > redirects to edit files.
+- Web tools: web_search (DuckDuckGo, no API key) and read_url (fetches a page \
+as readable text; 'topic' searches the full text). Both auto-approve as \
+read-only, and every query/URL is echoed to the user — but they send data off \
+this machine, so never put private local content into them.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` changes the shared working directory. Ctrl-C cancels only the \
 running command. Ctrl-D or `exit` quits.

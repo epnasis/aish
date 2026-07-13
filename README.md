@@ -9,8 +9,9 @@ Two design pillars:
   data, which is frequently wrong for macOS/BSD userland.
 - **Mandatory approval**: every proposed shell command is shown verbatim and requires
   an explicit `y` before it executes. There is no code path that runs a model-proposed
-  command without approval. `read_docs` is the only auto-approved tool and accepts a
-  validated bare command name, never a shell string.
+  command without approval. The only auto-approved tools are constrained, read-only
+  ones (`read_docs`, `read_file`, `read_skill`, `remember`, `web_search`, `read_url`) —
+  none of them accepts a shell string, and every call is echoed to you.
 
 A third safety layer sits above the prompt: a **denylist** of unrecoverable
 command classes — `rm -rf`, `shred`, `mkfs`, `dd` to raw devices,
@@ -27,6 +28,11 @@ Quality-of-life on top of the pillars:
   understand still prompts. Disable with `--ask-all`.
 - `read_docs` takes an optional `topic` to search full man pages past the truncation
   limit (the model is told about this whenever docs come back truncated).
+- **Web browsing**: `web_search` (DuckDuckGo, no API key needed) plus `read_url`
+  (fetches a page as readable text, same `topic` search as `read_docs`) let the
+  agent answer from the live web with cited sources. Both send their input off
+  your machine, so the model is instructed never to put local file contents or
+  other private data into a query — and every query/URL is echoed as it happens.
 - Old tool outputs are compacted between tasks and under context pressure, so long
   REPL sessions never silently evict the system prompt.
 - Answers stream token-by-token (TTY only); command output streams live too.
