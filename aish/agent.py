@@ -17,7 +17,7 @@ from typing import Any
 
 import ollama
 
-from . import skills, tools
+from . import files, skills, tools
 from .approval import Blocked
 
 _PLATFORM_NOTES = {
@@ -63,6 +63,11 @@ EMPTY_RESPONSE = (
 class ModelUnavailable(RuntimeError):
     """The model call failed after a retry (Ollama down, overloaded, or OOM)."""
 
+
+WRITE_DENIED = (
+    "USER DENIED this file change — nothing was written. "
+    "Do not retry the same change; adjust it or ask the user what they want."
+)
 
 BLOCKED_RESULT = (
     "BLOCKED by the safety denylist ({reason}) — NOT executed, and it cannot "
@@ -110,6 +115,7 @@ class Agent:
         self,
         model: str,
         approve: Callable[[str], Any],
+        approve_write: Callable[[Any], bool] = lambda _plan: False,
         echo: Callable[[str], None] = lambda _: None,
         stream: Callable[[str], None] | None = None,
         client_chat: Callable[..., Any] = ollama.chat,
@@ -124,6 +130,7 @@ class Agent:
     ):
         self.model = model
         self.approve = approve
+        self.approve_write = approve_write
         self.echo = echo
         self.stream = stream
         self.chat = client_chat
@@ -306,6 +313,14 @@ class Agent:
             self.echo(f"→ read_skill: {skill}")
             return skills.load_skill(skill, skills.skill_dirs(self.cwd))
 
+        if name == "read_file":
+            path = str(args.get("path", ""))
+            self.echo(f"→ read_file: {path}")
+            return files.read_file(path, self.cwd)
+
+        if name in ("write_file", "edit_file"):
+            return self._dispatch_write(name, args)
+
         if name == "run_command":
             command = str(args.get("command", ""))
 
@@ -331,6 +346,26 @@ class Agent:
             return result
 
         return f"ERROR: unknown tool '{name}'"
+
+    def _dispatch_write(self, name: str, args: dict) -> str:
+        if name == "write_file":
+            plan = files.plan_write(
+                str(args.get("path", "")), str(args.get("content", "")), self.cwd
+            )
+        else:
+            plan = files.plan_edit(
+                str(args.get("path", "")),
+                str(args.get("old_str", "")),
+                str(args.get("new_str", "")),
+                self.cwd,
+            )
+        if plan.error:
+            return f"ERROR: {plan.error}"
+        if not self.approve_write(plan):
+            return WRITE_DENIED
+        result = files.commit(plan)
+        self.echo(result)
+        return result
 
     def _parse_cd(self, command: str) -> str | None:
         """A bare `cd <dir>` changes agent state instead of spawning a shell

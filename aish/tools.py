@@ -305,6 +305,63 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "read_file",
+            "description": (
+                "Read a text file with line numbers. Prefer this over `cat` when you "
+                "intend to edit the file next."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path (rel to cwd or abs)."}
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": (
+                "Create a file or overwrite it entirely with new content. The user sees "
+                "a diff and must approve before anything is written. Use edit_file for "
+                "small changes to a large existing file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path (rel to cwd or abs)."},
+                    "content": {"type": "string", "description": "The full new file contents."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": (
+                "Replace an exact string in a file with a new string. old_str must match "
+                "exactly and be UNIQUE in the file (include surrounding lines for context "
+                "if needed) — the edit fails rather than guess. The user approves a diff "
+                "before it is written."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path (rel to cwd or abs)."},
+                    "old_str": {"type": "string", "description": "Exact unique text to replace."},
+                    "new_str": {"type": "string", "description": "Replacement text."},
+                },
+                "required": ["path", "old_str", "new_str"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command",
             "description": (
                 "Run a shell command on the user's machine. The user sees the exact "

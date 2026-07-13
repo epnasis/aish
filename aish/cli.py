@@ -157,6 +157,46 @@ def make_approver(ask_all: bool, allow_path: Path, log, deny_path: Path = DEFAUL
     return ask_approval
 
 
+CYAN = "\033[36m"
+
+
+def colorize_diff(diff: str) -> str:
+    out = []
+    for line in diff.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            out.append(f"{BOLD}{line}{RESET}")
+        elif line.startswith("+"):
+            out.append(f"{GREEN}{line}{RESET}")
+        elif line.startswith("-"):
+            out.append(f"{RED}{line}{RESET}")
+        elif line.startswith("@@"):
+            out.append(f"{CYAN}{line}{RESET}")
+        else:
+            out.append(f"{DIM}{line}{RESET}")
+    return "\n".join(out)
+
+
+def make_write_approver(log):
+    def approve_write(plan) -> bool:
+        verb = "create" if plan.is_new else "edit"
+        print(f"\n{YELLOW}{BOLD}▶ {verb} file?{RESET} {BOLD}{plan.target}{RESET} "
+              f"{DIM}(+{plan.added} -{plan.removed}){RESET}")
+        if plan.diff.strip():
+            print(colorize_diff(plan.diff))
+        else:
+            print(f"{DIM}(no textual changes){RESET}")
+        try:
+            answer = input(f"{YELLOW}[y/N]{RESET} ").strip().lower()
+        except EOFError:
+            answer = ""
+        approved = answer in ("y", "yes")
+        if log:
+            log.command(f"{verb} {plan.target}", "approved" if approved else "denied")
+        return approved
+
+    return approve_write
+
+
 def echo(text: str) -> None:
     lines = text.splitlines()
     shown = lines[:ECHO_PREVIEW_LINES]
@@ -283,6 +323,10 @@ About aish (you) — use this to answer questions about your own usage:
 - Approval prompt keys: y=run once, n=deny, a=always allow (saves command \
 prefixes to {allow_path}; chained |/&&/|| segments are vetted and allowlisted \
 independently; read-only commands auto-approve), e=edit the command first.
+- File tools: prefer read_file/write_file/edit_file over cat/sed/heredocs for \
+working with files. write_file creates or overwrites; edit_file replaces an \
+exact UNIQUE string (include context lines if needed). The user approves a \
+colored diff before any write. Do NOT use sed -i or > redirects to edit files.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` changes the shared working directory. Ctrl-C cancels only the \
 running command. Ctrl-D or `exit` quits.
@@ -442,6 +486,7 @@ def main() -> int:
     agent = Agent(
         model=args.model,
         approve=make_approver(args.ask_all, allow_path, logref, deny_path),
+        approve_write=make_write_approver(logref),
         echo=echo,
         stream=stream_line,
         num_ctx=args.num_ctx,

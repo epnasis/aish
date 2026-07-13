@@ -509,3 +509,68 @@ class TestModelResilience:
         agent = Agent(model="fake", approve=lambda _c: True, client_chat=dead)
         with pytest.raises(ModelUnavailable, match="overloaded"):
             agent.run_task("hi")
+
+
+class TestFileTools:
+    def call(self, name, **args):
+        return SimpleNamespace(function=SimpleNamespace(name=name, arguments=args))
+
+    def test_read_file_no_approval(self, tmp_path):
+        (tmp_path / "r.txt").write_text("readable\n")
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self.call("read_file", path="r.txt")]), model_says("done")],
+            approve=lambda _c: pytest.fail("read_file must not hit approval"),
+            cwd=str(tmp_path),
+        )
+        agent.run_task("read it")
+        assert "readable" in tool_messages(agent.messages)[0]["content"]
+
+    def test_write_file_approved_writes_and_shows_plan(self, tmp_path):
+        seen = {}
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self.call("write_file", path="new.py", content="x=1\n")]),
+             model_says("done")],
+            approve_write=lambda plan: seen.update(added=plan.added, is_new=plan.is_new) or True,
+            cwd=str(tmp_path),
+        )
+        agent.run_task("write it")
+        assert (tmp_path / "new.py").read_text() == "x=1\n"
+        assert seen == {"added": 1, "is_new": True}
+        assert "created" in tool_messages(agent.messages)[0]["content"]
+
+    def test_write_file_denied_does_not_write(self, tmp_path):
+        from aish.agent import WRITE_DENIED
+
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self.call("write_file", path="x.py", content="x=1\n")]),
+             model_says("ok")],
+            approve_write=lambda _plan: False,
+            cwd=str(tmp_path),
+        )
+        agent.run_task("write it")
+        assert not (tmp_path / "x.py").exists()
+        assert tool_messages(agent.messages)[0]["content"] == WRITE_DENIED
+
+    def test_edit_file_default_denies(self, tmp_path):
+        (tmp_path / "c.py").write_text("a = 1\n")
+        # default approve_write denies — Agent constructed without one
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self.call("edit_file", path="c.py", old_str="a = 1",
+                                              new_str="a = 2")]),
+             model_says("ok")],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("edit it")
+        assert (tmp_path / "c.py").read_text() == "a = 1\n"
+
+    def test_edit_error_skips_approval(self, tmp_path):
+        (tmp_path / "c.py").write_text("a = 1\n")
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self.call("edit_file", path="c.py", old_str="nope",
+                                              new_str="x")]),
+             model_says("ok")],
+            approve_write=lambda _p: pytest.fail("errored plan must not reach approval"),
+            cwd=str(tmp_path),
+        )
+        agent.run_task("edit it")
+        assert "not found" in tool_messages(agent.messages)[0]["content"]
