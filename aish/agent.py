@@ -294,7 +294,13 @@ class Agent:
         if cd_target is not None:
             result = self._change_dir(cd_target)
         else:
-            result = tools.run_command(command, cwd=self.cwd, on_line=self.stream)
+            result = tools.run_command(
+                command,
+                cwd=self.cwd,
+                on_line=self.stream,
+                allow_detach=True,
+                log_dir=self.job_log_dir,
+            )
         self._append(
             {"role": "user", "content": f"[I ran `{command}` myself; output:]\n{result}"}
         )
@@ -338,7 +344,13 @@ class Agent:
                 result = tools.start_background(final, cwd=self.cwd, log_dir=self.job_log_dir)
                 self.echo(result)
                 return result
-            result = tools.run_command(final, cwd=self.cwd, on_line=self.stream)
+            result = tools.run_command(
+                final,
+                cwd=self.cwd,
+                on_line=self.stream,
+                allow_detach=True,
+                log_dir=self.job_log_dir,
+            )
             if self.stream is None:
                 self.echo(result)
             if final != command:

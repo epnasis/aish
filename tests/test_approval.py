@@ -172,9 +172,25 @@ class TestDenylist:
 
 class TestLooksDestructive:
     def test_flags_destructive_commands(self):
-        for command in ("rm x", "sudo ls", "mv a b", "kill 123", "ls > f", "npm i --force"):
+        for command in ("rm x", "sudo ls", "mv a b", "kill 123", "npm i --force",
+                        "pkill node", "chmod -R 777 .", "sudo pmset -a hibernatemode 0"):
             assert looks_destructive(command), command
 
     def test_quiet_on_benign(self):
-        for command in ("ls -la", "git status", "cat f | wc -l", "git push --force-with-lease"):
+        for command in ("ls -la", "git status", "cat f | wc -l",
+                        "git push --force-with-lease"):
+            assert not looks_destructive(command), command
+
+    def test_redirects_and_quoted_gt_do_not_warn(self):
+        # regression: 2>/dev/null and '>' inside quoted programs were flagging
+        # every read-only diagnostic, breeding approval fatigue
+        for command in (
+            "swapctl -l 2>/dev/null",
+            "pmset -g 2>/dev/null | grep -i sleep",
+            'sysctl vm.swapusage 2>/dev/null; echo "---"; ls -lh /var/vm 2>/dev/null',
+            "ps -e -o rss,comm | sort -rn | awk '{a[NR]=$1} END{for(i=15;i>=1;i--) print a[i]}'",
+            "echo done > out.txt",
+            "tar -xf archive.tar",
+            "grep -f patterns.txt file",
+        ):
             assert not looks_destructive(command), command

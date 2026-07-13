@@ -240,25 +240,34 @@ _DESTRUCTIVE_COMMANDS = {
 
 
 def looks_destructive(command: str) -> bool:
-    """Cheap heuristic for the approval prompt's red warning — advisory only,
-    never a substitute for the gate itself."""
-    if ">" in command or "<" in command:
-        return True
-    for segment in split_chain(command) or [command]:
+    """Whether to show the red warning at the prompt — advisory only, never a
+    substitute for the gate. Keyed on command VERBS (rm, mv, kill, sudo, …),
+    NOT on redirects: `2>/dev/null` and a `>` inside a quoted awk/sed program
+    are not destructive, and flagging them just breeds approval fatigue."""
+    for segment in split_chain(command) or _rough_segments(command):
         try:
             tokens = shlex.split(segment)
         except ValueError:
-            return True
+            continue  # can't parse → don't cry wolf
         if tokens and tokens[0].rsplit("/", 1)[-1] == "sudo":
             return True
         tokens = _strip_wrappers(tokens)
         if not tokens:
             continue
-        if tokens[0].rsplit("/", 1)[-1] in _DESTRUCTIVE_COMMANDS:
+        name = tokens[0].rsplit("/", 1)[-1]
+        if name in _DESTRUCTIVE_COMMANDS:
             return True
-        if "--force" in tokens:
+        if "--force" in tokens[1:]:  # explicit only; bare -f means "file" too often
             return True
     return False
+
+
+def _rough_segments(command: str) -> list[str]:
+    """Split a command with shell metachars we don't fully model into rough
+    pieces (on ; | && ||) just to inspect each verb — good enough for the
+    advisory warning, never used for auto-approval."""
+    parts = re.split(r"[;&|]+", command)
+    return [p.strip() for p in parts if p.strip()]
 
 
 def suggest_prefix(segment: str) -> str:

@@ -1,5 +1,6 @@
 import os
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -204,3 +205,35 @@ class TestBackgroundJobs:
         tools.start_background("pwd", cwd=str(tmp_path), log_dir=tmp_path)
         tools.JOBS[-1]["proc"].wait(timeout=10)
         assert tmp_path.name in Path(tools.JOBS[-1]["log"]).read_text()
+
+
+class TestDetach:
+    def test_detach_registers_job_and_drains_to_log(self, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        monkeypatch.setattr(tools, "JOBS", [])
+        proc = sp.Popen(
+            "echo early; sleep 1; echo late",
+            shell=True, stdout=sp.PIPE, stderr=sp.STDOUT, stdin=sp.DEVNULL,
+        )
+        os.read(proc.stdout.fileno(), 6)  # main loop already consumed "early\n"
+        msg = tools._detach_running(proc, "echo early; sleep 1; echo late",
+                                    ["early"], tmp_path, None)
+        assert "detached to background" in msg
+        assert f"pid {proc.pid}" in msg
+        assert len(tools.JOBS) == 1
+        proc.wait(timeout=10)
+        time.sleep(0.2)  # let the drain thread flush
+        log = Path(tools.JOBS[0]["log"]).read_text()
+        assert "early" in log and "late" in log
+
+    def test_flush_buf_emits_trailing_partial_line(self):
+        lines, seen = [], []
+        tools._flush_buf(b"no newline", lines, seen.append)
+        assert lines == ["no newline"]
+        assert seen == ["no newline"]
+
+    def test_flush_buf_noop_on_empty(self):
+        lines = []
+        tools._flush_buf(b"", lines, None)
+        assert lines == []

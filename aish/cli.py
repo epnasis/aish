@@ -45,8 +45,9 @@ SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
   /quit, /exit   quit (plain 'exit' works too)
 input: Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
 (iTerm2: set Option=Esc+) · pasted newlines are kept · !<cmd> runs directly
-without the model · !cd <dir> moves the working directory · Ctrl-C cancels a
-running command{RESET}"""
+without the model · !cd <dir> moves the working directory
+while a command runs: Ctrl-C cancels it · Ctrl-B detaches it to a background
+job (keeps running, frees the prompt; see /jobs){RESET}"""
 
 LOGO = f"\033[1;97maish{RESET}"  # bright white bold
 
@@ -348,7 +349,9 @@ clears the screen; /model [name] shows or switches the model; /jobs lists \
 background jobs; /help lists commands; /quit or /exit quits.
 - Long-running commands (servers, watchers, big upgrades): set \
 background=true on run_command — it detaches, survives aish exiting, and \
-logs to a file you can tail with normal commands.
+logs to a file you can tail with normal commands. The user can also detach a \
+command that is already running by pressing Ctrl-B (it becomes a background \
+job); Ctrl-C cancels a running command instead.
 - Safety denylist: unrecoverable command classes (rm -rf, shred, mkfs, dd \
 to raw devices, diskutil erase, git clean -f, git push --force) are blocked \
 outright — you cannot run them even with approval. The user can extend the \

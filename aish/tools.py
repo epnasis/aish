@@ -7,13 +7,27 @@ name, validated and resolved against PATH before anything is executed.
 """
 
 import datetime
+import os
 import re
+import select
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
+
+try:
+    import termios
+    import tty
+
+    _HAS_TERMIOS = True
+except ImportError:  # non-unix
+    _HAS_TERMIOS = False
+
+DETACH_KEY = b"\x02"  # Ctrl-B
 
 # Enough for the model to work with without blowing a 32k context on one result.
 HEAD_CHARS = 4000
@@ -41,11 +55,15 @@ def run_command(
     timeout: float = 120,
     cwd: str | None = None,
     on_line: Callable[[str], None] | None = None,
+    allow_detach: bool = False,
+    log_dir=None,
 ) -> str:
     """Execute a shell command, streaming output lines via on_line as they
     arrive (stderr merged into stdout so ordering is preserved live).
 
     Ctrl-C cancels the command — not the session — and returns partial output.
+    When allow_detach is set on a TTY, Ctrl-B hands the still-running command
+    to the background-job table and returns immediately.
     """
     try:
         proc = subprocess.Popen(
@@ -59,23 +77,46 @@ def run_command(
     except OSError as exc:
         return f"ERROR: failed to start command: {exc}"
 
-    timed_out = threading.Event()
-
-    def _on_timeout() -> None:
-        timed_out.set()
-        proc.kill()
-
-    timer = threading.Timer(timeout, _on_timeout)
-    timer.start()
+    watch_keys = allow_detach and _HAS_TERMIOS and sys.stdin.isatty()
+    stdin_fd = sys.stdin.fileno() if watch_keys else -1
+    saved_term = None
+    deadline = None if timeout is None else time.monotonic() + timeout
+    out_fd = proc.stdout.fileno()
     lines: list[str] = []
-    cancelled = False
+    buf = b""
+    cancelled = timed_out = False
+
     try:
-        assert proc.stdout is not None
-        for raw in proc.stdout:
-            line = _decode(raw).rstrip("\n")
-            lines.append(line)
-            if on_line:
-                on_line(line)
+        if watch_keys:
+            saved_term = termios.tcgetattr(stdin_fd)
+            tty.setcbreak(stdin_fd)  # cbreak keeps ISIG, so Ctrl-C still signals
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                proc.kill()
+                break
+            slice_t = 0.5
+            if deadline is not None:
+                slice_t = min(0.5, max(0.0, deadline - time.monotonic()))
+            watch = [out_fd, stdin_fd] if watch_keys else [out_fd]
+            ready, _, _ = select.select(watch, [], [], slice_t)
+
+            if watch_keys and stdin_fd in ready:
+                if os.read(stdin_fd, 1) == DETACH_KEY:
+                    _flush_buf(buf, lines, on_line)
+                    return _detach_running(proc, command, lines, log_dir, on_line)
+
+            if out_fd in ready:
+                chunk = os.read(out_fd, 65536)
+                if not chunk:
+                    break
+                buf += chunk
+                *complete, buf = buf.split(b"\n")
+                for raw in complete:
+                    line = _decode(raw)
+                    lines.append(line)
+                    if on_line:
+                        on_line(line)
         proc.wait()
     except KeyboardInterrupt:
         cancelled = True
@@ -86,18 +127,66 @@ def run_command(
             proc.kill()
             proc.wait()
     finally:
-        timer.cancel()
+        if saved_term is not None:
+            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, saved_term)
 
+    _flush_buf(buf, lines, on_line)
     parts = []
     output = "\n".join(lines)
     if output.strip():
         parts.append(output)
-    if timed_out.is_set():
+    if timed_out:
         parts.append(f"ERROR: command timed out after {timeout}s (any partial output is above)")
     elif cancelled:
         parts.append("[cancelled by user with Ctrl-C — any partial output is above]")
     parts.append(f"[exit code: {proc.returncode}]")
     return truncate("\n".join(parts))
+
+
+def _flush_buf(buf: bytes, lines: list[str], on_line) -> None:
+    """Emit any trailing bytes with no final newline as one last line."""
+    if buf:
+        line = _decode(buf)
+        lines.append(line)
+        if on_line:
+            on_line(line)
+
+
+def _detach_running(proc, command, collected, log_dir, on_line) -> str:
+    """Hand a running foreground command to the background-job table: a daemon
+    thread drains the rest of its output to a log file the model can tail."""
+    directory = Path(log_dir) if log_dir else Path.home() / ".local" / "state" / "aish" / "jobs"
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = directory / f"job-{stamp}-{len(JOBS) + 1}.log"
+    log_file = log_path.open("wb")
+    if collected:
+        log_file.write(("\n".join(collected) + "\n").encode())
+        log_file.flush()
+    JOBS.append({"pid": proc.pid, "command": command, "log": str(log_path), "proc": proc})
+
+    out_fd = proc.stdout.fileno()
+
+    def drain() -> None:
+        try:
+            while True:
+                chunk = os.read(out_fd, 65536)
+                if not chunk:
+                    break
+                log_file.write(chunk)
+                log_file.flush()
+            proc.wait()
+        finally:
+            log_file.close()
+
+    threading.Thread(target=drain, daemon=True).start()
+    message = (
+        f"[detached to background: pid {proc.pid}, log: {log_path}]\n"
+        f"Still running. Check with: tail -n 30 {log_path} — stop with: kill {proc.pid}"
+    )
+    if on_line:
+        on_line(message)
+    return message
 
 
 TOPIC_CONTEXT_LINES = 4
