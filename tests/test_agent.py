@@ -245,6 +245,90 @@ def test_missing_dependency_names_package_and_reinstall_fix(monkeypatch):
     assert "uv tool install --force" in result
 
 
+class TestParallelReadOnlyTools:
+    def test_two_searches_run_concurrently_results_in_order(self, monkeypatch):
+        """Both fakes block on a barrier that only opens when the two run at
+        the same time — a sequential implementation times out and fails."""
+        import threading
+
+        import aish.agent as agent_module
+
+        barrier = threading.Barrier(2)
+
+        def fake_search(query, **_kw):
+            barrier.wait(timeout=5)
+            return f"results for {query}"
+
+        monkeypatch.setattr(agent_module.web, "web_search", fake_search)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("web_search", query="alpha"),
+                    tool_call("web_search", query="beta"),
+                ]),
+                model_says("done"),
+            ]
+        )
+        assert agent.run_task("search twice") == "done"
+        contents = [m["content"] for m in tool_messages(agent.messages)]
+        assert contents == ["results for alpha", "results for beta"]
+
+    def test_mixed_turn_keeps_order_and_approval_still_gates(self, monkeypatch):
+        """run_command in the same turn still goes through approve(); results
+        land in the model's original call order."""
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(
+            agent_module.web, "web_search", lambda query, **_kw: f"results for {query}"
+        )
+        approved = []
+
+        def approve(command):
+            approved.append(command)
+            return True
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("web_search", query="alpha"),
+                    tool_call("run_command", command="echo hi"),
+                    tool_call("web_search", query="beta"),
+                ]),
+                model_says("done"),
+            ],
+            approve=approve,
+        )
+        assert agent.run_task("research then run") == "done"
+        assert approved == ["echo hi"]
+        contents = [m["content"] for m in tool_messages(agent.messages)]
+        assert contents[0] == "results for alpha"
+        assert "hi" in contents[1]
+        assert contents[2] == "results for beta"
+
+    def test_one_failing_parallel_call_does_not_poison_the_other(self, monkeypatch):
+        import aish.agent as agent_module
+
+        def fake_search(query, **_kw):
+            if query == "bad":
+                raise RuntimeError("boom")
+            return f"results for {query}"
+
+        monkeypatch.setattr(agent_module.web, "web_search", fake_search)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("web_search", query="bad"),
+                    tool_call("web_search", query="good"),
+                ]),
+                model_says("done"),
+            ]
+        )
+        assert agent.run_task("search twice") == "done"
+        contents = [m["content"] for m in tool_messages(agent.messages)]
+        assert "failed internally" in contents[0]
+        assert contents[1] == "results for good"
+
+
 class TestCwdAndCd:
     def test_bare_cd_changes_cwd_without_approval(self, tmp_path):
         agent, _ = make_agent(

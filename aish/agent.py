@@ -13,6 +13,8 @@ import platform
 import shlex
 import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any
 
 import ollama
@@ -62,6 +64,9 @@ Rules:
    promising result and answer from what the page actually says, citing the
    URL. Search queries and URLs LEAVE THIS MACHINE — never include private
    local data (file contents, key values, personal details) in them.
+   When researching, batch independent lookups: issue several web_search /
+   read_url calls in a single reply — they run in parallel, which is much
+   faster than one per turn.
 """
 
 DENIED_RESULT = (
@@ -89,6 +94,9 @@ BLOCKED_RESULT = (
     "be approved through you at all. If the user truly intends this, they must "
     "run it themselves with the ! prefix. Propose a safer alternative if one exists."
 )
+
+# No side effects and no approval prompt — safe to run concurrently.
+READ_ONLY_TOOLS = frozenset({"read_docs", "read_skill", "web_search", "read_url", "read_file"})
 
 TRIM_KEEP_CHARS = 200
 TRIMMED_NOTE = "\n[trimmed: full output dropped to save context]"
@@ -201,26 +209,11 @@ class Agent:
             if content and self.on_token is None:
                 self.echo(content)
 
-            for call in tool_calls:
-                name = call["function"]["name"]
-                args = call["function"]["arguments"] or {}
-                try:
-                    result = self._dispatch(name, args)
-                except ModuleNotFoundError as exc:
-                    # A broken install, not a transient failure: retrying the
-                    # same call can never succeed, so say so to the model too.
-                    result = (
-                        f"ERROR: tool '{name}' is unavailable — this aish "
-                        f"installation is missing the '{exc.name}' package. "
-                        "Do NOT retry this tool; it will keep failing. Tell "
-                        "the user to reinstall aish (uv tool install --force "
-                        "git+https://github.com/epnasis/aish.git) and restart."
-                    )
-                    self.echo(result)
-                except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
-                    result = f"ERROR: tool '{name}' failed internally: {exc!r}"
-                    self.echo(result)
-                self._append({"role": "tool", "tool_name": name, "content": result})
+            results = self._execute_tool_calls(tool_calls)
+            for call, result in zip(tool_calls, results, strict=True):
+                self._append(
+                    {"role": "tool", "tool_name": call["function"]["name"], "content": result}
+                )
 
         stopped = "(stopped: hit the max-steps limit without finishing — try a narrower task)"
         if self.on_token:
@@ -334,18 +327,87 @@ class Agent:
         )
         return result
 
-    def _dispatch(self, name: str, args: dict) -> str:
+    def _execute_tool_calls(self, tool_calls: list[dict]) -> list[str]:
+        """Run one model turn's tool calls; results keep the call order.
+
+        Read-only tools (no side effects, no approval prompt) run concurrently
+        when the turn has more than one — they are network/disk-bound, so this
+        is a pure latency win. Anything that prompts the user or writes stays
+        sequential: two interleaved [y/N] prompts would be unanswerable.
+        """
+        calls = [(c["function"]["name"], c["function"]["arguments"] or {}) for c in tool_calls]
+        concurrent = [i for i, (name, _) in enumerate(calls) if name in READ_ONLY_TOOLS]
+        if len(concurrent) < 2:
+            return [
+                self._call_result(name, partial(self._dispatch, name, args))
+                for name, args in calls
+            ]
+
+        results: list[str] = [""] * len(calls)
+        with ThreadPoolExecutor(max_workers=min(len(concurrent), 8)) as pool:
+            futures = {}
+            for i in concurrent:
+                label, thunk = self._read_only_call(*calls[i])
+                self.echo(label)
+                futures[i] = pool.submit(thunk)
+            # Collect in call order; future.result() re-raises worker
+            # exceptions here, so error echoes stay on the main thread.
+            for i, (name, args) in enumerate(calls):
+                if i in futures:
+                    results[i] = self._call_result(name, futures[i].result)
+                else:
+                    results[i] = self._call_result(name, partial(self._dispatch, name, args))
+        return results
+
+    def _call_result(self, name: str, fn: Callable[[], str]) -> str:
+        try:
+            return fn()
+        except ModuleNotFoundError as exc:
+            # A broken install, not a transient failure: retrying the
+            # same call can never succeed, so say so to the model too.
+            result = (
+                f"ERROR: tool '{name}' is unavailable — this aish "
+                f"installation is missing the '{exc.name}' package. "
+                "Do NOT retry this tool; it will keep failing. Tell "
+                "the user to reinstall aish (uv tool install --force "
+                "git+https://github.com/epnasis/aish.git) and restart."
+            )
+            self.echo(result)
+            return result
+        except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
+            result = f"ERROR: tool '{name}' failed internally: {exc!r}"
+            self.echo(result)
+            return result
+
+    def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
+        """(echo label, execution thunk) for a READ_ONLY_TOOLS member — split
+        so the label prints before the thunk possibly runs on a worker thread."""
         if name == "read_docs":
             command = str(args.get("command", ""))
             topic = args.get("topic") or None
             label = f"→ read_docs: {command}" + (f" (topic: {topic})" if topic else "")
-            self.echo(label)
-            return tools.read_docs(command, topic=str(topic) if topic else None)
-
+            return label, partial(tools.read_docs, command, topic=str(topic) if topic else None)
         if name == "read_skill":
             skill = str(args.get("name", ""))
-            self.echo(f"→ read_skill: {skill}")
-            return skills.load_skill(skill, skills.skill_dirs(self.cwd))
+            return f"→ read_skill: {skill}", partial(
+                skills.load_skill, skill, skills.skill_dirs(self.cwd)
+            )
+        if name == "web_search":
+            query = str(args.get("query", ""))
+            return f"→ web_search: {query}", partial(web.web_search, query)
+        if name == "read_url":
+            url = str(args.get("url", ""))
+            topic = args.get("topic") or None
+            label = f"→ read_url: {url}" + (f" (topic: {topic})" if topic else "")
+            return label, partial(web.read_url, url, topic=str(topic) if topic else None)
+        path = str(args.get("path", ""))  # read_file
+        return f"→ read_file: {path}", partial(files.read_file, path, self.cwd)
+
+    def _dispatch(self, name: str, args: dict) -> str:
+        if name in READ_ONLY_TOOLS:
+            label, thunk = self._read_only_call(name, args)
+            self.echo(label)
+            return thunk()
 
         if name == "remember":
             note = str(args.get("note", ""))
@@ -354,22 +416,6 @@ class Agent:
             result = tools.remember(note, self.lessons_path)
             self.echo(f"→ {result}")
             return result
-
-        if name == "web_search":
-            query = str(args.get("query", ""))
-            self.echo(f"→ web_search: {query}")
-            return web.web_search(query)
-
-        if name == "read_url":
-            url = str(args.get("url", ""))
-            topic = args.get("topic") or None
-            self.echo(f"→ read_url: {url}" + (f" (topic: {topic})" if topic else ""))
-            return web.read_url(url, topic=str(topic) if topic else None)
-
-        if name == "read_file":
-            path = str(args.get("path", ""))
-            self.echo(f"→ read_file: {path}")
-            return files.read_file(path, self.cwd)
 
         if name in ("write_file", "edit_file"):
             return self._dispatch_write(name, args)
