@@ -6,12 +6,14 @@ auto-approved, so it never accepts a shell string — only a bare command
 name, validated and resolved against PATH before anything is executed.
 """
 
+import datetime
 import re
 import shlex
 import shutil
 import subprocess
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 # Enough for the model to work with without blowing a 32k context on one result.
 HEAD_CHARS = 4000
@@ -103,6 +105,49 @@ TRUNCATION_HINT = (
     "\n[docs truncated — call read_docs again with a 'topic' (e.g. a flag name) "
     "to search the full text]"
 )
+
+
+# Background jobs started this session (the processes outlive aish).
+JOBS: list[dict] = []
+
+
+def start_background(command: str, cwd: str | None = None, log_dir=None) -> str:
+    """Start a detached long-running command; output goes to a log file the
+    model (or user) can tail. The process survives aish exiting."""
+    directory = Path(log_dir) if log_dir else Path.home() / ".local" / "state" / "aish" / "jobs"
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = directory / f"job-{stamp}-{len(JOBS) + 1}.log"
+    log_file = log_path.open("wb")
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=cwd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        log_file.close()
+        return f"ERROR: failed to start background job: {exc}"
+    JOBS.append({"pid": proc.pid, "command": command, "log": str(log_path), "proc": proc})
+    return (
+        f"[background job started: pid {proc.pid}, log: {log_path}]\n"
+        f"Check progress with: tail -n 30 {log_path} — stop with: kill {proc.pid}"
+    )
+
+
+def jobs_table() -> str:
+    if not JOBS:
+        return "no background jobs this session"
+    lines = []
+    for i, job in enumerate(JOBS, 1):
+        code = job["proc"].poll()
+        status = "running" if code is None else f"exit {code}"
+        lines.append(f"{i:>3}. [{status:>8}] pid {job['pid']} · {job['command']} · {job['log']}")
+    return "\n".join(lines)
 
 
 def read_docs(command: str, topic: str | None = None) -> str:
@@ -271,7 +316,15 @@ TOOL_SCHEMAS = [
                     "command": {
                         "type": "string",
                         "description": "The exact shell command to run.",
-                    }
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true for long-running commands (servers, watchers, big "
+                            "upgrades): runs detached, output goes to a log file you can "
+                            "tail with normal commands."
+                        ),
+                    },
                 },
                 "required": ["command"],
             },

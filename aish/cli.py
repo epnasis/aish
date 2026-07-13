@@ -6,11 +6,16 @@ import sys
 import tomllib
 from pathlib import Path
 
+from . import tools
 from .agent import Agent, environment_context
 from .approval import (
     DEFAULT_ALLOWLIST,
+    DEFAULT_DENYLIST,
+    Blocked,
+    check_denied,
     is_auto_approvable,
     load_prefixes,
+    looks_destructive,
     save_prefix,
     suggest_prefix,
     unvetted_segments,
@@ -22,17 +27,20 @@ BOLD = "\033[1m"
 DIM = "\033[2m"
 YELLOW = "\033[33m"
 GREEN = "\033[32m"
+RED = "\033[31m"
 RESET = "\033[0m"
 
 ECHO_PREVIEW_LINES = 12
 REPLAY_TOOL_LINES = 4
 
-SLASH_COMMANDS = ("/clear", "/exit", "/help", "/new", "/quit", "/resume")
+SLASH_COMMANDS = ("/clear", "/exit", "/help", "/jobs", "/model", "/new", "/quit", "/resume")
 
 SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
   /resume [n]    pick an earlier session to load (lists recent sessions with
                  a summary; Enter=latest, repeat to reach older ones)
   /new, /clear   fresh conversation in a new session file (clears the screen)
+  /model [name]  show or switch the Ollama model for this session
+  /jobs          list background jobs started this session
   /help          this help
   /quit, /exit   quit (plain 'exit' works too)
 input: Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
@@ -101,18 +109,28 @@ def allow_segments_flow(command: str, allow_path: Path) -> None:
         print(f"{DIM}  saved: {answer or suggestion} → {allow_path}{RESET}")
 
 
-def make_approver(ask_all: bool, allow_path: Path, log):
+def make_approver(ask_all: bool, allow_path: Path, log, deny_path: Path = DEFAULT_DENYLIST):
     def record(command: str, decision: str) -> None:
         if log:
             log.command(command, decision)
 
-    def ask_approval(command: str) -> str | None:
+    def ask_approval(command: str) -> str | Blocked | None:
+        # Denylist first: unrecoverable commands never reach the prompt and
+        # the allowlist can never bypass this.
+        reason = check_denied(command, load_prefixes(deny_path))
+        if reason:
+            print(f"\n{RED}✗ blocked ({reason}):{RESET}\n  {BOLD}{command}{RESET}")
+            print(f"{DIM}  run it yourself with !{command}  if you truly mean it{RESET}")
+            record(command, f"blocked: {reason}")
+            return Blocked(reason)
+
         if not ask_all and is_auto_approvable(command, load_prefixes(allow_path)):
             print(f"\n{GREEN}✓ auto-approved:{RESET} {BOLD}{command}{RESET}")
             record(command, "auto")
             return command
 
-        print(f"\n{YELLOW}{BOLD}▶ run command?{RESET}\n  {BOLD}{command}{RESET}")
+        warning = f" {RED}⚠ destructive{RESET}" if looks_destructive(command) else ""
+        print(f"\n{YELLOW}{BOLD}▶ run command?{RESET}{warning}\n  {BOLD}{command}{RESET}")
         try:
             answer = input(f"{YELLOW}[y/N/a(lways)/e(dit)]{RESET} ").strip().lower()
         except EOFError:
@@ -231,6 +249,18 @@ def handle_slash(
         print(f"{DIM}resumed {len(messages)} messages from {selected.path.name}:{RESET}")
         replay_history(messages)
         return "handled"
+    if command == "/model":
+        parts = task.split()
+        if len(parts) > 1:
+            agent.model = parts[1]
+            print(f"{DIM}model switched to {agent.model} (this session only){RESET}")
+        else:
+            print(f"{DIM}current model: {agent.model} — /model <name> to switch, "
+                  f"'ollama list' shows what's installed{RESET}")
+        return "handled"
+    if command == "/jobs":
+        print(f"{DIM}{tools.jobs_table()}{RESET}")
+        return "handled"
     if command == "/help":
         print(SLASH_HELP)
         return "handled"
@@ -239,7 +269,12 @@ def handle_slash(
 
 
 def usage_context(
-    model: str, vi_mode: bool, allow_path: Path, state_dir: Path, config_path: Path
+    model: str,
+    vi_mode: bool,
+    allow_path: Path,
+    state_dir: Path,
+    config_path: Path,
+    deny_path: Path = DEFAULT_DENYLIST,
 ) -> str:
     """Self-knowledge for the system prompt: aish should be able to explain
     and (via approved commands) reconfigure itself."""
@@ -255,7 +290,19 @@ running command. Ctrl-D or `exit` quits.
 picker of earlier sessions (summary = the session's first user message; \
 Enter picks the latest, /resume N picks directly) and replays the chosen \
 one into this conversation; /new or /clear starts a fresh conversation and \
-clears the screen; /help lists commands; /quit or /exit quits.
+clears the screen; /model [name] shows or switches the model; /jobs lists \
+background jobs; /help lists commands; /quit or /exit quits.
+- Long-running commands (servers, watchers, big upgrades): set \
+background=true on run_command — it detaches, survives aish exiting, and \
+logs to a file you can tail with normal commands.
+- Safety denylist: unrecoverable command classes (rm -rf, shred, mkfs, dd \
+to raw devices, diskutil erase, git clean -f, git push --force) are blocked \
+outright — you cannot run them even with approval. The user can extend the \
+list with segment prefixes in {deny_path} and can run blocked commands \
+manually with the ! prefix. When blocked, suggest a safer alternative.
+- If the user asks you to remember something durable (a fact, preference, \
+or convention), append a short bullet to ~/.config/aish/AISH.md (create it \
+if missing) via a shell command — it loads into your context every session.
 - Multiline input: Enter submits; a newline is inserted by Ctrl+J, by ending \
 the line with a backslash then Enter, or by Option/Alt+Enter (in iTerm2 only \
 with "Left Option key: Esc+"); pasted text keeps its newlines.
@@ -350,6 +397,7 @@ def main() -> int:
         os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
     )
     allow_path = Path(os.environ.get("AISH_ALLOWLIST", str(DEFAULT_ALLOWLIST)))
+    deny_path = Path(os.environ.get("AISH_DENYLIST", str(DEFAULT_DENYLIST)))
 
     history: list[dict] = []
     resumed: set[Path] = set()
@@ -377,15 +425,23 @@ def main() -> int:
         part
         for part in [
             environment_context(cwd),
-            usage_context(args.model, args.vi_mode, allow_path, state_dir, config_path),
+            usage_context(
+                args.model, args.vi_mode, allow_path, state_dir, config_path, deny_path
+            ),
             skills_context(cwd),
             *load_context_files(cwd),
         ]
         if part
     )
+
+    stream_answers = sys.stdout.isatty()
+
+    def print_token(token: str) -> None:
+        print(f"{GREEN}{token}{RESET}", end="", flush=True)
+
     agent = Agent(
         model=args.model,
-        approve=make_approver(args.ask_all, allow_path, logref),
+        approve=make_approver(args.ask_all, allow_path, logref, deny_path),
         echo=echo,
         stream=stream_line,
         num_ctx=args.num_ctx,
@@ -394,6 +450,8 @@ def main() -> int:
         cwd=cwd,
         context=context,
         on_message=logref.message,
+        on_token=print_token if stream_answers else None,
+        job_log_dir=state_dir / "jobs",
     )
     if history:
         agent.load_history(history)
@@ -401,7 +459,9 @@ def main() -> int:
         replay_history(history)
 
     if args.task:
-        print(f"{GREEN}{agent.run_task(' '.join(args.task))}{RESET}")
+        result = agent.run_task(" ".join(args.task))
+        if not stream_answers:
+            print(f"{GREEN}{result}{RESET}")
         return 0
 
     print(
@@ -435,7 +495,9 @@ def main() -> int:
                     print(f"\n{YELLOW}(command interrupted){RESET}")
             continue
         try:
-            print(f"\n{GREEN}{agent.run_task(task)}{RESET}")
+            result = agent.run_task(task)
+            if not stream_answers:
+                print(f"\n{GREEN}{result}{RESET}")
         except KeyboardInterrupt:
             print(f"\n{YELLOW}(task interrupted){RESET}")
 

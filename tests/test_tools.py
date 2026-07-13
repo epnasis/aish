@@ -1,5 +1,6 @@
 import os
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -184,3 +185,22 @@ class TestStreamingAndCwd:
         result = tools.run_command("echo early; sleep 5", timeout=0.5)
         assert "early" in result
         assert "timed out" in result
+
+
+class TestBackgroundJobs:
+    def test_start_registers_and_logs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tools, "JOBS", [])
+        result = tools.start_background("echo bg-marker", log_dir=tmp_path)
+        assert "background job started" in result
+        assert "tail -n 30" in result
+        job = tools.JOBS[-1]
+        job["proc"].wait(timeout=10)
+        assert "bg-marker" in Path(job["log"]).read_text()
+        assert "exit 0" in tools.jobs_table()
+        assert "echo bg-marker" in tools.jobs_table()
+
+    def test_respects_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tools, "JOBS", [])
+        tools.start_background("pwd", cwd=str(tmp_path), log_dir=tmp_path)
+        tools.JOBS[-1]["proc"].wait(timeout=10)
+        assert tmp_path.name in Path(tools.JOBS[-1]["log"]).read_text()

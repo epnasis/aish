@@ -395,3 +395,86 @@ def test_read_skill_dispatch_no_approval(tmp_path):
     )
     agent.run_task("how do I use demo?")
     assert "use it wisely" in tool_messages(agent.messages)[0]["content"]
+
+
+class FakeStreamChat:
+    """Scripted streaming responses: each turn is a list of chunks."""
+
+    def __init__(self, turns):
+        self.turns = list(turns)
+
+    def __call__(self, **kwargs):
+        assert kwargs.get("stream") is True
+        return iter(self.turns.pop(0))
+
+
+def chunk(content=None, tool_calls=None):
+    return SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=tool_calls))
+
+
+class TestStreaming:
+    def test_tokens_stream_in_order_with_newlines(self):
+        tokens = []
+        chat = FakeStreamChat([[chunk("Hel"), chunk("lo"), chunk(" world")]])
+        agent = Agent(model="fake", approve=lambda _c: True, client_chat=chat,
+                      on_token=tokens.append)
+        assert agent.run_task("hi") == "Hello world"
+        assert tokens == ["\n", "Hel", "lo", " world", "\n"]
+
+    def test_streamed_tool_call_then_answer(self):
+        tokens = []
+        chat = FakeStreamChat(
+            [
+                [chunk(tool_calls=[tool_call("run_command", command="echo streamed42")])],
+                [chunk("the answer")],
+            ]
+        )
+        agent = Agent(model="fake", approve=lambda c: c, client_chat=chat,
+                      on_token=tokens.append)
+        assert agent.run_task("run it") == "the answer"
+        assert "streamed42" in tool_messages(agent.messages)[0]["content"]
+        assistant = [m for m in agent.messages
+                     if isinstance(m, dict) and m.get("role") == "assistant"]
+        assert assistant[0]["tool_calls"][0]["function"]["name"] == "run_command"
+
+    def test_synthesized_results_still_reach_user(self):
+        tokens = []
+        endless = [chunk(tool_calls=[tool_call("read_docs", command="ls")])]
+        chat = FakeStreamChat([list(endless)] * 3)
+        agent = Agent(model="fake", approve=lambda _c: True, client_chat=chat,
+                      on_token=tokens.append, max_steps=3)
+        result = agent.run_task("loop")
+        assert "max-steps" in result
+        assert any("max-steps" in t for t in tokens)
+
+
+class TestBlockedAndBackground:
+    def test_blocked_command_never_executes(self, tmp_path):
+        from aish.approval import Blocked
+
+        marker = tmp_path / "boom"
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("understood"),
+            ],
+            approve=lambda _c: Blocked("test reason"),
+        )
+        agent.run_task("do it")
+        assert not marker.exists()
+        content = tool_messages(agent.messages)[0]["content"]
+        assert "BLOCKED" in content and "test reason" in content and "! prefix" in content
+
+    def test_background_arg_starts_job(self, tmp_path, monkeypatch):
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(agent_module.tools, "JOBS", [])
+        call = SimpleNamespace(function=SimpleNamespace(
+            name="run_command", arguments={"command": "echo bg", "background": True}))
+        agent, _ = make_agent(
+            [model_says(tool_calls=[call]), model_says("started")],
+            job_log_dir=tmp_path,
+        )
+        agent.run_task("start it")
+        assert "background job started" in tool_messages(agent.messages)[0]["content"]
+        assert len(agent_module.tools.JOBS) == 1

@@ -21,7 +21,7 @@ def test_yes_approves_once_without_persisting(tmp_path, monkeypatch):
 def test_deny_returns_none(tmp_path, monkeypatch):
     approve = make_approver(False, tmp_path / "allow.txt", None)
     scripted_input(monkeypatch, ["n"])
-    assert approve("rm -rf /") is None
+    assert approve("rm stale.txt") is None
 
 
 def test_always_persists_per_segment_and_future_auto_approves(tmp_path, monkeypatch):
@@ -388,3 +388,56 @@ def test_skills_context_lists_skills(tmp_path, monkeypatch):
     text = skills_context(str(tmp_path))
     assert "read_skill" in text
     assert "- demo: demo things" in text
+
+
+class TestDenylistApprover:
+    def test_blocked_without_prompting(self, tmp_path, capsys):
+        from aish.approval import Blocked
+        from aish.cli import make_approver
+
+        approve = make_approver(False, tmp_path / "allow.txt", None, tmp_path / "deny.txt")
+        verdict = approve("rm -rf /")  # input() would raise if called
+        assert isinstance(verdict, Blocked)
+        assert "blocked" in capsys.readouterr().out
+
+    def test_allowlist_cannot_bypass_denylist(self, tmp_path):
+        from aish.approval import Blocked, save_prefix
+        from aish.cli import make_approver
+
+        allow = tmp_path / "allow.txt"
+        save_prefix(allow, "rm")
+        approve = make_approver(False, allow, None, tmp_path / "deny.txt")
+        assert isinstance(approve("rm -rf /tmp/x"), Blocked)
+
+    def test_destructive_warning_shown(self, tmp_path, capsys, monkeypatch):
+        from aish.cli import make_approver
+
+        approve = make_approver(False, tmp_path / "allow.txt", None, tmp_path / "deny.txt")
+        scripted_input(monkeypatch, ["n"])
+        approve("mv /etc/hosts /tmp/")
+        assert "⚠ destructive" in capsys.readouterr().out
+
+
+class TestModelAndJobs:
+    def test_model_switch(self, tmp_path, capsys):
+        from aish.agent import Agent
+        from aish.cli import LogRef, handle_slash
+        from aish.session import SessionLog
+
+        agent = Agent(model="old", approve=lambda _c: None, client_chat=lambda **_k: None)
+        logref = LogRef(SessionLog.new(tmp_path))
+        handle_slash("/model qwen3:8b", agent, logref, tmp_path)
+        assert agent.model == "qwen3:8b"
+        handle_slash("/model", agent, logref, tmp_path)
+        assert "qwen3:8b" in capsys.readouterr().out
+
+    def test_jobs_empty(self, tmp_path, capsys, monkeypatch):
+        from aish import tools
+        from aish.agent import Agent
+        from aish.cli import LogRef, handle_slash
+        from aish.session import SessionLog
+
+        monkeypatch.setattr(tools, "JOBS", [])
+        agent = Agent(model="m", approve=lambda _c: None, client_chat=lambda **_k: None)
+        handle_slash("/jobs", agent, LogRef(SessionLog.new(tmp_path)), tmp_path)
+        assert "no background jobs" in capsys.readouterr().out

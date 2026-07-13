@@ -12,6 +12,14 @@ Two design pillars:
   command without approval. `read_docs` is the only auto-approved tool and accepts a
   validated bare command name, never a shell string.
 
+A third safety layer sits above the prompt: a **denylist** of unrecoverable
+command classes — `rm -rf`, `shred`, `mkfs`, `dd` to raw devices,
+`diskutil erase*`, `git clean -f`, `git push --force` (but not
+`--force-with-lease`) — that the model can never run, even with approval;
+only you can, via the `!` prefix. Extend it with segment prefixes in
+`~/.config/aish/deny.txt`. Destructive-looking (but recoverable) commands get
+a red ⚠ at the approval prompt.
+
 Quality-of-life on top of the pillars:
 
 - Positively-identified read-only commands (`ls`, `grep`, `find` without `-exec`, …)
@@ -21,6 +29,11 @@ Quality-of-life on top of the pillars:
   limit (the model is told about this whenever docs come back truncated).
 - Old tool outputs are compacted between tasks and under context pressure, so long
   REPL sessions never silently evict the system prompt.
+- Answers stream token-by-token (TTY only); command output streams live too.
+- Long-running commands can run as detached background jobs (they survive aish
+  exiting) with output logged to `~/.local/state/aish/jobs/`; `/jobs` lists them.
+- `/model <name>` switches the Ollama model mid-session; ask aish to "remember"
+  something and it appends it to `~/.config/aish/AISH.md` through the normal gate.
 
 ## Install (macOS / Linux)
 

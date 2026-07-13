@@ -17,6 +17,15 @@ import shlex
 from pathlib import Path
 
 DEFAULT_ALLOWLIST = Path.home() / ".config" / "aish" / "allow.txt"
+DEFAULT_DENYLIST = Path.home() / ".config" / "aish" / "deny.txt"
+
+
+class Blocked:
+    """Approver verdict for denylisted commands: not executable through the
+    model at all — only the user can run these, via the ! prefix."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
 
 SAFE_COMMANDS = frozenset(
     {
@@ -126,6 +135,130 @@ def unvetted_segments(command: str, prefixes: list[str]) -> list[str]:
     if segments is None:
         return []
     return [s for s in segments if not (_segment_is_safe(s) or _matches_prefix(s, prefixes))]
+
+
+# Wrappers that don't change what the underlying command does.
+_WRAPPERS = ("sudo", "nohup", "time", "command")
+
+_DISKUTIL_DESTRUCTIVE = {
+    "erasedisk",
+    "erasevolume",
+    "zerodisk",
+    "reformat",
+    "partitiondisk",
+    "secureerase",
+}
+
+# rm with recursive+force in either order, even inside strings we can't
+# fully parse (unquoted ;, subshells, ...). Fail closed on the worst one.
+_RAW_RM_RF_RE = re.compile(
+    r"(?:^|[;&|`$(]\s*)(?:sudo\s+)?rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*[fF]|-[a-zA-Z]*[fF][a-zA-Z]*[rR])"
+)
+
+
+def _strip_wrappers(tokens: list[str]) -> list[str]:
+    while tokens and tokens[0].rsplit("/", 1)[-1] in _WRAPPERS:
+        tokens = tokens[1:]
+    return tokens
+
+
+def _flag_letters(tokens: list[str]) -> set[str]:
+    letters: set[str] = set()
+    for token in tokens[1:]:
+        if token.startswith("-") and not token.startswith("--"):
+            letters.update(token[1:])
+    return letters
+
+
+def _segment_deny_reason(segment: str) -> str | None:
+    """Built-in denylist: command classes whose effects are not recoverable."""
+    try:
+        tokens = _strip_wrappers(shlex.split(segment))
+    except ValueError:
+        return None  # unparseable → the raw regex scan is the safety net
+    if not tokens:
+        return None
+    name = tokens[0].rsplit("/", 1)[-1]
+    flags = _flag_letters(tokens)
+    longs = {t for t in tokens[1:] if t.startswith("--")}
+
+    if name == "rm":
+        recursive = bool({"r", "R"} & flags) or "--recursive" in longs
+        force = "f" in flags or "--force" in longs
+        if recursive and force:
+            return "rm -rf: recursive force delete is unrecoverable"
+    if name in ("shred", "srm"):
+        return f"{name}: secure deletion is unrecoverable"
+    if name.startswith("mkfs"):
+        return "mkfs: formatting a filesystem is unrecoverable"
+    if name == "dd" and any(t.startswith("of=/dev/") for t in tokens[1:]):
+        return "dd writing to a raw device is unrecoverable"
+    if name == "diskutil" and len(tokens) > 1 and tokens[1].lower() in _DISKUTIL_DESTRUCTIVE:
+        return "diskutil erase/partition is unrecoverable"
+    if name == "git" and len(tokens) > 1:
+        subcommand = next((t for t in tokens[1:] if not t.startswith("-")), "")
+        if subcommand == "clean" and ("f" in flags or "--force" in longs):
+            return "git clean -f deletes untracked files unrecoverably"
+        if subcommand == "push" and ("--force" in longs or "f" in flags):
+            if "--force-with-lease" not in longs:
+                return "git push --force can destroy remote history"
+    return None
+
+
+def check_denied(command: str, extra_prefixes: list[str] | None = None) -> str | None:
+    """Reason string if the command hits the denylist, else None.
+    User prefixes from deny.txt match segments the same way allow.txt does."""
+    segments = split_chain(command)
+    if segments is None:
+        if _RAW_RM_RF_RE.search(command):
+            return "rm -rf inside a compound command"
+        return None
+    for segment in segments:
+        reason = _segment_deny_reason(segment)
+        if reason:
+            return reason
+        for prefix in extra_prefixes or ():
+            if segment == prefix or segment.startswith(prefix + " "):
+                return f"matches your denylist entry '{prefix}'"
+    return None
+
+
+_DESTRUCTIVE_COMMANDS = {
+    "chmod",
+    "chown",
+    "dd",
+    "kill",
+    "killall",
+    "launchctl",
+    "mv",
+    "pkill",
+    "reboot",
+    "rm",
+    "shutdown",
+    "truncate",
+}
+
+
+def looks_destructive(command: str) -> bool:
+    """Cheap heuristic for the approval prompt's red warning — advisory only,
+    never a substitute for the gate itself."""
+    if ">" in command or "<" in command:
+        return True
+    for segment in split_chain(command) or [command]:
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            return True
+        if tokens and tokens[0].rsplit("/", 1)[-1] == "sudo":
+            return True
+        tokens = _strip_wrappers(tokens)
+        if not tokens:
+            continue
+        if tokens[0].rsplit("/", 1)[-1] in _DESTRUCTIVE_COMMANDS:
+            return True
+        if "--force" in tokens:
+            return True
+    return False
 
 
 def suggest_prefix(segment: str) -> str:

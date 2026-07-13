@@ -18,6 +18,7 @@ from typing import Any
 import ollama
 
 from . import skills, tools
+from .approval import Blocked
 
 _PLATFORM_NOTES = {
     "darwin": (
@@ -51,6 +52,12 @@ Rules:
 DENIED_RESULT = (
     "USER DENIED this command — it was NOT executed. "
     "Do not propose it again; change approach or ask the user."
+)
+
+BLOCKED_RESULT = (
+    "BLOCKED by the safety denylist ({reason}) — NOT executed, and it cannot "
+    "be approved through you at all. If the user truly intends this, they must "
+    "run it themselves with the ! prefix. Propose a safer alternative if one exists."
 )
 
 TRIM_KEEP_CHARS = 200
@@ -102,6 +109,8 @@ class Agent:
         cwd: str | None = None,
         context: str = "",
         on_message: Callable[[dict], None] | None = None,
+        on_token: Callable[[str], None] | None = None,
+        job_log_dir: os.PathLike | str | None = None,
     ):
         self.model = model
         self.approve = approve
@@ -113,6 +122,8 @@ class Agent:
         self.think = think
         self.cwd = cwd or os.getcwd()
         self.on_message = on_message
+        self.on_token = on_token
+        self.job_log_dir = job_log_dir
         content = system_prompt() + (f"\n{context}" if context else "")
         self.messages: list[Any] = [{"role": "system", "content": content}]
 
@@ -141,25 +152,24 @@ class Agent:
 
         for _ in range(self.max_steps):
             self._enforce_budget(task_start)
-            response = self.chat(
-                model=self.model,
-                messages=self.messages,
-                tools=tools.TOOL_SCHEMAS,
-                options={"num_ctx": self.num_ctx},
-                think=self.think,
-            )
-            message = response.message
-            self._append(message)
+            content, tool_calls = self._chat_turn()
+            entry: dict = {"role": "assistant", "content": content}
+            if tool_calls:
+                entry["tool_calls"] = tool_calls
+            self._append(entry)
 
-            if not message.tool_calls:
-                return message.content or "(model returned an empty response)"
+            if not tool_calls:
+                result = content or "(model returned an empty response)"
+                if not content and self.on_token:
+                    self.on_token(result + "\n")
+                return result
 
-            if message.content:
-                self.echo(message.content)
+            if content and self.on_token is None:
+                self.echo(content)
 
-            for call in message.tool_calls:
-                name = call.function.name
-                args = call.function.arguments or {}
+            for call in tool_calls:
+                name = call["function"]["name"]
+                args = call["function"]["arguments"] or {}
                 try:
                     result = self._dispatch(name, args)
                 except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
@@ -167,7 +177,53 @@ class Agent:
                     self.echo(result)
                 self._append({"role": "tool", "tool_name": name, "content": result})
 
-        return "(stopped: hit the max-steps limit without finishing — try a narrower task)"
+        stopped = "(stopped: hit the max-steps limit without finishing — try a narrower task)"
+        if self.on_token:
+            self.on_token(stopped + "\n")
+        return stopped
+
+    def _chat_turn(self) -> tuple[str, list[dict]]:
+        """One model call; returns (content, normalized tool_calls). Streams
+        content through on_token when set."""
+        kwargs = dict(
+            model=self.model,
+            messages=self.messages,
+            tools=tools.TOOL_SCHEMAS,
+            options={"num_ctx": self.num_ctx},
+            think=self.think,
+        )
+        if self.on_token is None:
+            message = self.chat(**kwargs).message
+            content = message.content or ""
+            raw_calls = message.tool_calls or []
+        else:
+            parts: list[str] = []
+            raw_calls = []
+            for chunk in self.chat(stream=True, **kwargs):
+                message = chunk.message
+                if message.content:
+                    if not parts:
+                        self.on_token("\n")
+                    parts.append(message.content)
+                    self.on_token(message.content)
+                if message.tool_calls:
+                    raw_calls.extend(message.tool_calls)
+            content = "".join(parts)
+            if content:
+                self.on_token("\n")
+        return content, [self._normalize_call(c) for c in raw_calls]
+
+    @staticmethod
+    def _normalize_call(call: Any) -> dict:
+        """Plain-dict tool call: safe to keep in history and send back to Ollama."""
+        if isinstance(call, dict):
+            function = call.get("function") or {}
+            name = function.get("name", "")
+            arguments = function.get("arguments") or {}
+        else:
+            name = call.function.name
+            arguments = call.function.arguments or {}
+        return {"function": {"name": name, "arguments": dict(arguments)}}
 
     def _trim_tool_message(self, message: Any) -> bool:
         if not (isinstance(message, dict) and message.get("role") == "tool"):
@@ -236,9 +292,15 @@ class Agent:
                 return self._change_dir(cd_target)
 
             decision = self.approve(command)
+            if isinstance(decision, Blocked):
+                return BLOCKED_RESULT.format(reason=decision.reason)
             if decision is None or decision is False:
                 return DENIED_RESULT
             final = command if decision is True else str(decision)
+            if args.get("background"):
+                result = tools.start_background(final, cwd=self.cwd, log_dir=self.job_log_dir)
+                self.echo(result)
+                return result
             result = tools.run_command(final, cwd=self.cwd, on_line=self.stream)
             if self.stream is None:
                 self.echo(result)
