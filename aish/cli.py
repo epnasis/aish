@@ -49,7 +49,14 @@ without the model · !cd <dir> moves the working directory
 while a command runs: Ctrl-C cancels it · Ctrl-B detaches it to a background
 job (keeps running, frees the prompt; see /jobs){RESET}"""
 
-LOGO = f"\033[1;97maish{RESET}"  # bright white bold
+LOGO_LINES = ("▄▀█ █ █▀ █░█", "█▀█ █ ▄█ █▀█")
+
+
+def banner(info: str) -> str:
+    """Two-line half-block wordmark with a dim info line beside its base."""
+    top, bottom = LOGO_LINES
+    white = "\033[1;97m"
+    return f"{white}{top}{RESET}\n{white}{bottom}{RESET}  {DIM}{info}{RESET}"
 
 # BoxPrompt instance when stdin is a TTY; None means plain input() fallback.
 _box = None
@@ -251,7 +258,7 @@ def handle_slash(
         agent.reset()
         logref.log = SessionLog.new(state_dir)
         print("\033[2J\033[3J\033[H", end="")  # clear screen + scrollback
-        print(f"{LOGO} {DIM}· fresh conversation — session {logref.log.path.name}{RESET}")
+        print(banner(f"fresh conversation — session {logref.log.path.name}"))
         return "handled"
     if command == "/resume":
         sessions = SessionLog.list_sessions(state_dir, exclude=resumed | {logref.log.path})
@@ -542,10 +549,7 @@ def main() -> int:
             print(f"{GREEN}{result}{RESET}")
         return 0
 
-    print(
-        f"{LOGO} {DIM}· model {args.model} · session {log.path.name}"
-        f" · /help · Ctrl-D quits{RESET}"
-    )
+    print(banner(f"model {args.model} · session {log.path.name} · /help · Ctrl-D quits"))
     while True:
         try:
             task = read_task(agent.cwd).strip()
