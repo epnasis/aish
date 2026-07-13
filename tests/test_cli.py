@@ -134,6 +134,18 @@ class TestUsageContext:
         text = usage_context("m", True, tmp_path, tmp_path, tmp_path)
         assert "currently true" in text
 
+    def test_grounds_identity_as_local_ollama(self, tmp_path):
+        from aish.cli import usage_context
+
+        text = usage_context("qwen3:8b", False, tmp_path, tmp_path, tmp_path)
+        lower = text.lower()
+        # names its real model, says it's local (not cloud), and that killing
+        # the server ends the session
+        assert "qwen3:8b" in text
+        assert "not a cloud" in lower
+        assert "llama-server" in lower
+        assert "session ends" in lower
+
 
 class TestSlashCompleter:
     def completions(self, text):
