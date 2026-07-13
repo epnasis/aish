@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 
 from . import tools
-from .agent import Agent, environment_context
+from .agent import Agent, ModelUnavailable, environment_context
 from .approval import (
     DEFAULT_ALLOWLIST,
     DEFAULT_DENYLIST,
@@ -459,7 +459,11 @@ def main() -> int:
         replay_history(history)
 
     if args.task:
-        result = agent.run_task(" ".join(args.task))
+        try:
+            result = agent.run_task(" ".join(args.task))
+        except ModelUnavailable as exc:
+            print(f"{RED}model unavailable:{RESET} {exc} — is Ollama running and not overloaded?")
+            return 1
         if not stream_answers:
             print(f"{GREEN}{result}{RESET}")
         return 0
@@ -500,6 +504,9 @@ def main() -> int:
                 print(f"\n{GREEN}{result}{RESET}")
         except KeyboardInterrupt:
             print(f"\n{YELLOW}(task interrupted){RESET}")
+        except ModelUnavailable as exc:
+            print(f"\n{RED}model unavailable:{RESET} {exc} — is Ollama overloaded? "
+                  f"(check `ollama ps` / system load)")
 
 
 if __name__ == "__main__":

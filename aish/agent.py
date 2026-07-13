@@ -54,6 +54,16 @@ DENIED_RESULT = (
     "Do not propose it again; change approach or ask the user."
 )
 
+EMPTY_RESPONSE = (
+    "(the model returned an empty response — Ollama may be overloaded or still "
+    "loading the model; try again, or check `ollama ps` and system load)"
+)
+
+
+class ModelUnavailable(RuntimeError):
+    """The model call failed after a retry (Ollama down, overloaded, or OOM)."""
+
+
 BLOCKED_RESULT = (
     "BLOCKED by the safety denylist ({reason}) — NOT executed, and it cannot "
     "be approved through you at all. If the user truly intends this, they must "
@@ -159,7 +169,7 @@ class Agent:
             self._append(entry)
 
             if not tool_calls:
-                result = content or "(model returned an empty response)"
+                result = content or EMPTY_RESPONSE
                 if not content and self.on_token:
                     self.on_token(result + "\n")
                 return result
@@ -184,7 +194,8 @@ class Agent:
 
     def _chat_turn(self) -> tuple[str, list[dict]]:
         """One model call; returns (content, normalized tool_calls). Streams
-        content through on_token when set."""
+        content through on_token when set. Retries once on a transport error
+        (a busy/overloaded local Ollama commonly drops or refuses a request)."""
         kwargs = dict(
             model=self.model,
             messages=self.messages,
@@ -192,6 +203,17 @@ class Agent:
             options={"num_ctx": self.num_ctx},
             think=self.think,
         )
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                return self._one_chat(kwargs)
+            except Exception as exc:  # noqa: BLE001 — surface, don't crash the REPL
+                last_error = exc
+                if attempt == 0:
+                    self.echo(f"model call failed ({exc}); retrying once…")
+        raise ModelUnavailable(str(last_error)) from last_error
+
+    def _one_chat(self, kwargs: dict) -> tuple[str, list[dict]]:
         if self.on_token is None:
             message = self.chat(**kwargs).message
             content = message.content or ""

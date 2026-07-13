@@ -478,3 +478,34 @@ class TestBlockedAndBackground:
         agent.run_task("start it")
         assert "background job started" in tool_messages(agent.messages)[0]["content"]
         assert len(agent_module.tools.JOBS) == 1
+
+
+class TestModelResilience:
+    def test_empty_response_gives_clear_hint(self):
+        from aish.agent import EMPTY_RESPONSE
+
+        agent, _ = make_agent([model_says("")])  # no content, no tool calls
+        assert agent.run_task("hi") == EMPTY_RESPONSE
+
+    def test_retries_once_then_succeeds(self):
+        calls = {"n": 0}
+
+        def flaky(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionError("connection refused")
+            return model_says("recovered")
+
+        agent = Agent(model="fake", approve=lambda _c: True, client_chat=flaky)
+        assert agent.run_task("hi") == "recovered"
+        assert calls["n"] == 2
+
+    def test_raises_model_unavailable_after_two_failures(self):
+        from aish.agent import ModelUnavailable
+
+        def dead(**kwargs):
+            raise ConnectionError("overloaded")
+
+        agent = Agent(model="fake", approve=lambda _c: True, client_chat=dead)
+        with pytest.raises(ModelUnavailable, match="overloaded"):
+            agent.run_task("hi")
