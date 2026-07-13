@@ -574,3 +574,25 @@ class TestFileTools:
         )
         agent.run_task("edit it")
         assert "not found" in tool_messages(agent.messages)[0]["content"]
+
+
+class TestRememberTool:
+    def test_remember_auto_approved_and_appends(self, tmp_path):
+        lessons = tmp_path / "lessons.md"
+        call = SimpleNamespace(function=SimpleNamespace(
+            name="remember", arguments={"note": "macOS ps: use ps aux -m"}))
+        agent, _ = make_agent(
+            [model_says(tool_calls=[call]), model_says("noted")],
+            approve=lambda _c: pytest.fail("remember must not hit approval"),
+            lessons_path=lessons,
+        )
+        agent.run_task("learn it")
+        assert "ps aux -m" in lessons.read_text()
+        assert "remembered" in tool_messages(agent.messages)[0]["content"]
+
+    def test_remember_without_path_errors_gracefully(self):
+        call = SimpleNamespace(function=SimpleNamespace(
+            name="remember", arguments={"note": "x"}))
+        agent, _ = make_agent([model_says(tool_calls=[call]), model_says("ok")])
+        agent.run_task("learn")
+        assert "no lessons file" in tool_messages(agent.messages)[0]["content"]

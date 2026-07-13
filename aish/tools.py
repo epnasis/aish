@@ -228,6 +228,25 @@ def start_background(command: str, cwd: str | None = None, log_dir=None) -> str:
     )
 
 
+def remember(note: str, lessons_path) -> str:
+    """Append a one-line lesson to the lessons file (loaded every session).
+    Constrained to append short text to one known file — safe to auto-approve."""
+    text = " ".join(note.split()).strip()
+    if not text:
+        return "ERROR: empty note"
+    path = Path(lessons_path)
+    try:
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        if any(text == line.lstrip("- ").strip() for line in existing.splitlines()):
+            return "(already remembered)"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"- {text}\n")
+    except OSError as exc:
+        return f"ERROR: could not save lesson: {exc}"
+    return f"remembered: {text}"
+
+
 def jobs_table() -> str:
     if not JOBS:
         return "no background jobs this session"
@@ -388,6 +407,28 @@ TOOL_SCHEMAS = [
                     }
                 },
                 "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember",
+            "description": (
+                "Save a short, durable lesson so future sessions have it — ESPECIALLY "
+                "after you get a command wrong and find the working form (e.g. a BSD vs "
+                "GNU flag difference). Write the corrected, ready-to-use command. Loaded "
+                "into your context every session. Don't record one-off or secret details."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note": {
+                        "type": "string",
+                        "description": "One-line lesson, e.g. 'macOS ps: sort by mem = ps aux -m'.",
+                    }
+                },
+                "required": ["note"],
             },
         },
     },

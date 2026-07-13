@@ -453,3 +453,22 @@ class TestModelAndJobs:
         agent = Agent(model="m", approve=lambda _c: None, client_chat=lambda **_k: None)
         handle_slash("/jobs", agent, LogRef(SessionLog.new(tmp_path)), tmp_path)
         assert "no background jobs" in capsys.readouterr().out
+
+
+def test_lessons_file_loaded_into_context(tmp_path, monkeypatch):
+    from aish.cli import load_context_files
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "no-home")
+    lessons = tmp_path / "lessons.md"
+    lessons.write_text("- macOS ps: ps aux -m\n")
+    parts = load_context_files(str(tmp_path), lessons)
+    assert any("lessons you saved" in p and "ps aux -m" in p for p in parts)
+
+
+def test_darwin_note_has_ps_guidance():
+    import sys
+
+    from aish.agent import system_prompt
+
+    if sys.platform == "darwin":
+        assert "ps aux -r" in system_prompt() or "ps aux -m" in system_prompt()

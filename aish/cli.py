@@ -357,9 +357,10 @@ to raw devices, diskutil erase, git clean -f, git push --force) are blocked \
 outright — you cannot run them even with approval. The user can extend the \
 list with segment prefixes in {deny_path} and can run blocked commands \
 manually with the ! prefix. When blocked, suggest a safer alternative.
-- If the user asks you to remember something durable (a fact, preference, \
-or convention), append a short bullet to ~/.config/aish/AISH.md (create it \
-if missing) via a shell command — it loads into your context every session.
+- Learning: call the remember tool to save a one-line lesson (loaded every \
+session under "lessons you saved") — do this after correcting any mistake, and \
+whenever the user asks you to remember something durable. For longer curated \
+notes the user maintains, ~/.config/aish/AISH.md is also loaded each session.
 - Multiline input: Enter submits; a newline is inserted by Ctrl+J, by ending \
 the line with a backslash then Enter, or by Option/Alt+Enter (in iTerm2 only \
 with "Left Option key: Esc+"); pasted text keeps its newlines.
@@ -396,12 +397,21 @@ def skills_context(cwd: str) -> str:
     )
 
 
-def load_context_files(cwd: str) -> list[str]:
+DEFAULT_LESSONS = Path.home() / ".config" / "aish" / "lessons.md"
+
+
+def load_context_files(cwd: str, lessons_path: Path = DEFAULT_LESSONS) -> list[str]:
     parts = []
-    for path in (Path.home() / ".config" / "aish" / "AISH.md", Path(cwd) / "AISH.md"):
+    sources = (
+        Path.home() / ".config" / "aish" / "AISH.md",
+        Path(cwd) / "AISH.md",
+        lessons_path,
+    )
+    for path in sources:
         try:
             if path.is_file():
-                parts.append(f"[context from {path}]\n{path.read_text(encoding='utf-8')}")
+                label = "lessons you saved" if path == lessons_path else f"context from {path}"
+                parts.append(f"[{label}]\n{path.read_text(encoding='utf-8')}")
         except OSError:
             continue
     return parts
@@ -455,6 +465,7 @@ def main() -> int:
     )
     allow_path = Path(os.environ.get("AISH_ALLOWLIST", str(DEFAULT_ALLOWLIST)))
     deny_path = Path(os.environ.get("AISH_DENYLIST", str(DEFAULT_DENYLIST)))
+    lessons_path = Path(os.environ.get("AISH_LESSONS", str(DEFAULT_LESSONS)))
 
     history: list[dict] = []
     resumed: set[Path] = set()
@@ -486,7 +497,7 @@ def main() -> int:
                 args.model, args.vi_mode, allow_path, state_dir, config_path, deny_path
             ),
             skills_context(cwd),
-            *load_context_files(cwd),
+            *load_context_files(cwd, lessons_path),
         ]
         if part
     )
@@ -510,6 +521,7 @@ def main() -> int:
         on_message=logref.message,
         on_token=print_token if stream_answers else None,
         job_log_dir=state_dir / "jobs",
+        lessons_path=lessons_path,
     )
     if history:
         agent.load_history(history)

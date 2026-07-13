@@ -22,8 +22,13 @@ from .approval import Blocked
 
 _PLATFORM_NOTES = {
     "darwin": (
-        "macOS (BSD userland, zsh — NOT GNU/Linux). Your memorized flag "
-        "knowledge is often wrong here: BSD sed/date/stat/find differ from GNU."
+        "macOS (BSD userland, zsh — NOT GNU/Linux). BSD tools differ from GNU and "
+        "your memorized flags are often the GNU ones. Common traps: `ps` has NO "
+        "`--sort` / `-C` / long options — sort with `ps aux -r` (by CPU) or "
+        "`ps aux -m` (by memory), or `ps -A -o pid,rss,comm | sort -k2 -rn`; "
+        "`sed -i` REQUIRES a backup-suffix argument (`sed -i ''`); `date` uses "
+        "`-v`/`-r`, not `-d`; `stat` uses `-f`, not `-c`; `find` lacks some GNU "
+        "predicates. When unsure of a flag, call read_docs first."
     ),
     "linux": "Linux (GNU userland). Flag details still vary by distro and version.",
 }
@@ -37,6 +42,11 @@ Rules:
 2. If a command fails with a usage or unknown-flag error, call read_docs
    before retrying. If docs come back truncated, call read_docs again with a
    topic (e.g. the flag name) to search the full text.
+2b. LEARN FROM MISTAKES: whenever you get a command or approach wrong and then
+   find the form that works, call remember() with a one-line lesson holding the
+   corrected, ready-to-run command — so next session you get it right the first
+   time instead of re-deriving it. Applies to ANY tool or task, not just shell
+   flags. Check the "lessons you saved" in your context before guessing.
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. If the
    user denies a command, do not retry it — change approach or ask.
@@ -127,6 +137,7 @@ class Agent:
         on_message: Callable[[dict], None] | None = None,
         on_token: Callable[[str], None] | None = None,
         job_log_dir: os.PathLike | str | None = None,
+        lessons_path: os.PathLike | str | None = None,
     ):
         self.model = model
         self.approve = approve
@@ -141,6 +152,7 @@ class Agent:
         self.on_message = on_message
         self.on_token = on_token
         self.job_log_dir = job_log_dir
+        self.lessons_path = lessons_path
         content = system_prompt() + (f"\n{context}" if context else "")
         self.messages: list[Any] = [{"role": "system", "content": content}]
 
@@ -318,6 +330,14 @@ class Agent:
             skill = str(args.get("name", ""))
             self.echo(f"→ read_skill: {skill}")
             return skills.load_skill(skill, skills.skill_dirs(self.cwd))
+
+        if name == "remember":
+            note = str(args.get("note", ""))
+            if self.lessons_path is None:
+                return "ERROR: no lessons file configured"
+            result = tools.remember(note, self.lessons_path)
+            self.echo(f"→ {result}")
+            return result
 
         if name == "read_file":
             path = str(args.get("path", ""))
