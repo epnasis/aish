@@ -206,6 +206,17 @@ class Agent:
                 args = call["function"]["arguments"] or {}
                 try:
                     result = self._dispatch(name, args)
+                except ModuleNotFoundError as exc:
+                    # A broken install, not a transient failure: retrying the
+                    # same call can never succeed, so say so to the model too.
+                    result = (
+                        f"ERROR: tool '{name}' is unavailable — this aish "
+                        f"installation is missing the '{exc.name}' package. "
+                        "Do NOT retry this tool; it will keep failing. Tell "
+                        "the user to reinstall aish (uv tool install --force "
+                        "git+https://github.com/epnasis/aish.git) and restart."
+                    )
+                    self.echo(result)
                 except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
                     result = f"ERROR: tool '{name}' failed internally: {exc!r}"
                     self.echo(result)

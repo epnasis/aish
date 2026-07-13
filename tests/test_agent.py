@@ -223,6 +223,28 @@ def test_tool_exception_becomes_result_not_crash(monkeypatch):
     assert "failed internally" in tool_messages(agent.messages)[0]["content"]
 
 
+def test_missing_dependency_names_package_and_reinstall_fix(monkeypatch):
+    """A ModuleNotFoundError means a broken install: the result must name the
+    missing package, tell the model not to retry, and give the reinstall fix."""
+    import aish.agent as agent_module
+
+    def boom(query, **_kw):
+        raise ModuleNotFoundError("No module named 'ddgs'", name="ddgs")
+
+    monkeypatch.setattr(agent_module.web, "web_search", boom)
+    agent, _ = make_agent(
+        [
+            model_says(tool_calls=[tool_call("web_search", query="latest news")]),
+            model_says("told the user"),
+        ]
+    )
+    assert agent.run_task("search the news") == "told the user"
+    result = tool_messages(agent.messages)[0]["content"]
+    assert "'ddgs'" in result
+    assert "Do NOT retry" in result
+    assert "uv tool install --force" in result
+
+
 class TestCwdAndCd:
     def test_bare_cd_changes_cwd_without_approval(self, tmp_path):
         agent, _ = make_agent(
