@@ -116,3 +116,40 @@ class TestPlanEdit:
     def test_nonexistent_file_errors(self, tmp_path):
         plan = plan_edit("gone.py", "a", "b", str(tmp_path))
         assert plan.error and "write_file" in plan.error
+
+
+class TestEditRescue:
+    """edit_file's two rescue layers for the failure loop small models hit:
+    pasting read_file's numbered output, or slightly-off indentation."""
+
+    def test_line_number_prefixes_stripped_from_old_and_new(self, tmp_path):
+        f = tmp_path / "t.js"
+        f.write_text("if (x) {\n  go();\n}\n")
+        plan = plan_edit(
+            str(f),
+            "  518  if (x) {\n  519    go();\n  520  }",
+            "  518  if (x) {\n  519    stop();\n  520  }",
+            str(tmp_path),
+        )
+        assert plan.error is None
+        assert commit(plan)
+        assert f.read_text() == "if (x) {\n  stop();\n}\n"
+
+    def test_wrong_indentation_rescued_when_unique(self, tmp_path):
+        f = tmp_path / "t.py"
+        f.write_text("def f():\n        return 1\n")
+        plan = plan_edit(str(f), "def f():\n  return 1", "def f():\n  return 2", str(tmp_path))
+        assert plan.error is None
+        assert "return 2" in plan.new
+
+    def test_ambiguous_relaxed_match_still_errors(self, tmp_path):
+        f = tmp_path / "t.py"
+        f.write_text("  x = 1\n    x = 1\n")
+        plan = plan_edit(str(f), "x = 1", "x = 2", str(tmp_path))
+        assert plan.error is not None  # two stripped-equal locations: no guessing
+
+    def test_not_found_error_names_the_line_number_trap(self, tmp_path):
+        f = tmp_path / "t.py"
+        f.write_text("hello\n")
+        plan = plan_edit(str(f), "goodbye", "farewell", str(tmp_path))
+        assert plan.error and "line-number prefixes" in plan.error

@@ -519,8 +519,9 @@ TOOL_SCHEMAS = [
             "description": (
                 "Replace an exact string in a file with a new string. old_str must match "
                 "exactly and be UNIQUE in the file (include surrounding lines for context "
-                "if needed) — the edit fails rather than guess. The user approves a diff "
-                "before it is written."
+                "if needed) — the edit fails rather than guess. NEVER include the 'NNN  ' "
+                "line-number prefixes that read_file shows; copy the raw file text. The "
+                "user approves a diff before it is written."
             ),
             "parameters": {
                 "type": "object",

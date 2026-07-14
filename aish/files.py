@@ -7,6 +7,7 @@ approval, then commits — so nothing is written unseen.
 
 import difflib
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -126,6 +127,37 @@ def plan_write(path: str, content: str, cwd: str) -> WritePlan:
     return WritePlan(target, path, old, new, is_new)
 
 
+_NUMBERED_LINE = re.compile(r"\s*\d+\s\s(.*)")
+
+
+def _strip_read_numbers(s: str) -> str | None:
+    """Undo read_file's ' NNN  ' prefixes, but only if EVERY line carries one —
+    models routinely paste the numbered output back into old_str."""
+    matches = [_NUMBERED_LINE.fullmatch(line) for line in s.splitlines()]
+    if matches and all(matches):
+        return "\n".join(m.group(1) for m in matches)
+    return None
+
+
+def _relaxed_match(text: str, old_str: str) -> str | None:
+    """The file's own exact lines whose stripped content equals old_str's
+    stripped lines — only when that occurs at exactly one place, so an edit
+    with slightly-off indentation rescues instead of failing, never guesses."""
+    wanted = [line.strip() for line in old_str.splitlines()]
+    if not wanted:
+        return None
+    file_lines = text.splitlines()
+    hits = [
+        i
+        for i in range(len(file_lines) - len(wanted) + 1)
+        if all(file_lines[i + j].strip() == wanted[j] for j in range(len(wanted)))
+    ]
+    if len(hits) != 1:
+        return None
+    candidate = "\n".join(file_lines[hits[0] : hits[0] + len(wanted)])
+    return candidate if text.count(candidate) == 1 else None
+
+
 def plan_edit(path: str, old_str: str, new_str: str, cwd: str) -> WritePlan:
     target = resolve(path, cwd)
     if not target.exists():
@@ -137,10 +169,28 @@ def plan_edit(path: str, old_str: str, new_str: str, cwd: str) -> WritePlan:
     except (OSError, UnicodeDecodeError) as exc:
         return WritePlan(target, path, "", "", False, error=f"cannot read {target}: {exc}")
 
+    if old.count(old_str) == 0:
+        stripped = _strip_read_numbers(old_str)
+        if stripped is not None and old.count(stripped) > 0:
+            old_str = stripped
+            new_str = _strip_read_numbers(new_str) or new_str
+        else:
+            relaxed = _relaxed_match(old, stripped if stripped is not None else old_str)
+            if relaxed is not None:
+                if stripped is not None:
+                    new_str = _strip_read_numbers(new_str) or new_str
+                old_str = relaxed
+
     count = old.count(old_str)
     if count == 0:
         return WritePlan(
-            target, path, old, old, False, error="old_str not found in file (verify exact text)"
+            target, path, old, old, False,
+            error=(
+                "old_str not found in file. Copy the lines EXACTLY as they are "
+                "in the file: do NOT include the 'NNN  ' line-number prefixes "
+                "that read_file shows, and keep the original indentation — "
+                "re-read the exact range first if unsure"
+            ),
         )
     if count > 1:
         return WritePlan(
