@@ -473,13 +473,21 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "read_file",
             "description": (
-                "Read a text file with line numbers. Prefer this over `cat` when you "
-                "intend to edit the file next."
+                "Read a text file with line numbers, optionally a specific line range. "
+                "Prefer this over `cat`/`sed -n`/`head`/`tail` — it needs no approval."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File path (rel to cwd or abs)."}
+                    "path": {"type": "string", "description": "File path (rel to cwd or abs)."},
+                    "offset": {
+                        "type": "integer",
+                        "description": "1-based line to start from (default 1).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max lines to return (default 2000).",
+                    },
                 },
                 "required": ["path"],
             },

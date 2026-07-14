@@ -34,6 +34,31 @@ class TestReadFile:
         (tmp_path / "e.txt").write_text("")
         assert read_file("e.txt", str(tmp_path)) == "(empty file)"
 
+    def test_offset_and_limit_read_a_range_with_true_line_numbers(self, tmp_path):
+        f = tmp_path / "big.txt"
+        f.write_text("\n".join(f"line{i}" for i in range(1, 101)))
+        out = read_file(str(f), str(tmp_path), offset=40, limit=3)
+        assert "40  line40" in out
+        assert "42  line42" in out
+        assert "line39" not in out and "line43" not in out
+        assert "58 more lines" in out
+        assert "offset=43" in out  # continuation hint points at the next line
+
+    def test_offset_past_end_errors(self, tmp_path):
+        f = tmp_path / "s.txt"
+        f.write_text("only\n")
+        assert read_file(str(f), str(tmp_path), offset=9).startswith("ERROR: offset 9")
+
+    def test_default_read_unchanged_and_truncation_hints_offset(self, tmp_path):
+        from aish.files import READ_MAX_LINES
+
+        f = tmp_path / "huge.txt"
+        f.write_text("\n".join(f"l{i}" for i in range(1, READ_MAX_LINES + 51)))
+        out = read_file(str(f), str(tmp_path))
+        assert f"{READ_MAX_LINES}  l{READ_MAX_LINES}" in out
+        assert "50 more lines" in out
+        assert f"offset={READ_MAX_LINES + 1}" in out
+
 
 class TestPlanWrite:
     def test_new_file_diff_all_additions(self, tmp_path):

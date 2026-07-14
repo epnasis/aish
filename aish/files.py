@@ -47,7 +47,7 @@ def is_sensitive_path(path: str, cwd: str) -> bool:
     return name.endswith(_SENSITIVE_SUFFIXES)
 
 
-def read_file(path: str, cwd: str) -> str:
+def read_file(path: str, cwd: str, offset: int = 1, limit: int = READ_MAX_LINES) -> str:
     target = resolve(path, cwd)
     try:
         text = target.read_text(encoding="utf-8", errors="replace")
@@ -59,9 +59,18 @@ def read_file(path: str, cwd: str) -> str:
         return f"ERROR: cannot read {target}: {exc}"
 
     lines = text.splitlines()
-    numbered = "\n".join(f"{i:>5}  {line}" for i, line in enumerate(lines[:READ_MAX_LINES], 1))
-    if len(lines) > READ_MAX_LINES:
-        numbered += f"\n[... {len(lines) - READ_MAX_LINES} more lines; read a range if needed]"
+    offset = max(1, offset)
+    limit = max(1, min(limit, READ_MAX_LINES))
+    if offset > len(lines) and lines:
+        return f"ERROR: offset {offset} is past the end of the file ({len(lines)} lines)"
+    window = lines[offset - 1 : offset - 1 + limit]
+    numbered = "\n".join(f"{i:>5}  {line}" for i, line in enumerate(window, offset))
+    remaining = len(lines) - (offset - 1 + len(window))
+    if remaining > 0:
+        numbered += (
+            f"\n[... {remaining} more lines; call read_file again with "
+            f"offset={offset + len(window)} to continue]"
+        )
     return numbered or "(empty file)"
 
 

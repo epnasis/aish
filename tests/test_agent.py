@@ -226,6 +226,24 @@ def test_tool_exception_becomes_result_not_crash(monkeypatch):
     assert "failed internally" in tool_messages(agent.messages)[0]["content"]
 
 
+def test_read_file_range_passes_through_dispatch(tmp_path):
+    f = tmp_path / "big.txt"
+    f.write_text("alpha\nbeta\ngamma\n")
+    echoes = []
+    agent, _ = make_agent(
+        [
+            model_says(tool_calls=[tool_call("read_file", path=str(f), offset=2, limit=1)]),
+            model_says("done"),
+        ],
+        echo=echoes.append,
+    )
+    assert agent.run_task("read part") == "done"
+    content = tool_messages(agent.messages)[0]["content"]
+    assert "2  beta" in content
+    assert "alpha" not in content and "gamma" not in content.split("[")[0]
+    assert any("(from line 2)" in e for e in echoes)
+
+
 def test_missing_dependency_names_package_and_reinstall_fix(monkeypatch):
     """A ModuleNotFoundError means a broken install: the result must name the
     missing package, tell the model not to retry, and give the reinstall fix."""

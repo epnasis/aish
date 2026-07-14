@@ -498,21 +498,35 @@ class Agent:
             topic = args.get("topic") or None
             label = f"→ read_url: {url}" + (f" (topic: {topic})" if topic else "")
             return label, partial(web.read_url, url, topic=str(topic) if topic else None)
-        path = str(args.get("path", ""))  # read_file
-        return f"→ read_file: {path}", partial(files.read_file, path, self.cwd)
+        return self._read_file_call(args)  # read_file
 
     def _read_needs_prompt(self, name: str, args: dict) -> bool:
         return name == "read_file" and files.is_sensitive_path(
             str(args.get("path", "")), self.cwd
         )
 
+    @staticmethod
+    def _int_arg(args: dict, key: str, default: int) -> int:
+        try:
+            return int(args.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+
+    def _read_file_call(self, args: dict) -> tuple[str, Callable[[], str]]:
+        path = str(args.get("path", ""))
+        offset = self._int_arg(args, "offset", 1)
+        limit = self._int_arg(args, "limit", files.READ_MAX_LINES)
+        label = f"→ read_file: {path}" + (f" (from line {offset})" if offset > 1 else "")
+        return label, partial(files.read_file, path, self.cwd, offset=offset, limit=limit)
+
     def _dispatch(self, name: str, args: dict) -> str:
         if name == "read_file":
             path = str(args.get("path", ""))
-            self.echo(f"→ read_file: {path}")
+            label, thunk = self._read_file_call(args)
+            self.echo(label)
             if files.is_sensitive_path(path, self.cwd) and not self.approve_read(path):
                 return READ_DENIED
-            return files.read_file(path, self.cwd)
+            return thunk()
 
         if name in READ_ONLY_TOOLS:
             label, thunk = self._read_only_call(name, args)
