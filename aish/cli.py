@@ -419,6 +419,9 @@ def handle_slash(
     return "handled"
 
 
+DEFAULT_LESSONS = Path.home() / ".config" / "aish" / "lessons.md"
+
+
 def usage_context(
     model: str,
     vi_mode: bool,
@@ -426,6 +429,7 @@ def usage_context(
     state_dir: Path,
     config_path: Path,
     deny_path: Path = DEFAULT_DENYLIST,
+    lessons_path: Path = DEFAULT_LESSONS,
 ) -> str:
     """Self-knowledge for the system prompt: aish should be able to explain
     and (via approved commands) reconfigure itself."""
@@ -472,10 +476,13 @@ to raw devices, diskutil erase, git clean -f, git push --force) are blocked \
 outright — you cannot run them even with approval. The user can extend the \
 list with segment prefixes in {deny_path} and can run blocked commands \
 manually with the ! prefix. When blocked, suggest a safer alternative.
-- Learning: call the remember tool to save a one-line lesson (loaded every \
-session under "lessons you saved") — do this after correcting any mistake, and \
-whenever the user asks you to remember something durable. For longer curated \
-notes the user maintains, ~/.config/aish/AISH.md is also loaded each session.
+- Learning: call the remember tool to save a one-line lesson — do this after \
+correcting any mistake, and whenever the user asks you to remember something \
+durable. Lessons live in {lessons_path} and are ALREADY loaded into your \
+context each session under "lessons you saved" — when the user asks about \
+your learnings, quote that section (or read the file); do not go hunting \
+elsewhere. For longer curated notes the user maintains, \
+~/.config/aish/AISH.md is also loaded each session.
 - Multiline input: Enter submits; a newline is inserted by Ctrl+J, by ending \
 the line with a backslash then Enter, or by Option/Alt+Enter (in iTerm2 only \
 with "Left Option key: Esc+"); pasted text keeps its newlines.
@@ -512,9 +519,6 @@ def skills_context(cwd: str) -> str:
     )
 
 
-DEFAULT_LESSONS = Path.home() / ".config" / "aish" / "lessons.md"
-
-
 def load_context_files(cwd: str, lessons_path: Path = DEFAULT_LESSONS) -> list[str]:
     parts = []
     sources = (
@@ -525,7 +529,12 @@ def load_context_files(cwd: str, lessons_path: Path = DEFAULT_LESSONS) -> list[s
     for path in sources:
         try:
             if path.is_file():
-                label = "lessons you saved" if path == lessons_path else f"context from {path}"
+                label = (
+                    "lessons you saved after earlier mistakes — apply them "
+                    "proactively whenever one is relevant"
+                    if path == lessons_path
+                    else f"context from {path}"
+                )
                 parts.append(f"[{label}]\n{path.read_text(encoding='utf-8')}")
         except OSError:
             continue
@@ -609,7 +618,8 @@ def main() -> int:
         for part in [
             environment_context(cwd),
             usage_context(
-                args.model, args.vi_mode, allow_path, state_dir, config_path, deny_path
+                args.model, args.vi_mode, allow_path, state_dir, config_path,
+                deny_path, lessons_path,
             ),
             skills_context(cwd),
             *load_context_files(cwd, lessons_path),

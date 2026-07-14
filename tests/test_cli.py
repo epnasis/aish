@@ -78,9 +78,11 @@ def test_read_only_auto_approves_without_input(tmp_path):
 def test_load_context_files_reads_cwd_aish_md(tmp_path, monkeypatch):
     from aish.cli import load_context_files
 
+    # explicit lessons path: the default is bound to the REAL home at import
+    # time, so a lessons file on the developer machine would leak in here
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "no-home")
     (tmp_path / "AISH.md").write_text("host facts here")
-    parts = load_context_files(str(tmp_path))
+    parts = load_context_files(str(tmp_path), tmp_path / "no-lessons.md")
     assert len(parts) == 1
     assert "host facts here" in parts[0]
     assert "AISH.md" in parts[0]
@@ -90,7 +92,7 @@ def test_load_context_files_empty_when_absent(tmp_path, monkeypatch):
     from aish.cli import load_context_files
 
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "no-home")
-    assert load_context_files(str(tmp_path)) == []
+    assert load_context_files(str(tmp_path), tmp_path / "no-lessons.md") == []
 
 
 class TestConfig:
