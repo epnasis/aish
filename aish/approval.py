@@ -71,6 +71,18 @@ UNSAFE_FLAGS = {
     "sort": ("-o", "--output"),
 }
 
+# Commands whose arguments are arbitrary code or another command. A bare-binary
+# allowlist prefix on any of these would silently grant arbitrary execution, so
+# such a prefix never auto-approves — only an explicitly narrower saved prefix
+# (e.g. `python manage.py`, not `python`) may.
+EXEC_WRAPPERS = frozenset(
+    {
+        "python", "python2", "python3", "bash", "sh", "zsh", "fish", "dash", "ksh",
+        "perl", "ruby", "node", "deno", "bun", "php", "lua", "awk", "gawk",
+        "xargs", "env", "eval", "exec", "nice", "timeout", "watch", "ssh", "make",
+    }
+)
+
 # Anything enabling redirection, substitution, expansion, or sequencing we
 # don't model. Scanned on the raw string, so quoting or escaping can't hide
 # these from us (at worst we reject a safe command). '&' and '|' are handled
@@ -93,6 +105,14 @@ def split_chain(command: str) -> list[str] | None:
     return segments
 
 
+def _has_unsafe_flag(name: str, tokens: list[str]) -> bool:
+    return any(
+        tok == flag or tok.startswith(flag + "=")
+        for flag in UNSAFE_FLAGS.get(name, ())
+        for tok in tokens[1:]
+    )
+
+
 def _segment_is_safe(segment: str) -> bool:
     try:
         tokens = shlex.split(segment)
@@ -103,14 +123,39 @@ def _segment_is_safe(segment: str) -> bool:
     name = tokens[0]
     if name not in SAFE_COMMANDS:
         return False
-    for flag in UNSAFE_FLAGS.get(name, ()):
-        if any(tok == flag or tok.startswith(flag + "=") for tok in tokens[1:]):
-            return False
-    return True
+    return not _has_unsafe_flag(name, tokens)
+
+
+def _matched_prefix(segment: str, prefixes: list[str]) -> str | None:
+    return next((p for p in prefixes if segment == p or segment.startswith(p + " ")), None)
 
 
 def _matches_prefix(segment: str, prefixes: list[str]) -> bool:
-    return any(segment == p or segment.startswith(p + " ") for p in prefixes)
+    return _matched_prefix(segment, prefixes) is not None
+
+
+def _prefix_approves(segment: str, prefixes: list[str]) -> bool:
+    """A user allowlist prefix auto-approves a segment only if it does not smuggle
+    in a write/exec flag or resolve to an interpreter that the bare prefix would
+    otherwise wave through. Fixes the hole where allow-listing a benign `find`
+    (or `python`) silently granted `find -delete` / arbitrary code."""
+    match = _matched_prefix(segment, prefixes)
+    if match is None:
+        return False
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    name = tokens[0].rsplit("/", 1)[-1]
+    if _has_unsafe_flag(name, tokens) or _has_unsafe_flag(tokens[0], tokens):
+        return False
+    # A bare-binary prefix cannot authorize an interpreter/exec wrapper; require
+    # a saved prefix of at least two tokens (an explicitly scoped subcommand).
+    if name in EXEC_WRAPPERS and len(match.split()) < 2:
+        return False
+    return True
 
 
 def is_read_only(command: str) -> bool:
@@ -125,7 +170,7 @@ def is_auto_approvable(command: str, prefixes: list[str]) -> bool:
     segments = split_chain(command)
     if segments is None:
         return False
-    return all(_segment_is_safe(s) or _matches_prefix(s, prefixes) for s in segments)
+    return all(_segment_is_safe(s) or _prefix_approves(s, prefixes) for s in segments)
 
 
 def unvetted_segments(command: str, prefixes: list[str]) -> list[str]:
@@ -134,7 +179,7 @@ def unvetted_segments(command: str, prefixes: list[str]) -> list[str]:
     segments = split_chain(command)
     if segments is None:
         return []
-    return [s for s in segments if not (_segment_is_safe(s) or _matches_prefix(s, prefixes))]
+    return [s for s in segments if not (_segment_is_safe(s) or _prefix_approves(s, prefixes))]
 
 
 # Wrappers that don't change what the underlying command does.
@@ -205,21 +250,90 @@ def _segment_deny_reason(segment: str) -> str | None:
     return None
 
 
+# Shell sequencing/pipe operators. Unlike split_chain's FORBIDDEN_CHARS, this
+# splits even when redirects or subshells are present — the denylist must
+# inspect every verb, not fail open the moment it sees a metacharacter.
+_DENY_SPLIT = re.compile(r"[;\n]|\|\|?|&&?")
+_SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+_CMD_WRAPPERS = frozenset(
+    {"env", "xargs", "nohup", "time", "command", "nice", "timeout", "sudo", "stdbuf"}
+)
+_FIND_EXEC_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+
+
+def _find_exec_commands(tokens: list[str]) -> list[str]:
+    """The command(s) `find ... -exec <cmd> ... {} ;/+` would run."""
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i] in _FIND_EXEC_FLAGS:
+            cmd, j = [], i + 1
+            while j < len(tokens) and tokens[j] not in (";", "+"):
+                if tokens[j] != "{}":
+                    cmd.append(tokens[j])
+                j += 1
+            if cmd:
+                out.append(shlex.join(cmd))
+            i = j
+        i += 1
+    return out
+
+
+def _unwrap_exec(segment: str) -> list[str]:
+    """Command string(s) embedded inside an exec wrapper, so the denylist can
+    see through `sh -c '...'`, `xargs rm`, `env VAR=x cmd`, `find -exec ...`."""
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return []
+    if not tokens:
+        return []
+    name = tokens[0].rsplit("/", 1)[-1]
+    if name in _SHELL_NAMES and "-c" in tokens:
+        idx = tokens.index("-c")
+        return [tokens[idx + 1]] if idx + 1 < len(tokens) else []
+    if name == "find":
+        return _find_exec_commands(tokens)
+    if name in _CMD_WRAPPERS:
+        rest = tokens[1:]
+        while rest and (rest[0].startswith("-") or (name == "env" and "=" in rest[0])):
+            rest = rest[1:]
+        return [shlex.join(rest)] if rest else []
+    return []
+
+
+def _collect_deny_segments(command: str, out: list[str], depth: int) -> None:
+    if depth > 6:  # bound recursion through nested wrappers
+        return
+    for piece in _DENY_SPLIT.split(command):
+        piece = piece.strip()
+        if not piece:
+            continue
+        out.append(piece)
+        for inner in _unwrap_exec(piece):
+            _collect_deny_segments(inner, out, depth + 1)
+
+
+def _deny_segments(command: str) -> list[str]:
+    out: list[str] = []
+    _collect_deny_segments(command, out, 0)
+    return out
+
+
 def check_denied(command: str, extra_prefixes: list[str] | None = None) -> str | None:
     """Reason string if the command hits the denylist, else None.
     User prefixes from deny.txt match segments the same way allow.txt does."""
-    segments = split_chain(command)
-    if segments is None:
-        if _RAW_RM_RF_RE.search(command):
-            return "rm -rf inside a compound command"
-        return None
-    for segment in segments:
+    for segment in _deny_segments(command):
         reason = _segment_deny_reason(segment)
         if reason:
             return reason
         for prefix in extra_prefixes or ():
             if segment == prefix or segment.startswith(prefix + " "):
                 return f"matches your denylist entry '{prefix}'"
+    # Last-resort net for rm -rf hidden in forms we couldn't segment cleanly
+    # (unbalanced quoting, exotic substitution).
+    if _RAW_RM_RF_RE.search(command):
+        return "rm -rf inside a compound command"
     return None
 
 
@@ -244,7 +358,7 @@ def looks_destructive(command: str) -> bool:
     substitute for the gate. Keyed on command VERBS (rm, mv, kill, sudo, …),
     NOT on redirects: `2>/dev/null` and a `>` inside a quoted awk/sed program
     are not destructive, and flagging them just breeds approval fatigue."""
-    for segment in split_chain(command) or _rough_segments(command):
+    for segment in _deny_segments(command):
         try:
             tokens = shlex.split(segment)
         except ValueError:
@@ -260,14 +374,6 @@ def looks_destructive(command: str) -> bool:
         if "--force" in tokens[1:]:  # explicit only; bare -f means "file" too often
             return True
     return False
-
-
-def _rough_segments(command: str) -> list[str]:
-    """Split a command with shell metachars we don't fully model into rough
-    pieces (on ; | && ||) just to inspect each verb — good enough for the
-    advisory warning, never used for auto-approval."""
-    parts = re.split(r"[;&|]+", command)
-    return [p.strip() for p in parts if p.strip()]
 
 
 def suggest_prefix(segment: str) -> str:

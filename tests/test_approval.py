@@ -120,6 +120,21 @@ class TestUserAllowlist:
     def test_missing_file_loads_empty(self, tmp_path):
         assert load_prefixes(tmp_path / "nope.txt") == []
 
+    def test_prefix_does_not_re_enable_unsafe_flags(self):
+        # allow-listing a benign `find` must NOT auto-approve destructive variants
+        assert is_auto_approvable("find . -name foo", ["find"])
+        assert is_auto_approvable("find . -newer x", ["find"])
+        assert not is_auto_approvable("find /important -delete", ["find"])
+        assert not is_auto_approvable("find . -exec rm {} +", ["find"])
+        assert not is_auto_approvable("sort -o /etc/hosts in", ["sort"])
+
+    def test_bare_interpreter_prefix_does_not_grant_execution(self):
+        assert not is_auto_approvable("python -c 'import os'", ["python"])
+        assert not is_auto_approvable("bash script.sh", ["bash"])
+        assert not is_auto_approvable("xargs rm", ["xargs"])
+        # but an explicitly scoped multi-token prefix is honored
+        assert is_auto_approvable("python manage.py check", ["python manage.py"])
+
 
 DENIED = [
     "rm -rf /",
@@ -168,6 +183,31 @@ class TestDenylist:
         assert check_denied("dropdb production", ["dropdb"])
         assert check_denied("ls && dropdb production", ["dropdb"])
         assert check_denied("dropdb-tool x", ["dropdb"]) is None  # prefix+space only
+
+    def test_denied_through_shell_wrappers(self):
+        # sh -c / bash -c payloads must be inspected, not waved through
+        assert check_denied('sh -c "rm -rf /tmp/x"')
+        assert check_denied('bash -c "shred -u secret"')
+        assert check_denied("bash -c 'mkfs.ext4 /dev/sda1'")
+
+    def test_denied_through_compound_and_redirects(self):
+        # any metachar used to defeat split_chain must not defeat the denylist
+        assert check_denied("echo hi; shred -u secret")
+        assert check_denied("rm -r -f /tmp/x; echo done")
+        assert check_denied("dd of=/dev/sda if=/dev/zero; true")
+        assert check_denied("mkfs.ext4 /dev/sda1 >/dev/null")
+        assert check_denied("git push --force origin main; echo x")
+
+    def test_denied_through_exec_wrappers(self):
+        assert check_denied("xargs rm -rf < list")
+        assert check_denied("find . -name x -exec rm -rf {} +")
+        assert check_denied("env FOO=bar mkfs.ext4 /dev/sda1")
+
+    def test_benign_commands_not_falsely_denied(self):
+        # rm/shred appearing as data, not as a verb, must stay allowed
+        assert check_denied('git commit -m "cleanup rm -rf logic"') is None
+        assert check_denied("echo shredder") is None
+        assert check_denied("grep -r mkfs /etc") is None
 
 
 class TestLooksDestructive:

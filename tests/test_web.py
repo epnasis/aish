@@ -115,7 +115,8 @@ class TestReadUrl:
         assert "Widgets frob nicely" in result
         assert "page truncated" in result
         assert "'topic'" in result
-        assert len(result) < web.DOCS_MAX_CHARS + 300
+        assert result.startswith(web.UNTRUSTED_NOTE)
+        assert len(result) < web.DOCS_MAX_CHARS + 300 + len(web.UNTRUSTED_NOTE)
 
     def test_topic_reaches_past_truncation(self, monkeypatch):
         monkeypatch.setattr(web, "_fetch", lambda url: (PAGE, "text/html"))

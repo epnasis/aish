@@ -12,6 +12,7 @@ import os
 import platform
 import shlex
 import sys
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -89,6 +90,11 @@ WRITE_DENIED = (
     "Do not retry the same change; adjust it or ask the user what they want."
 )
 
+READ_DENIED = (
+    "USER DENIED reading this sensitive file — its contents were NOT read. "
+    "Do not retry; proceed without it or ask the user."
+)
+
 BLOCKED_RESULT = (
     "BLOCKED by the safety denylist ({reason}) — NOT executed, and it cannot "
     "be approved through you at all. If the user truly intends this, they must "
@@ -97,6 +103,17 @@ BLOCKED_RESULT = (
 
 # No side effects and no approval prompt — safe to run concurrently.
 READ_ONLY_TOOLS = frozenset({"read_docs", "read_skill", "web_search", "read_url", "read_file"})
+
+# Tool runs and model turns faster than this stay silent; slower ones get a
+# dim "✓ … 2.3s" line so waits are attributable.
+SLOW_SECS = 1.0
+
+
+def format_secs(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m{secs:02d}s"
 
 TRIM_KEEP_CHARS = 200
 TRIMMED_NOTE = "\n[trimmed: full output dropped to save context]"
@@ -139,6 +156,7 @@ class Agent:
         model: str,
         approve: Callable[[str], Any],
         approve_write: Callable[[Any], bool] = lambda _plan: False,
+        approve_read: Callable[[str], bool] = lambda _path: True,
         echo: Callable[[str], None] = lambda _: None,
         stream: Callable[[str], None] | None = None,
         client_chat: Callable[..., Any] = ollama.chat,
@@ -155,6 +173,7 @@ class Agent:
         self.model = model
         self.approve = approve
         self.approve_write = approve_write
+        self.approve_read = approve_read
         self.echo = echo
         self.stream = stream
         self.chat = client_chat
@@ -194,7 +213,9 @@ class Agent:
 
         for _ in range(self.max_steps):
             self._enforce_budget(task_start)
+            turn_start = time.perf_counter()
             content, tool_calls = self._chat_turn()
+            turn_secs = time.perf_counter() - turn_start
             entry: dict = {"role": "assistant", "content": content}
             if tool_calls:
                 entry["tool_calls"] = tool_calls
@@ -204,8 +225,12 @@ class Agent:
                 result = content or EMPTY_RESPONSE
                 if not content and self.on_token:
                     self.on_token(result + "\n")
+                if turn_secs >= SLOW_SECS:
+                    self.echo(f"✓ answered in {format_secs(turn_secs)}")
                 return result
 
+            if turn_secs >= SLOW_SECS:
+                self.echo(f"✓ thought for {format_secs(turn_secs)}")
             if content and self.on_token is None:
                 self.echo(content)
 
@@ -336,10 +361,14 @@ class Agent:
         sequential: two interleaved [y/N] prompts would be unanswerable.
         """
         calls = [(c["function"]["name"], c["function"]["arguments"] or {}) for c in tool_calls]
-        concurrent = [i for i, (name, _) in enumerate(calls) if name in READ_ONLY_TOOLS]
+        concurrent = [
+            i
+            for i, (name, args) in enumerate(calls)
+            if name in READ_ONLY_TOOLS and not self._read_needs_prompt(name, args)
+        ]
         if len(concurrent) < 2:
             return [
-                self._call_result(name, partial(self._dispatch, name, args))
+                self._call_result(name, partial(self._timed, partial(self._dispatch, name, args)))
                 for name, args in calls
             ]
 
@@ -349,19 +378,28 @@ class Agent:
             for i in concurrent:
                 label, thunk = self._read_only_call(*calls[i])
                 self.echo(label)
-                futures[i] = pool.submit(thunk)
+                # _timed runs on the worker so the reported duration is the
+                # call's true runtime, not how long collection waited for it.
+                futures[i] = pool.submit(self._timed, thunk)
             # Collect in call order; future.result() re-raises worker
             # exceptions here, so error echoes stay on the main thread.
             for i, (name, args) in enumerate(calls):
                 if i in futures:
                     results[i] = self._call_result(name, futures[i].result)
                 else:
-                    results[i] = self._call_result(name, partial(self._dispatch, name, args))
+                    results[i] = self._call_result(
+                        name, partial(self._timed, partial(self._dispatch, name, args))
+                    )
         return results
 
-    def _call_result(self, name: str, fn: Callable[[], str]) -> str:
+    @staticmethod
+    def _timed(fn: Callable[[], str]) -> tuple[str, float]:
+        start = time.perf_counter()
+        return fn(), time.perf_counter() - start
+
+    def _call_result(self, name: str, fn: Callable[[], tuple[str, float]]) -> str:
         try:
-            return fn()
+            result, elapsed = fn()
         except ModuleNotFoundError as exc:
             # A broken install, not a transient failure: retrying the
             # same call can never succeed, so say so to the model too.
@@ -378,6 +416,9 @@ class Agent:
             result = f"ERROR: tool '{name}' failed internally: {exc!r}"
             self.echo(result)
             return result
+        if elapsed >= SLOW_SECS:
+            self.echo(f"✓ {name} {format_secs(elapsed)}")
+        return result
 
     def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
         """(echo label, execution thunk) for a READ_ONLY_TOOLS member — split
@@ -403,7 +444,19 @@ class Agent:
         path = str(args.get("path", ""))  # read_file
         return f"→ read_file: {path}", partial(files.read_file, path, self.cwd)
 
+    def _read_needs_prompt(self, name: str, args: dict) -> bool:
+        return name == "read_file" and files.is_sensitive_path(
+            str(args.get("path", "")), self.cwd
+        )
+
     def _dispatch(self, name: str, args: dict) -> str:
+        if name == "read_file":
+            path = str(args.get("path", ""))
+            self.echo(f"→ read_file: {path}")
+            if files.is_sensitive_path(path, self.cwd) and not self.approve_read(path):
+                return READ_DENIED
+            return files.read_file(path, self.cwd)
+
         if name in READ_ONLY_TOOLS:
             label, thunk = self._read_only_call(name, args)
             self.echo(label)

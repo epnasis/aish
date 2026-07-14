@@ -21,6 +21,32 @@ def resolve(path: str, cwd: str) -> Path:
     return p if p.is_absolute() else Path(cwd) / p
 
 
+# Directories/files that commonly hold credentials. Reading these auto-approved
+# would let an injected read_file exfiltrate secrets into context unseen, so
+# they are routed through an explicit prompt instead.
+_SENSITIVE_DIRS = frozenset({".ssh", ".aws", ".gnupg", ".kube", ".docker", "gcloud"})
+_SENSITIVE_NAMES = frozenset(
+    {
+        "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".netrc", "credentials",
+        ".pgpass", ".git-credentials", ".htpasswd", "secrets", ".npmrc",
+    }
+)
+_SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".env")
+
+
+def is_sensitive_path(path: str, cwd: str) -> bool:
+    """True for paths that commonly hold secrets (SSH/AWS keys, .env, .pem …).
+    Advisory: used to require a prompt before an auto-approved read_file
+    touches them — never a hard block."""
+    target = resolve(path, cwd)
+    name = target.name.lower()
+    if {p.lower() for p in target.parts} & _SENSITIVE_DIRS:
+        return True
+    if name in _SENSITIVE_NAMES or name.startswith(".env"):
+        return True
+    return name.endswith(_SENSITIVE_SUFFIXES)
+
+
 def read_file(path: str, cwd: str) -> str:
     target = resolve(path, cwd)
     try:

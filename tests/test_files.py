@@ -1,4 +1,18 @@
-from aish.files import commit, plan_edit, plan_write, read_file
+from aish.files import commit, is_sensitive_path, plan_edit, plan_write, read_file
+
+
+class TestIsSensitivePath:
+    def test_flags_secret_paths(self):
+        for path in (
+            "~/.ssh/id_rsa", "~/.ssh/config", "~/.aws/credentials",
+            "/home/u/.gnupg/secring", "project/.env", ".env.production",
+            "server.pem", "tls.key", "~/.netrc", "certs/store.p12",
+        ):
+            assert is_sensitive_path(path, "/tmp"), path
+
+    def test_allows_ordinary_paths(self):
+        for path in ("README.md", "src/main.py", "notes.txt", "data.json", "environment.rst"):
+            assert not is_sensitive_path(path, "/tmp"), path
 
 
 class TestReadFile:

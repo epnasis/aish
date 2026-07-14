@@ -329,6 +329,98 @@ class TestParallelReadOnlyTools:
         assert contents[1] == "results for good"
 
 
+class FakeClock:
+    """Deterministic stand-in for time.perf_counter: only advances on demand."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class TestElapsedTimeReporting:
+    def patch_clock(self, monkeypatch):
+        import aish.agent as agent_module
+
+        clock = FakeClock()
+        monkeypatch.setattr(agent_module, "time", SimpleNamespace(perf_counter=clock))
+        return clock
+
+    def test_slow_tool_gets_timing_line(self, monkeypatch):
+        import aish.agent as agent_module
+
+        clock = self.patch_clock(monkeypatch)
+
+        def slow_search(query, **_kw):
+            clock.advance(2.5)
+            return "results"
+
+        monkeypatch.setattr(agent_module.web, "web_search", slow_search)
+        echoes = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("web_search", query="x")]),
+                model_says("done"),
+            ],
+            echo=echoes.append,
+        )
+        assert agent.run_task("search") == "done"
+        assert "✓ web_search 2.5s" in echoes
+
+    def test_fast_tool_stays_silent(self, monkeypatch):
+        import aish.agent as agent_module
+
+        clock = self.patch_clock(monkeypatch)
+
+        def quick_search(query, **_kw):
+            clock.advance(0.4)
+            return "results"
+
+        monkeypatch.setattr(agent_module.web, "web_search", quick_search)
+        echoes = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("web_search", query="x")]),
+                model_says("done"),
+            ],
+            echo=echoes.append,
+        )
+        assert agent.run_task("search") == "done"
+        assert not any(e.startswith("✓ web_search") for e in echoes)
+
+    def test_slow_model_turns_report_thinking_and_answer(self, monkeypatch):
+        import aish.agent as agent_module
+
+        clock = self.patch_clock(monkeypatch)
+        monkeypatch.setattr(agent_module.web, "web_search", lambda q, **_kw: "results")
+        responses = [
+            model_says(tool_calls=[tool_call("web_search", query="x")]),
+            model_says("done"),
+        ]
+
+        def slow_chat(**_kwargs):
+            clock.advance(3.0)
+            return responses.pop(0)
+
+        echoes = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=slow_chat, echo=echoes.append
+        )
+        assert agent.run_task("search") == "done"
+        assert "✓ thought for 3.0s" in echoes
+        assert "✓ answered in 3.0s" in echoes
+
+    def test_format_secs(self):
+        from aish.agent import format_secs
+
+        assert format_secs(2.34) == "2.3s"
+        assert format_secs(75) == "1m15s"
+
+
 class TestCwdAndCd:
     def test_bare_cd_changes_cwd_without_approval(self, tmp_path):
         agent, _ = make_agent(
@@ -630,6 +722,34 @@ class TestFileTools:
         )
         agent.run_task("read it")
         assert "readable" in tool_messages(agent.messages)[0]["content"]
+
+    def test_sensitive_read_prompts_and_denial_blocks_contents(self, tmp_path):
+        from aish.agent import READ_DENIED
+
+        secret = tmp_path / ".env"
+        secret.write_text("API_KEY=supersecret\n")
+        asked = []
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self.call("read_file", path=".env")]), model_says("ok")],
+            approve_read=lambda p: asked.append(p) or False,
+            cwd=str(tmp_path),
+        )
+        agent.run_task("read env")
+        assert asked == [".env"]  # the gate was consulted
+        result = tool_messages(agent.messages)[0]["content"]
+        assert result == READ_DENIED
+        assert "supersecret" not in result
+
+    def test_sensitive_read_approved_returns_contents(self, tmp_path):
+        secret = tmp_path / ".env"
+        secret.write_text("API_KEY=supersecret\n")
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self.call("read_file", path=".env")]), model_says("ok")],
+            approve_read=lambda _p: True,
+            cwd=str(tmp_path),
+        )
+        agent.run_task("read env")
+        assert "supersecret" in tool_messages(agent.messages)[0]["content"]
 
     def test_write_file_approved_writes_and_shows_plan(self, tmp_path):
         seen = {}

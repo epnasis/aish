@@ -153,9 +153,16 @@ def _flush_buf(buf: bytes, lines: list[str], on_line) -> None:
             on_line(line)
 
 
+# Copies stdin→stdout; run as an independent process so it outlives aish.
+_DRAIN_SCRIPT = "import shutil,sys; shutil.copyfileobj(sys.stdin.buffer, sys.stdout.buffer)"
+
+
 def _detach_running(proc, command, collected, log_dir, on_line) -> str:
-    """Hand a running foreground command to the background-job table: a daemon
-    thread drains the rest of its output to a log file the model can tail."""
+    """Hand a running foreground command to the background-job table. Its
+    still-open output pipe is drained by an INDEPENDENT process in its own
+    session, so output keeps flowing to the log — and the child never blocks on
+    a full pipe — even after aish exits. (A daemon thread would die with aish,
+    stalling the child once its 64 KB pipe buffer filled.)"""
     directory = Path(log_dir) if log_dir else Path.home() / ".local" / "state" / "aish" / "jobs"
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -166,21 +173,32 @@ def _detach_running(proc, command, collected, log_dir, on_line) -> str:
         log_file.flush()
     JOBS.append({"pid": proc.pid, "command": command, "log": str(log_path), "proc": proc})
 
-    out_fd = proc.stdout.fileno()
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c", _DRAIN_SCRIPT],
+            stdin=proc.stdout,
+            stdout=log_file,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        proc.stdout.close()  # the drainer holds the only read end now
+        log_file.close()     # …and, via its dup, the only write end
+    except OSError:
+        # Couldn't spawn a drainer: fall back to an in-process daemon thread
+        # (works while aish runs, but won't outlive it).
+        out_fd = proc.stdout.fileno()
 
-    def drain() -> None:
-        try:
-            while True:
-                chunk = os.read(out_fd, 65536)
-                if not chunk:
-                    break
-                log_file.write(chunk)
-                log_file.flush()
-            proc.wait()
-        finally:
-            log_file.close()
+        def drain() -> None:
+            try:
+                while chunk := os.read(out_fd, 65536):
+                    log_file.write(chunk)
+                    log_file.flush()
+                proc.wait()
+            finally:
+                log_file.close()
 
-    threading.Thread(target=drain, daemon=True).start()
+        threading.Thread(target=drain, daemon=True).start()
+
     message = (
         f"[detached to background: pid {proc.pid}, log: {log_path}]\n"
         f"Still running. Check with: tail -n 30 {log_path} — stop with: kill {proc.pid}"

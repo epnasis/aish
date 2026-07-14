@@ -205,6 +205,25 @@ def make_write_approver(log):
     return approve_write
 
 
+def make_read_approver(log):
+    """Prompt before an auto-approved read_file touches a secret-bearing path,
+    so an injected read_file can't silently pull keys into context."""
+
+    def approve_read(path: str) -> bool:
+        print(f"\n{YELLOW}{BOLD}▶ read sensitive file?{RESET} {BOLD}{path}{RESET} "
+              f"{RED}⚠ may contain secrets{RESET}")
+        try:
+            answer = input(f"{YELLOW}[y/N]{RESET} ").strip().lower()
+        except EOFError:
+            answer = ""
+        approved = answer in ("y", "yes")
+        if log:
+            log.command(f"read {path}", "approved" if approved else "denied")
+        return approved
+
+    return approve_read
+
+
 def echo(text: str) -> None:
     lines = text.splitlines()
     shown = lines[:ECHO_PREVIEW_LINES]
@@ -522,6 +541,7 @@ def main() -> int:
         model=args.model,
         approve=make_approver(args.ask_all, allow_path, logref, deny_path),
         approve_write=make_write_approver(logref),
+        approve_read=make_read_approver(logref),
         echo=echo,
         stream=stream_line,
         num_ctx=args.num_ctx,
