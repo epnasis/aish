@@ -104,16 +104,22 @@ BLOCKED_RESULT = (
 # No side effects and no approval prompt — safe to run concurrently.
 READ_ONLY_TOOLS = frozenset({"read_docs", "read_skill", "web_search", "read_url", "read_file"})
 
-# Tool runs and model turns faster than this stay silent; slower ones get a
-# dim "✓ … 2.3s" line so waits are attributable.
-SLOW_SECS = 1.0
-
-
 def format_secs(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
     minutes, secs = divmod(int(seconds), 60)
     return f"{minutes}m{secs:02d}s"
+
+
+class _NoStatus:
+    """Default live-status sink: aish shows a ticking timer only when the CLI
+    injects one (TTY); everywhere else these are no-ops."""
+
+    def start(self, label: str) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
 
 TRIM_KEEP_CHARS = 200
 TRIMMED_NOTE = "\n[trimmed: full output dropped to save context]"
@@ -141,13 +147,8 @@ def environment_context(cwd: str) -> str:
     )
 
 
-def _serialize(message: Any) -> dict:
-    if isinstance(message, dict):
-        return {k: message[k] for k in ("role", "content", "tool_name") if k in message}
-    return {
-        "role": getattr(message, "role", "assistant"),
-        "content": getattr(message, "content", None) or "",
-    }
+def _serialize(message: dict) -> dict:
+    return {k: message[k] for k in ("role", "content", "tool_name") if k in message}
 
 
 class Agent:
@@ -169,6 +170,7 @@ class Agent:
         on_token: Callable[[str], None] | None = None,
         job_log_dir: os.PathLike | str | None = None,
         lessons_path: os.PathLike | str | None = None,
+        status: Any = None,
     ):
         self.model = model
         self.approve = approve
@@ -185,8 +187,9 @@ class Agent:
         self.on_token = on_token
         self.job_log_dir = job_log_dir
         self.lessons_path = lessons_path
+        self.status = status if status is not None else _NoStatus()
         content = system_prompt() + (f"\n{context}" if context else "")
-        self.messages: list[Any] = [{"role": "system", "content": content}]
+        self.messages: list[dict] = [{"role": "system", "content": content}]
 
     def reset(self) -> None:
         """Drop the conversation, keep the system prompt."""
@@ -197,7 +200,7 @@ class Agent:
         directly so they are not re-recorded)."""
         self.messages.extend(m for m in messages if m.get("role") != "system")
 
-    def _append(self, message: Any) -> None:
+    def _append(self, message: dict) -> None:
         self.messages.append(message)
         if self.on_message:
             self.on_message(_serialize(message))
@@ -214,7 +217,11 @@ class Agent:
         for _ in range(self.max_steps):
             self._enforce_budget(task_start)
             turn_start = time.perf_counter()
-            content, tool_calls = self._chat_turn()
+            self.status.start("thinking")
+            try:
+                content, tool_calls = self._chat_turn()
+            finally:
+                self.status.stop()
             turn_secs = time.perf_counter() - turn_start
             entry: dict = {"role": "assistant", "content": content}
             if tool_calls:
@@ -225,12 +232,10 @@ class Agent:
                 result = content or EMPTY_RESPONSE
                 if not content and self.on_token:
                     self.on_token(result + "\n")
-                if turn_secs >= SLOW_SECS:
-                    self.echo(f"✓ answered in {format_secs(turn_secs)}")
+                self.echo(f"✓ answered in {format_secs(turn_secs)}")
                 return result
 
-            if turn_secs >= SLOW_SECS:
-                self.echo(f"✓ thought for {format_secs(turn_secs)}")
+            self.echo(f"✓ thought for {format_secs(turn_secs)}")
             if content and self.on_token is None:
                 self.echo(content)
 
@@ -278,6 +283,7 @@ class Agent:
                 message = chunk.message
                 if message.content:
                     if not parts:
+                        self.status.stop()  # erase the live timer line first
                         self.on_token("\n")
                     parts.append(message.content)
                     self.on_token(message.content)
@@ -300,8 +306,8 @@ class Agent:
             arguments = call.function.arguments or {}
         return {"function": {"name": name, "arguments": dict(arguments)}}
 
-    def _trim_tool_message(self, message: Any) -> bool:
-        if not (isinstance(message, dict) and message.get("role") == "tool"):
+    def _trim_tool_message(self, message: dict) -> bool:
+        if message.get("role") != "tool":
             return False
         content = message["content"]
         if len(content) <= TRIM_KEEP_CHARS + len(TRIMMED_NOTE):
@@ -310,13 +316,7 @@ class Agent:
         return True
 
     def _total_chars(self) -> int:
-        total = 0
-        for message in self.messages:
-            if isinstance(message, dict):
-                total += len(message.get("content") or "")
-            else:
-                total += len(getattr(message, "content", None) or "")
-        return total
+        return sum(len(message.get("content") or "") for message in self.messages)
 
     def _enforce_budget(self, task_start: int) -> None:
         """Trim this task's oldest tool outputs (never the 2 most recent)
@@ -327,7 +327,7 @@ class Agent:
         tool_indices = [
             i
             for i in range(task_start, len(self.messages))
-            if isinstance(self.messages[i], dict) and self.messages[i].get("role") == "tool"
+            if self.messages[i].get("role") == "tool"
         ]
         for i in tool_indices[:-2]:
             if self._trim_tool_message(self.messages[i]) and self._total_chars() <= budget:
@@ -381,12 +381,18 @@ class Agent:
                 # _timed runs on the worker so the reported duration is the
                 # call's true runtime, not how long collection waited for it.
                 futures[i] = pool.submit(self._timed, thunk)
-            # Collect in call order; future.result() re-raises worker
-            # exceptions here, so error echoes stay on the main thread.
+            # Collect futures first, under one live timer; future.result()
+            # re-raises worker exceptions here, so error echoes stay on the
+            # main thread. Tools that may prompt the user run after the timer
+            # stops — a [y/N] prompt must never fight the ticking line.
+            self.status.start(f"{len(futures)} parallel lookups")
+            try:
+                for i in futures:
+                    results[i] = self._call_result(calls[i][0], futures[i].result)
+            finally:
+                self.status.stop()
             for i, (name, args) in enumerate(calls):
-                if i in futures:
-                    results[i] = self._call_result(name, futures[i].result)
-                else:
+                if i not in futures:
                     results[i] = self._call_result(
                         name, partial(self._timed, partial(self._dispatch, name, args))
                     )
@@ -416,8 +422,7 @@ class Agent:
             result = f"ERROR: tool '{name}' failed internally: {exc!r}"
             self.echo(result)
             return result
-        if elapsed >= SLOW_SECS:
-            self.echo(f"✓ {name} {format_secs(elapsed)}")
+        self.echo(f"✓ {name} {format_secs(elapsed)}")
         return result
 
     def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
@@ -460,7 +465,11 @@ class Agent:
         if name in READ_ONLY_TOOLS:
             label, thunk = self._read_only_call(name, args)
             self.echo(label)
-            return thunk()
+            self.status.start(name)
+            try:
+                return thunk()
+            finally:
+                self.status.stop()
 
         if name == "remember":
             note = str(args.get("note", ""))

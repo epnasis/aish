@@ -371,7 +371,8 @@ class TestElapsedTimeReporting:
         assert agent.run_task("search") == "done"
         assert "✓ web_search 2.5s" in echoes
 
-    def test_fast_tool_stays_silent(self, monkeypatch):
+    def test_fast_tool_also_reports_time(self, monkeypatch):
+        """No threshold: every tool call reports its duration, however quick."""
         import aish.agent as agent_module
 
         clock = self.patch_clock(monkeypatch)
@@ -390,7 +391,7 @@ class TestElapsedTimeReporting:
             echo=echoes.append,
         )
         assert agent.run_task("search") == "done"
-        assert not any(e.startswith("✓ web_search") for e in echoes)
+        assert "✓ web_search 0.4s" in echoes
 
     def test_slow_model_turns_report_thinking_and_answer(self, monkeypatch):
         import aish.agent as agent_module
@@ -419,6 +420,83 @@ class TestElapsedTimeReporting:
 
         assert format_secs(2.34) == "2.3s"
         assert format_secs(75) == "1m15s"
+
+
+class RecordingStatus:
+    def __init__(self):
+        self.events = []
+
+    def start(self, label):
+        self.events.append(("start", label))
+
+    def stop(self):
+        self.events.append(("stop",))
+
+
+class TestLiveStatus:
+    def test_model_turn_starts_thinking_timer_and_stops_before_first_token(self):
+        events = []
+
+        class Status:
+            def start(self, label):
+                events.append(("start", label))
+
+            def stop(self):
+                events.append(("stop",))
+
+        def chat(stream=False, **_kwargs):
+            assert stream is True
+            return iter([model_says("hi")])
+
+        agent = Agent(
+            model="fake",
+            approve=lambda _c: True,
+            client_chat=chat,
+            on_token=lambda t: events.append(("token", t)),
+            status=Status(),
+        )
+        assert agent.run_task("hello") == "hi"
+        assert events[0] == ("start", "thinking")
+        first_stop = events.index(("stop",))
+        first_token = next(i for i, e in enumerate(events) if e[0] == "token")
+        assert first_stop < first_token
+
+    def test_sequential_readonly_tool_gets_named_timer(self, monkeypatch):
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(agent_module.web, "web_search", lambda q, **_kw: "results")
+        status = RecordingStatus()
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("web_search", query="x")]),
+                model_says("done"),
+            ],
+            status=status,
+        )
+        assert agent.run_task("search") == "done"
+        assert ("start", "web_search") in status.events
+
+    def test_parallel_lookups_get_batch_timer(self, monkeypatch):
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(agent_module.web, "web_search", lambda q, **_kw: "results")
+        status = RecordingStatus()
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("web_search", query="a"),
+                    tool_call("web_search", query="b"),
+                ]),
+                model_says("done"),
+            ],
+            status=status,
+        )
+        assert agent.run_task("search twice") == "done"
+        assert ("start", "2 parallel lookups") in status.events
+        # every start is eventually stopped (prompts must never race the timer)
+        assert status.events.count(("stop",)) >= sum(
+            1 for e in status.events if e[0] == "start"
+        )
 
 
 class TestCwdAndCd:

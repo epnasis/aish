@@ -3,6 +3,8 @@
 import argparse
 import os
 import sys
+import threading
+import time
 import tomllib
 from pathlib import Path
 
@@ -155,6 +157,14 @@ def make_approver(ask_all: bool, allow_path: Path, log, deny_path: Path = DEFAUL
         if answer == "e":
             edited = edit_line(command)
             if edited:
+                # The denylist stays authoritative even for an edit — otherwise
+                # `ls` could be edited into `rm -rf /` and run unchecked.
+                reason = check_denied(edited, load_prefixes(deny_path))
+                if reason:
+                    print(f"\n{RED}✗ blocked ({reason}):{RESET}\n  {BOLD}{edited}{RESET}")
+                    print(f"{DIM}  run it yourself with !{edited}  if you truly mean it{RESET}")
+                    record(f"{command} => {edited}", f"blocked: {reason}")
+                    return Blocked(reason)
                 record(f"{command} => {edited}", "edited")
                 return edited
             record(command, "denied")
@@ -234,6 +244,47 @@ def echo(text: str) -> None:
 
 def stream_line(line: str) -> None:
     print(f"{DIM}  {line}{RESET}")
+
+
+class LiveTimer:
+    """One dim '✻ label… Ns' line redrawn in place while a phase runs.
+
+    start() paints immediately and spawns a ticker thread; stop() joins it and
+    erases the line, so the caller may print the moment stop() returns. The
+    agent guarantees stop() is called before any prompt or streamed token.
+    """
+
+    TICK_SECS = 0.25
+
+    def __init__(self):
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+
+    def _paint(self, label: str, started: float) -> None:
+        secs = int(time.perf_counter() - started)
+        print(f"\r\033[K{DIM}  ✻ {label}… {secs}s{RESET}", end="", flush=True)
+
+    def start(self, label: str) -> None:
+        self.stop()
+        self._stop_event.clear()
+        started = time.perf_counter()
+        self._paint(label, started)
+
+        def tick():
+            while not self._stop_event.wait(self.TICK_SECS):
+                self._paint(label, started)
+
+        self._thread = threading.Thread(target=tick, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        thread = self._thread
+        if thread is None:
+            return
+        self._thread = None
+        self._stop_event.set()
+        thread.join(timeout=1)
+        print("\r\033[K", end="", flush=True)
 
 
 def read_task(cwd: str) -> str:
@@ -553,6 +604,7 @@ def main() -> int:
         on_token=print_token if stream_answers else None,
         job_log_dir=state_dir / "jobs",
         lessons_path=lessons_path,
+        status=LiveTimer() if stream_answers else None,
     )
     if history:
         agent.load_history(history)

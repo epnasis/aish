@@ -110,6 +110,16 @@ class TestReadDocs:
         calls = log.read_text().splitlines()
         assert calls == ["--help"]
 
+    def test_help_probe_refuses_binary_planted_in_cwd(self, tmp_path, monkeypatch):
+        """With '.' on PATH, a doc lookup must not execute a cwd-local binary."""
+        marker = tmp_path / "ran"
+        make_fake_command(tmp_path, "cwdcmd", f"touch {marker}; echo usage")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("PATH", f".:{os.environ['PATH']}")
+        result = tools.read_docs("cwdcmd")
+        assert not marker.exists()  # never executed
+        assert "NO DOCUMENTATION FOUND" in result
+
 
 def test_man_output_is_plain_text():
     """col -b must strip backspace overstrikes man uses for bold."""

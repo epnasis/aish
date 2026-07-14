@@ -319,8 +319,24 @@ def read_docs(command: str, topic: str | None = None) -> str:
     return result
 
 
+def _resolves_into_cwd(resolved: str) -> bool:
+    """True if a PATH-resolved binary lives in the current directory — i.e. a
+    '.'-in-PATH would let a doc lookup run a locally-planted executable."""
+    try:
+        return os.path.dirname(os.path.realpath(resolved)) == os.path.realpath(os.getcwd())
+    except OSError:
+        return True  # can't tell whose binary this is → refuse to run it
+
+
 def _fetch_docs(name: str) -> tuple[str, str] | None:
-    """Full documentation text and its source label, or None if none exists."""
+    """Full documentation text and its source label, or None if none exists.
+
+    NOTE: the --help/-h fallback EXECUTES the resolved binary (one conventional
+    help flag, 10s timeout, no stdin) — a deliberate grounding tradeoff, tried
+    only after the man page fails. A candidate that resolves into the current
+    directory is refused, so a '.'-in-PATH can't turn a doc lookup into running
+    an attacker-planted binary.
+    """
     quoted = shlex.quote(name)
     man = subprocess.run(
         f"man {quoted} 2>/dev/null | col -b",
@@ -333,7 +349,8 @@ def _fetch_docs(name: str) -> tuple[str, str] | None:
     if man_text:
         return man_text, f"man {name}"
 
-    if shutil.which(name) is None:
+    resolved = shutil.which(name)
+    if resolved is None or _resolves_into_cwd(resolved):
         return None
 
     for flag in ("--help", "-h"):

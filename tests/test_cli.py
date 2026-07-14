@@ -52,6 +52,18 @@ def test_edit_returns_edited_command(tmp_path, monkeypatch):
     assert approve("tool -x") == "tool -y"
 
 
+def test_edited_command_is_re_checked_against_denylist(tmp_path, monkeypatch):
+    import aish.cli as cli
+    from aish.approval import Blocked
+
+    approve = make_approver(False, tmp_path / "allow.txt", None, tmp_path / "deny.txt")
+    scripted_input(monkeypatch, ["e"])
+    # user edits a benign (non-auto-approved) command into an unrecoverable one
+    monkeypatch.setattr(cli, "edit_line", lambda _initial: "rm -rf /")
+    result = approve("brew doctor")
+    assert isinstance(result, Blocked)
+
+
 def test_ask_all_prompts_even_for_read_only(tmp_path, monkeypatch):
     approve = make_approver(True, tmp_path / "allow.txt", None)
     scripted_input(monkeypatch, ["n"])
@@ -472,3 +484,28 @@ def test_darwin_note_has_ps_guidance():
 
     if sys.platform == "darwin":
         assert "ps aux -r" in system_prompt() or "ps aux -m" in system_prompt()
+
+
+class TestLiveTimer:
+    def test_paints_immediately_and_erases_on_stop(self, capsys):
+        from aish.cli import LiveTimer
+
+        timer = LiveTimer()
+        timer.start("thinking")
+        timer.stop()
+        out = capsys.readouterr().out
+        assert "✻ thinking… 0s" in out
+        assert out.endswith("\r\033[K")  # line erased: safe to print after stop()
+
+    def test_stop_is_idempotent_and_start_replaces(self, capsys):
+        from aish.cli import LiveTimer
+
+        timer = LiveTimer()
+        timer.stop()  # no-op before any start
+        timer.start("web_search")
+        timer.start("read_url")  # implicit stop of the previous phase
+        timer.stop()
+        timer.stop()
+        out = capsys.readouterr().out
+        assert "✻ web_search… 0s" in out
+        assert "✻ read_url… 0s" in out
