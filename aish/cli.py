@@ -659,7 +659,8 @@ def main() -> int:
     )
     if history:
         agent.load_history(history)
-        print(f"{DIM}resumed {len(history)} messages from {log.path.name}:{RESET}")
+        print(f"{DIM}resumed {len(history)} messages from {log.path.name}"
+              f" · model {args.model} · /help:{RESET}")
         replay_history(history)
 
     if args.task:
@@ -672,7 +673,8 @@ def main() -> int:
             print(f"{GREEN}{result}{RESET}")
         return 0
 
-    print(banner(f"model {args.model} · session {log.path.name} · /help · Ctrl-D quits"))
+    if not history:  # a resumed session continues where it was — no big banner
+        print(banner(f"model {args.model} · session {log.path.name} · /help · Ctrl-D quits"))
     while True:
         try:
             task = read_task(agent.cwd).strip()
