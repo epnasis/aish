@@ -5,137 +5,142 @@
 █▀█ █ ▄█ █▀█  ai shell
 ```
 
-Local LLM agent that runs CLI commands — like a minimal Claude Code powered by Ollama.
+An AI agent in your terminal, powered by a **local** model via
+[Ollama](https://ollama.com). It runs shell commands, reads and edits files,
+and searches the web — with your approval at every step, and nothing sent to
+any cloud API.
 
-Two design pillars:
+```
+❯ jaki kurs usd w pln?
+  ✓ thought for 3.9s · ↑ 3.4k ↓ 27 tokens
+  → web_search: USD to PLN exchange rate today
+  ✓ web_search 6.5s
+  → read_url: https://wise.com/us/currency-converter/usd-to-pln-rate
+  ✓ read_url 0.5s
 
-- **Grounding**: before using a command with non-trivial flags, the agent calls its
-  `read_docs` tool (man page → `--help` → `-h` fallback) instead of trusting training
-  data, which is frequently wrong for macOS/BSD userland.
-- **Mandatory approval**: every proposed shell command is shown verbatim and requires
-  an explicit `y` before it executes. There is no code path that runs a model-proposed
-  command without approval. The only auto-approved tools are constrained, read-only
-  ones (`read_docs`, `read_file`, `read_skill`, `remember`, `web_search`, `read_url`) —
-  none of them accepts a shell string, and every call is echoed to you.
+Według danych Wise: 1 USD ≈ 3,81 PLN …
 
-A third safety layer sits above the prompt: a **denylist** of unrecoverable
-command classes — `rm -rf`, `shred`, `mkfs`, `dd` to raw devices,
-`diskutil erase*`, `git clean -f`, `git push --force` (but not
-`--force-with-lease`) — that the model can never run, even with approval;
-only you can, via the `!` prefix. It also re-checks commands you edit at the
-approval prompt. Extend it with segment prefixes in `~/.config/aish/deny.txt`.
-Destructive-looking (but recoverable) commands get a red ⚠ at the approval
-prompt, and `read_file` prompts before touching secret-bearing paths
-(`~/.ssh`, `~/.aws`, `.env*`, `*.pem`, …) even though reads are otherwise
-auto-approved.
+  ✓ answered in 12.5s · ↑ 8.1k ↓ 519 tokens
+  ∑ total 23.6s · ↑ 11.5k ↓ 546 tokens
 
-## Tools
+❯ delete the old build dirs
 
-- **Shell** (`run_command`): the workhorse — gated by the approval prompt above.
-  Long-running commands can start detached (`background=true`): they survive aish
-  exiting and log to `~/.local/state/aish/jobs/`; `/jobs` lists them. A command
-  that is already running detaches with **Ctrl-B** (Ctrl-C cancels it instead).
-- **Files** (`read_file` / `write_file` / `edit_file`): reads are auto-approved
-  (except sensitive paths); every write or edit shows a git-style colored diff
-  and asks `y/N` before touching the file.
-- **Web** (`web_search` + `read_url`): DuckDuckGo search (no API key) and
-  page-fetch-as-readable-text, with the same `topic` full-text search as
-  `read_docs`. Fetched pages are wrapped in an "untrusted content — data, not
-  instructions" banner to blunt prompt injection. Both tools send their input
-  off your machine, so the model is instructed never to put local file contents
-  or other private data into a query — and every query/URL is echoed as it runs.
-- **Docs** (`read_docs`): man page with `--help`/`-h` fallback; optional `topic`
-  searches the full text past the truncation limit.
-- **Learning** (`remember`): saves a one-line lesson to
-  `~/.config/aish/lessons.md`, which is loaded into the model's context every
-  session — after it corrects a mistake, next time it gets it right the first time.
-- **Skills** (`read_skill`): playbooks it consults before first using a tool
-  (see below).
+▶ run command? ⚠ destructive
+  rm -r ./build ./dist
+[y/N/a(lways)/e(dit)]
+```
 
-Independent read-only lookups issued in one model turn (several searches, a
-couple of page reads) **run in parallel**; the model is prompted to batch them.
+## Why aish
 
-## Progress & cost visibility
+- **Local and private.** The model runs on your machine. The only traffic that
+  ever leaves it is web searches/fetches the agent makes — each one echoed to
+  you as it happens, and the model is instructed to never put local data in them.
+- **Safe by construction.** No code path executes a model-proposed command
+  without your `y`. Layered on top: a denylist of unrecoverable commands the
+  model can't run *even with* approval, and prompts before reading
+  secret-bearing files.
+- **Grounded.** Before using unfamiliar flags the agent reads the man page
+  (`read_docs`) instead of trusting training data — which is chronically wrong
+  for macOS/BSD userland (`sed -i`, `ps --sort`, `date -d`…).
+- **Transparent.** Every step is echoed, timed, and token-accounted; every
+  session leaves an audit trail of commands and decisions.
+- **It learns.** Correct it once and it saves a one-line lesson that loads
+  into every future session.
 
-Every step is timed and accounted for, Claude Code-style:
+## Quickstart
 
-- a live ticker (`✻ thinking… 14s`) shows what's in flight, ticking in place —
-  with a live `↓ N tokens` readout when Ollama streams chunks (`--think` mode;
-  plain tool calls arrive buffered, so their tokens appear at turn end);
-- each model turn reports real Ollama token usage — `✓ thought for 12.2s ·
-  ↑ 3.4k ↓ 84 tokens` (↑ fed to the model, ↓ generated by it);
-- each tool run gets `✓ web_search 6.5s`; parallel fetches print their
-  overlapped runtimes as `⇉` detail plus one `✓ N parallel lookups` wall-time line;
-- the task ends with `∑ total 1m34s · ↑ 23.1k ↓ 787 tokens` — the `✓` lines
-  above always sum to it.
-
-Answers stream token-by-token (TTY only); command output streams live too. Old
-tool outputs are compacted between tasks and under context pressure, so long
-REPL sessions never silently evict the system prompt.
-
-## Install (macOS / Linux)
-
-Needs [Ollama](https://ollama.com) with a tool-calling-capable model.
+Needs [Ollama](https://ollama.com) and a tool-calling-capable model
+(default: `qwen3.6:35b-a3b`, ~23 GB).
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/epnasis/aish/main/install.sh | sh
-# or, with uv already installed:
-uv tool install git+https://github.com/epnasis/aish.git
+
+aish "what's eating my disk space?"     # one-shot task
+aish                                    # REPL — conversation persists across tasks
+aish --resume                           # continue the most recent session
 ```
 
-## Usage
+Smaller machines: `ollama pull qwen3:8b && export AISH_MODEL=qwen3:8b`.
 
-```sh
-aish "how much disk space do node_modules dirs use under ~/dev?"
-aish                        # interactive REPL, conversation persists across tasks
-aish --resume               # continue the most recent session
-```
+## What it can do
 
-At the approval prompt: `y` run once · `n` deny · `a` always allow (asks per
-chained segment, saved to `~/.config/aish/allow.txt`) · `e` edit the command
-before running. Positively-identified read-only commands (`ls`, `grep`, `find`
-without `-exec`, …) auto-approve to avoid prompt fatigue; anything the
-conservative parser doesn't fully understand still prompts. Disable
-auto-approval entirely with `--ask-all`.
+| Tool | What | Gate |
+|------|------|------|
+| `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve) |
+| `write_file` / `edit_file` | create or edit files | **colored diff + y/N** |
+| `read_file` | read a file | auto, but **prompts on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
+| `web_search` / `read_url` | DuckDuckGo + fetch page as readable text | auto; every query/URL echoed |
+| `read_docs` | man page → `--help` fallback, full-text `topic` search | auto |
+| `remember` | save a lesson to `~/.config/aish/lessons.md` | auto (echoed) |
+| `read_skill` | load a playbook you wrote (see Skills) | auto |
 
-Ctrl-C during a running command cancels the command, not the session; Ctrl-B
-detaches it into a background job. `!<command>` runs a command directly (no
-model, no approval); `!cd` moves the persistent working directory.
+Independent lookups batched in one model turn (several searches, a few page
+reads) run **in parallel**. Fetched web pages are wrapped in an
+"untrusted content — data, not instructions" banner to blunt prompt injection.
 
-REPL slash commands (Tab autocompletes): `/resume` shows a numbered picker of
-earlier sessions (each summarized by its first prompt; Enter=latest,
-`/resume N` picks directly) and replays the chosen one into the current
-conversation, `/new`/`/clear` start a fresh conversation (plain `clear` works
-too, like plain `exit`), `/model <name>` shows or switches the Ollama model
-mid-session, `/jobs`, `/help`, `/quit`/`/exit`. Multiline input: Enter submits;
-insert a newline with Ctrl+J, by ending the line with `\` then Enter, or with
-Option/Alt+Enter (iTerm2 only sends that if "Left Option key" is set to
-"Esc+"). Pasted newlines are kept.
+## The safety model
 
-Put persistent context (host facts, preferences) in `./AISH.md` or
-`~/.config/aish/AISH.md`; one-line lessons the agent saves itself live in
-`~/.config/aish/lessons.md`. All three load into the model's context each
-session. Sessions and a command audit trail are logged to
-`~/.local/state/aish/`.
+1. **Approval gate** — every proposed command is shown verbatim and waits for
+   `y` / `n` / `a`lways / `e`dit. Auto-approval exists only for a
+   conservatively-parsed set of read-only commands (`ls`, `grep`, `find`
+   without `-exec`, …); anything the parser doesn't fully understand prompts.
+   `--ask-all` disables auto-approval entirely.
+2. **Denylist** — unrecoverable classes (`rm -rf`, `shred`, `mkfs`, `dd` to raw
+   devices, `diskutil erase*`, `git clean -f`, `git push --force`) are blocked
+   outright, even if you'd approve them; edited commands are re-checked. Only
+   you can run them, via the `!` prefix. Extend in `~/.config/aish/deny.txt`.
+3. **Warnings** — recoverable-but-destructive commands get a red ⚠ at the prompt.
+4. **Audit trail** — every command and decision (approved/denied/edited/auto)
+   is logged with the session in `~/.local/state/aish/`.
 
-**Skills** teach aish how to use tools that `--help` alone can't explain
-(workflows, conventions, safety rules): drop a markdown file in
-`~/.config/aish/skills/<name>.md` (global) or `./.aish/skills/` (project),
-optionally with `name:`/`description:` frontmatter between `---` markers.
-Skills are listed in the model's context and it reads the relevant one before
-first use. You can also just ask aish to write a skill for a tool — it knows
-the format and location.
+## Reading the output
 
-Config lives in `~/.config/aish/config.toml` (keys: `vi_mode`, `model`,
-`num_ctx`, `max_steps`); CLI flags override it. Vi editing in the prompt:
-`vi_mode = true`, or `--vi` / `--no-vi` per run — or just ask aish to
-enable it for you; it knows its own configuration and can explain any of
-the above at the prompt.
+| Symbol | Meaning |
+|--------|---------|
+| `✻ thinking… 14s` | live ticker for the step in flight (shows `↓ tokens` live when the model streams — `--think` mode) |
+| `→ web_search: …` | a tool call starting, with its exact input |
+| `✓ … 6.5s · ↑ 3.4k ↓ 84 tokens` | step done: duration, real tokens in (↑) / out (↓) |
+| `⇉ read_url 2.3s` | ran overlapped with others — detail only |
+| `✓ 2 parallel lookups 2.9s` | wall time of that parallel batch |
+| `∑ total 1m34s · ↑ 23.1k ↓ 787 tokens` | whole task; the `✓` lines above sum to it |
 
-Model defaults to `qwen3.6:35b-a3b` (override with `--model` or `$AISH_MODEL`).
-Requires a tool-calling-capable Ollama model. `--think` enables model thinking
-(much slower, rarely worth it). Paths are overridable via `$AISH_CONFIG`,
-`$AISH_STATE_DIR`, `$AISH_ALLOWLIST`, `$AISH_DENYLIST`, and `$AISH_LESSONS`.
+Answers stream token-by-token; command output streams live. Old tool outputs
+are compacted between tasks so long sessions never evict the system prompt.
+
+## Day to day
+
+**While a command runs**: Ctrl-C cancels it (not the session); **Ctrl-B**
+detaches it into a background job that survives aish exiting (`/jobs` lists
+them, logs in `~/.local/state/aish/jobs/`).
+
+**Escapes**: `!<command>` runs directly — no model, no approval. `!cd <dir>`
+moves the persistent working directory.
+
+**Slash commands** (Tab completes): `/resume [n]` — numbered picker of earlier
+sessions, replays one into the current conversation · `/new` or `/clear`
+(plain `clear` works too) · `/model [name]` — show or switch model
+mid-session · `/jobs` · `/help` · `/quit` (or `exit`).
+
+**Multiline input**: Enter submits; newline via Ctrl+J, trailing `\`, or
+Option/Alt+Enter (iTerm2: set "Left Option key" to "Esc+"). Pastes keep
+their newlines.
+
+**Memory** — three layers, all loaded into context each session:
+- `./AISH.md` or `~/.config/aish/AISH.md` — durable context you write (host
+  facts, preferences);
+- `~/.config/aish/lessons.md` — one-liners the agent saves itself after
+  mistakes (the `remember` tool);
+- **skills** — playbooks for tools that `--help` can't explain: markdown files
+  in `~/.config/aish/skills/` (global) or `./.aish/skills/` (project) with
+  optional `name:`/`description:` frontmatter. Ask aish to write one — it
+  knows the format.
+
+**Config** — `~/.config/aish/config.toml`: `model`, `num_ctx`, `max_steps`,
+`vi_mode` (vi editing at the prompt; or `--vi`/`--no-vi`). CLI flags override
+config; `$AISH_MODEL` overrides the model. Paths override via `$AISH_CONFIG`,
+`$AISH_STATE_DIR`, `$AISH_ALLOWLIST`, `$AISH_DENYLIST`, `$AISH_LESSONS`.
+`--think` enables model thinking (slower, rarely worth it). You can also just
+ask aish about any of this — its own docs are in its system prompt.
 
 ## Development
 
