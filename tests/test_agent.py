@@ -16,10 +16,13 @@ def tool_call(name: str, **arguments):
     return SimpleNamespace(function=SimpleNamespace(name=name, arguments=arguments))
 
 
-def model_says(content: str = "", tool_calls: list | None = None):
-    return SimpleNamespace(
+def model_says(content: str = "", tool_calls: list | None = None, tokens: tuple | None = None):
+    response = SimpleNamespace(
         message=SimpleNamespace(content=content, tool_calls=tool_calls or None)
     )
+    if tokens:
+        response.prompt_eval_count, response.eval_count = tokens
+    return response
 
 
 class FakeChat:
@@ -328,6 +331,27 @@ class TestParallelReadOnlyTools:
         assert "failed internally" in contents[0]
         assert contents[1] == "results for good"
 
+    def test_parallel_calls_marked_overlapped_plus_summable_batch_line(self, monkeypatch):
+        """Overlapped runtimes print as ⇉ detail; only the batch ✓ wall-time
+        line counts toward ∑, so ✓ components always sum to the total."""
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(agent_module.web, "web_search", lambda q, **_kw: "results")
+        echoes = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("web_search", query="a"),
+                    tool_call("web_search", query="b"),
+                ]),
+                model_says("done"),
+            ],
+            echo=echoes.append,
+        )
+        assert agent.run_task("search twice") == "done"
+        assert sum(1 for e in echoes if e.startswith("⇉ web_search")) == 2
+        assert any(e.startswith("✓ 2 parallel lookups") for e in echoes)
+
 
 class FakeClock:
     """Deterministic stand-in for time.perf_counter: only advances on demand."""
@@ -391,7 +415,8 @@ class TestElapsedTimeReporting:
             echo=echoes.append,
         )
         assert agent.run_task("search") == "done"
-        assert "✓ web_search 0.4s" in echoes
+        assert "✓ web_search 0.4s" in echoes  # time only: token counts are
+        # shown solely where Ollama reports real usage (model-turn lines)
 
     def test_slow_model_turns_report_thinking_and_answer(self, monkeypatch):
         import aish.agent as agent_module
@@ -413,13 +438,50 @@ class TestElapsedTimeReporting:
         )
         assert agent.run_task("search") == "done"
         assert "✓ thought for 3.0s" in echoes
-        assert "✓ answered in 3.0s" in echoes
+        assert any(e.startswith("✓ answered in 3.0s") for e in echoes)
 
     def test_format_secs(self):
         from aish.agent import format_secs
 
         assert format_secs(2.34) == "2.3s"
         assert format_secs(75) == "1m15s"
+
+    def test_format_tokens(self):
+        from aish.agent import format_tokens
+
+        assert format_tokens(999) == "999"
+        assert format_tokens(1234) == "1.2k"
+
+    def test_answer_line_includes_task_total_and_tokens(self, monkeypatch):
+        """Total spans the whole task — thinking + tools + answering — and
+        token counts accumulate across every model turn."""
+        import aish.agent as agent_module
+
+        clock = self.patch_clock(monkeypatch)
+
+        def slow_search(query, **_kw):
+            clock.advance(2.0)
+            return "results"
+
+        monkeypatch.setattr(agent_module.web, "web_search", slow_search)
+        responses = [
+            model_says(tool_calls=[tool_call("web_search", query="x")], tokens=(1200, 100)),
+            model_says("done", tokens=(2000, 250)),
+        ]
+
+        def slow_chat(**_kwargs):
+            clock.advance(3.0)
+            return responses.pop(0)
+
+        echoes = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=slow_chat, echo=echoes.append
+        )
+        assert agent.run_task("go") == "done"
+        assert "✓ thought for 3.0s · ↑ 1.2k ↓ 100 tokens" in echoes
+        assert "✓ answered in 3.0s · ↑ 2.0k ↓ 250 tokens" in echoes
+        # totals on their own line; components above sum exactly to them
+        assert "∑ total 8.0s · ↑ 3.2k ↓ 350 tokens" in echoes  # 3s + 2s + 3s
 
 
 class RecordingStatus:
@@ -428,6 +490,9 @@ class RecordingStatus:
 
     def start(self, label):
         self.events.append(("start", label))
+
+    def add_tokens(self, count):
+        self.events.append(("tokens", count))
 
     def stop(self):
         self.events.append(("stop",))
@@ -440,6 +505,9 @@ class TestLiveStatus:
         class Status:
             def start(self, label):
                 events.append(("start", label))
+
+            def add_tokens(self, count):
+                events.append(("tokens", count))
 
             def stop(self):
                 events.append(("stop",))
@@ -497,6 +565,39 @@ class TestLiveStatus:
         assert status.events.count(("stop",)) >= sum(
             1 for e in status.events if e[0] == "start"
         )
+
+    def test_streamed_chunks_feed_live_token_count(self):
+        """Each streamed chunk bumps the ticker's token readout — including
+        tool-call chunks, where nothing else is visible on screen."""
+        events = []
+
+        class Status:
+            def start(self, label):
+                events.append(("start", label))
+
+            def add_tokens(self, count):
+                events.append(("tokens", count))
+
+            def stop(self):
+                events.append(("stop",))
+
+        turns = [
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]) for _ in range(3)],
+            [model_says("done")],
+        ]
+
+        def chat(stream=False, **_kwargs):
+            return iter(turns.pop(0))
+
+        agent = Agent(
+            model="fake",
+            approve=lambda _c: True,
+            client_chat=chat,
+            on_token=lambda _t: None,
+            status=Status(),
+        )
+        assert agent.run_task("docs") == "done"
+        assert events.count(("tokens", 1)) == 4  # 3 tool-call chunks + 1 answer chunk
 
 
 class TestCwdAndCd:

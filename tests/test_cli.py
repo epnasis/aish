@@ -509,3 +509,24 @@ class TestLiveTimer:
         out = capsys.readouterr().out
         assert "✻ web_search… 0s" in out
         assert "✻ read_url… 0s" in out
+
+    def test_token_count_appears_after_add_tokens(self, capsys):
+        from aish.cli import LiveTimer
+
+        timer = LiveTimer()
+        timer.start("thinking")
+        timer.add_tokens(8100)
+        timer._paint()  # deterministic repaint; the ticker thread does this every 0.25s
+        timer.stop()
+        out = capsys.readouterr().out
+        assert "✻ thinking… 0s · ↓ 8.1k tokens" in out
+
+    def test_println_erases_ticker_frame_first(self, capsys):
+        from aish.cli import LiveTimer
+
+        timer = LiveTimer()
+        timer.start("2 parallel lookups")
+        timer.println("  ✓ web_search 2.8s")
+        timer.stop()
+        out = capsys.readouterr().out
+        assert "\r\033[K  ✓ web_search 2.8s\n" in out  # never glued to the ✻ frame

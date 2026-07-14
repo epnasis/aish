@@ -9,7 +9,7 @@ import tomllib
 from pathlib import Path
 
 from . import tools
-from .agent import Agent, ModelUnavailable, environment_context
+from .agent import Agent, ModelUnavailable, environment_context, format_tokens
 from .approval import (
     DEFAULT_ALLOWLIST,
     DEFAULT_DENYLIST,
@@ -40,7 +40,8 @@ SLASH_COMMANDS = ("/clear", "/exit", "/help", "/jobs", "/model", "/new", "/quit"
 SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
   /resume [n]    pick an earlier session to load (lists recent sessions with
                  a summary; Enter=latest, repeat to reach older ones)
-  /new, /clear   fresh conversation in a new session file (clears the screen)
+  /new, /clear   fresh conversation in a new session file (clears the screen;
+                 plain 'clear' works too)
   /model [name]  show or switch the Ollama model for this session
   /jobs          list background jobs started this session
   /help          this help
@@ -234,12 +235,21 @@ def make_read_approver(log):
     return approve_read
 
 
+# LiveTimer when interactive; echo prints through it so a line landing while
+# the ticker runs erases the ticker frame first instead of gluing onto it.
+_timer = None
+
+
 def echo(text: str) -> None:
     lines = text.splitlines()
     shown = lines[:ECHO_PREVIEW_LINES]
-    print(DIM + "\n".join(f"  {line}" for line in shown) + RESET)
+    out = DIM + "\n".join(f"  {line}" for line in shown) + RESET
     if len(lines) > ECHO_PREVIEW_LINES:
-        print(f"{DIM}  … ({len(lines) - ECHO_PREVIEW_LINES} more lines fed to model){RESET}")
+        out += f"\n{DIM}  … ({len(lines) - ECHO_PREVIEW_LINES} more lines fed to model){RESET}"
+    if _timer is not None:
+        _timer.println(out)
+    else:
+        print(out)
 
 
 def stream_line(line: str) -> None:
@@ -247,11 +257,13 @@ def stream_line(line: str) -> None:
 
 
 class LiveTimer:
-    """One dim '✻ label… Ns' line redrawn in place while a phase runs.
+    """One dim '✻ label… Ns · ↓ N tokens' line redrawn in place while a phase
+    runs.
 
     start() paints immediately and spawns a ticker thread; stop() joins it and
     erases the line, so the caller may print the moment stop() returns. The
-    agent guarantees stop() is called before any prompt or streamed token.
+    agent guarantees stop() is called before any prompt or streamed token, and
+    feeds add_tokens() as generation chunks arrive.
     """
 
     TICK_SECS = 0.25
@@ -259,23 +271,43 @@ class LiveTimer:
     def __init__(self):
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._label = ""
+        self._started = 0.0
+        self._tokens = 0
 
-    def _paint(self, label: str, started: float) -> None:
-        secs = int(time.perf_counter() - started)
-        print(f"\r\033[K{DIM}  ✻ {label}… {secs}s{RESET}", end="", flush=True)
+    def _paint(self) -> None:
+        secs = int(time.perf_counter() - self._started)
+        elapsed = f"{secs}s" if secs < 60 else f"{secs // 60}m{secs % 60:02d}s"
+        line = f"✻ {self._label}… {elapsed}"
+        if self._tokens:
+            line += f" · ↓ {format_tokens(self._tokens)} tokens"
+        with self._lock:
+            print(f"\r\033[K{DIM}  {line}{RESET}", end="", flush=True)
+
+    def println(self, text: str) -> None:
+        """Print a full line while the ticker may be running: erase the
+        current ticker frame first so the two never share a line."""
+        with self._lock:
+            print(f"\r\033[K{text}")
 
     def start(self, label: str) -> None:
         self.stop()
         self._stop_event.clear()
-        started = time.perf_counter()
-        self._paint(label, started)
+        self._label = label
+        self._started = time.perf_counter()
+        self._tokens = 0
+        self._paint()
 
         def tick():
             while not self._stop_event.wait(self.TICK_SECS):
-                self._paint(label, started)
+                self._paint()
 
         self._thread = threading.Thread(target=tick, daemon=True)
         self._thread.start()
+
+    def add_tokens(self, count: int) -> None:
+        self._tokens += count
 
     def stop(self) -> None:
         thread = self._thread
@@ -284,7 +316,8 @@ class LiveTimer:
         self._thread = None
         self._stop_event.set()
         thread.join(timeout=1)
-        print("\r\033[K", end="", flush=True)
+        with self._lock:
+            print("\r\033[K", end="", flush=True)
 
 
 def read_task(cwd: str) -> str:
@@ -425,8 +458,9 @@ running command. Ctrl-D or `exit` quits.
 - REPL slash commands (Tab autocompletes them): /resume shows a numbered \
 picker of earlier sessions (summary = the session's first user message; \
 Enter picks the latest, /resume N picks directly) and replays the chosen \
-one into this conversation; /new or /clear starts a fresh conversation and \
-clears the screen; /model [name] shows or switches the model; /jobs lists \
+one into this conversation; /new or /clear (or plain 'clear') starts a \
+fresh conversation and clears the screen; /model [name] shows or switches \
+the model; /jobs lists \
 background jobs; /help lists commands; /quit or /exit quits.
 - Long-running commands (servers, watchers, big upgrades): set \
 background=true on run_command — it detaches, survives aish exiting, and \
@@ -585,6 +619,10 @@ def main() -> int:
 
     stream_answers = sys.stdout.isatty()
 
+    global _timer
+    if stream_answers:
+        _timer = LiveTimer()
+
     def print_token(token: str) -> None:
         print(f"{GREEN}{token}{RESET}", end="", flush=True)
 
@@ -604,7 +642,7 @@ def main() -> int:
         on_token=print_token if stream_answers else None,
         job_log_dir=state_dir / "jobs",
         lessons_path=lessons_path,
-        status=LiveTimer() if stream_answers else None,
+        status=_timer,
     )
     if history:
         agent.load_history(history)
@@ -633,6 +671,8 @@ def main() -> int:
             continue
         if task in ("exit", "quit"):
             return 0
+        if task == "clear":  # parity with plain 'exit' — no slash needed
+            task = "/clear"
         if not task:
             continue
         if task.startswith("/"):
