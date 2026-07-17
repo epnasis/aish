@@ -80,6 +80,20 @@ def test_search_all_words_and_fuzzy_tiers(tmp_path):
     assert results[1].path == typo_title
 
 
+def test_search_fuzzy_matches_typoed_words_in_contents(tmp_path):
+    hit = make_session(
+        tmp_path,
+        "session-20260101-000000-000000.jsonl",
+        ("user", "restart the server"),
+        ("assistant", "I restarted nginx."),  # trailing dot must not block fuzzy
+    )
+    make_session(
+        tmp_path, "session-20260102-000000-000000.jsonl", ("user", "pasta recipe ideas")
+    )
+    results = SessionLog.search_sessions(tmp_path, "restrat nginz")  # typos in both words
+    assert [r.path for r in results] == [hit]
+
+
 def test_search_ties_break_newest_first(tmp_path):
     older = make_session(
         tmp_path, "session-20260101-000000-000000.jsonl", ("user", "fix the build")

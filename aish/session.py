@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TITLE_MAX = 60
-FUZZY_THRESHOLD = 0.55
+FUZZY_THRESHOLD = 0.55  # whole query vs whole title
+FUZZY_WORD_CUTOFF = 0.75  # single query word vs single session word
+_PUNCT = ".,;:!?()[]{}<>'\"`"
 _BANG_RE = re.compile(r"^\[I ran `(.+?)` myself")
 
 
@@ -24,11 +26,13 @@ class SessionInfo:
 @dataclass
 class SessionEntry:
     """A session preloaded for searching: display info plus casefolded
-    title/contents so ranking never re-reads the file."""
+    title/contents and a word vocabulary, so ranking never re-reads the
+    file."""
 
     info: SessionInfo
     title_cf: str
     content_cf: str
+    words: frozenset
 
 
 class SessionLog:
@@ -124,13 +128,15 @@ class SessionLog:
             messages = SessionLog.load_messages(path)
             if not messages:
                 continue
+            content_cf = " ".join(
+                " ".join((m.get("content") or "").split()) for m in messages
+            ).casefold()
             entries.append(
                 SessionEntry(
                     info=SessionLog._info_from(path, messages),
                     title_cf=SessionLog._derive_title(messages).casefold(),
-                    content_cf=" ".join(
-                        " ".join((m.get("content") or "").split()) for m in messages
-                    ).casefold(),
+                    content_cf=content_cf,
+                    words=frozenset(w.strip(_PUNCT) for w in content_cf.split()) - {""},
                 )
             )
         return entries
@@ -139,7 +145,8 @@ class SessionLog:
     def rank(entries: list["SessionEntry"], query: str) -> list[SessionInfo]:
         """Deterministic ranking over titles and full message contents — no
         LLM. Tiers: exact title, phrase in title, phrase in contents, all
-        words in contents, fuzzy title similarity (difflib). Ties keep
+        words in contents, then fuzzy (difflib): every query word close to
+        some session word, or the whole query close to the title. Ties keep
         newest-first order; an empty query keeps everything, newest first."""
         query_cf = " ".join(query.split()).casefold()
         words = query_cf.split()
@@ -155,7 +162,10 @@ class SessionLog:
                 score = 3
             elif all(word in entry.content_cf for word in words):
                 score = 2
-            elif (
+            elif all(
+                difflib.get_close_matches(word, entry.words, n=1, cutoff=FUZZY_WORD_CUTOFF)
+                for word in words
+            ) or (
                 difflib.SequenceMatcher(None, query_cf, entry.title_cf).ratio()
                 >= FUZZY_THRESHOLD
             ):
