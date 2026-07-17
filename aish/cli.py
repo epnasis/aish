@@ -65,7 +65,8 @@ SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
   /help          this help
   /quit, /exit   quit (plain 'exit' works too)
 input: Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
-(iTerm2: set Option=Esc+) · pasted newlines are kept · !<cmd> runs directly
+(iTerm2: set Option=Esc+) · pasted newlines are kept · @ mentions a project
+file (type to filter, Tab/Enter completes) · !<cmd> runs directly
 without the model · !cd <dir> moves the working directory
 while a command runs: Ctrl-C cancels it · Ctrl-B detaches it to a background
 job (keeps running, frees the prompt; see /jobs){RESET}"""
@@ -779,6 +780,10 @@ elsewhere. For longer curated notes the user maintains, \
 - Multiline input: Enter submits; a newline is inserted by Ctrl+J, by ending \
 the line with a backslash then Enter, or by Option/Alt+Enter (in iTerm2 only \
 with "Left Option key: Esc+"); pasted text keeps its newlines.
+- File mentions: '@<path>' in a user message references a file (the prompt \
+autocompletes project files after '@'). The path is relative to the working \
+directory — when its contents matter to the task, read it with read_file \
+before answering.
 - Sessions: conversation + command audit trail logged to {state_dir}; \
 `aish --resume` continues the most recent session.
 - Config file: {config_path} (TOML). Keys: vi_mode, model, num_ctx, \

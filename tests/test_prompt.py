@@ -46,6 +46,59 @@ def test_vi_mode_esc_then_edit(tmp_path):
     assert drive(tmp_path, "hello\x1b0\r", vi_mode=True) == "hello"
 
 
+class TestAtFileCompleter:
+    def project(self, tmp_path):
+        (tmp_path / "notes.md").write_text("n")
+        (tmp_path / "domain.py").write_text("d")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("m")
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".git" / "config").write_text("secret")
+        return tmp_path
+
+    def completions(self, root, text):
+        from prompt_toolkit.document import Document
+
+        from aish.prompt import AtFileCompleter
+
+        completer = AtFileCompleter(get_cwd=lambda: str(root))
+        return [c.text for c in completer.get_completions(Document(text), None)]
+
+    def test_bare_at_lists_project_files(self, tmp_path):
+        got = self.completions(self.project(tmp_path), "explain @")
+        assert "notes.md " in got and "src/" in got
+
+    def test_fragment_filters_and_ranks_basename_prefix_first(self, tmp_path):
+        got = self.completions(self.project(tmp_path), "@ma")
+        # main.py's basename starts with 'ma'; domain.py merely contains it
+        assert got.index("src/main.py ") < got.index("domain.py ")
+
+    def test_matches_anywhere_in_path(self, tmp_path):
+        assert "src/main.py " in self.completions(self.project(tmp_path), "@src/ma")
+
+    def test_ignored_dirs_are_hidden(self, tmp_path):
+        got = self.completions(self.project(tmp_path), "@config")
+        assert got == []
+
+    def test_at_inside_a_word_does_not_trigger(self, tmp_path):
+        assert self.completions(self.project(tmp_path), "mail me@notes") == []
+
+    def test_closed_mention_does_not_trigger(self, tmp_path):
+        assert self.completions(self.project(tmp_path), "see @notes.md and fix") == []
+
+    def test_slash_command_line_is_left_alone(self, tmp_path):
+        assert self.completions(self.project(tmp_path), "/cd @no") == []
+
+    def test_completion_replaces_only_the_fragment(self, tmp_path):
+        from prompt_toolkit.document import Document
+
+        from aish.prompt import AtFileCompleter
+
+        completer = AtFileCompleter(get_cwd=lambda: str(self.project(tmp_path)))
+        first = next(completer.get_completions(Document("read @not"), None))
+        assert first.start_position == -len("not")
+
+
 def picker_search(query):
     """Stand-in for SessionLog.rank: substring filter over fake sessions."""
     from pathlib import Path

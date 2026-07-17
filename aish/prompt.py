@@ -1,5 +1,6 @@
 """Boxed input UI: horizontal rules hugging the input line, expanding as the
-entry becomes multiline; slash-command autocomplete; vi/emacs editing.
+entry becomes multiline; slash-command and @-file autocomplete; vi/emacs
+editing.
 
 Built as a small prompt_toolkit Application (full_screen=False) instead of
 PromptSession because a "footer under the input" is not something
@@ -11,12 +12,13 @@ input quits.
 """
 
 import os
+import time
 from pathlib import Path
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.completion import Completer, Completion, PathCompleter
+from prompt_toolkit.completion import Completer, Completion, PathCompleter, merge_completers
 from prompt_toolkit.cursor_shapes import ModalCursorShapeConfig
 from prompt_toolkit.document import Document
 from prompt_toolkit.enums import EditingMode
@@ -63,6 +65,94 @@ class SlashCompleter(Completer):
             yield from self._dirs.get_completions(sub, complete_event)
 
 
+# Directories skipped when indexing files for @-mention completion: they are
+# dependency/VCS/cache trees that would drown real project files.
+ATFILE_IGNORED_DIRS = frozenset(
+    {
+        ".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__",
+        ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
+    }
+)
+ATFILE_SCAN_CAP = 5000
+ATFILE_MAX_RESULTS = 8
+ATFILE_CACHE_SECS = 3.0
+
+
+def at_fragment(text: str) -> str | None:
+    """The '@file' mention being typed at the cursor, or None. The '@' must
+    start a word (line start or after whitespace, so emails don't trigger),
+    and the mention is still open only while it contains no whitespace."""
+    at = text.rfind("@")
+    if at < 0 or (at > 0 and not text[at - 1].isspace()):
+        return None
+    fragment = text[at + 1 :]
+    if any(ch.isspace() for ch in fragment):
+        return None
+    return fragment
+
+
+class AtFileCompleter(Completer):
+    """Complete '@<fragment>' anywhere in the input with project file paths,
+    Claude Code style. Files are indexed recursively from the session cwd
+    (junk dirs skipped, capped) and cached briefly so fast typing doesn't
+    re-walk a large tree on every keystroke."""
+
+    def __init__(self, get_cwd=os.getcwd):
+        self.get_cwd = get_cwd
+        self._cache: tuple[str, float, list[str]] | None = None
+
+    def _index(self) -> list[str]:
+        root = self.get_cwd()
+        now = time.monotonic()
+        if (
+            self._cache
+            and self._cache[0] == root
+            and now - self._cache[1] < ATFILE_CACHE_SECS
+        ):
+            return self._cache[2]
+        paths: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(root, onerror=lambda _e: None):
+            dirnames[:] = sorted(d for d in dirnames if d not in ATFILE_IGNORED_DIRS)
+            rel = os.path.relpath(dirpath, root)
+            prefix = "" if rel == "." else rel + "/"
+            paths.extend(prefix + d + "/" for d in dirnames)
+            paths.extend(prefix + f for f in sorted(filenames))
+            if len(paths) >= ATFILE_SCAN_CAP:
+                del paths[ATFILE_SCAN_CAP:]
+                break
+        self._cache = (root, now, paths)
+        return paths
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if text.startswith("/"):  # slash-command line: SlashCompleter's turf
+            return
+        fragment = at_fragment(text)
+        if fragment is None:
+            return
+        needle = fragment.casefold()
+        scored = []
+        for path in self._index():
+            name = os.path.basename(path.rstrip("/")).casefold()
+            if not needle:
+                score = 1
+            elif name.startswith(needle):
+                score = 3
+            elif needle in name:
+                score = 2
+            elif needle in path.casefold():
+                score = 1
+            else:
+                continue
+            scored.append((-score, path))
+        scored.sort()
+        for _, path in scored[:ATFILE_MAX_RESULTS]:
+            # Directories complete open-ended (keep typing to descend); files
+            # get a trailing space that closes the mention.
+            inserted = path if path.endswith("/") else path + " "
+            yield Completion(inserted, start_position=-len(fragment), display=path)
+
+
 class BoxPrompt:
     def __init__(self, vi_mode: bool, state_dir: Path, commands: tuple[str, ...] = ()):
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -71,7 +161,12 @@ class BoxPrompt:
         # created later): path completion for /cd et al. resolves against it.
         self.get_cwd = os.getcwd
         self._history = FileHistory(str(state_dir / "history"))
-        self._completer = SlashCompleter(commands, get_cwd=lambda: self.get_cwd())
+        self._completer = merge_completers(
+            [
+                SlashCompleter(commands, get_cwd=lambda: self.get_cwd()),
+                AtFileCompleter(get_cwd=lambda: self.get_cwd()),
+            ]
+        )
         self._edit_session = PromptSession(vi_mode=vi_mode)
 
     def edit(self, initial: str) -> str:
@@ -203,7 +298,9 @@ class BoxPrompt:
                 fragments = [(RULE_STYLE, "─── ")]
                 for i, completion in enumerate(state.completions):
                     current = completion is state.current_completion
-                    fragments.append(("reverse" if current else RULE_STYLE, completion.text))
+                    fragments.append(
+                        ("reverse" if current else RULE_STYLE, completion.display_text)
+                    )
                     if i < len(state.completions) - 1:
                         fragments.append((RULE_STYLE, " · "))
                 fragments.append((RULE_STYLE, " "))
