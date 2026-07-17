@@ -401,9 +401,10 @@ def test_resume_uses_live_picker_when_interactive(tmp_path, capsys, monkeypatch)
     agent, logref = two_session_setup(tmp_path)
 
     class FakeBox:
-        def pick_session(self, search, initial=""):
+        def pick(self, search, initial="", render=str):
             assert initial == "jan"  # /resume <text> pre-fills the filter
             assert [i.title for i in search("")] == ["from february", "from january"]
+            assert "from january" in render(search("january")[0])
             return search("january")[0]
 
     monkeypatch.setattr(cli, "_box", FakeBox())
@@ -418,7 +419,9 @@ def test_resume_live_picker_cancel(tmp_path, capsys, monkeypatch):
 
     agent, logref = two_session_setup(tmp_path)
     monkeypatch.setattr(
-        cli, "_box", type("Box", (), {"pick_session": lambda self, s, initial="": None})()
+        cli,
+        "_box",
+        type("Box", (), {"pick": lambda self, s, initial="", render=str: None})(),
     )
     handle_slash("/resume", agent, logref, tmp_path, set())
     assert "cancelled" in capsys.readouterr().out
@@ -526,6 +529,92 @@ class TestDenylistApprover:
         scripted_input(monkeypatch, ["n"])
         approve("mv /etc/hosts /tmp/")
         assert "⚠ destructive" in capsys.readouterr().out
+
+
+class TestModelPicker:
+    def test_rank_models_tiers(self):
+        from aish.cli import rank_models
+
+        models = [("qwen3:8b", "local · 5 GB"), ("gemini", "cloud"), ("gemini-embed", "cloud")]
+        assert [m[0] for m in rank_models(models, "")] == ["qwen3:8b", "gemini", "gemini-embed"]
+        assert rank_models(models, "gemini")[0][0] == "gemini"  # exact beats prefix
+        assert rank_models(models, "gem")[0][0] == "gemini"  # prefix, list order on ties
+        assert rank_models(models, "local")[0][0] == "qwen3:8b"  # substring in description
+        assert rank_models(models, "qwn3")[0][0] == "qwen3:8b"  # fuzzy typo
+        assert rank_models(models, "zzz") == []
+
+    def test_available_models_merges_local_and_cloud(self, monkeypatch):
+        import sys
+        from types import SimpleNamespace
+
+        from aish.cli import available_models
+
+        fake_ollama = SimpleNamespace(
+            list=lambda: SimpleNamespace(
+                models=[SimpleNamespace(model="qwen3:8b", size=5_000_000_000)]
+            )
+        )
+        monkeypatch.setitem(sys.modules, "ollama", fake_ollama)
+        agent = SimpleNamespace(model="qwen3:8b", provider="ollama")
+        models = dict(available_models(agent))
+        assert "current" in models["qwen3:8b"]
+        assert "gemini" in models and "openai" in models and "claude" in models
+        assert "claude-max" in models
+
+    def test_available_models_when_ollama_down(self, monkeypatch):
+        import sys
+        from types import SimpleNamespace
+
+        from aish.cli import available_models
+
+        def boom():
+            raise ConnectionError("ollama not running")
+
+        monkeypatch.setitem(sys.modules, "ollama", SimpleNamespace(list=boom))
+        agent = SimpleNamespace(model="x", provider="gemini")
+        models = available_models(agent)
+        assert [name for name, _ in models] == ["gemini", "openai", "claude", "claude-max"]
+        assert "current" in dict(models)["gemini"]
+
+    def test_model_no_arg_opens_picker_and_switches(self, tmp_path, capsys, monkeypatch):
+        import aish.cli as cli
+        from aish.agent import Agent
+        from aish.cli import LogRef, handle_slash
+        from aish.session import SessionLog
+
+        agent = Agent(model="old", approve=lambda _c: None, client_chat=lambda **_k: None)
+        logref = LogRef(SessionLog.new(tmp_path))
+        monkeypatch.setattr(
+            cli, "available_models", lambda _a: [("qwen3:8b", "local · 5 GB")]
+        )
+
+        class FakeBox:
+            def pick(self, search, initial="", render=str):
+                assert "qwen3:8b" in render(search("")[0])
+                return search("")[0]
+
+        monkeypatch.setattr(cli, "_box", FakeBox())
+        handle_slash("/model", agent, logref, tmp_path)
+        assert agent.model == "qwen3:8b"
+        assert "switched" in capsys.readouterr().out
+
+    def test_model_picker_cancel_keeps_model(self, tmp_path, capsys, monkeypatch):
+        import aish.cli as cli
+        from aish.agent import Agent
+        from aish.cli import LogRef, handle_slash
+        from aish.session import SessionLog
+
+        agent = Agent(model="old", approve=lambda _c: None, client_chat=lambda **_k: None)
+        logref = LogRef(SessionLog.new(tmp_path))
+        monkeypatch.setattr(cli, "available_models", lambda _a: [("qwen3:8b", "local")])
+        monkeypatch.setattr(
+            cli,
+            "_box",
+            type("Box", (), {"pick": lambda self, s, initial="", render=str: None})(),
+        )
+        handle_slash("/model", agent, logref, tmp_path)
+        assert agent.model == "old"
+        assert "cancelled" in capsys.readouterr().out
 
 
 class TestModelAndJobs:

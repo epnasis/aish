@@ -63,9 +63,18 @@ def picker_search(query):
 
 def pick(tmp_path, keys: str, initial: str = ""):
     box = BoxPrompt(False, tmp_path)
+    render = lambda info: f"{info.when} · {info.title}"  # noqa: E731
     with create_pipe_input() as pipe:
         pipe.send_text(keys)
-        return box.pick_session_with_io(picker_search, initial, input=pipe, output=DummyOutput())
+        return box.pick_with_io(picker_search, initial, render, input=pipe, output=DummyOutput())
+
+
+def test_picker_is_generic_over_plain_items(tmp_path):
+    box = BoxPrompt(False, tmp_path)
+    search = lambda q: [s for s in ("alpha", "bravo") if q in s]  # noqa: E731
+    with create_pipe_input() as pipe:
+        pipe.send_text("v\r")
+        assert box.pick_with_io(search, "", str, input=pipe, output=DummyOutput()) == "bravo"
 
 
 def test_picker_enter_takes_top_result(tmp_path):

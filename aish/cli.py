@@ -1,6 +1,7 @@
 """Interactive CLI: one-shot task from argv, or a REPL keeping conversation state."""
 
 import argparse
+import difflib
 import os
 import sys
 import threading
@@ -45,8 +46,9 @@ SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
   /resume <text> open the picker with the filter pre-filled
   /new, /clear   fresh conversation in a new session file (clears the screen;
                  plain 'clear' works too)
-  /model [name]  show or switch the model (Ollama name, or a cloud model:
-                 gemini:/openai:/claude: — bare provider name picks a default)
+  /model [name]  switch the model (Ollama name, or a cloud model: gemini:/
+                 openai:/claude: — bare provider name picks a default); no
+                 arg opens a searchable picker of local + cloud models
   /jobs          list background jobs started this session
   /help          this help
   /quit, /exit   quit (plain 'exit' works too)
@@ -353,6 +355,80 @@ def replay_history(messages: list[dict]) -> None:
                 print(f"{DIM}  … ({len(lines) - REPLAY_TOOL_LINES} more lines){RESET}")
 
 
+def available_models(agent) -> list[tuple[str, str]]:
+    """(name, description) pairs for the /model picker: installed Ollama
+    models plus the cloud providers. Ollama being down just hides the local
+    ones."""
+    provider_now = getattr(agent, "provider", "ollama")
+    models = []
+    try:
+        import ollama
+
+        listed = ollama.list().models
+    except Exception:
+        listed = []
+    for m in listed:
+        name = getattr(m, "model", None)
+        if not name:
+            continue
+        size = (getattr(m, "size", 0) or 0) / 1e9
+        current = " · current" if provider_now == "ollama" and agent.model == name else ""
+        models.append((name, f"local · {size:.0f} GB{current}"))
+    for pname, provider in backends.PROVIDERS.items():
+        current = " · current" if provider_now == pname else ""
+        models.append((pname, f"cloud · default {provider.default_model}{current}"))
+    models.append(("claude-max", "cloud · Claude subscription (restart to switch)"))
+    return models
+
+
+def rank_models(models: list[tuple[str, str]], query: str) -> list[tuple[str, str]]:
+    """Deterministic picker ranking: exact name, name prefix, substring in
+    name or description, then fuzzy name similarity. Ties keep list order."""
+    query_cf = " ".join(query.split()).casefold()
+    if not query_cf:
+        return models
+    ranked = []
+    for model in models:
+        name_cf = model[0].casefold()
+        if name_cf == query_cf:
+            score = 4
+        elif name_cf.startswith(query_cf):
+            score = 3
+        elif query_cf in name_cf or query_cf in model[1].casefold():
+            score = 2
+        elif difflib.SequenceMatcher(None, query_cf, name_cf).ratio() >= 0.55:
+            score = 1
+        else:
+            continue
+        ranked.append((score, model))
+    ranked.sort(key=lambda pair: -pair[0])
+    return [model for _, model in ranked]
+
+
+def switch_model(agent, arg: str) -> None:
+    """Point the running agent at another model/backend (session-only)."""
+    crossing_max = arg.startswith("claude-max") or (
+        getattr(agent, "provider", "ollama") == "claude-max"
+    )
+    if crossing_max:
+        print(f"{DIM}claude-max runs a different agent loop — restart aish "
+              f"(aish --model {arg}) to switch{RESET}")
+        return
+    try:
+        chat, provider, name = backends.make_chat(arg)
+    except backends.BackendError as exc:
+        print(f"{RED}{exc}{RESET}")
+        return
+    switched_provider = provider != getattr(agent, "provider", "ollama")
+    agent.chat = chat
+    agent.model = name
+    agent.provider = provider
+    print(f"{DIM}model switched to {arg} (this session only){RESET}")
+    if switched_provider:
+        print(f"{DIM}note: the system prompt still describes the startup "
+              f"backend — restart aish to refresh its self-description{RESET}")
+
+
 def handle_slash(
     task: str, agent: Agent, logref: LogRef, state_dir: Path, resumed: set | None = None
 ) -> str:
@@ -378,8 +454,10 @@ def handle_slash(
             if not entries:
                 print(f"{DIM}no earlier session to resume{RESET}")
                 return "handled"
-            selected = _box.pick_session(
-                lambda query: SessionLog.rank(entries, query), initial=arg
+            selected = _box.pick(
+                lambda query: SessionLog.rank(entries, query),
+                initial=arg,
+                render=lambda info: f"{info.when} · {info.count:>3} msgs · {info.title}",
             )
             if selected is None:
                 print(f"{DIM}cancelled{RESET}")
@@ -433,26 +511,18 @@ def handle_slash(
     if command == "/model":
         parts = task.split()
         if len(parts) > 1:
-            crossing_max = parts[1].startswith("claude-max") or (
-                getattr(agent, "provider", "ollama") == "claude-max"
+            switch_model(agent, parts[1])
+        elif _box is not None:
+            # Interactive: same live-filter picker as /resume, over models.
+            models = available_models(agent)
+            selected = _box.pick(
+                lambda query: rank_models(models, query),
+                render=lambda model: f"{model[0]:<28} {model[1]}",
             )
-            if crossing_max:
-                print(f"{DIM}claude-max runs a different agent loop — restart aish "
-                      f"(aish --model {parts[1]}) to switch{RESET}")
-                return "handled"
-            try:
-                chat, provider, name = backends.make_chat(parts[1])
-            except backends.BackendError as exc:
-                print(f"{RED}{exc}{RESET}")
-                return "handled"
-            switched_provider = provider != getattr(agent, "provider", "ollama")
-            agent.chat = chat
-            agent.model = name
-            agent.provider = provider
-            print(f"{DIM}model switched to {parts[1]} (this session only){RESET}")
-            if switched_provider:
-                print(f"{DIM}note: the system prompt still describes the startup "
-                      f"backend — restart aish to refresh its self-description{RESET}")
+            if selected is None:
+                print(f"{DIM}cancelled — still on {agent.model}{RESET}")
+            else:
+                switch_model(agent, selected[0])
         else:
             print(f"{DIM}current model: {agent.model} — /model <name> to switch "
                   f"('ollama list' shows local models; gemini:/openai: for cloud){RESET}")
@@ -548,8 +618,9 @@ pre-fills the filter and /resume N loads the N-th newest directly; the \
 chosen session is replayed into this conversation. Session \
 files are append-only and never deleted — every past session stays \
 available. /new or /clear (or plain 'clear') starts a \
-fresh conversation and clears the screen; /model [name] shows or switches \
-the model; /jobs lists \
+fresh conversation and clears the screen; /model <name> switches the model \
+and /model alone opens the same type-to-filter picker over installed Ollama \
+models and the cloud providers; /jobs lists \
 background jobs; /help lists commands; /quit or /exit quits.
 - Long-running commands (servers, watchers, big upgrades): set \
 background=true on run_command — it detaches, survives aish exiting, and \

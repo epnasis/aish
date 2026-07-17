@@ -67,17 +67,18 @@ class BoxPrompt:
         """read() with injected I/O — for tests driving keystrokes."""
         return self._build_app(cwd_display, input=input, output=output).run()
 
-    def pick_session(self, search, initial: str = ""):
-        """Live-filter picker: typing re-ranks via search(query), Up/Down move
-        the selection, Enter returns the selected item, Esc/Ctrl-C returns
+    def pick(self, search, initial: str = "", render=str):
+        """Live-filter picker over arbitrary items: typing re-ranks via
+        search(query), render(item) draws each row, Up/Down move the
+        selection, Enter returns the selected item, Esc/Ctrl-C returns
         None."""
-        return self._build_picker(search, initial).run()
+        return self._build_picker(search, initial, render).run()
 
-    def pick_session_with_io(self, search, initial: str, input, output):
-        """pick_session() with injected I/O — for tests driving keystrokes."""
-        return self._build_picker(search, initial, input=input, output=output).run()
+    def pick_with_io(self, search, initial: str, render, input, output):
+        """pick() with injected I/O — for tests driving keystrokes."""
+        return self._build_picker(search, initial, render, input=input, output=output).run()
 
-    def _build_picker(self, search, initial: str, input=None, output=None) -> Application:
+    def _build_picker(self, search, initial: str, render, input=None, output=None) -> Application:
         state = {"results": search(initial), "selected": 0}
 
         def refresh(buff):
@@ -93,15 +94,15 @@ class BoxPrompt:
         def rows():
             results = state["results"]
             fragments = []
-            for i, info in enumerate(results[:PICKER_MAX_ROWS]):
-                line = f" {info.when} · {info.count:>3} msgs · {info.title}"
+            for i, item in enumerate(results[:PICKER_MAX_ROWS]):
+                line = " " + render(item)
                 if i == state["selected"]:
                     fragments.append(("bold", "❯"))
                     fragments.append(("reverse", line + "\n"))
                 else:
                     fragments.append((RULE_STYLE, " " + line + "\n"))
             if not results:
-                fragments.append((RULE_STYLE, "  (no matching session — Esc cancels)\n"))
+                fragments.append((RULE_STYLE, "  (no match — Esc cancels)\n"))
             elif len(results) > PICKER_MAX_ROWS:
                 hidden = len(results) - PICKER_MAX_ROWS
                 fragments.append((RULE_STYLE, f"  … {hidden} more, type to narrow\n"))
@@ -143,7 +144,7 @@ class BoxPrompt:
                 Window(FormattedTextControl(rows), dont_extend_height=True),
                 Window(
                     FormattedTextControl(
-                        [(RULE_STYLE, "type to filter · ↑/↓ select · Enter loads · Esc cancels")]
+                        [(RULE_STYLE, "type to filter · ↑/↓ select · Enter picks · Esc cancels")]
                     ),
                     height=1,
                 ),

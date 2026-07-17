@@ -142,8 +142,9 @@ sessions (start date + first message): type to filter by title and contents
 LLM), ↑/↓ to select, Enter replays the session into the current conversation;
 `/resume <n>` picks directly, `/resume <text>` pre-fills the filter · `/new`
 or `/clear`
-(plain `clear` works too) · `/model [name]` — show or switch model
-mid-session · `/jobs` · `/help` · `/quit` (or `exit`).
+(plain `clear` works too) · `/model [name]` — switch model mid-session; no
+arg opens the same type-to-filter picker over local models and cloud
+providers · `/jobs` · `/help` · `/quit` (or `exit`).
 
 **Multiline input**: Enter submits; newline via Ctrl+J, trailing `\`, or
 Option/Alt+Enter (iTerm2: set "Left Option key" to "Esc+"). Pastes keep
