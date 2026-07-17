@@ -58,7 +58,7 @@ curl -fsSL https://raw.githubusercontent.com/epnasis/aish/main/install.sh | sh
 
 aish "what's eating my disk space?"     # one-shot task
 aish                                    # REPL — conversation persists across tasks
-aish --resume                           # continue the most recent session
+aish --resume                           # pick an earlier session (same picker as /resume)
 ```
 
 Smaller machines: `ollama pull qwen3:8b && export AISH_MODEL=qwen3:8b`.

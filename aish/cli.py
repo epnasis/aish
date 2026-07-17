@@ -785,7 +785,8 @@ autocompletes project files after '@'). The path is relative to the working \
 directory — when its contents matter to the task, read it with read_file \
 before answering.
 - Sessions: conversation + command audit trail logged to {state_dir}; \
-`aish --resume` continues the most recent session.
+`aish --resume` opens the same session picker as /resume at launch (piped \
+input resumes the most recent session).
 - Config file: {config_path} (TOML). Keys: vi_mode, model, num_ctx, \
 max_steps. vi_mode (prompt vi editing) is currently {str(vi_mode).lower()}; \
 enable it with the line `vi_mode = true`. Config is read at startup only — \
@@ -890,7 +891,10 @@ def main() -> int:
         help="prompt for every command, including read-only ones",
     )
     parser.add_argument(
-        "--resume", action="store_true", help="continue the most recent session"
+        "--resume",
+        action="store_true",
+        help="pick an earlier session to continue (same picker as /resume; "
+        "resumes the latest when input is piped)",
     )
     args = parser.parse_args()
 
@@ -913,27 +917,43 @@ def main() -> int:
     deny_path = Path(os.environ.get("AISH_DENYLIST", str(DEFAULT_DENYLIST)))
     lessons_path = Path(os.environ.get("AISH_LESSONS", str(DEFAULT_LESSONS)))
 
-    history: list[dict] = []
-    resumed: set[Path] = set()
-    if args.resume:
-        latest = SessionLog.latest(state_dir)
-        if latest is not None:
-            resumed.add(latest)
-        if latest is None:
-            print(f"{DIM}no previous session found — starting fresh{RESET}")
-            log = SessionLog.new(state_dir)
-        else:
-            history = SessionLog.load_messages(latest)
-            log = SessionLog(latest)
-    else:
-        log = SessionLog.new(state_dir)
-    logref = LogRef(log)
-
     global _box
     if sys.stdin.isatty():
         from .prompt import BoxPrompt
 
         _box = BoxPrompt(args.vi_mode, state_dir, SLASH_COMMANDS)
+
+    history: list[dict] = []
+    resumed: set[Path] = set()
+    log: SessionLog | None = None
+    if args.resume:
+        chosen: Path | None = None
+        if _box is not None:
+            # Interactive: same live-filter picker as /resume, rather than
+            # silently assuming the most recent session.
+            entries = SessionLog.load_entries(state_dir)
+            if not entries:
+                print(f"{DIM}no previous session found — starting fresh{RESET}")
+            else:
+                selected = _box.pick(
+                    lambda query: SessionLog.rank(entries, query),
+                    render=lambda info: f"{info.when} · {info.count:>3} msgs · {info.title}",
+                )
+                if selected is None:
+                    print(f"{DIM}cancelled — starting fresh{RESET}")
+                else:
+                    chosen = selected.path
+        else:  # pipes/scripts can't pick — keep resuming the latest
+            chosen = SessionLog.latest(state_dir)
+            if chosen is None:
+                print(f"{DIM}no previous session found — starting fresh{RESET}")
+        if chosen is not None:
+            history = SessionLog.load_messages(chosen)
+            log = SessionLog(chosen)
+            resumed.add(chosen)
+    if log is None:
+        log = SessionLog.new(state_dir)
+    logref = LogRef(log)
 
     context = "\n\n".join(
         part
