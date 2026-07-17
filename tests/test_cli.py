@@ -543,6 +543,25 @@ class TestModelPicker:
         assert rank_models(models, "qwn3")[0][0] == "qwen3:8b"  # fuzzy typo
         assert rank_models(models, "zzz") == []
 
+    def test_rank_models_offers_typed_cloud_model(self):
+        from aish.cli import rank_models
+
+        models = [("gemini", "cloud · default gemini-3.5-flash"), ("qwen3:8b", "local")]
+        results = rank_models(models, "gemini:gemini-3.5-pro")
+        assert results[0][0] == "gemini:gemini-3.5-pro"  # exact typed model on top
+        assert "Gemini" in results[0][1]
+        assert results[0][0] not in [name for name, _ in models]  # synthesized
+
+        # Uppercase provider still yields a switchable name
+        assert rank_models(models, "Gemini:pro-x")[0][0] == "gemini:pro-x"
+        # claude-max:opus is a valid restart target — offer it too
+        assert rank_models(models, "claude-max:opus")[0][0] == "claude-max:opus"
+        # bare provider and ollama-style colon names never synthesize
+        assert all(":" not in name for name, _ in rank_models(models, "gemini"))
+        assert [name for name, _ in rank_models(models, "qwen3:8b")] == ["qwen3:8b"]
+        # provider prefix without a model name doesn't synthesize either
+        assert rank_models(models, "gemini:")[0][0] == "gemini"
+
     def test_available_models_merges_local_and_cloud(self, monkeypatch):
         import sys
         from types import SimpleNamespace

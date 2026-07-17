@@ -49,6 +49,7 @@ SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
   /model [name]  switch the model (Ollama name, or a cloud model: gemini:/
                  openai:/claude: — bare provider name picks a default); no
                  arg opens a searchable picker of local + cloud models
+                 (typing provider:model there offers that exact model)
   /jobs          list background jobs started this session
   /help          this help
   /quit, /exit   quit (plain 'exit' works too)
@@ -383,11 +384,21 @@ def available_models(agent) -> list[tuple[str, str]]:
 
 def rank_models(models: list[tuple[str, str]], query: str) -> list[tuple[str, str]]:
     """Deterministic picker ranking: exact name, name prefix, substring in
-    name or description, then fuzzy name similarity. Ties keep list order."""
+    name or description, then fuzzy name similarity. Ties keep list order.
+
+    A query that itself names a cloud model (provider:model) becomes a
+    selectable row on top — the static list can't enumerate provider
+    catalogs, so the exact string the user typed is the offer."""
     query_cf = " ".join(query.split()).casefold()
     if not query_cf:
         return models
     ranked = []
+    raw = query.strip()
+    provider, sep, rest = raw.partition(":")
+    provider = provider.casefold()
+    if sep and rest and (provider in backends.PROVIDERS or provider == "claude-max"):
+        label = PROVIDER_LABELS.get(provider, provider)
+        ranked.append((5, (f"{provider}:{rest}", f"cloud · {label} · this exact model")))
     for model in models:
         name_cf = model[0].casefold()
         if name_cf == query_cf:
@@ -620,7 +631,8 @@ files are append-only and never deleted — every past session stays \
 available. /new or /clear (or plain 'clear') starts a \
 fresh conversation and clears the screen; /model <name> switches the model \
 and /model alone opens the same type-to-filter picker over installed Ollama \
-models and the cloud providers; /jobs lists \
+models and the cloud providers (typing provider:model inside the picker \
+offers that exact cloud model as a selectable row); /jobs lists \
 background jobs; /help lists commands; /quit or /exit quits.
 - Long-running commands (servers, watchers, big upgrades): set \
 background=true on run_command — it detaches, survives aish exiting, and \
