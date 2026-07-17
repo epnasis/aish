@@ -8,7 +8,7 @@ import time
 import tomllib
 from pathlib import Path
 
-from . import tools
+from . import backends, tools
 from .agent import Agent, ModelUnavailable, environment_context, format_tokens
 from .approval import (
     DEFAULT_ALLOWLIST,
@@ -38,11 +38,15 @@ REPLAY_TOOL_LINES = 4
 SLASH_COMMANDS = ("/clear", "/exit", "/help", "/jobs", "/model", "/new", "/quit", "/resume")
 
 SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
-  /resume [n]    pick an earlier session to load (lists recent sessions with
-                 a summary; Enter=latest, repeat to reach older ones)
+  /resume        pick an earlier session: type to filter by title and
+                 contents (exact match first, then phrase, words, fuzzy),
+                 ↑/↓ select, Enter loads, Esc cancels
+  /resume <n>    load the n-th newest session directly
+  /resume <text> open the picker with the filter pre-filled
   /new, /clear   fresh conversation in a new session file (clears the screen;
                  plain 'clear' works too)
-  /model [name]  show or switch the Ollama model for this session
+  /model [name]  show or switch the model (Ollama name, or a cloud model:
+                 gemini:/openai:/claude: — bare provider name picks a default)
   /jobs          list background jobs started this session
   /help          this help
   /quit, /exit   quit (plain 'exit' works too)
@@ -364,34 +368,60 @@ def handle_slash(
         print(banner(f"fresh conversation — session {logref.log.path.name}"))
         return "handled"
     if command == "/resume":
-        sessions = SessionLog.list_sessions(state_dir, exclude=resumed | {logref.log.path})
-        if not sessions:
-            print(f"{DIM}no earlier session to resume{RESET}")
-            return "handled"
+        parts = task.split(maxsplit=1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        exclude = resumed | {logref.log.path}
 
-        parts = task.split()
-        if len(parts) > 1 and parts[1].isdigit():
-            choice = int(parts[1])
-        elif len(sessions) == 1:
-            choice = 1
-        else:
-            for i, info in enumerate(sessions[:10], 1):
-                print(f"{DIM}{i:>3}. {info.when} · {info.count:>3} msgs ·{RESET} {info.title}")
-            try:
-                answer = input(
-                    f"{YELLOW}resume which?{RESET} [1=latest] (number, q=cancel) "
-                ).strip().lower()
-            except EOFError:
-                answer = "q"
-            if answer in ("q", "quit"):
+        if not arg.isdigit() and _box is not None:
+            # Interactive: live-filter picker — typing re-ranks, Enter loads.
+            entries = SessionLog.load_entries(state_dir, exclude=exclude)
+            if not entries:
+                print(f"{DIM}no earlier session to resume{RESET}")
+                return "handled"
+            selected = _box.pick_session(
+                lambda query: SessionLog.rank(entries, query), initial=arg
+            )
+            if selected is None:
                 print(f"{DIM}cancelled{RESET}")
                 return "handled"
-            choice = int(answer) if answer.isdigit() else 1
-        if not 1 <= choice <= len(sessions):
-            print(f"{DIM}no such session number{RESET}")
-            return "handled"
+        else:
+            # /resume <n>, or no TTY (pipes/scripts): one-shot numbered flow.
+            searching = bool(arg) and not arg.isdigit()
+            if searching:
+                sessions = SessionLog.search_sessions(state_dir, arg, exclude=exclude)
+                if not sessions:
+                    print(f"{DIM}no session matches '{arg}'{RESET}")
+                    return "handled"
+            else:
+                sessions = SessionLog.list_sessions(state_dir, exclude=exclude)
+                if not sessions:
+                    print(f"{DIM}no earlier session to resume{RESET}")
+                    return "handled"
 
-        selected = sessions[choice - 1]
+            if arg.isdigit():
+                choice = int(arg)
+            elif len(sessions) == 1:
+                choice = 1
+            else:
+                default = "best match" if searching else "latest"
+                for i, info in enumerate(sessions, 1):
+                    print(
+                        f"{DIM}{i:>3}. {info.when} · {info.count:>3} msgs ·{RESET} {info.title}"
+                    )
+                try:
+                    answer = input(
+                        f"{YELLOW}resume which?{RESET} [1={default}] (number, q=cancel) "
+                    ).strip().lower()
+                except EOFError:
+                    answer = "q"
+                if answer in ("q", "quit"):
+                    print(f"{DIM}cancelled{RESET}")
+                    return "handled"
+                choice = int(answer) if answer.isdigit() else 1
+            if not 1 <= choice <= len(sessions):
+                print(f"{DIM}no such session number{RESET}")
+                return "handled"
+            selected = sessions[choice - 1]
         messages = SessionLog.load_messages(selected.path)
         resumed.add(selected.path)
         agent.load_history(messages)
@@ -403,11 +433,29 @@ def handle_slash(
     if command == "/model":
         parts = task.split()
         if len(parts) > 1:
-            agent.model = parts[1]
-            print(f"{DIM}model switched to {agent.model} (this session only){RESET}")
+            crossing_max = parts[1].startswith("claude-max") or (
+                getattr(agent, "provider", "ollama") == "claude-max"
+            )
+            if crossing_max:
+                print(f"{DIM}claude-max runs a different agent loop — restart aish "
+                      f"(aish --model {parts[1]}) to switch{RESET}")
+                return "handled"
+            try:
+                chat, provider, name = backends.make_chat(parts[1])
+            except backends.BackendError as exc:
+                print(f"{RED}{exc}{RESET}")
+                return "handled"
+            switched_provider = provider != getattr(agent, "provider", "ollama")
+            agent.chat = chat
+            agent.model = name
+            agent.provider = provider
+            print(f"{DIM}model switched to {parts[1]} (this session only){RESET}")
+            if switched_provider:
+                print(f"{DIM}note: the system prompt still describes the startup "
+                      f"backend — restart aish to refresh its self-description{RESET}")
         else:
-            print(f"{DIM}current model: {agent.model} — /model <name> to switch, "
-                  f"'ollama list' shows what's installed{RESET}")
+            print(f"{DIM}current model: {agent.model} — /model <name> to switch "
+                  f"('ollama list' shows local models; gemini:/openai: for cloud){RESET}")
         return "handled"
     if command == "/jobs":
         print(f"{DIM}{tools.jobs_table()}{RESET}")
@@ -422,6 +470,43 @@ def handle_slash(
 DEFAULT_LESSONS = Path.home() / ".config" / "aish" / "lessons.md"
 
 
+PROVIDER_LABELS = {
+    "gemini": "Google Gemini",
+    "openai": "OpenAI",
+    "claude": "Anthropic Claude",
+    "claude-max": "Anthropic Claude (subscription)",
+}
+
+
+def identity_context(model: str, provider: str) -> str:
+    """The one system-prompt section that depends on where the model runs."""
+    if provider == "ollama":
+        return (
+            f"- YOUR IDENTITY: you are the local model '{model}' running through Ollama "
+            "ON THIS MACHINE — you are NOT a cloud service and NOT accessed over any API. "
+            "The Ollama process (ollama / llama-server, often ~20+ GB RAM) that the user "
+            "sees in `top`/`ps` IS you: it is the server executing your weights right now. "
+            "If the user stops Ollama, quits the Ollama app, or runs `killall llama-server` "
+            "/ `ollama stop`, THIS SESSION ENDS immediately — you would be killing "
+            "yourself. So when the user is hunting memory hogs or asks about that process, "
+            "say plainly that it is you; never recommend or run a command that kills it "
+            "without first warning that it terminates the current aish session, and let "
+            "them decide."
+        )
+    label = PROVIDER_LABELS.get(provider, provider)
+    model_desc = f"the model '{model}'" if model else "a Claude model"
+    return (
+        f"- YOUR IDENTITY: you are {model_desc}, reached over the {label} "
+        "cloud API — you do NOT run on this machine. aish executes approved commands "
+        f"locally and sends only this conversation to {label}. PRIVACY: everything "
+        "in the conversation — the user's messages, files you read, command output — "
+        f"leaves this machine for {label}'s servers, so be conservative about "
+        "pulling sensitive local data (keys, credentials, personal files) into "
+        "context, and warn the user before reading such files. Local Ollama models "
+        "are unrelated to you; stopping Ollama does not affect this session."
+    )
+
+
 def usage_context(
     model: str,
     vi_mode: bool,
@@ -430,21 +515,13 @@ def usage_context(
     config_path: Path,
     deny_path: Path = DEFAULT_DENYLIST,
     lessons_path: Path = DEFAULT_LESSONS,
+    provider: str = "ollama",
 ) -> str:
     """Self-knowledge for the system prompt: aish should be able to explain
     and (via approved commands) reconfigure itself."""
     return f"""\
 About aish (you) — use this to answer questions about your own usage:
-- YOUR IDENTITY: you are the local model '{model}' running through Ollama \
-ON THIS MACHINE — you are NOT a cloud service and NOT accessed over any API. \
-The Ollama process (ollama / llama-server, often ~20+ GB RAM) that the user \
-sees in `top`/`ps` IS you: it is the server executing your weights right now. \
-If the user stops Ollama, quits the Ollama app, or runs `killall llama-server` \
-/ `ollama stop`, THIS SESSION ENDS immediately — you would be killing \
-yourself. So when the user is hunting memory hogs or asks about that process, \
-say plainly that it is you; never recommend or run a command that kills it \
-without first warning that it terminates the current aish session, and let \
-them decide.
+{identity_context(model, provider)}
 - Approval prompt keys: y=run once, n=deny, a=always allow (saves command \
 prefixes to {allow_path}; chained |/&&/|| segments are vetted and allowlisted \
 independently; read-only commands auto-approve), e=edit the command first.
@@ -462,10 +539,15 @@ this machine, so never put private local content into them.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` changes the shared working directory. Ctrl-C cancels only the \
 running command. Ctrl-D or `exit` quits.
-- REPL slash commands (Tab autocompletes them): /resume shows a numbered \
-picker of earlier sessions (summary = the session's first user message; \
-Enter picks the latest, /resume N picks directly) and replays the chosen \
-one into this conversation; /new or /clear (or plain 'clear') starts a \
+- REPL slash commands (Tab autocompletes them): /resume opens a live picker \
+over ALL earlier sessions with start dates (summary = the session's first \
+user message): typing filters by title and full contents deterministically \
+(exact title match, then phrase, then all-words, then fuzzy — no model \
+involved), arrow keys select, Enter loads, Esc cancels; /resume <text> \
+pre-fills the filter and /resume N loads the N-th newest directly; the \
+chosen session is replayed into this conversation. Session \
+files are append-only and never deleted — every past session stays \
+available. /new or /clear (or plain 'clear') starts a \
 fresh conversation and clears the screen; /model [name] shows or switches \
 the model; /jobs lists \
 background jobs; /help lists commands; /quit or /exit quits.
@@ -544,6 +626,15 @@ def load_context_files(cwd: str, lessons_path: Path = DEFAULT_LESSONS) -> list[s
     return parts
 
 
+def _backend_hint(agent) -> str:
+    provider = getattr(agent, "provider", "ollama")
+    if provider == "ollama":
+        return " — is Ollama running and not overloaded? (check `ollama ps` / system load)"
+    if provider == "claude-max":
+        return " — is the claude CLI installed and logged in? (run `claude` then /login)"
+    return " — check your API key, network, and the provider's rate limits"
+
+
 def main() -> int:
     config_path = Path(
         os.environ.get("AISH_CONFIG", str(Path.home() / ".config" / "aish" / "config.toml"))
@@ -558,7 +649,11 @@ def main() -> int:
     parser.add_argument(
         "--model",
         default=os.environ.get("AISH_MODEL") or config.get("model") or "qwen3.6:35b-a3b",
-        help="Ollama model (default: $AISH_MODEL, config, or qwen3.6:35b-a3b)",
+        help="Ollama model name, or a cloud model: gemini:<m> / openai:<m> / "
+        "claude:<m> (API keys via GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY; "
+        "bare provider name picks its default), or claude-max[:opus|sonnet] to run on "
+        "a Claude Pro/Max subscription via the claude CLI login. "
+        "Default: $AISH_MODEL, config, or qwen3.6:35b-a3b",
     )
     parser.add_argument(
         "--num-ctx", type=int, default=int(config.get("num_ctx", 32768)),
@@ -585,6 +680,17 @@ def main() -> int:
         "--resume", action="store_true", help="continue the most recent session"
     )
     args = parser.parse_args()
+
+    if args.model == "claude-max" or args.model.startswith("claude-max:"):
+        # Claude subscription path: the Agent SDK owns the loop, so this is a
+        # different agent class, not a chat backend (built below).
+        chat, provider, model_name = None, "claude-max", args.model.partition(":")[2]
+    else:
+        try:
+            chat, provider, model_name = backends.make_chat(args.model)
+        except backends.BackendError as exc:
+            print(f"{RED}error:{RESET} {exc}", file=sys.stderr)
+            return 1
 
     cwd = os.getcwd()
     state_dir = Path(
@@ -621,8 +727,8 @@ def main() -> int:
         for part in [
             environment_context(cwd),
             usage_context(
-                args.model, args.vi_mode, allow_path, state_dir, config_path,
-                deny_path, lessons_path,
+                model_name, args.vi_mode, allow_path, state_dir, config_path,
+                deny_path, lessons_path, provider=provider,
             ),
             skills_context(cwd),
             *load_context_files(cwd, lessons_path),
@@ -639,24 +745,49 @@ def main() -> int:
     def print_token(token: str) -> None:
         print(f"{GREEN}{token}{RESET}", end="", flush=True)
 
-    agent = Agent(
-        model=args.model,
-        approve=make_approver(args.ask_all, allow_path, logref, deny_path),
-        approve_write=make_write_approver(logref),
-        approve_read=make_read_approver(logref),
-        echo=echo,
-        stream=stream_line,
-        num_ctx=args.num_ctx,
-        max_steps=args.max_steps,
-        think=args.think,
-        cwd=cwd,
-        context=context,
-        on_message=logref.message,
-        on_token=print_token if stream_answers else None,
-        job_log_dir=state_dir / "jobs",
-        lessons_path=lessons_path,
-        status=_timer,
-    )
+    if provider == "claude-max":
+        from .claude_max import ClaudeMaxAgent, api_key_warning
+
+        warning = api_key_warning()
+        if warning:
+            print(f"{YELLOW}warning: {warning}{RESET}")
+        agent = ClaudeMaxAgent(
+            model=model_name,
+            approve=make_approver(args.ask_all, allow_path, logref, deny_path),
+            approve_write=make_write_approver(logref),
+            approve_read=make_read_approver(logref),
+            echo=echo,
+            stream=stream_line,
+            max_steps=args.max_steps,
+            cwd=cwd,
+            context=context,
+            on_message=logref.message,
+            on_token=print_token if stream_answers else None,
+            job_log_dir=state_dir / "jobs",
+            lessons_path=lessons_path,
+            status=_timer,
+        )
+    else:
+        agent = Agent(
+            model=model_name,
+            client_chat=chat,
+            approve=make_approver(args.ask_all, allow_path, logref, deny_path),
+            approve_write=make_write_approver(logref),
+            approve_read=make_read_approver(logref),
+            echo=echo,
+            stream=stream_line,
+            num_ctx=args.num_ctx,
+            max_steps=args.max_steps,
+            think=args.think,
+            cwd=cwd,
+            context=context,
+            on_message=logref.message,
+            on_token=print_token if stream_answers else None,
+            job_log_dir=state_dir / "jobs",
+            lessons_path=lessons_path,
+            status=_timer,
+        )
+        agent.provider = provider
     if history:
         agent.load_history(history)
         print(f"{DIM}resumed {len(history)} messages from {log.path.name}"
@@ -667,7 +798,7 @@ def main() -> int:
         try:
             result = agent.run_task(" ".join(args.task))
         except ModelUnavailable as exc:
-            print(f"{RED}model unavailable:{RESET} {exc} — is Ollama running and not overloaded?")
+            print(f"{RED}model unavailable:{RESET} {exc}{_backend_hint(agent)}")
             return 1
         if not stream_answers:
             print(f"{GREEN}{result}{RESET}")
@@ -710,8 +841,7 @@ def main() -> int:
         except KeyboardInterrupt:
             print(f"\n{YELLOW}(task interrupted){RESET}")
         except ModelUnavailable as exc:
-            print(f"\n{RED}model unavailable:{RESET} {exc} — is Ollama overloaded? "
-                  f"(check `ollama ps` / system load)")
+            print(f"\n{RED}model unavailable:{RESET} {exc}{_backend_hint(agent)}")
 
 
 if __name__ == "__main__":

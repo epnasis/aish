@@ -17,6 +17,7 @@ from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.cursor_shapes import ModalCursorShapeConfig
+from prompt_toolkit.document import Document
 from prompt_toolkit.enums import EditingMode
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.history import FileHistory
@@ -29,6 +30,7 @@ from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.shortcuts import PromptSession
 
 RULE_STYLE = "fg:ansibrightblack"
+PICKER_MAX_ROWS = 10
 
 
 class SlashCompleter(Completer):
@@ -64,6 +66,100 @@ class BoxPrompt:
     def read_with_io(self, cwd_display: str, input, output) -> str:
         """read() with injected I/O — for tests driving keystrokes."""
         return self._build_app(cwd_display, input=input, output=output).run()
+
+    def pick_session(self, search, initial: str = ""):
+        """Live-filter picker: typing re-ranks via search(query), Up/Down move
+        the selection, Enter returns the selected item, Esc/Ctrl-C returns
+        None."""
+        return self._build_picker(search, initial).run()
+
+    def pick_session_with_io(self, search, initial: str, input, output):
+        """pick_session() with injected I/O — for tests driving keystrokes."""
+        return self._build_picker(search, initial, input=input, output=output).run()
+
+    def _build_picker(self, search, initial: str, input=None, output=None) -> Application:
+        state = {"results": search(initial), "selected": 0}
+
+        def refresh(buff):
+            state["results"] = search(buff.text)
+            state["selected"] = 0
+
+        buffer = Buffer(
+            document=Document(initial, cursor_position=len(initial)),
+            multiline=False,
+            on_text_changed=refresh,
+        )
+
+        def rows():
+            results = state["results"]
+            fragments = []
+            for i, info in enumerate(results[:PICKER_MAX_ROWS]):
+                line = f" {info.when} · {info.count:>3} msgs · {info.title}"
+                if i == state["selected"]:
+                    fragments.append(("bold", "❯"))
+                    fragments.append(("reverse", line + "\n"))
+                else:
+                    fragments.append((RULE_STYLE, " " + line + "\n"))
+            if not results:
+                fragments.append((RULE_STYLE, "  (no matching session — Esc cancels)\n"))
+            elif len(results) > PICKER_MAX_ROWS:
+                hidden = len(results) - PICKER_MAX_ROWS
+                fragments.append((RULE_STYLE, f"  … {hidden} more, type to narrow\n"))
+            return fragments
+
+        keys = KeyBindings()
+
+        @keys.add("enter")
+        def _accept(event):
+            results = state["results"]
+            event.app.exit(result=results[state["selected"]] if results else None)
+
+        @keys.add("up")
+        @keys.add("c-p")
+        def _up(event):
+            state["selected"] = max(0, state["selected"] - 1)
+
+        @keys.add("down")
+        @keys.add("c-n")
+        @keys.add("tab")
+        def _down(event):
+            visible = min(len(state["results"]), PICKER_MAX_ROWS)
+            state["selected"] = min(max(visible - 1, 0), state["selected"] + 1)
+
+        @keys.add("escape", eager=True)
+        @keys.add("c-c")
+        def _cancel(event):
+            event.app.exit(result=None)
+
+        body = HSplit(
+            [
+                Window(
+                    BufferControl(
+                        buffer=buffer,
+                        input_processors=[BeforeInput([("bold", "search❯ ")])],
+                    ),
+                    height=1,
+                ),
+                Window(FormattedTextControl(rows), dont_extend_height=True),
+                Window(
+                    FormattedTextControl(
+                        [(RULE_STYLE, "type to filter · ↑/↓ select · Enter loads · Esc cancels")]
+                    ),
+                    height=1,
+                ),
+            ],
+            align=VerticalAlign.TOP,
+        )
+
+        app = Application(
+            layout=Layout(body, focused_element=buffer),
+            key_bindings=merge_key_bindings([load_key_bindings(), keys]),
+            full_screen=False,
+            input=input,
+            output=output,
+        )
+        app.ttimeoutlen = 0.05
+        return app
 
     def _build_app(self, cwd_display: str, input=None, output=None) -> Application:
         buffer = Buffer(
