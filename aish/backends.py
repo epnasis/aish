@@ -136,6 +136,30 @@ def make_chat(model_arg: str, client=None) -> tuple:
     return OpenAICompatBackend(client, provider_name), provider_name, model_name
 
 
+def list_models(provider_name: str) -> list[str]:
+    """Chat-capable model ids from a provider's list endpoint. Needs
+    credentials (raises BackendError like make_chat); network errors
+    propagate — callers treat any failure as 'catalog unavailable'."""
+    provider = PROVIDERS[provider_name]
+    if provider.kind == "anthropic":
+        client = _anthropic_client(provider)
+        return [m.id for m in client.models.list(limit=100)]
+    api_key = os.environ.get(provider.env_key, "").strip()
+    if not api_key:
+        raise BackendError(f"{provider.env_key} is not set")
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url=provider.base_url, timeout=10)
+    ids = [m.id for m in client.models.list()]
+    if provider_name == "gemini":
+        ids = [i.removeprefix("models/") for i in ids]
+        ids = [i for i in ids if i.startswith("gemini")]
+    elif provider_name == "openai":
+        # keep chat models; drop whisper/tts/dall-e/embeddings noise
+        ids = [i for i in ids if i.startswith("gpt") or (i[:1] == "o" and i[1:2].isdigit())]
+    return sorted(set(ids), reverse=True)  # newer version numbers first
+
+
 def _anthropic_client(provider: Provider):
     # The anthropic SDK resolves credentials itself (ANTHROPIC_API_KEY,
     # ANTHROPIC_AUTH_TOKEN, or an `ant auth login` profile on disk) — only

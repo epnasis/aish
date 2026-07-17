@@ -595,6 +595,42 @@ class TestModelPicker:
         assert [name for name, _ in models] == ["gemini", "openai", "claude", "claude-max"]
         assert "current" in dict(models)["gemini"]
 
+    def test_cloud_model_catalog_fetches_and_caches(self, tmp_path, monkeypatch):
+        import aish.cli as cli
+
+        def fake_list(name):
+            if name == "gemini":
+                return ["gemini-3.5-pro", "gemini-3.5-flash"]
+            raise cli.backends.BackendError("no key")
+
+        monkeypatch.setattr(cli.backends, "list_models", fake_list)
+        catalog = cli.cloud_model_catalog(tmp_path)
+        assert catalog == {"gemini": ["gemini-3.5-pro", "gemini-3.5-flash"]}
+
+        def explode(_name):
+            raise AssertionError("second call must be served from cache")
+
+        monkeypatch.setattr(cli.backends, "list_models", explode)
+        assert cli.cloud_model_catalog(tmp_path) == catalog
+
+    def test_available_models_includes_fetched_catalog(self, tmp_path, monkeypatch):
+        import sys
+        from types import SimpleNamespace
+
+        import aish.cli as cli
+
+        def boom():
+            raise ConnectionError("ollama not running")
+
+        monkeypatch.setitem(sys.modules, "ollama", SimpleNamespace(list=boom))
+        monkeypatch.setattr(
+            cli, "cloud_model_catalog", lambda _s: {"gemini": ["gemini-3.5-pro"]}
+        )
+        agent = SimpleNamespace(model="gemini-3.5-pro", provider="gemini")
+        models = dict(cli.available_models(agent, tmp_path))
+        assert "gemini:gemini-3.5-pro" in models
+        assert "current" in models["gemini:gemini-3.5-pro"]
+
     def test_model_no_arg_opens_picker_and_switches(self, tmp_path, capsys, monkeypatch):
         import aish.cli as cli
         from aish.agent import Agent
@@ -604,7 +640,7 @@ class TestModelPicker:
         agent = Agent(model="old", approve=lambda _c: None, client_chat=lambda **_k: None)
         logref = LogRef(SessionLog.new(tmp_path))
         monkeypatch.setattr(
-            cli, "available_models", lambda _a: [("qwen3:8b", "local · 5 GB")]
+            cli, "available_models", lambda _a, _s=None: [("qwen3:8b", "local · 5 GB")]
         )
 
         class FakeBox:
@@ -625,7 +661,9 @@ class TestModelPicker:
 
         agent = Agent(model="old", approve=lambda _c: None, client_chat=lambda **_k: None)
         logref = LogRef(SessionLog.new(tmp_path))
-        monkeypatch.setattr(cli, "available_models", lambda _a: [("qwen3:8b", "local")])
+        monkeypatch.setattr(
+            cli, "available_models", lambda _a, _s=None: [("qwen3:8b", "local")]
+        )
         monkeypatch.setattr(
             cli,
             "_box",

@@ -1,7 +1,9 @@
 """Interactive CLI: one-shot task from argv, or a REPL keeping conversation state."""
 
 import argparse
+import datetime
 import difflib
+import json
 import os
 import sys
 import threading
@@ -356,10 +358,63 @@ def replay_history(messages: list[dict]) -> None:
                 print(f"{DIM}  … ({len(lines) - REPLAY_TOOL_LINES} more lines){RESET}")
 
 
-def available_models(agent) -> list[tuple[str, str]]:
+CATALOG_TTL = datetime.timedelta(hours=24)
+CATALOG_FETCH_WAIT = 3.0  # seconds the picker will wait for provider APIs
+
+
+def cloud_model_catalog(state_dir: Path) -> dict[str, list[str]]:
+    """{provider: [model ids]} from the providers' list endpoints, for every
+    provider with credentials. Fetches run in parallel with a hard wait cap
+    (a slow provider is just absent this time) and land in a 24h disk cache
+    so the picker usually opens instantly."""
+    cache_path = state_dir / "cloud-models.json"
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        fetched = datetime.datetime.fromisoformat(cached["fetched"])
+        if datetime.datetime.now() - fetched < CATALOG_TTL:
+            return cached["models"]
+    except (OSError, ValueError, KeyError):
+        pass
+
+    results: dict[str, list[str]] = {}
+
+    def fetch(name: str) -> None:
+        try:
+            ids = backends.list_models(name)
+        except Exception:
+            return
+        if ids:
+            results[name] = ids
+
+    threads = [
+        threading.Thread(target=fetch, args=(name,), daemon=True)
+        for name in backends.PROVIDERS
+    ]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + CATALOG_FETCH_WAIT
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    catalog = dict(results)
+    if catalog:
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(
+                    {"fetched": datetime.datetime.now().isoformat(), "models": catalog}
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return catalog
+
+
+def available_models(agent, state_dir: Path | None = None) -> list[tuple[str, str]]:
     """(name, description) pairs for the /model picker: installed Ollama
-    models plus the cloud providers. Ollama being down just hides the local
-    ones."""
+    models, the cloud providers, and — when credentials + network allow —
+    each provider's actual model catalog. Ollama being down just hides the
+    local ones."""
     provider_now = getattr(agent, "provider", "ollama")
     models = []
     try:
@@ -379,6 +434,12 @@ def available_models(agent) -> list[tuple[str, str]]:
         current = " · current" if provider_now == pname else ""
         models.append((pname, f"cloud · default {provider.default_model}{current}"))
     models.append(("claude-max", "cloud · Claude subscription (restart to switch)"))
+    catalog = cloud_model_catalog(state_dir) if state_dir is not None else {}
+    for pname, ids in catalog.items():
+        label = PROVIDER_LABELS.get(pname, pname)
+        for model_id in ids:
+            current = " · current" if provider_now == pname and agent.model == model_id else ""
+            models.append((f"{pname}:{model_id}", f"cloud · {label}{current}"))
     return models
 
 
@@ -525,7 +586,7 @@ def handle_slash(
             switch_model(agent, parts[1])
         elif _box is not None:
             # Interactive: same live-filter picker as /resume, over models.
-            models = available_models(agent)
+            models = available_models(agent, state_dir)
             selected = _box.pick(
                 lambda query: rank_models(models, query),
                 render=lambda model: f"{model[0]:<28} {model[1]}",
