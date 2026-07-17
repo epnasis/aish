@@ -2,12 +2,14 @@
 audit trail of every command decision, in one file per session."""
 
 import datetime
+import difflib
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 TITLE_MAX = 60
+FUZZY_THRESHOLD = 0.55
 _BANG_RE = re.compile(r"^\[I ran `(.+?)` myself")
 
 
@@ -53,31 +55,39 @@ class SessionLog:
         return messages
 
     @staticmethod
-    def info(path: Path) -> SessionInfo | None:
-        """Summary line for a session picker; None for empty sessions.
-        The title is the first user message — cheap, deterministic, and it
-        almost always names the task."""
-        messages = SessionLog.load_messages(path)
-        if not messages:
-            return None
-        title = "(no user input)"
+    def _derive_title(messages: list[dict]) -> str:
+        """Untruncated title: the first user message — cheap, deterministic,
+        and it almost always names the task."""
         for message in messages:
             if message.get("role") == "user":
                 content = " ".join((message.get("content") or "").split())
                 bang = _BANG_RE.match(content)
-                title = f"! {bang.group(1)}" if bang else content
-                break
-        if len(title) > TITLE_MAX:
-            title = title[: TITLE_MAX - 1] + "…"
+                return f"! {bang.group(1)}" if bang else content
+        return "(no user input)"
 
+    @staticmethod
+    def _started_at(path: Path) -> datetime.datetime:
         try:  # session-YYYYmmdd-HHMMSS[-ffffff].jsonl
             _, day, clock = path.stem.split("-")[:3]
-            when = datetime.datetime.strptime(f"{day}-{clock}", "%Y%m%d-%H%M%S")
+            return datetime.datetime.strptime(f"{day}-{clock}", "%Y%m%d-%H%M%S")
         except ValueError:
-            when = datetime.datetime.fromtimestamp(path.stat().st_mtime)
-        return SessionInfo(
-            path=path, when=when.strftime("%b %d %H:%M"), count=len(messages), title=title
-        )
+            return datetime.datetime.fromtimestamp(path.stat().st_mtime)
+
+    @staticmethod
+    def _info_from(path: Path, messages: list[dict]) -> SessionInfo:
+        title = SessionLog._derive_title(messages)
+        if len(title) > TITLE_MAX:
+            title = title[: TITLE_MAX - 1] + "…"
+        when = SessionLog._started_at(path).strftime("%Y-%m-%d %H:%M")
+        return SessionInfo(path=path, when=when, count=len(messages), title=title)
+
+    @staticmethod
+    def info(path: Path) -> SessionInfo | None:
+        """Summary line for a session picker; None for empty sessions."""
+        messages = SessionLog.load_messages(path)
+        if not messages:
+            return None
+        return SessionLog._info_from(path, messages)
 
     @staticmethod
     def list_sessions(state_dir: Path, exclude: set | None = None) -> list[SessionInfo]:
@@ -91,6 +101,46 @@ class SessionLog:
             if info:
                 infos.append(info)
         return infos
+
+    @staticmethod
+    def search_sessions(
+        state_dir: Path, query: str, exclude: set | None = None
+    ) -> list[SessionInfo]:
+        """Deterministic ranked search over titles and full message contents —
+        no LLM. Tiers: exact title, phrase in title, phrase in contents, all
+        words in contents, fuzzy title similarity (difflib). Ties keep
+        newest-first order."""
+        exclude = exclude or set()
+        query_cf = " ".join(query.split()).casefold()
+        words = query_cf.split()
+        if not words:
+            return []
+        ranked = []
+        for path in sorted(state_dir.glob("session-*.jsonl"), reverse=True):
+            if path in exclude:
+                continue
+            messages = SessionLog.load_messages(path)
+            if not messages:
+                continue
+            title_cf = SessionLog._derive_title(messages).casefold()
+            content_cf = " ".join(
+                " ".join((m.get("content") or "").split()) for m in messages
+            ).casefold()
+            if title_cf == query_cf:
+                score = 5
+            elif query_cf in title_cf:
+                score = 4
+            elif query_cf in content_cf:
+                score = 3
+            elif all(word in content_cf for word in words):
+                score = 2
+            elif difflib.SequenceMatcher(None, query_cf, title_cf).ratio() >= FUZZY_THRESHOLD:
+                score = 1
+            else:
+                continue
+            ranked.append((score, SessionLog._info_from(path, messages)))
+        ranked.sort(key=lambda pair: -pair[0])  # stable: newest first within a tier
+        return [info for _, info in ranked]
 
     def _record(self, kind: str, **fields) -> None:
         record = {

@@ -359,6 +359,59 @@ def test_resume_invalid_number(tmp_path, capsys):
     assert "no such session" in capsys.readouterr().out
 
 
+def test_resume_search_loads_single_match_directly(tmp_path, capsys):
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+    handle_slash("/resume january", agent, logref, tmp_path, set())
+    out = capsys.readouterr().out
+    assert "resume which?" not in out  # one match: no picker needed
+    assert "resumed" in out and "session-20260101" in out
+
+
+def test_resume_search_picker_defaults_to_best_match(tmp_path, capsys, monkeypatch):
+    from aish.cli import handle_slash
+    from aish.session import SessionLog
+
+    agent, logref = two_session_setup(tmp_path)
+    third = SessionLog(tmp_path / "session-20260301-000000-000000.jsonl")
+    third.message({"role": "user", "content": "from january too"})
+
+    scripted_input(monkeypatch, [""])  # Enter = best match
+    handle_slash("/resume from january", agent, logref, tmp_path, set())
+    out = capsys.readouterr().out
+    # ranked picker: exact title first despite being oldest, then title phrase
+    assert out.index("from january\n") < out.index("from january too")
+    assert "resumed" in out and "session-20260101" in out  # Enter took the best match
+
+
+def test_resume_search_no_match(tmp_path, capsys):
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+    handle_slash("/resume nonexistent topic", agent, logref, tmp_path, set())
+    assert "no session matches" in capsys.readouterr().out
+    assert len(agent.messages) == 1  # nothing loaded
+
+
+def test_resume_lists_all_sessions_not_just_ten(tmp_path, capsys, monkeypatch):
+    from aish.agent import Agent
+    from aish.cli import LogRef, handle_slash
+    from aish.session import SessionLog
+
+    for day in range(1, 13):
+        log = SessionLog(tmp_path / f"session-202601{day:02d}-000000-000000.jsonl")
+        log.message({"role": "user", "content": f"task number {day}"})
+
+    agent = Agent(model="fake", approve=lambda _c: None, client_chat=lambda **_k: None)
+    logref = LogRef(SessionLog.new(tmp_path))
+    scripted_input(monkeypatch, ["q"])
+    handle_slash("/resume", agent, logref, tmp_path, set())
+    out = capsys.readouterr().out
+    assert " 12." in out and "task number 1" in out  # oldest still listed
+    assert "2026-01-12" in out  # full start date with year
+
+
 def test_session_info_slug_and_time(tmp_path):
     from aish.session import SessionLog
 
@@ -366,7 +419,7 @@ def test_session_info_slug_and_time(tmp_path):
     log.message({"role": "user", "content": "  count the .py   files\nunder ~/dev  "})
     info = SessionLog.info(log.path)
     assert info.title == "count the .py files under ~/dev"
-    assert info.when == "Jul 12 23:27"
+    assert info.when == "2026-07-12 23:27"
     assert info.count == 1
 
 
