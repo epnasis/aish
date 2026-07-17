@@ -5,6 +5,7 @@ import datetime
 import difflib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -447,31 +448,41 @@ def rank_models(models: list[tuple[str, str]], query: str) -> list[tuple[str, st
     """Deterministic picker ranking: exact name, name prefix, substring in
     name or description, then fuzzy name similarity. Ties keep list order.
 
-    A query that itself names a cloud model (provider:model) becomes a
-    selectable row on top — the static list can't enumerate provider
-    catalogs, so the exact string the user typed is the offer."""
+    Multi-word queries match per word ("gem pro" finds gemini-3.5-pro),
+    and each word may be a typo (fuzzy against the name/description
+    tokens). A query that itself names a cloud model (provider:model)
+    becomes a selectable row on top — the static list can't enumerate
+    provider catalogs, so the exact string the user typed is the offer."""
     query_cf = " ".join(query.split()).casefold()
     if not query_cf:
         return models
+    words = query_cf.split()
     ranked = []
     raw = query.strip()
     provider, sep, rest = raw.partition(":")
     provider = provider.casefold()
     if sep and rest and (provider in backends.PROVIDERS or provider == "claude-max"):
         label = PROVIDER_LABELS.get(provider, provider)
-        ranked.append((5, (f"{provider}:{rest}", f"cloud · {label} · this exact model")))
+        ranked.append((6, (f"{provider}:{rest}", f"cloud · {label} · this exact model")))
     for model in models:
         name_cf = model[0].casefold()
+        hay = f"{name_cf} {model[1].casefold()}"
         if name_cf == query_cf:
-            score = 4
+            score = 5
         elif name_cf.startswith(query_cf):
+            score = 4
+        elif query_cf in hay:
             score = 3
-        elif query_cf in name_cf or query_cf in model[1].casefold():
+        elif all(word in hay for word in words):
             score = 2
-        elif difflib.SequenceMatcher(None, query_cf, name_cf).ratio() >= 0.55:
-            score = 1
         else:
-            continue
+            tokens = frozenset(re.split(r"[^a-z0-9]+", hay)) - {""}
+            if all(
+                difflib.get_close_matches(word, tokens, n=1, cutoff=0.75) for word in words
+            ) or difflib.SequenceMatcher(None, query_cf, name_cf).ratio() >= 0.55:
+                score = 1
+            else:
+                continue
         ranked.append((score, model))
     ranked.sort(key=lambda pair: -pair[0])
     return [model for _, model in ranked]

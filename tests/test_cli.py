@@ -543,6 +543,21 @@ class TestModelPicker:
         assert rank_models(models, "qwn3")[0][0] == "qwen3:8b"  # fuzzy typo
         assert rank_models(models, "zzz") == []
 
+    def test_rank_models_multi_word_queries(self):
+        from aish.cli import rank_models
+
+        models = [
+            ("gemini:gemini-3.5-pro", "cloud · Google Gemini"),
+            ("gemini:gemini-3.5-flash", "cloud · Google Gemini"),
+            ("qwen3:8b", "local · 5 GB"),
+        ]
+        # words match independently anywhere in name+description
+        assert rank_models(models, "gem pro")[0][0] == "gemini:gemini-3.5-pro"
+        # each word may be a typo (per-word fuzzy against name tokens)
+        assert rank_models(models, "gemni flsh")[0][0] == "gemini:gemini-3.5-flash"
+        # a word matching nothing kills the row
+        assert all("qwen" not in name for name, _ in rank_models(models, "gem zzz"))
+
     def test_rank_models_offers_typed_cloud_model(self):
         from aish.cli import rank_models
 
