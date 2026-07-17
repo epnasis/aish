@@ -86,9 +86,9 @@ in/out of it by restarting aish rather than `/model`.
 
 | Tool | What | Gate |
 |------|------|------|
-| `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve) |
+| `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve inside the session roots) |
 | `write_file` / `edit_file` | create or edit files | **colored diff + y/N** |
-| `read_file` | read a file | auto, but **prompts on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
+| `read_file` | read a file | auto inside the session roots; **prompts outside them and on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
 | `web_search` / `read_url` | DuckDuckGo + fetch page as readable text | auto; every query/URL echoed |
 | `read_docs` | man page → `--help` fallback, full-text `topic` search | auto |
 | `remember` | save a lesson to `~/.config/aish/lessons.md` | auto (echoed) |
@@ -105,6 +105,13 @@ reads) run **in parallel**. Fetched web pages are wrapped in an
    conservatively-parsed set of read-only commands (`ls`, `grep`, `find`
    without `-exec`, …); anything the parser doesn't fully understand prompts.
    `--ask-all` disables auto-approval entirely.
+   Auto-approval is also **scoped to the session roots** (the launch
+   directory): commands with path arguments escaping them (absolute, `~`, or
+   `..` paths — symlinks resolved) and `read_file` outside them prompt, even
+   when allowlisted. `/cd <dir>` moves the session to another project (cwd
+   *and* root — Tab completes directories); `/add-dir <dir>` (alias
+   `/dir-add`) allows another tree as well; both are user-only — a model-issued
+   `cd` moves only the working directory and never widens the scope.
 2. **Denylist** — unrecoverable classes (`rm -rf`, `shred`, `mkfs`, `dd` to raw
    devices, `diskutil erase*`, `git clean -f`, `git push --force`) are blocked
    outright, even if you'd approve them; edited commands are re-checked. Only

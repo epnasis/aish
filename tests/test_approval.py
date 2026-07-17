@@ -234,3 +234,80 @@ class TestLooksDestructive:
             "grep -f patterns.txt file",
         ):
             assert not looks_destructive(command), command
+
+
+class TestRootScoping:
+    """Auto-approval confined to session roots: path arguments escaping every
+    root force a prompt, even for read-only or allowlisted commands."""
+
+    def approvable(self, command, root, cwd=None, prefixes=(), extra_roots=()):
+        return is_auto_approvable(
+            command, list(prefixes), cwd=cwd or str(root), roots=[root, *extra_roots]
+        )
+
+    def test_relative_paths_inside_root_approve(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        assert self.approvable("ls src", tmp_path)
+        assert self.approvable("grep -r TODO src", tmp_path)
+        assert self.approvable("cat README.md", tmp_path)
+
+    def test_absolute_path_outside_root_prompts(self, tmp_path):
+        assert not self.approvable("cat /etc/hosts", tmp_path)
+        assert not self.approvable("ls /", tmp_path)
+
+    def test_absolute_path_inside_root_approves(self, tmp_path):
+        target = tmp_path / "notes.txt"
+        target.write_text("x")
+        assert self.approvable(f"cat {target}", tmp_path)
+
+    def test_dotdot_escape_prompts(self, tmp_path):
+        root = tmp_path / "project"
+        root.mkdir()
+        (tmp_path / "secret.txt").write_text("x")
+        assert not self.approvable("cat ../secret.txt", root)
+        # .. that stays inside the root is fine
+        sub = root / "sub"
+        sub.mkdir()
+        assert self.approvable("cat ../file", root, cwd=str(sub))
+
+    def test_home_anchored_path_prompts(self, tmp_path):
+        assert not self.approvable("ls ~", tmp_path)
+        assert not self.approvable("cat ~/.zshrc", tmp_path)
+
+    def test_cwd_outside_roots_kills_auto_approval(self, tmp_path):
+        root = tmp_path / "project"
+        elsewhere = tmp_path / "elsewhere"
+        root.mkdir()
+        elsewhere.mkdir()
+        # even a bare read-only command: relative paths would resolve outside
+        assert not self.approvable("ls", root, cwd=str(elsewhere))
+
+    def test_allowlist_does_not_bypass_scoping(self, tmp_path):
+        assert not self.approvable(
+            "git log /etc", tmp_path, prefixes=["git log"]
+        )
+        assert self.approvable("git log .", tmp_path, prefixes=["git log"])
+
+    def test_added_root_widens_scope(self, tmp_path):
+        root = tmp_path / "project"
+        other = tmp_path / "other"
+        root.mkdir()
+        other.mkdir()
+        assert not self.approvable(f"ls {other}", root)
+        assert self.approvable(f"ls {other}", root, extra_roots=[other])
+
+    def test_flag_value_paths_are_checked(self, tmp_path):
+        assert not self.approvable("grep --file=/etc/passwd pattern .", tmp_path)
+        # plain flags never trip the scan
+        assert self.approvable("ls -la", tmp_path)
+
+    def test_symlink_escape_prompts(self, tmp_path):
+        root = tmp_path / "project"
+        root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (root / "link").symlink_to(outside)
+        assert not self.approvable(f"ls {root / 'link'}", root)
+
+    def test_no_scope_args_keeps_old_behavior(self):
+        assert is_auto_approvable("cat /etc/hosts", [])

@@ -39,7 +39,10 @@ RESET = "\033[0m"
 ECHO_PREVIEW_LINES = 12
 REPLAY_TOOL_LINES = 4
 
-SLASH_COMMANDS = ("/clear", "/exit", "/help", "/jobs", "/model", "/new", "/quit", "/resume")
+SLASH_COMMANDS = (
+    "/add-dir", "/cd", "/clear", "/dir-add", "/exit", "/help", "/jobs",
+    "/model", "/new", "/quit", "/resume",
+)
 
 SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
   /resume        pick an earlier session: type to filter by title and
@@ -53,6 +56,11 @@ SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
                  openai:/claude: — bare provider name picks a default); no
                  arg opens a searchable picker of local + cloud models
                  (typing provider:model there offers that exact model)
+  /cd <dir>      move the session to another project: changes the working
+                 directory AND re-anchors the auto-approval root there
+                 (Tab completes directories); !cd only moves the directory
+  /add-dir <dir> allow auto-approved reads/commands in another directory
+                 tree too (alias /dir-add); no arg lists current roots
   /jobs          list background jobs started this session
   /help          this help
   /quit, /exit   quit (plain 'exit' works too)
@@ -130,7 +138,17 @@ def allow_segments_flow(command: str, allow_path: Path) -> None:
         print(f"{DIM}  saved: {answer or suggestion} → {allow_path}{RESET}")
 
 
-def make_approver(ask_all: bool, allow_path: Path, log, deny_path: Path = DEFAULT_DENYLIST):
+def make_approver(
+    ask_all: bool,
+    allow_path: Path,
+    log,
+    deny_path: Path = DEFAULT_DENYLIST,
+    get_scope=None,
+):
+    """get_scope() -> (cwd, roots): the agent's live directory scope, bound
+    late because the agent is constructed after its approver. When present,
+    auto-approval is confined to the session roots."""
+
     def record(command: str, decision: str) -> None:
         if log:
             log.command(command, decision)
@@ -145,7 +163,10 @@ def make_approver(ask_all: bool, allow_path: Path, log, deny_path: Path = DEFAUL
             record(command, f"blocked: {reason}")
             return Blocked(reason)
 
-        if not ask_all and is_auto_approvable(command, load_prefixes(allow_path)):
+        cwd, roots = get_scope() if get_scope else (None, None)
+        if not ask_all and is_auto_approvable(
+            command, load_prefixes(allow_path), cwd=cwd, roots=roots
+        ):
             print(f"\n{GREEN}✓ auto-approved:{RESET} {BOLD}{command}{RESET}")
             record(command, "auto")
             return command
@@ -227,12 +248,17 @@ def make_write_approver(log):
 
 
 def make_read_approver(log):
-    """Prompt before an auto-approved read_file touches a secret-bearing path,
-    so an injected read_file can't silently pull keys into context."""
+    """Prompt before an auto-approved read_file touches a secret-bearing path
+    or one outside the session roots, so an injected read_file can't silently
+    pull keys — or arbitrary files elsewhere on the machine — into context."""
 
-    def approve_read(path: str) -> bool:
-        print(f"\n{YELLOW}{BOLD}▶ read sensitive file?{RESET} {BOLD}{path}{RESET} "
-              f"{RED}⚠ may contain secrets{RESET}")
+    def approve_read(path: str, reason: str = "sensitive") -> bool:
+        if reason == "outside":
+            print(f"\n{YELLOW}{BOLD}▶ read file outside the project?{RESET} "
+                  f"{BOLD}{path}{RESET} {DIM}(/cd or /add-dir widens the scope){RESET}")
+        else:
+            print(f"\n{YELLOW}{BOLD}▶ read sensitive file?{RESET} {BOLD}{path}{RESET} "
+                  f"{RED}⚠ may contain secrets{RESET}")
         try:
             answer = input(f"{YELLOW}[y/N]{RESET} ").strip().lower()
         except EOFError:
@@ -610,6 +636,25 @@ def handle_slash(
             print(f"{DIM}current model: {agent.model} — /model <name> to switch "
                   f"('ollama list' shows local models; gemini:/openai: for cloud){RESET}")
         return "handled"
+    if command == "/cd":
+        parts = task.split(maxsplit=1)
+        if len(parts) < 2:
+            roots = ", ".join(str(r) for r in agent.roots)
+            print(f"{DIM}cwd: {agent.cwd} · roots: {roots} — /cd <dir> moves both{RESET}")
+            return "handled"
+        agent.rebase(parts[1].strip())  # echoes its own result/error
+        return "handled"
+    if command in ("/add-dir", "/dir-add"):
+        parts = task.split(maxsplit=1)
+        if len(parts) < 2:
+            for root in agent.roots:
+                print(f"{DIM}  root: {root}{RESET}")
+            print(f"{DIM}/add-dir <dir> allows auto-approved work there too{RESET}")
+            return "handled"
+        result = agent.add_root(parts[1].strip())
+        color = RED if result.startswith("ERROR") else DIM
+        print(f"{color}{result}{RESET}")
+        return "handled"
     if command == "/jobs":
         print(f"{DIM}{tools.jobs_table()}{RESET}")
         return "handled"
@@ -677,7 +722,12 @@ About aish (you) — use this to answer questions about your own usage:
 {identity_context(model, provider)}
 - Approval prompt keys: y=run once, n=deny, a=always allow (saves command \
 prefixes to {allow_path}; chained |/&&/|| segments are vetted and allowlisted \
-independently; read-only commands auto-approve), e=edit the command first.
+independently; read-only commands auto-approve), e=edit the command first. \
+Auto-approval is confined to the session roots (the launch directory plus \
+any the user added): commands whose path arguments point outside them, and \
+read_file outside them, prompt even when otherwise read-only or allowlisted. \
+Only the user can widen this via /cd or /add-dir — if you need a file \
+outside the roots, just try; the user will be prompted.
 - File tools: prefer read_file/write_file/edit_file over cat/sed/heredocs for \
 working with files. read_file takes optional offset (1-based start line) and \
 limit — use it for line ranges instead of `sed -n`/`head`/`tail`, which need \
@@ -705,7 +755,10 @@ fresh conversation and clears the screen; /model <name> switches the model \
 and /model alone opens the same type-to-filter picker over installed Ollama \
 models and the cloud providers (typing provider:model inside the picker \
 offers that exact cloud model as a selectable row); /jobs lists \
-background jobs; /help lists commands; /quit or /exit quits.
+background jobs; /help lists commands; /quit or /exit quits; /cd <dir> \
+moves the working directory AND re-anchors the session root there (user \
+only; !cd and your cd move only the working directory); /add-dir <dir> \
+(alias /dir-add) adds another directory tree to the session roots.
 - Long-running commands (servers, watchers, big upgrades): set \
 background=true on run_command — it detaches, survives aish exiting, and \
 logs to a file you can tail with normal commands. The user can also detach a \
@@ -900,6 +953,15 @@ def main() -> int:
     def print_token(token: str) -> None:
         print(f"{GREEN}{token}{RESET}", end="", flush=True)
 
+    # The approver needs the agent's live cwd/roots, but the agent is built
+    # with the approver — so the scope binds late through this holder.
+    agent_holder: list = []
+
+    def get_scope():
+        if agent_holder:
+            return agent_holder[0].cwd, agent_holder[0].roots
+        return cwd, [Path(cwd).resolve()]
+
     if provider == "claude-max":
         from .claude_max import ClaudeMaxAgent, api_key_warning
 
@@ -908,7 +970,7 @@ def main() -> int:
             print(f"{YELLOW}warning: {warning}{RESET}")
         agent = ClaudeMaxAgent(
             model=model_name,
-            approve=make_approver(args.ask_all, allow_path, logref, deny_path),
+            approve=make_approver(args.ask_all, allow_path, logref, deny_path, get_scope),
             approve_write=make_write_approver(logref),
             approve_read=make_read_approver(logref),
             echo=echo,
@@ -926,7 +988,7 @@ def main() -> int:
         agent = Agent(
             model=model_name,
             client_chat=chat,
-            approve=make_approver(args.ask_all, allow_path, logref, deny_path),
+            approve=make_approver(args.ask_all, allow_path, logref, deny_path, get_scope),
             approve_write=make_write_approver(logref),
             approve_read=make_read_approver(logref),
             echo=echo,
@@ -943,6 +1005,9 @@ def main() -> int:
             status=_timer,
         )
         agent.provider = provider
+    agent_holder.append(agent)
+    if _box is not None:
+        _box.get_cwd = lambda: agent.cwd  # /cd path completion follows the agent
     if history:
         agent.load_history(history)
         print(f"{DIM}resumed {len(history)} messages from {log.path.name}"

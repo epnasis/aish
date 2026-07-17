@@ -56,7 +56,7 @@ class ClaudeMaxAgent:
             model="unused",
             approve=approve or (lambda _c: None),
             approve_write=approve_write or (lambda _p: False),
-            approve_read=approve_read or (lambda _p: True),
+            approve_read=approve_read or (lambda _p, _r: True),
             echo=echo,
             stream=stream,
             client_chat=self._never_called,
@@ -86,6 +86,28 @@ class ClaudeMaxAgent:
     @property
     def cwd(self) -> str:
         return self.inner.cwd
+
+    @property
+    def roots(self):
+        return self.inner.roots
+
+    def rebase(self, target: str) -> str:
+        result = self.inner.rebase(target)
+        if not result.startswith("ERROR"):
+            self._pending_notes.append(
+                f"[I moved the session to {self.cwd} with /cd — this directory "
+                "is the project now]"
+            )
+        return result
+
+    def add_root(self, target: str) -> str:
+        result = self.inner.add_root(target)
+        if result.startswith("[added"):
+            self._pending_notes.append(
+                f"[I added {self.roots[-1]} as a session root with /add-dir — "
+                "you may work there too]"
+            )
+        return result
 
     @staticmethod
     def _load_sdk():

@@ -48,6 +48,16 @@ def is_sensitive_path(path: str, cwd: str) -> bool:
     return name.endswith(_SENSITIVE_SUFFIXES)
 
 
+def is_outside_roots(path: str, cwd: str, roots) -> bool:
+    """True when the resolved target (symlinks and .. defused) escapes every
+    session root. Fail closed: unresolvable paths count as outside."""
+    try:
+        target = resolve(path, cwd).resolve()
+        return not any(target.is_relative_to(Path(r).resolve()) for r in roots)
+    except OSError:
+        return True
+
+
 def read_file(path: str, cwd: str, offset: int = 1, limit: int = READ_MAX_LINES) -> str:
     target = resolve(path, cwd)
     try:

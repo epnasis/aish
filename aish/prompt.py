@@ -10,12 +10,13 @@ Tab / menu completes slash commands · Ctrl-C aborts input · Ctrl-D on empty
 input quits.
 """
 
+import os
 from pathlib import Path
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.completion import Completer, Completion, PathCompleter
 from prompt_toolkit.cursor_shapes import ModalCursorShapeConfig
 from prompt_toolkit.document import Document
 from prompt_toolkit.enums import EditingMode
@@ -33,26 +34,44 @@ RULE_STYLE = "fg:ansibrightblack"
 PICKER_MAX_ROWS = 10
 
 
-class SlashCompleter(Completer):
-    """Complete slash commands, only as the first word of the input."""
+# Slash commands whose argument is a directory — their args get path completion.
+DIR_ARG_COMMANDS = ("/cd", "/add-dir", "/dir-add")
 
-    def __init__(self, commands: tuple[str, ...]):
+
+class SlashCompleter(Completer):
+    """Complete slash commands as the first word; directory paths after
+    commands that take one (/cd, /add-dir)."""
+
+    def __init__(self, commands: tuple[str, ...], get_cwd=os.getcwd):
         self.commands = commands
+        self._dirs = PathCompleter(
+            only_directories=True, expanduser=True, get_paths=lambda: [get_cwd()]
+        )
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
-        if text.startswith("/") and " " not in text and "\n" not in text:
+        if not text.startswith("/") or "\n" in text:
+            return
+        first, sep, rest = text.partition(" ")
+        if not sep:
             for command in self.commands:
                 if command.startswith(text):
                     yield Completion(command, start_position=-len(text))
+            return
+        if first in DIR_ARG_COMMANDS:
+            sub = Document(rest, cursor_position=len(rest))
+            yield from self._dirs.get_completions(sub, complete_event)
 
 
 class BoxPrompt:
     def __init__(self, vi_mode: bool, state_dir: Path, commands: tuple[str, ...] = ()):
         state_dir.mkdir(parents=True, exist_ok=True)
         self.vi_mode = vi_mode
+        # Rebindable after construction (the agent that owns the live cwd is
+        # created later): path completion for /cd et al. resolves against it.
+        self.get_cwd = os.getcwd
         self._history = FileHistory(str(state_dir / "history"))
-        self._completer = SlashCompleter(commands)
+        self._completer = SlashCompleter(commands, get_cwd=lambda: self.get_cwd())
         self._edit_session = PromptSession(vi_mode=vi_mode)
 
     def edit(self, initial: str) -> str:

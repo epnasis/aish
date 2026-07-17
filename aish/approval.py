@@ -12,6 +12,7 @@ evaluated independently: ALL segments must be read-only or user-allowlisted
 for the whole command to auto-approve.
 """
 
+import os
 import re
 import shlex
 from pathlib import Path
@@ -164,11 +165,63 @@ def is_read_only(command: str) -> bool:
     return segments is not None and all(_segment_is_safe(s) for s in segments)
 
 
-def is_auto_approvable(command: str, prefixes: list[str]) -> bool:
-    """True if EVERY chained segment is independently read-only or matches a
-    user-persisted prefix. One unvetted segment means the whole command prompts."""
+def _within_roots(target: Path, resolved_roots: list[Path]) -> bool:
+    return any(target.is_relative_to(r) for r in resolved_roots)
+
+
+def _token_escapes(token: str, cwd: str, resolved_roots: list[Path]) -> bool:
+    """Conservative: only tokens that could name a path outside the session
+    roots trip this — absolute, ~-anchored, or containing '..'. Plain relative
+    tokens can't leave the cwd (itself verified to be under a root)."""
+    candidate = token.split("=", 1)[1] if token.startswith("-") and "=" in token else token
+    if token.startswith("-") and candidate is token:
+        return False
+    expanded = os.path.expanduser(candidate)
+    anchored = os.path.isabs(expanded)
+    if not anchored and ".." not in Path(candidate).parts:
+        return False
+    try:
+        target = (Path(expanded) if anchored else Path(cwd) / expanded).resolve()
+        return not _within_roots(target, resolved_roots)
+    except OSError:
+        return True
+
+
+def _segment_escapes_roots(segment: str, cwd: str, resolved_roots: list[Path]) -> bool:
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return True
+    return any(_token_escapes(t, cwd, resolved_roots) for t in tokens[1:])
+
+
+def paths_escape_roots(command: str, cwd: str, roots) -> bool:
+    """True when the command's cwd or any path-like argument resolves outside
+    every session root — such commands prompt instead of auto-approving, so a
+    read-only verb can't quietly pull files from elsewhere on the machine."""
+    try:
+        resolved_roots = [Path(r).resolve() for r in roots]
+        if not _within_roots(Path(cwd).resolve(), resolved_roots):
+            return True
+    except OSError:
+        return True
     segments = split_chain(command)
     if segments is None:
+        return True
+    return any(_segment_escapes_roots(s, cwd, resolved_roots) for s in segments)
+
+
+def is_auto_approvable(
+    command: str, prefixes: list[str], cwd: str | None = None, roots=None
+) -> bool:
+    """True if EVERY chained segment is independently read-only or matches a
+    user-persisted prefix. One unvetted segment means the whole command prompts.
+    When cwd/roots are given, path arguments escaping the roots also force a
+    prompt — and the user allowlist never bypasses that check."""
+    segments = split_chain(command)
+    if segments is None:
+        return False
+    if cwd is not None and roots and paths_escape_roots(command, cwd, roots):
         return False
     return all(_segment_is_safe(s) or _prefix_approves(s, prefixes) for s in segments)
 

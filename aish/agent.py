@@ -16,6 +16,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import ollama
@@ -181,7 +182,7 @@ class Agent:
         model: str,
         approve: Callable[[str], Any],
         approve_write: Callable[[Any], bool] = lambda _plan: False,
-        approve_read: Callable[[str], bool] = lambda _path: True,
+        approve_read: Callable[[str, str], bool] = lambda _path, _reason: True,
         echo: Callable[[str], None] = lambda _: None,
         stream: Callable[[str], None] | None = None,
         client_chat: Callable[..., Any] = ollama.chat,
@@ -207,6 +208,10 @@ class Agent:
         self.max_steps = max_steps
         self.think = think
         self.cwd = cwd or os.getcwd()
+        # Session roots: auto-approved reads/commands are confined to these
+        # trees. Seeded with the launch dir; only user-typed slash commands
+        # (/cd, /add-dir) may change them — model-issued cd moves cwd only.
+        self.roots: list[Path] = [Path(self.cwd).resolve()]
         self.on_message = on_message
         self.on_token = on_token
         self.job_log_dir = job_log_dir
@@ -411,6 +416,35 @@ class Agent:
         )
         return result
 
+    def rebase(self, target: str) -> str:
+        """User-typed /cd: move cwd AND re-anchor the primary session root.
+        Never reachable by the model — that's what keeps root scoping honest."""
+        result = self._change_dir(target)
+        if result.startswith("ERROR"):
+            return result
+        self.roots[0] = Path(self.cwd).resolve()
+        self.echo(f"[session root re-anchored to {self.roots[0]}]")
+        self._append(
+            {"role": "user", "content": f"[I moved the session to {self.cwd} with /cd — "
+             "this directory is the project now]"}
+        )
+        return result
+
+    def add_root(self, target: str) -> str:
+        """User-typed /add-dir: allow auto-approved reads/commands in another tree."""
+        path = Path(os.path.expanduser(target))
+        if not path.is_absolute():
+            path = Path(self.cwd) / path
+        path = path.resolve()
+        if not path.is_dir():
+            return f"ERROR: no such directory: {path}"
+        if path in self.roots:
+            return f"[{path} is already a session root]"
+        self.roots.append(path)
+        note = f"[I added {path} as a session root with /add-dir — you may work there too]"
+        self._append({"role": "user", "content": note})
+        return f"[added session root {path}]"
+
     def _execute_tool_calls(self, tool_calls: list[dict]) -> list[str]:
         """Run one model turn's tool calls; results keep the call order.
 
@@ -517,9 +551,16 @@ class Agent:
         return self._read_file_call(args)  # read_file
 
     def _read_needs_prompt(self, name: str, args: dict) -> bool:
-        return name == "read_file" and files.is_sensitive_path(
-            str(args.get("path", "")), self.cwd
-        )
+        path = str(args.get("path", ""))
+        return name == "read_file" and self._read_prompt_reason(path) is not None
+
+    def _read_prompt_reason(self, path: str) -> str | None:
+        """Why an otherwise auto-approved read_file must prompt, or None."""
+        if files.is_sensitive_path(path, self.cwd):
+            return "sensitive"
+        if files.is_outside_roots(path, self.cwd, self.roots):
+            return "outside"
+        return None
 
     @staticmethod
     def _int_arg(args: dict, key: str, default: int) -> int:
@@ -540,7 +581,8 @@ class Agent:
             path = str(args.get("path", ""))
             label, thunk = self._read_file_call(args)
             self.echo(label)
-            if files.is_sensitive_path(path, self.cwd) and not self.approve_read(path):
+            reason = self._read_prompt_reason(path)
+            if reason is not None and not self.approve_read(path, reason):
                 return READ_DENIED
             return thunk()
 

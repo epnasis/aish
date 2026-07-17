@@ -928,7 +928,7 @@ class TestFileTools:
         asked = []
         agent, _ = make_agent(
             [model_says(tool_calls=[self.call("read_file", path=".env")]), model_says("ok")],
-            approve_read=lambda p: asked.append(p) or False,
+            approve_read=lambda p, _r: asked.append(p) or False,
             cwd=str(tmp_path),
         )
         agent.run_task("read env")
@@ -942,7 +942,7 @@ class TestFileTools:
         secret.write_text("API_KEY=supersecret\n")
         agent, _ = make_agent(
             [model_says(tool_calls=[self.call("read_file", path=".env")]), model_says("ok")],
-            approve_read=lambda _p: True,
+            approve_read=lambda _p, _r: True,
             cwd=str(tmp_path),
         )
         agent.run_task("read env")
@@ -1065,3 +1065,117 @@ class TestRememberTool:
         agent, _ = make_agent([model_says(tool_calls=[call]), model_says("ok")])
         agent.run_task("learn")
         assert "no lessons file" in tool_messages(agent.messages)[0]["content"]
+
+
+class TestRootScoping:
+    """read_file auto-approval is confined to session roots; only the
+    user-side rebase/add_root (i.e. /cd and /add-dir) widen or move them."""
+
+    def test_read_outside_root_prompts_with_reason(self, tmp_path):
+        from aish.agent import READ_DENIED
+
+        root = tmp_path / "project"
+        root.mkdir()
+        outside = tmp_path / "elsewhere.txt"
+        outside.write_text("private\n")
+        asked = []
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("read_file", path=str(outside))]),
+             model_says("ok")],
+            approve_read=lambda p, r: asked.append((p, r)) or False,
+            cwd=str(root),
+        )
+        agent.run_task("read it")
+        assert asked == [(str(outside), "outside")]
+        result = tool_messages(agent.messages)[0]["content"]
+        assert result == READ_DENIED
+        assert "private" not in result
+
+    def test_read_inside_root_needs_no_prompt(self, tmp_path):
+        (tmp_path / "ok.txt").write_text("fine\n")
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("read_file", path="ok.txt")]),
+             model_says("ok")],
+            approve_read=lambda _p, _r: pytest.fail("in-root read must not prompt"),
+            cwd=str(tmp_path),
+        )
+        agent.run_task("read it")
+        assert "fine" in tool_messages(agent.messages)[0]["content"]
+
+    def test_sensitive_beats_outside_as_reason(self, tmp_path):
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / ".env").write_text("KEY=x\n")
+        asked = []
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("read_file", path=".env")]),
+             model_says("ok")],
+            approve_read=lambda p, r: asked.append(r) or True,
+            cwd=str(root),
+        )
+        agent.run_task("read env")
+        assert asked == ["sensitive"]
+
+    def test_model_cd_moves_cwd_but_not_root(self, tmp_path):
+        root = tmp_path / "project"
+        elsewhere = tmp_path / "elsewhere"
+        root.mkdir()
+        elsewhere.mkdir()
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("run_command", command=f"cd {elsewhere}")]),
+             model_says("moved")],
+            cwd=str(root),
+        )
+        agent.run_task("go elsewhere")
+        assert agent.cwd == str(elsewhere)
+        assert agent.roots == [root.resolve()]
+
+    def test_rebase_moves_cwd_and_root_and_tells_model(self, tmp_path):
+        root = tmp_path / "wrong"
+        right = tmp_path / "right"
+        root.mkdir()
+        right.mkdir()
+        agent, _ = make_agent([], cwd=str(root))
+        result = agent.rebase(str(right))
+        assert "working directory is now" in result
+        assert agent.cwd == str(right)
+        assert agent.roots == [right.resolve()]
+        note = agent.messages[-1]
+        assert note["role"] == "user" and "/cd" in note["content"]
+
+    def test_rebase_bad_dir_is_error_and_keeps_root(self, tmp_path):
+        agent, _ = make_agent([], cwd=str(tmp_path))
+        result = agent.rebase(str(tmp_path / "missing"))
+        assert result.startswith("ERROR")
+        assert agent.roots == [tmp_path.resolve()]
+
+    def test_rebase_keeps_added_roots(self, tmp_path):
+        a, b, c = tmp_path / "a", tmp_path / "b", tmp_path / "c"
+        for d in (a, b, c):
+            d.mkdir()
+        agent, _ = make_agent([], cwd=str(a))
+        agent.add_root(str(b))
+        agent.rebase(str(c))
+        assert agent.roots == [c.resolve(), b.resolve()]
+
+    def test_add_root_widens_read_scope(self, tmp_path):
+        root = tmp_path / "project"
+        other = tmp_path / "other"
+        root.mkdir()
+        other.mkdir()
+        (other / "doc.txt").write_text("shared\n")
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("read_file", path=str(other / "doc.txt"))]),
+             model_says("ok")],
+            approve_read=lambda _p, _r: pytest.fail("added root must not prompt"),
+            cwd=str(root),
+        )
+        agent.add_root(str(other))
+        agent.run_task("read it")
+        assert "shared" in tool_messages(agent.messages)[0]["content"]
+
+    def test_add_root_rejects_missing_and_dedupes(self, tmp_path):
+        agent, _ = make_agent([], cwd=str(tmp_path))
+        assert agent.add_root(str(tmp_path / "nope")).startswith("ERROR")
+        assert "already" in agent.add_root(str(tmp_path))
+        assert agent.roots == [tmp_path.resolve()]
