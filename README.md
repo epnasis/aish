@@ -6,9 +6,10 @@
 ```
 
 An AI agent in your terminal, powered by a **local** model via
-[Ollama](https://ollama.com). It runs shell commands, reads and edits files,
-and searches the web — with your approval at every step, and nothing sent to
-any cloud API.
+[Ollama](https://ollama.com) — or, when you want more brainpower, a cloud
+model (Gemini, Claude, OpenAI). It runs shell commands, reads and edits
+files, and searches the web — with your approval at every step. With the
+default local model, nothing is sent to any cloud API.
 
 ```
 ❯ jaki kurs usd w pln?
@@ -61,6 +62,25 @@ aish --resume                           # continue the most recent session
 ```
 
 Smaller machines: `ollama pull qwen3:8b && export AISH_MODEL=qwen3:8b`.
+
+## Cloud models (optional)
+
+The default is local-only. When a task needs a stronger model, the same agent
+(same tools, same approval gates) can run on a cloud backend — note everything
+in the conversation then leaves your machine:
+
+| `--model` (or `/model`) | Runs on | Cost |
+|---|---|---|
+| `gemini` or `gemini:<model>` | Google Gemini API | **free tier** — get a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey), `export GEMINI_API_KEY=...` (Flash models: ~1.5k requests/day at no charge) |
+| `claude` or `claude:<model>` | Anthropic API | pay per token — `export ANTHROPIC_API_KEY=...` |
+| `claude-max[:opus\|sonnet]` | Claude Agent SDK via the local `claude` CLI login | **your Claude Pro/Max subscription** — no API key; needs [Claude Code](https://claude.com/claude-code) installed and logged in |
+| `openai` or `openai:<model>` | OpenAI API | pay per token — `export OPENAI_API_KEY=...` (ChatGPT Plus can't be used via API) |
+
+Bare provider names pick a sensible default model (`gemini-3.5-flash`,
+`claude-opus-4-8`, `gpt-5.6`). `claude-max` strips Claude Code down to bare
+inference and hands it aish's own tools, so every command still goes through
+aish's approval prompt and denylist; it keeps its own session state, so switch
+in/out of it by restarting aish rather than `/model`.
 
 ## What it can do
 

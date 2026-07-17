@@ -76,13 +76,13 @@ DENIED_RESULT = (
 )
 
 EMPTY_RESPONSE = (
-    "(the model returned an empty response — Ollama may be overloaded or still "
-    "loading the model; try again, or check `ollama ps` and system load)"
+    "(the model returned an empty response — the backend may be overloaded or "
+    "still loading; try again)"
 )
 
 
 class ModelUnavailable(RuntimeError):
-    """The model call failed after a retry (Ollama down, overloaded, or OOM)."""
+    """The model call failed after a retry (backend down, overloaded, or OOM)."""
 
 
 WRITE_DENIED = (
@@ -245,7 +245,7 @@ class Agent:
             turn_start = time.perf_counter()
             self.status.start("thinking")
             try:
-                content, tool_calls, usage = self._chat_turn()
+                content, tool_calls, usage, raw_blocks = self._chat_turn()
             finally:
                 self.status.stop()
             turn_secs = time.perf_counter() - turn_start
@@ -254,6 +254,11 @@ class Agent:
             entry: dict = {"role": "assistant", "content": content}
             if tool_calls:
                 entry["tool_calls"] = tool_calls
+            if raw_blocks:
+                # Provider-native content blocks (e.g. Anthropic thinking +
+                # tool_use): the backend echoes these verbatim on the next
+                # request instead of reconstructing the turn.
+                entry["raw_blocks"] = raw_blocks
             self._append(entry)
 
             if not tool_calls:
@@ -284,11 +289,11 @@ class Agent:
             self.on_token(stopped + "\n")
         return stopped
 
-    def _chat_turn(self) -> tuple[str, list[dict], tuple[int, int]]:
-        """One model call; returns (content, normalized tool_calls, token usage).
-        Streams content through on_token when set. Retries once on a transport
-        error (a busy/overloaded local Ollama commonly drops or refuses a
-        request)."""
+    def _chat_turn(self) -> tuple[str, list[dict], tuple[int, int], list | None]:
+        """One model call; returns (content, normalized tool_calls, token usage,
+        provider-native raw blocks or None). Streams content through on_token
+        when set. Retries once on a transport error (a busy/overloaded local
+        Ollama commonly drops or refuses a request)."""
         kwargs = dict(
             model=self.model,
             messages=self.messages,
@@ -306,13 +311,15 @@ class Agent:
                     self.echo(f"model call failed ({exc}); retrying once…")
         raise ModelUnavailable(str(last_error)) from last_error
 
-    def _one_chat(self, kwargs: dict) -> tuple[str, list[dict], tuple[int, int]]:
+    def _one_chat(self, kwargs: dict) -> tuple[str, list[dict], tuple[int, int], list | None]:
+        raw_blocks = None
         if self.on_token is None:
             response = self.chat(**kwargs)
             message = response.message
             content = message.content or ""
             raw_calls = message.tool_calls or []
             usage = _usage(response)
+            raw_blocks = getattr(message, "raw_blocks", None)
         else:
             parts: list[str] = []
             raw_calls = []
@@ -330,24 +337,33 @@ class Agent:
                     self.on_token(message.content)
                 if message.tool_calls:
                     raw_calls.extend(message.tool_calls)
+                if getattr(message, "raw_blocks", None):
+                    raw_blocks = message.raw_blocks
                 if _usage(chunk) != (0, 0):  # counts arrive on the final chunk
                     usage = _usage(chunk)
             content = "".join(parts)
             if content:
                 self.on_token("\n")
-        return content, [self._normalize_call(c) for c in raw_calls], usage
+        return content, [self._normalize_call(c) for c in raw_calls], usage, raw_blocks
 
     @staticmethod
     def _normalize_call(call: Any) -> dict:
-        """Plain-dict tool call: safe to keep in history and send back to Ollama."""
+        """Plain-dict tool call: safe to keep in history and send back to the
+        backend. extra_content (e.g. Gemini thought signatures) must survive
+        the round trip — some providers reject the next request without it."""
         if isinstance(call, dict):
             function = call.get("function") or {}
             name = function.get("name", "")
             arguments = function.get("arguments") or {}
+            extra = call.get("extra_content")
         else:
             name = call.function.name
             arguments = call.function.arguments or {}
-        return {"function": {"name": name, "arguments": dict(arguments)}}
+            extra = getattr(call, "extra_content", None)
+        normalized = {"function": {"name": name, "arguments": dict(arguments)}}
+        if extra:
+            normalized["extra_content"] = extra
+        return normalized
 
     def _trim_tool_message(self, message: dict) -> bool:
         if message.get("role") != "tool":

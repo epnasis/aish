@@ -4,8 +4,11 @@ version = "0.1.0"
 description = "Local LLM agent that runs CLI commands with mandatory approval, grounded by reading man pages and --help before guessing flags"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=0.60",
+    "claude-agent-sdk>=0.2.121",
     "ddgs>=9.14.4",
     "ollama>=0.5",
+    "openai>=1.60",
     "prompt-toolkit>=3.0",
 ]
 
