@@ -21,6 +21,16 @@ class SessionInfo:
     title: str
 
 
+@dataclass
+class SessionEntry:
+    """A session preloaded for searching: display info plus casefolded
+    title/contents so ranking never re-reads the file."""
+
+    info: SessionInfo
+    title_cf: str
+    content_cf: str
+
+
 class SessionLog:
     def __init__(self, path: Path):
         self.path = path
@@ -103,44 +113,67 @@ class SessionLog:
         return infos
 
     @staticmethod
-    def search_sessions(
-        state_dir: Path, query: str, exclude: set | None = None
-    ) -> list[SessionInfo]:
-        """Deterministic ranked search over titles and full message contents —
-        no LLM. Tiers: exact title, phrase in title, phrase in contents, all
-        words in contents, fuzzy title similarity (difflib). Ties keep
-        newest-first order."""
+    def load_entries(state_dir: Path, exclude: set | None = None) -> list["SessionEntry"]:
+        """Searchable sessions, newest first, read from disk once — so a live
+        picker can re-rank on every keystroke without touching files."""
         exclude = exclude or set()
-        query_cf = " ".join(query.split()).casefold()
-        words = query_cf.split()
-        if not words:
-            return []
-        ranked = []
+        entries = []
         for path in sorted(state_dir.glob("session-*.jsonl"), reverse=True):
             if path in exclude:
                 continue
             messages = SessionLog.load_messages(path)
             if not messages:
                 continue
-            title_cf = SessionLog._derive_title(messages).casefold()
-            content_cf = " ".join(
-                " ".join((m.get("content") or "").split()) for m in messages
-            ).casefold()
-            if title_cf == query_cf:
+            entries.append(
+                SessionEntry(
+                    info=SessionLog._info_from(path, messages),
+                    title_cf=SessionLog._derive_title(messages).casefold(),
+                    content_cf=" ".join(
+                        " ".join((m.get("content") or "").split()) for m in messages
+                    ).casefold(),
+                )
+            )
+        return entries
+
+    @staticmethod
+    def rank(entries: list["SessionEntry"], query: str) -> list[SessionInfo]:
+        """Deterministic ranking over titles and full message contents — no
+        LLM. Tiers: exact title, phrase in title, phrase in contents, all
+        words in contents, fuzzy title similarity (difflib). Ties keep
+        newest-first order; an empty query keeps everything, newest first."""
+        query_cf = " ".join(query.split()).casefold()
+        words = query_cf.split()
+        if not words:
+            return [entry.info for entry in entries]
+        ranked = []
+        for entry in entries:
+            if entry.title_cf == query_cf:
                 score = 5
-            elif query_cf in title_cf:
+            elif query_cf in entry.title_cf:
                 score = 4
-            elif query_cf in content_cf:
+            elif query_cf in entry.content_cf:
                 score = 3
-            elif all(word in content_cf for word in words):
+            elif all(word in entry.content_cf for word in words):
                 score = 2
-            elif difflib.SequenceMatcher(None, query_cf, title_cf).ratio() >= FUZZY_THRESHOLD:
+            elif (
+                difflib.SequenceMatcher(None, query_cf, entry.title_cf).ratio()
+                >= FUZZY_THRESHOLD
+            ):
                 score = 1
             else:
                 continue
-            ranked.append((score, SessionLog._info_from(path, messages)))
+            ranked.append((score, entry.info))
         ranked.sort(key=lambda pair: -pair[0])  # stable: newest first within a tier
         return [info for _, info in ranked]
+
+    @staticmethod
+    def search_sessions(
+        state_dir: Path, query: str, exclude: set | None = None
+    ) -> list[SessionInfo]:
+        """One-shot ranked search; empty queries match nothing."""
+        if not query.split():
+            return []
+        return SessionLog.rank(SessionLog.load_entries(state_dir, exclude), query)
 
     def _record(self, kind: str, **fields) -> None:
         record = {

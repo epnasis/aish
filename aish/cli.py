@@ -38,10 +38,11 @@ REPLAY_TOOL_LINES = 4
 SLASH_COMMANDS = ("/clear", "/exit", "/help", "/jobs", "/model", "/new", "/quit", "/resume")
 
 SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
-  /resume        list all earlier sessions (start date + summary) to load one
-  /resume <n>    load session n from that list directly
-  /resume <text> search sessions by title and contents (exact match first,
-                 then phrase, words, fuzzy); Enter loads the best match
+  /resume        pick an earlier session: type to filter by title and
+                 contents (exact match first, then phrase, words, fuzzy),
+                 ↑/↓ select, Enter loads, Esc cancels
+  /resume <n>    load the n-th newest session directly
+  /resume <text> open the picker with the filter pre-filled
   /new, /clear   fresh conversation in a new session file (clears the screen;
                  plain 'clear' works too)
   /model [name]  show or switch the Ollama model for this session
@@ -369,41 +370,57 @@ def handle_slash(
         parts = task.split(maxsplit=1)
         arg = parts[1].strip() if len(parts) > 1 else ""
         exclude = resumed | {logref.log.path}
-        searching = bool(arg) and not arg.isdigit()
-        if searching:
-            sessions = SessionLog.search_sessions(state_dir, arg, exclude=exclude)
-            if not sessions:
-                print(f"{DIM}no session matches '{arg}'{RESET}")
-                return "handled"
-        else:
-            sessions = SessionLog.list_sessions(state_dir, exclude=exclude)
-            if not sessions:
+
+        if not arg.isdigit() and _box is not None:
+            # Interactive: live-filter picker — typing re-ranks, Enter loads.
+            entries = SessionLog.load_entries(state_dir, exclude=exclude)
+            if not entries:
                 print(f"{DIM}no earlier session to resume{RESET}")
                 return "handled"
-
-        if arg.isdigit():
-            choice = int(arg)
-        elif len(sessions) == 1:
-            choice = 1
-        else:
-            default = "best match" if searching else "latest"
-            for i, info in enumerate(sessions, 1):
-                print(f"{DIM}{i:>3}. {info.when} · {info.count:>3} msgs ·{RESET} {info.title}")
-            try:
-                answer = input(
-                    f"{YELLOW}resume which?{RESET} [1={default}] (number, q=cancel) "
-                ).strip().lower()
-            except EOFError:
-                answer = "q"
-            if answer in ("q", "quit"):
+            selected = _box.pick_session(
+                lambda query: SessionLog.rank(entries, query), initial=arg
+            )
+            if selected is None:
                 print(f"{DIM}cancelled{RESET}")
                 return "handled"
-            choice = int(answer) if answer.isdigit() else 1
-        if not 1 <= choice <= len(sessions):
-            print(f"{DIM}no such session number{RESET}")
-            return "handled"
+        else:
+            # /resume <n>, or no TTY (pipes/scripts): one-shot numbered flow.
+            searching = bool(arg) and not arg.isdigit()
+            if searching:
+                sessions = SessionLog.search_sessions(state_dir, arg, exclude=exclude)
+                if not sessions:
+                    print(f"{DIM}no session matches '{arg}'{RESET}")
+                    return "handled"
+            else:
+                sessions = SessionLog.list_sessions(state_dir, exclude=exclude)
+                if not sessions:
+                    print(f"{DIM}no earlier session to resume{RESET}")
+                    return "handled"
 
-        selected = sessions[choice - 1]
+            if arg.isdigit():
+                choice = int(arg)
+            elif len(sessions) == 1:
+                choice = 1
+            else:
+                default = "best match" if searching else "latest"
+                for i, info in enumerate(sessions, 1):
+                    print(
+                        f"{DIM}{i:>3}. {info.when} · {info.count:>3} msgs ·{RESET} {info.title}"
+                    )
+                try:
+                    answer = input(
+                        f"{YELLOW}resume which?{RESET} [1={default}] (number, q=cancel) "
+                    ).strip().lower()
+                except EOFError:
+                    answer = "q"
+                if answer in ("q", "quit"):
+                    print(f"{DIM}cancelled{RESET}")
+                    return "handled"
+                choice = int(answer) if answer.isdigit() else 1
+            if not 1 <= choice <= len(sessions):
+                print(f"{DIM}no such session number{RESET}")
+                return "handled"
+            selected = sessions[choice - 1]
         messages = SessionLog.load_messages(selected.path)
         resumed.add(selected.path)
         agent.load_history(messages)
@@ -474,12 +491,13 @@ this machine, so never put private local content into them.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` changes the shared working directory. Ctrl-C cancels only the \
 running command. Ctrl-D or `exit` quits.
-- REPL slash commands (Tab autocompletes them): /resume lists ALL earlier \
-sessions with start dates (summary = the session's first user message; \
-Enter picks the latest, /resume N picks directly); /resume <text> searches \
-session titles and full contents deterministically (exact title match, then \
-phrase, then all-words, then fuzzy — no model involved) and Enter loads the \
-best match; the chosen session is replayed into this conversation. Session \
+- REPL slash commands (Tab autocompletes them): /resume opens a live picker \
+over ALL earlier sessions with start dates (summary = the session's first \
+user message): typing filters by title and full contents deterministically \
+(exact title match, then phrase, then all-words, then fuzzy — no model \
+involved), arrow keys select, Enter loads, Esc cancels; /resume <text> \
+pre-fills the filter and /resume N loads the N-th newest directly; the \
+chosen session is replayed into this conversation. Session \
 files are append-only and never deleted — every past session stays \
 available. /new or /clear (or plain 'clear') starts a \
 fresh conversation and clears the screen; /model [name] shows or switches \

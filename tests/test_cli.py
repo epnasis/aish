@@ -394,6 +394,37 @@ def test_resume_search_no_match(tmp_path, capsys):
     assert len(agent.messages) == 1  # nothing loaded
 
 
+def test_resume_uses_live_picker_when_interactive(tmp_path, capsys, monkeypatch):
+    import aish.cli as cli
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+
+    class FakeBox:
+        def pick_session(self, search, initial=""):
+            assert initial == "jan"  # /resume <text> pre-fills the filter
+            assert [i.title for i in search("")] == ["from february", "from january"]
+            return search("january")[0]
+
+    monkeypatch.setattr(cli, "_box", FakeBox())
+    handle_slash("/resume jan", agent, logref, tmp_path, set())
+    out = capsys.readouterr().out
+    assert "resumed" in out and "session-20260101" in out
+
+
+def test_resume_live_picker_cancel(tmp_path, capsys, monkeypatch):
+    import aish.cli as cli
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+    monkeypatch.setattr(
+        cli, "_box", type("Box", (), {"pick_session": lambda self, s, initial="": None})()
+    )
+    handle_slash("/resume", agent, logref, tmp_path, set())
+    assert "cancelled" in capsys.readouterr().out
+    assert len(agent.messages) == 1  # nothing loaded
+
+
 def test_resume_lists_all_sessions_not_just_ten(tmp_path, capsys, monkeypatch):
     from aish.agent import Agent
     from aish.cli import LogRef, handle_slash

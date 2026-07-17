@@ -97,6 +97,14 @@ def test_search_no_match_and_empty_query(tmp_path):
     assert SessionLog.search_sessions(tmp_path, "   ") == []
 
 
+def test_rank_empty_query_lists_all_newest_first(tmp_path):
+    make_session(tmp_path, "session-20260101-000000-000000.jsonl", ("user", "older"))
+    make_session(tmp_path, "session-20260102-000000-000000.jsonl", ("user", "newer"))
+    entries = SessionLog.load_entries(tmp_path)
+    assert [info.title for info in SessionLog.rank(entries, "")] == ["newer", "older"]
+    assert [info.title for info in SessionLog.rank(entries, "  ")] == ["newer", "older"]
+
+
 def test_search_respects_exclude(tmp_path):
     path = make_session(tmp_path, "session-20260101-000000-000000.jsonl", ("user", "hello"))
     assert SessionLog.search_sessions(tmp_path, "hello", exclude={path}) == []

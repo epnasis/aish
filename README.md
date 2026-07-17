@@ -116,11 +116,12 @@ them, logs in `~/.local/state/aish/jobs/`).
 **Escapes**: `!<command>` runs directly — no model, no approval. `!cd <dir>`
 moves the persistent working directory.
 
-**Slash commands** (Tab completes): `/resume` — numbered picker of all earlier
-sessions (start date + first message), replays one into the current
-conversation; `/resume <n>` picks directly; `/resume <text>` searches titles
-and contents (deterministic ranking: exact title, then phrase, all-words,
-fuzzy — never an LLM) · `/new` or `/clear`
+**Slash commands** (Tab completes): `/resume` — live picker over all earlier
+sessions (start date + first message): type to filter by title and contents
+(deterministic ranking: exact title, then phrase, all-words, fuzzy — never an
+LLM), ↑/↓ to select, Enter replays the session into the current conversation;
+`/resume <n>` picks directly, `/resume <text>` pre-fills the filter · `/new`
+or `/clear`
 (plain `clear` works too) · `/model [name]` — show or switch model
 mid-session · `/jobs` · `/help` · `/quit` (or `exit`).
 
