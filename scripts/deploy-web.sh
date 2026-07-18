@@ -25,7 +25,17 @@ if ! ssh "$HOST" "launchctl kickstart -k \"gui/\$(id -u)/${LABEL}\"" 2>/dev/null
     exit 1
 fi
 
-sleep 2
-# The service may bind one interface only, so probe whatever it listens on.
-ssh "$HOST" 'ADDR=$(netstat -an | awk "/\.8787.*LISTEN/{print \$4; exit}" | sed "s/\.8787$//"); [ "$ADDR" = "*" ] && ADDR=127.0.0.1; curl -s -o /dev/null --connect-timeout 5 -w "  health (${ADDR}): HTTP %{http_code}\n" "http://${ADDR}:8787/"'
+# The service may bind one interface only, so probe whatever it listens
+# on — retrying while it comes back up after the restart.
+ssh "$HOST" 'for i in 1 2 3 4 5 6 7 8 9 10; do
+    ADDR=$(netstat -an | awk "/\.8787.*LISTEN/{print \$4; exit}" | sed "s/\.8787$//")
+    if [ -n "$ADDR" ]; then
+        [ "$ADDR" = "*" ] && ADDR=127.0.0.1
+        curl -s -o /dev/null --connect-timeout 5 -w "  health (${ADDR}): HTTP %{http_code}\n" "http://${ADDR}:8787/"
+        exit 0
+    fi
+    sleep 1
+done
+echo "  health: no listener on 8787 after 10s — check ~/Library/Logs/aish-web.log"
+exit 1'
 echo "✓ deployed"
