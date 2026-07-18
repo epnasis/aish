@@ -19,7 +19,7 @@ uv run aish                            # run from source
 After changing code, the user's installed `aish` does NOT pick it up — uv freezes the wheel and caches it at the same version. Reinstall with:
 
 ```sh
-uv tool install --force --reinstall --no-cache /Users/epnasis/dev/aish
+uv tool install --force --reinstall --no-cache /path/to/aish
 ```
 
 ## Architecture

@@ -248,6 +248,30 @@ Switching to/from `claude-max` needs a restart (`aish-web --model claude-max`),
 and there is no mid-task cancel yet — deny its next approval, or restart the
 server.
 
+### Run it on an always-on machine
+
+To reach aish-web from your phone anytime, run it as a service on a Mac
+that's always on (a home server / Mac mini) — two scripts automate the
+whole thing over ssh:
+
+```sh
+# one-time: install the launchd service (RunAtLoad + KeepAlive,
+# logs to ~/Library/Logs/aish-web.log on the remote)
+AISH_WEB_TOKEN=$(openssl rand -hex 16) GEMINI_API_KEY=... \
+    scripts/install-web-service.sh myserver gemini:gemini-3.5-flash 192.168.1.20
+
+# every deploy after that: sync working tree, reinstall, restart
+scripts/deploy-web.sh myserver
+```
+
+The remote needs `uv` (`curl -LsSf https://astral.sh/uv/install.sh | sh`);
+the deploy script rsyncs your working tree, so the remote needs no GitHub
+credentials. The third install argument binds a single interface (serve
+only one of the machine's networks); omit it for `0.0.0.0`. Pass whichever
+provider key your default model needs — secrets go only into the remote
+plist (chmod 600), never into the repo. Then open
+`http://<host>:8787/?token=<your-token>` and Add to Home Screen.
+
 ## Development
 
 ```sh
