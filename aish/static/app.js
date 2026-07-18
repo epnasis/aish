@@ -438,15 +438,24 @@ function reportViewport(label) {
     ` screen=${screen.width}x${screen.height} composerBot=${$("composer").getBoundingClientRect().bottom.toFixed(1)}` +
     ` msgTop=${messagesEl.getBoundingClientRect().top.toFixed(1)} msgBot=${messagesEl.getBoundingClientRect().bottom.toFixed(1)}` +
     ` botEl=${(document.elementFromPoint(innerWidth / 2, innerHeight - 4) || {}).id || "none"}` +
+    ` bodyTop=${document.body.style.top || "-"} bodyH=${document.body.style.height || "-"}` +
+    ` kbOpen=${document.body.classList.contains("kb-open")}` +
+    ` active=${(document.activeElement || {}).id || "none"}` +
     ` standalone=${matchMedia("(display-mode: standalone)").matches} rev=${PAGE_REV}`;
   try { send({ type: "client_debug", text }); } catch { /* socket down — skip */ }
 }
+
+let lastVvReport = 0;
 
 if (window.visualViewport) {
   const onViewportChange = () => {
     syncKeyboardInset();
     snapViewportHome();
     scrollToEnd();
+    if (Date.now() - lastVvReport > 400) {
+      lastVvReport = Date.now();
+      reportViewport("vv-change"); // #8/#24 diagnostics at the moment it matters
+    }
   };
   visualViewport.addEventListener("resize", onViewportChange);
   visualViewport.addEventListener("scroll", onViewportChange);
@@ -1549,7 +1558,17 @@ $("sessions-search").addEventListener(
 function openSessionsSheet(query) {
   openSheet("sessions-sheet");
   $("sessions-search").value = query;
-  $("sessions-search").focus();
+  // Focus only after the sheet's layout settles: focusing synchronously lets
+  // iOS measure the input at its pre-layout position and pan the whole
+  // layout absurdly far to "reveal" it — the sheet then opens scrolled away
+  // and stuck until the keyboard closes (#24). preventScroll stops the
+  // browser's own reveal-scroll; the input is already visible.
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      $("sessions-search").focus({ preventScroll: true });
+      setTimeout(() => reportViewport("search-focused"), 600);
+    })
+  );
   send({ type: "sessions", query });
 }
 
