@@ -34,7 +34,10 @@ html, body {
 body {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  /* min-, not fixed: iOS standalone can momentarily size the viewport
+     taller than 100dvh (keyboard dismissal, rotation); the body must keep
+     painting --bg down there instead of exposing a band. */
+  min-height: 100dvh;
   overflow: hidden;
 }
 
