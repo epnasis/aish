@@ -198,7 +198,8 @@ keeps its ANSI colors, and locking your phone mid-task loses nothing (on
 reconnect the server replays the transcript, including any approval still
 waiting). Every finished answer gets a small speaker button that reads it
 aloud with the device's native text-to-speech (tap again to stop; code
-blocks are skipped) — hands-free answers on the phone, no cloud audio API
+blocks are skipped, and the voice follows the answer's detected language —
+English or Polish) — hands-free answers on the phone, no cloud audio API
 involved. "Allow this session" auto-approves the command's prefixes until
 the session closes — in memory only, never written to the allowlist.
 

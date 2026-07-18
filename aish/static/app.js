@@ -673,6 +673,18 @@ function speakableText(el) {
   return parts.join("").replace(/[^\S\n]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
 }
 
+function speechLang(text) {
+  // Without an explicit lang the engine uses the device's default voice —
+  // a Polish phone reads English text with Polish phonemes. Cheap
+  // bilingual vote: Polish reliably shows diacritics/stopwords; tie or
+  // neither defaults to English.
+  const sample = text.slice(0, 600).toLowerCase();
+  let polish = (sample.match(/[ąćęłńśźż]/g) || []).length;
+  polish += 2 * ((sample.match(/(^|\s)(się|jest|nie|czy|oraz|przez|tego|można|żeby|które)(?=\s|[.,;:!?)]|$)/g) || []).length);
+  const english = (sample.match(/(^|\s)(the|and|is|of|to|that|with|this|for|are)(?=\s|[.,;:!?)]|$)/g) || []).length;
+  return polish > english ? "pl-PL" : "en-US";
+}
+
 function stopSpeaking() {
   if (!TTS_OK) return;
   speechSynthesis.cancel();
@@ -690,6 +702,7 @@ function toggleSpeak(btn, el) {
   const text = speakableText(el);
   if (!text) return;
   const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = speechLang(text);
   utterance.onend = utterance.onerror = () => {
     // cancel() also fires these on the old utterance — only reset if this
     // button is still the active one.
