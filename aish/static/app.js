@@ -1086,6 +1086,37 @@ function debounce(fn, ms) {
   };
 }
 
+// Arrow/Enter navigation for sheet result lists (same semantics as the
+// TUI picker: first row is the best match, Enter takes the highlight).
+function setActiveRow(rows, index) {
+  rows.forEach((row, i) => row.classList.toggle("active", i === index));
+  if (rows[index]) rows[index].scrollIntoView({ block: "nearest" });
+}
+
+function highlightFirstRow(listEl) {
+  const rows = [...listEl.querySelectorAll(".row")];
+  if (rows.length) setActiveRow(rows, 0);
+}
+
+function attachListNav(searchEl, listEl) {
+  searchEl.addEventListener("keydown", (e) => {
+    const rows = [...listEl.querySelectorAll(".row")];
+    if (!rows.length) return;
+    const index = rows.findIndex((row) => row.classList.contains("active"));
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      const next = index < 0
+        ? (step === 1 ? 0 : rows.length - 1)
+        : (index + step + rows.length) % rows.length;
+      setActiveRow(rows, next);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      (index >= 0 ? rows[index] : rows[0]).click();
+    }
+  });
+}
+
 // sessions
 $("session-chip").onclick = () => openSessionsSheet("");
 $("new-chip").onclick = () => send({ type: "new" });
@@ -1139,6 +1170,7 @@ function renderSessions(sessions) {
     row.onclick = () => { send({ type: "resume", path: info.name }); closeSheets(); };
     list.appendChild(row);
   }
+  highlightFirstRow(list);
 }
 
 // models
@@ -1171,6 +1203,7 @@ function renderModels(event) {
       send({ type: "set_model", spec: model.name, save: $("model-save").checked });
     list.appendChild(row);
   }
+  highlightFirstRow(list);
 }
 
 function onModelChanged(event) {
@@ -1190,6 +1223,9 @@ $("root-add").onclick = () => {
   if (path) { send({ type: "add_dir", path }); $("root-input").value = ""; }
 };
 $("jobs-refresh").onclick = () => send({ type: "jobs" });
+
+attachListNav($("sessions-search"), $("sessions-list"));
+attachListNav($("model-search"), $("model-list"));
 
 function renderWorkspace(event) {
   if (event.cwd) $("ws-cwd").textContent = event.cwd;

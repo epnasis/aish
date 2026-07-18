@@ -497,6 +497,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   font-size: 15px;
 }
 .sheet-list .row:active { background: var(--bg-elev2); }
+.sheet-list .row.active { background: var(--bg-elev2); border-radius: 8px; }
 .sheet-list .row .meta { color: var(--dim); font-size: 12px; display: block; margin-top: 2px; }
 .sheet-list .row.current { color: var(--green); }
 .sheet-list .badge {
