@@ -503,6 +503,27 @@ class TestSessions:
             assert notice["session"] == session_a
             assert notice["state"] == "idle"
 
+    def test_resume_from_disk_restores_recorded_model(self, app_env, monkeypatch):
+        switched = FakeChat([model_says("hi from gemini"), model_says("still gemini")])
+        monkeypatch.setattr(
+            server_module.backends,
+            "make_chat",
+            lambda spec: (switched, "gemini", "gemini-3-pro"),
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "set_model", "spec": "gemini:gemini-3-pro"})
+            recv_until(ws, "model_changed")
+            ws.send_json({"type": "task", "text": "hello there"})
+            recv_until(ws, "done")
+        # Fresh server instance: nothing in memory, must restore from the log.
+        client2, _ = make_client(app_env, [])
+        with client2, connected(client2) as (ws, _, _):
+            ws.send_json({"type": "resume", "path": name})
+            hello2 = recv_until(ws, "hello")
+            assert hello2["model"] == "gemini:gemini-3-pro"  # sticky, not reset
+
     def test_resume_rejects_path_escape(self, app_env):
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):

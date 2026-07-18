@@ -937,8 +937,13 @@ def create_app(
         """Build one Session: fresh agent wired to its own bridge/log. For an
         existing path the conversation is reloaded into the agent (the file
         keeps growing in place — same semantics as `aish --resume`)."""
+        history: list[dict] = []
+        recorded_spec = ""
+        if path is not None:
+            # Parse BEFORE anything is appended: the last model record in
+            # the file is the model this session must resume with.
+            history, recorded_spec = SessionLog._parse(path)
         log = SessionLog(path) if path is not None else SessionLog.new(state_dir)
-        log.model(model)
         logref = LogRef(log)
         bridge = Bridge(get_loop)
 
@@ -979,16 +984,13 @@ def create_app(
         agent.roots.append(uploads_dir.resolve())
         agent_holder.append(agent)
 
-        history: list[dict] = []
         if path is not None:
-            history, recorded_spec = SessionLog._parse(path)
             agent.load_history(history)
-            # Resume with the model that session last used (drawer shows it);
-            # fall back to the startup model when it can't be built.
+            # Resume with the model this session last used (the drawer shows
+            # it); fall back to the startup model when it can't be built.
             if (
-                client_chat is None
-                and recorded_spec
-                and recorded_spec != model
+                recorded_spec
+                and recorded_spec != model_spec(agent)
                 and provider != "claude-max"
                 and not recorded_spec.startswith("claude-max")
             ):
@@ -997,6 +999,7 @@ def create_app(
                     agent.chat, agent.model, agent.provider = chat2, name2, provider2
                 except backends.BackendError:
                     pass
+        logref.model(model_spec(agent))  # record what this session actually runs
         return Session(agent, logref, bridge), history
 
     server = WebServer(open_session, state_dir, config_path, token)

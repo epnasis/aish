@@ -141,7 +141,7 @@ function handle(event) {
       setBusy(true);
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
       rememberPrompt(stripAttachmentNotes(event.text));
-      addMsg("user", event.text);
+      makeRecallable(addMsg("user", event.text));
       break;
     case "queued":
       showToast(`queued (#${event.position}) — runs after the current task`);
@@ -316,7 +316,7 @@ function onHistory(history) {
   for (const message of history) {
     const content = (message.content || "").trim();
     if (!content) continue;
-    if (message.role === "user") addMsg("user", content);
+    if (message.role === "user") makeRecallable(addMsg("user", content));
     else if (message.role === "assistant") {
       addMsg("answer md", "").replaceChildren(renderMarkdown(content));
     } else {
@@ -728,6 +728,26 @@ function rememberPrompt(text) {
 function resizeInput() {
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, innerHeight * 0.3)}px`;
+}
+
+function makeRecallable(bubble) {
+  // Touch path for prompt recall (no arrow keys on phone keyboards): tap
+  // one of your bubbles to put its text back in the composer. Only fills
+  // an empty composer so a stray tap can't clobber a draft.
+  bubble.title = "tap to reuse this prompt";
+  bubble.addEventListener("click", () => {
+    const text = stripAttachmentNotes(bubble.textContent);
+    if (!text) return;
+    if (input.value.trim() && input.value.trim() !== text) {
+      showToast("clear the input first to reuse this prompt");
+      return;
+    }
+    input.value = text;
+    const end = text.length;
+    input.setSelectionRange(end, end);
+    resizeInput();
+    input.focus();
+  });
 }
 
 function recallHistory(key) {
