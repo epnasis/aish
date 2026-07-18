@@ -67,6 +67,8 @@ Rules:
    promising result and answer from what the page actually says, citing the
    URL. Search queries and URLs LEAVE THIS MACHINE — never include private
    local data (file contents, key values, personal details) in them.
+   read_url only reaches public internet hosts; for a localhost or LAN
+   service, propose a curl command instead (it goes through approval).
    When researching, batch independent lookups: issue several web_search /
    read_url calls in a single reply — they run in parallel, which is much
    faster than one per turn.

@@ -4,10 +4,15 @@ Both tools are read-only and auto-approved, but their input LEAVES THE
 MACHINE (the query goes to DuckDuckGo, the URL to its host), so every call
 is echoed to the user and the system prompt forbids putting private local
 data into them. Fetching is restricted to http/https so read_url can never
-be steered at file:// or other local schemes.
+be steered at file:// or other local schemes, and to public hosts only —
+loopback, LAN, and cloud-metadata addresses are refused, on the initial URL
+and on every redirect (SSRF guard, see _require_public).
 """
 
+import ipaddress
+import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
@@ -113,6 +118,12 @@ def read_url(url: str, topic: str | None = None) -> str:
 
     try:
         text, content_type = _fetch(url)
+    except BlockedURLError as exc:
+        return (
+            f"ERROR: {exc} — read_url only fetches public internet hosts. "
+            "For a local/internal service, use run_command with curl (it goes "
+            "through user approval)."
+        )
     except urllib.error.HTTPError as exc:
         return f"ERROR: {url} returned HTTP {exc.code} {exc.reason}"
     except Exception as exc:  # noqa: BLE001 — DNS, TLS, timeouts: report, don't crash
@@ -143,10 +154,54 @@ def read_url(url: str, topic: str | None = None) -> str:
     return UNTRUSTED_NOTE + result
 
 
+class BlockedURLError(Exception):
+    """URL refused by the SSRF guard (non-public target)."""
+
+
+def _require_public(url: str) -> None:
+    """Raise BlockedURLError unless every address the host resolves to is public.
+
+    read_url is auto-approved, so without this a prompt-injected page could
+    steer it at cloud metadata (169.254.169.254), localhost services, or the
+    LAN. Checks DNS resolution up front and again on every redirect hop (see
+    _PublicOnlyRedirects); a DNS-rebinding TOCTOU between check and connect
+    remains, which is an accepted limit of a resolve-and-check design.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("http", "https"):
+        raise BlockedURLError(f"{url!r} is not http(s)")
+    host = parsed.hostname
+    if not host:
+        raise BlockedURLError(f"{url!r} has no host")
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise BlockedURLError(f"could not resolve {host!r} ({exc})") from exc
+    for info in infos:
+        addr = info[4][0].split("%")[0]  # strip IPv6 zone id
+        ip = ipaddress.ip_address(addr)
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if not ip.is_global or ip.is_multicast:
+            raise BlockedURLError(f"{host!r} resolves to non-public address {ip}")
+
+
+class _PublicOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Re-run the SSRF check on every redirect target before following it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _require_public(urllib.parse.urljoin(req.full_url, newurl))
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_opener = urllib.request.build_opener(_PublicOnlyRedirects())
+
+
 def _fetch(url: str) -> tuple[str, str]:
-    """Decoded body text and its content type, size-capped."""
+    """Decoded body text and its content type, size-capped. Public hosts only."""
+    _require_public(url)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT) as response:
+    with _opener.open(request, timeout=FETCH_TIMEOUT) as response:
         content_type = response.headers.get_content_type()
         charset = response.headers.get_content_charset() or "utf-8"
         raw = response.read(FETCH_MAX_BYTES)

@@ -158,6 +158,82 @@ class TestReadUrl:
         assert web.read_url("https://example.com/blank").startswith("ERROR")
 
 
+def fake_resolver(*addresses):
+    """getaddrinfo stand-in returning the given literal addresses."""
+    import socket
+
+    def resolve(host, port, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (addr, 0)) for addr in addresses]
+
+    return resolve
+
+
+class TestSsrfGuard:
+    BLOCKED_LITERALS = [
+        "http://127.0.0.1:8787/",  # loopback
+        "http://169.254.169.254/latest/meta-data/",  # cloud metadata (link-local)
+        "http://10.0.0.1/",  # RFC1918
+        "http://192.168.1.1/admin",  # RFC1918
+        "http://0.0.0.0/",  # unspecified
+        "http://[::1]/",  # IPv6 loopback
+        "http://[::ffff:127.0.0.1]/",  # IPv4-mapped loopback
+    ]
+
+    def test_blocks_non_public_ip_literals(self):
+        for url in self.BLOCKED_LITERALS:
+            with pytest.raises(web.BlockedURLError):
+                web._require_public(url)
+
+    def test_blocks_hostname_resolving_to_private(self, monkeypatch):
+        monkeypatch.setattr(web.socket, "getaddrinfo", fake_resolver("192.168.10.20"))
+        with pytest.raises(web.BlockedURLError):
+            web._require_public("https://innocent.example.com/")
+
+    def test_blocks_if_any_resolved_address_is_private(self, monkeypatch):
+        monkeypatch.setattr(web.socket, "getaddrinfo", fake_resolver("93.184.216.34", "127.0.0.1"))
+        with pytest.raises(web.BlockedURLError):
+            web._require_public("https://dual.example.com/")
+
+    def test_allows_public_hostname(self, monkeypatch):
+        monkeypatch.setattr(web.socket, "getaddrinfo", fake_resolver("93.184.216.34"))
+        web._require_public("https://example.com/")  # must not raise
+
+    def test_dns_failure_blocked(self, monkeypatch):
+        import socket as socket_module
+
+        def fail(host, port, **kwargs):
+            raise socket_module.gaierror("NXDOMAIN")
+
+        monkeypatch.setattr(web.socket, "getaddrinfo", fail)
+        with pytest.raises(web.BlockedURLError):
+            web._require_public("https://nonexistent.example.com/")
+
+    def test_redirect_to_private_refused(self):
+        import urllib.request
+
+        req = urllib.request.Request("https://public.example.com/page")
+        handler = web._PublicOnlyRedirects()
+        with pytest.raises(web.BlockedURLError):
+            handler.redirect_request(req, None, 302, "Found", {}, "http://127.0.0.1/steal")
+
+    def test_redirect_to_public_followed(self, monkeypatch):
+        import email.message
+        import urllib.request
+
+        monkeypatch.setattr(web.socket, "getaddrinfo", fake_resolver("93.184.216.34"))
+        req = urllib.request.Request("https://public.example.com/page")
+        handler = web._PublicOnlyRedirects()
+        new_req = handler.redirect_request(
+            req, None, 302, "Found", email.message.Message(), "https://public.example.com/other"
+        )
+        assert new_req.full_url == "https://public.example.com/other"
+
+    def test_read_url_reports_blocked_with_alternative(self):
+        result = web.read_url("http://127.0.0.1:8787/token")
+        assert result.startswith("ERROR")
+        assert "run_command" in result
+
+
 @pytest.mark.skipif(
     not os.environ.get("AISH_LIVE_WEB"), reason="set AISH_LIVE_WEB=1 to hit the network"
 )

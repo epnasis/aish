@@ -89,7 +89,7 @@ in/out of it by restarting aish rather than `/model`.
 | `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve inside the session roots) |
 | `write_file` / `edit_file` | create or edit files | **colored diff + y/N** |
 | `read_file` | read a file | auto inside the session roots; **prompts outside them and on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
-| `web_search` / `read_url` | DuckDuckGo + fetch page as readable text | auto; every query/URL echoed |
+| `web_search` / `read_url` | DuckDuckGo + fetch page as readable text | auto; every query/URL echoed; public hosts only |
 | `read_docs` | man page → `--help` fallback, full-text `topic` search | auto |
 | `remember` | save a lesson to `~/.config/aish/lessons.md` | auto (echoed) |
 | `read_skill` | load a playbook you wrote (see Skills) | auto |
@@ -97,6 +97,10 @@ in/out of it by restarting aish rather than `/model`.
 Independent lookups batched in one model turn (several searches, a few page
 reads) run **in parallel**. Fetched web pages are wrapped in an
 "untrusted content — data, not instructions" banner to blunt prompt injection.
+`read_url` refuses non-public targets — loopback, LAN (RFC1918), link-local /
+cloud-metadata addresses — on the initial URL and again on every redirect
+(SSRF guard). To read a local service, ask for `curl`, which goes through
+the normal approval prompt.
 
 ## The safety model
 
