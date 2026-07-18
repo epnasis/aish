@@ -399,6 +399,26 @@ function snapViewportHome() {
   if (keyboardClosed && (scrollY || visualViewport.offsetTop)) window.scrollTo(0, 0);
 }
 
+// iOS standalone ignores interactive-widget=resizes-content (device telemetry:
+// vv.h=543 while innerHeight stays 894), so the keyboard resize is done by
+// hand: while the keyboard is up, pin the fixed body to the visual viewport's
+// exact box. The composer then sits flush on the keyboard/accessory bar
+// instead of iOS panning a full-height layout with a dead gap (#24). The
+// kb-open class also drops the home-indicator padding — the keyboard covers
+// that inset, and keeping it was most of the visible black strip.
+function syncKeyboardInset() {
+  if (!window.visualViewport) return;
+  const kbOpen = visualViewport.height < innerHeight - 60;
+  document.body.classList.toggle("kb-open", kbOpen);
+  if (kbOpen) {
+    document.body.style.top = `${visualViewport.offsetTop}px`;
+    document.body.style.height = `${visualViewport.height}px`;
+  } else {
+    document.body.style.top = "";
+    document.body.style.height = "";
+  }
+}
+
 // The pan sometimes settles without any visualViewport event — seen when the
 // keyboard dismissal is a side effect of hiding its input (closing a sheet)
 // while the transcript is being replaced (#8). After such moments, retry the
@@ -424,6 +444,7 @@ function reportViewport(label) {
 
 if (window.visualViewport) {
   const onViewportChange = () => {
+    syncKeyboardInset();
     snapViewportHome();
     scrollToEnd();
   };

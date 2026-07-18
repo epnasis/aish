@@ -43,7 +43,16 @@ body {
   position: fixed;
   inset: 0;
   overflow: hidden;
+  /* Containing block for fixed descendants (sheets, backdrop, fabs): when JS
+     shrinks the body to the visual viewport while the keyboard is up, they
+     must ride along instead of staying anchored behind the keyboard. */
+  transform: translateZ(0);
 }
+
+/* Keyboard visible (JS-toggled): it covers the home-indicator area, so the
+   safe-area bottom padding would just render as a dead strip above it. */
+body.kb-open #composer { padding-bottom: 8px; }
+body.kb-open .sheet { padding-bottom: 14px; }
 
 .mono, pre, code {
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
