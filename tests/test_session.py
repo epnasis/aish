@@ -36,12 +36,37 @@ def test_model_empty_for_sessions_without_record(tmp_path):
     assert SessionLog.info(path).model == ""
 
 
-def test_model_records_do_not_pollute_messages_or_search(tmp_path):
+def test_model_records_do_not_pollute_messages(tmp_path):
     log = SessionLog.new(tmp_path)
     log.model("mistral:7b")
     log.message({"role": "user", "content": "hello"})
     assert SessionLog.load_messages(log.path) == [{"role": "user", "content": "hello"}]
-    assert SessionLog.search_sessions(tmp_path, "mistral") == []
+
+
+def test_search_matches_model_name(tmp_path):
+    log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+    log.model("gemini:gemini-2.5-pro")
+    log.message({"role": "user", "content": "hello"})
+    make_session(tmp_path, "session-20260102-000000-000000.jsonl", ("user", "hello"))
+
+    results = SessionLog.search_sessions(tmp_path, "gemini")
+    assert [r.path for r in results] == [log.path]  # modelless session not matched
+    assert SessionLog.search_sessions(tmp_path, "gemni")[0].path == log.path  # fuzzy typo
+
+
+def test_search_model_match_ranks_above_content_match(tmp_path):
+    content_hit = make_session(
+        tmp_path,
+        "session-20260102-000000-000000.jsonl",  # newer, but weaker match
+        ("user", "something else"),
+        ("assistant", "qwen models are nice"),
+    )
+    log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+    log.model("qwen3:8b")
+    log.message({"role": "user", "content": "hello"})
+
+    results = SessionLog.search_sessions(tmp_path, "qwen")
+    assert [r.path for r in results] == [log.path, content_hit]
 
 
 def test_latest_picks_newest_and_none_when_empty(tmp_path):

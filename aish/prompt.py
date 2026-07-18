@@ -214,7 +214,8 @@ class BoxPrompt:
                     fragments.append(("bold", "❯"))
                     fragments.append(("reverse", line + "\n"))
                 else:
-                    fragments.append((RULE_STYLE, " " + line + "\n"))
+                    # Default foreground: dim rows are unreadable on dark themes.
+                    fragments.append(("", " " + line + "\n"))
             if not results:
                 fragments.append((RULE_STYLE, "  (no match — Esc cancels)\n"))
             elif len(results) > PICKER_MAX_ROWS:

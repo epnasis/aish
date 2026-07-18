@@ -27,13 +27,14 @@ class SessionInfo:
 @dataclass
 class SessionEntry:
     """A session preloaded for searching: display info plus casefolded
-    title/contents and a word vocabulary, so ranking never re-reads the
-    file."""
+    title/contents/model and a word vocabulary, so ranking never re-reads
+    the file."""
 
     info: SessionInfo
     title_cf: str
     content_cf: str
     words: frozenset
+    model_cf: str = ""
 
 
 class SessionLog:
@@ -141,23 +142,31 @@ class SessionLog:
             content_cf = " ".join(
                 " ".join((m.get("content") or "").split()) for m in messages
             ).casefold()
+            model_cf = model.casefold()
+            # Model tokens ("gemini", "2.5", "pro") join the fuzzy vocabulary
+            # so a typo like "gemni" still filters by model.
+            model_words = frozenset(re.split(r"[^a-z0-9.]+", model_cf)) - {""}
             entries.append(
                 SessionEntry(
                     info=SessionLog._info_from(path, messages, model),
                     title_cf=SessionLog._derive_title(messages).casefold(),
                     content_cf=content_cf,
-                    words=frozenset(w.strip(_PUNCT) for w in content_cf.split()) - {""},
+                    words=(
+                        frozenset(w.strip(_PUNCT) for w in content_cf.split()) - {""}
+                    ) | model_words,
+                    model_cf=model_cf,
                 )
             )
         return entries
 
     @staticmethod
     def rank(entries: list["SessionEntry"], query: str) -> list[SessionInfo]:
-        """Deterministic ranking over titles and full message contents — no
-        LLM. Tiers: exact title, phrase in title, phrase in contents, all
-        words in contents, then fuzzy (difflib): every query word close to
-        some session word, or the whole query close to the title. Ties keep
-        newest-first order; an empty query keeps everything, newest first."""
+        """Deterministic ranking over titles, model names, and full message
+        contents — no LLM. Tiers: exact title, phrase in title or model,
+        phrase in contents, all words in contents/model, then fuzzy
+        (difflib): every query word close to some session word, or the whole
+        query close to the title. Ties keep newest-first order; an empty
+        query keeps everything, newest first."""
         query_cf = " ".join(query.split()).casefold()
         words = query_cf.split()
         if not words:
@@ -166,11 +175,11 @@ class SessionLog:
         for entry in entries:
             if entry.title_cf == query_cf:
                 score = 5
-            elif query_cf in entry.title_cf:
+            elif query_cf in entry.title_cf or query_cf in entry.model_cf:
                 score = 4
             elif query_cf in entry.content_cf:
                 score = 3
-            elif all(word in entry.content_cf for word in words):
+            elif all(word in entry.content_cf or word in entry.model_cf for word in words):
                 score = 2
             elif all(
                 difflib.get_close_matches(word, entry.words, n=1, cutoff=FUZZY_WORD_CUTOFF)

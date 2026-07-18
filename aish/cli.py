@@ -30,10 +30,13 @@ from .session import SessionInfo, SessionLog
 from .skills import GLOBAL_SKILLS_DIR, list_skills, skill_dirs
 
 BOLD = "\033[1m"
-DIM = "\033[2m"
+# Bright black, not ANSI faint (\033[2m): faint is nearly unreadable on many
+# dark terminal themes, while bright black stays legible on dark and light.
+DIM = "\033[90m"
 YELLOW = "\033[33m"
 GREEN = "\033[32m"
 RED = "\033[31m"
+CYAN = "\033[36m"
 RESET = "\033[0m"
 
 ECHO_PREVIEW_LINES = 12
@@ -44,34 +47,34 @@ SLASH_COMMANDS = (
     "/model", "/new", "/quit", "/resume",
 )
 
-SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
-  /resume        pick an earlier session: type to filter by title and
-                 contents (exact match first, then phrase, words, fuzzy),
+SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab autocompletes):{RESET}
+  {CYAN}/resume{RESET}        pick an earlier session: type to filter by title, contents,
+                 and model (exact match first, then phrase, words, fuzzy),
                  ↑/↓ select, Enter loads, Esc cancels
-  /resume <n>    load the n-th newest session directly
-  /resume <text> open the picker with the filter pre-filled
-  /new, /clear   fresh conversation in a new session file (clears the screen;
+  {CYAN}/resume <n>{RESET}    load the n-th newest session directly
+  {CYAN}/resume <text>{RESET} open the picker with the filter pre-filled
+  {CYAN}/new, /clear{RESET}   fresh conversation in a new session file (clears the screen;
                  plain 'clear' works too)
-  /model [name]  switch the model (Ollama name, or a cloud model: gemini:/
+  {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
                  openai:/claude: — bare provider name picks a default); no
                  arg opens a searchable picker of local + cloud models
                  (typing provider:model there offers that exact model);
                  add --save to persist as the startup default (config.toml),
                  /model --save alone persists the current model
-  /cd <dir>      move the session to another project: changes the working
+  {CYAN}/cd <dir>{RESET}      move the session to another project: changes the working
                  directory AND re-anchors the auto-approval root there
                  (Tab completes directories); !cd only moves the directory
-  /add-dir <dir> allow auto-approved reads/commands in another directory
+  {CYAN}/add-dir <dir>{RESET} allow auto-approved reads/commands in another directory
                  tree too (alias /dir-add); no arg lists current roots
-  /jobs          list background jobs started this session
-  /help          this help
-  /quit, /exit   quit (plain 'exit' works too)
-input: Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
+  {CYAN}/jobs{RESET}          list background jobs started this session
+  {CYAN}/help{RESET}          this help
+  {CYAN}/quit, /exit{RESET}   quit (plain 'exit' works too)
+{BOLD}input:{RESET} Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
 (iTerm2: set Option=Esc+) · pasted newlines are kept · @ mentions a project
 file (type to filter, Tab/Enter completes) · !<cmd> runs directly
 without the model · !cd <dir> moves the working directory
-while a command runs: Ctrl-C cancels it · Ctrl-B detaches it to a background
-job (keeps running, frees the prompt; see /jobs){RESET}"""
+{BOLD}while a command runs:{RESET} Ctrl-C cancels it · Ctrl-B detaches it to a background
+job (keeps running, frees the prompt; see /jobs)"""
 
 LOGO_LINES = ("▄▀█ █ █▀ █░█", "█▀█ █ ▄█ █▀█")
 
@@ -211,9 +214,6 @@ def make_approver(
         return None
 
     return ask_approval
-
-
-CYAN = "\033[36m"
 
 
 def colorize_diff(diff: str) -> str:
@@ -844,9 +844,10 @@ running command. Ctrl-D or `exit` quits.
 - REPL slash commands (Tab autocompletes them): /resume opens a live picker \
 over ALL earlier sessions with start date, message count, and the model each \
 session last used (summary = the session's first \
-user message): typing filters by title and full contents deterministically \
-(exact title match, then phrase, then all-words, then fuzzy — no model \
-involved), arrow keys select, Enter loads, Esc cancels; /resume <text> \
+user message): typing filters by title, full contents, and model name \
+deterministically (exact title match, then phrase, then all-words, then \
+fuzzy — no LLM involved), arrow keys select, Enter loads, Esc cancels; \
+/resume <text> \
 pre-fills the filter and /resume N loads the N-th newest directly; the \
 chosen session is replayed into this conversation. Session \
 files are append-only and never deleted — every past session stays \
