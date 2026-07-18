@@ -18,6 +18,7 @@ lock/unlock mid-task lossless.
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import os
 import queue
 import sys
@@ -28,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import uvicorn
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -66,6 +67,36 @@ if TYPE_CHECKING:
     from .claude_max import ClaudeMaxAgent
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _static_rev() -> str:
+    """Fingerprint of the served frontend, sent in hello. The client compares
+    it to the rev it was loaded with and reloads on mismatch — an installed
+    iOS PWA resumed from the app switcher never reloads the page on its own,
+    so deployed frontend fixes would otherwise not reach the device."""
+    try:
+        stats = sorted(
+            (p.name, s.st_mtime_ns, s.st_size)
+            for p in STATIC_DIR.iterdir()
+            if p.is_file() and (s := p.stat())
+        )
+        return hashlib.md5(repr(stats).encode()).hexdigest()[:12]
+    except OSError:
+        return "0"
+
+
+STATIC_REV = _static_rev()
+
+
+async def serve_index(request):  # noqa: ARG001 — Starlette route signature
+    """index.html with cache-busting ?v=<rev> on its assets and no-cache on
+    itself: the page then always names the exact JS/CSS revision it runs, so
+    a stale-from-HTTP-cache page can be detected (hello.rev mismatch) and a
+    reload is guaranteed to fetch the current code."""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace('src="app.js"', f'src="app.js?v={STATIC_REV}"')
+    html = html.replace('href="style.css"', f'href="style.css?v={STATIC_REV}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 # Replay buffer bounds: enough for a long task's worth of events; beyond it
 # the oldest are dropped and the client shows a truncation marker.
@@ -483,6 +514,7 @@ class WebServer:
             "cwd": session.agent.cwd,
             "roots": [str(root) for root in session.agent.roots],
             "home": str(Path.home()),  # client abbreviates paths to ~
+            "rev": STATIC_REV,
         }
 
     def _cwd_event(self) -> dict:
@@ -590,6 +622,10 @@ class WebServer:
             await self._send_files(websocket, str(message.get("query", "")))
         elif kind == "stop":
             await self._stop_task(websocket)
+        elif kind == "client_debug":
+            # Device-side diagnostics (viewport state on iOS, etc.) — printed
+            # to the server log because the phone has no reachable console.
+            print(f"CLIENT_DEBUG: {message.get('text', '')}", flush=True)
         else:
             await websocket.send_json(
                 {"type": "error", "text": f"unknown message type {kind!r}"}
@@ -1140,6 +1176,8 @@ def create_app(
             Route("/upload", server.handle_upload, methods=["POST"]),
             Route("/dirs", server.handle_dirs, methods=["GET"]),
             Route("/dirs/search", server.handle_dirs_search, methods=["GET"]),
+            Route("/", serve_index, methods=["GET"]),
+            Route("/index.html", serve_index, methods=["GET"]),
             Mount("/", StaticFiles(directory=STATIC_DIR, html=True)),
         ],
         lifespan=lifespan,

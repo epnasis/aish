@@ -195,7 +195,18 @@ function setTitle(text) {
   $("session-chip").textContent = text || "New chat";
 }
 
+// The ?v= the server stamped into our own <script> tag — ground truth for
+// which code revision this page actually runs (unlike any value learned at
+// runtime, it can't be polluted by a stale-from-HTTP-cache load).
+const PAGE_REV = (() => {
+  const script = document.querySelector('script[src*="app.js"]');
+  try { return new URL(script.src).searchParams.get("v"); } catch { return null; }
+})();
+
 function onHello(event) {
+  // Server code changed since this page was built (or the page predates rev
+  // stamping entirely) — reload; the replay mechanism restores the view.
+  if (event.rev && event.rev !== PAGE_REV) { location.reload(); return; }
   $("model-chip").textContent = event.model;
   setTitle(event.title);
   renderWorkspace(event);
@@ -220,6 +231,7 @@ function onReplay(event) {
   }
   scrollToEnd(true);
   snapViewportSoon(); // session switches race keyboard dismissal with this rebuild (#8)
+  setTimeout(() => reportViewport("after-replay"), 1200);
   // Every replay marks a fresh view (new chat, resume, reconnect) — on
   // desktop, land the cursor in the composer ready to type.
   if (FINE_POINTER && $("backdrop").hidden) input.focus();
@@ -385,6 +397,17 @@ function snapViewportHome() {
 // the keyboard is gone and an offset is left over.
 function snapViewportSoon() {
   for (const ms of [50, 150, 350, 700]) setTimeout(snapViewportHome, ms);
+}
+
+// Temporary #8 diagnostics: the band only reproduces on-device where there is
+// no console, so ship the viewport numbers to the server log instead.
+function reportViewport(label) {
+  const vv = window.visualViewport;
+  const text =
+    `${label} vv.h=${vv ? vv.height.toFixed(1) : "n/a"} vv.top=${vv ? vv.offsetTop.toFixed(1) : "n/a"}` +
+    ` innerH=${innerHeight} scrollY=${scrollY} docH=${document.documentElement.getBoundingClientRect().height.toFixed(1)}` +
+    ` standalone=${matchMedia("(display-mode: standalone)").matches} rev=${PAGE_REV}`;
+  try { send({ type: "client_debug", text }); } catch { /* socket down — skip */ }
 }
 
 if (window.visualViewport) {

@@ -103,7 +103,17 @@ class TestConnect:
             assert hello["session"].startswith("session-")
             assert hello["busy"] is False
             assert hello["cwd"] == app_env["cwd"]
+            assert hello["rev"]  # static-files fingerprint for staleness checks
             assert replay["events"] == []
+
+    def test_index_stamps_asset_revision(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            response = client.get("/")
+            assert response.status_code == 200
+            assert 'src="app.js?v=' in response.text
+            assert 'href="style.css?v=' in response.text
+            assert response.headers["cache-control"] == "no-cache"
 
     def test_hello_title_is_first_user_message(self, app_env):
         client, _ = make_client(app_env, [model_says("ok")])
