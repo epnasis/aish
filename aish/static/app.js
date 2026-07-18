@@ -140,6 +140,7 @@ function handle(event) {
       sawAnswer = false;
       setBusy(true);
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
+      rememberPrompt(stripAttachmentNotes(event.text));
       addMsg("user", event.text);
       break;
     case "queued":
@@ -703,6 +704,57 @@ function onApprovalResolved(event) {
 // ---- composer + autocomplete ---------------------------------------------
 const input = $("input");
 
+// Prompt history recall (terminal/Slack convention): ArrowUp in an empty
+// composer steps back through earlier prompts, ArrowDown forward to the
+// saved draft. Seeded from replayed user events, so it survives reconnects.
+const promptHistory = [];
+let historyIndex = null; // null = not navigating
+let historyDraft = "";
+
+function stripAttachmentNotes(text) {
+  return text
+    .split("\n")
+    .filter((line) => !/^\[(attached file|image attached|document attached):/.test(line))
+    .join("\n")
+    .trim();
+}
+
+function rememberPrompt(text) {
+  if (text && promptHistory[promptHistory.length - 1] !== text) promptHistory.push(text);
+  if (promptHistory.length > 100) promptHistory.shift();
+  historyIndex = null;
+}
+
+function resizeInput() {
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, innerHeight * 0.3)}px`;
+}
+
+function recallHistory(key) {
+  if (key === "ArrowUp") {
+    if (!promptHistory.length || (input.value !== "" && historyIndex === null)) return false;
+    if (historyIndex === null) {
+      historyDraft = input.value;
+      historyIndex = promptHistory.length;
+    }
+    if (historyIndex > 0) historyIndex -= 1;
+    input.value = promptHistory[historyIndex];
+  } else {
+    if (historyIndex === null) return false;
+    historyIndex += 1;
+    if (historyIndex >= promptHistory.length) {
+      historyIndex = null;
+      input.value = historyDraft;
+    } else {
+      input.value = promptHistory[historyIndex];
+    }
+  }
+  const end = input.value.length;
+  input.setSelectionRange(end, end);
+  resizeInput();
+  return true;
+}
+
 const SLASH_COMMANDS = [
   ["/model", "switch model — opens the searchable picker"],
   ["/resume", "search & resume an earlier session"],
@@ -743,6 +795,10 @@ input.addEventListener("keydown", (e) => {
       return;
     }
   }
+  if ((e.key === "ArrowUp" || e.key === "ArrowDown") && recallHistory(e.key)) {
+    e.preventDefault();
+    return;
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     submitInput();
@@ -750,8 +806,8 @@ input.addEventListener("keydown", (e) => {
 });
 
 input.addEventListener("input", () => {
-  input.style.height = "auto";
-  input.style.height = `${Math.min(input.scrollHeight, innerHeight * 0.3)}px`;
+  historyIndex = null; // typing leaves history-recall mode
+  resizeInput();
   updateSuggest();
 });
 
@@ -846,6 +902,7 @@ function submitInput() {
   hideSuggest();
   let text = input.value.trim();
   if (text.startsWith("/")) {
+    rememberPrompt(text); // slash commands never echo back as user events
     input.value = "";
     input.style.height = "auto";
     handleSlash(text);
