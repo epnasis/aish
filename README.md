@@ -144,7 +144,8 @@ them, logs in `~/.local/state/aish/jobs/`).
 moves the persistent working directory.
 
 **Slash commands** (Tab completes): `/resume` — live picker over all earlier
-sessions (start date + first message): type to filter by title and contents
+sessions (start date, message count, model used, first message): type to
+filter by title and contents
 (deterministic ranking: exact title, then phrase, all-words, fuzzy — never an
 LLM), ↑/↓ to select, Enter replays the session into the current conversation;
 `/resume <n>` picks directly, `/resume <text>` pre-fills the filter · `/new`

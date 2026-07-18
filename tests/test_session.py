@@ -22,6 +22,28 @@ def test_roundtrip_messages_and_commands(tmp_path):
     assert all("ts" in r for r in records)
 
 
+def test_model_recorded_last_switch_wins(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.model("qwen3:8b")
+    log.message({"role": "user", "content": "hi"})
+    log.model("gemini:gemini-2.5-pro")  # mid-session switch: last record wins
+    assert SessionLog.info(log.path).model == "gemini:gemini-2.5-pro"
+    assert SessionLog.load_entries(tmp_path)[0].info.model == "gemini:gemini-2.5-pro"
+
+
+def test_model_empty_for_sessions_without_record(tmp_path):
+    path = make_session(tmp_path, "session-20260101-000000-000000.jsonl", ("user", "hi"))
+    assert SessionLog.info(path).model == ""
+
+
+def test_model_records_do_not_pollute_messages_or_search(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.model("mistral:7b")
+    log.message({"role": "user", "content": "hello"})
+    assert SessionLog.load_messages(log.path) == [{"role": "user", "content": "hello"}]
+    assert SessionLog.search_sessions(tmp_path, "mistral") == []
+
+
 def test_latest_picks_newest_and_none_when_empty(tmp_path):
     assert SessionLog.latest(tmp_path) is None
     (tmp_path / "session-20260101-000000.jsonl").write_text("")

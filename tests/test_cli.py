@@ -215,6 +215,27 @@ class TestSlashCommands:
         assert agent.messages[0]["role"] == "system"
         assert logref.log.path != old_path
 
+    def test_new_session_records_current_model(self, tmp_path):
+        import json
+
+        from aish.cli import handle_slash
+
+        agent, logref = self.fake_agent(), self.logref(tmp_path)
+        handle_slash("/new", agent, logref, tmp_path)
+        records = [json.loads(line) for line in logref.log.path.read_text().splitlines()]
+        assert records[0]["kind"] == "model" and records[0]["model"] == "fake"
+
+    def test_session_row_shows_model_and_omits_when_absent(self, tmp_path):
+        from aish.cli import session_row
+        from aish.session import SessionInfo
+
+        with_model = SessionInfo(
+            path=tmp_path, when="2026-01-01 00:00", count=3, title="fix build", model="qwen3:8b"
+        )
+        assert session_row(with_model) == "2026-01-01 00:00 ·   3 msgs · qwen3:8b · fix build"
+        legacy = SessionInfo(path=tmp_path, when="2026-01-01 00:00", count=3, title="fix build")
+        assert session_row(legacy) == "2026-01-01 00:00 ·   3 msgs · fix build"
+
     def test_resume_loads_previous_replays_and_relogs(self, tmp_path, capsys):
         from aish.cli import handle_slash
         from aish.session import SessionLog

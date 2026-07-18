@@ -26,7 +26,7 @@ from .approval import (
     suggest_prefix,
     unvetted_segments,
 )
-from .session import SessionLog
+from .session import SessionInfo, SessionLog
 from .skills import GLOBAL_SKILLS_DIR, list_skills, skill_dirs
 
 BOLD = "\033[1m"
@@ -97,6 +97,9 @@ class LogRef:
 
     def command(self, command: str, decision: str) -> None:
         self.log.command(command, decision)
+
+    def model(self, spec: str) -> None:
+        self.log.model(spec)
 
 
 def load_config(path: Path) -> dict:
@@ -370,6 +373,12 @@ def read_task(cwd: str) -> str:
     return _box.read(display)
 
 
+def session_row(info: SessionInfo) -> str:
+    """Picker row for a session: when, size, model (if recorded), title."""
+    model = f" · {info.model}" if info.model else ""
+    return f"{info.when} · {info.count:>3} msgs{model} · {info.title}"
+
+
 def replay_history(messages: list[dict]) -> None:
     """Print a loaded conversation so the user sees what they resumed."""
     for message in messages:
@@ -614,6 +623,7 @@ def handle_slash(
     if command in ("/new", "/clear"):
         agent.reset()
         logref.log = SessionLog.new(state_dir)
+        logref.model(model_spec(agent))
         print("\033[2J\033[3J\033[H", end="")  # clear screen + scrollback
         print(banner(f"fresh conversation — session {logref.log.path.name}"))
         return "handled"
@@ -631,7 +641,7 @@ def handle_slash(
             selected = _box.pick(
                 lambda query: SessionLog.rank(entries, query),
                 initial=arg,
-                render=lambda info: f"{info.when} · {info.count:>3} msgs · {info.title}",
+                render=session_row,
             )
             if selected is None:
                 print(f"{DIM}cancelled{RESET}")
@@ -657,9 +667,9 @@ def handle_slash(
             else:
                 default = "best match" if searching else "latest"
                 for i, info in enumerate(sessions, 1):
-                    print(
-                        f"{DIM}{i:>3}. {info.when} · {info.count:>3} msgs ·{RESET} {info.title}"
-                    )
+                    row = session_row(info)
+                    head, _, title = row.rpartition(" · ")
+                    print(f"{DIM}{i:>3}. {head} ·{RESET} {title}")
                 try:
                     answer = input(
                         f"{YELLOW}resume which?{RESET} [1={default}] (number, q=cancel) "
@@ -693,6 +703,7 @@ def handle_slash(
         if names:
             if not switch_model(agent, names[0], saving=save):
                 return "handled"
+            logref.model(model_spec(agent))
         elif not save:
             if _box is not None:
                 # Interactive: same live-filter picker as /resume, over models.
@@ -703,8 +714,8 @@ def handle_slash(
                 )
                 if selected is None:
                     print(f"{DIM}cancelled — still on {agent.model}{RESET}")
-                else:
-                    switch_model(agent, selected[0])
+                elif switch_model(agent, selected[0]):
+                    logref.model(model_spec(agent))
             else:
                 print(f"{DIM}current model: {agent.model} — /model <name> to switch "
                       f"('ollama list' shows local models; gemini:/openai: for cloud); "
@@ -831,7 +842,8 @@ this machine, so never put private local content into them.
 `!cd <dir>` changes the shared working directory. Ctrl-C cancels only the \
 running command. Ctrl-D or `exit` quits.
 - REPL slash commands (Tab autocompletes them): /resume opens a live picker \
-over ALL earlier sessions with start dates (summary = the session's first \
+over ALL earlier sessions with start date, message count, and the model each \
+session last used (summary = the session's first \
 user message): typing filters by title and full contents deterministically \
 (exact title match, then phrase, then all-words, then fuzzy — no model \
 involved), arrow keys select, Enter loads, Esc cancels; /resume <text> \
@@ -1027,7 +1039,7 @@ def main() -> int:
             else:
                 selected = _box.pick(
                     lambda query: SessionLog.rank(entries, query),
-                    render=lambda info: f"{info.when} · {info.count:>3} msgs · {info.title}",
+                    render=session_row,
                 )
                 if selected is None:
                     print(f"{DIM}cancelled — starting fresh{RESET}")
@@ -1043,6 +1055,7 @@ def main() -> int:
             resumed.add(chosen)
     if log is None:
         log = SessionLog.new(state_dir)
+    log.model(args.model)
     logref = LogRef(log)
 
     context = "\n\n".join(

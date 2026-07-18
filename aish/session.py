@@ -21,6 +21,7 @@ class SessionInfo:
     when: str
     count: int
     title: str
+    model: str = ""  # last model used; "" for sessions logged before model records
 
 
 @dataclass
@@ -53,20 +54,29 @@ class SessionLog:
         return files[-1] if files else None
 
     @staticmethod
-    def load_messages(path: Path) -> list[dict]:
-        """Conversation messages only (no audit records, no stale system
-        prompt — a fresh one is built on resume)."""
-        messages = []
+    def _parse(path: Path) -> tuple[list[dict], str]:
+        """One pass over the file: conversation messages (no audit records, no
+        stale system prompt — a fresh one is built on resume) plus the last
+        recorded model ("" for sessions that predate model records)."""
+        messages: list[dict] = []
+        model = ""
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
-            if record.get("kind") == "message" and record.get("role") != "system":
+            kind = record.get("kind")
+            if kind == "model":
+                model = record.get("model") or model
+            elif kind == "message" and record.get("role") != "system":
                 messages.append(
                     {k: v for k, v in record.items() if k in ("role", "content", "tool_name")}
                 )
-        return messages
+        return messages, model
+
+    @staticmethod
+    def load_messages(path: Path) -> list[dict]:
+        return SessionLog._parse(path)[0]
 
     @staticmethod
     def _derive_title(messages: list[dict]) -> str:
@@ -88,20 +98,20 @@ class SessionLog:
             return datetime.datetime.fromtimestamp(path.stat().st_mtime)
 
     @staticmethod
-    def _info_from(path: Path, messages: list[dict]) -> SessionInfo:
+    def _info_from(path: Path, messages: list[dict], model: str = "") -> SessionInfo:
         title = SessionLog._derive_title(messages)
         if len(title) > TITLE_MAX:
             title = title[: TITLE_MAX - 1] + "…"
         when = SessionLog._started_at(path).strftime("%Y-%m-%d %H:%M")
-        return SessionInfo(path=path, when=when, count=len(messages), title=title)
+        return SessionInfo(path=path, when=when, count=len(messages), title=title, model=model)
 
     @staticmethod
     def info(path: Path) -> SessionInfo | None:
         """Summary line for a session picker; None for empty sessions."""
-        messages = SessionLog.load_messages(path)
+        messages, model = SessionLog._parse(path)
         if not messages:
             return None
-        return SessionLog._info_from(path, messages)
+        return SessionLog._info_from(path, messages, model)
 
     @staticmethod
     def list_sessions(state_dir: Path, exclude: set | None = None) -> list[SessionInfo]:
@@ -125,7 +135,7 @@ class SessionLog:
         for path in sorted(state_dir.glob("session-*.jsonl"), reverse=True):
             if path in exclude:
                 continue
-            messages = SessionLog.load_messages(path)
+            messages, model = SessionLog._parse(path)
             if not messages:
                 continue
             content_cf = " ".join(
@@ -133,7 +143,7 @@ class SessionLog:
             ).casefold()
             entries.append(
                 SessionEntry(
-                    info=SessionLog._info_from(path, messages),
+                    info=SessionLog._info_from(path, messages, model),
                     title_cf=SessionLog._derive_title(messages).casefold(),
                     content_cf=content_cf,
                     words=frozenset(w.strip(_PUNCT) for w in content_cf.split()) - {""},
@@ -196,6 +206,11 @@ class SessionLog:
 
     def message(self, message: dict) -> None:
         self._record("message", **message)
+
+    def model(self, spec: str) -> None:
+        """Record the model in use; appended at session start and on every
+        /model switch, so the last record is the session's current model."""
+        self._record("model", model=spec)
 
     def command(self, command: str, decision: str) -> None:
         self._record("command", command=command, decision=decision)
