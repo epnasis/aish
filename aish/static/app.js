@@ -212,6 +212,9 @@ function onReplay(event) {
     replaying = false;
   }
   scrollToEnd(true);
+  // Every replay marks a fresh view (new chat, resume, reconnect) — on
+  // desktop, land the cursor in the composer ready to type.
+  if (FINE_POINTER && $("backdrop").hidden) input.focus();
 }
 
 function onToken(text) {
@@ -1031,13 +1034,22 @@ $("backdrop").onclick = closeSheets;
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("backdrop").hidden) closeSheets();
-  // Cmd/Ctrl+Shift+O = new chat (ChatGPT convention).
+  // Cmd/Ctrl+Shift+O = new chat, Cmd/Ctrl+Shift+P = search sessions
+  // (ChatGPT / command-palette conventions).
   if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "o") {
     e.preventDefault();
     send({ type: "new" });
     closeSheets();
   }
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "p") {
+    e.preventDefault();
+    openSessionsSheet("");
+  }
 });
+
+// Desktop only: auto-focusing on a phone would pop the keyboard over the
+// content on every reconnect.
+const FINE_POINTER = matchMedia("(pointer: fine)").matches;
 
 // Grabber: drag down to dismiss (pointer events cover touch and mouse).
 for (const sheet of document.querySelectorAll(".sheet")) {
@@ -1086,6 +1098,7 @@ $("sessions-search").addEventListener(
 function openSessionsSheet(query) {
   openSheet("sessions-sheet");
   $("sessions-search").value = query;
+  $("sessions-search").focus();
   send({ type: "sessions", query });
 }
 
@@ -1138,6 +1151,7 @@ $("model-search").addEventListener(
 function openModelSheet(query) {
   openSheet("model-sheet");
   $("model-search").value = query;
+  $("model-search").focus();
   $("model-list").textContent = "loading models…";
   send({ type: "models", query });
 }
