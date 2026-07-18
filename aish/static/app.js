@@ -219,6 +219,7 @@ function onReplay(event) {
     replaying = false;
   }
   scrollToEnd(true);
+  snapViewportSoon(); // session switches race keyboard dismissal with this rebuild (#8)
   // Every replay marks a fresh view (new chat, resume, reconnect) — on
   // desktop, land the cursor in the composer ready to type.
   if (FINE_POINTER && $("backdrop").hidden) input.focus();
@@ -371,10 +372,24 @@ function scrollToEndSettled() {
 // (#8) — once the visual viewport is full-height again (keyboard gone), snap
 // the window home. Never snap while the keyboard is up: the pan is what keeps
 // the composer visible above it.
+function snapViewportHome() {
+  if (!window.visualViewport) return;
+  const keyboardClosed = visualViewport.height >= innerHeight - 1;
+  if (keyboardClosed && (scrollY || visualViewport.offsetTop)) window.scrollTo(0, 0);
+}
+
+// The pan sometimes settles without any visualViewport event — seen when the
+// keyboard dismissal is a side effect of hiding its input (closing a sheet)
+// while the transcript is being replaced (#8). After such moments, retry the
+// snap across the dismissal animation window; each attempt is a no-op unless
+// the keyboard is gone and an offset is left over.
+function snapViewportSoon() {
+  for (const ms of [50, 150, 350, 700]) setTimeout(snapViewportHome, ms);
+}
+
 if (window.visualViewport) {
   const onViewportChange = () => {
-    const keyboardClosed = visualViewport.height >= innerHeight - 1;
-    if (keyboardClosed && (scrollY || visualViewport.offsetTop)) window.scrollTo(0, 0);
+    snapViewportHome();
     scrollToEnd();
   };
   visualViewport.addEventListener("resize", onViewportChange);
@@ -1348,8 +1363,14 @@ function openSheet(id) {
   $("backdrop").hidden = false;
 }
 function closeSheets() {
+  // Blur a focused sheet input before hiding it: merely hiding leaves iOS to
+  // dismiss the keyboard on its own schedule, and the layout-viewport pan it
+  // caused can then settle without any visualViewport event (#8).
+  const active = document.activeElement;
+  if (active && active.closest(".sheet")) active.blur();
   for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
   $("backdrop").hidden = true;
+  snapViewportSoon();
 }
 for (const b of document.querySelectorAll("[data-close]")) {
   b.onclick = closeSheets;
