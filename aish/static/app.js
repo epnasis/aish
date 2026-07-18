@@ -365,9 +365,20 @@ function scrollToEndSettled() {
 }
 
 // Keyboard show/hide resizes the viewport; if the user was reading the tail,
-// keep them pinned to it instead of leaving the bottom hidden.
+// keep them pinned to it instead of leaving the bottom hidden. iOS standalone
+// additionally pans the layout viewport up to reveal the focused input and
+// often forgets to pan back on dismissal, leaving a blank band at the bottom
+// (#8) — once the visual viewport is full-height again (keyboard gone), snap
+// the window home. Never snap while the keyboard is up: the pan is what keeps
+// the composer visible above it.
 if (window.visualViewport) {
-  visualViewport.addEventListener("resize", () => scrollToEnd());
+  const onViewportChange = () => {
+    const keyboardClosed = visualViewport.height >= innerHeight - 1;
+    if (keyboardClosed && (scrollY || visualViewport.offsetTop)) window.scrollTo(0, 0);
+    scrollToEnd();
+  };
+  visualViewport.addEventListener("resize", onViewportChange);
+  visualViewport.addEventListener("scroll", onViewportChange);
 }
 
 function updateScrollButton() {
