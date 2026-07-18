@@ -452,7 +452,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 #suggest {
   background: var(--bg-elev);
   border-top: 0.5px solid var(--sep);
-  max-height: 40dvh;
+  max-height: 40%; /* of the pinned body — see .sheet */
   overflow-y: auto;
 }
 .suggest-row {
@@ -561,7 +561,10 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .sheet {
   position: fixed;
   inset: auto 0 0 0;
-  max-height: 82dvh;
+  /* % of the fixed body, NOT dvh: dvh tracks the layout viewport, which iOS
+     keeps full-height under the keyboard — the sheet must shrink with the
+     JS-pinned body so the results list stays above the keyboard (#24). */
+  max-height: 82%;
   display: flex;
   flex-direction: column;
   background: var(--bg-elev);
