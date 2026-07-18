@@ -13,6 +13,46 @@
 const $ = (id) => document.getElementById(id);
 const messagesEl = $("messages");
 
+// ---- notifications -------------------------------------------------------
+// Best-effort: fires only while the page is alive but unfocused (background
+// tab, other app in front). True lock-screen push would need Web Push +
+// VAPID server-side. On iOS this requires the installed (home-screen) app.
+let swRegistration = null;
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker
+    .register("sw.js")
+    .then((registration) => { swRegistration = registration; })
+    .catch(() => {});
+}
+
+let askedNotify = false;
+let replaying = false;
+
+function maybeRequestNotifyPermission() {
+  // Called from a user gesture (task submit) — required on iOS.
+  if (!("Notification" in window) || Notification.permission !== "default" || askedNotify) {
+    return;
+  }
+  askedNotify = true;
+  Notification.requestPermission().catch(() => {});
+}
+
+function notify(title, body) {
+  if (replaying || document.hasFocus()) return;
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const options = {
+    body: (body || "").slice(0, 140),
+    tag: "aish", // coalesce: the newest state is the only one that matters
+    icon: "icon-192.png",
+    badge: "icon-192.png",
+  };
+  if (swRegistration) {
+    swRegistration.showNotification(title, options).catch(() => {});
+  } else {
+    try { new Notification(title, options); } catch { /* unsupported */ }
+  }
+}
+
 // ---- token (optional auth) ----------------------------------------------
 const urlToken = new URLSearchParams(location.search).get("token");
 if (urlToken) localStorage.setItem("aish-token", urlToken);
@@ -78,7 +118,12 @@ function handle(event) {
     case "token": onToken(event.text); break;
     case "echo": closeAnswer(); addAnsiMsg("echo", event.text); break;
     case "stream": addAnsiMsg("stream", event.text); break;
-    case "error": closeAnswer(); addMsg("error", event.text); setStatus(null); break;
+    case "error":
+      closeAnswer();
+      addMsg("error", event.text);
+      setStatus(null);
+      notify("aish — task failed", event.text);
+      break;
     case "status": onStatus(event); break;
     case "approval_request": onApprovalRequest(event); break;
     case "approval_resolved": onApprovalResolved(event); break;
@@ -97,6 +142,7 @@ function handle(event) {
 function onSessionState(event) {
   const short = event.session.replace(/^session-|\.jsonl$/g, "").replace(/-\d{6}$/, "");
   showToast(`session ${short}: task finished — tap the session title to open it`);
+  notify("aish — background task finished", `session ${short}`);
   if (!$("sessions-sheet").hidden) {
     send({ type: "sessions", query: $("sessions-search").value });
   }
@@ -118,7 +164,12 @@ function onReplay(event) {
   answerText = "";
   sawAnswer = false;
   if (event.truncated) addMsg("notice", "… earlier events trimmed …");
-  for (const item of event.events) handle(item);
+  replaying = true; // replayed history must not re-fire notifications
+  try {
+    for (const item of event.events) handle(item);
+  } finally {
+    replaying = false;
+  }
   scrollToEnd(true);
 }
 
@@ -144,6 +195,7 @@ function onDone(event) {
   }
   closeAnswer();
   setStatus(null);
+  notify("aish — answer ready", event.result);
 }
 
 function onStatus(event) {
@@ -452,6 +504,7 @@ function onApprovalRequest(event) {
   cards.set(event.id, card);
   messagesEl.appendChild(card);
   scrollToEnd(true);
+  notify("aish — approval needed", card.dataset.summary);
 }
 
 function title(card, html) {
@@ -727,6 +780,7 @@ function submitInput() {
     text = text ? `${text}\n\n${listing}` : listing;
   }
   if (send({ type: "task", text })) {
+    maybeRequestNotifyPermission();
     input.value = "";
     input.style.height = "auto";
     attachments = [];

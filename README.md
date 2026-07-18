@@ -221,6 +221,13 @@ note the model cannot *see* image contents, only work on the files with
 tools. On iPhone/iPad, "Add to Home Screen" installs it as a full-screen
 app.
 
+**Notifications**: with permission granted (asked on your first task), the
+app notifies you when an approval is waiting, an answer is ready, a task
+fails, or a background session finishes — but only while the page is open
+and out of focus (background tab, another app in front). It cannot reach a
+locked phone: that would need Web Push infrastructure, and on iOS
+notifications work only from the installed home-screen app.
+
 Sessions are the same JSONL files as the terminal, so `aish --resume` can pick
 up a web session and vice versa.
 
