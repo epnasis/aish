@@ -406,6 +406,9 @@ function reportViewport(label) {
   const text =
     `${label} vv.h=${vv ? vv.height.toFixed(1) : "n/a"} vv.top=${vv ? vv.offsetTop.toFixed(1) : "n/a"}` +
     ` innerH=${innerHeight} scrollY=${scrollY} docH=${document.documentElement.getBoundingClientRect().height.toFixed(1)}` +
+    ` screen=${screen.width}x${screen.height} composerBot=${$("composer").getBoundingClientRect().bottom.toFixed(1)}` +
+    ` msgTop=${messagesEl.getBoundingClientRect().top.toFixed(1)} msgBot=${messagesEl.getBoundingClientRect().bottom.toFixed(1)}` +
+    ` botEl=${(document.elementFromPoint(innerWidth / 2, innerHeight - 4) || {}).id || "none"}` +
     ` standalone=${matchMedia("(display-mode: standalone)").matches} rev=${PAGE_REV}`;
   try { send({ type: "client_debug", text }); } catch { /* socket down — skip */ }
 }
@@ -1328,6 +1331,7 @@ function handleSlash(text) {
     case "/jobs": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
     case "/help": openSheet("workspace-sheet"); break;
     case "/quit": case "/exit": showToast("just close the tab — sessions persist"); break;
+    case "/debug": reportViewport("manual"); showToast("viewport state sent to server log"); break;
     default: showToast(`unknown command ${command}`);
   }
 }
