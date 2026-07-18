@@ -954,6 +954,12 @@ $("backdrop").onclick = closeSheets;
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("backdrop").hidden) closeSheets();
+  // Cmd/Ctrl+Shift+O = new chat (ChatGPT convention).
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "o") {
+    e.preventDefault();
+    send({ type: "new" });
+    closeSheets();
+  }
 });
 
 // Grabber: drag down to dismiss (pointer events cover touch and mouse).
