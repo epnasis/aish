@@ -27,6 +27,10 @@
 
 <main id="messages"></main>
 
+<button id="scroll-down" hidden aria-label="scroll to bottom">
+  <svg viewBox="0 0 24 24"><path d="M12 5.5v13M6.8 13.3 12 18.5l5.2-5.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+</button>
+
 <div id="statusline" hidden><span class="pulse">✻</span> <span id="status-text"></span></div>
 <div id="connbar" hidden>reconnecting…</div>
 
@@ -38,7 +42,7 @@
     <svg viewBox="0 0 24 24"><path d="M20.6 11.6 12.4 19.8a5 5 0 0 1-7.1-7.1l8.3-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.2a1.8 1.8 0 0 1-2.6-2.6l7.6-7.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
   <input id="file-input" type="file" multiple hidden>
-  <textarea id="input" rows="1" placeholder="Message aish"
+  <textarea id="input" rows="1" placeholder="Ask aish"
             autocomplete="off" autocapitalize="sentences" spellcheck="true"></textarea>
   <button id="send" type="submit" aria-label="send">
     <svg viewBox="0 0 24 24"><path d="M12 18.5v-13M6.8 10.7 12 5.5l5.2 5.2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>

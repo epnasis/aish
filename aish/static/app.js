@@ -235,7 +235,18 @@ function nearBottom() {
 
 function scrollToEnd(force) {
   if (force || nearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight;
+  updateScrollButton();
 }
+
+function updateScrollButton() {
+  $("scroll-down").hidden = nearBottom();
+}
+
+messagesEl.addEventListener("scroll", updateScrollButton, { passive: true });
+
+$("scroll-down").onclick = () => {
+  messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
+};
 
 function onHistory(history) {
   addMsg("notice", `— resumed ${history.length} messages —`);

@@ -408,6 +408,17 @@ class WebServer:
     async def startup(self) -> None:
         self.loop = asyncio.get_running_loop()
 
+    async def shutdown(self) -> None:
+        """Unblock everything so Ctrl-C exits promptly: workers parked on an
+        approval slot would otherwise wait forever and keep the interpreter
+        alive. Denials are recorded in the audit log like any other deny."""
+        for session in self.sessions.values():
+            for uid in list(session.bridge.pending):
+                session.bridge.answer(uid, {"action": "deny"})
+        if self.ws is not None:
+            with contextlib.suppress(Exception):
+                await self.ws.close()
+
     def add_session(self, session: Session, activate: bool = True) -> None:
         self.sessions[session.name] = session
         if activate:
@@ -855,6 +866,7 @@ def create_app(
     async def lifespan(_app):
         await server.startup()
         yield
+        await server.shutdown()
 
     app = Starlette(
         routes=[
@@ -929,7 +941,13 @@ def main() -> int:
     query = f"/?token={token}" if token else "/"
     print(f"aish-web · model {args.model} · http://{args.host}:{args.port}{query}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
-    return 0
+    # uvicorn has finished its graceful shutdown (connections closed, lifespan
+    # ran, pending approvals denied). A worker thread still inside a model
+    # call is not interruptible and would block interpreter exit — end the
+    # process now; session logs flush on every write, so nothing is lost.
+    print("aish-web stopped")
+    sys.stdout.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
