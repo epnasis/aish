@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>aish</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <button id="model-chip" class="chip" title="switch model">…</button>
+  <button id="session-chip" class="chip grow" title="sessions">aish</button>
+  <button id="menu-chip" class="chip" title="workspace">⋯</button>
+</header>
+
+<main id="messages"></main>
+
+<div id="statusline" hidden><span class="pulse">✻</span> <span id="status-text"></span></div>
+<div id="connbar" hidden>reconnecting…</div>
+
+<form id="composer">
+  <textarea id="input" rows="1" placeholder="ask aish… (/ for commands)"
+            autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+  <button id="send" type="submit" aria-label="send">➤</button>
+</form>
+
+<!-- sessions drawer -->
+<div id="sessions-sheet" class="sheet" hidden>
+  <div class="sheet-head">
+    <input id="sessions-search" type="search" placeholder="search sessions…">
+    <button id="new-chat" class="primary">new chat</button>
+    <button class="close" data-close="sessions-sheet">✕</button>
+  </div>
+  <div id="sessions-list" class="sheet-list"></div>
+</div>
+
+<!-- model sheet -->
+<div id="model-sheet" class="sheet" hidden>
+  <div class="sheet-head">
+    <input id="model-search" type="search" placeholder="search models…">
+    <button class="close" data-close="model-sheet">✕</button>
+  </div>
+  <label class="save-toggle"><input type="checkbox" id="model-save"> make startup default</label>
+  <div id="model-list" class="sheet-list"></div>
+</div>
+
+<!-- workspace panel -->
+<div id="workspace-sheet" class="sheet" hidden>
+  <div class="sheet-head">
+    <strong class="grow">workspace</strong>
+    <button class="close" data-close="workspace-sheet">✕</button>
+  </div>
+  <div class="ws-section">
+    <div class="ws-label">working directory <span class="ws-note">(re-anchors auto-approval root)</span></div>
+    <div id="ws-cwd" class="mono"></div>
+    <div class="ws-row"><input id="cd-input" placeholder="/path/to/project"><button id="cd-go">cd</button></div>
+  </div>
+  <div class="ws-section">
+    <div class="ws-label">session roots <span class="ws-note">(auto-approval allowed in these trees)</span></div>
+    <div id="ws-roots" class="mono"></div>
+    <div class="ws-row"><input id="root-input" placeholder="/another/tree"><button id="root-add">add root</button></div>
+  </div>
+  <div class="ws-section">
+    <div class="ws-label">background jobs</div>
+    <pre id="ws-jobs" class="mono">—</pre>
+    <button id="jobs-refresh">refresh</button>
+  </div>
+  <div class="ws-section ws-about">
+    aish web · commands need your approval before running · the "always allow"
+    list can only be grown from terminal aish · sessions are shared with the
+    terminal (resume either way)
+  </div>
+</div>
+
+<div id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

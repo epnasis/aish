@@ -10,13 +10,17 @@ dependencies = [
     "ollama>=0.5",
     "openai>=1.60",
     "prompt-toolkit>=3.0",
+    "starlette>=0.40",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.scripts]
 aish = "aish.cli:main"
+aish-web = "aish.server:main"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.27",
     "pytest>=8",
     "ruff>=0.8",
 ]

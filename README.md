@@ -179,6 +179,43 @@ override via `$AISH_CONFIG`,
 `--think` enables model thinking (slower, rarely worth it). You can also just
 ask aish about any of this — its own docs are in its system prompt.
 
+## Web UI
+
+`aish-web` serves the same agent to a browser — built for phones: approvals
+become tap-able cards (Approve / Edit / Deny), file writes show the colored
+diff before anything lands on disk, answers stream live, and locking your
+phone mid-task loses nothing (on reconnect the server replays the transcript,
+including any approval still waiting).
+
+```sh
+aish-web                      # http://127.0.0.1:8787, config-default model
+aish-web --host 0.0.0.0       # expose to your LAN (see security note below)
+aish-web --model gemini       # same --model forms as aish
+```
+
+Header controls replace the slash commands: the **model chip** opens a
+searchable model picker (with a "make startup default" toggle), the **session
+title** opens the sessions drawer (search + resume + new chat), and the **⋯
+menu** shows the working directory, session roots (`/cd` / `/add-dir`
+equivalents), and background jobs. Typing `/model`, `/resume`, `/new`, `/cd`,
+`/add-dir`, or `/jobs` in the input box opens the matching UI. On iPhone/iPad,
+"Add to Home Screen" installs it as a full-screen app.
+
+Sessions are the same JSONL files as the terminal, so `aish --resume` can pick
+up a web session and vice versa.
+
+**Security**: whoever reaches this UI can drive an agent that executes
+approved commands on the host, so it binds to `127.0.0.1` unless you opt into
+`--host 0.0.0.0`, and setting `AISH_WEB_TOKEN=<secret>` requires
+`?token=<secret>` on first visit (stored by the browser) — recommended even on
+a home LAN. One task runs at a time; a second device connecting takes over the
+session view. Deliberately **not** available from the web: `!` direct
+commands, and growing the "always allow" list — approving a card runs the
+command once, and the allowlist can only be extended from terminal aish.
+Switching to/from `claude-max` needs a restart (`aish-web --model claude-max`),
+and there is no mid-task cancel yet — deny its next approval, or restart the
+server.
+
 ## Development
 
 ```sh

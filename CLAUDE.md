@@ -36,6 +36,7 @@ Data flow: `cli.py` (REPL/argv, slash commands, rendering) constructs an `Agent`
 - **`web.py`** — `web_search`/`read_url`, auto-approved but their inputs leave the machine, so every call is echoed and fetched content is wrapped in an untrusted-content banner. http/https only.
 - **`session.py`** — append-only JSONL per session in `~/.local/state/aish/`: conversation (for `--resume`) plus audit trail of every command decision.
 - **`prompt.py`** — the boxed input UI, built as a small prompt_toolkit `Application` (not `PromptSession`) because the footer-under-input layout requires it.
+- **`server.py`** — `aish-web`: the same Agent behind a Starlette WebSocket instead of a TTY. `Bridge` is the core mechanism: `run_task` runs via `asyncio.to_thread`, callbacks emit JSON events through `call_soon_threadsafe`, and the approval callbacks block the worker on a `queue.Queue` slot until the browser answers — the approval gate is unchanged, only the transport differs. One agent/one task/one client per process; every (re)connect gets hello + a full transcript replay, which is what makes phone lock/unlock lossless. The vanilla-JS frontend lives in `aish/static/` (no build step). Web approvers mirror `cli.make_approver` exactly (denylist first, also on edited commands; auto-approval scoped to live roots); "always allow" is deliberately terminal-only.
 - **`skills.py`** — markdown playbooks from `./.aish/skills/` (project, wins on clash) or `~/.config/aish/skills/`.
 
 ## Testing pattern
