@@ -47,7 +47,7 @@ SLASH_COMMANDS = (
     "/model", "/new", "/quit", "/resume",
 )
 
-SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab autocompletes):{RESET}
+SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
   {CYAN}/resume{RESET}        pick an earlier session: type to filter by title, contents,
                  and model (exact match first, then phrase, words, fuzzy),
                  ↑/↓ select, Enter loads, Esc cancels
@@ -638,9 +638,17 @@ def handle_slash(
     resumed: set | None = None,
     config_path: Path | None = None,
 ) -> str:
-    """Dispatch a /command; returns 'exit' or 'handled'."""
+    """Dispatch a /command; returns 'exit' or 'handled'. Unambiguous
+    prefixes resolve (/res → /resume); ambiguous ones list the options."""
     resumed = resumed if resumed is not None else set()
     command = task.split()[0].lower()
+    if command not in SLASH_COMMANDS:
+        matches = [c for c in SLASH_COMMANDS if c.startswith(command)]
+        if len(matches) == 1:
+            command = matches[0]
+        elif matches:
+            print(f"{DIM}ambiguous — did you mean {' or '.join(matches)}?{RESET}")
+            return "handled"
     if command in ("/quit", "/exit"):
         return "exit"
     if command in ("/new", "/clear"):
@@ -866,7 +874,8 @@ this machine, so never put private local content into them.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` changes the shared working directory. Ctrl-C cancels only the \
 running command. Ctrl-D or `exit` quits.
-- REPL slash commands (Tab autocompletes them): /resume opens a live picker \
+- REPL slash commands (Tab autocompletes them; an unambiguous prefix works, \
+e.g. /res for /resume): /resume opens a live picker \
 over ALL earlier sessions with start date, message count, and the model each \
 session last used (summary = the session's first \
 user message): typing filters by title, full contents, and model name \

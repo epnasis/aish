@@ -43,6 +43,10 @@ class SessionLog:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = path.open("a", encoding="utf-8")
 
+    def close(self) -> None:
+        """Release the append handle (the file itself always persists)."""
+        self._fh.close()
+
     @classmethod
     def new(cls, state_dir: Path) -> "SessionLog":
         # Microseconds: /new within the same second must not reuse the file.

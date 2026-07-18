@@ -191,7 +191,15 @@ live and render as markdown (tables, code blocks, links), command output
 keeps its ANSI colors, and locking your phone mid-task loses nothing (on
 reconnect the server replays the transcript, including any approval still
 waiting). "Allow this session" auto-approves the command's prefixes until
-the server restarts — in memory only, never written to the allowlist.
+the session closes — in memory only, never written to the allowlist.
+
+**Parallel sessions**: several sessions can be open at once, each with its
+own agent, model, working directory, and running task. Start a task, hit the
+compose button, work on something else — the first task keeps running and
+the sessions drawer shows live badges (running / needs approval); a toast
+tells you when a background task finishes. Up to 6 sessions stay open in
+memory (idle ones beyond that are closed; their files persist and reopen
+on demand).
 
 ```sh
 aish-web                      # http://127.0.0.1:8787, config-default model
@@ -203,14 +211,15 @@ Header controls replace the slash commands: the **model chip** opens a
 searchable model picker (with a "make startup default" toggle), the **session
 title** opens the sessions drawer (search + resume + new chat), and the **⋯
 menu** shows the working directory, session roots (`/cd` / `/add-dir`
-equivalents), and background jobs; the **＋** chip starts a fresh chat. The
-input box autocompletes like the terminal: `/` pops up the command list and
-`@` pops up project-file completion (same walk and ranking as the TUI).
-The 📎 button uploads files (to `~/.local/state/aish/uploads/`, a session
-root) and attaches their paths to your message so the agent can `read_file`
-them — note the model cannot *see* image contents, only work on the files
-with tools. On iPhone/iPad, "Add to Home Screen" installs it as a
-full-screen app.
+equivalents), and background jobs; the **compose** button starts a fresh
+chat. The input box autocompletes like the terminal: `/` pops up the command
+list (unambiguous prefixes work — `/res` runs `/resume`) and `@` pops up
+project-file completion (same walk and ranking as the TUI). The paperclip
+uploads files (to `~/.local/state/aish/uploads/`, a session root) and
+attaches their paths to your message so the agent can `read_file` them —
+note the model cannot *see* image contents, only work on the files with
+tools. On iPhone/iPad, "Add to Home Screen" installs it as a full-screen
+app.
 
 Sessions are the same JSONL files as the terminal, so `aish --resume` can pick
 up a web session and vice versa.
@@ -219,8 +228,9 @@ up a web session and vice versa.
 approved commands on the host, so it binds to `127.0.0.1` unless you opt into
 `--host 0.0.0.0`, and setting `AISH_WEB_TOKEN=<secret>` requires
 `?token=<secret>` on first visit (stored by the browser) — recommended even on
-a home LAN. One task runs at a time; a second device connecting takes over the
-session view. Deliberately **not** available from the web: `!` direct
+a home LAN. One task runs per session (open more sessions for parallel work);
+a second device connecting takes over the view. Deliberately **not**
+available from the web: `!` direct
 commands, and growing the "always allow" list — approving a card runs the
 command once, and the allowlist can only be extended from terminal aish.
 Switching to/from `claude-max` needs a restart (`aish-web --model claude-max`),

@@ -6,10 +6,13 @@ out, and approvals block the agent's worker thread on a queue until the
 browser answers — the approval gate is identical to the terminal's, only the
 transport differs.
 
-Process model: one process owns one Agent and one SessionLog; one task runs
-at a time, and one client is active — a new connection replaces the old one
-and receives the buffered transcript, which is what makes phone lock/unlock
-mid-task lossless.
+Process model: one process holds MANY open sessions (each its own Agent +
+SessionLog + transcript + busy flag) but shows ONE to the single connected
+client. Tasks keep running in background sessions; switching sessions just
+replays the target's transcript, so a task started in one session finishes
+while you work in another. A new connection replaces the old one and receives
+the active session's buffered transcript, which is what makes phone
+lock/unlock mid-task lossless.
 """
 
 import argparse
@@ -60,39 +63,52 @@ from .session import SessionLog
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-UPLOAD_MAX_BYTES = 25 * 1024 * 1024
-
 # Replay buffer bounds: enough for a long task's worth of events; beyond it
 # the oldest are dropped and the client shows a truncation marker.
 TRANSCRIPT_MAX = 600
 TRANSCRIPT_KEEP = 500
+
+# Open sessions kept in memory at once; beyond this the longest-idle one is
+# closed (its file persists — reopening it later just reloads the history).
+MAX_OPEN_SESSIONS = 6
+
+UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 
 CLOSE_REPLACED = 4000  # another device connected; this socket is superseded
 CLOSE_BAD_TOKEN = 4403
 
 
 class Bridge:
-    """Bridges the agent's worker thread to the event loop.
+    """Bridges one session's agent worker thread to the event loop.
 
     Outbound events go through call_soon_threadsafe into an asyncio queue a
-    sender coroutine drains; approval requests additionally block the worker
-    on a plain queue.Queue slot until the client's answer fills it. The
-    transcript buffer is only ever touched on the loop thread (inside _put),
-    so replay snapshots need no locking.
+    sender coroutine drains — but only while this session is the one shown
+    (`attached`); a background session's events land in its transcript alone
+    and surface on the next switch. Approval requests additionally block the
+    worker on a plain queue.Queue slot until the client's answer fills it.
+    The transcript buffer is only ever touched on the loop thread (inside
+    _put), so replay snapshots need no locking.
     """
 
-    def __init__(self):
-        self.loop: asyncio.AbstractEventLoop | None = None
+    def __init__(self, get_loop):
+        self._get_loop = get_loop
+        self.attached = False
         self.outbox: asyncio.Queue = asyncio.Queue()
         self.pending: dict[str, queue.Queue] = {}
         self.transcript: list[dict] = []
         self.truncated = False
 
     def emit(self, event: dict, record: bool = True) -> None:
-        if self.loop is None:  # before startup: nothing listening yet
+        loop = self._get_loop()
+        if loop is None:  # before startup: nothing listening yet
             self._put(event, record)
             return
-        self.loop.call_soon_threadsafe(self._put, event, record)
+        loop.call_soon_threadsafe(self._put, event, record)
+
+    def record(self, event: dict) -> None:
+        """Loop-thread-only synchronous record (emit() would defer a tick and
+        race the replay snapshot taken right after)."""
+        self._put(event, True)
 
     def _put(self, event: dict, record: bool) -> None:
         if record:
@@ -104,13 +120,14 @@ class Bridge:
                 if len(self.transcript) > TRANSCRIPT_MAX:
                     del self.transcript[: len(self.transcript) - TRANSCRIPT_KEEP]
                     self.truncated = True
-        self.outbox.put_nowait(event)
+        if self.attached:
+            self.outbox.put_nowait(event)
 
     def ask(self, event: dict) -> dict:
         """Emit an approval_request (id added in place) and block the calling
         worker thread until answer() delivers the client's decision. No
         timeout by design: an unanswered approval simply waits — the request
-        stays in the transcript and reappears on reconnect."""
+        stays in the transcript and reappears when this session is shown."""
         event["id"] = uid = uuid.uuid4().hex
         slot: queue.Queue = queue.Queue(maxsize=1)
         self.pending[uid] = slot
@@ -132,10 +149,6 @@ class Bridge:
 
     def reset_outbox(self) -> None:
         self.outbox = asyncio.Queue()
-
-    def clear(self) -> None:
-        self.transcript.clear()
-        self.truncated = False
 
 
 class WebStatus:
@@ -180,7 +193,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     cli.make_approver semantics exactly: denylist first (also on edited
     commands), then auto-approval scoped to the live session roots, then a
     blocking approval card. session_prefixes backs the card's "Allow this
-    session" button — in-memory only, forgotten when the server stops."""
+    session" button — in-memory only, forgotten when the session closes."""
     session_prefixes: set[str] = set()
 
     def known_prefixes() -> frozenset:
@@ -325,16 +338,19 @@ About aish (you) — use this to answer questions about your own usage:
 {identity_context(model, provider)}
 - The user talks to you through the aish WEB UI in a browser (often a phone), \
 not a terminal. Every command you propose appears as an approval card with \
-Approve / Edit / Deny buttons; file writes show a unified diff before \
-approval. Read-only commands auto-approve within the session roots \
-(allowlist: {allow_path}).
+Approve / Allow this session / Edit / Deny buttons; file writes show a \
+unified diff before approval. Read-only commands auto-approve within the \
+session roots (allowlist: {allow_path}). "Allow this session" auto-approves \
+that command's prefixes until the session closes — in memory only.
 - There are NO slash commands and NO ! direct commands here. Model switching, \
 resuming earlier sessions, new chats, changing the working directory, and \
 adding session roots all happen through the UI's header controls — if the \
 user asks how, point them at the model chip, the session title (sessions \
-drawer), and the ⋯ menu (workspace panel).
-- The "always allow" allowlist cannot be grown from the web UI — that is \
-terminal-only by design. Approving a card runs the command once.
+drawer), the ＋ chip (new chat), and the ⋯ menu (workspace panel).
+- Several sessions can be open at once; a task keeps running when the user \
+switches to another session and its result is there when they switch back.
+- The persistent "always allow" allowlist cannot be grown from the web UI — \
+that is terminal-only by design.
 - Safety denylist: unrecoverable command classes are blocked outright and \
 cannot be approved here at all (extendable in {deny_path}); suggest a safer \
 alternative when blocked.
@@ -350,40 +366,83 @@ work with metadata/shell tools (sips, exiftool) and say so if asked to \
 describe one."""
 
 
-class WebServer:
-    """Per-process server state: one agent, one session log, one active client."""
+class Session:
+    """One open conversation: its own agent, log, transcript, and busy flag."""
 
-    def __init__(self, agent, logref, bridge, state_dir, config_path, token):
+    def __init__(self, agent, logref: LogRef, bridge: Bridge):
         self.agent = agent
         self.logref = logref
         self.bridge = bridge
+        self.busy = False
+        self.runner: asyncio.Task | None = None
+        self.last_shown = time.monotonic()
+
+    @property
+    def name(self) -> str:
+        return self.logref.log.path.name
+
+    def state(self) -> str:
+        if self.busy:
+            return "waiting" if self.bridge.pending else "running"
+        return "idle"
+
+    def close(self) -> None:
+        self.logref.log.close()
+
+
+class WebServer:
+    """Per-process state: open sessions, the one being shown, one client."""
+
+    def __init__(self, open_session, state_dir, config_path, token):
+        self.open_session = open_session  # (path | None) -> Session
         self.state_dir = state_dir
         self.uploads_dir = state_dir / "uploads"
         self.config_path = config_path
         self.token = token
-        self.busy = False
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.sessions: dict[str, Session] = {}
+        self.active: Session | None = None
         self.ws: WebSocket | None = None
         self.sender: asyncio.Task | None = None
-        self.runner: asyncio.Task | None = None
 
     async def startup(self) -> None:
-        self.bridge.loop = asyncio.get_running_loop()
+        self.loop = asyncio.get_running_loop()
+
+    def add_session(self, session: Session, activate: bool = True) -> None:
+        self.sessions[session.name] = session
+        if activate:
+            self.active = session
+
+    def _evict_idle(self) -> None:
+        """Close the longest-idle non-busy background session past the cap.
+        Running sessions are never closed — the cap can be exceeded by work."""
+        while len(self.sessions) >= MAX_OPEN_SESSIONS:
+            idle = [
+                s for s in self.sessions.values()
+                if not s.busy and s is not self.active
+            ]
+            if not idle:
+                return
+            oldest = min(idle, key=lambda s: s.last_shown)
+            oldest.close()
+            del self.sessions[oldest.name]
 
     def _hello(self) -> dict:
+        session = self.active
         return {
             "type": "hello",
-            "model": model_spec(self.agent),
-            "session": self.logref.log.path.name,
-            "busy": self.busy,
-            "cwd": self.agent.cwd,
-            "roots": [str(root) for root in self.agent.roots],
+            "model": model_spec(session.agent),
+            "session": session.name,
+            "busy": session.busy,
+            "cwd": session.agent.cwd,
+            "roots": [str(root) for root in session.agent.roots],
         }
 
     def _cwd_event(self) -> dict:
         return {
             "type": "cwd_changed",
-            "cwd": self.agent.cwd,
-            "roots": [str(root) for root in self.agent.roots],
+            "cwd": self.active.agent.cwd,
+            "roots": [str(root) for root in self.active.agent.roots],
         }
 
     async def handle_ws(self, websocket: WebSocket) -> None:
@@ -407,9 +466,6 @@ class WebServer:
                 self.ws = None
 
     async def _attach(self, websocket: WebSocket) -> None:
-        if self.sender:
-            self.sender.cancel()
-            self.sender = None
         old = self.ws
         self.ws = websocket
         if old is not None:
@@ -417,20 +473,34 @@ class WebServer:
                 await old.close(code=CLOSE_REPLACED)
             except Exception:  # noqa: BLE001 — the old socket may already be dead
                 pass
+        await self._show(websocket, self.active)
+
+    async def _show(self, websocket: WebSocket, session: Session) -> None:
+        """Point the client at `session`: hello + full transcript replay,
+        then live events from its bridge."""
+        if self.sender:
+            self.sender.cancel()
+            self.sender = None
+        for other in self.sessions.values():
+            other.bridge.attached = False
+        self.active = session
+        session.last_shown = time.monotonic()
+        bridge = session.bridge
         # Same synchronous block: no _put callback can land between the queue
         # swap and the snapshot, so replay + live stream never duplicate.
-        self.bridge.reset_outbox()
-        snapshot = list(self.bridge.transcript)
+        bridge.attached = True
+        bridge.reset_outbox()
+        snapshot = list(bridge.transcript)
         await websocket.send_json(self._hello())
         await websocket.send_json(
-            {"type": "replay", "events": snapshot, "truncated": self.bridge.truncated}
+            {"type": "replay", "events": snapshot, "truncated": bridge.truncated}
         )
-        self.sender = asyncio.ensure_future(self._send_loop(websocket))
+        self.sender = asyncio.ensure_future(self._send_loop(websocket, bridge))
 
-    async def _send_loop(self, websocket: WebSocket) -> None:
+    async def _send_loop(self, websocket: WebSocket, bridge: Bridge) -> None:
         try:
             while True:
-                event = await self.bridge.outbox.get()
+                event = await bridge.outbox.get()
                 await websocket.send_json(event)
         except Exception:  # noqa: BLE001 — a dead socket ends the loop; replay recovers
             pass
@@ -440,7 +510,10 @@ class WebServer:
         if kind == "task":
             await self._start_task(websocket, str(message.get("text", "")).strip())
         elif kind == "approval":
-            self.bridge.answer(str(message.get("id", "")), message)
+            uid = str(message.get("id", ""))
+            for session in self.sessions.values():
+                if session.bridge.answer(uid, message):
+                    break
         elif kind == "sessions":
             await self._send_sessions(websocket, str(message.get("query", "")))
         elif kind == "resume":
@@ -465,9 +538,13 @@ class WebServer:
             )
 
     async def _reject_busy(self, websocket: WebSocket) -> bool:
-        if self.busy:
+        if self.active.busy:
             await websocket.send_json(
-                {"type": "error", "text": "busy — wait for the current task to finish"}
+                {
+                    "type": "error",
+                    "text": "this session is busy — wait, or start a new "
+                    "session (＋) and work there in parallel",
+                }
             )
             return True
         return False
@@ -475,31 +552,43 @@ class WebServer:
     async def _start_task(self, websocket: WebSocket, text: str) -> None:
         if not text or await self._reject_busy(websocket):
             return
-        self.busy = True
-        self.bridge.emit({"type": "user", "text": text})
-        self.runner = asyncio.ensure_future(self._run_task(text))
+        session = self.active
+        session.busy = True
+        session.bridge.emit({"type": "user", "text": text})
+        session.runner = asyncio.ensure_future(self._run_task(session, text))
 
-    async def _run_task(self, text: str) -> None:
+    async def _run_task(self, session: Session, text: str) -> None:
         try:
-            result = await asyncio.to_thread(self.agent.run_task, text)
-            self.bridge.emit({"type": "done", "result": result})
+            result = await asyncio.to_thread(session.agent.run_task, text)
+            session.bridge.emit({"type": "done", "result": result})
         except ModelUnavailable as exc:
-            self.bridge.emit(
-                {"type": "error", "text": f"model unavailable: {exc}{_backend_hint(self.agent)}"}
+            session.bridge.emit(
+                {
+                    "type": "error",
+                    "text": f"model unavailable: {exc}{_backend_hint(session.agent)}",
+                }
             )
         except Exception as exc:  # noqa: BLE001 — a task bug must not kill the server
-            self.bridge.emit({"type": "error", "text": f"task failed: {exc!r}"})
+            session.bridge.emit({"type": "error", "text": f"task failed: {exc!r}"})
         finally:
-            self.busy = False
+            session.busy = False
+            if session is not self.active and self.ws is not None:
+                try:  # heads-up toast; the drawer badge is the durable signal
+                    await self.ws.send_json(
+                        {"type": "session_state", "session": session.name, "state": "idle"}
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _send_sessions(self, websocket: WebSocket, query: str) -> None:
-        state_dir, exclude = self.state_dir, {self.logref.log.path}
+        state_dir, exclude = self.state_dir, {self.active.logref.log.path}
 
         def load():
             entries = SessionLog.load_entries(state_dir, exclude=exclude)
             return SessionLog.rank(entries, query)
 
         infos = await asyncio.to_thread(load)
+        open_states = {name: s.state() for name, s in self.sessions.items()}
         await websocket.send_json(
             {
                 "type": "session_list",
@@ -510,6 +599,7 @@ class WebServer:
                         "count": info.count,
                         "model": info.model,
                         "title": info.title,
+                        "state": open_states.get(info.path.name, ""),
                     }
                     for info in infos
                 ],
@@ -517,43 +607,33 @@ class WebServer:
         )
 
     async def _resume(self, websocket: WebSocket, name: str) -> None:
-        if await self._reject_busy(websocket):
+        if name == self.active.name:
+            await self._show(websocket, self.active)
+            return
+        existing = self.sessions.get(name)
+        if existing is not None:
+            await self._show(websocket, existing)
             return
         safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
         path = self.state_dir / name
         if not safe or ".." in name or not path.is_file():
             await websocket.send_json({"type": "error", "text": f"no such session: {name}"})
             return
-        messages = await asyncio.to_thread(SessionLog.load_messages, path)
-        # Same semantics as the terminal's /resume: merge into the current
-        # conversation, re-logging so the current session file stays
-        # self-contained.
-        self.agent.load_history(messages)
-        for message in messages:
-            self.logref.message(message)
-        self.bridge.emit(
-            {"type": "echo", "text": f"resumed {len(messages)} messages from {name}"}
-        )
-        self.bridge.emit({"type": "history", "messages": messages})
+        self._evict_idle()
+        session, history = await asyncio.to_thread(self.open_session, path)
+        # Recorded synchronously so the _show snapshot right below includes it.
+        session.bridge.record({"type": "history", "messages": history})
+        self.add_session(session, activate=False)
+        await self._show(websocket, session)
 
     async def _new_session(self, websocket: WebSocket) -> None:
-        if await self._reject_busy(websocket):
-            return
-        self.agent.reset()
-        self.logref.log = SessionLog.new(self.state_dir)
-        self.logref.model(model_spec(self.agent))
-        self.bridge.clear()
-        await websocket.send_json(self._hello())
-        # An empty replay is the client's "clear the screen" signal.
-        await websocket.send_json({"type": "replay", "events": [], "truncated": False})
-
-    async def _send_files(self, websocket: WebSocket, query: str) -> None:
-        cwd = self.agent.cwd
-        paths = await asyncio.to_thread(list_files, cwd, query)
-        await websocket.send_json({"type": "file_list", "query": query, "files": paths})
+        self._evict_idle()
+        session, _ = await asyncio.to_thread(self.open_session, None)
+        self.add_session(session, activate=False)
+        await self._show(websocket, session)
 
     async def _send_models(self, websocket: WebSocket, query: str) -> None:
-        agent, state_dir = self.agent, self.state_dir
+        agent, state_dir = self.active.agent, self.state_dir
 
         def load():
             return rank_models(available_models(agent, state_dir), query)
@@ -562,7 +642,7 @@ class WebServer:
         await websocket.send_json(
             {
                 "type": "model_list",
-                "current": model_spec(self.agent),
+                "current": model_spec(self.active.agent),
                 "models": [{"name": name, "desc": desc} for name, desc in ranked],
             }
         )
@@ -570,11 +650,12 @@ class WebServer:
     async def _set_model(self, websocket: WebSocket, message: dict) -> None:
         if await self._reject_busy(websocket):
             return
+        session = self.active
         spec = str(message.get("spec", "")).strip()
         if not spec:
             return
         crossing_max = spec.startswith("claude-max") or (
-            getattr(self.agent, "provider", "ollama") == "claude-max"
+            getattr(session.agent, "provider", "ollama") == "claude-max"
         )
         if crossing_max:
             await websocket.send_json(
@@ -590,10 +671,10 @@ class WebServer:
         except backends.BackendError as exc:
             await websocket.send_json({"type": "error", "text": str(exc)})
             return
-        self.agent.chat = chat
-        self.agent.model = name
-        self.agent.provider = provider
-        self.logref.model(model_spec(self.agent))
+        session.agent.chat = chat
+        session.agent.model = name
+        session.agent.provider = provider
+        session.logref.model(model_spec(session.agent))
         saved = False
         if message.get("save"):
             if self.config_path is None:
@@ -606,19 +687,34 @@ class WebServer:
                     await websocket.send_json({"type": "error", "text": error})
                 else:
                     saved = True
-        self.bridge.emit({"type": "echo", "text": f"model switched to {spec}"})
+        session.bridge.emit({"type": "echo", "text": f"model switched to {spec}"})
         await websocket.send_json(
-            {"type": "model_changed", "model": model_spec(self.agent), "saved": saved}
+            {"type": "model_changed", "model": model_spec(session.agent), "saved": saved}
         )
 
     async def _cd(self, websocket: WebSocket, path: str) -> None:
         if await self._reject_busy(websocket) or not path:
             return
-        result = await asyncio.to_thread(self.agent.rebase, path)
+        result = await asyncio.to_thread(self.active.agent.rebase, path)
         if result.startswith("ERROR"):
             await websocket.send_json({"type": "error", "text": result})
             return
         await websocket.send_json(self._cwd_event())
+
+    async def _add_dir(self, websocket: WebSocket, path: str) -> None:
+        if await self._reject_busy(websocket) or not path:
+            return
+        result = await asyncio.to_thread(self.active.agent.add_root, path)
+        if result.startswith("ERROR"):
+            await websocket.send_json({"type": "error", "text": result})
+            return
+        self.active.bridge.emit({"type": "echo", "text": result})
+        await websocket.send_json(self._cwd_event())
+
+    async def _send_files(self, websocket: WebSocket, query: str) -> None:
+        cwd = self.active.agent.cwd
+        paths = await asyncio.to_thread(list_files, cwd, query)
+        await websocket.send_json({"type": "file_list", "query": query, "files": paths})
 
     async def handle_upload(self, request) -> JSONResponse:
         """POST /upload?name=<filename>, raw body — no multipart, so no extra
@@ -647,16 +743,6 @@ class WebServer:
         target.write_bytes(body)
         return JSONResponse({"path": str(target)})
 
-    async def _add_dir(self, websocket: WebSocket, path: str) -> None:
-        if await self._reject_busy(websocket) or not path:
-            return
-        result = await asyncio.to_thread(self.agent.add_root, path)
-        if result.startswith("ERROR"):
-            await websocket.send_json({"type": "error", "text": result})
-            return
-        self.bridge.emit({"type": "echo", "text": result})
-        await websocket.send_json(self._cwd_event())
-
 
 def create_app(
     model: str,
@@ -683,6 +769,8 @@ def create_app(
     allow_path = Path(allow_path or os.environ.get("AISH_ALLOWLIST", str(DEFAULT_ALLOWLIST)))
     deny_path = Path(deny_path or os.environ.get("AISH_DENYLIST", str(DEFAULT_DENYLIST)))
     lessons_path = Path(lessons_path or os.environ.get("AISH_LESSONS", str(DEFAULT_LESSONS)))
+    uploads_dir = state_dir / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
 
     if client_chat is not None:
         chat, provider, model_name = client_chat, "ollama", model
@@ -690,24 +778,6 @@ def create_app(
         chat, provider, model_name = None, "claude-max", model.partition(":")[2]
     else:
         chat, provider, model_name = backends.make_chat(model)
-
-    log = SessionLog.new(state_dir)
-    log.model(model)
-    logref = LogRef(log)
-    bridge = Bridge()
-
-    # The approvers need the agent's live cwd/roots, but the agent is built
-    # with the approvers — the scope binds late through this holder.
-    agent_holder: list = []
-
-    def get_scope():
-        if agent_holder:
-            return agent_holder[0].cwd, agent_holder[0].roots
-        return cwd, [Path(cwd).resolve()]
-
-    approve, approve_write, approve_read = make_web_approvers(
-        bridge, logref, allow_path, deny_path, ask_all, get_scope
-    )
 
     context = "\n\n".join(
         part
@@ -720,35 +790,66 @@ def create_app(
         if part
     )
 
-    common = dict(
-        model=model_name,
-        approve=approve,
-        approve_write=approve_write,
-        approve_read=approve_read,
-        echo=lambda text: bridge.emit({"type": "echo", "text": text}),
-        stream=lambda text: bridge.emit({"type": "stream", "text": text}),
-        max_steps=max_steps,
-        cwd=cwd,
-        context=context,
-        on_message=logref.message,
-        on_token=lambda text: bridge.emit({"type": "token", "text": text}),
-        job_log_dir=state_dir / "jobs",
-        lessons_path=lessons_path,
-        status=WebStatus(bridge),
-    )
-    if provider == "claude-max":
-        from .claude_max import ClaudeMaxAgent
+    server_ref: list = []
 
-        agent = ClaudeMaxAgent(**common)
-    else:
-        agent = Agent(client_chat=chat, num_ctx=num_ctx, think=think, **common)
-        agent.provider = provider
-    agent_holder.append(agent)
+    def get_loop():
+        return server_ref[0].loop if server_ref else None
 
-    server = WebServer(agent, logref, bridge, state_dir, config_path, token)
-    # Uploaded files must be readable without an approval round trip.
-    server.uploads_dir.mkdir(parents=True, exist_ok=True)
-    agent.roots.append(server.uploads_dir.resolve())
+    def open_session(path: Path | None) -> tuple[Session, list[dict]]:
+        """Build one Session: fresh agent wired to its own bridge/log. For an
+        existing path the conversation is reloaded into the agent (the file
+        keeps growing in place — same semantics as `aish --resume`)."""
+        log = SessionLog(path) if path is not None else SessionLog.new(state_dir)
+        log.model(model)
+        logref = LogRef(log)
+        bridge = Bridge(get_loop)
+
+        agent_holder: list = []
+
+        def get_scope():
+            if agent_holder:
+                return agent_holder[0].cwd, agent_holder[0].roots
+            return cwd, [Path(cwd).resolve()]
+
+        approve, approve_write, approve_read = make_web_approvers(
+            bridge, logref, allow_path, deny_path, ask_all, get_scope
+        )
+        common = dict(
+            model=model_name,
+            approve=approve,
+            approve_write=approve_write,
+            approve_read=approve_read,
+            echo=lambda text: bridge.emit({"type": "echo", "text": text}),
+            stream=lambda text: bridge.emit({"type": "stream", "text": text}),
+            max_steps=max_steps,
+            cwd=cwd,
+            context=context,
+            on_message=logref.message,
+            on_token=lambda text: bridge.emit({"type": "token", "text": text}),
+            job_log_dir=state_dir / "jobs",
+            lessons_path=lessons_path,
+            status=WebStatus(bridge),
+        )
+        if provider == "claude-max":
+            from .claude_max import ClaudeMaxAgent
+
+            agent = ClaudeMaxAgent(**common)
+        else:
+            agent = Agent(client_chat=chat, num_ctx=num_ctx, think=think, **common)
+            agent.provider = provider
+        agent.roots.append(uploads_dir.resolve())
+        agent_holder.append(agent)
+
+        history: list[dict] = []
+        if path is not None:
+            history = SessionLog.load_messages(path)
+            agent.load_history(history)
+        return Session(agent, logref, bridge), history
+
+    server = WebServer(open_session, state_dir, config_path, token)
+    server_ref.append(server)
+    first, _ = open_session(None)
+    server.add_session(first)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):

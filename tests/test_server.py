@@ -346,15 +346,102 @@ class TestSessions:
             assert listing["sessions"], "previous session missing from list"
             assert "zebra" in listing["sessions"][0]["title"]
 
-            ws.send_json({"type": "resume", "path": listing["sessions"][0]["name"]})
-            history = recv_until(ws, "history")
-            roles = [m["role"] for m in history["messages"]]
-            assert "user" in roles and "assistant" in roles
+            resumed_name = listing["sessions"][0]["name"]
+            ws.send_json({"type": "resume", "path": resumed_name})
+            hello = recv_until(ws, "hello")
+            assert hello["session"] == resumed_name  # switched, not merged
+            replay = recv_until(ws, "replay")
+            # Still open in memory: the live transcript replays as-is.
+            users = [e for e in replay["events"] if e["type"] == "user"]
+            assert users and "zebra" in users[0]["text"]
 
             ws.send_json({"type": "task", "text": "what animal did I mention?"})
             recv_until(ws, "done")
             contents = json.dumps(chat.calls[-1]["messages"])
             assert "zebra" in contents  # resumed context reached the model
+
+    def test_resume_from_disk_replays_history(self, app_env):
+        # First server instance writes a session to disk…
+        client, _ = make_client(app_env, [model_says("noted the walrus")])
+        with client, connected(client) as (ws, hello, _):
+            old_name = hello["session"]
+            ws.send_json({"type": "task", "text": "remember the walrus"})
+            recv_until(ws, "done")
+        # …a fresh instance (nothing in memory) reopens it from the file.
+        client2, chat2 = make_client(app_env, [model_says("the walrus")])
+        with client2, connected(client2) as (ws, _, _):
+            ws.send_json({"type": "resume", "path": old_name})
+            hello = recv_until(ws, "hello")
+            assert hello["session"] == old_name
+            replay = recv_until(ws, "replay")
+            history = [e for e in replay["events"] if e["type"] == "history"]
+            roles = [m["role"] for m in history[0]["messages"]]
+            assert "user" in roles and "assistant" in roles
+
+            ws.send_json({"type": "task", "text": "what animal?"})
+            recv_until(ws, "done")
+            assert "walrus" in json.dumps(chat2.calls[-1]["messages"])
+
+    def test_parallel_sessions_run_and_finish_independently(self, app_env, tmp_path):
+        # Session A blocks on an approval; session B runs a full task while A
+        # is still waiting; switching back to A replays the pending card and
+        # approving it finishes A's task.
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/a")]),
+            model_says("B says hi"),  # session B's whole task
+            model_says("A finished"),  # session A resumes after approval
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, hello_a, _):
+            session_a = hello_a["session"]
+            ws.send_json({"type": "task", "text": "touch a file"})
+            request = recv_until(ws, "approval_request")
+
+            ws.send_json({"type": "new"})
+            hello_b = recv_until(ws, "hello")
+            assert hello_b["session"] != session_a
+            recv_until(ws, "replay")
+
+            ws.send_json({"type": "task", "text": "say hi"})
+            done_b = recv_until(ws, "done")
+            assert done_b["result"] == "B says hi"
+
+            ws.send_json({"type": "sessions", "query": ""})
+            listing = recv_until(ws, "session_list")
+            state_by_name = {s["name"]: s["state"] for s in listing["sessions"]}
+            assert state_by_name[session_a] == "waiting"
+
+            ws.send_json({"type": "resume", "path": session_a})
+            back = recv_until(ws, "hello")
+            assert back["session"] == session_a and back["busy"] is True
+            replay = recv_until(ws, "replay")
+            pending = [e for e in replay["events"] if e["type"] == "approval_request"]
+            assert pending and pending[0]["id"] == request["id"]
+
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            done_a = recv_until(ws, "done")
+            assert done_a["result"] == "A finished"
+            assert (tmp_path / "a").exists()
+
+    def test_background_finish_sends_notice(self, app_env, tmp_path):
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+            model_says("A done in background"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, hello_a, _):
+            session_a = hello_a["session"]
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "new"})
+            recv_until(ws, "hello")
+            recv_until(ws, "replay")
+            # Approve A's card while B is shown: A finishes in the background
+            # and the client gets a session_state heads-up.
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            notice = recv_until(ws, "session_state")
+            assert notice["session"] == session_a
+            assert notice["state"] == "idle"
 
     def test_resume_rejects_path_escape(self, app_env):
         client, _ = make_client(app_env, [])
@@ -398,8 +485,8 @@ class TestModels:
             assert changed["model"] == "gemini:gemini-3-pro"
             assert changed["saved"] is True
             server = client.app.state.server
-            assert server.agent.chat is new_chat
-            assert server.agent.provider == "gemini"
+            assert server.active.agent.chat is new_chat
+            assert server.active.agent.provider == "gemini"
             config = app_env["config_path"].read_text(encoding="utf-8")
             assert 'model = "gemini:gemini-3-pro"' in config
 
@@ -465,7 +552,7 @@ class TestUpload:
                 assert fh.read() == b"hello upload"
             server = client.app.state.server
             assert server.uploads_dir.resolve() in [
-                r for r in server.agent.roots
+                r for r in server.active.agent.roots
             ]
 
     def test_upload_rejects_bad_names(self, app_env):

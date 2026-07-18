@@ -57,6 +57,19 @@ def test_session_allow_is_per_approver_not_global(tmp_path, monkeypatch):
     assert fresh("cargo build") is None
 
 
+def test_slash_prefix_resolves_when_unambiguous(tmp_path, capsys):
+    from aish.cli import LogRef, handle_slash
+    from aish.session import SessionLog
+
+    log = SessionLog.new(tmp_path)
+    logref = LogRef(log)
+    agent = type("A", (), {"reset": lambda self: None, "cwd": str(tmp_path),
+                           "roots": [tmp_path], "model": "m"})()
+    assert handle_slash("/ex", agent, logref, tmp_path) == "exit"
+    assert handle_slash("/c", agent, logref, tmp_path) == "handled"  # ambiguous
+    assert "ambiguous" in capsys.readouterr().out
+
+
 def test_always_with_skip_leaves_segment_unvetted(tmp_path, monkeypatch):
     allow = tmp_path / "allow.txt"
     approve = make_approver(False, allow, None)

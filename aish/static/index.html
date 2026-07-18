@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0d1117">
+<meta name="theme-color" content="#000000">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>aish</title>
@@ -15,10 +15,14 @@
 <body>
 
 <header id="topbar">
-  <button id="model-chip" class="chip" title="switch model">…</button>
-  <button id="session-chip" class="chip grow" title="sessions">aish</button>
-  <button id="new-chip" class="chip" title="new chat">＋</button>
-  <button id="menu-chip" class="chip" title="workspace">⋯</button>
+  <button id="model-chip" class="bar-btn tinted" title="switch model">…</button>
+  <button id="session-chip" class="bar-title" title="sessions">aish</button>
+  <button id="new-chip" class="bar-btn icon" title="new chat" aria-label="new chat">
+    <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+  </button>
+  <button id="menu-chip" class="bar-btn icon" title="workspace" aria-label="workspace">
+    <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="19" cy="12" r="1.7" fill="currentColor"/></svg>
+  </button>
 </header>
 
 <main id="messages"></main>
@@ -30,28 +34,34 @@
 <div id="attachments" hidden></div>
 
 <form id="composer">
-  <button id="attach" type="button" aria-label="attach files">📎</button>
+  <button id="attach" type="button" aria-label="attach files">
+    <svg viewBox="0 0 24 24"><path d="M20.6 11.6 12.4 19.8a5 5 0 0 1-7.1-7.1l8.3-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.2a1.8 1.8 0 0 1-2.6-2.6l7.6-7.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
   <input id="file-input" type="file" multiple hidden>
-  <textarea id="input" rows="1" placeholder="ask aish… (/ commands, @ files)"
-            autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-  <button id="send" type="submit" aria-label="send">➤</button>
+  <textarea id="input" rows="1" placeholder="Message aish"
+            autocomplete="off" autocapitalize="sentences" spellcheck="true"></textarea>
+  <button id="send" type="submit" aria-label="send">
+    <svg viewBox="0 0 24 24"><path d="M12 18.5v-13M6.8 10.7 12 5.5l5.2 5.2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
 </form>
 
 <!-- sessions drawer -->
 <div id="sessions-sheet" class="sheet" hidden>
+  <div class="grabber"></div>
   <div class="sheet-head">
-    <input id="sessions-search" type="search" placeholder="search sessions…">
-    <button id="new-chat" class="primary">new chat</button>
-    <button class="close" data-close="sessions-sheet">✕</button>
+    <input id="sessions-search" type="search" placeholder="Search sessions">
+    <button id="new-chat" class="primary">New</button>
+    <button class="close" data-close="sessions-sheet">Done</button>
   </div>
   <div id="sessions-list" class="sheet-list"></div>
 </div>
 
 <!-- model sheet -->
 <div id="model-sheet" class="sheet" hidden>
+  <div class="grabber"></div>
   <div class="sheet-head">
-    <input id="model-search" type="search" placeholder="search models…">
-    <button class="close" data-close="model-sheet">✕</button>
+    <input id="model-search" type="search" placeholder="Search models">
+    <button class="close" data-close="model-sheet">Done</button>
   </div>
   <label class="save-toggle"><input type="checkbox" id="model-save"> make startup default</label>
   <div id="model-list" class="sheet-list"></div>
@@ -59,29 +69,31 @@
 
 <!-- workspace panel -->
 <div id="workspace-sheet" class="sheet" hidden>
+  <div class="grabber"></div>
   <div class="sheet-head">
-    <strong class="grow">workspace</strong>
-    <button class="close" data-close="workspace-sheet">✕</button>
+    <strong class="grow">Workspace</strong>
+    <button class="close" data-close="workspace-sheet">Done</button>
   </div>
   <div class="ws-section">
-    <div class="ws-label">working directory <span class="ws-note">(re-anchors auto-approval root)</span></div>
+    <div class="ws-label">Working directory <span class="ws-note">(re-anchors auto-approval root)</span></div>
     <div id="ws-cwd" class="mono"></div>
-    <div class="ws-row"><input id="cd-input" placeholder="/path/to/project"><button id="cd-go">cd</button></div>
+    <div class="ws-row"><input id="cd-input" placeholder="/path/to/project"><button id="cd-go">Go</button></div>
   </div>
   <div class="ws-section">
-    <div class="ws-label">session roots <span class="ws-note">(auto-approval allowed in these trees)</span></div>
+    <div class="ws-label">Session roots <span class="ws-note">(auto-approval allowed in these trees)</span></div>
     <div id="ws-roots" class="mono"></div>
-    <div class="ws-row"><input id="root-input" placeholder="/another/tree"><button id="root-add">add root</button></div>
+    <div class="ws-row"><input id="root-input" placeholder="/another/tree"><button id="root-add">Add</button></div>
   </div>
   <div class="ws-section">
-    <div class="ws-label">background jobs</div>
+    <div class="ws-label">Background jobs</div>
     <pre id="ws-jobs" class="mono">—</pre>
-    <button id="jobs-refresh">refresh</button>
+    <button id="jobs-refresh">Refresh</button>
   </div>
   <div class="ws-section ws-about">
-    aish web · commands need your approval before running · the "always allow"
-    list can only be grown from terminal aish · sessions are shared with the
-    terminal (resume either way)
+    aish web · commands need your approval before running · type / for
+    commands, @ to mention project files · the persistent "always allow"
+    list can only be grown from terminal aish · sessions are shared with
+    the terminal and keep running when you switch away
   </div>
 </div>
 

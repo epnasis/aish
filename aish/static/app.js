@@ -87,6 +87,15 @@ function handle(event) {
     case "cwd_changed": renderWorkspace(event); break;
     case "job_list": $("ws-jobs").textContent = event.text || "—"; break;
     case "file_list": onFileList(event); break;
+    case "session_state": onSessionState(event); break;
+  }
+}
+
+function onSessionState(event) {
+  const short = event.session.replace(/^session-|\.jsonl$/g, "").replace(/-\d{6}$/, "");
+  showToast(`session ${short}: task finished — tap the session title to open it`);
+  if (!$("sessions-sheet").hidden) {
+    send({ type: "sessions", query: $("sessions-search").value });
   }
 }
 
@@ -720,9 +729,19 @@ function submitInput() {
   }
 }
 
+const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/dir-add", "/quit", "/exit"]);
+
 function handleSlash(text) {
-  const [command, ...rest] = text.split(/\s+/);
+  let [command, ...rest] = text.split(/\s+/);
   const arg = rest.join(" ");
+  if (!SLASH_ALL.includes(command)) {
+    const matches = SLASH_ALL.filter((cmd) => cmd.startsWith(command));
+    if (matches.length === 1) command = matches[0];
+    else if (matches.length > 1) {
+      showToast(`ambiguous — ${matches.join(" or ")}?`);
+      return;
+    }
+  }
   switch (command) {
     case "/model": openModelSheet(arg); break;
     case "/resume": openSessionsSheet(arg); break;
@@ -732,6 +751,7 @@ function handleSlash(text) {
       arg ? send({ type: "add_dir", path: arg }) : openSheet("workspace-sheet"); break;
     case "/jobs": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
     case "/help": openSheet("workspace-sheet"); break;
+    case "/quit": case "/exit": showToast("just close the tab — sessions persist"); break;
     default: showToast(`unknown command ${command}`);
   }
 }
@@ -773,7 +793,7 @@ function renderAttachments() {
   attachments.forEach((attachment, i) => {
     const chip = document.createElement("span");
     chip.className = "attach-chip";
-    chip.textContent = `📄 ${attachment.name} `;
+    chip.textContent = attachment.name;
     const remove = document.createElement("button");
     remove.type = "button";
     remove.textContent = "✕";
@@ -818,6 +838,13 @@ function openSessionsSheet(query) {
   send({ type: "sessions", query });
 }
 
+const STATE_BADGES = {
+  running: ["● running", "st-running"],
+  waiting: ["● needs approval", "st-waiting"],
+  idle: ["○ open", "st-open"],
+};
+const STATE_ORDER = { waiting: 0, running: 1, idle: 2, "": 3 };
+
 function renderSessions(sessions) {
   const list = $("sessions-list");
   list.replaceChildren();
@@ -825,10 +852,22 @@ function renderSessions(sessions) {
     list.textContent = "no matching sessions";
     return;
   }
-  for (const info of sessions) {
+  // Open sessions surface first (needs-approval, then running), keeping the
+  // server's ranking within each group.
+  const sorted = [...sessions].sort(
+    (a, b) => STATE_ORDER[a.state || ""] - STATE_ORDER[b.state || ""]
+  );
+  for (const info of sorted) {
     const row = document.createElement("button");
     row.className = "row";
-    row.textContent = info.title;
+    if (info.state) {
+      const [label, cls] = STATE_BADGES[info.state] || [];
+      const badge = document.createElement("span");
+      badge.className = `badge ${cls}`;
+      badge.textContent = label;
+      row.appendChild(badge);
+    }
+    row.appendChild(document.createTextNode(info.title));
     const meta = document.createElement("span");
     meta.className = "meta";
     meta.textContent = `${info.when} · ${info.count} msgs${info.model ? " · " + info.model : ""}`;
