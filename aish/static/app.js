@@ -71,6 +71,7 @@ function connect() {
   ws.onopen = () => {
     backoff = 1000;
     $("connbar").hidden = true;
+    checkAppVersion(); // server restarts are when the UI code changes
   };
   ws.onmessage = (raw) => handle(JSON.parse(raw.data));
   ws.onclose = (event) => {
@@ -86,6 +87,26 @@ function connect() {
     reconnectTimer = setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 10000);
   };
+}
+
+let appVersion = null;
+
+async function checkAppVersion() {
+  // A long-lived tab/PWA keeps running old JS across server upgrades and
+  // silently speaks an outdated protocol. Compare the served app.js
+  // fingerprint on every (re)connect; reload when it changed — the replay
+  // mechanism restores the full view afterwards.
+  try {
+    const response = await fetch("app.js", { method: "HEAD", cache: "no-store" });
+    const tag = response.headers.get("etag") || response.headers.get("last-modified");
+    if (!tag) return;
+    if (appVersion === null) {
+      appVersion = tag;
+    } else if (tag !== appVersion) {
+      showToast("aish-web updated — reloading");
+      setTimeout(() => location.reload(), 1000);
+    }
+  } catch { /* offline blip; next reconnect checks again */ }
 }
 
 function send(message) {
