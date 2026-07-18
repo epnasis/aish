@@ -15,6 +15,7 @@ for the whole command to auto-approve.
 import os
 import re
 import shlex
+from collections.abc import Collection
 from pathlib import Path
 
 DEFAULT_ALLOWLIST = Path.home() / ".config" / "aish" / "allow.txt"
@@ -127,15 +128,15 @@ def _segment_is_safe(segment: str) -> bool:
     return not _has_unsafe_flag(name, tokens)
 
 
-def _matched_prefix(segment: str, prefixes: list[str]) -> str | None:
+def _matched_prefix(segment: str, prefixes: Collection[str]) -> str | None:
     return next((p for p in prefixes if segment == p or segment.startswith(p + " ")), None)
 
 
-def _matches_prefix(segment: str, prefixes: list[str]) -> bool:
+def _matches_prefix(segment: str, prefixes: Collection[str]) -> bool:
     return _matched_prefix(segment, prefixes) is not None
 
 
-def _prefix_approves(segment: str, prefixes: list[str]) -> bool:
+def _prefix_approves(segment: str, prefixes: Collection[str]) -> bool:
     """A user allowlist prefix auto-approves a segment only if it does not smuggle
     in a write/exec flag or resolve to an interpreter that the bare prefix would
     otherwise wave through. Fixes the hole where allow-listing a benign `find`
@@ -212,7 +213,7 @@ def paths_escape_roots(command: str, cwd: str, roots) -> bool:
 
 
 def is_auto_approvable(
-    command: str, prefixes: list[str], cwd: str | None = None, roots=None
+    command: str, prefixes: Collection[str], cwd: str | None = None, roots=None
 ) -> bool:
     """True if EVERY chained segment is independently read-only or matches a
     user-persisted prefix. One unvetted segment means the whole command prompts.
@@ -226,7 +227,7 @@ def is_auto_approvable(
     return all(_segment_is_safe(s) or _prefix_approves(s, prefixes) for s in segments)
 
 
-def unvetted_segments(command: str, prefixes: list[str]) -> list[str]:
+def unvetted_segments(command: str, prefixes: Collection[str]) -> list[str]:
     """The segments that would still need a prompt — what the 'always allow'
     flow should ask about, one by one."""
     segments = split_chain(command)

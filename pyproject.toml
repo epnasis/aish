@@ -21,6 +21,7 @@ aish-web = "aish.server:main"
 [dependency-groups]
 dev = [
     "httpx>=0.27",
+    "mypy>=1.14",
     "pytest>=8",
     "ruff>=0.8",
 ]
@@ -38,6 +39,10 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.mypy]
+files = ["aish"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

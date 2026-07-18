@@ -210,6 +210,7 @@ class Agent:
         status: Any = None,
     ):
         self.model = model
+        self.provider = "ollama"  # callers overwrite after construction (cli/server)
         self.approve = approve
         self.approve_write = approve_write
         self.approve_read = approve_read

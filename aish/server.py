@@ -24,6 +24,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import uvicorn
 from starlette.applications import Starlette
@@ -60,6 +61,9 @@ from .cli import (
 )
 from .prompt import ATFILE_IGNORED_DIRS, ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .session import SessionLog
+
+if TYPE_CHECKING:
+    from .claude_max import ClaudeMaxAgent
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -229,7 +233,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             suggest_prefix(segment)
             for segment in unvetted_segments(command, known_prefixes()) or [command]
         ]
-        request = {
+        request: dict[str, Any] = {
             "type": "approval_request",
             "kind": "command",
             "command": command,
@@ -269,7 +273,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
 
     def approve_write(plan) -> bool:
         verb = "create" if plan.is_new else "edit"
-        request = {
+        request: dict[str, Any] = {
             "type": "approval_request",
             "kind": "write",
             "verb": verb,
@@ -285,7 +289,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         return approved
 
     def approve_read(path: str, reason: str = "sensitive") -> bool:
-        request = {
+        request: dict[str, Any] = {
             "type": "approval_request",
             "kind": "read",
             "path": path,
@@ -411,9 +415,20 @@ class WebServer:
         self.token = token
         self.loop: asyncio.AbstractEventLoop | None = None
         self.sessions: dict[str, Session] = {}
-        self.active: Session | None = None
+        self._active: Session | None = None
         self.ws: WebSocket | None = None
         self.sender: asyncio.Task | None = None
+
+    @property
+    def active(self) -> Session:
+        """The session shown to the client. Set before the server accepts any
+        traffic (a session is opened at startup), so None only during init."""
+        assert self._active is not None, "no active session yet"
+        return self._active
+
+    @active.setter
+    def active(self, session: Session) -> None:
+        self._active = session
 
     async def startup(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -440,7 +455,7 @@ class WebServer:
         while len(self.sessions) >= MAX_OPEN_SESSIONS:
             idle = [
                 s for s in self.sessions.values()
-                if not s.busy and s is not self.active
+                if not s.busy and s is not self._active
             ]
             if not idle:
                 return
@@ -977,10 +992,13 @@ def create_app(
             lessons_path=lessons_path,
             status=WebStatus(bridge),
         )
+        agent: Agent | ClaudeMaxAgent
         if provider == "claude-max":
-            from .claude_max import ClaudeMaxAgent
+            # aliased so the annotation above binds the TYPE_CHECKING import,
+            # not this function-local one (F823)
+            from .claude_max import ClaudeMaxAgent as _ClaudeMaxAgent
 
-            agent = ClaudeMaxAgent(**common)
+            agent = _ClaudeMaxAgent(**common)
             agent.provider = "claude-max"  # media_support must not default to ollama
         else:
             agent = Agent(client_chat=chat, num_ctx=num_ctx, think=think, **common)
@@ -995,7 +1013,7 @@ def create_app(
             if (
                 recorded_spec
                 and recorded_spec != model_spec(agent)
-                and provider != "claude-max"
+                and isinstance(agent, Agent)  # claude-max keeps its own session state
                 and not recorded_spec.startswith("claude-max")
             ):
                 try:

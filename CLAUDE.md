@@ -13,6 +13,7 @@ uv run pytest                          # full test suite — no model/network ne
 uv run pytest tests/test_agent.py      # one file
 uv run pytest tests/test_agent.py -k compaction   # one test by keyword
 uv run ruff check .                    # lint (also formats config: line-length 100)
+uv run mypy                            # type check (CI-gated; config in pyproject.toml)
 uv run aish                            # run from source
 ```
 

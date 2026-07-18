@@ -145,7 +145,7 @@ def _strip_read_numbers(s: str) -> str | None:
     models routinely paste the numbered output back into old_str."""
     matches = [_NUMBERED_LINE.fullmatch(line) for line in s.splitlines()]
     if matches and all(matches):
-        return "\n".join(m.group(1) for m in matches)
+        return "\n".join(m.group(1) for m in matches if m)
     return None
 
 

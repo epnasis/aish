@@ -18,6 +18,7 @@ import base64
 import json
 import mimetypes
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -133,7 +134,7 @@ def parse_model(model_arg: str) -> tuple[str, str]:
     return "ollama", model_arg
 
 
-def make_chat(model_arg: str, client=None) -> tuple:
+def make_chat(model_arg: str, client=None) -> tuple[Callable, str, str]:
     """Resolve a --model string to (chat_callable, provider_name, model_name).
 
     ``client`` injects a pre-built provider client (tests)."""
@@ -387,7 +388,7 @@ def _extra_content(tool_call) -> dict | None:
         model_extra = getattr(tool_call, "model_extra", None)
         if isinstance(model_extra, dict):
             extra = model_extra.get("extra_content")
-    if hasattr(extra, "model_dump"):
+    if extra is not None and hasattr(extra, "model_dump"):
         extra = extra.model_dump()
     return extra if isinstance(extra, dict) else None
 

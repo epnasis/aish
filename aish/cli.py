@@ -11,6 +11,7 @@ import threading
 import time
 import tomllib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import backends, tools
 from .agent import Agent, ModelUnavailable, environment_context, format_tokens
@@ -28,6 +29,9 @@ from .approval import (
 )
 from .session import SessionInfo, SessionLog
 from .skills import GLOBAL_SKILLS_DIR, list_skills, skill_dirs
+
+if TYPE_CHECKING:
+    from .claude_max import ClaudeMaxAgent
 
 BOLD = "\033[1m"
 # Bright black, not ANSI faint (\033[2m): faint is nearly unreadable on many
@@ -632,7 +636,7 @@ def save_default_model(config_path: Path, spec: str) -> str | None:
 
 def handle_slash(
     task: str,
-    agent: Agent,
+    agent: "Agent | ClaudeMaxAgent",
     logref: LogRef,
     state_dir: Path,
     resumed: set | None = None,
@@ -1125,13 +1129,17 @@ def main() -> int:
             return agent_holder[0].cwd, agent_holder[0].roots
         return cwd, [Path(cwd).resolve()]
 
+    agent: Agent | ClaudeMaxAgent
     if provider == "claude-max":
-        from .claude_max import ClaudeMaxAgent, api_key_warning
+        # aliased so the annotation above binds the TYPE_CHECKING import,
+        # not this function-local one (F823)
+        from .claude_max import ClaudeMaxAgent as _ClaudeMaxAgent
+        from .claude_max import api_key_warning
 
         warning = api_key_warning()
         if warning:
             print(f"{YELLOW}warning: {warning}{RESET}")
-        agent = ClaudeMaxAgent(
+        agent = _ClaudeMaxAgent(
             model=model_name,
             approve=make_approver(args.ask_all, allow_path, logref, deny_path, get_scope),
             approve_write=make_write_approver(logref),
@@ -1148,6 +1156,7 @@ def main() -> int:
             status=_timer,
         )
     else:
+        assert chat is not None  # None only for claude-max, handled above
         agent = Agent(
             model=model_name,
             client_chat=chat,

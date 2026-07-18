@@ -178,7 +178,7 @@ def _require_public(url: str) -> None:
     except socket.gaierror as exc:
         raise BlockedURLError(f"could not resolve {host!r} ({exc})") from exc
     for info in infos:
-        addr = info[4][0].split("%")[0]  # strip IPv6 zone id
+        addr = str(info[4][0]).split("%")[0]  # strip IPv6 zone id
         ip = ipaddress.ip_address(addr)
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
             ip = ip.ipv4_mapped

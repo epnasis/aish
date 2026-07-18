@@ -14,6 +14,7 @@ input quits.
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.application.current import get_app
@@ -167,7 +168,7 @@ class BoxPrompt:
                 AtFileCompleter(get_cwd=lambda: self.get_cwd()),
             ]
         )
-        self._edit_session = PromptSession(vi_mode=vi_mode)
+        self._edit_session: PromptSession[str] = PromptSession(vi_mode=vi_mode)
 
     def edit(self, initial: str) -> str:
         """Pre-filled single-line edit (for the approval 'e' option)."""
@@ -192,7 +193,9 @@ class BoxPrompt:
         """pick() with injected I/O — for tests driving keystrokes."""
         return self._build_picker(search, initial, render, input=input, output=output).run()
 
-    def _build_picker(self, search, initial: str, render, input=None, output=None) -> Application:
+    def _build_picker(
+        self, search, initial: str, render, input=None, output=None
+    ) -> "Application[Any]":
         state = {"results": search(initial), "selected": 0}
 
         def refresh(buff):
@@ -267,7 +270,7 @@ class BoxPrompt:
             align=VerticalAlign.TOP,
         )
 
-        app = Application(
+        app: Application[Any] = Application(
             layout=Layout(body, focused_element=buffer),
             key_bindings=merge_key_bindings([load_key_bindings(), keys]),
             full_screen=False,
@@ -277,7 +280,7 @@ class BoxPrompt:
         app.ttimeoutlen = 0.05
         return app
 
-    def _build_app(self, cwd_display: str, input=None, output=None) -> Application:
+    def _build_app(self, cwd_display: str, input=None, output=None) -> "Application[str]":
         buffer = Buffer(
             history=self._history,
             completer=self._completer,
@@ -377,7 +380,7 @@ class BoxPrompt:
             align=VerticalAlign.TOP,
         )
 
-        app = Application(
+        app: Application[str] = Application(
             layout=Layout(body, focused_element=buffer),
             key_bindings=merge_key_bindings([load_key_bindings(), keys]),
             editing_mode=EditingMode.VI if self.vi_mode else EditingMode.EMACS,

@@ -83,6 +83,7 @@ def run_command(
     stdin_fd = sys.stdin.fileno() if watch_keys else -1
     saved_term = None
     deadline = None if timeout is None else time.monotonic() + timeout
+    assert proc.stdout is not None  # Popen was given stdout=PIPE
     out_fd = proc.stdout.fileno()
     lines: list[str] = []
     buf = b""
