@@ -105,6 +105,16 @@ class TestConnect:
             assert hello["cwd"] == app_env["cwd"]
             assert replay["events"] == []
 
+    def test_hello_title_is_first_user_message(self, app_env):
+        client, _ = make_client(app_env, [model_says("ok")])
+        with client:
+            with connected(client) as (ws, hello, _):
+                assert hello["title"] == ""  # fresh session: client shows "New chat"
+                ws.send_json({"type": "task", "text": "rename all the photos"})
+                recv_until(ws, "done")
+            with connected(client) as (_ws, hello, _):
+                assert hello["title"] == "rename all the photos"
+
     def test_task_streams_and_finishes(self, app_env):
         client, chat = make_client(app_env, [model_says("hi there")])
         with client, connected(client) as (ws, _, _):

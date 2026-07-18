@@ -114,7 +114,12 @@ function handle(event) {
   switch (event.type) {
     case "hello": onHello(event); break;
     case "replay": onReplay(event); break;
-    case "user": closeAnswer(); sawAnswer = false; addMsg("user", event.text); break;
+    case "user":
+      closeAnswer();
+      sawAnswer = false;
+      if (!sessionTitled) setTitle(event.text.split("\n")[0]);
+      addMsg("user", event.text);
+      break;
     case "token": onToken(event.text); break;
     case "echo": closeAnswer(); addAnsiMsg("echo", event.text); break;
     case "stream": addAnsiMsg("stream", event.text); break;
@@ -140,19 +145,26 @@ function handle(event) {
 }
 
 function onSessionState(event) {
-  const short = event.session.replace(/^session-|\.jsonl$/g, "").replace(/-\d{6}$/, "");
-  showToast(`session ${short}: task finished — tap the session title to open it`);
-  notify("aish — background task finished", `session ${short}`);
+  const label = event.title
+    ? `“${event.title.slice(0, 40)}”`
+    : event.session.replace(/^session-|\.jsonl$/g, "").replace(/-\d{6}$/, "");
+  showToast(`${label}: task finished — tap the title to switch back`);
+  notify("aish — background task finished", event.title || event.session);
   if (!$("sessions-sheet").hidden) {
     send({ type: "sessions", query: $("sessions-search").value });
   }
 }
 
+let sessionTitled = false;
+
+function setTitle(text) {
+  sessionTitled = Boolean(text);
+  $("session-chip").textContent = text || "New chat";
+}
+
 function onHello(event) {
   $("model-chip").textContent = event.model;
-  $("session-chip").textContent = event.session
-    .replace(/^session-|\.jsonl$/g, "")
-    .replace(/-\d{6}$/, ""); // drop the microseconds suffix
+  setTitle(event.title);
   renderWorkspace(event);
   if (!event.busy) setStatus(null);
 }

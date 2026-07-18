@@ -438,12 +438,22 @@ class WebServer:
             oldest.close()
             del self.sessions[oldest.name]
 
+    @staticmethod
+    def _title(session: Session) -> str:
+        """The conversation title, same derivation as the sessions drawer:
+        the first user message ('' while the session is still empty)."""
+        for message in session.agent.messages[1:]:
+            if message.get("role") == "user":
+                return " ".join((message.get("content") or "").split())[:80]
+        return ""
+
     def _hello(self) -> dict:
         session = self.active
         return {
             "type": "hello",
             "model": model_spec(session.agent),
             "session": session.name,
+            "title": self._title(session),
             "busy": session.busy,
             "cwd": session.agent.cwd,
             "roots": [str(root) for root in session.agent.roots],
@@ -586,7 +596,12 @@ class WebServer:
             if session is not self.active and self.ws is not None:
                 try:  # heads-up toast; the drawer badge is the durable signal
                     await self.ws.send_json(
-                        {"type": "session_state", "session": session.name, "state": "idle"}
+                        {
+                            "type": "session_state",
+                            "session": session.name,
+                            "title": self._title(session),
+                            "state": "idle",
+                        }
                     )
                 except Exception:  # noqa: BLE001
                     pass
