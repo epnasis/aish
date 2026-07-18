@@ -1179,3 +1179,54 @@ class TestRootScoping:
         assert agent.add_root(str(tmp_path / "nope")).startswith("ERROR")
         assert "already" in agent.add_root(str(tmp_path))
         assert agent.roots == [tmp_path.resolve()]
+
+
+class TestCancel:
+    def test_cancel_stops_before_next_model_call(self, tmp_path):
+        from aish.agent import CANCELLED_RESULT
+
+        marker = tmp_path / "ran"
+
+        def approve_and_cancel(_cmd):
+            agent.cancel()  # user hits Stop while the card is up, then denies
+            return False
+
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("should never be reached"),
+            ],
+            approve=approve_and_cancel,
+        )
+        result = agent.run_task("touch it")
+        assert result == CANCELLED_RESULT
+        assert len(chat.calls) == 1  # no model call after the stop
+        assert not marker.exists()
+        # history stays model-consumable: cancelled note closes the turn
+        assert agent.messages[-1] == {"role": "assistant", "content": CANCELLED_RESULT}
+
+    def test_cancel_before_tool_execution_pairs_results(self, tmp_path):
+        from aish.agent import CANCELLED_RESULT, NOT_EXECUTED
+
+        marker = tmp_path / "ran"
+        agent, chat = make_agent(
+            [model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")])],
+            approve=lambda _cmd: pytest.fail("must not reach approval after cancel"),
+        )
+        original = agent._chat_turn
+
+        def cancel_after_turn():
+            out = original()
+            agent.cancel()  # stop lands while the model was proposing calls
+            return out
+
+        agent._chat_turn = cancel_after_turn
+        assert agent.run_task("touch it") == CANCELLED_RESULT
+        assert not marker.exists()
+        tool_results = tool_messages(agent.messages)
+        assert tool_results[-1]["content"] == NOT_EXECUTED
+
+    def test_new_task_clears_stale_cancel(self):
+        agent, chat = make_agent([model_says("fresh answer")])
+        agent.cancel()  # left over from a previous task
+        assert agent.run_task("hello") == "fresh answer"

@@ -289,11 +289,26 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 
 /* ---- status + connection ---- */
 #statusline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 4px 16px;
   font-size: 12px;
   color: var(--dim);
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
+#statusline[hidden] { display: none; }
+#stop-btn {
+  margin-left: auto;
+  background: var(--bg-elev2);
+  border: none;
+  border-radius: 999px;
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 12px;
+}
+#stop-btn:active { opacity: 0.6; }
 #statusline .pulse { color: var(--green); animation: pulse 1.2s ease-in-out infinite; display: inline-block; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 #connbar {
@@ -405,6 +420,14 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 #send:disabled { opacity: 0.35; }
 
 /* ---- sheets (iOS bottom sheets) ---- */
+#backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 19;
+}
+#backdrop[hidden] { display: none; }
+
 .sheet {
   position: fixed;
   inset: auto 0 0 0;
@@ -420,13 +443,26 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .sheet[hidden] { display: none; }
 .grabber {
+  /* Generous invisible hit area around the visible 36×5 bar. */
+  width: 120px;
+  padding: 10px 42px 8px;
+  margin: -4px auto 2px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  background: none;
+  touch-action: none;
+  cursor: grab;
+}
+.grabber::before {
+  content: "";
+  display: block;
   width: 36px;
   height: 5px;
   border-radius: 3px;
   background: var(--bg-elev3);
-  margin: 4px auto 10px;
-  flex-shrink: 0;
 }
+.sheet.dragging { transition: none; }
+.sheet { transition: transform 0.18s ease-out; }
 .sheet-head { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
 .sheet-head strong { font-size: 17px; }
 .sheet-head .grow { flex: 1; }

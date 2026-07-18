@@ -74,6 +74,7 @@ MAX_OPEN_SESSIONS = 6
 
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 MEDIA_MAX_BYTES = 20 * 1024 * 1024  # inline base64 limit; larger files fall back to a path
+MAX_QUEUE = 5  # messages waiting behind a busy session
 
 CLOSE_REPLACED = 4000  # another device connected; this socket is superseded
 CLOSE_BAD_TOKEN = 4403
@@ -349,7 +350,11 @@ adding session roots all happen through the UI's header controls — if the \
 user asks how, point them at the model chip, the session title (sessions \
 drawer), the ＋ chip (new chat), and the ⋯ menu (workspace panel).
 - Several sessions can be open at once; a task keeps running when the user \
-switches to another session and its result is there when they switch back.
+switches to another session and its result is there when they switch back. \
+While you work, messages the user sends are QUEUED and run one after \
+another; the user can also press Stop to cancel your current task — a \
+"(task stopped by user)" note means exactly that, so do not treat it as an \
+error.
 - The persistent "always allow" allowlist cannot be grown from the web UI — \
 that is terminal-only by design.
 - Safety denylist: unrecoverable command classes are blocked outright and \
@@ -379,6 +384,7 @@ class Session:
         self.bridge = bridge
         self.busy = False
         self.runner: asyncio.Task | None = None
+        self.queue: list[tuple[str, list[str]]] = []  # (text, attachments) waiting
         self.last_shown = time.monotonic()
 
     @property
@@ -562,6 +568,8 @@ class WebServer:
             await websocket.send_json({"type": "job_list", "text": tools.jobs_table()})
         elif kind == "files":
             await self._send_files(websocket, str(message.get("query", "")))
+        elif kind == "stop":
+            await self._stop_task(websocket)
         else:
             await websocket.send_json(
                 {"type": "error", "text": f"unknown message type {kind!r}"}
@@ -610,15 +618,45 @@ class WebServer:
                 notes.append(f"[attached file: {path}]")
         return images, documents, notes
 
+    async def _stop_task(self, websocket: WebSocket) -> None:
+        session = self.active
+        if not session.busy:
+            await websocket.send_json({"type": "error", "text": "nothing is running"})
+            return
+        if not hasattr(session.agent, "cancel"):
+            await websocket.send_json(
+                {"type": "error", "text": "stop is not supported on this backend"}
+            )
+            return
+        session.agent.cancel()
+        # A worker parked on an approval card must be unblocked to notice.
+        for uid in list(session.bridge.pending):
+            session.bridge.answer(uid, {"action": "deny"})
+        session.bridge.emit({"type": "echo", "text": "✕ stop requested"})
+
     async def _start_task(
         self, websocket: WebSocket, text: str, attachments: list[str] | None = None
     ) -> None:
-        if (not text and not attachments) or await self._reject_busy(websocket):
+        if not text and not attachments:
             return
         session = self.active
-        images, documents, notes = self._classify_attachments(
-            session.agent, attachments or []
-        )
+        if session.busy:
+            if len(session.queue) >= MAX_QUEUE:
+                await websocket.send_json(
+                    {"type": "error", "text": f"queue full ({MAX_QUEUE} waiting)"}
+                )
+                return
+            session.queue.append((text, attachments or []))
+            await websocket.send_json(
+                {"type": "queued", "position": len(session.queue), "text": text}
+            )
+            return
+        self._launch(session, text, attachments or [])
+
+    def _launch(self, session: Session, text: str, attachments: list[str]) -> None:
+        # Attachments classify at start time so a model switch while queued
+        # is honored (vision support is per-backend).
+        images, documents, notes = self._classify_attachments(session.agent, attachments)
         if notes:
             text = f"{text}\n\n" + "\n".join(notes) if text else "\n".join(notes)
         session.busy = True
@@ -653,7 +691,10 @@ class WebServer:
             session.bridge.emit({"type": "error", "text": f"task failed: {exc!r}"})
         finally:
             session.busy = False
-            if session is not self.active and self.ws is not None:
+            if session.queue:
+                text, attachments = session.queue.pop(0)
+                self._launch(session, text, attachments)
+            elif session is not self.active and self.ws is not None:
                 try:  # heads-up toast; the drawer badge is the durable signal
                     await self.ws.send_json(
                         {
@@ -715,6 +756,17 @@ class WebServer:
     async def _new_session(self, websocket: WebSocket) -> None:
         self._evict_idle()
         session, _ = await asyncio.to_thread(self.open_session, None)
+        # A new chat inherits the model you're currently using (like ChatGPT/
+        # Claude apps); the saved default applies only at server start.
+        source = self.active.agent
+        if (
+            getattr(source, "provider", "ollama") != "claude-max"
+            and getattr(session.agent, "provider", "ollama") != "claude-max"
+        ):
+            session.agent.chat = source.chat
+            session.agent.model = source.model
+            session.agent.provider = getattr(source, "provider", "ollama")
+            session.logref.model(model_spec(session.agent))
         self.add_session(session, activate=False)
         await self._show(websocket, session)
 
@@ -929,8 +981,22 @@ def create_app(
 
         history: list[dict] = []
         if path is not None:
-            history = SessionLog.load_messages(path)
+            history, recorded_spec = SessionLog._parse(path)
             agent.load_history(history)
+            # Resume with the model that session last used (drawer shows it);
+            # fall back to the startup model when it can't be built.
+            if (
+                client_chat is None
+                and recorded_spec
+                and recorded_spec != model
+                and provider != "claude-max"
+                and not recorded_spec.startswith("claude-max")
+            ):
+                try:
+                    chat2, provider2, name2 = backends.make_chat(recorded_spec)
+                    agent.chat, agent.model, agent.provider = chat2, name2, provider2
+                except backends.BackendError:
+                    pass
         return Session(agent, logref, bridge), history
 
     server = WebServer(open_session, state_dir, config_path, token)

@@ -198,7 +198,7 @@ class TestStreamingAndCwd:
             'sh -c \'echo first; sleep 30; echo never\'', timeout=60, on_line=interrupt
         )
         assert "first" in result
-        assert "cancelled by user" in result
+        assert "stopped by user" in result
         assert "never" not in result
 
     def test_timeout_includes_partial_output(self):

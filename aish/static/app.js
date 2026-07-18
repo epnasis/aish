@@ -138,8 +138,12 @@ function handle(event) {
     case "user":
       closeAnswer();
       sawAnswer = false;
+      setBusy(true);
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
       addMsg("user", event.text);
+      break;
+    case "queued":
+      showToast(`queued (#${event.position}) — runs after the current task`);
       break;
     case "token": onToken(event.text); break;
     case "echo": closeAnswer(); addAnsiMsg("echo", event.text); break;
@@ -147,6 +151,7 @@ function handle(event) {
     case "error":
       closeAnswer();
       addMsg("error", event.text);
+      setBusy(false);
       setStatus(null);
       notify("aish — task failed", event.text);
       break;
@@ -187,12 +192,14 @@ function onHello(event) {
   $("model-chip").textContent = event.model;
   setTitle(event.title);
   renderWorkspace(event);
+  setBusy(event.busy);
   if (!event.busy) setStatus(null);
 }
 
 function onReplay(event) {
   messagesEl.replaceChildren();
   cards.clear();
+  pendingCards = 0;
   answerEl = null;
   answerText = "";
   sawAnswer = false;
@@ -227,6 +234,7 @@ function onDone(event) {
     addMsg("answer md", "").replaceChildren(renderMarkdown(event.result));
   }
   closeAnswer();
+  setBusy(false);
   setStatus(null);
   notify("aish — answer ready", event.result);
 }
@@ -238,10 +246,31 @@ function onStatus(event) {
   setStatus(text);
 }
 
+let clientBusy = false;
+let pendingCards = 0;
+let statusText = "";
+
 function setStatus(text) {
-  $("statusline").hidden = !text;
-  $("status-text").textContent = text || "";
+  statusText = text || "";
+  refreshStatusline();
 }
+
+function setBusy(busy) {
+  clientBusy = busy;
+  refreshStatusline();
+}
+
+function refreshStatusline() {
+  // Visible whenever the session is working — including parked on an
+  // approval card — so Stop is always reachable while something runs.
+  const visible = clientBusy || Boolean(statusText);
+  $("statusline").hidden = !visible;
+  $("status-text").textContent =
+    statusText || (pendingCards > 0 ? "waiting for approval" : "working…");
+  $("stop-btn").hidden = !clientBusy;
+}
+
+$("stop-btn").onclick = () => send({ type: "stop" });
 
 // ---- message rendering ---------------------------------------------------
 function addMsg(kind, text) {
@@ -546,6 +575,8 @@ function onApprovalRequest(event) {
     buildReadCard(card, event);
   }
   cards.set(event.id, card);
+  pendingCards += 1;
+  refreshStatusline();
   messagesEl.appendChild(card);
   scrollToEnd(true);
   notify("aish — approval needed", card.dataset.summary);
@@ -659,6 +690,8 @@ function buildReadCard(card, event) {
 function onApprovalResolved(event) {
   const card = cards.get(event.id);
   if (!card) return;
+  pendingCards = Math.max(0, pendingCards - 1);
+  refreshStatusline();
   card.replaceChildren();
   card.className = "card resolved";
   const verdict = document.createElement("div");
@@ -908,12 +941,46 @@ function renderAttachments() {
 function openSheet(id) {
   for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
   $(id).hidden = false;
+  $("backdrop").hidden = false;
 }
 function closeSheets() {
   for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
+  $("backdrop").hidden = true;
 }
 for (const b of document.querySelectorAll("[data-close]")) {
-  b.onclick = () => { $(b.dataset.close).hidden = true; };
+  b.onclick = closeSheets;
+}
+$("backdrop").onclick = closeSheets;
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("backdrop").hidden) closeSheets();
+});
+
+// Grabber: drag down to dismiss (pointer events cover touch and mouse).
+for (const sheet of document.querySelectorAll(".sheet")) {
+  const handle = sheet.querySelector(".grabber");
+  if (!handle) continue;
+  let startY = null;
+  handle.addEventListener("pointerdown", (e) => {
+    startY = e.clientY;
+    sheet.classList.add("dragging");
+    handle.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (startY === null) return;
+    const dy = Math.max(0, e.clientY - startY);
+    sheet.style.transform = `translateY(${dy}px)`;
+  });
+  const finish = (e) => {
+    if (startY === null) return;
+    const dy = e.clientY - startY;
+    startY = null;
+    sheet.classList.remove("dragging");
+    sheet.style.transform = "";
+    if (dy > 80) closeSheets();
+  };
+  handle.addEventListener("pointerup", finish);
+  handle.addEventListener("pointercancel", finish);
 }
 
 function debounce(fn, ms) {

@@ -58,6 +58,7 @@ def run_command(
     on_line: Callable[[str], None] | None = None,
     allow_detach: bool = False,
     log_dir=None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> str:
     """Execute a shell command, streaming output lines via on_line as they
     arrive (stderr merged into stdout so ordering is preserved live).
@@ -95,6 +96,17 @@ def run_command(
             if deadline is not None and time.monotonic() >= deadline:
                 timed_out = True
                 proc.kill()
+                break
+            # Cooperative cancel (web UI Stop button): checked once per
+            # select slice, so a stop lands within ~0.5s.
+            if should_stop is not None and should_stop():
+                cancelled = True
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
                 break
             slice_t = 0.5
             if deadline is not None:
@@ -139,7 +151,7 @@ def run_command(
     if timed_out:
         parts.append(f"ERROR: command timed out after {timeout}s (any partial output is above)")
     elif cancelled:
-        parts.append("[cancelled by user with Ctrl-C — any partial output is above]")
+        parts.append("[stopped by user — any partial output is above]")
     parts.append(f"[exit code: {proc.returncode}]")
     return truncate("\n".join(parts))
 

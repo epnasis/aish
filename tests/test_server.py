@@ -312,16 +312,66 @@ class TestReconnect:
                 )
                 recv_until(ws2, "done")
 
-    def test_task_while_busy_rejected(self, app_env, tmp_path):
+    def test_config_ops_rejected_while_busy(self, app_env, tmp_path):
+        # Tasks queue now, but model/cwd changes mid-task would yank state
+        # from under the running agent — those still reject.
         client, _ = make_client(app_env, self.pending_responses(tmp_path))
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "task", "text": "run it"})
             request = recv_until(ws, "approval_request")  # agent now blocked → busy
-            ws.send_json({"type": "task", "text": "another"})
+            ws.send_json({"type": "cd", "path": str(tmp_path)})
             error = recv_until(ws, "error")
             assert "busy" in error["text"]
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
             recv_until(ws, "done")
+
+
+class TestStopAndQueue:
+    def test_stop_cancels_task_waiting_on_approval(self, app_env, tmp_path):
+        from aish.agent import CANCELLED_RESULT
+
+        marker = tmp_path / "never"
+        client, chat = make_client(
+            app_env,
+            [model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")])],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "touch it"})
+            recv_until(ws, "approval_request")
+            ws.send_json({"type": "stop"})
+            done = recv_until(ws, "done")
+            assert done["result"] == CANCELLED_RESULT
+            assert not marker.exists()
+            assert len(chat.calls) == 1  # no model call after the stop
+            ws.send_json({"type": "stop"})  # nothing running anymore
+            error = recv_until(ws, "error")
+            assert "nothing is running" in error["text"]
+
+    def test_message_while_busy_queues_and_runs_next(self, app_env, tmp_path):
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/a")]),
+                model_says("first answer"),
+                model_says("second answer"),
+            ],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "first task"})
+            request = recv_until(ws, "approval_request")
+
+            ws.send_json({"type": "task", "text": "second task"})
+            queued = recv_until(ws, "queued")
+            assert queued["position"] == 1
+
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            first = recv_until(ws, "done")
+            assert first["result"] == "first answer"
+            # the queued message starts on its own
+            user = recv_until(ws, "user")
+            assert user["text"] == "second task"
+            second = recv_until(ws, "done")
+            assert second["result"] == "second answer"
 
 
 class TestSessions:
@@ -499,6 +549,21 @@ class TestModels:
             assert server.active.agent.provider == "gemini"
             config = app_env["config_path"].read_text(encoding="utf-8")
             assert 'model = "gemini:gemini-3-pro"' in config
+
+    def test_new_chat_inherits_current_model(self, app_env, monkeypatch):
+        new_chat = FakeChat([])
+        monkeypatch.setattr(
+            server_module.backends,
+            "make_chat",
+            lambda spec: (new_chat, "gemini", "gemini-3-pro"),
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "set_model", "spec": "gemini:gemini-3-pro"})
+            recv_until(ws, "model_changed")
+            ws.send_json({"type": "new"})
+            hello = recv_until(ws, "hello")
+            assert hello["model"] == "gemini:gemini-3-pro"  # sticky, not reset
 
     def test_set_model_claude_max_needs_restart(self, app_env):
         client, _ = make_client(app_env, [])

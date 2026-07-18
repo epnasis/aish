@@ -12,6 +12,7 @@ import os
 import platform
 import shlex
 import sys
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -84,6 +85,14 @@ EMPTY_RESPONSE = (
 
 class ModelUnavailable(RuntimeError):
     """The model call failed after a retry (backend down, overloaded, or OOM)."""
+
+
+class TaskCancelled(Exception):
+    """Raised inside the loop when cancel() interrupts a streaming turn."""
+
+
+CANCELLED_RESULT = "(task stopped by user — any partial work is above)"
+NOT_EXECUTED = "(not executed — the user stopped the task)"
 
 
 WRITE_DENIED = (
@@ -218,8 +227,16 @@ class Agent:
         self.job_log_dir = job_log_dir
         self.lessons_path = lessons_path
         self.status = status if status is not None else _NoStatus()
+        self._cancel = threading.Event()
         content = system_prompt() + (f"\n{context}" if context else "")
         self.messages: list[dict] = [{"role": "system", "content": content}]
+
+    def cancel(self) -> None:
+        """Stop the running task at the next boundary: mid-stream (the token
+        loop), before the next model call, before executing proposed tool
+        calls, or by terminating the running shell command. Thread-safe —
+        called from the server loop while run_task holds a worker thread."""
+        self._cancel.set()
 
     def reset(self) -> None:
         """Drop the conversation, keep the system prompt."""
@@ -256,14 +273,19 @@ class Agent:
             user_message["documents"] = list(documents)
         self._append(user_message)
 
+        self._cancel.clear()  # a stale stop must not kill the new task
         task_started = time.perf_counter()
         tokens_in = tokens_out = 0
         for _ in range(self.max_steps):
+            if self._cancel.is_set():
+                return self._finish_cancelled()
             self._enforce_budget(task_start)
             turn_start = time.perf_counter()
             self.status.start("thinking")
             try:
                 content, tool_calls, usage, raw_blocks = self._chat_turn()
+            except TaskCancelled:
+                return self._finish_cancelled()
             finally:
                 self.status.stop()
             turn_secs = time.perf_counter() - turn_start
@@ -296,6 +318,20 @@ class Agent:
             if content and self.on_token is None:
                 self.echo(content)
 
+            if self._cancel.is_set():
+                # Proposed calls must not run after a stop — but every
+                # tool_use still needs a paired result or the next request
+                # is rejected (Anthropic pairing rules).
+                for call in tool_calls:
+                    self._append(
+                        {
+                            "role": "tool",
+                            "tool_name": call["function"]["name"],
+                            "content": NOT_EXECUTED,
+                        }
+                    )
+                return self._finish_cancelled()
+
             results = self._execute_tool_calls(tool_calls)
             for call, result in zip(tool_calls, results, strict=True):
                 self._append(
@@ -306,6 +342,14 @@ class Agent:
         if self.on_token:
             self.on_token(stopped + "\n")
         return stopped
+
+    def _finish_cancelled(self) -> str:
+        """History stays model-consumable: an assistant note closes the turn."""
+        self._append({"role": "assistant", "content": CANCELLED_RESULT})
+        if self.on_token:
+            self.on_token(CANCELLED_RESULT + "\n")
+        self.echo("✕ task stopped")
+        return CANCELLED_RESULT
 
     def _chat_turn(self) -> tuple[str, list[dict], tuple[int, int], list | None]:
         """One model call; returns (content, normalized tool_calls, token usage,
@@ -323,6 +367,8 @@ class Agent:
         for attempt in range(2):
             try:
                 return self._one_chat(kwargs)
+            except TaskCancelled:
+                raise  # a user stop is not a transport error — never retry
             except Exception as exc:  # noqa: BLE001 — surface, don't crash the REPL
                 last_error = exc
                 if attempt == 0:
@@ -343,6 +389,10 @@ class Agent:
             raw_calls = []
             usage = (0, 0)
             for chunk in self.chat(stream=True, **kwargs):
+                if self._cancel.is_set():
+                    # Abandoning the iterator closes the connection, which
+                    # stops generation server-side — the fastest stop there is.
+                    raise TaskCancelled
                 # Ollama streams ~one chunk per generated token, so chunk
                 # count drives the live "↓ N tokens" readout on the ticker.
                 self.status.add_tokens(1)
@@ -642,6 +692,7 @@ class Agent:
                 on_line=self.stream,
                 allow_detach=True,
                 log_dir=self.job_log_dir,
+                should_stop=self._cancel.is_set,
             )
             if self.stream is None:
                 self.echo(result)

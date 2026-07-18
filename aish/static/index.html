@@ -31,7 +31,7 @@
   <svg viewBox="0 0 24 24"><path d="M12 5.5v13M6.8 13.3 12 18.5l5.2-5.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
 </button>
 
-<div id="statusline" hidden><span class="pulse">✻</span> <span id="status-text"></span></div>
+<div id="statusline" hidden><span class="pulse">✻</span> <span id="status-text"></span><button id="stop-btn" type="button">Stop</button></div>
 <div id="connbar" hidden>reconnecting…</div>
 
 <div id="suggest" hidden></div>
@@ -48,6 +48,8 @@
     <svg viewBox="0 0 24 24"><path d="M12 18.5v-13M6.8 10.7 12 5.5l5.2 5.2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
 </form>
+
+<div id="backdrop" hidden></div>
 
 <!-- sessions drawer -->
 <div id="sessions-sheet" class="sheet" hidden>
