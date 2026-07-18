@@ -110,6 +110,13 @@ collapsed **Sources (n)** row that expands to clickable page titles.
    `y` / `n` / `a`lways / `s`ession / `e`dit. `a` saves command prefixes to the
    persistent allowlist; `s` allows the same prefixes **for this session
    only** — kept in memory, forgotten on exit, never written to disk.
+   The suggested prefix is the command's **static subcommand path** — the
+   binary's basename plus its subcommand words, stopping at the first flag or
+   dynamic argument, with known multi-level CLIs (`gh`, `docker`, `npm`,
+   `aws`, `kubectl`, …) kept to their natural depth. So approving
+   `gh issue create --title "…"` offers `gh issue create`, never a blanket
+   `gh` that would also wave through `gh repo delete`; you can still type a
+   different prefix at the prompt.
    Auto-approval exists only for a
    conservatively-parsed set of read-only commands (`ls`, `grep`, `find`
    without `-exec`, …); anything the parser doesn't fully understand prompts.

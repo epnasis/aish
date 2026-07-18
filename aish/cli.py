@@ -867,10 +867,11 @@ def usage_context(
 About aish (you) — use this to answer questions about your own usage:
 {identity_context(model, provider)}
 - Approval prompt keys: y=run once, n=deny, a=always allow (saves command \
-prefixes to {allow_path}; chained |/&&/|| segments are vetted and allowlisted \
-independently; read-only commands auto-approve), s=allow for THIS SESSION \
-only (same prefix flow, kept in memory and forgotten on exit), e=edit the \
-command first. \
+prefixes to {allow_path}; the suggested prefix is the static subcommand path \
+— e.g. 'gh issue create', never a blanket 'gh'; chained |/&&/|| segments are \
+vetted and allowlisted independently; read-only commands auto-approve), \
+s=allow for THIS SESSION only (same prefix flow, kept in memory and \
+forgotten on exit), e=edit the command first. \
 Auto-approval is confined to the session roots (the launch directory plus \
 any the user added): commands whose path arguments point outside them, and \
 read_file outside them, prompt even when otherwise read-only or allowlisted. \

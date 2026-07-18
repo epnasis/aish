@@ -109,6 +109,27 @@ class TestUserAllowlist:
         assert suggest_prefix("ls -la /tmp") == "ls"
         assert suggest_prefix("cat /etc/hosts") == "cat"
 
+    def test_suggest_prefix_multi_level_clis(self):
+        assert suggest_prefix('gh issue create --title "t" --body "b"') == "gh issue create"
+        assert suggest_prefix("docker run -d -p 80:80 nginx") == "docker run"
+        assert suggest_prefix("npm run dev") == "npm run dev"
+        assert suggest_prefix('git commit -m "first commit"') == "git commit"
+        assert suggest_prefix("aws s3 ls") == "aws s3 ls"
+
+    def test_suggest_prefix_strips_binary_path(self):
+        assert suggest_prefix('/opt/homebrew/bin/gh issue create --title "t"') == "gh issue create"
+
+    def test_suggest_prefix_stops_at_dynamic_arguments(self):
+        assert suggest_prefix("gh issue view 20") == "gh issue view"  # depth ceiling
+        assert suggest_prefix("git add .") == "git add"
+        assert suggest_prefix("kubectl get pods/web-1") == "kubectl get"
+        assert suggest_prefix("npm run --silent dev") == "npm run"
+
+    def test_suggest_prefix_keeps_exec_wrapper_script(self):
+        # bare 'python' never auto-approves (EXEC_WRAPPERS), so the script
+        # name must stay in the suggestion to make a usable rule
+        assert suggest_prefix("python manage.py runserver") == "python manage.py"
+
     def test_save_and_load_roundtrip_with_dedupe(self, tmp_path):
         path = tmp_path / "allow.txt"
         save_prefix(path, "git status")

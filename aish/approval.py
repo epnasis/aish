@@ -430,17 +430,50 @@ def looks_destructive(command: str) -> bool:
     return False
 
 
+# CLIs whose static command path nests deeper than one subcommand level:
+# how many tokens after the binary can belong to the path ('gh issue create'
+# = 2). A ceiling, not a fill — collection still stops at the first flag or
+# dynamic-looking argument. Unlisted tools keep one level ('git status').
+SUBCOMMAND_DEPTH = {
+    "aws": 2,       # aws s3 ls
+    "az": 2,
+    "docker": 2,    # docker compose up
+    "gcloud": 3,    # gcloud compute instances list
+    "gh": 2,        # gh issue create
+    "kubectl": 2,   # kubectl get pods
+    "npm": 2,       # npm run dev
+    "pnpm": 2,
+    "podman": 2,
+    "uv": 2,        # uv pip install
+    "yarn": 2,
+}
+
+# A token that can be part of a command path: word-ish, no '/', '=', or
+# leading '-'/'.'  — flags, paths, and KEY=value assignments are dynamic
+# arguments, not subcommands. Interior dots stay allowed so an exec-wrapper
+# script name ('python manage.py') still scopes the rule.
+_SUBCOMMAND_WORD = re.compile(r"^[A-Za-z0-9][\w.-]*$")
+
+
 def suggest_prefix(segment: str) -> str:
-    """Default 'always allow' rule: first two tokens ('git status'), unless
-    the second is a value-ish argument starting with '-' or a path. Two tokens
-    scope the rule to a subcommand instead of a whole binary."""
+    """Default 'always allow' rule: the static command path — the binary's
+    basename plus its subcommand words ('gh issue create'), stopping at the
+    first flag or dynamic argument. Scopes the rule to a subcommand instead
+    of a whole binary, so allowlisting 'gh issue create' never waves through
+    'gh repo delete'."""
     try:
         tokens = shlex.split(segment)
     except ValueError:
         tokens = segment.split()
-    if len(tokens) >= 2 and not tokens[1].startswith(("-", "/", "~", ".")):
-        return f"{tokens[0]} {tokens[1]}"
-    return tokens[0] if tokens else segment.strip()
+    if not tokens:
+        return segment.strip()
+    binary = tokens[0].rsplit("/", 1)[-1]
+    parts = [binary]
+    for token in tokens[1 : 1 + SUBCOMMAND_DEPTH.get(binary, 1)]:
+        if not _SUBCOMMAND_WORD.match(token):
+            break
+        parts.append(token)
+    return " ".join(parts)
 
 
 def load_prefixes(path: Path) -> list[str]:
