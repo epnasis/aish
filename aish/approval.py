@@ -15,6 +15,7 @@ for the whole command to auto-approve.
 import os
 import re
 import shlex
+import shutil
 from collections.abc import Collection
 from pathlib import Path
 
@@ -115,6 +116,27 @@ def _has_unsafe_flag(name: str, tokens: list[str]) -> bool:
     )
 
 
+def _canonical_tokens(tokens: list[str]) -> list[str]:
+    """If the command is invoked by absolute path but resolves to the very same
+    file its bare name finds on PATH, rewrite token 0 to the bare name so
+    SAFE_COMMANDS and saved allowlist prefixes match either spelling. A path
+    that shadows the PATH binary (or isn't on PATH at all) stays untouched, so
+    it still fails closed everywhere a bare name is required."""
+    head = os.path.expanduser(tokens[0])
+    if not os.path.isabs(head):
+        return tokens
+    name = head.rsplit("/", 1)[-1]
+    on_path = shutil.which(name)
+    if not on_path:
+        return tokens
+    try:
+        if os.path.realpath(head) == os.path.realpath(on_path):
+            return [name, *tokens[1:]]
+    except OSError:
+        pass
+    return tokens
+
+
 def _segment_is_safe(segment: str) -> bool:
     try:
         tokens = shlex.split(segment)
@@ -122,6 +144,7 @@ def _segment_is_safe(segment: str) -> bool:
         return False
     if not tokens:
         return False
+    tokens = _canonical_tokens(tokens)
     name = tokens[0]
     if name not in SAFE_COMMANDS:
         return False
@@ -141,14 +164,19 @@ def _prefix_approves(segment: str, prefixes: Collection[str]) -> bool:
     in a write/exec flag or resolve to an interpreter that the bare prefix would
     otherwise wave through. Fixes the hole where allow-listing a benign `find`
     (or `python`) silently granted `find -delete` / arbitrary code."""
-    match = _matched_prefix(segment, prefixes)
-    if match is None:
-        return False
     try:
         tokens = shlex.split(segment)
     except ValueError:
         return False
     if not tokens:
+        return False
+    tokens = _canonical_tokens(tokens)
+    # Match the raw segment first (preserves exact-string rules), then the
+    # canonical spelling, so '/opt/homebrew/bin/gh pr list' still matches a
+    # saved 'gh pr list' — but only because _canonical_tokens proved the path
+    # is the same binary PATH would run.
+    match = _matched_prefix(segment, prefixes) or _matched_prefix(shlex.join(tokens), prefixes)
+    if match is None:
         return False
     name = tokens[0].rsplit("/", 1)[-1]
     if _has_unsafe_flag(name, tokens) or _has_unsafe_flag(tokens[0], tokens):

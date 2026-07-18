@@ -40,7 +40,7 @@ UNSAFE = [
     "sort --output=/etc/hosts input",
     "echo $HOME",  # expansion we can't reason about
     "ls | xargs rm",  # unlisted command in pipeline
-    "/bin/ls",  # path form could shadow the real binary
+    "/tmp/fake/ls",  # path form shadowing the real PATH binary
     "ls 'unbalanced",  # unparseable quoting
     "ls | | wc",  # empty pipeline segment
     "",
@@ -155,6 +155,51 @@ class TestUserAllowlist:
         assert not is_auto_approvable("xargs rm", ["xargs"])
         # but an explicitly scoped multi-token prefix is honored
         assert is_auto_approvable("python manage.py check", ["python manage.py"])
+
+
+class TestPathInvocation:
+    """A full-path invocation counts as the bare name only when it resolves to
+    the exact binary PATH lookup finds — a shadowing or off-PATH binary still
+    fails closed."""
+
+    def test_same_binary_by_path_is_read_only(self, tmp_path, monkeypatch):
+        binary = tmp_path / "ls"
+        binary.write_text("")
+        monkeypatch.setattr("aish.approval.shutil.which", lambda name: str(binary))
+        assert is_read_only(f"{binary} -la")
+
+    def test_shadowing_path_still_prompts(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("aish.approval.shutil.which", lambda name: "/usr/bin/ls")
+        assert not is_read_only(f"{tmp_path}/ls -la")
+
+    def test_binary_missing_from_path_prompts(self, monkeypatch):
+        monkeypatch.setattr("aish.approval.shutil.which", lambda name: None)
+        assert not is_read_only("/somewhere/ls")
+
+    def test_full_path_matches_saved_prefix(self, monkeypatch):
+        monkeypatch.setattr(
+            "aish.approval.shutil.which", lambda name: "/opt/homebrew/bin/gh"
+        )
+        assert is_auto_approvable("/opt/homebrew/bin/gh pr list", ["gh pr list"])
+        assert not is_auto_approvable("/opt/homebrew/bin/gh repo delete x", ["gh pr list"])
+
+    def test_symlinked_install_matches(self, tmp_path, monkeypatch):
+        real = tmp_path / "cellar" / "gh"
+        real.parent.mkdir()
+        real.write_text("")
+        link = tmp_path / "bin" / "gh"
+        link.parent.mkdir()
+        link.symlink_to(real)
+        monkeypatch.setattr("aish.approval.shutil.which", lambda name: str(link))
+        assert is_auto_approvable(f"{real} pr list", ["gh pr list"])
+
+    def test_unsafe_flags_still_checked_after_canonicalization(self, monkeypatch):
+        monkeypatch.setattr("aish.approval.shutil.which", lambda name: "/usr/bin/find")
+        assert not is_read_only("/usr/bin/find . -delete")
+
+    def test_full_path_interpreter_still_blocked(self, monkeypatch):
+        monkeypatch.setattr("aish.approval.shutil.which", lambda name: "/bin/bash")
+        assert not is_auto_approvable("/bin/bash -c 'rm x'", ["bash"])
 
 
 DENIED = [
