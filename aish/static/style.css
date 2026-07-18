@@ -21,7 +21,9 @@
   --r-control: 10px;
 }
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
+/* touch-action: double-tap must never zoom the app (it fights text
+   selection and leaves the layout scaled); pinch and panning stay allowed. */
+* { box-sizing: border-box; margin: 0; padding: 0; touch-action: manipulation; }
 
 html, body {
   height: 100%;
@@ -34,10 +36,12 @@ html, body {
 body {
   display: flex;
   flex-direction: column;
-  /* min-, not fixed: iOS standalone can momentarily size the viewport
-     taller than 100dvh (keyboard dismissal, rotation); the body must keep
-     painting --bg down there instead of exposing a band. */
-  min-height: 100dvh;
+  /* Pinned to the window edges instead of sized by dvh: iOS standalone
+     re-lays the layout viewport out short (by the status-bar inset) after
+     keyboard use, and a fixed-position body tracking the window is the
+     known prevention for getting stuck in that state (#8). */
+  position: fixed;
+  inset: 0;
   overflow: hidden;
 }
 
