@@ -152,7 +152,7 @@ function handle(event) {
       break;
     case "token": onToken(event.text); break;
     case "echo": closeAnswer(); addAnsiMsg("echo", event.text); break;
-    case "stream": addAnsiMsg("stream", event.text); break;
+    case "stream": addStreamLine(event.text); break;
     case "error":
       closeAnswer();
       addMsg("error", event.text);
@@ -297,6 +297,19 @@ function addAnsiMsg(kind, text) {
   messagesEl.appendChild(el);
   scrollToEnd();
   return el;
+}
+
+// Consecutive stream lines share one block so the output scrolls sideways as a
+// whole; any other message ending up last (echo, answer, card) starts a new one.
+function addStreamLine(text) {
+  const last = messagesEl.lastElementChild;
+  if (last && last.classList.contains("stream")) {
+    last.appendChild(document.createTextNode("\n"));
+    last.appendChild(ansiFragment(text));
+    scrollToEnd();
+    return last;
+  }
+  return addAnsiMsg("stream", text);
 }
 
 function nearBottom() {
