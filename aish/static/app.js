@@ -384,8 +384,17 @@ function scrollToEndSettled() {
 // (#8) — once the visual viewport is full-height again (keyboard gone), snap
 // the window home. Never snap while the keyboard is up: the pan is what keeps
 // the composer visible above it.
+// Whether an editable element has focus. iOS resizes innerHeight while the
+// keyboard animates open, so height comparisons alone briefly misread the
+// keyboard as closed — but focus always lands before the viewport events, so
+// this is the race-free "hands off the viewport" signal.
+function editingNow() {
+  const el = document.activeElement;
+  return Boolean(el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable));
+}
+
 function snapViewportHome() {
-  if (!window.visualViewport) return;
+  if (!window.visualViewport || editingNow()) return;
   const keyboardClosed = visualViewport.height >= innerHeight - 1;
   if (keyboardClosed && (scrollY || visualViewport.offsetTop)) window.scrollTo(0, 0);
   recoverShortWindow();
@@ -412,24 +421,18 @@ function windowIsShort() {
 }
 
 function recoverShortWindow() {
-  if (!windowIsShort() || Date.now() - lastRecover < 2000) return;
+  if (editingNow() || !windowIsShort() || Date.now() - lastRecover < 2000) return;
   lastRecover = Date.now();
   const content = VIEWPORT_META.getAttribute("content");
   VIEWPORT_META.setAttribute("content", content + ", minimum-scale=1");
   requestAnimationFrame(() => {
     VIEWPORT_META.setAttribute("content", content);
     setTimeout(() => {
-      if (!windowIsShort()) { reportViewport("recovered-by-meta"); return; }
-      const probe = document.createElement("input");
-      probe.readOnly = true;
-      probe.setAttribute("inputmode", "none");
-      probe.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0";
-      document.body.appendChild(probe);
-      probe.focus({ preventScroll: true });
-      probe.blur();
-      probe.remove();
-      setTimeout(() => reportViewport(windowIsShort() ? "still-short" : "recovered-by-focus"), 300);
-    }, 250);
+      if (editingNow()) return; // user started typing — state is theirs now
+      const short = windowIsShort();
+      reportViewport(short ? "still-short" : "recovered-by-meta");
+      if (short) setTimeout(recoverShortWindow, 2100); // one more try after the cooldown
+    }, 300);
   });
 }
 
