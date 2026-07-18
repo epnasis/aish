@@ -51,7 +51,7 @@ body {
 
 /* Keyboard visible (JS-toggled): it covers the home-indicator area, so the
    safe-area bottom padding would just render as a dead strip above it. */
-body.kb-open #composer { padding-bottom: 8px; }
+body.kb-open #composer { margin-bottom: 0; }
 body.kb-open .sheet { padding-bottom: 14px; }
 
 .mono, pre, code {
@@ -499,7 +499,10 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   gap: 8px;
   align-items: flex-end;
   padding: 8px 12px;
-  padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  /* Home-indicator clearance as margin, not padding: the reserved strip then
+     shows the black body background instead of the composer's grey material,
+     so the pill reads as sitting at the bottom of the app. */
+  margin-bottom: env(safe-area-inset-bottom);
   background: rgba(22, 22, 24, 0.85);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
