@@ -105,6 +105,19 @@
 
 <div id="toast" hidden></div>
 
+<div id="token-gate" hidden>
+  <div class="gate-card">
+    <h2>Access token</h2>
+    <p>This server requires a token. Paste it once — it's remembered on this
+    device.</p>
+    <form id="token-form">
+      <input id="token-input" type="text" placeholder="token"
+             autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button type="submit" class="primary">Connect</button>
+    </form>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

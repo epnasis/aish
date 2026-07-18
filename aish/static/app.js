@@ -80,7 +80,11 @@ function connect() {
       return; // deliberate replacement: do not fight over the session
     }
     if (event.code === 4403) {
-      showToast("wrong or missing token — add ?token=… to the URL");
+      // In-app entry: iOS home-screen apps launch without query params and
+      // have storage isolated from Safari, so the URL trick can't help there.
+      if (token) showToast("that token was rejected — check for typos");
+      $("token-gate").hidden = false;
+      $("token-input").focus();
       return;
     }
     $("connbar").hidden = false;
@@ -1241,5 +1245,13 @@ function showToast(text) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { toast.hidden = true; }, 3500);
 }
+
+$("token-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const value = $("token-input").value.trim();
+  if (!value) return;
+  localStorage.setItem("aish-token", value);
+  location.reload(); // reconnect with the new token from a clean slate
+});
 
 connect();
