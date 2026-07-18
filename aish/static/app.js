@@ -146,6 +146,8 @@ function handle(event) {
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
       rememberPrompt(stripAttachmentNotes(event.text));
       makeRecallable(addMsg("user", event.text));
+      // Your own message always comes into view, even if you were scrolled up.
+      if (!replaying) scrollToEnd(true);
       break;
     case "queued":
       showToast(`queued (#${event.position}) — runs after the current task`);
@@ -353,6 +355,19 @@ function nearBottom() {
 function scrollToEnd(force) {
   if (force || nearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight;
   updateScrollButton();
+}
+
+// iOS Safari settles keyboard-driven layout changes a beat after the gesture;
+// the second pass lands the view at the true bottom once heights are final.
+function scrollToEndSettled() {
+  scrollToEnd(true);
+  setTimeout(() => scrollToEnd(true), 120);
+}
+
+// Keyboard show/hide resizes the viewport; if the user was reading the tail,
+// keep them pinned to it instead of leaving the bottom hidden.
+if (window.visualViewport) {
+  visualViewport.addEventListener("resize", () => scrollToEnd());
 }
 
 function updateScrollButton() {
@@ -1237,6 +1252,7 @@ function submitInput() {
     input.style.height = "auto";
     attachments = [];
     renderAttachments();
+    scrollToEndSettled();
   }
 }
 
