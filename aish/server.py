@@ -478,6 +478,10 @@ class WebServer:
 
     async def handle_ws(self, websocket: WebSocket) -> None:
         if self.token and websocket.query_params.get("token") != self.token:
+            # Accept, THEN close: refusing the handshake would reach the
+            # browser as a generic 1006 and the client couldn't tell a bad
+            # token from a dead server (it would just retry forever).
+            await websocket.accept()
             await websocket.close(code=CLOSE_BAD_TOKEN)
             return
         await websocket.accept()

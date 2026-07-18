@@ -709,10 +709,16 @@ class TestUpload:
 
 class TestTokenGate:
     def test_wrong_token_rejected_right_token_accepted(self, app_env):
+        from starlette.websockets import WebSocketDisconnect
+
         client, _ = make_client(app_env, [], token="s3cret")
         with client:
-            with pytest.raises(Exception):  # noqa: B017 — close surfaces per-transport
-                with client.websocket_connect("/ws?token=wrong") as ws:
+            # Accepted then closed with the app code — browsers only expose
+            # close codes for accepted sockets, and the client needs 4403 to
+            # show "wrong token" instead of looping on "reconnecting…".
+            with client.websocket_connect("/ws?token=wrong") as ws:
+                with pytest.raises(WebSocketDisconnect) as exc:
                     ws.receive_json()
+                assert exc.value.code == 4403
             with connected(client, "/ws?token=s3cret") as (_ws, hello, _):
                 assert hello["model"] == "fake"
