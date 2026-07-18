@@ -218,8 +218,12 @@ class OpenAICompatBackend:
             # Some compatible servers reject stream_options — retry without.
             chunks = self.client.chat.completions.create(stream=True, **kwargs)
         # Tool-call fragments must be accumulated across chunks; only text
-        # deltas are useful to the caller incrementally.
-        pending: dict[int, dict] = {}
+        # deltas are useful to the caller incrementally. OpenAI numbers
+        # concurrent calls with an integer index; Gemini's compat layer sends
+        # index=None and one complete call per fragment, distinguished by id.
+        # Key slots on whichever is present, else the two calls of a parallel
+        # turn merge into one garbage call ("read_urlread_url").
+        pending: dict[tuple, dict] = {}
         usage = (0, 0)
         for chunk in chunks:
             if getattr(chunk, "usage", None):
@@ -232,19 +236,26 @@ class OpenAICompatBackend:
             if delta.content:
                 yield ChatChunk(message=ChatMessage(content=delta.content))
             for frag in delta.tool_calls or []:
-                slot = pending.setdefault(
-                    frag.index, {"name": "", "arguments": "", "extra": None}
-                )
+                index = getattr(frag, "index", None)
+                if index is not None:
+                    key = ("index", index)
+                elif getattr(frag, "id", None):
+                    key = ("id", frag.id)
+                else:  # no index, no id: continuation of the latest call
+                    key = next(reversed(pending), ("index", 0))
+                slot = pending.setdefault(key, {"name": "", "arguments": "", "extra": None})
                 if frag.function:
                     slot["name"] += frag.function.name or ""
                     slot["arguments"] += frag.function.arguments or ""
                 slot["extra"] = _extra_content(frag) or slot["extra"]
+        # Insertion order is arrival order, which is the call order for
+        # every provider; mixed key types make sorting impossible anyway.
         tool_calls = [
             ToolCall(
                 ToolFunction(name=slot["name"], arguments=_parse_args(slot["arguments"])),
                 extra_content=slot["extra"],
             )
-            for _, slot in sorted(pending.items())
+            for slot in pending.values()
         ]
         yield ChatChunk(
             message=ChatMessage(tool_calls=tool_calls),

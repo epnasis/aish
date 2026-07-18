@@ -180,6 +180,35 @@ def test_stream_preserves_gemini_thought_signature():
     assert out[-1].message.tool_calls[0].extra_content == extra
 
 
+def test_stream_gemini_null_index_calls_stay_separate():
+    # Gemini's OpenAI-compat streaming sends index=None with one complete
+    # call per fragment (unique id each); only the first call of a turn
+    # carries a thought signature. Keying slots on the index used to merge
+    # both calls into one ("read_urlread_url" with unparseable arguments).
+    extra = {"google": {"thought_signature": "SIG"}}
+    frag1 = SimpleNamespace(
+        index=None,
+        id="0zgx4nnk",
+        function=SimpleNamespace(name="read_url", arguments='{"url": "https://a.example"}'),
+        extra_content=extra,
+    )
+    frag2 = SimpleNamespace(
+        index=None,
+        id="f19844a0",
+        function=SimpleNamespace(name="read_url", arguments='{"url": "https://b.example"}'),
+        extra_content=None,
+    )
+    chunks = [_delta_chunk(tool_calls=[frag1]), _delta_chunk(tool_calls=[frag2])]
+    backend = OpenAICompatBackend(FakeClient(stream_chunks=chunks), "gemini")
+    out = list(backend(model="m", messages=[], stream=True))
+    calls = out[-1].message.tool_calls
+    assert [c.function.name for c in calls] == ["read_url", "read_url"]
+    assert calls[0].function.arguments == {"url": "https://a.example"}
+    assert calls[1].function.arguments == {"url": "https://b.example"}
+    assert calls[0].extra_content == extra
+    assert calls[1].extra_content is None
+
+
 def test_convert_reemits_extra_content():
     messages = [
         {
