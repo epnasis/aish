@@ -221,6 +221,26 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md tr:last-child td { border-bottom: none; }
 .msg.md th { background: var(--bg-elev2); font-weight: 600; }
 
+/* ---- read-aloud button under answers ---- */
+.speak-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin: 4px 0 0 -6px; /* optical: align icon with the answer's text edge */
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--dim);
+}
+.speak-btn:active { opacity: 0.5; }
+.speak-btn svg { width: 19px; height: 19px; }
+.speak-btn .stop-shape { display: none; }
+.speak-btn.speaking { color: var(--blue); }
+.speak-btn.speaking .stop-shape { display: block; }
+.speak-btn.speaking .speak-shape { display: none; }
+
 /* ---- approval cards ---- */
 .card {
   background: var(--bg-elev);

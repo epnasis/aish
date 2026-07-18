@@ -202,6 +202,7 @@ function onHello(event) {
 }
 
 function onReplay(event) {
+  stopSpeaking(); // the active button is about to be detached with the DOM
   messagesEl.replaceChildren();
   cards.clear();
   pendingCards = 0;
@@ -233,13 +234,18 @@ function onToken(text) {
 }
 
 function closeAnswer() {
+  // A finished answer (streaming ends, or something else interrupts the
+  // block) gets its read-aloud button; mid-stream re-renders would clobber it.
+  if (answerEl && answerText.trim()) attachSpeakButton(answerEl);
   answerEl = null;
   answerText = "";
 }
 
 function onDone(event) {
   if (!sawAnswer && event.result) {
-    addMsg("answer md", "").replaceChildren(renderMarkdown(event.result));
+    const el = addMsg("answer md", "");
+    el.replaceChildren(renderMarkdown(event.result));
+    attachSpeakButton(el);
   }
   closeAnswer();
   if (event.sources && event.sources.length) addSources(event.sources);
@@ -366,7 +372,9 @@ function onHistory(history) {
     if (!content) continue;
     if (message.role === "user") makeRecallable(addMsg("user", content));
     else if (message.role === "assistant") {
-      addMsg("answer md", "").replaceChildren(renderMarkdown(content));
+      const el = addMsg("answer md", "");
+      el.replaceChildren(renderMarkdown(content));
+      attachSpeakButton(el);
     } else {
       const lines = content.split("\n");
       const shown = lines.slice(0, 4).join("\n");
@@ -605,6 +613,92 @@ function inlineMd(text) {
     rest = rest.slice(match.index + match[0].length);
   }
   return frag;
+}
+
+// ---- read aloud (Web Speech API) -----------------------------------------
+// Native speechSynthesis: offline, no audio-generation API, and iOS allows
+// it because speak() runs inside the button's tap gesture. One utterance at
+// a time; the active button shows a stop square instead of the speaker.
+const TTS_OK = "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
+let speakingBtn = null;
+let liveUtterance = null; // held so WebKit can't GC it mid-speech (kills onend)
+
+function attachSpeakButton(el) {
+  if (!TTS_OK) return;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "speak-btn";
+  btn.title = "read aloud";
+  btn.setAttribute("aria-label", "read aloud");
+  btn.appendChild(speakIcon());
+  btn.onclick = () => toggleSpeak(btn, el);
+  el.appendChild(btn);
+}
+
+function speakIcon() {
+  const NS = "http://www.w3.org/2000/svg";
+  const make = (tag, attrs) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    return node;
+  };
+  const svg = make("svg", { viewBox: "0 0 24 24" });
+  const speaker = make("g", { class: "speak-shape", fill: "none",
+    stroke: "currentColor", "stroke-width": "1.7",
+    "stroke-linecap": "round", "stroke-linejoin": "round" });
+  speaker.appendChild(make("path", {
+    d: "M11.5 5.5 7.4 9H4.8a.8.8 0 0 0-.8.8v4.4a.8.8 0 0 0 .8.8h2.6l4.1 3.5z",
+  }));
+  speaker.appendChild(make("path", { d: "M15 9.3a4 4 0 0 1 0 5.4" }));
+  speaker.appendChild(make("path", { d: "M17.6 6.8a7.6 7.6 0 0 1 0 10.4" }));
+  svg.appendChild(speaker);
+  svg.appendChild(make("rect", { class: "stop-shape",
+    x: "6.5", y: "6.5", width: "11", height: "11", rx: "2.5", fill: "currentColor" }));
+  return svg;
+}
+
+function speakableText(el) {
+  // Read what's on screen, minus code blocks (hearing code character by
+  // character is noise) and the button itself. Block elements become line
+  // breaks — textContent alone would run "…end.Next" together and slur.
+  const parts = [];
+  const walk = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) { parts.push(node.nodeValue); return; }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    if (node.tagName === "PRE" || node.classList.contains("speak-btn")) return;
+    for (const child of node.childNodes) walk(child);
+    if (/^(P|LI|H[1-6]|TR|BLOCKQUOTE)$/.test(node.tagName)) parts.push("\n");
+  };
+  walk(el);
+  return parts.join("").replace(/[^\S\n]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
+}
+
+function stopSpeaking() {
+  if (!TTS_OK) return;
+  speechSynthesis.cancel();
+  if (speakingBtn) speakingBtn.classList.remove("speaking");
+  speakingBtn = null;
+  liveUtterance = null;
+}
+
+function toggleSpeak(btn, el) {
+  if (speakingBtn === btn) {
+    stopSpeaking();
+    return;
+  }
+  stopSpeaking();
+  const text = speakableText(el);
+  if (!text) return;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.onend = utterance.onerror = () => {
+    // cancel() also fires these on the old utterance — only reset if this
+    // button is still the active one.
+    if (speakingBtn === btn) stopSpeaking();
+  };
+  speakingBtn = btn;
+  liveUtterance = utterance;
+  btn.classList.add("speaking");
+  speechSynthesis.speak(utterance);
 }
 
 // ---- approval cards ------------------------------------------------------
