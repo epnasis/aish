@@ -65,13 +65,16 @@ document.addEventListener("visibilitychange", () => {
 // ---- event dispatch ------------------------------------------------------
 let answerEl = null; // the assistant block tokens append to
 let answerText = "";
+let sawAnswer = false; // any tokens streamed since the task started —
+// echo lines close the answer block, so this (not answerText) decides
+// whether done.result still needs rendering
 const cards = new Map(); // approval id -> card element
 
 function handle(event) {
   switch (event.type) {
     case "hello": onHello(event); break;
     case "replay": onReplay(event); break;
-    case "user": closeAnswer(); addMsg("user", event.text); break;
+    case "user": closeAnswer(); sawAnswer = false; addMsg("user", event.text); break;
     case "token": onToken(event.text); break;
     case "echo": closeAnswer(); addAnsiMsg("echo", event.text); break;
     case "stream": addAnsiMsg("stream", event.text); break;
@@ -113,12 +116,14 @@ function onReplay(event) {
   cards.clear();
   answerEl = null;
   answerText = "";
+  sawAnswer = false;
   if (event.truncated) addMsg("notice", "… earlier events trimmed …");
   for (const item of event.events) handle(item);
   scrollToEnd(true);
 }
 
 function onToken(text) {
+  sawAnswer = true;
   if (!answerEl) {
     answerEl = addMsg("answer md", "");
     answerText = "";
@@ -134,7 +139,7 @@ function closeAnswer() {
 }
 
 function onDone(event) {
-  if (!answerText.trim() && event.result) {
+  if (!sawAnswer && event.result) {
     addMsg("answer md", "").replaceChildren(renderMarkdown(event.result));
   }
   closeAnswer();
