@@ -1287,9 +1287,152 @@ attachListNav($("sessions-search"), $("sessions-list"));
 attachListNav($("model-search"), $("model-list"));
 
 function renderWorkspace(event) {
-  if (event.cwd) $("ws-cwd").textContent = event.cwd;
+  if (event.home) homeDir = event.home;
+  if (event.cwd) {
+    currentCwd = event.cwd;
+    $("ws-cwd").textContent = event.cwd;
+    const chip = $("cwd-chip");
+    chip.textContent = abbreviatePath(event.cwd);
+    chip.hidden = false;
+  }
   if (event.roots) $("ws-roots").textContent = event.roots.join("\n");
 }
+
+// ---- cwd chip + directory picker -----------------------------------------
+let homeDir = "";
+let currentCwd = "";
+
+function abbreviatePath(path) {
+  let p = path;
+  if (homeDir && (p === homeDir || p.startsWith(homeDir + "/"))) {
+    p = "~" + p.slice(homeDir.length);
+  }
+  // middle-free truncation keeping the leaf — the informative part
+  return p.length > 38 ? "…" + p.slice(-37) : p;
+}
+
+const RECENT_DIRS_KEY = "aish-recent-dirs";
+function recentDirs() {
+  try { return JSON.parse(localStorage.getItem(RECENT_DIRS_KEY)) || []; }
+  catch { return []; }
+}
+function rememberDir(path) {
+  const list = [path, ...recentDirs().filter((p) => p !== path)].slice(0, 6);
+  localStorage.setItem(RECENT_DIRS_KEY, JSON.stringify(list));
+}
+
+let dirPath = "";       // directory the picker is browsing
+let dirEntries = [];    // its subdirectory names
+let dirSearchTimer = null;
+
+async function dirsFetch(url, params) {
+  if (token) params.set("token", token);
+  const response = await fetch(`${url}?${params}`);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || response.status);
+  return body;
+}
+
+async function browseDir(path) {
+  let body;
+  try {
+    body = await dirsFetch("/dirs", new URLSearchParams({ path }));
+  } catch (err) {
+    showToast(`can't open: ${err.message}`);
+    return;
+  }
+  dirPath = body.path;
+  dirEntries = body.dirs;
+  $("dir-search").value = "";
+  renderDirList();
+}
+
+function dirRow(label, meta, onTap, cls = "") {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = `row ${cls}`.trim();
+  const name = document.createElement("span");
+  name.className = "folder";
+  name.textContent = label;
+  row.appendChild(name);
+  if (meta) {
+    const metaEl = document.createElement("span");
+    metaEl.className = "meta";
+    metaEl.textContent = meta;
+    row.appendChild(metaEl);
+  }
+  row.onclick = onTap;
+  return row;
+}
+
+function sectionLabel(text) {
+  const el = document.createElement("div");
+  el.className = "section-label";
+  el.textContent = text;
+  return el;
+}
+
+function renderDirList(deepResults = null) {
+  $("dir-current").textContent = abbreviatePath(dirPath);
+  const list = $("dir-list");
+  list.replaceChildren();
+  const query = $("dir-search").value.trim().toLowerCase();
+
+  if (!query) {
+    const recents = recentDirs().filter((p) => p !== dirPath);
+    if (recents.length) {
+      list.appendChild(sectionLabel("Recent"));
+      for (const p of recents) {
+        list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p)));
+      }
+      list.appendChild(sectionLabel("Folders"));
+    }
+  }
+  if (dirPath !== "/") {
+    list.appendChild(
+      dirRow("‹ ..", null, () => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/"), "up")
+    );
+  }
+  const visible = dirEntries.filter(
+    (n) => !n.startsWith(".") && (!query || n.toLowerCase().includes(query))
+  );
+  for (const name of visible) {
+    list.appendChild(
+      dirRow(name, null, () => browseDir(dirPath === "/" ? `/${name}` : `${dirPath}/${name}`))
+    );
+  }
+  if (deepResults && deepResults.length) {
+    list.appendChild(sectionLabel("Everywhere"));
+    for (const p of deepResults) {
+      list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p)));
+    }
+  }
+}
+
+$("cwd-chip").onclick = () => {
+  openSheet("dir-sheet");
+  browseDir(currentCwd || homeDir || "/");
+};
+$("dir-use").onclick = () => {
+  if (!dirPath) return;
+  rememberDir(dirPath);
+  send({ type: "cd", path: dirPath });
+  closeSheets();
+};
+$("dir-search").addEventListener("input", () => {
+  renderDirList();
+  clearTimeout(dirSearchTimer);
+  const query = $("dir-search").value.trim();
+  if (query.length < 2) return;
+  dirSearchTimer = setTimeout(async () => {
+    try {
+      const body = await dirsFetch(
+        "/dirs/search", new URLSearchParams({ q: query, base: homeDir || dirPath })
+      );
+      if ($("dir-search").value.trim() === query) renderDirList(body.results);
+    } catch { /* deep search is best-effort */ }
+  }, 250);
+});
 
 // toast
 let toastTimer;

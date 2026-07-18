@@ -482,6 +482,7 @@ class WebServer:
             "busy": session.busy,
             "cwd": session.agent.cwd,
             "roots": [str(root) for root in session.agent.roots],
+            "home": str(Path.home()),  # client abbreviates paths to ~
         }
 
     def _cwd_event(self) -> dict:
@@ -879,6 +880,98 @@ class WebServer:
         paths = await asyncio.to_thread(list_files, cwd, query)
         await websocket.send_json({"type": "file_list", "query": query, "files": paths})
 
+    # Directory picker backend (top-bar cwd control). Deliberately NOT scoped
+    # to session roots: /cd already accepts any path the server user can
+    # reach, so listing adds no capability — but it stays names-only and
+    # token-gated.
+    DIR_SEARCH_MAX = 50
+    DIR_SEARCH_DEPTH = 5
+    DIR_SEARCH_VISIT_CAP = 20_000
+    DIR_SEARCH_SKIP = {".git", "node_modules", "venv", ".venv", "__pycache__", ".Trash"}
+
+    async def handle_dirs(self, request) -> JSONResponse:
+        """GET /dirs?path=<abs> — subdirectory names only (browse mode)."""
+        if self.token and request.query_params.get("token") != self.token:
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        raw = request.query_params.get("path", "").strip() or str(Path.home())
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            return JSONResponse({"error": "path must be absolute"}, status_code=400)
+        path = path.resolve()
+        if not path.is_dir():
+            return JSONResponse({"error": "not a directory"}, status_code=404)
+
+        def list_dirs() -> list[str]:
+            with os.scandir(path) as entries:
+                return sorted(
+                    (e.name for e in entries if e.is_dir(follow_symlinks=True)),
+                    key=str.lower,
+                )
+
+        try:
+            names = await asyncio.to_thread(list_dirs)
+        except PermissionError:
+            return JSONResponse({"error": "permission denied"}, status_code=403)
+        return JSONResponse({"path": str(path), "dirs": names})
+
+    async def handle_dirs_search(self, request) -> JSONResponse:
+        """GET /dirs/search?q=<term>&base=<abs> — bounded fuzzy walk under
+        base: depth- and visit-capped, hidden/noise dirs skipped, results
+        ranked match-tightness first, then shallowness."""
+        if self.token and request.query_params.get("token") != self.token:
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        query = request.query_params.get("q", "").strip().lower()
+        if not query:
+            return JSONResponse({"results": []})
+        raw = request.query_params.get("base", "").strip() or str(Path.home())
+        base = Path(raw).expanduser()
+        if not base.is_absolute():
+            return JSONResponse({"error": "base must be absolute"}, status_code=400)
+        base = base.resolve()
+        if not base.is_dir():
+            return JSONResponse({"error": "not a directory"}, status_code=404)
+
+        def subsequence(needle: str, haystack: str) -> bool:
+            it = iter(haystack)
+            return all(ch in it for ch in needle)
+
+        def walk() -> list[str]:
+            scored: list[tuple[int, int, int, str]] = []
+            queue: list[tuple[Path, int]] = [(base, 0)]
+            visited = 0
+            while queue and visited < self.DIR_SEARCH_VISIT_CAP:
+                current, depth = queue.pop(0)
+                try:
+                    with os.scandir(current) as entries:
+                        children = [
+                            e.name for e in entries if e.is_dir(follow_symlinks=False)
+                        ]
+                except OSError:
+                    continue
+                visited += 1
+                for name in sorted(children, key=str.lower):
+                    if name.startswith(".") or name in self.DIR_SEARCH_SKIP:
+                        continue
+                    lower = name.lower()
+                    if lower.startswith(query):
+                        tightness = 0
+                    elif query in lower:
+                        tightness = 1
+                    elif subsequence(query, lower):
+                        tightness = 2
+                    else:
+                        tightness = -1
+                    child = current / name
+                    if tightness >= 0:
+                        scored.append((tightness, depth, len(name), str(child)))
+                    if depth + 1 < self.DIR_SEARCH_DEPTH:
+                        queue.append((child, depth + 1))
+            scored.sort()
+            return [path for _, _, _, path in scored[: self.DIR_SEARCH_MAX]]
+
+        results = await asyncio.to_thread(walk)
+        return JSONResponse({"results": results})
+
     async def handle_upload(self, request) -> JSONResponse:
         """POST /upload?name=<filename>, raw body — no multipart, so no extra
         dependency. Files land in <state_dir>/uploads (a session root, so the
@@ -1045,6 +1138,8 @@ def create_app(
         routes=[
             WebSocketRoute("/ws", server.handle_ws),
             Route("/upload", server.handle_upload, methods=["POST"]),
+            Route("/dirs", server.handle_dirs, methods=["GET"]),
+            Route("/dirs/search", server.handle_dirs_search, methods=["GET"]),
             Mount("/", StaticFiles(directory=STATIC_DIR, html=True)),
         ],
         lifespan=lifespan,

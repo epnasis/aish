@@ -728,6 +728,56 @@ class TestUpload:
             )
 
 
+class TestDirListing:
+    def make_tree(self, tmp_path):
+        base = tmp_path / "tree"
+        for d in ("alpha", "beta/nested", "beta/.hidden", ".git/objects", "projects/aish"):
+            (base / d).mkdir(parents=True)
+        (base / "file.txt").write_text("not a dir", encoding="utf-8")
+        return base
+
+    def test_dirs_lists_subdirectories_only(self, app_env, tmp_path):
+        base = self.make_tree(tmp_path)
+        client, _ = make_client(app_env, [])
+        with client:
+            body = client.get(f"/dirs?path={base}").json()
+            assert body["path"] == str(base)
+            assert body["dirs"] == [".git", "alpha", "beta", "projects"]
+
+    def test_dirs_requires_token_when_set(self, app_env, tmp_path):
+        base = self.make_tree(tmp_path)
+        client, _ = make_client(app_env, [], token="s3cret")
+        with client:
+            assert client.get(f"/dirs?path={base}").status_code == 403
+            assert client.get(f"/dirs?path={base}&token=s3cret").status_code == 200
+            assert client.get(f"/dirs/search?q=x&base={base}").status_code == 403
+
+    def test_dirs_rejects_bad_paths(self, app_env, tmp_path):
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.get("/dirs?path=relative/path").status_code == 400
+            assert client.get(f"/dirs?path={tmp_path}/nope").status_code == 404
+            assert client.get(f"/dirs?path={tmp_path}/tree/file.txt").status_code == 404
+
+    def test_search_finds_nested_dirs_skips_hidden(self, app_env, tmp_path):
+        base = self.make_tree(tmp_path)
+        client, _ = make_client(app_env, [])
+        with client:
+            body = client.get(f"/dirs/search?q=nested&base={base}").json()
+            assert body["results"] == [str(base / "beta" / "nested")]
+            body = client.get(f"/dirs/search?q=hidden&base={base}").json()
+            assert body["results"] == []  # dotfolders never surface
+
+    def test_search_ranks_prefix_before_substring(self, app_env, tmp_path):
+        base = tmp_path / "rank"
+        for d in ("aish", "my-aish-fork", "unrelated"):
+            (base / d).mkdir(parents=True)
+        client, _ = make_client(app_env, [])
+        with client:
+            results = client.get(f"/dirs/search?q=aish&base={base}").json()["results"]
+            assert results == [str(base / "aish"), str(base / "my-aish-fork")]
+
+
 class TestTokenGate:
     def test_wrong_token_rejected_right_token_accepted(self, app_env):
         from starlette.websockets import WebSocketDisconnect

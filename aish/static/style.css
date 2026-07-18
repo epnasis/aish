@@ -92,6 +92,26 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   padding: 6px 4px;
 }
 .bar-title:active { opacity: 0.6; }
+#bar-center {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+#bar-center .bar-title { flex: initial; width: 100%; padding-bottom: 0; }
+#cwd-chip {
+  max-width: 100%;
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 11px;
+  padding: 0 4px 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#cwd-chip:active { opacity: 0.6; }
 
 /* ---- messages ---- */
 #messages {
@@ -588,6 +608,27 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 }
 .ws-row button { margin-top: 0; }
 .ws-about { color: var(--dim); font-size: 12px; line-height: 1.5; }
+
+/* directory picker sheet */
+.dir-current-row { align-items: center; margin-bottom: 4px; }
+.dir-current-row .grow { flex: 1; min-width: 0; }
+#dir-current {
+  color: var(--dim);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap; /* abbreviatePath() already keeps the leaf visible */
+}
+#dir-list .row .folder { color: var(--fg); }
+#dir-list .row.up { color: var(--blue); }
+#dir-list .section-label {
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 10px 6px 2px;
+}
 
 /* token gate */
 #token-gate {

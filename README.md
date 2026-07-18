@@ -215,9 +215,11 @@ aish-web --model gemini       # same --model forms as aish
 
 Header controls replace the slash commands: the **model chip** opens a
 searchable model picker (with a "make startup default" toggle), the **session
-title** opens the sessions drawer (search + resume + new chat), and the **⋯
-menu** shows the working directory, session roots (`/cd` / `/add-dir`
-equivalents), and background jobs; the **compose** button starts a fresh
+title** opens the sessions drawer (search + resume + new chat), the **cwd
+subtitle** under the title shows the working directory at all times — tap it
+to browse or fuzzy-search folders and change directory without typing — and
+the **⋯ menu** shows the working directory, session roots (`/cd` /
+`/add-dir` equivalents), and background jobs; the **compose** button starts a fresh
 chat; the **wrap** button toggles line-wrapping for command output, code
 blocks, and diffs (default: scroll sideways; the choice is remembered per
 device). The input box autocompletes like the terminal: `/` pops up the command

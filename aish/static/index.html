@@ -16,7 +16,10 @@
 
 <header id="topbar">
   <button id="model-chip" class="bar-btn tinted" title="switch model">…</button>
-  <button id="session-chip" class="bar-title" title="sessions">aish</button>
+  <div id="bar-center">
+    <button id="session-chip" class="bar-title" title="sessions">aish</button>
+    <button id="cwd-chip" title="change directory" hidden></button>
+  </div>
   <button id="wrap-chip" class="bar-btn icon" title="toggle line wrap" aria-label="toggle line wrap">
     <svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h12a3.25 3.25 0 0 1 0 6.5h-2.5m0 0 2.2-2.2m-2.2 2.2 2.2 2.2M4 18.5h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
@@ -104,6 +107,23 @@
     list can only be grown from terminal aish · sessions are shared with
     the terminal and keep running when you switch away
   </div>
+</div>
+
+<div id="dir-sheet" class="sheet" hidden>
+  <div class="grabber"></div>
+  <div class="sheet-head">
+    <strong class="grow">Working directory</strong>
+    <button class="close" data-close="dir-sheet">Done</button>
+  </div>
+  <div class="ws-row">
+    <input id="dir-search" placeholder="search folders" autocomplete="off"
+           autocapitalize="off" spellcheck="false">
+  </div>
+  <div class="ws-row dir-current-row">
+    <div id="dir-current" class="mono grow"></div>
+    <button id="dir-use" class="primary">Use</button>
+  </div>
+  <div id="dir-list" class="sheet-list"></div>
 </div>
 
 <div id="toast" hidden></div>
