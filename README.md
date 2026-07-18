@@ -151,7 +151,9 @@ LLM), ↑/↓ to select, Enter replays the session into the current conversation
 or `/clear`
 (plain `clear` works too) · `/model [name]` — switch model mid-session; no
 arg opens the same type-to-filter picker over local models and cloud
-providers · `/jobs` · `/help` · `/quit` (or `exit`).
+providers; add `--save` to persist the choice as the startup default in
+`config.toml` (`/model --save` alone persists the current model) ·
+`/jobs` · `/help` · `/quit` (or `exit`).
 
 **Multiline input**: Enter submits; newline via Ctrl+J, trailing `\`, or
 Option/Alt+Enter (iTerm2: set "Left Option key" to "Esc+"). Pastes keep
@@ -169,7 +171,9 @@ their newlines.
 
 **Config** — `~/.config/aish/config.toml`: `model`, `num_ctx`, `max_steps`,
 `vi_mode` (vi editing at the prompt; or `--vi`/`--no-vi`). CLI flags override
-config; `$AISH_MODEL` overrides the model. Paths override via `$AISH_CONFIG`,
+config; `$AISH_MODEL` overrides the model. `/model <name> --save` writes the
+`model` key for you (comments and other keys are left untouched). Paths
+override via `$AISH_CONFIG`,
 `$AISH_STATE_DIR`, `$AISH_ALLOWLIST`, `$AISH_DENYLIST`, `$AISH_LESSONS`.
 `--think` enables model thinking (slower, rarely worth it). You can also just
 ask aish about any of this — its own docs are in its system prompt.

@@ -777,3 +777,131 @@ class TestLiveTimer:
         timer.stop()
         out = capsys.readouterr().out
         assert "\r\033[K  ✓ web_search 2.8s\n" in out  # never glued to the ✻ frame
+
+
+class TestModelSave:
+    def _agent(self):
+        from types import SimpleNamespace
+
+        from aish.agent import Agent
+
+        agent = Agent(model="old", approve=lambda _c: None, client_chat=lambda **_k: None)
+        return agent, SimpleNamespace
+
+    def test_save_creates_config_file(self, tmp_path):
+        import tomllib
+
+        from aish.cli import save_default_model
+
+        config = tmp_path / "sub" / "config.toml"
+        assert save_default_model(config, "qwen3:8b") is None
+        assert tomllib.loads(config.read_text())["model"] == "qwen3:8b"
+
+    def test_save_replaces_line_keeps_comments_and_keys(self, tmp_path):
+        import tomllib
+
+        from aish.cli import save_default_model
+
+        config = tmp_path / "config.toml"
+        config.write_text(
+            "# my config\n"
+            'model = "old-model"  # old choice\n'
+            "num_ctx = 8192\n"
+            "[extras]\n"
+            'model = "table-scoped, must survive"\n'
+        )
+        assert save_default_model(config, "gemini:gemini-3.5-pro") is None
+        text = config.read_text()
+        assert "# my config" in text
+        assert "num_ctx = 8192" in text
+        assert 'model = "table-scoped, must survive"' in text
+        assert tomllib.loads(text)["model"] == "gemini:gemini-3.5-pro"
+
+    def test_save_inserts_before_first_table(self, tmp_path):
+        import tomllib
+
+        from aish.cli import save_default_model
+
+        config = tmp_path / "config.toml"
+        config.write_text("num_ctx = 8192\n[extras]\nfoo = 1\n")
+        assert save_default_model(config, "qwen3:8b") is None
+        parsed = tomllib.loads(config.read_text())
+        assert parsed["model"] == "qwen3:8b"
+        assert parsed["extras"]["foo"] == 1
+
+    def test_save_rejects_toml_breaking_name(self, tmp_path):
+        from aish.cli import save_default_model
+
+        config = tmp_path / "config.toml"
+        error = save_default_model(config, 'bad"\nrogue = true')
+        assert error is not None
+        assert not config.exists()
+
+    def test_model_spec_roundtrip(self):
+        from types import SimpleNamespace
+
+        from aish.cli import model_spec
+
+        assert model_spec(SimpleNamespace(model="qwen3:8b", provider="ollama")) == "qwen3:8b"
+        assert (
+            model_spec(SimpleNamespace(model="gemini-3.5-pro", provider="gemini"))
+            == "gemini:gemini-3.5-pro"
+        )
+        assert model_spec(SimpleNamespace(model="", provider="claude-max")) == "claude-max"
+
+    def test_model_switch_and_save(self, tmp_path, capsys):
+        import tomllib
+
+        from aish.cli import LogRef, handle_slash
+        from aish.session import SessionLog
+
+        agent, _ = self._agent()
+        logref = LogRef(SessionLog.new(tmp_path))
+        config = tmp_path / "config.toml"
+        handle_slash("/model qwen3:8b --save", agent, logref, tmp_path, config_path=config)
+        assert agent.model == "qwen3:8b"
+        assert tomllib.loads(config.read_text())["model"] == "qwen3:8b"
+        assert "startup default" in capsys.readouterr().out
+
+    def test_model_save_current_without_switch(self, tmp_path, capsys):
+        import tomllib
+
+        from aish.cli import LogRef, handle_slash
+        from aish.session import SessionLog
+
+        agent, _ = self._agent()
+        logref = LogRef(SessionLog.new(tmp_path))
+        config = tmp_path / "config.toml"
+        handle_slash("/model --save", agent, logref, tmp_path, config_path=config)
+        assert agent.model == "old"
+        assert tomllib.loads(config.read_text())["model"] == "old"
+
+    def test_model_unknown_flag_shows_usage(self, tmp_path, capsys):
+        from aish.cli import LogRef, handle_slash
+        from aish.session import SessionLog
+
+        agent, _ = self._agent()
+        logref = LogRef(SessionLog.new(tmp_path))
+        handle_slash("/model qwen3:8b --bogus", agent, logref, tmp_path)
+        assert agent.model == "old"
+        assert "usage: /model" in capsys.readouterr().out
+
+    def test_model_save_without_config_path_errors(self, tmp_path, capsys):
+        from aish.cli import LogRef, handle_slash
+        from aish.session import SessionLog
+
+        agent, _ = self._agent()
+        logref = LogRef(SessionLog.new(tmp_path))
+        handle_slash("/model --save", agent, logref, tmp_path)
+        assert "cannot save" in capsys.readouterr().out
+
+    def test_failed_switch_does_not_save(self, tmp_path, capsys):
+        from aish.cli import LogRef, handle_slash
+        from aish.session import SessionLog
+
+        agent, _ = self._agent()
+        agent.provider = "claude-max"  # switching away is blocked in-session
+        logref = LogRef(SessionLog.new(tmp_path))
+        config = tmp_path / "config.toml"
+        handle_slash("/model qwen3:8b --save", agent, logref, tmp_path, config_path=config)
+        assert not config.exists()

@@ -55,7 +55,9 @@ SLASH_HELP = f"""{DIM}commands (Tab autocompletes):
   /model [name]  switch the model (Ollama name, or a cloud model: gemini:/
                  openai:/claude: — bare provider name picks a default); no
                  arg opens a searchable picker of local + cloud models
-                 (typing provider:model there offers that exact model)
+                 (typing provider:model there offers that exact model);
+                 add --save to persist as the startup default (config.toml),
+                 /model --save alone persists the current model
   /cd <dir>      move the session to another project: changes the working
                  directory AND re-anchors the auto-approval root there
                  (Tab completes directories); !cd only moves the directory
@@ -515,32 +517,94 @@ def rank_models(models: list[tuple[str, str]], query: str) -> list[tuple[str, st
     return [model for _, model in ranked]
 
 
-def switch_model(agent, arg: str) -> None:
-    """Point the running agent at another model/backend (session-only)."""
+def switch_model(agent, arg: str, saving: bool = False) -> bool:
+    """Point the running agent at another model/backend. Returns True on
+    success (so /model --save only persists a model that actually loaded)."""
     crossing_max = arg.startswith("claude-max") or (
         getattr(agent, "provider", "ollama") == "claude-max"
     )
     if crossing_max:
         print(f"{DIM}claude-max runs a different agent loop — restart aish "
               f"(aish --model {arg}) to switch{RESET}")
-        return
+        return False
     try:
         chat, provider, name = backends.make_chat(arg)
     except backends.BackendError as exc:
         print(f"{RED}{exc}{RESET}")
-        return
+        return False
     switched_provider = provider != getattr(agent, "provider", "ollama")
     agent.chat = chat
     agent.model = name
     agent.provider = provider
-    print(f"{DIM}model switched to {arg} (this session only){RESET}")
+    if saving:
+        print(f"{DIM}model switched to {arg}{RESET}")
+    else:
+        print(f"{DIM}model switched to {arg} (this session — /model --save "
+              f"makes it the startup default){RESET}")
     if switched_provider:
         print(f"{DIM}note: the system prompt still describes the startup "
               f"backend — restart aish to refresh its self-description{RESET}")
+    return True
+
+
+def model_spec(agent) -> str:
+    """The --model string that recreates the agent's current model, e.g.
+    'qwen3:8b' (Ollama is the unprefixed default) or 'gemini:gemini-3.5-pro'."""
+    provider = getattr(agent, "provider", "ollama")
+    if provider == "ollama":
+        return agent.model
+    return f"{provider}:{agent.model}" if agent.model else provider
+
+
+def save_default_model(config_path: Path, spec: str) -> str | None:
+    """Persist `model = spec` as the startup default; returns an error string
+    or None on success.
+
+    The config is hand-edited TOML, so no TOML writer (it would drop comments):
+    only the one top-level `model = ...` line is replaced in place, or inserted
+    before the first [table] header. The result is re-parsed before writing so
+    a bad edit can never corrupt the config."""
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    except OSError as exc:
+        return f"cannot read {config_path}: {exc}"
+    lines = text.splitlines()
+    new_line = f'model = "{spec}"'
+    top_level_end = next(
+        (i for i, line in enumerate(lines) if line.lstrip().startswith("[")), len(lines)
+    )
+    for i in range(top_level_end):
+        if re.match(r"\s*model\s*=", lines[i]):
+            lines[i] = new_line
+            break
+    else:
+        lines.insert(top_level_end, new_line)
+    new_text = "\n".join(lines) + "\n"
+    try:
+        parsed = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as exc:
+        return f"refusing to write {config_path}: edit would produce invalid TOML ({exc})"
+    if parsed.get("model") != spec:
+        return f"refusing to write {config_path}: model name {spec!r} does not survive TOML"
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = config_path.with_name(config_path.name + ".tmp")
+        tmp_path.write_text(new_text, encoding="utf-8")
+        tmp_path.replace(config_path)
+    except OSError as exc:
+        return f"cannot write {config_path}: {exc}"
+    return None
 
 
 def handle_slash(
-    task: str, agent: Agent, logref: LogRef, state_dir: Path, resumed: set | None = None
+    task: str,
+    agent: Agent,
+    logref: LogRef,
+    state_dir: Path,
+    resumed: set | None = None,
+    config_path: Path | None = None,
 ) -> str:
     """Dispatch a /command; returns 'exit' or 'handled'."""
     resumed = resumed if resumed is not None else set()
@@ -619,23 +683,46 @@ def handle_slash(
         replay_history(messages)
         return "handled"
     if command == "/model":
-        parts = task.split()
-        if len(parts) > 1:
-            switch_model(agent, parts[1])
-        elif _box is not None:
-            # Interactive: same live-filter picker as /resume, over models.
-            models = available_models(agent, state_dir)
-            selected = _box.pick(
-                lambda query: rank_models(models, query),
-                render=lambda model: f"{model[0]:<28} {model[1]}",
-            )
-            if selected is None:
-                print(f"{DIM}cancelled — still on {agent.model}{RESET}")
+        parts = task.split()[1:]
+        save = "--save" in parts
+        names = [p for p in parts if not p.startswith("-")]
+        unknown = [p for p in parts if p.startswith("-") and p != "--save"]
+        if unknown or len(names) > 1:
+            print(f"{RED}usage: /model [name] [--save]{RESET}")
+            return "handled"
+        if names:
+            if not switch_model(agent, names[0], saving=save):
+                return "handled"
+        elif not save:
+            if _box is not None:
+                # Interactive: same live-filter picker as /resume, over models.
+                models = available_models(agent, state_dir)
+                selected = _box.pick(
+                    lambda query: rank_models(models, query),
+                    render=lambda model: f"{model[0]:<28} {model[1]}",
+                )
+                if selected is None:
+                    print(f"{DIM}cancelled — still on {agent.model}{RESET}")
+                else:
+                    switch_model(agent, selected[0])
             else:
-                switch_model(agent, selected[0])
-        else:
-            print(f"{DIM}current model: {agent.model} — /model <name> to switch "
-                  f"('ollama list' shows local models; gemini:/openai: for cloud){RESET}")
+                print(f"{DIM}current model: {agent.model} — /model <name> to switch "
+                      f"('ollama list' shows local models; gemini:/openai: for cloud); "
+                      f"--save makes it the startup default{RESET}")
+            return "handled"
+        if save:
+            if config_path is None:
+                print(f"{RED}no config path available — cannot save{RESET}")
+                return "handled"
+            spec = model_spec(agent)
+            error = save_default_model(config_path, spec)
+            if error:
+                print(f"{RED}{error}{RESET}")
+            else:
+                print(f"{DIM}saved {spec} as the startup default ({config_path}){RESET}")
+                if os.environ.get("AISH_MODEL"):
+                    print(f"{YELLOW}note: $AISH_MODEL is set and overrides the config "
+                          f"at startup — unset it for the saved default to apply{RESET}")
         return "handled"
     if command == "/cd":
         parts = task.split(maxsplit=1)
@@ -753,9 +840,11 @@ chosen session is replayed into this conversation. Session \
 files are append-only and never deleted — every past session stays \
 available. /new or /clear (or plain 'clear') starts a \
 fresh conversation and clears the screen; /model <name> switches the model \
-and /model alone opens the same type-to-filter picker over installed Ollama \
-models and the cloud providers (typing provider:model inside the picker \
-offers that exact cloud model as a selectable row); /jobs lists \
+for this session and /model alone opens the same type-to-filter picker over \
+installed Ollama models and the cloud providers (typing provider:model inside \
+the picker offers that exact cloud model as a selectable row); adding --save \
+persists the choice as the startup default in the config file, and \
+/model --save alone persists the current model; /jobs lists \
 background jobs; /help lists commands; /quit or /exit quits; /cd <dir> \
 moves the working directory AND re-anchors the session root there (user \
 only; !cd and your cd move only the working directory); /add-dir <dir> \
@@ -801,7 +890,8 @@ read via the read_skill tool. To create one when the user asks, write \
 <name>.md there with optional frontmatter lines (name:, description:) \
 between --- markers, then a body of workflows, exact commands, and safety \
 rules; it is picked up on the next aish start.
-- Current model: {model} (change via --model, $AISH_MODEL, or config).
+- Current model: {model} (change via --model, $AISH_MODEL, or config; \
+/model <name> --save persists a switch as the startup default).
 When the user asks you to change one of your settings, edit the config file \
 with a normal shell command (it goes through approval like any command)."""
 
@@ -1067,7 +1157,9 @@ def main() -> int:
         if not task:
             continue
         if task.startswith("/"):
-            if handle_slash(task, agent, logref, state_dir, resumed) == "exit":
+            if handle_slash(
+                task, agent, logref, state_dir, resumed, config_path=config_path
+            ) == "exit":
                 return 0
             continue
         if task.startswith("!"):
