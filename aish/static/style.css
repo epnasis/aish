@@ -75,6 +75,8 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .bar-btn.icon { padding: 6px; flex-shrink: 0; }
 .bar-btn.icon svg { width: 22px; height: 22px; display: block; }
 .bar-btn:active { opacity: 0.5; }
+#wrap-chip { color: var(--dim); }
+#wrap-chip.active { color: var(--blue); }
 .bar-title {
   flex: 1;
   min-width: 0;
@@ -262,6 +264,22 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .diff div { white-space: pre; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
 .diff .add { color: var(--green); }
+/* wrap mode (body.wrap, toggled from the top bar): monospace blocks wrap
+   instead of scrolling sideways. pre-wrap keeps indentation; anywhere breaks
+   unbroken tokens (URLs, hashes). Diff/echo lines get a hanging indent so
+   continuation lines tuck under the content, not the +/- gutter. */
+body.wrap .msg.echo, body.wrap .msg.stream,
+body.wrap .msg.md pre, body.wrap .msg.md pre code,
+body.wrap .diff div,
+body.wrap .card code, body.wrap .card .cmd {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+body.wrap .diff div { padding-left: 12px; text-indent: -12px; }
+body.wrap .msg.echo, body.wrap .msg.stream {
+  padding-left: 22px; /* 10px base + 12px hang */
+  text-indent: -12px;
+}
 .diff .del { color: var(--red); }
 .diff .hunk { color: var(--cyan); }
 .diff .head { font-weight: 700; }

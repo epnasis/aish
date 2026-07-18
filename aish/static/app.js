@@ -1134,6 +1134,20 @@ function attachListNav(searchEl, listEl) {
   });
 }
 
+// wrap mode: device-local ergonomics (like the token), not session state.
+// Applied here, before any replay renders, so history draws in the chosen mode.
+const WRAP_KEY = "aish-wrap";
+if (localStorage.getItem(WRAP_KEY) === "1") {
+  document.body.classList.add("wrap");
+  $("wrap-chip").classList.add("active");
+}
+$("wrap-chip").onclick = () => {
+  const on = document.body.classList.toggle("wrap");
+  $("wrap-chip").classList.toggle("active", on);
+  localStorage.setItem(WRAP_KEY, on ? "1" : "0");
+  showToast(on ? "wrap on" : "wrap off");
+};
+
 // sessions
 $("session-chip").onclick = () => openSessionsSheet("");
 $("new-chip").onclick = () => send({ type: "new" });

@@ -216,7 +216,9 @@ searchable model picker (with a "make startup default" toggle), the **session
 title** opens the sessions drawer (search + resume + new chat), and the **⋯
 menu** shows the working directory, session roots (`/cd` / `/add-dir`
 equivalents), and background jobs; the **compose** button starts a fresh
-chat. The input box autocompletes like the terminal: `/` pops up the command
+chat; the **wrap** button toggles line-wrapping for command output, code
+blocks, and diffs (default: scroll sideways; the choice is remembered per
+device). The input box autocompletes like the terminal: `/` pops up the command
 list (unambiguous prefixes work — `/res` runs `/resume`) and `@` pops up
 project-file completion (same walk and ranking as the TUI). The paperclip
 uploads files (to `~/.local/state/aish/uploads/`, a session root).
