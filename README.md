@@ -196,11 +196,12 @@ writes show the colored diff before anything lands on disk, answers stream
 live and render as markdown (tables, code blocks, links), command output
 keeps its ANSI colors, and locking your phone mid-task loses nothing (on
 reconnect the server replays the transcript, including any approval still
-waiting). Every finished answer gets a small speaker button that reads it
-aloud with the device's native text-to-speech (tap again to stop; code
-blocks are skipped, and the voice follows the answer's detected language —
-English or Polish) — hands-free answers on the phone, no cloud audio API
-involved. "Allow this session" auto-approves the command's prefixes until
+waiting). Every finished answer gets a speaker button that reads it aloud
+with the device's native text-to-speech — no cloud audio API involved. While
+reading it expands into a small player: pause/resume, skip to the previous
+or next paragraph, and a speed control (0.8×–2×, remembered on the device).
+Code blocks are skipped, and the voice follows the answer's detected
+language — English or Polish. "Allow this session" auto-approves the command's prefixes until
 the session closes — in memory only, never written to the allowlist.
 
 **Parallel sessions**: several sessions can be open at once, each with its

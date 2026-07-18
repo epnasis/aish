@@ -221,25 +221,53 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md tr:last-child td { border-bottom: none; }
 .msg.md th { background: var(--bg-elev2); font-weight: 600; }
 
-/* ---- read-aloud button under answers ---- */
-.speak-btn {
+/* ---- read-aloud player under answers ---- */
+.tts {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: 6px 0 0 -8px; /* optical: align icon with the answer's text edge */
+}
+.tts button {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  margin: 4px 0 0 -6px; /* optical: align icon with the answer's text edge */
+  width: 40px;
+  height: 40px;
+  padding: 0;
   background: none;
   border: none;
-  border-radius: 8px;
+  border-radius: 10px;
   color: var(--dim);
 }
-.speak-btn:active { opacity: 0.5; }
-.speak-btn svg { width: 19px; height: 19px; }
-.speak-btn .stop-shape { display: none; }
-.speak-btn.speaking { color: var(--blue); }
-.speak-btn.speaking .stop-shape { display: block; }
-.speak-btn.speaking .speak-shape { display: none; }
+.tts button:active { opacity: 0.5; }
+.tts button svg { width: 23px; height: 23px; }
+.tts .t-skip svg, .tts .t-stop svg { width: 20px; height: 20px; }
+/* idle: just the speaker; active: the full player pill */
+.tts .t-skip, .tts .t-rate, .tts .t-stop { display: none; }
+.tts .i-pause, .tts .i-play { display: none; }
+.tts.active {
+  background: var(--bg-elev);
+  border-radius: 999px;
+  padding: 0 4px;
+}
+.tts.active button { color: var(--fg); }
+.tts.active .t-skip, .tts.active .t-stop { display: flex; }
+.tts.active .t-stop { color: var(--dim); }
+.tts.active .t-rate {
+  display: flex;
+  width: auto;
+  min-width: 44px;
+  padding: 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--blue);
+}
+.tts.active .i-speak { display: none; }
+.tts.active .t-main { color: var(--blue); }
+.tts.active:not(.paused) .i-pause { display: block; }
+.tts.active.paused .i-play { display: block; }
 
 /* ---- approval cards ---- */
 .card {

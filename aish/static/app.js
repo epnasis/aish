@@ -617,60 +617,159 @@ function inlineMd(text) {
 
 // ---- read aloud (Web Speech API) -----------------------------------------
 // Native speechSynthesis: offline, no audio-generation API, and iOS allows
-// it because speak() runs inside the button's tap gesture. One utterance at
-// a time; the active button shows a stop square instead of the speaker.
+// it because speak() runs inside the button's tap gesture. Answers are
+// spoken as a queue of paragraph-sized chunks (the API can't seek, so
+// chunking is what makes prev/next skip possible — and it sidesteps
+// Chrome's stall on long utterances). One player is active at a time; its
+// speaker button expands into prev / pause / next / speed / stop controls.
 const TTS_OK = "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
-let speakingBtn = null;
-let liveUtterance = null; // held so WebKit can't GC it mid-speech (kills onend)
 
-function attachSpeakButton(el) {
-  if (!TTS_OK) return;
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "speak-btn";
-  btn.title = "read aloud";
-  btn.setAttribute("aria-label", "read aloud");
-  btn.appendChild(speakIcon());
-  btn.onclick = () => toggleSpeak(btn, el);
-  el.appendChild(btn);
-}
+const TTS_RATES = [0.8, 1, 1.25, 1.5, 2];
+const TTS_RATE_KEY = "aish-tts-rate"; // device-local, like the wrap toggle
+let ttsRate = parseFloat(localStorage.getItem(TTS_RATE_KEY));
+if (!TTS_RATES.includes(ttsRate)) ttsRate = 1;
 
-function speakIcon() {
+const player = {
+  box: null,      // the active answer's .tts container
+  chunks: [],
+  index: 0,
+  lang: "en-US",
+  paused: false,
+  seq: 0,         // bumped on every cancel/skip so stale onend callbacks no-op
+  utterance: null, // held so WebKit can't GC it mid-speech (kills onend)
+};
+
+function svgIcon(cls, build) {
   const NS = "http://www.w3.org/2000/svg";
   const make = (tag, attrs) => {
     const node = document.createElementNS(NS, tag);
     for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
     return node;
   };
-  const svg = make("svg", { viewBox: "0 0 24 24" });
-  const speaker = make("g", { class: "speak-shape", fill: "none",
-    stroke: "currentColor", "stroke-width": "1.7",
-    "stroke-linecap": "round", "stroke-linejoin": "round" });
-  speaker.appendChild(make("path", {
-    d: "M11.5 5.5 7.4 9H4.8a.8.8 0 0 0-.8.8v4.4a.8.8 0 0 0 .8.8h2.6l4.1 3.5z",
-  }));
-  speaker.appendChild(make("path", { d: "M15 9.3a4 4 0 0 1 0 5.4" }));
-  speaker.appendChild(make("path", { d: "M17.6 6.8a7.6 7.6 0 0 1 0 10.4" }));
-  svg.appendChild(speaker);
-  svg.appendChild(make("rect", { class: "stop-shape",
-    x: "6.5", y: "6.5", width: "11", height: "11", rx: "2.5", fill: "currentColor" }));
+  const svg = make("svg", { viewBox: "0 0 24 24", class: cls });
+  build(make, svg);
   return svg;
+}
+
+function speakerIcon() {
+  return svgIcon("i-speak", (make, svg) => {
+    const g = make("g", { fill: "none", stroke: "currentColor", "stroke-width": "1.7",
+      "stroke-linecap": "round", "stroke-linejoin": "round" });
+    g.appendChild(make("path", {
+      d: "M11.5 5.5 7.4 9H4.8a.8.8 0 0 0-.8.8v4.4a.8.8 0 0 0 .8.8h2.6l4.1 3.5z",
+    }));
+    g.appendChild(make("path", { d: "M15 9.3a4 4 0 0 1 0 5.4" }));
+    g.appendChild(make("path", { d: "M17.6 6.8a7.6 7.6 0 0 1 0 10.4" }));
+    svg.appendChild(g);
+  });
+}
+
+function pauseIcon() {
+  return svgIcon("i-pause", (make, svg) => {
+    svg.appendChild(make("rect", { x: "7", y: "6", width: "3.4", height: "12", rx: "1.4", fill: "currentColor" }));
+    svg.appendChild(make("rect", { x: "13.6", y: "6", width: "3.4", height: "12", rx: "1.4", fill: "currentColor" }));
+  });
+}
+
+function playIcon() {
+  return svgIcon("i-play", (make, svg) => {
+    svg.appendChild(make("path", {
+      d: "M8.6 6.3v11.4a.7.7 0 0 0 1.07.6l8.9-5.7a.7.7 0 0 0 0-1.2l-8.9-5.7a.7.7 0 0 0-1.07.6z",
+      fill: "currentColor",
+    }));
+  });
+}
+
+function skipSvg(forward) {
+  return svgIcon(forward ? "" : "", (make, svg) => {
+    if (forward) {
+      svg.appendChild(make("path", {
+        d: "M6.5 7.4v9.2a.7.7 0 0 0 1.08.59l7.2-4.6a.7.7 0 0 0 0-1.18l-7.2-4.6A.7.7 0 0 0 6.5 7.4z",
+        fill: "currentColor",
+      }));
+      svg.appendChild(make("rect", { x: "16.2", y: "6.6", width: "1.9", height: "10.8", rx: ".95", fill: "currentColor" }));
+    } else {
+      svg.appendChild(make("path", {
+        d: "M17.5 7.4v9.2a.7.7 0 0 1-1.08.59l-7.2-4.6a.7.7 0 0 1 0-1.18l7.2-4.6a.7.7 0 0 1 1.08.59z",
+        fill: "currentColor",
+      }));
+      svg.appendChild(make("rect", { x: "5.9", y: "6.6", width: "1.9", height: "10.8", rx: ".95", fill: "currentColor" }));
+    }
+  });
+}
+
+function xIcon() {
+  return svgIcon("", (make, svg) => {
+    svg.appendChild(make("path", { d: "M7.5 7.5l9 9M16.5 7.5l-9 9", fill: "none",
+      stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round" }));
+  });
+}
+
+function attachSpeakButton(el) {
+  if (!TTS_OK) return;
+  const box = document.createElement("div");
+  box.className = "tts";
+  const mkBtn = (cls, label, ...icons) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = cls;
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+    btn.append(...icons);
+    return btn;
+  };
+  const prev = mkBtn("t-skip t-prev", "previous paragraph", skipSvg(false));
+  const main = mkBtn("t-main", "read aloud", speakerIcon(), pauseIcon(), playIcon());
+  const next = mkBtn("t-skip t-next", "next paragraph", skipSvg(true));
+  const rate = mkBtn("t-rate", "reading speed");
+  rate.textContent = rateLabel();
+  const stop = mkBtn("t-stop", "stop reading", xIcon());
+  prev.onclick = () => skipChunk(-1);
+  next.onclick = () => skipChunk(1);
+  rate.onclick = cycleRate;
+  stop.onclick = stopSpeaking;
+  main.onclick = () => {
+    if (player.box === box) togglePause();
+    else startPlayback(box, el);
+  };
+  box.append(prev, main, next, rate, stop);
+  el.appendChild(box);
 }
 
 function speakableText(el) {
   // Read what's on screen, minus code blocks (hearing code character by
-  // character is noise) and the button itself. Block elements become line
+  // character is noise) and the player controls. Block elements become line
   // breaks — textContent alone would run "…end.Next" together and slur.
   const parts = [];
   const walk = (node) => {
     if (node.nodeType === Node.TEXT_NODE) { parts.push(node.nodeValue); return; }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
-    if (node.tagName === "PRE" || node.classList.contains("speak-btn")) return;
+    if (node.tagName === "PRE" || node.classList.contains("tts")) return;
     for (const child of node.childNodes) walk(child);
     if (/^(P|LI|H[1-6]|TR|BLOCKQUOTE)$/.test(node.tagName)) parts.push("\n");
   };
   walk(el);
   return parts.join("").replace(/[^\S\n]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
+}
+
+function chunkParagraphs(text) {
+  // One chunk per paragraph. Runs of short blocks (list items, one-line
+  // headings) group into a single chunk so skip jumps feel like paragraphs,
+  // not individual bullets; real paragraphs always stand alone.
+  const chunks = [];
+  let run = "";
+  const flushRun = () => { if (run) { chunks.push(run); run = ""; } };
+  for (const block of text.split("\n")) {
+    if (block.length < 60) {
+      if (run.length + block.length > 250) flushRun();
+      run = run ? `${run}\n${block}` : block;
+    } else {
+      flushRun();
+      chunks.push(block);
+    }
+  }
+  flushRun();
+  return chunks;
 }
 
 function speechLang(text) {
@@ -685,33 +784,79 @@ function speechLang(text) {
   return polish > english ? "pl-PL" : "en-US";
 }
 
-function stopSpeaking() {
-  if (!TTS_OK) return;
-  speechSynthesis.cancel();
-  if (speakingBtn) speakingBtn.classList.remove("speaking");
-  speakingBtn = null;
-  liveUtterance = null;
+function rateLabel() {
+  return `${ttsRate}×`;
 }
 
-function toggleSpeak(btn, el) {
-  if (speakingBtn === btn) {
-    stopSpeaking();
-    return;
-  }
+function stopSpeaking() {
+  if (!TTS_OK) return;
+  player.seq += 1; // orphan any in-flight onend so it can't chain
+  speechSynthesis.cancel();
+  if (player.box) player.box.classList.remove("active", "paused");
+  player.box = null;
+  player.utterance = null;
+  player.paused = false;
+}
+
+function startPlayback(box, el) {
   stopSpeaking();
   const text = speakableText(el);
   if (!text) return;
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = speechLang(text);
-  utterance.onend = utterance.onerror = () => {
-    // cancel() also fires these on the old utterance — only reset if this
-    // button is still the active one.
-    if (speakingBtn === btn) stopSpeaking();
+  player.box = box;
+  player.chunks = chunkParagraphs(text);
+  player.lang = speechLang(text);
+  box.classList.add("active");
+  box.querySelector(".t-rate").textContent = rateLabel();
+  speakChunk(0);
+}
+
+function speakChunk(index) {
+  player.seq += 1;
+  const seq = player.seq;
+  speechSynthesis.cancel();
+  player.index = index;
+  player.paused = false;
+  player.box.classList.remove("paused");
+  const utterance = new SpeechSynthesisUtterance(player.chunks[index]);
+  utterance.lang = player.lang;
+  utterance.rate = ttsRate;
+  utterance.onend = () => {
+    if (seq !== player.seq) return; // cancelled/skipped — a newer speak owns state
+    if (player.index + 1 < player.chunks.length) speakChunk(player.index + 1);
+    else stopSpeaking();
   };
-  speakingBtn = btn;
-  liveUtterance = utterance;
-  btn.classList.add("speaking");
+  utterance.onerror = () => {
+    if (seq === player.seq) stopSpeaking();
+  };
+  player.utterance = utterance;
+  speechSynthesis.resume(); // cancel-while-paused leaves WebKit stuck paused
   speechSynthesis.speak(utterance);
+}
+
+function togglePause() {
+  if (player.paused) {
+    speechSynthesis.resume();
+    player.paused = false;
+  } else {
+    speechSynthesis.pause();
+    player.paused = true;
+  }
+  player.box.classList.toggle("paused", player.paused);
+}
+
+function skipChunk(delta) {
+  if (!player.box) return;
+  const next = Math.min(player.chunks.length - 1, Math.max(0, player.index + delta));
+  speakChunk(next);
+}
+
+function cycleRate() {
+  ttsRate = TTS_RATES[(TTS_RATES.indexOf(ttsRate) + 1) % TTS_RATES.length];
+  localStorage.setItem(TTS_RATE_KEY, String(ttsRate));
+  if (player.box) {
+    player.box.querySelector(".t-rate").textContent = rateLabel();
+    speakChunk(player.index); // rate is fixed per utterance — restart the chunk
+  }
 }
 
 // ---- approval cards ------------------------------------------------------
