@@ -35,6 +35,28 @@ def test_always_persists_per_segment_and_future_auto_approves(tmp_path, monkeypa
     assert approve("git status && cargo build --release") == "git status && cargo build --release"
 
 
+def test_session_allow_auto_approves_without_persisting(tmp_path, monkeypatch):
+    allow = tmp_path / "allow.txt"
+    approve = make_approver(False, allow, None)
+    # 's', then accept the suggested prefix for each unvetted segment
+    scripted_input(monkeypatch, ["s", ""])
+    assert approve("cargo build --quiet") == "cargo build --quiet"
+    assert load_prefixes(allow) == []  # nothing written to disk
+    # same prefix auto-approves for the rest of the session (no prompt)
+    assert approve("cargo build --release") == "cargo build --release"
+
+
+def test_session_allow_is_per_approver_not_global(tmp_path, monkeypatch):
+    allow = tmp_path / "allow.txt"
+    approve = make_approver(False, allow, None)
+    scripted_input(monkeypatch, ["s", ""])
+    assert approve("cargo build") == "cargo build"
+    # a fresh approver (new session) starts clean and prompts again
+    fresh = make_approver(False, allow, None)
+    scripted_input(monkeypatch, ["n"])
+    assert fresh("cargo build") is None
+
+
 def test_always_with_skip_leaves_segment_unvetted(tmp_path, monkeypatch):
     allow = tmp_path / "allow.txt"
     approve = make_approver(False, allow, None)

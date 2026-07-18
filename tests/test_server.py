@@ -199,6 +199,37 @@ class TestCommandApproval:
             assert recv_done is not None
             assert "BLOCKED by the safety denylist" in tool_results(chat)[-1]["content"]
 
+    def test_allow_this_session_skips_future_prompts(self, app_env, tmp_path):
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/a")]),
+            model_says("first done"),
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/b")]),
+            model_says("second done"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "touch a"})
+            request = recv_until(ws, "approval_request")
+            assert request["prefixes"] == ["touch"]
+            ws.send_json(
+                {"type": "approval", "id": request["id"], "action": "approve_session"}
+            )
+            assert recv_until(ws, "approval_resolved")["decision"] == "approved"
+            recv_until(ws, "done")
+            assert (tmp_path / "a").exists()
+
+            ws.send_json({"type": "task", "text": "touch b"})
+            auto = None
+            for _ in range(200):
+                event = ws.receive_json()
+                if event["type"] == "done":
+                    break
+                assert event["type"] != "approval_request"
+                if event["type"] == "echo" and "auto-approved" in event["text"]:
+                    auto = event
+            assert auto is not None
+            assert (tmp_path / "b").exists()
+
     def test_allowlisted_readonly_auto_approves(self, app_env):
         client, _ = make_client(app_env, self.responses("ls"))
         with client, connected(client) as (ws, _, _):
@@ -294,6 +325,9 @@ class TestSessions:
                 ws.send_json({"type": "new"})
                 fresh = recv_until(ws, "hello")
                 assert fresh["session"] != first
+                # The empty replay is the client's clear-screen signal.
+                cleared = recv_until(ws, "replay")
+                assert cleared["events"] == []
             with connected(client) as (_ws, _, replay):
                 assert replay["events"] == []
 
@@ -404,6 +438,54 @@ class TestWorkspace:
             ws.send_json({"type": "cd", "path": "/definitely/not/here"})
             error = recv_until(ws, "error")
             assert error["text"].startswith("ERROR")
+
+
+class TestFilesAutocomplete:
+    def test_file_list_matches_tui_scoring(self, app_env, tmp_path):
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "readme.md").write_text("x", encoding="utf-8")
+        (tmp_path / "main.py").write_text("x", encoding="utf-8")
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "files", "query": "read"})
+            listing = recv_until(ws, "file_list")
+            assert listing["query"] == "read"
+            assert "docs/readme.md" in listing["files"]
+            assert "main.py" not in listing["files"]
+
+
+class TestUpload:
+    def test_upload_saves_and_lands_in_roots(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            response = client.post("/upload?name=notes.txt", content=b"hello upload")
+            assert response.status_code == 200
+            path = response.json()["path"]
+            with open(path, "rb") as fh:
+                assert fh.read() == b"hello upload"
+            server = client.app.state.server
+            assert server.uploads_dir.resolve() in [
+                r for r in server.agent.roots
+            ]
+
+    def test_upload_rejects_bad_names(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.post("/upload?name=.hidden", content=b"x").status_code == 400
+            assert client.post("/upload", content=b"x").status_code == 400
+            # Path components are stripped, never traversed.
+            response = client.post("/upload?name=../../evil.txt", content=b"x")
+            assert response.status_code == 200
+            assert response.json()["path"].endswith("uploads/evil.txt")
+
+    def test_upload_requires_token_when_set(self, app_env):
+        client, _ = make_client(app_env, [], token="s3cret")
+        with client:
+            assert client.post("/upload?name=a.txt", content=b"x").status_code == 403
+            assert (
+                client.post("/upload?name=a.txt&token=s3cret", content=b"x").status_code
+                == 200
+            )
 
 
 class TestTokenGate:

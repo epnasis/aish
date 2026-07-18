@@ -17,6 +17,7 @@
 <header id="topbar">
   <button id="model-chip" class="chip" title="switch model">…</button>
   <button id="session-chip" class="chip grow" title="sessions">aish</button>
+  <button id="new-chip" class="chip" title="new chat">＋</button>
   <button id="menu-chip" class="chip" title="workspace">⋯</button>
 </header>
 
@@ -25,8 +26,13 @@
 <div id="statusline" hidden><span class="pulse">✻</span> <span id="status-text"></span></div>
 <div id="connbar" hidden>reconnecting…</div>
 
+<div id="suggest" hidden></div>
+<div id="attachments" hidden></div>
+
 <form id="composer">
-  <textarea id="input" rows="1" placeholder="ask aish… (/ for commands)"
+  <button id="attach" type="button" aria-label="attach files">📎</button>
+  <input id="file-input" type="file" multiple hidden>
+  <textarea id="input" rows="1" placeholder="ask aish… (/ commands, @ files)"
             autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
   <button id="send" type="submit" aria-label="send">➤</button>
 </form>

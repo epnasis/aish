@@ -28,7 +28,7 @@ Według danych Wise: 1 USD ≈ 3,81 PLN …
 
 ▶ run command? ⚠ destructive
   rm -r ./build ./dist
-[y/N/a(lways)/e(dit)]
+[y/N/a(lways)/s(ession)/e(dit)]
 ```
 
 ## Why aish
@@ -101,7 +101,10 @@ reads) run **in parallel**. Fetched web pages are wrapped in an
 ## The safety model
 
 1. **Approval gate** — every proposed command is shown verbatim and waits for
-   `y` / `n` / `a`lways / `e`dit. Auto-approval exists only for a
+   `y` / `n` / `a`lways / `s`ession / `e`dit. `a` saves command prefixes to the
+   persistent allowlist; `s` allows the same prefixes **for this session
+   only** — kept in memory, forgotten on exit, never written to disk.
+   Auto-approval exists only for a
    conservatively-parsed set of read-only commands (`ls`, `grep`, `find`
    without `-exec`, …); anything the parser doesn't fully understand prompts.
    `--ask-all` disables auto-approval entirely.
@@ -182,10 +185,13 @@ ask aish about any of this — its own docs are in its system prompt.
 ## Web UI
 
 `aish-web` serves the same agent to a browser — built for phones: approvals
-become tap-able cards (Approve / Edit / Deny), file writes show the colored
-diff before anything lands on disk, answers stream live, and locking your
-phone mid-task loses nothing (on reconnect the server replays the transcript,
-including any approval still waiting).
+become tap-able cards (Approve / Allow this session / Edit / Deny), file
+writes show the colored diff before anything lands on disk, answers stream
+live and render as markdown (tables, code blocks, links), command output
+keeps its ANSI colors, and locking your phone mid-task loses nothing (on
+reconnect the server replays the transcript, including any approval still
+waiting). "Allow this session" auto-approves the command's prefixes until
+the server restarts — in memory only, never written to the allowlist.
 
 ```sh
 aish-web                      # http://127.0.0.1:8787, config-default model
@@ -197,9 +203,14 @@ Header controls replace the slash commands: the **model chip** opens a
 searchable model picker (with a "make startup default" toggle), the **session
 title** opens the sessions drawer (search + resume + new chat), and the **⋯
 menu** shows the working directory, session roots (`/cd` / `/add-dir`
-equivalents), and background jobs. Typing `/model`, `/resume`, `/new`, `/cd`,
-`/add-dir`, or `/jobs` in the input box opens the matching UI. On iPhone/iPad,
-"Add to Home Screen" installs it as a full-screen app.
+equivalents), and background jobs; the **＋** chip starts a fresh chat. The
+input box autocompletes like the terminal: `/` pops up the command list and
+`@` pops up project-file completion (same walk and ranking as the TUI).
+The 📎 button uploads files (to `~/.local/state/aish/uploads/`, a session
+root) and attaches their paths to your message so the agent can `read_file`
+them — note the model cannot *see* image contents, only work on the files
+with tools. On iPhone/iPad, "Add to Home Screen" installs it as a
+full-screen app.
 
 Sessions are the same JSONL files as the terminal, so `aish --resume` can pick
 up a web session and vice versa.

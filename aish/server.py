@@ -24,7 +24,8 @@ from pathlib import Path
 
 import uvicorn
 from starlette.applications import Starlette
-from starlette.routing import Mount, WebSocketRoute
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -38,6 +39,8 @@ from .approval import (
     is_auto_approvable,
     load_prefixes,
     looks_destructive,
+    suggest_prefix,
+    unvetted_segments,
 )
 from .cli import (
     DEFAULT_LESSONS,
@@ -52,9 +55,12 @@ from .cli import (
     save_default_model,
     skills_context,
 )
+from .prompt import ATFILE_IGNORED_DIRS, ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .session import SessionLog
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 
 # Replay buffer bounds: enough for a long task's worth of events; beyond it
 # the oldest are dropped and the client shows a truncation marker.
@@ -173,7 +179,12 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     """The three approval callbacks, backed by browser round trips. Mirrors
     cli.make_approver semantics exactly: denylist first (also on edited
     commands), then auto-approval scoped to the live session roots, then a
-    blocking approval card."""
+    blocking approval card. session_prefixes backs the card's "Allow this
+    session" button — in-memory only, forgotten when the server stops."""
+    session_prefixes: set[str] = set()
+
+    def known_prefixes() -> frozenset:
+        return frozenset(load_prefixes(allow_path)) | session_prefixes
 
     def record(command: str, decision: str) -> None:
         logref.command(command, decision)
@@ -193,22 +204,35 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
 
         cwd, roots = get_scope()
         if not ask_all and is_auto_approvable(
-            command, load_prefixes(allow_path), cwd=cwd, roots=roots
+            command, known_prefixes(), cwd=cwd, roots=roots
         ):
             bridge.emit({"type": "echo", "text": f"✓ auto-approved: {command}"})
             record(command, "auto")
             return command
 
+        suggestions = [
+            suggest_prefix(segment)
+            for segment in unvetted_segments(command, known_prefixes()) or [command]
+        ]
         request = {
             "type": "approval_request",
             "kind": "command",
             "command": command,
             "destructive": looks_destructive(command),
+            "prefixes": suggestions,
         }
         answer = bridge.ask(request)
         action = answer.get("action")
         if action == "approve":
             record(command, "approved")
+            resolve(request["id"], "approved")
+            return command
+        if action == "approve_session":
+            session_prefixes.update(suggestions)
+            bridge.emit(
+                {"type": "echo", "text": f"✓ session-allowed: {', '.join(suggestions)}"}
+            )
+            record(command, "approved+session")
             resolve(request["id"], "approved")
             return command
         if action == "edit":
@@ -261,6 +285,38 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     return ask_approval, approve_write, approve_read
 
 
+def list_files(cwd: str, query: str) -> list[str]:
+    """Project paths for @-mention completion — the same walk, junk-dir
+    skiplist, cap, and scoring as the TUI's AtFileCompleter."""
+    paths: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(cwd, onerror=lambda _e: None):
+        dirnames[:] = sorted(d for d in dirnames if d not in ATFILE_IGNORED_DIRS)
+        rel = os.path.relpath(dirpath, cwd)
+        prefix = "" if rel == "." else rel + "/"
+        paths.extend(prefix + d + "/" for d in dirnames)
+        paths.extend(prefix + f for f in sorted(filenames))
+        if len(paths) >= ATFILE_SCAN_CAP:
+            del paths[ATFILE_SCAN_CAP:]
+            break
+    needle = query.casefold()
+    scored = []
+    for path in paths:
+        name = os.path.basename(path.rstrip("/")).casefold()
+        if not needle:
+            score = 1
+        elif name.startswith(needle):
+            score = 3
+        elif needle in name:
+            score = 2
+        elif needle in path.casefold():
+            score = 1
+        else:
+            continue
+        scored.append((-score, path))
+    scored.sort()
+    return [path for _, path in scored[:ATFILE_MAX_RESULTS]]
+
+
 def web_usage_context(model, provider, allow_path, deny_path, state_dir) -> str:
     """Self-knowledge for the system prompt, web-UI edition — aish should
     describe the interface the user is actually looking at."""
@@ -286,7 +342,12 @@ alternative when blocked.
 same format as terminal aish, so sessions are interchangeable between both.
 - File tools: prefer read_file/write_file/edit_file over cat/sed/heredocs; \
 the user approves a diff card before any write. Do NOT use sed -i or > \
-redirects to edit files."""
+redirects to edit files.
+- Attachments: the web UI can upload files; they arrive as "[attached file: \
+<path>]" lines in the user's message. Read them with read_file (text) or \
+process them with shell tools. You cannot SEE image contents — for images, \
+work with metadata/shell tools (sips, exiftool) and say so if asked to \
+describe one."""
 
 
 class WebServer:
@@ -297,6 +358,7 @@ class WebServer:
         self.logref = logref
         self.bridge = bridge
         self.state_dir = state_dir
+        self.uploads_dir = state_dir / "uploads"
         self.config_path = config_path
         self.token = token
         self.busy = False
@@ -395,6 +457,8 @@ class WebServer:
             await self._add_dir(websocket, str(message.get("path", "")).strip())
         elif kind == "jobs":
             await websocket.send_json({"type": "job_list", "text": tools.jobs_table()})
+        elif kind == "files":
+            await self._send_files(websocket, str(message.get("query", "")))
         else:
             await websocket.send_json(
                 {"type": "error", "text": f"unknown message type {kind!r}"}
@@ -480,6 +544,13 @@ class WebServer:
         self.logref.model(model_spec(self.agent))
         self.bridge.clear()
         await websocket.send_json(self._hello())
+        # An empty replay is the client's "clear the screen" signal.
+        await websocket.send_json({"type": "replay", "events": [], "truncated": False})
+
+    async def _send_files(self, websocket: WebSocket, query: str) -> None:
+        cwd = self.agent.cwd
+        paths = await asyncio.to_thread(list_files, cwd, query)
+        await websocket.send_json({"type": "file_list", "query": query, "files": paths})
 
     async def _send_models(self, websocket: WebSocket, query: str) -> None:
         agent, state_dir = self.agent, self.state_dir
@@ -548,6 +619,33 @@ class WebServer:
             await websocket.send_json({"type": "error", "text": result})
             return
         await websocket.send_json(self._cwd_event())
+
+    async def handle_upload(self, request) -> JSONResponse:
+        """POST /upload?name=<filename>, raw body — no multipart, so no extra
+        dependency. Files land in <state_dir>/uploads (a session root, so the
+        agent's read_file auto-approves them)."""
+        if self.token and request.query_params.get("token") != self.token:
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        name = os.path.basename(request.query_params.get("name", "").strip())
+        if not name or name.startswith(".") or name in ("..",):
+            return JSONResponse({"error": "invalid file name"}, status_code=400)
+        body = await request.body()
+        if not body:
+            return JSONResponse({"error": "empty upload"}, status_code=400)
+        if len(body) > UPLOAD_MAX_BYTES:
+            return JSONResponse(
+                {"error": f"file too large (max {UPLOAD_MAX_BYTES // (1024 * 1024)} MB)"},
+                status_code=413,
+            )
+        self.uploads_dir.mkdir(parents=True, exist_ok=True)
+        target = self.uploads_dir / name
+        stem, suffix = target.stem, target.suffix
+        counter = 1
+        while target.exists():
+            target = self.uploads_dir / f"{stem}-{counter}{suffix}"
+            counter += 1
+        target.write_bytes(body)
+        return JSONResponse({"path": str(target)})
 
     async def _add_dir(self, websocket: WebSocket, path: str) -> None:
         if await self._reject_busy(websocket) or not path:
@@ -648,6 +746,9 @@ def create_app(
     agent_holder.append(agent)
 
     server = WebServer(agent, logref, bridge, state_dir, config_path, token)
+    # Uploaded files must be readable without an approval round trip.
+    server.uploads_dir.mkdir(parents=True, exist_ok=True)
+    agent.roots.append(server.uploads_dir.resolve())
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
@@ -657,6 +758,7 @@ def create_app(
     app = Starlette(
         routes=[
             WebSocketRoute("/ws", server.handle_ws),
+            Route("/upload", server.handle_upload, methods=["POST"]),
             Mount("/", StaticFiles(directory=STATIC_DIR, html=True)),
         ],
         lifespan=lifespan,

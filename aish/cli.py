@@ -153,10 +153,17 @@ def make_approver(
     log,
     deny_path: Path = DEFAULT_DENYLIST,
     get_scope=None,
+    session_prefixes: set[str] | None = None,
 ):
     """get_scope() -> (cwd, roots): the agent's live directory scope, bound
     late because the agent is constructed after its approver. When present,
-    auto-approval is confined to the session roots."""
+    auto-approval is confined to the session roots. session_prefixes holds
+    prefixes allowed for this session only ('s' at the prompt) — unioned with
+    the persistent allowlist but never written to disk."""
+    session_prefixes = set() if session_prefixes is None else session_prefixes
+
+    def known_prefixes() -> frozenset:
+        return frozenset(load_prefixes(allow_path)) | session_prefixes
 
     def record(command: str, decision: str) -> None:
         if log:
@@ -174,7 +181,7 @@ def make_approver(
 
         cwd, roots = get_scope() if get_scope else (None, None)
         if not ask_all and is_auto_approvable(
-            command, load_prefixes(allow_path), cwd=cwd, roots=roots
+            command, known_prefixes(), cwd=cwd, roots=roots
         ):
             print(f"\n{GREEN}✓ auto-approved:{RESET} {BOLD}{command}{RESET}")
             record(command, "auto")
@@ -183,7 +190,9 @@ def make_approver(
         warning = f" {RED}⚠ destructive{RESET}" if looks_destructive(command) else ""
         print(f"\n{YELLOW}{BOLD}▶ run command?{RESET}{warning}\n  {BOLD}{command}{RESET}")
         try:
-            answer = input(f"{YELLOW}[y/N/a(lways)/e(dit)]{RESET} ").strip().lower()
+            answer = input(
+                f"{YELLOW}[y/N/a(lways)/s(ession)/e(dit)]{RESET} "
+            ).strip().lower()
         except EOFError:
             record(command, "denied")
             return None
@@ -194,6 +203,20 @@ def make_approver(
         if answer == "a":
             allow_segments_flow(command, allow_path)
             record(command, "approved+allowlisted")
+            return command
+        if answer == "s":
+            for segment in unvetted_segments(command, known_prefixes()) or [command]:
+                suggestion = suggest_prefix(segment)
+                typed = input(
+                    f"{YELLOW}allow prefix for THIS SESSION{RESET} "
+                    f"[{BOLD}{suggestion}{RESET}] "
+                    f"(enter=yes, s=skip, or type a different prefix): "
+                ).strip()
+                if typed.lower() == "s":
+                    continue
+                session_prefixes.add(typed or suggestion)
+                print(f"{DIM}  session-allowed: {typed or suggestion}{RESET}")
+            record(command, "approved+session")
             return command
         if answer == "e":
             edited = edit_line(command)
@@ -821,7 +844,9 @@ About aish (you) — use this to answer questions about your own usage:
 {identity_context(model, provider)}
 - Approval prompt keys: y=run once, n=deny, a=always allow (saves command \
 prefixes to {allow_path}; chained |/&&/|| segments are vetted and allowlisted \
-independently; read-only commands auto-approve), e=edit the command first. \
+independently; read-only commands auto-approve), s=allow for THIS SESSION \
+only (same prefix flow, kept in memory and forgotten on exit), e=edit the \
+command first. \
 Auto-approval is confined to the session roots (the launch directory plus \
 any the user added): commands whose path arguments point outside them, and \
 read_file outside them, prompt even when otherwise read-only or allowlisted. \
