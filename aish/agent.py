@@ -173,7 +173,8 @@ def environment_context(cwd: str) -> str:
 
 
 def _serialize(message: dict) -> dict:
-    return {k: message[k] for k in ("role", "content", "tool_name") if k in message}
+    keys = ("role", "content", "tool_name", "images", "documents")
+    return {k: message[k] for k in keys if k in message}
 
 
 class Agent:
@@ -234,14 +235,26 @@ class Agent:
         if self.on_message:
             self.on_message(_serialize(message))
 
-    def run_task(self, task: str) -> str:
+    def run_task(
+        self,
+        task: str,
+        images: list[str] | None = None,
+        documents: list[str] | None = None,
+    ) -> str:
         # Old tasks' raw tool outputs are rarely needed verbatim again;
         # shrinking them keeps long REPL sessions inside the context window.
         task_start = len(self.messages)
         for message in self.messages[1:task_start]:
             self._trim_tool_message(message)
 
-        self._append({"role": "user", "content": task})
+        # Media rides on the user message as file paths; each backend encodes
+        # them for its API (ollama `images`, data URLs, Anthropic blocks).
+        user_message: dict = {"role": "user", "content": task}
+        if images:
+            user_message["images"] = list(images)
+        if documents:
+            user_message["documents"] = list(documents)
+        self._append(user_message)
 
         task_started = time.perf_counter()
         tokens_in = tokens_out = 0

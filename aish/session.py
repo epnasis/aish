@@ -74,9 +74,8 @@ class SessionLog:
             if kind == "model":
                 model = record.get("model") or model
             elif kind == "message" and record.get("role") != "system":
-                messages.append(
-                    {k: v for k, v in record.items() if k in ("role", "content", "tool_name")}
-                )
+                keys = ("role", "content", "tool_name", "images", "documents")
+                messages.append({k: v for k, v in record.items() if k in keys})
         return messages, model
 
     @staticmethod

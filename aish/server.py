@@ -73,6 +73,7 @@ TRANSCRIPT_KEEP = 500
 MAX_OPEN_SESSIONS = 6
 
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+MEDIA_MAX_BYTES = 20 * 1024 * 1024  # inline base64 limit; larger files fall back to a path
 
 CLOSE_REPLACED = 4000  # another device connected; this socket is superseded
 CLOSE_BAD_TOKEN = 4403
@@ -359,11 +360,14 @@ same format as terminal aish, so sessions are interchangeable between both.
 - File tools: prefer read_file/write_file/edit_file over cat/sed/heredocs; \
 the user approves a diff card before any write. Do NOT use sed -i or > \
 redirects to edit files.
-- Attachments: the web UI can upload files; they arrive as "[attached file: \
-<path>]" lines in the user's message. Read them with read_file (text) or \
-process them with shell tools. You cannot SEE image contents — for images, \
-work with metadata/shell tools (sips, exiftool) and say so if asked to \
-describe one."""
+- Attachments: the web UI can upload files. Images (and PDFs, when your \
+backend supports them) are delivered to you NATIVELY — a "[image attached: \
+… — you can see it]" note means the image itself is in the message: look at \
+it directly (describe it, read text in it, use what you see to search the \
+web); do NOT write scripts to parse it. Files that arrive as plain \
+"[attached file: <path>]" lines were NOT delivered natively: read text \
+files with read_file, process binaries with shell tools — in that mode you \
+cannot see image contents, and should say so if asked to describe one."""
 
 
 class Session:
@@ -529,7 +533,12 @@ class WebServer:
     async def _handle(self, websocket: WebSocket, message: dict) -> None:
         kind = message.get("type")
         if kind == "task":
-            await self._start_task(websocket, str(message.get("text", "")).strip())
+            attachments = [
+                str(p) for p in (message.get("attachments") or []) if isinstance(p, str)
+            ]
+            await self._start_task(
+                websocket, str(message.get("text", "")).strip(), attachments
+            )
         elif kind == "approval":
             uid = str(message.get("id", ""))
             for session in self.sessions.values():
@@ -570,17 +579,68 @@ class WebServer:
             return True
         return False
 
-    async def _start_task(self, websocket: WebSocket, text: str) -> None:
-        if not text or await self._reject_busy(websocket):
+    def _classify_attachments(
+        self, agent, paths: list[str]
+    ) -> tuple[list[str], list[str], list[str]]:
+        """(native images, native documents, text notes). Only files inside
+        the uploads dir qualify for native delivery — an arbitrary client
+        path must never be silently base64'd off the machine. Everything
+        else (unsupported type/backend, oversized, outside uploads) becomes
+        a path note the agent handles through the normal gated tools."""
+        support = backends.media_support(getattr(agent, "provider", "ollama"))
+        uploads = self.uploads_dir.resolve()
+        images: list[str] = []
+        documents: list[str] = []
+        notes: list[str] = []
+        for raw in paths:
+            path = Path(raw)
+            try:
+                in_uploads = path.resolve().is_relative_to(uploads)
+                size_ok = path.is_file() and path.stat().st_size <= MEDIA_MAX_BYTES
+            except OSError:
+                in_uploads = size_ok = False
+            suffix = path.suffix.lower()
+            if in_uploads and size_ok and suffix in backends.IMAGE_SUFFIXES and "image" in support:
+                images.append(str(path))
+                notes.append(f"[image attached: {path.name} — you can see it]")
+            elif in_uploads and size_ok and suffix == ".pdf" and "pdf" in support:
+                documents.append(str(path))
+                notes.append(f"[document attached: {path.name} — you can read it]")
+            else:
+                notes.append(f"[attached file: {path}]")
+        return images, documents, notes
+
+    async def _start_task(
+        self, websocket: WebSocket, text: str, attachments: list[str] | None = None
+    ) -> None:
+        if (not text and not attachments) or await self._reject_busy(websocket):
             return
         session = self.active
+        images, documents, notes = self._classify_attachments(
+            session.agent, attachments or []
+        )
+        if notes:
+            text = f"{text}\n\n" + "\n".join(notes) if text else "\n".join(notes)
         session.busy = True
         session.bridge.emit({"type": "user", "text": text})
-        session.runner = asyncio.ensure_future(self._run_task(session, text))
+        session.runner = asyncio.ensure_future(
+            self._run_task(session, text, images, documents)
+        )
 
-    async def _run_task(self, session: Session, text: str) -> None:
+    async def _run_task(
+        self,
+        session: Session,
+        text: str,
+        images: list[str] | None = None,
+        documents: list[str] | None = None,
+    ) -> None:
         try:
-            result = await asyncio.to_thread(session.agent.run_task, text)
+            if images or documents:
+                result = await asyncio.to_thread(
+                    session.agent.run_task, text, images, documents
+                )
+            else:
+                result = await asyncio.to_thread(session.agent.run_task, text)
             session.bridge.emit({"type": "done", "result": result})
         except ModelUnavailable as exc:
             session.bridge.emit(
@@ -860,6 +920,7 @@ def create_app(
             from .claude_max import ClaudeMaxAgent
 
             agent = ClaudeMaxAgent(**common)
+            agent.provider = "claude-max"  # media_support must not default to ollama
         else:
             agent = Agent(client_chat=chat, num_ctx=num_ctx, think=think, **common)
             agent.provider = provider

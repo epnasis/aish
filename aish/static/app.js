@@ -798,11 +798,9 @@ function submitInput() {
     return;
   }
   if (!text && !attachments.length) return;
-  if (attachments.length) {
-    const listing = attachments.map((a) => `[attached file: ${a.path}]`).join("\n");
-    text = text ? `${text}\n\n${listing}` : listing;
-  }
-  if (send({ type: "task", text })) {
+  // The server decides per-backend whether attachments go to the model
+  // natively (vision) or as path notes for the gated tools.
+  if (send({ type: "task", text, attachments: attachments.map((a) => a.path) })) {
     maybeRequestNotifyPermission();
     input.value = "";
     input.style.height = "auto";

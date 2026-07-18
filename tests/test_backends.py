@@ -353,3 +353,55 @@ def test_stream_yields_text_then_final_tool_calls_and_usage():
     assert final.message.tool_calls[0].function.name == "run_command"
     assert final.message.tool_calls[0].function.arguments == {"command": "ls"}
     assert (final.prompt_eval_count, final.eval_count) == (11, 5)
+
+
+# ---------------------------------------------------------------- media
+
+
+def test_openai_user_media_becomes_data_url_parts(tmp_path):
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"\x89PNG-fake")
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-fake")
+    out = convert_messages(
+        [{"role": "user", "content": "look", "images": [str(image)], "documents": [str(pdf)]}]
+    )
+    parts = out[0]["content"]
+    assert parts[0] == {"type": "text", "text": "look"}
+    assert parts[1]["type"] == "image_url"
+    assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert parts[2]["type"] == "file"
+    assert parts[2]["file"]["filename"] == "doc.pdf"
+    assert parts[2]["file"]["file_data"].startswith("data:application/pdf;base64,")
+
+
+def test_openai_missing_media_degrades_to_note(tmp_path):
+    out = convert_messages(
+        [{"role": "user", "content": "look", "images": [str(tmp_path / "gone.png")]}]
+    )
+    parts = out[0]["content"]
+    assert parts[1]["type"] == "text"
+    assert "attachment unavailable" in parts[1]["text"]
+
+
+def test_anthropic_user_media_becomes_blocks(tmp_path):
+    image = tmp_path / "shot.jpg"
+    image.write_bytes(b"\xff\xd8fake")
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-fake")
+    _, out = convert_messages_anthropic(
+        [{"role": "user", "content": "look", "images": [str(image)], "documents": [str(pdf)]}]
+    )
+    blocks = out[0]["content"]
+    assert blocks[0]["type"] == "image"
+    assert blocks[0]["source"]["media_type"] == "image/jpeg"
+    assert blocks[1]["type"] == "document"
+    assert blocks[1]["source"]["media_type"] == "application/pdf"
+    assert blocks[2] == {"type": "text", "text": "look"}
+
+
+def test_media_support_map():
+    assert "image" in backends.media_support("ollama")
+    assert "pdf" in backends.media_support("claude")
+    assert "pdf" not in backends.media_support("gemini")
+    assert backends.media_support("claude-max") == frozenset()

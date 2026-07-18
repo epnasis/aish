@@ -14,7 +14,9 @@ default model). Anything without a known prefix is an Ollama model, so all
 existing invocations keep working unchanged.
 """
 
+import base64
 import json
+import mimetypes
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,6 +93,33 @@ PROVIDERS = {
 
 class BackendError(RuntimeError):
     """Backend cannot be constructed (unknown provider, missing API key)."""
+
+
+# What each provider's API accepts as native user-message media. Ollama is
+# best-effort: the images key only helps on vision models (llava, qwen-vl,
+# gemma3, …) — text-only models ignore it. Gemini's OpenAI-compat layer
+# documents image data URLs but not file parts, so PDFs stay tool-territory
+# there. claude-max runs a different agent loop entirely.
+MEDIA_SUPPORT = {
+    "ollama": frozenset({"image"}),
+    "gemini": frozenset({"image"}),
+    "openai": frozenset({"image", "pdf"}),
+    "claude": frozenset({"image", "pdf"}),
+}
+
+IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+
+
+def media_support(provider_name: str) -> frozenset:
+    return MEDIA_SUPPORT.get(provider_name, frozenset())
+
+
+def _mime(path) -> str:
+    return mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+
+
+def _b64_file(path) -> str:
+    return base64.b64encode(Path(path).read_bytes()).decode("ascii")
 
 
 def parse_model(model_arg: str) -> tuple[str, str]:
@@ -308,9 +337,37 @@ def convert_messages(messages: list[dict]) -> list[dict]:
                 # information without breaking the API's id pairing rules.
                 name = message.get("tool_name", "tool")
                 out.append({"role": "user", "content": f"[{name} result]\n{content}"})
+        elif role == "user" and (message.get("images") or message.get("documents")):
+            out.append({"role": "user", "content": _openai_media_parts(message)})
         else:
             out.append({"role": role, "content": content})
     return out
+
+
+def _openai_media_parts(message: dict) -> list[dict]:
+    """User text + attached media as OpenAI content parts (data URLs). An
+    unreadable file degrades to a text note instead of failing the call."""
+    parts: list[dict] = []
+    content = message.get("content") or ""
+    if content:
+        parts.append({"type": "text", "text": content})
+    for path in message.get("images") or []:
+        try:
+            url = f"data:{_mime(path)};base64,{_b64_file(path)}"
+        except OSError:
+            parts.append({"type": "text", "text": f"[attachment unavailable: {path}]"})
+            continue
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    for path in message.get("documents") or []:
+        try:
+            data = f"data:application/pdf;base64,{_b64_file(path)}"
+        except OSError:
+            parts.append({"type": "text", "text": f"[attachment unavailable: {path}]"})
+            continue
+        parts.append(
+            {"type": "file", "file": {"filename": os.path.basename(path), "file_data": data}}
+        )
+    return parts
 
 
 def _parse_args(raw: str) -> dict:
@@ -498,9 +555,39 @@ def convert_messages_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
             else:
                 name = message.get("tool_name", "tool")
                 out.append({"role": "user", "content": f"[{name} result]\n{content}"})
+        elif role == "user" and (message.get("images") or message.get("documents")):
+            out.append({"role": "user", "content": _anthropic_media_blocks(message)})
         elif content:  # user turns; skip empty messages — the API rejects them
             out.append({"role": role, "content": content})
     return "\n".join(system_parts), out
+
+
+def _anthropic_media_blocks(message: dict) -> list[dict]:
+    """User text + attached media as Anthropic content blocks. An unreadable
+    file degrades to a text note instead of failing the call."""
+    blocks: list[dict] = []
+    for path in message.get("images") or []:
+        try:
+            source = {"type": "base64", "media_type": _mime(path), "data": _b64_file(path)}
+        except OSError:
+            blocks.append({"type": "text", "text": f"[attachment unavailable: {path}]"})
+            continue
+        blocks.append({"type": "image", "source": source})
+    for path in message.get("documents") or []:
+        try:
+            source = {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": _b64_file(path),
+            }
+        except OSError:
+            blocks.append({"type": "text", "text": f"[attachment unavailable: {path}]"})
+            continue
+        blocks.append({"type": "document", "source": source})
+    content = message.get("content") or ""
+    if content:
+        blocks.append({"type": "text", "text": content})
+    return blocks
 
 
 def _from_anthropic(response) -> ChatChunk:

@@ -575,6 +575,42 @@ class TestUpload:
             assert response.status_code == 200
             assert response.json()["path"].endswith("uploads/evil.txt")
 
+    def test_attached_image_goes_native_pdf_falls_back(self, app_env):
+        client, chat = make_client(app_env, [model_says("I see it")])
+        with client:
+            image = client.post("/upload?name=photo.png", content=b"\x89PNG-fake").json()
+            pdf = client.post("/upload?name=paper.pdf", content=b"%PDF-fake").json()
+            with connected(client) as (ws, _, _):
+                ws.send_json(
+                    {
+                        "type": "task",
+                        "text": "what is this?",
+                        "attachments": [image["path"], pdf["path"]],
+                    }
+                )
+                user = recv_until(ws, "user")
+                assert "you can see it" in user["text"]  # image went native
+                assert f"[attached file: {pdf['path']}]" in user["text"]  # pdf fell back
+                recv_until(ws, "done")
+            sent = [m for m in chat.calls[0]["messages"] if m["role"] == "user"][-1]
+            # test provider is "ollama": images native, pdf stays a path note
+            assert sent.get("images") == [image["path"]]
+            assert "documents" not in sent
+
+    def test_attachment_outside_uploads_never_goes_native(self, app_env, tmp_path):
+        secret = tmp_path / "secret.png"
+        secret.write_bytes(b"\x89PNG-private")
+        client, chat = make_client(app_env, [model_says("ok")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json(
+                {"type": "task", "text": "look", "attachments": [str(secret)]}
+            )
+            user = recv_until(ws, "user")
+            assert f"[attached file: {secret}]" in user["text"]
+            recv_until(ws, "done")
+            sent = [m for m in chat.calls[0]["messages"] if m["role"] == "user"][-1]
+            assert "images" not in sent  # nothing base64'd from outside uploads
+
     def test_upload_requires_token_when_set(self, app_env):
         client, _ = make_client(app_env, [], token="s3cret")
         with client:

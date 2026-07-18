@@ -215,11 +215,15 @@ equivalents), and background jobs; the **compose** button starts a fresh
 chat. The input box autocompletes like the terminal: `/` pops up the command
 list (unambiguous prefixes work — `/res` runs `/resume`) and `@` pops up
 project-file completion (same walk and ranking as the TUI). The paperclip
-uploads files (to `~/.local/state/aish/uploads/`, a session root) and
-attaches their paths to your message so the agent can `read_file` them —
-note the model cannot *see* image contents, only work on the files with
-tools. On iPhone/iPad, "Add to Home Screen" installs it as a full-screen
-app.
+uploads files (to `~/.local/state/aish/uploads/`, a session root).
+**Images go to the model natively** when the backend supports vision
+(Gemini, OpenAI, Claude, and Ollama vision models like llava/qwen-vl) — the
+model actually sees them: it can describe a photo, read text off a
+screenshot, or use what it sees to search the web. PDFs are native on
+OpenAI and Claude. Anything else (or on a non-vision backend) arrives as a
+path the agent handles with its normal gated tools. Only files in the
+uploads directory are ever sent natively. On iPhone/iPad, "Add to Home
+Screen" installs it as a full-screen app.
 
 **Notifications**: with permission granted (asked on your first task), the
 app notifies you when an approval is waiting, an answer is ready, a task
