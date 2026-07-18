@@ -388,6 +388,49 @@ function snapViewportHome() {
   if (!window.visualViewport) return;
   const keyboardClosed = visualViewport.height >= innerHeight - 1;
   if (keyboardClosed && (scrollY || visualViewport.offsetTop)) window.scrollTo(0, 0);
+  recoverShortWindow();
+}
+
+// iOS standalone sometimes re-lays the webview out short by the status-bar
+// inset after keyboard/session transitions: with the keyboard closed,
+// innerHeight sticks at screen.height minus the top inset (956→894 on a Pro
+// Max) and the bottom strip is raw black screen the page cannot paint (#8).
+// All in-page metrics read consistent, so the only tell is the short window
+// itself. Re-writing the viewport meta forces WebKit to re-evaluate the
+// viewport; if the window is still short a beat later, cycling focus through
+// a keyboardless input kicks the layout machinery the rest of the way.
+const VIEWPORT_META = document.querySelector('meta[name="viewport"]');
+let lastRecover = 0;
+
+function windowIsShort() {
+  const portrait = matchMedia("(orientation: portrait)").matches;
+  const keyboardClosed = !window.visualViewport || visualViewport.height >= innerHeight - 1;
+  return (
+    matchMedia("(display-mode: standalone)").matches &&
+    portrait && keyboardClosed && innerHeight < screen.height - 1
+  );
+}
+
+function recoverShortWindow() {
+  if (!windowIsShort() || Date.now() - lastRecover < 2000) return;
+  lastRecover = Date.now();
+  const content = VIEWPORT_META.getAttribute("content");
+  VIEWPORT_META.setAttribute("content", content + ", minimum-scale=1");
+  requestAnimationFrame(() => {
+    VIEWPORT_META.setAttribute("content", content);
+    setTimeout(() => {
+      if (!windowIsShort()) { reportViewport("recovered-by-meta"); return; }
+      const probe = document.createElement("input");
+      probe.readOnly = true;
+      probe.setAttribute("inputmode", "none");
+      probe.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0";
+      document.body.appendChild(probe);
+      probe.focus({ preventScroll: true });
+      probe.blur();
+      probe.remove();
+      setTimeout(() => reportViewport(windowIsShort() ? "still-short" : "recovered-by-focus"), 300);
+    }, 250);
+  });
 }
 
 // The pan sometimes settles without any visualViewport event — seen when the
@@ -421,6 +464,10 @@ if (window.visualViewport) {
   visualViewport.addEventListener("resize", onViewportChange);
   visualViewport.addEventListener("scroll", onViewportChange);
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) snapViewportSoon(); // app-switcher restore can land in the short-window state
+});
 
 function updateScrollButton() {
   $("scroll-down").hidden = nearBottom();
