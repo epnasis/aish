@@ -211,6 +211,7 @@ class Agent:
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
+        self.task_sources: list[dict] = []  # pages read_url fetched for the current task
         self.approve = approve
         self.approve_write = approve_write
         self.approve_read = approve_read
@@ -277,6 +278,7 @@ class Agent:
         self._append(user_message)
 
         self._cancel.clear()  # a stale stop must not kill the new task
+        self.task_sources = []
         task_started = time.perf_counter()
         tokens_in = tokens_out = 0
         for _ in range(self.max_steps):
@@ -340,6 +342,7 @@ class Agent:
                 self._append(
                     {"role": "tool", "tool_name": call["function"]["name"], "content": result}
                 )
+                self._collect_source(call, result)
 
         stopped = "(stopped: hit the max-steps limit without finishing — try a narrower task)"
         if self.on_token:
@@ -615,6 +618,20 @@ class Agent:
             label = f"→ read_url: {url}" + (f" (topic: {topic})" if topic else "")
             return label, partial(web.read_url, url, topic=str(topic) if topic else None)
         return self._read_file_call(args)  # read_file
+
+    def _collect_source(self, call: dict, result: str) -> None:
+        """Track pages actually fetched this task, so answers can cite them.
+        Only read_url counts — web_search hits are found-but-maybe-unread."""
+        if call["function"]["name"] != "read_url" or result.startswith("ERROR"):
+            return
+        url = str((call["function"].get("arguments") or {}).get("url", "")).strip()
+        if not url or any(s["url"] == url for s in self.task_sources):
+            return
+        source = {"url": url}
+        title = web.PAGE_TITLES.get(url)
+        if title:
+            source["title"] = title
+        self.task_sources.append(source)
 
     def _read_needs_prompt(self, name: str, args: dict) -> bool:
         path = str(args.get("path", ""))

@@ -242,9 +242,37 @@ function onDone(event) {
     addMsg("answer md", "").replaceChildren(renderMarkdown(event.result));
   }
   closeAnswer();
+  if (event.sources && event.sources.length) addSources(event.sources);
   setBusy(false);
   setStatus(null);
   notify("aish — answer ready", event.result);
+}
+
+function addSources(sources) {
+  const details = document.createElement("details");
+  details.className = "sources";
+  const summary = document.createElement("summary");
+  summary.textContent = `Sources (${sources.length})`;
+  details.appendChild(summary);
+  for (const source of sources) {
+    const row = document.createElement("a");
+    row.className = "source-row";
+    row.href = source.url;
+    row.target = "_blank";
+    row.rel = "noopener noreferrer";
+    const name = document.createElement("span");
+    name.className = "source-name";
+    let host = source.url;
+    try { host = new URL(source.url).hostname; } catch { /* keep full url */ }
+    name.textContent = source.title || host;
+    const url = document.createElement("span");
+    url.className = "source-url";
+    url.textContent = source.url;
+    row.append(name, url);
+    details.appendChild(row);
+  }
+  messagesEl.appendChild(details);
+  scrollToEnd();
 }
 
 function onStatus(event) {

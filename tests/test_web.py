@@ -41,6 +41,20 @@ class TestHtmlToText:
     def test_malformed_html_returns_partial(self):
         assert "start" in web.html_to_text("<p>start<b>unclosed")
 
+    def test_title_extracted_not_in_body_text(self):
+        html = "<html><head><title>  My   Page </title></head><body><p>body</p></body></html>"
+        text, title = web._extract(html)
+        assert title == "My Page"
+        assert "My Page" not in text
+        assert "body" in text
+
+    def test_read_url_stores_page_title(self, monkeypatch):
+        page = "<html><head><title>Widget Manual</title></head><body><p>hi</p></body></html>"
+        monkeypatch.setattr(web, "_fetch", lambda url: (page, "text/html"))
+        monkeypatch.setattr(web, "PAGE_TITLES", {})
+        web.read_url("https://example.com/manual")
+        assert web.PAGE_TITLES["https://example.com/manual"] == "Widget Manual"
+
 
 def fake_ddgs(results):
     """Install a fake ddgs module so web_search's deferred import finds it."""

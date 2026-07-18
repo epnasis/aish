@@ -47,31 +47,50 @@ _BLOCK_TAGS = {
 
 
 class _TextExtractor(HTMLParser):
-    """Visible text only: skips script/style subtrees, newlines at block tags."""
+    """Visible text only: skips script/style subtrees, newlines at block tags.
+    The <title> (inside the otherwise-skipped <head>) is captured separately
+    so pages can be cited by name."""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self.title_parts: list[str] = []
         self._skip_depth = 0
+        self._in_title = False
+
+    @property
+    def title(self) -> str:
+        return " ".join("".join(self.title_parts).split())
 
     def handle_starttag(self, tag, attrs):
+        if tag == "title":
+            self._in_title = True
         if tag in _SKIP_TAGS:
             self._skip_depth += 1
         elif tag in _BLOCK_TAGS:
             self.parts.append("\n")
 
     def handle_endtag(self, tag):
+        if tag == "title":
+            self._in_title = False
         if tag in _SKIP_TAGS:
             self._skip_depth = max(0, self._skip_depth - 1)
         elif tag in _BLOCK_TAGS:
             self.parts.append("\n")
 
     def handle_data(self, data):
-        if self._skip_depth == 0:
+        if self._in_title:
+            self.title_parts.append(data)
+        elif self._skip_depth == 0:
             self.parts.append(data)
 
 
 def html_to_text(html: str) -> str:
+    return _extract(html)[0]
+
+
+def _extract(html: str) -> tuple[str, str]:
+    """(visible text, page title) — title empty when the page has none."""
     extractor = _TextExtractor()
     try:
         extractor.feed(html)
@@ -85,7 +104,14 @@ def html_to_text(html: str) -> str:
             out.append(line)
         elif out and out[-1]:
             out.append("")  # collapse blank runs to a single separator
-    return "\n".join(out).strip()
+    return "\n".join(out).strip(), extractor.title
+
+
+# Titles of successfully fetched pages, for citing sources by name after a
+# task (agent.task_sources). Written per read_url call; bounded by clearing —
+# entries are tiny and only the current task's URLs are ever looked up.
+PAGE_TITLES: dict[str, str] = {}
+PAGE_TITLES_MAX = 500
 
 
 def web_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> str:
@@ -130,7 +156,11 @@ def read_url(url: str, topic: str | None = None) -> str:
         return f"ERROR: could not fetch {url}: {exc}"
 
     if content_type in ("text/html", "application/xhtml+xml"):
-        text = html_to_text(text)
+        text, title = _extract(text)
+        if title:
+            if len(PAGE_TITLES) >= PAGE_TITLES_MAX:
+                PAGE_TITLES.clear()
+            PAGE_TITLES[url] = title
     elif not (content_type.startswith("text/") or content_type.endswith(("json", "xml"))):
         return f"ERROR: {url} is {content_type}, not a text page — cannot read it"
     if not text.strip():

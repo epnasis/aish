@@ -1044,6 +1044,53 @@ class TestWebTools:
         assert seen == {"url": "https://x.example/doc", "topic": "install"}
         assert any("read_url: https://x.example/doc (topic: install)" in e for e in echoed)
 
+    def test_sources_collected_from_read_url(self, monkeypatch):
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(
+            agent_module.web, "read_url", lambda url, topic=None: f"[{url}] page text"
+        )
+        monkeypatch.setitem(
+            agent_module.web.PAGE_TITLES, "https://a.example/doc", "A Documentation"
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    self.call("read_url", url="https://a.example/doc"),
+                    self.call("read_url", url="https://b.example/"),
+                    self.call("read_url", url="https://a.example/doc"),  # dup dropped
+                ]),
+                model_says("answer"),
+            ]
+        )
+        agent.run_task("research")
+        assert agent.task_sources == [
+            {"url": "https://a.example/doc", "title": "A Documentation"},
+            {"url": "https://b.example/"},
+        ]
+
+    def test_sources_skip_failures_and_reset_per_task(self, monkeypatch):
+        import aish.agent as agent_module
+
+        results = {"https://ok.example/": "[page] text", "https://bad.example/": "ERROR: 404"}
+        monkeypatch.setattr(
+            agent_module.web, "read_url", lambda url, topic=None: results[url]
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    self.call("read_url", url="https://ok.example/"),
+                    self.call("read_url", url="https://bad.example/"),
+                ]),
+                model_says("answer"),
+                model_says("no web this time"),
+            ]
+        )
+        agent.run_task("research")
+        assert [s["url"] for s in agent.task_sources] == ["https://ok.example/"]
+        agent.run_task("chat only")
+        assert agent.task_sources == []
+
 
 class TestRememberTool:
     def test_remember_auto_approved_and_appends(self, tmp_path):

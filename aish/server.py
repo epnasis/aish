@@ -698,7 +698,13 @@ class WebServer:
                 )
             else:
                 result = await asyncio.to_thread(session.agent.run_task, text)
-            session.bridge.emit({"type": "done", "result": result})
+            done: dict[str, Any] = {"type": "done", "result": result}
+            # Riding on `done` (not a new event type) makes replay correctness
+            # automatic and keeps the answer↔sources association explicit.
+            sources = getattr(session.agent, "task_sources", [])
+            if sources:
+                done["sources"] = list(sources)
+            session.bridge.emit(done)
         except ModelUnavailable as exc:
             session.bridge.emit(
                 {

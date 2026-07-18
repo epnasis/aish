@@ -122,8 +122,29 @@ class TestConnect:
             assert recv_until(ws, "user")["text"] == "say hi"
             done = recv_until(ws, "done")
             assert done["result"] == "hi there"
+            assert "sources" not in done  # no web use, no sources field
             sent_user = [m for m in chat.calls[0]["messages"] if m["role"] == "user"]
             assert sent_user[-1]["content"] == "say hi"
+
+    def test_done_carries_sources_after_read_url(self, app_env, monkeypatch):
+        from types import SimpleNamespace
+
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(
+            agent_module.web, "read_url", lambda url, topic=None: f"[{url}] text"
+        )
+        read_call = SimpleNamespace(
+            function=SimpleNamespace(name="read_url", arguments={"url": "https://x.example/"})
+        )
+        client, _ = make_client(
+            app_env,
+            [model_says(tool_calls=[read_call]), model_says("answer")],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "research"})
+            done = recv_until(ws, "done")
+            assert done["sources"] == [{"url": "https://x.example/"}]
 
 
 class TestCommandApproval:

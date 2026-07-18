@@ -406,6 +406,18 @@ def session_row(info: SessionInfo) -> str:
     return f"{info.when} · {info.count:>3} msgs{model} · {info.title}"
 
 
+def print_sources(agent) -> None:
+    """Dim list of the pages the answer was based on (web tasks only)."""
+    sources = getattr(agent, "task_sources", [])
+    if not sources:
+        return
+    print(f"{DIM}Sources:{RESET}")
+    for source in sources:
+        title = source.get("title")
+        line = f"{title} — {source['url']}" if title else source["url"]
+        print(f"{DIM}  ↳ {line}{RESET}")
+
+
 def replay_history(messages: list[dict]) -> None:
     """Print a loaded conversation so the user sees what they resumed."""
     for message in messages:
@@ -1194,6 +1206,7 @@ def main() -> int:
             return 1
         if not stream_answers:
             print(f"{GREEN}{result}{RESET}")
+        print_sources(agent)
         return 0
 
     if not history:  # a resumed session continues where it was — no big banner
@@ -1232,6 +1245,7 @@ def main() -> int:
             result = agent.run_task(task)
             if not stream_answers:
                 print(f"\n{GREEN}{result}{RESET}")
+            print_sources(agent)
         except KeyboardInterrupt:
             print(f"\n{YELLOW}(task interrupted){RESET}")
         except ModelUnavailable as exc:

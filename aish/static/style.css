@@ -252,6 +252,34 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .card .verdict.approved { color: var(--green); }
 .card .verdict.denied { color: var(--red); }
 
+/* ---- sources under an answer ---- */
+.sources {
+  margin: 2px 0 10px;
+  font-size: 13px;
+}
+.sources summary {
+  color: var(--dim);
+  cursor: pointer;
+  padding: 4px 0;
+  list-style-position: inside;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.source-row {
+  display: block;
+  padding: 5px 0 5px 14px;
+  text-decoration: none;
+}
+.source-row .source-name { display: block; color: var(--blue); }
+.source-row .source-url {
+  display: block;
+  color: var(--dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* diff rendering */
 .diff {
   background: var(--bg);

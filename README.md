@@ -100,7 +100,9 @@ reads) run **in parallel**. Fetched web pages are wrapped in an
 `read_url` refuses non-public targets — loopback, LAN (RFC1918), link-local /
 cloud-metadata addresses — on the initial URL and again on every redirect
 (SSRF guard). To read a local service, ask for `curl`, which goes through
-the normal approval prompt.
+the normal approval prompt. Answers cite what was read: after a task that
+fetched pages, the CLI prints a dim `Sources:` list and the web UI shows a
+collapsed **Sources (n)** row that expands to clickable page titles.
 
 ## The safety model
 
