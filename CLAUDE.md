@@ -23,6 +23,15 @@ After changing code, the user's installed `aish` does NOT pick it up — uv free
 uv tool install --force --reinstall --no-cache /path/to/aish
 ```
 
+## Workflow: when to use a worktree
+
+Before editing code, check `git status`. Work in a git worktree on a feature branch (via EnterWorktree) instead of this checkout when either:
+
+- the change is **non-trivial** — a multi-file feature or refactor, not a small fix; or
+- the tree is **not clean with changes you didn't make** — the user or another session is mid-work in this checkout.
+
+Merge back to main after tests pass, then remove the worktree. Trivial fixes on a clean tree go directly in this checkout. The reinstall/ship step (`uv tool install ...`) always runs from this main checkout after merge — never from a worktree path.
+
 ## Architecture
 
 The core invariant: **the model never executes anything directly.** Backends only return structured tool-call requests; `Agent._dispatch()` in `agent.py` is the single execution point, and `run_command` is unreachable there unless the `approve()` callback returns the (possibly user-edited) command.
