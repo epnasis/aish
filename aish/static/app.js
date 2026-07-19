@@ -2199,11 +2199,13 @@ function sessionGroup(ts) {
 
 function sessionStamp(ts) {
   const date = new Date(ts * 1000);
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const today = dayStart(Date.now());
   const day = dayStart(date);
-  if (day >= today) return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  if (day >= today - 6 * DAY_MS) return date.toLocaleDateString([], { weekday: "short" });
-  return date.toLocaleDateString([], { day: "numeric", month: "short" });
+  if (day >= today) return time;
+  if (day >= today - 6 * DAY_MS)
+    return `${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  return `${date.toLocaleDateString([], { day: "numeric", month: "short" })}, ${time}`;
 }
 
 function renderSessions(event) {
