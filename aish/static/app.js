@@ -2066,6 +2066,26 @@ messagesEl.addEventListener("wheel", (event) => {
   }
 }, { passive: false });
 
+// ---- keyboard pager ------------------------------------------------------
+// Ctrl+H / Ctrl+L (vim: h = left, l = right) page like the swipe: H = back
+// = older chat, L = forward = newer, past the newest = fresh chat. Ctrl,
+// not Cmd — Cmd+H hides the window and Cmd+L is the address bar. This
+// shadows the text field's emacs-style Ctrl+H (delete backward); Backspace
+// still deletes.
+document.addEventListener("keydown", (event) => {
+  if (!event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if (event.key !== "h" && event.key !== "l") return;
+  event.preventDefault(); // even at the pager's edge, never delete-backward
+  // One page per deliberate press: no key-repeat runs, and the previous
+  // switch must land (its replay resets swipeInFrom) before the next.
+  if (event.repeat || swipeInFrom || !$("backdrop").hidden) return;
+  const direction = event.key === "l" ? 1 : -1;
+  const target = swipeTarget(direction);
+  if (!target) return;
+  messagesEl.style.transition = "transform 0.18s ease-out";
+  commitPage(direction, target, messagesEl.clientWidth);
+});
+
 // sessions
 $("session-chip").onclick = () => openSessionsSheet("");
 $("new-chip").onclick = () => send({ type: "new" });

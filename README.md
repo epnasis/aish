@@ -288,6 +288,9 @@ pill shows which chat you're heading to, and it turns blue once letting go
 will switch — release earlier and it snaps back (on a trackpad the switch
 happens the moment the pill turns blue). Code blocks still scroll
 sideways normally; the gesture only engages on a clearly horizontal drag.
+On a keyboard, **Ctrl+H / Ctrl+L** page the same way (vim h/l: older /
+newer), and Cmd/Ctrl+Shift+O starts a new chat, Cmd/Ctrl+Shift+P opens
+session search.
 
 ```sh
 aish-web                      # http://127.0.0.1:8787, config-default model
