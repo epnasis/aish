@@ -538,6 +538,13 @@ class WebServer:
             "roots": [str(root) for root in session.agent.roots],
             "home": str(Path.home()),  # client abbreviates paths to ~
             "rev": STATIC_REV,
+            # Insertion-ordered open sessions: the client's swipe pager uses
+            # this to know its neighbors (and their titles) ahead of release.
+            # The set only changes through resume/new — both re-send hello.
+            "open": [
+                {"name": s.name, "title": self._title(s)}
+                for s in self.sessions.values()
+            ],
         }
 
     def _cwd_event(self) -> dict:

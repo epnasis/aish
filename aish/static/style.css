@@ -135,6 +135,36 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .msg { margin-bottom: 12px; max-width: 100%; overflow-wrap: anywhere; }
 
+/* ---- swipe pager hint (target session while dragging sideways) ---- */
+#swipe-hint {
+  position: fixed;
+  top: calc(64px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 76vw;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--bg-elev2);
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 500;
+  pointer-events: none;
+  transition: background 0.15s;
+}
+#swipe-hint svg { width: 16px; height: 16px; flex-shrink: 0; }
+#swipe-hint span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#swipe-hint.prev .chev-right { display: none; }
+#swipe-hint:not(.prev) .chev-left { display: none; }
+#swipe-hint.commit { background: var(--blue); }
+
 .msg.user {
   background: var(--blue);
   color: #fff;

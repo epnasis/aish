@@ -209,6 +209,8 @@ function onHello(event) {
   if (event.rev && event.rev !== PAGE_REV) { location.reload(); return; }
   $("model-chip").textContent = event.model;
   setTitle(event.title);
+  openSessions = event.open || [];
+  currentSession = event.session;
   renderWorkspace(event);
   setBusy(event.busy);
   if (!event.busy) setStatus(null);
@@ -216,6 +218,21 @@ function onHello(event) {
 
 function onReplay(event) {
   stopSpeaking(); // the active button is about to be detached with the DOM
+  if (swipeInFrom) {
+    // This replay is the landing half of a committed swipe: enter from the
+    // side the old transcript left toward, completing the pager illusion.
+    const from = swipeInFrom;
+    swipeInFrom = 0;
+    messagesEl.style.transition = "none";
+    messagesEl.style.transform = `translateX(${from * messagesEl.clientWidth}px)`;
+    requestAnimationFrame(() => {
+      messagesEl.style.transition = "transform 0.18s ease-out";
+      messagesEl.style.transform = "";
+    });
+  } else {
+    messagesEl.style.transition = "none";
+    messagesEl.style.transform = "";
+  }
   messagesEl.replaceChildren();
   cards.clear();
   pendingCards = 0;
@@ -1631,6 +1648,113 @@ $("wrap-chip").onclick = () => {
   else if (anchor) restoreAnchor(anchor);
   showToast(on ? "wrap on" : "wrap off");
 };
+
+// ---- swipe pager between open sessions -----------------------------------
+// Horizontal pager gesture (the iOS Weather-app model): drag the transcript
+// sideways and it follows the finger; a pill names the neighboring open
+// session and turns blue once release would switch. Order = the order
+// sessions were opened (the server's table, sent in hello.open). Touches
+// near the screen edges are left to Safari's back/forward gesture, and pans
+// starting inside horizontally scrollable output stay scrolls.
+let openSessions = []; // [{name, title}] insertion-ordered, from hello
+let currentSession = null;
+let swipeInFrom = 0; // set on commit; onReplay animates the new page in
+
+const EDGE_GUARD = 28; // px — Safari's back/forward gesture zone
+const DECIDE_AT = 12; // px of travel before the gesture picks an axis
+const COMMIT_AT = 0.3; // fraction of width that arms release-to-switch
+
+const swipe = {
+  tracking: false, horizontal: false, blocked: false,
+  startX: 0, startY: 0, dx: 0, width: 1, startTime: 0,
+};
+
+function sessionNeighbor(direction) {
+  const index = openSessions.findIndex((s) => s.name === currentSession);
+  return index < 0 ? null : openSessions[index + direction] || null;
+}
+
+function scrollsHorizontally(node) {
+  for (; node && node !== messagesEl; node = node.parentElement) {
+    if (node.scrollWidth > node.clientWidth + 1) {
+      const overflow = getComputedStyle(node).overflowX;
+      if (overflow === "auto" || overflow === "scroll") return true;
+    }
+  }
+  return false;
+}
+
+function updateSwipeHint(neighbor, dx) {
+  const hint = $("swipe-hint");
+  if (!neighbor) { hint.hidden = true; return; }
+  hint.hidden = false;
+  hint.classList.toggle("prev", dx > 0);
+  hint.classList.toggle("commit", Math.abs(dx) > swipe.width * COMMIT_AT);
+  $("swipe-hint-title").textContent = neighbor.title || "New chat";
+  hint.style.opacity = Math.min(Math.abs(dx) / 60, 1);
+}
+
+messagesEl.addEventListener("touchstart", (event) => {
+  if (event.touches.length !== 1) { swipe.tracking = false; return; }
+  const touch = event.touches[0];
+  swipe.tracking =
+    touch.clientX > EDGE_GUARD &&
+    touch.clientX < innerWidth - EDGE_GUARD &&
+    !scrollsHorizontally(event.target);
+  swipe.horizontal = false;
+  swipe.blocked = false;
+  swipe.dx = 0;
+  swipe.startX = touch.clientX;
+  swipe.startY = touch.clientY;
+  swipe.startTime = event.timeStamp;
+  swipe.width = messagesEl.clientWidth;
+}, { passive: true });
+
+messagesEl.addEventListener("touchmove", (event) => {
+  if (!swipe.tracking || swipe.blocked) return;
+  const touch = event.touches[0];
+  const dx = touch.clientX - swipe.startX;
+  const dy = touch.clientY - swipe.startY;
+  if (!swipe.horizontal) {
+    if (Math.abs(dx) < DECIDE_AT && Math.abs(dy) < DECIDE_AT) return;
+    // Mostly-vertical (or diagonal) start: it's a scroll, stand down for the
+    // rest of this touch — a late preventDefault can't stop iOS anyway.
+    if (Math.abs(dx) < Math.abs(dy) * 1.4) { swipe.blocked = true; return; }
+    swipe.horizontal = true;
+  }
+  event.preventDefault(); // page-drag now, not a scroll
+  const neighbor = sessionNeighbor(dx < 0 ? 1 : -1);
+  swipe.dx = neighbor ? dx : dx / 3; // rubber-band past the first/last session
+  messagesEl.style.transition = "none";
+  messagesEl.style.transform = `translateX(${swipe.dx}px)`;
+  updateSwipeHint(neighbor, dx);
+}, { passive: false });
+
+function endSwipe(event) {
+  const wasHorizontal = swipe.horizontal;
+  swipe.tracking = false;
+  swipe.horizontal = false;
+  if (!wasHorizontal) return;
+  $("swipe-hint").hidden = true;
+  const dx = swipe.dx;
+  const direction = dx < 0 ? 1 : -1;
+  const neighbor = sessionNeighbor(direction);
+  const flick =
+    Math.abs(dx) > 48 && event.timeStamp - swipe.startTime < 250;
+  messagesEl.style.transition = "transform 0.18s ease-out";
+  if (neighbor && (Math.abs(dx) > swipe.width * COMMIT_AT || flick)) {
+    swipeInFrom = direction; // the landing replay animates in from this side
+    messagesEl.style.transform = `translateX(${-direction * swipe.width}px)`;
+    send({ type: "resume", path: neighbor.name });
+  } else {
+    messagesEl.style.transform = "";
+    if (!neighbor && Math.abs(dx) > 60 && openSessions.length <= 1) {
+      showToast("no other open sessions — tap the title to browse");
+    }
+  }
+}
+messagesEl.addEventListener("touchend", endSwipe);
+messagesEl.addEventListener("touchcancel", endSwipe);
 
 // sessions
 $("session-chip").onclick = () => openSessionsSheet("");

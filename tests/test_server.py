@@ -495,6 +495,26 @@ class TestSessions:
             contents = json.dumps(chat.calls[-1]["messages"])
             assert "zebra" in contents  # resumed context reached the model
 
+    def test_hello_lists_open_sessions_in_opening_order(self, app_env):
+        # The swipe pager pages through hello["open"]: every open session in
+        # the order it was opened, with the drawer's title derivation.
+        client, _ = make_client(app_env, [model_says("ok")])
+        with client, connected(client) as (ws, hello, _):
+            first = hello["session"]
+            assert [s["name"] for s in hello["open"]] == [first]
+            ws.send_json({"type": "task", "text": "remember the yak"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "new"})
+            hello = recv_until(ws, "hello")
+            second = hello["session"]
+            assert [s["name"] for s in hello["open"]] == [first, second]
+            assert hello["open"][0]["title"] == "remember the yak"
+            recv_until(ws, "replay")
+            # Switching back must not reorder the pager's pages.
+            ws.send_json({"type": "resume", "path": first})
+            hello = recv_until(ws, "hello")
+            assert [s["name"] for s in hello["open"]] == [first, second]
+
     def test_resume_from_disk_replays_history(self, app_env):
         # First server instance writes a session to disk…
         client, _ = make_client(app_env, [model_says("noted the walrus")])
