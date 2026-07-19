@@ -202,6 +202,16 @@ TASK_REMINDER = (
 )
 
 
+def task_reminder(index: str) -> str:
+    """The per-task system reminder: always the current local time (issue #36
+    — it lives here, not in the system prompt, so messages[0] stays
+    byte-stable for prompt caching and the time is fresh every task), plus
+    the skills nudge whenever any skills/memory are advertised."""
+    now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    time_note = f"{TASK_REMINDER_MARK}Current local time: {now}</system-reminder>"
+    return f"{time_note}\n{TASK_REMINDER}" if index else time_note
+
+
 # /learn — the user-triggered distillation pass. Runs as a normal task, so
 # recall/read/diff-approval all apply; shared by the CLI and the web server.
 LEARN_PROMPT = (
@@ -314,7 +324,8 @@ def environment_context(cwd: str) -> str:
         os_desc = platform.platform(terse=True)
     return (
         "Environment:\n"
-        f"- today's date: {datetime.date.today().isoformat()}\n"
+        f"- session started: {datetime.datetime.now().astimezone().isoformat(timespec='seconds')}"
+        " (current time arrives with each task)\n"
         f"- project directory (all commands run here): {cwd}\n"
         f"- user: {getpass.getuser()}\n"
         f"- OS: {os_desc} ({platform.machine()})"
@@ -437,8 +448,7 @@ class Agent:
             user_message["images"] = list(images)
         if documents:
             user_message["documents"] = list(documents)
-        if index:
-            self.messages.append({"role": "system", "content": TASK_REMINDER})
+        self.messages.append({"role": "system", "content": task_reminder(index)})
         self._append(user_message)
 
         self._cancel.clear()  # a stale stop must not kill the new task

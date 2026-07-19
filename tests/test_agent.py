@@ -5,6 +5,7 @@ FakeChat returns pre-scripted responses shaped like the ollama library's
 approval gate with no model, no network, and full determinism.
 """
 
+import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -1542,15 +1543,44 @@ class TestSkillsFreshness:
         # sits directly before the latest user message
         assert agent.messages[reminders[0] + 1]["content"] == "task two"
 
-    def test_no_reminder_when_no_skills(self, tmp_path):
+    def test_no_skills_nudge_when_no_skills(self, tmp_path):
         from aish.agent import TASK_REMINDER_MARK
 
         agent, _ = make_agent([model_says("done")], cwd=str(tmp_path))
         agent.run_task("task")
-        assert not any(
-            str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
+        reminders = [
+            str(m.get("content", ""))
             for m in agent.messages[1:]
+            if str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
+        ]
+        # the time-only reminder is still there; the skills nudge is not
+        assert len(reminders) == 1
+        assert "read_skill" not in reminders[0]
+        assert "Current local time:" in reminders[0]
+
+    def test_reminder_carries_fresh_local_iso_time(self, tmp_path):
+        """Issue #36: each task's reminder grounds the model in the current
+        local date/time (ISO 8601 with UTC offset)."""
+        import re
+
+        from aish.agent import TASK_REMINDER_MARK
+
+        agent, _ = make_agent([model_says("done")], cwd=str(tmp_path))
+        before = datetime.datetime.now().astimezone()
+        agent.run_task("task")
+        after = datetime.datetime.now().astimezone()
+        reminder = next(
+            str(m["content"])
+            for m in agent.messages[1:]
+            if str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
         )
+        match = re.search(
+            r"Current local time: (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})",
+            reminder,
+        )
+        assert match, reminder
+        stamp = datetime.datetime.fromisoformat(match.group(1))
+        assert before.replace(microsecond=0) <= stamp <= after
 
     def test_reminder_stays_out_of_session_log(self, tmp_path):
         from aish.agent import TASK_REMINDER_MARK
