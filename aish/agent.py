@@ -48,9 +48,10 @@ Rules:
 2. If a command fails with a usage or unknown-flag error, call read_docs
    before retrying. If docs come back truncated, call read_docs again with a
    topic (e.g. the flag name) to search the full text.
-2b. LEARNING: consult saved knowledge BEFORE your own memory — when a task
-   matches a skill in your context, read it FIRST and follow it over your
-   memorized approach (skills encode what actually worked on THIS machine);
+2b. LEARNING: consult saved knowledge BEFORE your training data — when a
+   task matches a skill in your context, read it FIRST and follow it over
+   your built-in approach (skills encode what actually worked on THIS
+   machine; same for the saved Memory facts in your context);
    when unsure whether something was solved before, call recall. And capture
    learnings as you go: when the user corrects you, when a skill's
    instructions proved wrong (update THAT skill — append the gotcha with
@@ -195,8 +196,9 @@ TASK_REMINDER_MARK = "<system-reminder>"
 TASK_REMINDER = (
     "<system-reminder>Before acting: scan the Skills index in your system "
     "prompt. If a skill matches this task, your FIRST action MUST be "
-    "read_skill(<name>) — do not attempt the task from memory. Skills "
-    "override your general knowledge.</system-reminder>"
+    "read_skill(<name>) — do not improvise the task from your training "
+    "data. Skills (and the saved Memory facts in your context) override "
+    "what you think you know.</system-reminder>"
 )
 
 

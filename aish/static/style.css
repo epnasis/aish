@@ -405,6 +405,25 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   margin-bottom: 10px;
   overflow-wrap: anywhere;
 }
+.card .cmd-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.card .cmd-row code { flex: 1; min-width: 0; margin-bottom: 0; }
+.card .edit-pencil {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border: none;
+  border-radius: var(--r-control);
+  background: var(--bg-elev2);
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.card .edit-pencil svg { width: 19px; height: 19px; }
+.card .edit-pencil:active { opacity: 0.7; }
+.card .edit-pencil:disabled { opacity: 0.5; }
+/* the hidden attribute must beat the display:flex/grid rules above */
+.card .buttons[hidden], .card .edit-pencil[hidden] { display: none !important; }
 .card .prefix-note {
   font-size: 13px;
   color: var(--dim);
@@ -424,7 +443,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .card .buttons button:active { opacity: 0.7; }
 .card .approve { background: var(--green); color: #003514; }
-.card .deny { background: var(--bg-elev2); color: var(--red); }
+.card .deny { background: var(--red); color: #fff; }
 .card .session { background: var(--bg-elev2); color: var(--blue); }
 .card .edit { background: var(--bg-elev2); color: var(--fg); }
 .card textarea {

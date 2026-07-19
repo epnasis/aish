@@ -883,6 +883,16 @@ function speakerIcon() {
   });
 }
 
+function pencilIcon() {
+  return svgIcon("i-pencil", (make, svg) => {
+    const g = make("g", { fill: "none", stroke: "currentColor", "stroke-width": "1.7",
+      "stroke-linecap": "round", "stroke-linejoin": "round" });
+    g.appendChild(make("path", { d: "M4.5 19.5h3.6L19.4 8.2a2 2 0 0 0-2.9-2.9L5.2 16.6z" }));
+    g.appendChild(make("path", { d: "M13.8 7l3.2 3.2" }));
+    svg.appendChild(g);
+  });
+}
+
 function pauseIcon() {
   return svgIcon("i-pause", (make, svg) => {
     svg.appendChild(make("rect", { x: "7", y: "6", width: "3.4", height: "12", rx: "1.4", fill: "currentColor" }));
@@ -1215,7 +1225,7 @@ function feedbackField() {
   const input = document.createElement("input");
   input.type = "text";
   input.className = "feedback";
-  input.placeholder = "Optional feedback — sent with whichever button you press";
+  input.placeholder = "Optional comment";
   input.enterKeyHint = "done";
   input.autocomplete = "off";
   input.addEventListener("keydown", (e) => {
@@ -1243,7 +1253,17 @@ function buildCommandCard(card, event) {
   title(card, parts);
   const code = document.createElement("code");
   code.textContent = event.command;
-  card.appendChild(code);
+  const cmdRow = document.createElement("div");
+  cmdRow.className = "cmd-row";
+  cmdRow.appendChild(code);
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "edit-pencil";
+  editBtn.title = "Edit the command before running";
+  editBtn.appendChild(pencilIcon());
+  editBtn.onclick = () => showEditor();
+  cmdRow.appendChild(editBtn);
+  card.appendChild(cmdRow);
   const escapes = event.escapes || [];
   if (escapes.length) card.appendChild(escapeNote(escapes));
   const prefixes = (event.prefixes || []).join(", ");
@@ -1268,20 +1288,22 @@ function buildCommandCard(card, event) {
       `add ${escapes.join(", ")} to the session roots until the session closes`]);
   }
   specs.push(
-    ["Edit", "edit", () => showEditor()],
     ["Deny", "deny", () => answerCard(event.id, "deny", feedbackExtra(feedback))],
   );
   const row = buttonRow(card, specs);
   row.classList.add("grid2");
   function showEditor() {
     row.hidden = true;
+    editBtn.hidden = true;
     const area = document.createElement("textarea");
     area.value = event.command;
     card.appendChild(area);
     const editRow = buttonRow(card, [
       ["Run edited", "approve", () =>
         answerCard(event.id, "edit", { command: area.value, ...feedbackExtra(feedback) })],
-      ["Cancel", "deny", () => { area.remove(); editRow.remove(); row.hidden = false; }],
+      ["Cancel", "edit", () => {
+        area.remove(); editRow.remove(); row.hidden = false; editBtn.hidden = false;
+      }],
     ]);
     area.focus();
   }

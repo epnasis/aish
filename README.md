@@ -251,9 +251,10 @@ ask aish about any of this — its own docs are in its system prompt.
 ## Web UI
 
 `aish-web` serves the same agent to a browser — built for phones: approvals
-become tap-able cards (Approve / Allow this session / Always allow / Edit /
-Deny — plus an optional feedback field whose text travels with *whichever*
-button you press: on Deny it tells the model why and what to do instead; on
+become tap-able cards (Approve / Allow this session / Always allow / Deny,
+a pencil icon beside the command to edit it before running — plus an
+optional comment field whose text travels with *whichever* button you press:
+on Deny it tells the model why and what to do instead; on
 any approval it reaches the model as guidance for this and future actions),
 file writes show the colored diff before anything lands on disk, answers stream
 live and render as markdown (tables, code blocks, links), command output
