@@ -499,10 +499,11 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   gap: 8px;
   align-items: flex-end;
   padding: 8px 12px;
-  /* Home-indicator clearance as margin, not padding: the reserved strip then
-     shows the black body background instead of the composer's grey material,
-     so the pill reads as sitting at the bottom of the app. */
-  margin-bottom: env(safe-area-inset-bottom);
+  /* Home-indicator clearance as margin, not padding, and deliberately tighter
+     than the full safe-area inset: the pill sits ~12px above the bezel with
+     the swipe bar overlapping the gap below it, instead of a 34px dead strip.
+     Devices without an inset resolve to 0. */
+  margin-bottom: max(calc(env(safe-area-inset-bottom) - 22px), 0px);
   background: rgba(22, 22, 24, 0.85);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
