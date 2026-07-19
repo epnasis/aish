@@ -61,6 +61,7 @@ from .cli import (
     load_config,
     load_context_files,
     model_spec,
+    parse_learn,
     rank_models,
     save_default_model,
 )
@@ -442,11 +443,14 @@ command or file read reaches outside the session roots, its card warns about \
 the escape and offers "Trust directory": one tap adds that directory to the \
 session roots, so allowlisted work there auto-approves afterwards — also in \
 memory only.
-- There are NO slash commands and NO ! direct commands here. Model switching, \
-resuming earlier sessions, new chats, changing the working directory, and \
-adding session roots all happen through the UI's header controls — if the \
-user asks how, point them at the model chip, the session title (sessions \
-drawer), the ＋ chip (new chat), and the ⋯ menu (workspace panel).
+- There are NO slash commands and NO ! direct commands here, with ONE \
+exception: a message starting with /learn distills the conversation into \
+saved skills/memory (an optional hint follows, e.g. "/learn the gh flow"; \
+"/learn lessons" migrates the legacy lessons file). Everything else — model \
+switching, resuming earlier sessions, new chats, changing the working \
+directory, adding session roots — happens through the UI's header controls: \
+if the user asks how, point them at the model chip, the session title \
+(sessions drawer), the ＋ chip (new chat), and the ⋯ menu (workspace panel).
 - Several sessions can be open at once; a task keeps running when the user \
 switches to another session and its result is there when they switch back. \
 While you work, messages the user sends are QUEUED and run one after \
@@ -805,6 +809,12 @@ class WebServer:
             text = f"{text}\n\n" + "\n".join(notes) if text else "\n".join(notes)
         session.busy = True
         session.bridge.emit({"type": "user", "text": text})
+        if text.startswith("/"):
+            # /learn is the one slash command on web: the transcript shows
+            # what the user typed, the model gets the distillation prompt.
+            learn = parse_learn(text, getattr(session.agent, "lessons_path", None))
+            if learn is not None:
+                text = learn
         session.runner = asyncio.ensure_future(
             self._run_task(session, text, images, documents)
         )

@@ -48,11 +48,16 @@ Rules:
 2. If a command fails with a usage or unknown-flag error, call read_docs
    before retrying. If docs come back truncated, call read_docs again with a
    topic (e.g. the flag name) to search the full text.
-2b. LEARN FROM MISTAKES: whenever you get a command or approach wrong and then
-   find the form that works, call remember() with a one-line lesson holding the
-   corrected, ready-to-run command — so next session you get it right the first
-   time instead of re-deriving it. Applies to ANY tool or task, not just shell
-   flags. Check the "lessons you saved" in your context before guessing.
+2b. LEARNING: consult saved knowledge BEFORE your own memory — when a task
+   matches a skill in your context, read it FIRST and follow it over your
+   memorized approach (skills encode what actually worked on THIS machine);
+   when unsure whether something was solved before, call recall. And capture
+   learnings as you go: when the user corrects you, when a skill's
+   instructions proved wrong (update THAT skill — append the gotcha with
+   edit_file, never create a duplicate), or when a hard-won multi-step
+   procedure worked, save it — recall first to find an existing entry, then
+   write or update the skill file (the user approves the diff). One-line
+   facts, preferences, and corrected commands → remember().
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. If the
    user denies a command, do not retry it — change approach or ask.
@@ -193,6 +198,39 @@ TASK_REMINDER = (
     "read_skill(<name>) — do not attempt the task from memory. Skills "
     "override your general knowledge.</system-reminder>"
 )
+
+
+# /learn — the user-triggered distillation pass. Runs as a normal task, so
+# recall/read/diff-approval all apply; shared by the CLI and the web server.
+LEARN_PROMPT = (
+    "Review this conversation for durable learnings{hint}. For each one: "
+    "call recall first to check for an existing skill or memory entry — if "
+    "one exists, UPDATE it (edit_file: append the gotcha or correct it) "
+    "instead of creating a duplicate. Save multi-step procedures as skills — "
+    "a markdown file in ~/.config/aish/skills/ (or ./.aish/skills/ when "
+    "project-specific) with a trigger-phrased description ('Use when the "
+    "user asks to …'); save one-line facts and preferences with remember(). "
+    "Then report what you saved and what you skipped and why. If nothing is "
+    "worth saving, say so plainly."
+)
+
+LEARN_LESSONS_PROMPT = (
+    "Migrate the legacy lessons file into structured knowledge — a conscious "
+    "review, not a mechanical copy. Read {path}, group related lines, and "
+    "flag obsolete ones to drop. For each keeper: recall first and UPDATE an "
+    "existing entry if one matches; otherwise save procedure-shaped lessons "
+    "as skills (trigger-phrased description) and fact-shaped ones with "
+    "remember(). Then list what was migrated and what was dropped, and ask "
+    "the user to confirm; once they confirm coverage, rename the file to "
+    "lessons.md.bak with a shell command so it stops being loaded."
+)
+
+
+def learn_prompt(hint: str, lessons_path=None) -> str:
+    if hint.strip().casefold() == "lessons" and lessons_path:
+        return LEARN_LESSONS_PROMPT.format(path=lessons_path)
+    clause = f", with attention to: {hint.strip()}" if hint.strip() else ""
+    return LEARN_PROMPT.format(hint=clause)
 
 
 # No side effects and no approval prompt — safe to run concurrently.

@@ -95,6 +95,10 @@ class ClaudeMaxAgent:
     def roots(self):
         return self.inner.roots
 
+    @property
+    def lessons_path(self):
+        return self.inner.lessons_path
+
     def rebase(self, target: str) -> str:
         result = self.inner.rebase(target)
         if not result.startswith("ERROR"):

@@ -222,7 +222,8 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
         )
     memory = _merged(memory_dirs(cwd), "memory")
     memory.sort(key=lambda e: e.mtime, reverse=True)
-    memory += _lesson_entries(lessons_path)
+    lessons = _lesson_entries(lessons_path)
+    memory += lessons
     shown = memory[:INDEX_MEMORY_MAX]
     if shown:
         lines = "\n".join(f"- {e.description}" for e in shown)
@@ -231,6 +232,12 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
             if len(memory) > INDEX_MEMORY_MAX
             else ""
         )
+        if lessons:
+            note += (
+                "\n(some of these are legacy one-line lessons — if the user "
+                "wants them organized, /learn lessons migrates them into "
+                "structured memory)"
+            )
         sections.append(
             "Memory — facts and lessons you saved earlier; apply them "
             "proactively:\n" + lines + note

@@ -1148,3 +1148,22 @@ class TestSkillsRefresh:
         system = chat.calls[0]["messages"][0]
         assert system["role"] == "system"
         assert "- late: Use when testing hot reload" in system["content"]
+
+
+class TestLearnCommand:
+    def test_learn_text_is_rewritten_to_prompt(self, app_env):
+        client, chat = make_client(app_env, [model_says("saved nothing")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/learn"})
+            assert recv_until(ws, "user")["text"] == "/learn"  # transcript keeps the typed form
+            recv_until(ws, "done")
+        sent_user = [m for m in chat.calls[0]["messages"] if m["role"] == "user"]
+        assert "durable learnings" in sent_user[-1]["content"]
+
+    def test_other_slash_text_goes_through_verbatim(self, app_env):
+        client, chat = make_client(app_env, [model_says("ok")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/etc/hosts looks odd"})
+            recv_until(ws, "done")
+        sent_user = [m for m in chat.calls[0]["messages"] if m["role"] == "user"]
+        assert sent_user[-1]["content"] == "/etc/hosts looks odd"

@@ -1046,3 +1046,33 @@ class TestDefaultWorkspace:
         sub = home / "dev"
         sub.mkdir()
         assert default_workspace(str(sub)) == str(sub)
+
+
+class TestParseLearn:
+    def test_learn_returns_distillation_prompt(self):
+        from aish.cli import parse_learn
+
+        prompt = parse_learn("/learn")
+        assert prompt is not None
+        assert "recall" in prompt and "skills" in prompt
+
+    def test_hint_is_embedded(self):
+        from aish.cli import parse_learn
+
+        prompt = parse_learn("/learn the gh issue flow")
+        assert "the gh issue flow" in prompt
+
+    def test_lessons_hint_switches_to_migration(self, tmp_path):
+        from aish.cli import parse_learn
+
+        lessons = tmp_path / "lessons.md"
+        prompt = parse_learn("/learn lessons", lessons)
+        assert str(lessons) in prompt
+        assert "lessons.md.bak" in prompt
+
+    def test_prefix_resolves_and_other_commands_pass_through(self):
+        from aish.cli import parse_learn
+
+        assert parse_learn("/lea") is not None
+        assert parse_learn("/resume") is None
+        assert parse_learn("/model gemini") is None

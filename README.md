@@ -45,8 +45,10 @@ Według danych Wise: 1 USD ≈ 3,81 PLN …
   for macOS/BSD userland (`sed -i`, `ps --sort`, `date -d`…).
 - **Transparent.** Every step is echoed, timed, and token-accounted; every
   session leaves an audit trail of commands and decisions.
-- **It learns.** Correct it once and it saves a one-line lesson that loads
-  into every future session.
+- **It learns.** Correct it once and it saves the fix to structured memory;
+  procedures worth repeating become skills — playbooks it checks BEFORE its
+  own training data, so it gets smarter with every session. `/learn` distills
+  a whole conversation on demand.
 
 ## Quickstart
 
@@ -91,9 +93,9 @@ in/out of it by restarting aish rather than `/model`.
 | `read_file` | read a file | auto inside the session roots; **prompts outside them and on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
 | `web_search` / `read_url` | DuckDuckGo + fetch page as readable text | auto; every query/URL echoed; public hosts only |
 | `read_docs` | man page → `--help` fallback, full-text `topic` search | auto |
-| `remember` | save a lesson to `~/.config/aish/lessons.md` | auto (echoed) |
-| `read_skill` | load a playbook you wrote (see Skills) | auto |
-| `search_sessions` | search past sessions ("the fix from yesterday") and read the matching turns — ranked excerpts first, then per-session detail | auto (echoed); current session excluded |
+| `remember` | save one fact/lesson as a structured memory entry in `~/.config/aish/memory/` (create-or-update by name, deduped) | auto (echoed) |
+| `read_skill` | load a playbook (see Memory & skills) | auto |
+| `recall` | ranked search over everything it knows — skills, memory, and past sessions (episodic fallback) — snippets first, full entry by name; deterministic ranking, hard output caps | auto (echoed); current session excluded |
 
 Independent lookups batched in one model turn (several searches, a few page
 reads) run **in parallel**. Fetched web pages are wrapped in an
@@ -194,21 +196,38 @@ or `/clear`
 arg opens the same type-to-filter picker over local models and cloud
 providers; add `--save` to persist the choice as the startup default in
 `config.toml` (`/model --save` alone persists the current model) ·
+`/learn [hint]` — save this conversation's learnings as skills/memory
+(`/learn lessons` migrates the legacy lessons file) ·
 `/jobs` · `/help` · `/quit` (or `exit`).
 
 **Multiline input**: Enter submits; newline via Ctrl+J, trailing `\`, or
 Option/Alt+Enter (iTerm2: set "Left Option key" to "Esc+"). Pastes keep
 their newlines.
 
-**Memory** — three layers, all loaded into context each session:
+**Memory & skills** — how aish learns. Everything is progressive
+disclosure: a small capped index of one-line descriptions goes into the
+prompt each task (rescanned live, so new entries appear immediately — no
+restart), full bodies load on demand, and the long tail is reachable through
+the ranked `recall` search — so the library can grow to thousands of entries
+without bloating the context.
+- **skills** — playbooks for anything worth repeating: markdown files in
+  `~/.config/aish/skills/` (global) or `./.aish/skills/` (project, wins on
+  name clash) with `name:`/`description:`/`keywords:` frontmatter. The
+  description states the trigger ("Use when the user asks to …") — that is
+  what makes it discoverable. aish is told to read a matching skill FIRST and
+  follow it over its own memorized approach, and to update a skill (append
+  the gotcha) whenever one proves wrong. Ask aish to write one — it knows
+  the format.
+- **memory** — one fact per file in `~/.config/aish/memory/` (or
+  `./.aish/memory/`), same format; the description line IS the fact. The 15
+  newest show in context, the rest are searchable. Saved via `remember`.
 - `./AISH.md` or `~/.config/aish/AISH.md` — durable context you write (host
-  facts, preferences);
-- `~/.config/aish/lessons.md` — one-liners the agent saves itself after
-  mistakes (the `remember` tool);
-- **skills** — playbooks for tools that `--help` can't explain: markdown files
-  in `~/.config/aish/skills/` (global) or `./.aish/skills/` (project) with
-  optional `name:`/`description:` frontmatter. Ask aish to write one — it
-  knows the format.
+  facts, preferences), always loaded in full.
+- **`/learn [hint]`** — distill the current conversation into skills/memory:
+  aish searches existing entries first, updates rather than duplicates, and
+  you approve every file diff. A legacy `~/.config/aish/lessons.md` keeps
+  working (its lines surface as memory) — `/learn lessons` migrates it
+  consciously and retires it.
 
 **Step limit & loop detection** — a task gets `max_steps` model turns
 (default 25). At the limit the model gets one final no-tools turn to judge
@@ -301,7 +320,8 @@ aish-web --host 0.0.0.0       # expose to your LAN (see security note below)
 aish-web --model gemini       # same --model forms as aish
 ```
 
-Header controls replace the slash commands: the **model chip** opens a
+Header controls replace the slash commands (except `/learn`, which works by
+typing it as a message): the **model chip** opens a
 searchable model picker (with a "make startup default" toggle), the **session
 title** opens the sessions drawer (search + resume + new chat), the **cwd
 subtitle** under the title shows the working directory at all times — tap it

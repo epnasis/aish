@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import backends, tools
-from .agent import Agent, ModelUnavailable, environment_context, format_tokens
+from .agent import Agent, ModelUnavailable, environment_context, format_tokens, learn_prompt
 from .approval import (
     DEFAULT_ALLOWLIST,
     DEFAULT_DENYLIST,
@@ -49,7 +49,7 @@ REPLAY_TOOL_LINES = 4
 
 SLASH_COMMANDS = (
     "/add-dir", "/cd", "/clear", "/dir-add", "/exit", "/help", "/jobs",
-    "/model", "/new", "/quit", "/resume",
+    "/learn", "/model", "/new", "/quit", "/resume",
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
@@ -71,6 +71,9 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  (Tab completes directories); !cd <dir> does the same
   {CYAN}/add-dir <dir>{RESET} allow auto-approved reads/commands in another directory
                  tree too (alias /dir-add); no arg lists current roots
+  {CYAN}/learn [hint]{RESET}  distill this conversation into saved skills/memory (the
+                 model searches existing knowledge first and you approve
+                 each write); /learn lessons migrates the legacy lessons.md
   {CYAN}/jobs{RESET}          list background jobs started this session
   {CYAN}/help{RESET}          this help
   {CYAN}/quit, /exit{RESET}   quit (plain 'exit' works too)
@@ -669,6 +672,18 @@ def save_default_model(config_path: Path, spec: str) -> str | None:
     except OSError as exc:
         return f"cannot write {config_path}: {exc}"
     return None
+
+
+def parse_learn(task: str, lessons_path=None) -> str | None:
+    """/learn [hint] → the distillation prompt (run as a normal task so
+    recall and diff approvals apply); None for any other slash input.
+    Unambiguous prefixes resolve, matching handle_slash (/lea → /learn)."""
+    verb = task.split()[0].lower()
+    if verb != "/learn":
+        matches = [c for c in SLASH_COMMANDS if c.startswith(verb)]
+        if matches != ["/learn"]:
+            return None
+    return learn_prompt(task.partition(" ")[2], lessons_path)
 
 
 def handle_slash(
@@ -1278,11 +1293,14 @@ def main() -> int:
         if not task:
             continue
         if task.startswith("/"):
-            if handle_slash(
-                task, agent, logref, state_dir, resumed, config_path=config_path
-            ) == "exit":
-                return 0
-            continue
+            learn = parse_learn(task, lessons_path)
+            if learn is None:
+                if handle_slash(
+                    task, agent, logref, state_dir, resumed, config_path=config_path
+                ) == "exit":
+                    return 0
+                continue
+            task = learn  # /learn runs as a normal task: recall + diff approvals apply
         if task.startswith("!"):
             command = task[1:].strip()
             if command:
