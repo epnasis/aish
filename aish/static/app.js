@@ -1490,6 +1490,7 @@ const SLASH_COMMANDS = [
   ["/model", "switch model — opens the searchable picker"],
   ["/resume", "search & resume an earlier session"],
   ["/new", "fresh conversation in a new session"],
+  ["/learn", "save this conversation's learnings as skills/memory"],
   ["/cd", "change working directory (re-anchors approval root)"],
   ["/add-dir", "allow auto-approved work in another tree"],
   ["/jobs", "list background jobs"],
@@ -1675,6 +1676,11 @@ function handleSlash(text) {
     case "/cd": arg ? send({ type: "cd", path: arg }) : openDirSheet(); break;
     case "/add-dir": case "/dir-add":
       arg ? send({ type: "add_dir", path: arg }) : openSheet("workspace-sheet"); break;
+    case "/learn":
+      // Runs as a task: the server swaps the text for the distillation
+      // prompt (cli.parse_learn) while the transcript shows what was typed.
+      if (send({ type: "task", text })) scrollToEndSettled();
+      break;
     case "/jobs": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
     case "/help": openSheet("workspace-sheet"); break;
     case "/quit": case "/exit": showToast("just close the tab — sessions persist"); break;
