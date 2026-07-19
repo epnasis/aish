@@ -70,6 +70,10 @@ def memory_dirs(cwd: str) -> list[Path]:
     return [Path(cwd) / ".aish" / "memory", GLOBAL_MEMORY_DIR]
 
 
+def _slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.casefold()).strip("-")[:48].rstrip("-")
+
+
 def _build_words(*texts: str) -> frozenset:
     return frozenset(
         w.strip(_PUNCT) for text in texts for w in text.casefold().split()
@@ -166,18 +170,30 @@ def _lesson_entries(lessons_path) -> list[Entry]:
     except OSError:
         return []
     lines = [ln.lstrip("- ").strip() for ln in text.splitlines() if ln.strip()]
-    return [
-        Entry(
-            name=f"lesson-{len(lines) - i}",
-            description=line,
-            keywords=[],
-            body=line,
-            kind="memory",
-            mtime=mtime,
-            words=_build_words(line),
+    entries: list[Entry] = []
+    seen: set[str] = set()
+    for i, line in enumerate(reversed(lines)):
+        # Content-derived slug (same recipe as save_memory): stable across
+        # file edits and eligible for exact-name ranking, unlike a position
+        # number. Collisions get a numeric suffix; unsluggable lines fall
+        # back to their position.
+        slug = _slugify(line) or f"lesson-{len(lines) - i}"
+        base, n = slug, 2
+        while slug in seen:
+            slug, n = f"{base}-{n}", n + 1
+        seen.add(slug)
+        entries.append(
+            Entry(
+                name=slug,
+                description=line,
+                keywords=[],
+                body=line,
+                kind="memory",
+                mtime=mtime,
+                words=_build_words(line),
+            )
         )
-        for i, line in enumerate(reversed(lines))
-    ]
+    return entries
 
 
 def load_entries(cwd: str, lessons_path=None) -> list[Entry]:
@@ -376,13 +392,17 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
     text = " ".join(fact.split()).strip()
     if not text:
         return "ERROR: empty fact"
-    slug = name.strip() or re.sub(r"[^a-z0-9]+", "-", text.casefold()).strip("-")[:48]
+    slug = name.strip() or _slugify(text)
     if not NAME_RE.match(slug or ""):
         return f"ERROR: invalid memory name {slug!r}"
     existing = load_entries(cwd, lessons_path) if cwd else []
     for entry in existing:
-        if entry.kind == "memory" and entry.description == text and entry.name != slug:
-            return "(already remembered)"
+        # Same-name file entries are the update path; path-less entries are
+        # legacy lessons, never updatable, so an identical fact is always a
+        # duplicate regardless of what its synthetic name slugged to.
+        if entry.kind == "memory" and entry.description == text:
+            if entry.path is None or entry.name != slug:
+                return "(already remembered)"
     keyword_list = [w.strip() for w in keywords.split(",") if w.strip()]
     directory = Path(memory_dir)
     path = directory / f"{slug}.md"

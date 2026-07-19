@@ -148,8 +148,10 @@ class TestLoadEntriesAndCache:
         kinds = [(e.kind, e.name) for e in entries]
         assert ("skill", "s") in kinds
         assert ("memory", "m") in kinds
-        lesson_descriptions = [e.description for e in entries if e.name.startswith("lesson-")]
-        assert lesson_descriptions == ["old lesson two", "old lesson one"]  # newest first
+        legacy = [e for e in entries if e.kind == "memory" and e.path is None]
+        assert [e.description for e in legacy] == ["old lesson two", "old lesson one"]
+        # names are content slugs (stable, rankable), not position numbers
+        assert [e.name for e in legacy] == ["old-lesson-two", "old-lesson-one"]
 
     def test_mtime_cache_reparses_only_changed_files(self, tmp_path, monkeypatch):
         d = tmp_path / ".aish" / "skills"
