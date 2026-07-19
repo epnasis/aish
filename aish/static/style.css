@@ -395,9 +395,12 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .diff .ctx { color: var(--dim); }
 
 /* ---- scroll-to-bottom arrow ---- */
+/* Horizontally centered (the chat-app convention) so it can never overlap
+   the Stop button, which lives at the right edge of the status line. */
 #scroll-down {
   position: fixed;
-  right: 14px;
+  left: 50%;
+  transform: translateX(-50%);
   bottom: calc(76px + env(safe-area-inset-bottom));
   width: 38px;
   height: 38px;
