@@ -422,25 +422,38 @@ function editingNow() {
   return Boolean(el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable));
 }
 
+// Keyboard-free viewport height, the baseline for keyboard detection.
+// innerHeight cannot be the reference: on current iOS it tracks the *visual*
+// viewport, so with the keyboard settled vv.height === innerHeight (device
+// telemetry: both 543 with the pan at 351) and any vv-vs-innerHeight
+// comparison reads the keyboard as closed. Refreshed whenever no editable is
+// focused and no pan is active, which also tracks rotation and browser-chrome
+// changes.
+let vvFullHeight = window.visualViewport ? visualViewport.height : 0;
+
 function snapViewportHome() {
   if (!window.visualViewport || editingNow()) return;
-  const keyboardClosed = visualViewport.height >= innerHeight - 1;
+  const keyboardClosed = visualViewport.height >= vvFullHeight - 1;
   if (keyboardClosed && (scrollY || visualViewport.offsetTop)) window.scrollTo(0, 0);
 }
 
-// iOS standalone ignores interactive-widget=resizes-content (device telemetry:
-// vv.h=543 while innerHeight stays 894), so the keyboard resize is done by
-// hand: while the keyboard is up, pin the fixed body to the visual viewport's
-// exact box. The composer then sits flush on the keyboard/accessory bar
-// instead of iOS panning a full-height layout with a dead gap (#24). The
-// kb-open class also drops the home-indicator padding — the keyboard covers
-// that inset, and keeping it was most of the visible black strip.
+// iOS standalone ignores interactive-widget=resizes-content, so the keyboard
+// resize is done by hand: while the keyboard is up, pin the fixed body to the
+// visual viewport's exact box. The composer then sits flush on the
+// keyboard/accessory bar and the top bar stays on-screen, instead of iOS
+// panning a full-height layout up past the header with a dead gap below
+// (#24). The kb-open class also drops the home-indicator padding — the
+// keyboard covers that inset, and keeping it was most of the visible black
+// strip.
 function syncKeyboardInset() {
   if (!window.visualViewport) return;
-  const kbOpen = visualViewport.height < innerHeight - 60;
+  if (!editingNow() && !visualViewport.offsetTop) vvFullHeight = visualViewport.height;
+  const kbOpen = editingNow() && visualViewport.height < vvFullHeight - 60;
   document.body.classList.toggle("kb-open", kbOpen);
   if (kbOpen) {
-    document.body.style.top = `${visualViewport.offsetTop}px`;
+    // offsetTop dips negative mid-animation; clamping keeps the header from
+    // being pinned above the very edge it must stay under.
+    document.body.style.top = `${Math.max(visualViewport.offsetTop, 0)}px`;
     document.body.style.height = `${visualViewport.height}px`;
   } else {
     document.body.style.top = "";
