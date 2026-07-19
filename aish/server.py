@@ -52,6 +52,7 @@ from .cli import (
     LogRef,
     _backend_hint,
     available_models,
+    default_workspace,
     identity_context,
     load_config,
     load_context_files,
@@ -1053,7 +1054,11 @@ def create_app(
     cwd: str | None = None,
 ) -> Starlette:
     """The Starlette app; client_chat injects a scripted backend (tests)."""
-    cwd = cwd or os.getcwd()
+    if cwd is None:
+        cwd = default_workspace(os.getcwd())
+        if cwd != os.getcwd():
+            print(f"started from the home directory — working in {cwd} instead "
+                  "to keep personal files out of scope")
     state_dir = Path(
         state_dir
         or os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))

@@ -814,6 +814,22 @@ def handle_slash(
 DEFAULT_LESSONS = Path.home() / ".config" / "aish" / "lessons.md"
 
 
+def default_workspace(cwd: str) -> str:
+    """Never anchor a session at $HOME itself: the session root scopes
+    auto-approved reads/commands, and home puts ~/.ssh, ~/.aws, shell
+    history, etc. inside that scope. Launching from home re-anchors to a
+    dedicated ~/aish workspace (created on first use); any other launch
+    directory is respected as-is."""
+    try:
+        if Path(cwd).resolve() != Path.home().resolve():
+            return cwd
+        workspace = Path.home() / "aish"
+        workspace.mkdir(exist_ok=True)
+        return str(workspace)
+    except OSError:
+        return cwd
+
+
 PROVIDER_LABELS = {
     "gemini": "Google Gemini",
     "openai": "OpenAI",
@@ -1063,7 +1079,10 @@ def main() -> int:
             print(f"{RED}error:{RESET} {exc}", file=sys.stderr)
             return 1
 
-    cwd = os.getcwd()
+    cwd = default_workspace(os.getcwd())
+    if cwd != os.getcwd():
+        print(f"{DIM}started from your home directory — working in {cwd} instead "
+              f"to keep personal files out of scope (/cd moves elsewhere){RESET}")
     state_dir = Path(
         os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
     )

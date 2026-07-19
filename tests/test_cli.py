@@ -961,3 +961,46 @@ class TestModelSave:
         config = tmp_path / "config.toml"
         handle_slash("/model qwen3:8b --save", agent, logref, tmp_path, config_path=config)
         assert not config.exists()
+
+
+class TestDefaultWorkspace:
+    """Launching from $HOME must not make the whole home tree the session
+    root — it re-anchors to ~/aish; every other launch dir is respected."""
+
+    def _fake_home(self, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        return home
+
+    def test_home_launch_reanchors_to_aish_subdir(self, tmp_path, monkeypatch):
+        from aish.cli import default_workspace
+
+        home = self._fake_home(tmp_path, monkeypatch)
+        assert default_workspace(str(home)) == str(home / "aish")
+        assert (home / "aish").is_dir()  # created on first use
+
+    def test_existing_workspace_is_reused(self, tmp_path, monkeypatch):
+        from aish.cli import default_workspace
+
+        home = self._fake_home(tmp_path, monkeypatch)
+        (home / "aish").mkdir()
+        assert default_workspace(str(home)) == str(home / "aish")
+
+    def test_non_home_launch_dir_is_respected(self, tmp_path, monkeypatch):
+        from aish.cli import default_workspace
+
+        self._fake_home(tmp_path, monkeypatch)
+        project = tmp_path / "project"
+        project.mkdir()
+        assert default_workspace(str(project)) == str(project)
+
+    def test_subdir_of_home_is_respected(self, tmp_path, monkeypatch):
+        from aish.cli import default_workspace
+
+        home = self._fake_home(tmp_path, monkeypatch)
+        sub = home / "dev"
+        sub.mkdir()
+        assert default_workspace(str(sub)) == str(sub)

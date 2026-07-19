@@ -128,6 +128,11 @@ collapsed **Sources (n)** row that expands to clickable page titles.
    *and* root — Tab completes directories); `/add-dir <dir>` (alias
    `/dir-add`) allows another tree as well; both are user-only — a model-issued
    `cd` moves only the working directory and never widens the scope.
+   Launching aish (or `aish-web`) **from your home directory** re-anchors the
+   session to `~/aish` (created on first use) instead — otherwise `~/.ssh`,
+   `~/.aws`, shell history, and the rest of your home tree would sit inside
+   the auto-approval scope. Launch from any other directory (or `/cd`
+   afterwards) and that choice is respected as-is.
 2. **Denylist** — unrecoverable classes (`rm -rf`, `shred`, `mkfs`, `dd` to raw
    devices, `diskutil erase*`, `git clean -f`, `git push --force`) are blocked
    outright, even if you'd approve them; edited commands are re-checked. Only
