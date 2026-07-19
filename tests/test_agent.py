@@ -117,7 +117,8 @@ class TestLoop:
         agent, chat = make_agent([endless] * 10, max_steps=3)
         result = agent.run_task("loop forever")
         assert "max-steps" in result
-        assert len(chat.calls) == 3
+        # 3 budgeted turns + 1 no-tools wrap-up turn; its tool calls never run
+        assert len(chat.calls) == 4
 
     def test_unknown_tool_reported_not_crashed(self):
         agent, _ = make_agent(
@@ -1277,3 +1278,76 @@ class TestCancel:
         agent, chat = make_agent([model_says("fresh answer")])
         agent.cancel()  # left over from a previous task
         assert agent.run_task("hello") == "fresh answer"
+
+
+class TestStepLimitAndLoops:
+    """#25: the step limit ends with a self-assessment turn, and running in
+    circles (identical call, identical output) warns then stops early."""
+
+    def _docs(self, monkeypatch, fn):
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(agent_module.tools, "read_docs", fn)
+
+    def test_step_limit_runs_wrapup_turn(self):
+        endless = model_says(tool_calls=[tool_call("read_docs", command="ls")])
+        agent, chat = make_agent(
+            [endless, endless, model_says("half done; X remains")], max_steps=2
+        )
+        result = agent.run_task("big task")
+        assert "max-steps" in result and "half done; X remains" in result
+        assert len(chat.calls) == 3  # 2 budgeted turns + 1 wrap-up
+        wrapup_prompt = [
+            m for m in chat.calls[2]["messages"]
+            if m["role"] == "user" and "step limit" in m["content"]
+        ]
+        assert wrapup_prompt
+
+    def test_wrapup_tool_calls_are_never_executed(self, monkeypatch):
+        from aish.agent import NOT_EXECUTED_LIMIT
+
+        executed = []
+        self._docs(monkeypatch, lambda c, topic=None: (executed.append(c), "docs")[1])
+        endless = model_says(tool_calls=[tool_call("read_docs", command="ls")])
+        agent, chat = make_agent([endless, endless], max_steps=1)
+        result = agent.run_task("task")
+        assert result.startswith("(stopped")
+        assert executed == ["ls"]  # only the in-budget call ran
+        assert tool_messages(agent.messages)[-1]["content"] == NOT_EXECUTED_LIMIT
+
+    def test_loop_warning_injected_after_three_identical_results(self, monkeypatch):
+        self._docs(monkeypatch, lambda c, topic=None: "same docs")
+        same = model_says(tool_calls=[tool_call("read_docs", command="ls")])
+        agent, _ = make_agent(
+            [same, same, same, model_says("changing approach")], max_steps=10
+        )
+        assert agent.run_task("loop") == "changing approach"
+        warnings = [
+            m for m in agent.messages
+            if m.get("role") == "user" and "identical output" in (m.get("content") or "")
+        ]
+        assert len(warnings) == 1  # warned exactly once, at the third repeat
+
+    def test_loop_stops_after_five_identical_results(self, monkeypatch):
+        self._docs(monkeypatch, lambda c, topic=None: "same docs")
+        same = model_says(tool_calls=[tool_call("read_docs", command="ls")])
+        agent, chat = make_agent(
+            [same] * 5 + [model_says("stuck because the flag is unsupported")],
+            max_steps=25,
+        )
+        result = agent.run_task("loop")
+        assert "no progress" in result and "stuck because" in result
+        assert len(chat.calls) == 6  # stopped at 5 repeats, then the diagnostic turn
+
+    def test_changing_output_never_trips_loop_detection(self, monkeypatch):
+        ticks = iter(range(100))
+        self._docs(monkeypatch, lambda c, topic=None: f"tick {next(ticks)}")
+        poll = model_says(tool_calls=[tool_call("read_docs", command="ls")])
+        agent, _ = make_agent([poll] * 6 + [model_says("done polling")], max_steps=25)
+        assert agent.run_task("poll") == "done polling"
+
+    def test_model_failure_in_wrapup_falls_back_to_headline(self):
+        endless = model_says(tool_calls=[tool_call("read_docs", command="ls")])
+        agent, chat = make_agent([endless], max_steps=1)  # wrap-up pops empty list
+        result = agent.run_task("task")
+        assert result.startswith("(stopped: hit the max-steps limit")

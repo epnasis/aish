@@ -191,6 +191,16 @@ their newlines.
   optional `name:`/`description:` frontmatter. Ask aish to write one — it
   knows the format.
 
+**Step limit & loop detection** — a task gets `max_steps` model turns
+(default 25). At the limit the model gets one final no-tools turn to judge
+the state and answer: the finished answer if the task is actually done,
+otherwise what was accomplished, what remains, and the next step — say
+"continue" to resume where it stopped. Independently, issuing the *exact
+same* tool call and getting the *exact same* output is treated as running
+in circles: three repeats inject a change-your-approach nudge, five stop
+the task with a diagnostic summary instead of burning the rest of the
+budget (polling a growing log never trips this — its output changes).
+
 **Config** — `~/.config/aish/config.toml`: `model`, `num_ctx`, `max_steps`,
 `vi_mode` (vi editing at the prompt; or `--vi`/`--no-vi`). CLI flags override
 config; `$AISH_MODEL` overrides the model. `/model <name> --save` writes the

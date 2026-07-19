@@ -96,6 +96,43 @@ class TaskCancelled(Exception):
 CANCELLED_RESULT = "(task stopped by user — any partial work is above)"
 NOT_EXECUTED = "(not executed — the user stopped the task)"
 
+# Loop detection: the exact same tool call returning the exact same output is
+# not progress. At WARN repeats the model gets one nudge to change approach;
+# at STOP repeats the task ends with a diagnostic wrap-up instead of burning
+# the remaining step budget. Legitimate polling (tail on a growing log,
+# job-status checks) has changing output, so it never trips this.
+LOOP_WARN_REPEATS = 3
+LOOP_STOP_REPEATS = 5
+
+LOOP_WARNING = (
+    "[aish: you have issued this exact tool call {count} times and received "
+    "identical output every time — repeating it cannot make progress. Change "
+    "your approach; if you have no other approach, stop and explain what is "
+    "blocking you.]"
+)
+
+STEP_LIMIT_NOTE = (
+    "[aish: you have reached the step limit for this task, so no more tool "
+    "calls are possible. Assess your work and reply with TEXT ONLY: if the "
+    "task is complete, give the final answer now. Otherwise state clearly "
+    "(1) what was accomplished, (2) what remains, and (3) the next concrete "
+    "step — the user can ask you to continue.]"
+)
+
+LOOP_STOP_NOTE = (
+    "[aish: stopping this task — the same tool call kept returning identical "
+    "output even after a warning, so you are running in circles. Reply with "
+    "TEXT ONLY: summarize what you tried, what failed and why you appear "
+    "stuck, and what would be needed to make progress.]"
+)
+
+STOPPED_LIMIT = (
+    "(stopped: hit the max-steps limit — say 'continue' to keep going, or "
+    "raise --max-steps)"
+)
+STOPPED_LOOP = "(stopped: repeating the same tool call with no progress)"
+NOT_EXECUTED_LIMIT = "(not executed — the step limit was reached)"
+
 
 WRITE_DENIED = (
     "USER DENIED this file change — nothing was written. "
@@ -281,6 +318,7 @@ class Agent:
         self.task_sources = []
         task_started = time.perf_counter()
         tokens_in = tokens_out = 0
+        repeats: dict[tuple, int] = {}  # (tool, args, result) -> occurrences
         for _ in range(self.max_steps):
             if self._cancel.is_set():
                 return self._finish_cancelled()
@@ -338,16 +376,72 @@ class Agent:
                 return self._finish_cancelled()
 
             results = self._execute_tool_calls(tool_calls)
+            warn = stuck = False
             for call, result in zip(tool_calls, results, strict=True):
                 self._append(
                     {"role": "tool", "tool_name": call["function"]["name"], "content": result}
                 )
                 self._collect_source(call, result)
+                key = self._call_key(call, result)
+                repeats[key] = count = repeats.get(key, 0) + 1
+                if count >= LOOP_STOP_REPEATS:
+                    stuck = True
+                elif count == LOOP_WARN_REPEATS:
+                    warn = True  # injected below: never between a turn's results
+            if stuck:
+                self.echo("✕ loop detected: identical call, identical output — stopping")
+                return self._finish_stopped(LOOP_STOP_NOTE, STOPPED_LOOP)
+            if warn:
+                self.echo("⚠ repeated identical tool call — nudging the model to change approach")
+                self._append(
+                    {"role": "user", "content": LOOP_WARNING.format(count=LOOP_WARN_REPEATS)}
+                )
 
-        stopped = "(stopped: hit the max-steps limit without finishing — try a narrower task)"
-        if self.on_token:
-            self.on_token(stopped + "\n")
-        return stopped
+        self.echo("⚠ step limit reached — asking the model to wrap up")
+        return self._finish_stopped(STEP_LIMIT_NOTE, STOPPED_LIMIT)
+
+    @staticmethod
+    def _call_key(call: dict, result: str) -> tuple:
+        """Identity of a tool call AND its outcome — repr(args) because
+        argument values may be unhashable."""
+        function = call["function"]
+        arguments = repr(sorted((function.get("arguments") or {}).items()))
+        return (function["name"], arguments, result)
+
+    def _finish_stopped(self, note: str, headline: str) -> str:
+        """Step budget exhausted or loop detected: one final no-tools turn so
+        the model can judge completion and report state (what's done, what
+        remains, why it's stuck) instead of the task cutting off with a bare
+        error line. The step budget is never silently exceeded — continuing
+        is the user's call."""
+        self._append({"role": "user", "content": note})
+        self.status.start("wrapping up")
+        try:
+            content, tool_calls, _usage, raw_blocks = self._chat_turn()
+        except TaskCancelled:
+            return self._finish_cancelled()
+        except ModelUnavailable:
+            content, tool_calls, raw_blocks = "", [], None
+        finally:
+            self.status.stop()
+        if content or tool_calls:
+            entry: dict = {"role": "assistant", "content": content}
+            if tool_calls:
+                entry["tool_calls"] = tool_calls
+            if raw_blocks:
+                entry["raw_blocks"] = raw_blocks
+            self._append(entry)
+            for call in tool_calls:  # every tool_use still needs a paired result
+                self._append(
+                    {
+                        "role": "tool",
+                        "tool_name": call["function"]["name"],
+                        "content": NOT_EXECUTED_LIMIT,
+                    }
+                )
+        if not content and self.on_token:
+            self.on_token(headline + "\n")
+        return f"{headline}\n\n{content}" if content else headline
 
     def _finish_cancelled(self) -> str:
         """History stays model-consumable: an assistant note closes the turn."""
