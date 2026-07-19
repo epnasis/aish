@@ -18,10 +18,20 @@
 <body>
 
 <header id="topbar">
+  <button id="history-chip" class="bar-btn icon" title="session history" aria-label="session history">
+    <svg viewBox="0 0 24 24"><path d="M4.6 5.2v4.2h4.2M4.8 9.4a7.8 7.8 0 1 1-.6 3.4M12 8.2v4.1l2.9 1.7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
   <button id="model-chip" class="bar-btn tinted" title="switch model">…</button>
   <div id="bar-center">
-    <button id="session-chip" class="bar-title" title="sessions">aish</button>
-    <button id="cwd-chip" title="change directory" hidden></button>
+    <button id="session-chip" class="bar-title" title="sessions">
+      <span id="session-title">aish</span>
+      <svg class="caret" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button id="cwd-chip" title="change directory">
+      <svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+      <span id="cwd-text">…</span>
+      <svg class="caret" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
   </div>
   <button id="wrap-chip" class="bar-btn icon" title="toggle line wrap" aria-label="toggle line wrap">
     <svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h12a3.25 3.25 0 0 1 0 6.5h-2.5m0 0 2.2-2.2m-2.2 2.2 2.2 2.2M4 18.5h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -35,6 +45,12 @@
 </header>
 
 <main id="messages"></main>
+
+<button id="empty-hint" hidden>
+  swipe sideways or tap
+  <svg viewBox="0 0 24 24"><path d="M4.6 5.2v4.2h4.2M4.8 9.4a7.8 7.8 0 1 1-.6 3.4M12 8.2v4.1l2.9 1.7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  for earlier chats
+</button>
 
 <div id="swipe-hint" hidden>
   <svg class="chev-left" viewBox="0 0 24 24"><path d="M14.5 6 9 12l5.5 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -97,7 +113,7 @@
   <div class="ws-section">
     <div class="ws-label">Working directory <span class="ws-note">(re-anchors auto-approval root)</span></div>
     <div id="ws-cwd" class="mono"></div>
-    <div class="ws-row"><input id="cd-input" placeholder="/path/to/project"><button id="cd-go">Go</button></div>
+    <div class="ws-row"><button id="ws-cd-change">Change…</button></div>
   </div>
   <div class="ws-section">
     <div class="ws-label">Session roots <span class="ws-note">(auto-approval allowed in these trees)</span></div>
