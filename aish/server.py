@@ -889,10 +889,9 @@ class WebServer:
                 "sessions": [
                     {
                         "name": info.path.name,
-                        "when": info.when,
-                        "count": info.count,
-                        "model": info.model,
                         "title": info.title,
+                        "snippet": info.snippet,
+                        "ts": info.mtime,
                         "state": open_states.get(info.path.name, ""),
                     }
                     for info in infos

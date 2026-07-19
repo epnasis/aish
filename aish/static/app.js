@@ -2154,25 +2154,57 @@ $("sessions-search").addEventListener(
 function openSessionsSheet(query) {
   openSheet("sessions-sheet");
   $("sessions-search").value = query;
-  // Focus only after the sheet's layout settles: focusing synchronously lets
-  // iOS measure the input at its pre-layout position and pan the whole
-  // layout absurdly far to "reveal" it — the sheet then opens scrolled away
-  // and stuck until the keyboard closes (#24). preventScroll stops the
-  // browser's own reveal-scroll; the input is already visible.
-  requestAnimationFrame(() =>
-    requestAnimationFrame(() => {
-      $("sessions-search").focus({ preventScroll: true });
-      setTimeout(() => reportViewport("search-focused"), 600);
-    })
-  );
+  // Auto-focus only where a hardware keyboard is likely: on touch devices
+  // focusing would throw the on-screen keyboard over the list before the
+  // user has even seen it — there, browsing is the common case and a tap
+  // on the field opts into searching.
+  if (FINE_POINTER) {
+    // Focus only after the sheet's layout settles: focusing synchronously lets
+    // iOS measure the input at its pre-layout position and pan the whole
+    // layout absurdly far to "reveal" it — the sheet then opens scrolled away
+    // and stuck until the keyboard closes (#24). preventScroll stops the
+    // browser's own reveal-scroll; the input is already visible.
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        $("sessions-search").focus({ preventScroll: true });
+        setTimeout(() => reportViewport("search-focused"), 600);
+      })
+    );
+  }
   send({ type: "sessions", query });
 }
 
+// Only the states the user can act on. "idle but open in server memory" is
+// an implementation detail — resume behaves identically either way.
 const STATE_BADGES = {
   running: ["● running", "st-running"],
   waiting: ["● needs approval", "st-waiting"],
-  idle: ["○ open", "st-open"],
 };
+
+const DAY_MS = 86400000;
+function dayStart(stamp) {
+  const day = new Date(stamp);
+  day.setHours(0, 0, 0, 0);
+  return +day;
+}
+
+function sessionGroup(ts) {
+  const today = dayStart(Date.now());
+  const day = dayStart(ts * 1000);
+  if (day >= today) return "Today";
+  if (day >= today - DAY_MS) return "Yesterday";
+  if (day >= today - 7 * DAY_MS) return "Previous 7 days";
+  return "Older";
+}
+
+function sessionStamp(ts) {
+  const date = new Date(ts * 1000);
+  const today = dayStart(Date.now());
+  const day = dayStart(date);
+  if (day >= today) return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (day >= today - 6 * DAY_MS) return date.toLocaleDateString([], { weekday: "short" });
+  return date.toLocaleDateString([], { day: "numeric", month: "short" });
+}
 
 function renderSessions(event) {
   const list = $("sessions-list");
@@ -2183,24 +2215,45 @@ function renderSessions(event) {
   }
   // Server order kept as-is: recency (same list the swipe pager pages
   // through, newest at top — swiping back = moving down this list), or
-  // ranked when searching. The session being viewed carries the "current"
-  // mark ("you are here"); badges mark open-session state on the rest.
+  // ranked when searching. Day headers only while browsing: search results
+  // are ordered by relevance, so grouping them by date would lie.
+  const grouped = !$("sessions-search").value.trim();
+  let lastGroup = null;
   for (const info of event.sessions) {
+    if (grouped) {
+      const group = sessionGroup(info.ts);
+      if (group !== lastGroup) {
+        list.appendChild(sectionLabel(group));
+        lastGroup = group;
+      }
+    }
     const row = document.createElement("button");
     const isCurrent = info.name === event.current;
-    row.className = "row" + (isCurrent ? " current" : "");
-    const badgeSpec = isCurrent ? ["● current", "st-current"] : STATE_BADGES[info.state];
+    row.className = "row session-row" + (isCurrent ? " current" : "");
+    const head = document.createElement("span");
+    head.className = "line";
+    const title = document.createElement("span");
+    title.className = "title";
+    title.textContent = info.title;
+    head.appendChild(title);
+    const badgeSpec = STATE_BADGES[info.state];
     if (badgeSpec) {
       const badge = document.createElement("span");
       badge.className = `badge ${badgeSpec[1]}`;
       badge.textContent = badgeSpec[0];
-      row.appendChild(badge);
+      head.appendChild(badge);
     }
-    row.appendChild(document.createTextNode(info.title));
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    meta.textContent = `${info.when} · ${info.count} msgs${info.model ? " · " + info.model : ""}`;
-    row.appendChild(meta);
+    const stamp = document.createElement("span");
+    stamp.className = "stamp";
+    stamp.textContent = sessionStamp(info.ts);
+    head.appendChild(stamp);
+    row.appendChild(head);
+    if (info.snippet) {
+      const snippet = document.createElement("span");
+      snippet.className = "snippet";
+      snippet.textContent = info.snippet;
+      row.appendChild(snippet);
+    }
     row.onclick = () => { send({ type: "resume", path: info.name }); closeSheets(); };
     list.appendChild(row);
   }

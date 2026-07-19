@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TextIO
 
 TITLE_MAX = 60
+SNIPPET_MAX = 90  # preview line under the title in the web sessions drawer
 FUZZY_THRESHOLD = 0.55  # whole query vs whole title
 FUZZY_WORD_CUTOFF = 0.75  # single query word vs single session word
 _PUNCT = ".,;:!?()[]{}<>'\"`"
@@ -34,6 +35,8 @@ class SessionInfo:
     count: int
     title: str
     model: str = ""  # last model used; "" for sessions logged before model records
+    snippet: str = ""  # last visible message — the drawer's preview line
+    mtime: float = 0.0  # last interaction (epoch seconds), the recency sort key
 
 
 @dataclass
@@ -109,6 +112,27 @@ class SessionLog:
         return "(no user input)"
 
     @staticmethod
+    def _derive_snippet(messages: list[dict]) -> str:
+        """Preview line: the last user or assistant message with visible text.
+        Tool records and empty tool-calling turns say nothing about where the
+        conversation left off, so they are skipped."""
+        for message in reversed(messages):
+            if message.get("role") not in ("user", "assistant"):
+                continue
+            content = " ".join((message.get("content") or "").split())
+            if not content:
+                continue
+            bang = _BANG_RE.match(content)
+            if bang:
+                content = f"! {bang.group(1)}"
+            elif message.get("role") == "user":
+                content = f"You: {content}"
+            if len(content) > SNIPPET_MAX:
+                content = content[: SNIPPET_MAX - 1] + "…"
+            return content
+        return ""
+
+    @staticmethod
     def _peek_title(path: Path) -> str | None:
         """First user message without parsing the whole log — the pager needs
         only a label per session. None = no user input yet (empty chat)."""
@@ -173,7 +197,19 @@ class SessionLog:
         if len(title) > TITLE_MAX:
             title = title[: TITLE_MAX - 1] + "…"
         when = SessionLog._started_at(path).strftime("%Y-%m-%d %H:%M")
-        return SessionInfo(path=path, when=when, count=len(messages), title=title, model=model)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        return SessionInfo(
+            path=path,
+            when=when,
+            count=len(messages),
+            title=title,
+            model=model,
+            snippet=SessionLog._derive_snippet(messages),
+            mtime=mtime,
+        )
 
     @staticmethod
     def info(path: Path) -> SessionInfo | None:

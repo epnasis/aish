@@ -293,8 +293,8 @@ chip-fed or typed — the chips disappear.
 **Parallel sessions**: several sessions can be open at once, each with its
 own agent, model, working directory, and running task. Start a task, hit the
 compose button, work on something else — the first task keeps running and
-the sessions drawer shows live badges (running / needs approval) and marks
-the chat you're looking at as ● current; a toast
+the sessions drawer shows live badges (running / needs approval) and
+highlights the chat you're looking at; a toast
 tells you when a background task finishes. Up to 6 sessions stay open in
 memory (idle ones beyond that are closed; their files persist and reopen
 on demand). **Swipe the transcript sideways** — a finger on the phone, a
@@ -323,8 +323,9 @@ aish-web --model gemini       # same --model forms as aish
 
 Header controls replace the slash commands (except `/learn`, which works by
 typing it as a message): the **history button** (top
-left, the standard chat-app spot) opens the sessions drawer (search +
-resume) — the **session title with its ˅ caret** opens the same drawer, and
+left, the standard chat-app spot) opens the sessions drawer — recent chats
+grouped by day, each with a preview of its last message, plus search —
+the **session title with its ˅ caret** opens the same drawer, and
 a fresh empty chat shows a one-line hint pointing at both it and the swipe
 pager; the **model chip** opens a searchable model picker (with a "make
 startup default" toggle); the **folder breadcrumb** under the title shows

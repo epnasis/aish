@@ -120,6 +120,35 @@ def test_info_date_includes_year(tmp_path):
     assert info.when == "2026-01-01 12:34"
 
 
+def test_snippet_is_last_visible_message(tmp_path):
+    make_session(
+        tmp_path,
+        "session-20260101-000000-000000.jsonl",
+        ("user", "fix the build"),
+        ("assistant", "Done — the build passes now."),
+    )
+    info = SessionLog.info(tmp_path / "session-20260101-000000-000000.jsonl")
+    assert info.snippet == "Done — the build passes now."
+    assert info.mtime > 0
+
+
+def test_snippet_prefixes_user_and_skips_tool_and_empty(tmp_path):
+    log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+    log.message({"role": "user", "content": "run the tests"})
+    log.message({"role": "assistant", "content": ""})  # tool-calling turn
+    log.message({"role": "tool", "tool_name": "run_command", "content": "3 passed"})
+    info = SessionLog.info(log.path)
+    assert info.snippet == "You: run the tests"
+
+
+def test_snippet_truncated(tmp_path):
+    make_session(
+        tmp_path, "session-20260101-000000-000000.jsonl", ("assistant", "word " * 60)
+    )
+    info = SessionLog.info(tmp_path / "session-20260101-000000-000000.jsonl")
+    assert len(info.snippet) <= 90 and info.snippet.endswith("…")
+
+
 def test_search_ranks_exact_title_over_phrase_over_content(tmp_path):
     content_hit = make_session(
         tmp_path,

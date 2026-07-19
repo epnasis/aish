@@ -627,7 +627,11 @@ class TestSessions:
             ws.send_json({"type": "sessions", "query": ""})
             listing = recv_until(ws, "session_list")
             assert listing["current"] == session_a
-            assert [s["name"] for s in listing["sessions"]][0] == session_a
+            row = listing["sessions"][0]
+            assert row["name"] == session_a
+            # The drawer's preview line and day-grouping timestamp.
+            assert row["snippet"] == "alpha done"
+            assert row["ts"] > 0
 
             # A brand-new chat is current but has no messages yet, so it is
             # not listed — nothing carries the current mark.
