@@ -140,6 +140,12 @@ let answerText = "";
 let sawAnswer = false; // any tokens streamed since the task started —
 // echo lines close the answer block, so this (not answerText) decides
 // whether done.result still needs rendering
+// Streaming renders incrementally: blocks above the last committed blank
+// line are stable DOM that is never rebuilt (so an embedded image decodes
+// once, not once per token), and renders are coalesced to one per frame.
+let answerStableLen = 0; // chars of answerText already in stable DOM
+let answerStableNodes = 0; // answerEl children that are stable
+let answerRenderQueued = false;
 const cards = new Map(); // approval id -> card element
 
 function handle(event) {
@@ -248,6 +254,8 @@ function onReplay(event) {
   pendingCards = 0;
   answerEl = null;
   answerText = "";
+  answerStableLen = 0;
+  answerStableNodes = 0;
   sawAnswer = false;
   if (event.truncated) addMsg("notice", "… earlier events trimmed …");
   replaying = true; // replayed history must not re-fire notifications
@@ -269,16 +277,65 @@ function onToken(text) {
   if (!answerEl) {
     answerEl = addMsg("answer md", "");
     answerText = "";
+    answerStableLen = 0;
+    answerStableNodes = 0;
   }
   answerText += text;
-  answerEl.replaceChildren(renderMarkdown(answerText));
+  if (!answerRenderQueued) {
+    answerRenderQueued = true;
+    requestAnimationFrame(renderAnswerFrame);
+  }
+}
+
+function renderAnswerFrame() {
+  answerRenderQueued = false;
+  if (!answerEl) return; // answer already closed (and flushed) this frame
+  renderAnswerNow();
   scrollToEnd();
+}
+
+function renderAnswerNow() {
+  const boundary = stableBoundary(answerText);
+  while (answerEl.childNodes.length > answerStableNodes) answerEl.lastChild.remove();
+  if (boundary > answerStableLen) {
+    answerEl.appendChild(renderMarkdown(answerText.slice(answerStableLen, boundary)));
+    answerStableLen = boundary;
+    answerStableNodes = answerEl.childNodes.length;
+  }
+  answerEl.appendChild(renderMarkdown(answerText.slice(answerStableLen)));
+}
+
+// Offset where the stable prefix ends: just past the last blank line that is
+// outside a code fence and already followed by another line (a trailing
+// blank may still grow into a paragraph continuation). Blocks never span a
+// blank line except fenced code, so splitting here renders identically to a
+// full parse.
+function stableBoundary(text) {
+  const lines = text.split("\n");
+  let boundary = 0;
+  let pos = 0;
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (inFence) {
+      if (/^```\s*$/.test(line)) inFence = false;
+    } else if (/^```(\w*)\s*$/.test(line)) {
+      inFence = true;
+    } else if (line.trim() === "" && i < lines.length - 1) {
+      boundary = pos + line.length + 1;
+    }
+    pos += line.length + 1;
+  }
+  return boundary;
 }
 
 function closeAnswer() {
   // A finished answer (streaming ends, or something else interrupts the
   // block) gets its copy/read-aloud row; mid-stream re-renders would clobber it.
-  if (answerEl && answerText.trim()) attachAnswerTools(answerEl, answerText);
+  if (answerEl) {
+    renderAnswerNow(); // flush any tokens still waiting on the next frame
+    if (answerText.trim()) attachAnswerTools(answerEl, answerText);
+  }
   answerEl = null;
   answerText = "";
 }
