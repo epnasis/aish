@@ -101,7 +101,13 @@ reads) run **in parallel**. Fetched web pages are wrapped in an
 `read_url` refuses non-public targets — loopback, LAN (RFC1918), link-local /
 cloud-metadata addresses — on the initial URL and again on every redirect
 (SSRF guard). To read a local service, ask for `curl`, which goes through
-the normal approval prompt. Answers cite what was read: after a task that
+the normal approval prompt. When a site blocks the plain fetcher (HTTP
+403/429/503) or serves a JavaScript-only shell, the error suggests the model
+retry once via [Jina Reader](https://jina.ai/reader) (`https://r.jina.ai/<url>`),
+which renders the page server-side and returns markdown. The retry is a
+separate, echoed `read_url` call — the URL visibly goes to a third party,
+never as a hidden fallback — and the hint warns against using it for URLs
+carrying secrets. Answers cite what was read: after a task that
 fetched pages, the CLI prints a dim `Sources:` list and the web UI shows a
 collapsed **Sources (n)** row that expands to clickable page titles.
 

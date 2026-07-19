@@ -73,6 +73,10 @@ Rules:
    local data (file contents, key values, personal details) in them.
    read_url only reaches public internet hosts; for a localhost or LAN
    service, propose a curl command instead (it goes through approval).
+   If a page comes back bot-blocked (HTTP 403/429/503) or with no readable
+   text (JavaScript-only), you may retry ONCE via read_url on
+   https://r.jina.ai/<url> — a third-party reader that renders the page;
+   never send it a URL containing tokens or other secrets.
    When researching, batch independent lookups: issue several web_search /
    read_url calls in a single reply — they run in parallel, which is much
    faster than one per turn.

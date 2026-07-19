@@ -30,6 +30,26 @@ PAGE_TRUNCATION_HINT = (
     "to search the full page text]"
 )
 
+# Sites behind bot protection (Cloudflare etc.) 403/429/503 a plain urllib
+# fetch, and JS-only SPAs return an empty shell. Jina Reader fetches and
+# renders the page server-side and returns markdown. Deliberately a hint to
+# the model, not an automatic retry: the fallback sends the URL to a third
+# party, so it must be a separate read_url call the user sees echoed — never
+# a hidden hop inside this one.
+JINA_READER_PREFIX = "https://r.jina.ai/"
+_JINA_BLOCK_CODES = (403, 429, 503)
+
+
+def _jina_hint(url: str) -> str:
+    if url.startswith(JINA_READER_PREFIX):
+        return ""  # the fallback itself failed; don't suggest it again
+    return (
+        f" — the site may block simple fetchers or need JavaScript; you may "
+        f"retry ONCE via read_url on {JINA_READER_PREFIX}{url} (Jina Reader, "
+        "a third-party service that fetches the page for you — never use it "
+        "for URLs containing tokens, session ids, or other secrets)"
+    )
+
 # Fetched pages are attacker-controllable; flag them so the model treats the
 # body as data, not as instructions (indirect prompt-injection defense).
 UNTRUSTED_NOTE = (
@@ -151,7 +171,8 @@ def read_url(url: str, topic: str | None = None) -> str:
             "through user approval)."
         )
     except urllib.error.HTTPError as exc:
-        return f"ERROR: {url} returned HTTP {exc.code} {exc.reason}"
+        hint = _jina_hint(url) if exc.code in _JINA_BLOCK_CODES else ""
+        return f"ERROR: {url} returned HTTP {exc.code} {exc.reason}{hint}"
     except Exception as exc:  # noqa: BLE001 — DNS, TLS, timeouts: report, don't crash
         return f"ERROR: could not fetch {url}: {exc}"
 
@@ -164,7 +185,7 @@ def read_url(url: str, topic: str | None = None) -> str:
     elif not (content_type.startswith("text/") or content_type.endswith(("json", "xml"))):
         return f"ERROR: {url} is {content_type}, not a text page — cannot read it"
     if not text.strip():
-        return f"ERROR: {url} returned no readable text"
+        return f"ERROR: {url} returned no readable text{_jina_hint(url)}"
 
     if topic:
         matched = _filter_topic(text, topic)

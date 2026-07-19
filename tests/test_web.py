@@ -5,6 +5,7 @@ no network. One opt-in live test (AISH_LIVE_WEB=1) exercises the real backend.
 import os
 import sys
 import types
+import urllib.error
 
 import pytest
 
@@ -170,6 +171,44 @@ class TestReadUrl:
     def test_empty_page_reported(self, monkeypatch):
         monkeypatch.setattr(web, "_fetch", lambda url: ("<html></html>", "text/html"))
         assert web.read_url("https://example.com/blank").startswith("ERROR")
+
+
+def http_error_fetch(code, reason):
+    def raiser(url):
+        raise urllib.error.HTTPError(url, code, reason, None, None)
+
+    return raiser
+
+
+class TestJinaFallbackHint:
+    def test_bot_block_codes_suggest_jina(self, monkeypatch):
+        for code, reason in ((403, "Forbidden"), (429, "Too Many Requests"), (503, "Unavailable")):
+            monkeypatch.setattr(web, "_fetch", http_error_fetch(code, reason))
+            result = web.read_url("https://shop.example.com/price")
+            assert result.startswith("ERROR"), result
+            assert f"HTTP {code}" in result
+            assert "https://r.jina.ai/https://shop.example.com/price" in result
+            assert "secrets" in result  # the hint must carry the privacy warning
+
+    def test_other_http_errors_get_no_hint(self, monkeypatch):
+        for code, reason in ((404, "Not Found"), (500, "Server Error")):
+            monkeypatch.setattr(web, "_fetch", http_error_fetch(code, reason))
+            result = web.read_url("https://example.com/gone")
+            assert result.startswith("ERROR")
+            assert "r.jina.ai" not in result
+
+    def test_empty_page_suggests_jina(self, monkeypatch):
+        monkeypatch.setattr(web, "_fetch", lambda url: ("<html></html>", "text/html"))
+        result = web.read_url("https://spa.example.com/app")
+        assert result.startswith("ERROR")
+        assert "https://r.jina.ai/https://spa.example.com/app" in result
+
+    def test_failed_jina_url_not_suggested_again(self, monkeypatch):
+        url = "https://r.jina.ai/https://shop.example.com/price"
+        monkeypatch.setattr(web, "_fetch", http_error_fetch(403, "Forbidden"))
+        assert "r.jina.ai/https://r.jina.ai" not in web.read_url(url)
+        monkeypatch.setattr(web, "_fetch", lambda u: ("", "text/plain"))
+        assert "r.jina.ai/https://r.jina.ai" not in web.read_url(url)
 
 
 def fake_resolver(*addresses):
