@@ -188,6 +188,7 @@ function handle(event) {
     case "job_list": $("ws-jobs").textContent = event.text || "—"; break;
     case "file_list": onFileList(event); break;
     case "session_state": onSessionState(event); break;
+    case "session_deleted": showToast("session deleted"); break;
   }
 }
 
@@ -1617,6 +1618,7 @@ function recallHistory(key) {
 const SLASH_COMMANDS = [
   ["/model", "switch model — opens the searchable picker"],
   ["/resume", "search & resume an earlier session"],
+  ["/delete", "delete an earlier session (trash icon in the drawer)"],
   ["/new", "fresh conversation in a new session"],
   ["/learn", "save this conversation's learnings as skills/memory"],
   ["/cd", "change working directory (re-anchors approval root)"],
@@ -1799,7 +1801,7 @@ function handleSlash(text) {
   }
   switch (command) {
     case "/model": openModelSheet(arg); break;
-    case "/resume": openSessionsSheet(arg); break;
+    case "/resume": case "/delete": openSessionsSheet(arg); break;
     case "/new": case "/clear": send({ type: "new" }); break;
     case "/cd": arg ? send({ type: "cd", path: arg }) : openDirSheet(); break;
     case "/add-dir": case "/dir-add":
@@ -2377,6 +2379,7 @@ function renderSessions(event) {
     stamp.className = "stamp";
     stamp.textContent = sessionStamp(info.ts);
     head.appendChild(stamp);
+    head.appendChild(sessionDeleteControl(info));
     row.appendChild(head);
     if (info.snippet) {
       const snippet = document.createElement("span");
@@ -2387,6 +2390,44 @@ function renderSessions(event) {
     row.onclick = () => { send({ type: "resume", path: info.name }); closeSheets(); };
     list.appendChild(row);
   }
+}
+
+const TRASH_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+  'stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 7V5a1 1 0 0 1 ' +
+  '1-1h2a1 1 0 0 1 1 1v2m-8 0l1 13h8l1-13M10 11v6m4-6v6"/></svg>';
+
+function sessionDeleteControl(info) {
+  // A span, not a nested <button> (the row itself is one). Deleting is
+  // destructive and unrecoverable, so it takes two taps: the first arms the
+  // control (turns into a red "Delete?"), the second sends the delete; it
+  // disarms on timeout so a stray tap can't linger. The server refuses
+  // running sessions and lands the client on a fresh chat when the current
+  // one is deleted — no client-side special cases needed.
+  const del = document.createElement("span");
+  del.className = "row-delete";
+  del.setAttribute("role", "button");
+  del.setAttribute("aria-label", `delete session ${info.title || info.name}`);
+  del.innerHTML = TRASH_SVG;
+  let armed = false;
+  let timer = null;
+  del.onclick = (event) => {
+    event.stopPropagation();
+    if (armed) {
+      clearTimeout(timer);
+      send({ type: "delete_session", name: info.name });
+      return;
+    }
+    armed = true;
+    del.classList.add("armed");
+    del.textContent = "Delete?";
+    timer = setTimeout(() => {
+      armed = false;
+      del.classList.remove("armed");
+      del.innerHTML = TRASH_SVG;
+    }, 4000);
+  };
+  return del;
 }
 
 // models

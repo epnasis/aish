@@ -893,6 +893,89 @@ class TestSessions:
             assert error["type"] == "error"
             assert "no such session" in error["text"]
 
+    def test_delete_background_session_removes_file_and_list_entry(self, app_env):
+        client, _ = make_client(app_env, [model_says("noted")])
+        with client, connected(client) as (ws, hello, _):
+            first = hello["session"]
+            ws.send_json({"type": "task", "text": "remember the zebra"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "new"})
+            recv_until(ws, "hello")
+
+            ws.send_json({"type": "delete_session", "name": first})
+            recv_until(ws, "session_deleted")
+            listing = recv_until(ws, "session_list")
+            assert first not in [s["name"] for s in listing["sessions"]]
+            assert not (app_env["state_dir"] / first).exists()
+
+    def test_delete_active_session_lands_on_new_chat(self, app_env):
+        client, _ = make_client(app_env, [model_says("noted")])
+        with client, connected(client) as (ws, hello, _):
+            first = hello["session"]
+            ws.send_json({"type": "task", "text": "remember the zebra"})
+            recv_until(ws, "done")
+            assert (app_env["state_dir"] / first).is_file()
+
+            ws.send_json({"type": "delete_session", "name": first})
+            # Client is moved to a fresh chat BEFORE the delete happens.
+            fresh = recv_until(ws, "hello")
+            assert fresh["session"] != first
+            cleared = recv_until(ws, "replay")
+            assert cleared["events"] == []
+            recv_until(ws, "session_deleted")
+            listing = recv_until(ws, "session_list")
+            assert listing["current"] == fresh["session"]
+            assert first not in [s["name"] for s in listing["sessions"]]
+            assert not (app_env["state_dir"] / first).exists()
+
+    def test_delete_cold_session_straight_from_disk(self, app_env):
+        state_dir = app_env["state_dir"]
+        state_dir.mkdir(parents=True, exist_ok=True)
+        old = state_dir / "session-20200101-000000-000000.jsonl"
+        old.write_text(
+            '{"kind": "message", "role": "user", "content": "old topic"}\n',
+            encoding="utf-8",
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "delete_session", "name": old.name})
+            recv_until(ws, "session_deleted")
+            recv_until(ws, "session_list")
+            assert not old.exists()
+
+    def test_delete_running_session_refused(self, app_env, tmp_path):
+        marker = tmp_path / "never"
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("gave up"),
+            ],
+        )
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "touch it"})
+            request = recv_until(ws, "approval_request")
+
+            ws.send_json({"type": "delete_session", "name": name})
+            error = ws.receive_json()
+            assert error["type"] == "error"
+            assert "still running" in error["text"]
+            assert (app_env["state_dir"] / name).is_file()
+
+            # The pending approval survived the refused delete untouched.
+            ws.send_json({"type": "approval", "id": request["id"], "action": "deny"})
+            recv_until(ws, "done")
+
+    def test_delete_rejects_path_escape_and_unknown_names(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            for name in ("../../../etc/passwd", "session-nonexistent.jsonl"):
+                ws.send_json({"type": "delete_session", "name": name})
+                error = ws.receive_json()
+                assert error["type"] == "error"
+                assert "no such session" in error["text"]
+
 
 class TestModels:
     def test_model_list_ranked(self, app_env, monkeypatch):
