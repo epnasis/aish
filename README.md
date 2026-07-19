@@ -215,7 +215,8 @@ without bloating the context.
   name clash) with `name:`/`description:`/`keywords:` frontmatter. The
   description states the trigger ("Use when the user asks to …") — that is
   what makes it discoverable. Skills and memories matching the task (by
-  name/keyword, deterministic) are **preloaded into context automatically**
+  name, keyword, or description word — deterministic, word-boundary and
+  plural-insensitive) are **preloaded into context automatically**
   before the model's first turn — no reliance on the model remembering to
   look; a skill too large to inject whole is truncated and other tools are
   refused until the model reads it in full (or explicitly says why it does

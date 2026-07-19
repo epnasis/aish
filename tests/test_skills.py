@@ -353,8 +353,43 @@ class TestPreflight:
         self._isolate(tmp_path, monkeypatch)
         self._skill(tmp_path, "tarball", "Use tar czf with care.")
         preload = preflight(str(tmp_path), None, "make a tarball of the project")
-        assert "[skill: tarball]\nUse tar czf with care." in preload.text
+        assert "[skill: tarball] playbook for tarball\nUse tar czf with care." in preload.text
         assert preload.unread == []
+
+    def test_reverse_match_on_description_content_word(self, tmp_path, monkeypatch):
+        # Issue #41: the Bali regression. The fact lives entirely in the
+        # description, the keywords miss the task's synonym ("villa"), and the
+        # body is empty — the description word must both trigger the match and
+        # appear in the injected block.
+        self._isolate(tmp_path, monkeypatch)
+        write_skill(
+            tmp_path / ".aish" / "memory",
+            "hotels-use-trippy.md",
+            "---\nname: hotels-use-trippy\n"
+            "description: For hotel, villa, or accommodation searches always run trippy.\n"
+            "keywords: hotels, bookings\n---\n",
+        )
+        task = "find me villa in bali with private pool close to beach for 3 adults"
+        preload = preflight(str(tmp_path), None, task)
+        assert preload.names == ["hotels-use-trippy"]
+        assert "always run trippy" in preload.text
+
+    def test_description_stopwords_do_not_fire(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        write_skill(
+            tmp_path / ".aish" / "memory",
+            "glue.md",
+            "---\nname: glue\n"
+            "description: Always make sure this tool runs when the user asks.\n---\n",
+        )
+        assert preflight(str(tmp_path), None, "the user asks about this and that").names == []
+
+    def test_keyword_plural_folding(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "stay-finder", "Book stays.", keywords="hotels")
+        assert preflight(str(tmp_path), None, "book a hotel in rome for two").names == [
+            "stay-finder"
+        ]
 
     def test_oversized_skill_truncated_and_flagged(self, tmp_path, monkeypatch):
         self._isolate(tmp_path, monkeypatch)

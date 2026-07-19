@@ -55,6 +55,21 @@ PREFLIGHT_HEAD_CHARS = 600  # teaser length for an oversized skill
 _PUNCT = ".,;:!?()[]{}<>'\"`"
 FUZZY_WORD_CUTOFF = 0.75  # single query word vs single entry word
 
+# Glue words that appear in almost every trigger-phrased description; a hit on
+# one of these says nothing about relevance, so reverse matching skips them.
+# Only function words and aish-domain boilerplate — never topic words.
+_STOPWORDS = frozenset(
+    """
+    when what which where whether this that these those there here with without
+    from into onto over under after before during instead rather always never
+    only also then than them they your yours their have will would should must
+    could sure make makes made need needs like some more most much many every
+    each other another about being does user users user's request requests asks
+    asked wants tool tools skill skills command commands file files using used
+    uses execute executes
+    """.split()
+)
+
 
 @dataclass
 class Entry:
@@ -270,12 +285,21 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
     return "\n\n".join(sections)
 
 
+def _block_header(entry: Entry) -> str:
+    """"[kind: name] description" — the description rides along unless it is
+    already the body's opening line, because for memories saved via `remember`
+    the description often IS the whole fact and the body is empty (#41)."""
+    if entry.description and entry.description not in entry.body:
+        return f"[{entry.kind}: {entry.name}] {entry.description}"
+    return f"[{entry.kind}: {entry.name}]"
+
+
 def load_skill(name: str, dirs: list[Path]) -> str:
     if not NAME_RE.match(name or ""):
         return f"ERROR: invalid skill name {name!r}"
     for entry in _merged(dirs, "skill"):
         if entry.name == name:
-            return f"[skill: {name}]\n{entry.body}"
+            return f"{_block_header(entry)}\n{entry.body}"
     available = ", ".join(n for n, _ in list_skills(dirs)) or "none"
     return f"ERROR: no skill named {name!r}. Available skills: {available}"
 
@@ -319,12 +343,33 @@ def rank_entries(entries: list[Entry], query: str) -> list[Entry]:
     return [entry for _, entry in score_entries(entries, query)]
 
 
+def _word_in(task_padded: str, word: str) -> bool:
+    """Whole-word hit, insensitive to a trailing s/es: keyword "hotels" must
+    fire on a task saying "hotel" and vice versa (issue #41)."""
+    variants = {word, word + "s"}
+    if word.endswith("s"):
+        variants.add(word[:-1])
+    if word.endswith("es"):
+        variants.add(word[:-2])
+    return any(f" {v} " in task_padded for v in variants)
+
+
+def _content_words(text: str):
+    for word in text.casefold().split():
+        word = word.strip(_PUNCT)
+        if len(word) >= 4 and word not in _STOPWORDS:
+            yield word
+
+
 def _reverse_score(entry: Entry, task_padded: str) -> int:
     """Does the entry's identity appear in the task text? The forward tiers
     in score_entries need the whole query to appear inside the entry — right
     for short recall queries, hopeless for a multi-sentence task. Name and
     keyword hits land on the same tier scale so max(forward, reverse) works.
-    Descriptions are trigger-phrased prose — too noisy to reverse-match.
+    Description content words score the preflight minimum: they are noisier
+    than keywords, but stopword/length filters plus the preflight caps keep
+    over-inclusion cheap, and a task phrased with a synonym the keywords
+    missed ("villa" vs "hotels") must still surface the entry (issue #41).
 
     `task_padded` is the space-padded, punctuation-stripped task from
     _pad_words, so matches respect word boundaries: skill "gh" must not
@@ -334,8 +379,11 @@ def _reverse_score(entry: Entry, task_padded: str) -> int:
         return 4
     for keyword in entry.keywords:
         keyword_cf = keyword.casefold()
-        if len(keyword_cf) >= 3 and f" {keyword_cf} " in task_padded:
+        if len(keyword_cf) >= 3 and _word_in(task_padded, keyword_cf):
             return 3
+    for word in _content_words(entry.description):
+        if _word_in(task_padded, word):
+            return 2
     return 0
 
 
@@ -382,10 +430,11 @@ def preflight(
         if remaining < 200:  # no room left for anything useful
             break
         if entry.kind == "memory" or len(entry.body) <= PREFLIGHT_ENTRY_CHARS:
-            header = f"[{entry.kind}: {entry.name}]\n"
-            body = entry.body[: min(PREFLIGHT_ENTRY_CHARS, remaining - len(header) - 1)]
+            header = _block_header(entry) + "\n"
+            room = max(0, min(PREFLIGHT_ENTRY_CHARS, remaining - len(header) - 1))
+            body = entry.body[:room]
             cut = "…" if len(body) < len(entry.body) else ""
-            block = f"{header}{body}{cut}"
+            block = f"{header}{body}{cut}".rstrip()
         else:  # oversized skill: teaser now, full body via the gated read_skill
             head = entry.body[:PREFLIGHT_HEAD_CHARS]
             block = (
@@ -421,7 +470,7 @@ def _snippet(text: str, words: list[str], width: int = RECALL_SNIPPET_CHARS) -> 
 def _entry_detail(name: str, entries: list[Entry]) -> str | None:
     for entry in entries:
         if entry.name == name:
-            return f"[{entry.kind}: {entry.name}]\n{entry.body}"
+            return f"{_block_header(entry)}\n{entry.body}"
     return None
 
 
