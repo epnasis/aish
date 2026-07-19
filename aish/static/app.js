@@ -1986,32 +1986,40 @@ messagesEl.addEventListener("touchcancel", endSwipe);
 // from event one it stays ours; uncancelled, Safari starts its own
 // back/forward navigation and no later preventDefault can stop it.
 const WHEEL_GAP = 120; // ms of silence = stream over (fingers up, no momentum)
-const WHEEL_COOLDOWN = 500; // ms after commit: swallow the momentum tail
+const WHEEL_DRAW_AT = 4; // px of claimed travel before the drag is drawn
 // Full COMMIT_AT on a wide desktop window is a lot of trackpad travel; cap it.
 const WHEEL_COMMIT_MAX = 200; // px
 
 const wheel = {
-  active: false, blocked: false, dx: 0, width: 1, cooldownUntil: 0, endTimer: 0,
+  active: false, blocked: false, committed: false,
+  dx: 0, pendX: 0, width: 1, endTimer: 0,
 };
 
 function wheelStreamOver() {
   const wasActive = wheel.active;
+  const dx = wheel.dx;
   wheel.active = false;
   wheel.blocked = false;
+  wheel.committed = false;
+  wheel.pendX = 0;
   if (!wasActive) return;
   $("swipe-hint").hidden = true;
   messagesEl.style.transition = "transform 0.18s ease-out";
-  const direction = wheel.dx < 0 ? 1 : -1;
-  snapBack(direction, swipeTarget(direction), wheel.dx);
+  const direction = dx < 0 ? 1 : -1;
+  snapBack(direction, swipeTarget(direction), dx);
 }
 
 messagesEl.addEventListener("wheel", (event) => {
-  if (event.timeStamp < wheel.cooldownUntil) {
+  clearTimeout(wheel.endTimer);
+  wheel.endTimer = setTimeout(wheelStreamOver, WHEEL_GAP);
+  if (wheel.committed) {
+    // A page was already committed on this gesture: swallow the momentum
+    // tail until the stream goes quiet. A fixed cooldown is not enough —
+    // a brisk swipe coasts for well over a second, and the leftovers would
+    // restart the pager and commit a second page nobody asked for.
     event.preventDefault();
     return;
   }
-  clearTimeout(wheel.endTimer);
-  wheel.endTimer = setTimeout(wheelStreamOver, WHEEL_GAP);
   if (wheel.blocked) return; // vertical scroll or opted out — native until quiet
   if (!wheel.active) {
     if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) {
@@ -2020,18 +2028,28 @@ messagesEl.addEventListener("wheel", (event) => {
       if (event.deltaY !== 0) wheel.blocked = true;
       return;
     }
-    if (Math.abs(event.deltaX) < 4) return; // too faint to judge yet
     if (selectionActive() || scrollsHorizontally(event.target)) {
       wheel.blocked = true;
       return;
     }
+    // Horizontal-dominant, however faint: claim it from this very event —
+    // one uncancelled 1px event is all Safari needs to start its own
+    // history swipe (the tab "goes back"). The drag isn't drawn until the
+    // claimed travel adds up; a vertical-dominant event arriving while
+    // still pending hands the stream back to native scrolling above.
+    event.preventDefault();
+    wheel.pendX -= event.deltaX;
+    if (Math.abs(wheel.pendX) < WHEEL_DRAW_AT) return;
     wheel.active = true;
-    wheel.dx = 0;
+    wheel.dx = wheel.pendX;
+    wheel.pendX = 0;
     wheel.width = messagesEl.clientWidth;
+  } else {
+    event.preventDefault(); // ours now — keeps Safari's history swipe out
+    // Scrolling right (deltaX > 0) drags the page left, like a leftward touch.
+    wheel.dx -= event.deltaX;
   }
-  event.preventDefault(); // ours now — keeps Safari's history swipe out
-  // Scrolling right (deltaX > 0) drags the page left, like a leftward touch.
-  const dx = wheel.dx - event.deltaX;
+  const dx = wheel.dx;
   const direction = dx < 0 ? 1 : -1;
   const target = swipeTarget(direction);
   wheel.dx = target ? dx : dx / 3; // rubber-band where no page exists
@@ -2040,9 +2058,8 @@ messagesEl.addEventListener("wheel", (event) => {
   const commitPx = Math.min(wheel.width * COMMIT_AT, WHEEL_COMMIT_MAX);
   updateSwipeHint(target, dx, commitPx);
   if (target && Math.abs(wheel.dx) > commitPx) {
-    clearTimeout(wheel.endTimer);
     wheel.active = false;
-    wheel.cooldownUntil = event.timeStamp + WHEEL_COOLDOWN;
+    wheel.committed = true; // endTimer stays armed: quiet ends the gesture
     $("swipe-hint").hidden = true;
     messagesEl.style.transition = "transform 0.18s ease-out";
     commitPage(direction, target, wheel.width);
