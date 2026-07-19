@@ -55,18 +55,33 @@ PREFLIGHT_HEAD_CHARS = 600  # teaser length for an oversized skill
 _PUNCT = ".,;:!?()[]{}<>'\"`"
 FUZZY_WORD_CUTOFF = 0.75  # single query word vs single entry word
 
-# Glue words that appear in almost every trigger-phrased description; a hit on
-# one of these says nothing about relevance, so reverse matching skips them.
-# Only function words and aish-domain boilerplate — never topic words.
+# Words that say nothing about an entry's topic, so description reverse
+# matching skips them (issue #42): function words, aish-domain boilerplate,
+# and generic task vocabulary — nouns and verbs any task might contain
+# ("photo", "check", "status"). Description matching is a synonym net for
+# TOPIC words only; an entry genuinely about photos or checking belongs to
+# these words via name/keywords, which are never stopword-filtered.
+# The membership test folds a trailing s/es, so singular forms suffice for
+# nouns; verb inflections are listed explicitly.
 _STOPWORDS = frozenset(
     """
     when what which where whether this that these those there here with without
     from into onto over under after before during instead rather always never
     only also then than them they your yours their have will would should must
     could sure make makes made need needs like some more most much many every
-    each other another about being does user users user's request requests asks
-    asked wants tool tools skill skills command commands file files using used
-    uses execute executes
+    each other another about being been just does user user's request asks
+    asked wants tool skill command file using used uses execute executes
+    first latest current local global based between missing directly
+
+    photo image picture video link page site website data info information
+    detail result list text output content version name number question answer
+    time date example thing project repository status code path live
+
+    check checking checked show showing shown find finding found create
+    creating created delete deleting deleted remove removing removed write
+    writing written read reading save saving saved upload uploading uploaded
+    search searching searched answering analyze analyzing identify verify
+    verifying work working run running
     """.split()
 )
 
@@ -357,7 +372,14 @@ def _word_in(task_padded: str, word: str) -> bool:
 def _content_words(text: str):
     for word in text.casefold().split():
         word = word.strip(_PUNCT)
-        if len(word) >= 4 and word not in _STOPWORDS:
+        if len(word) < 4:
+            continue
+        bases = {word}
+        if word.endswith("s"):
+            bases.add(word[:-1])
+        if word.endswith("es"):
+            bases.add(word[:-2])
+        if bases.isdisjoint(_STOPWORDS):
             yield word
 
 
