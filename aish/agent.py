@@ -24,6 +24,7 @@ import ollama
 
 from . import files, skills, tools, web
 from .approval import Blocked
+from .session import SessionLog
 
 _PLATFORM_NOTES = {
     "darwin": (
@@ -151,7 +152,9 @@ BLOCKED_RESULT = (
 )
 
 # No side effects and no approval prompt — safe to run concurrently.
-READ_ONLY_TOOLS = frozenset({"read_docs", "read_skill", "web_search", "read_url", "read_file"})
+READ_ONLY_TOOLS = frozenset(
+    {"read_docs", "read_skill", "web_search", "read_url", "read_file", "search_sessions"}
+)
 
 def format_secs(seconds: float) -> str:
     if seconds < 60:
@@ -245,6 +248,8 @@ class Agent:
         job_log_dir: os.PathLike | str | None = None,
         lessons_path: os.PathLike | str | None = None,
         status: Any = None,
+        state_dir: os.PathLike | str | None = None,
+        current_session: Callable[[], Path] | None = None,
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
@@ -267,6 +272,10 @@ class Agent:
         self.on_token = on_token
         self.job_log_dir = job_log_dir
         self.lessons_path = lessons_path
+        # Session store for the search_sessions tool; current_session is
+        # excluded from ranking (its content is already this conversation).
+        self.state_dir = state_dir
+        self.current_session = current_session
         self.status = status if status is not None else _NoStatus()
         self._cancel = threading.Event()
         content = system_prompt() + (f"\n{context}" if context else "")
@@ -711,7 +720,24 @@ class Agent:
             topic = args.get("topic") or None
             label = f"→ read_url: {url}" + (f" (topic: {topic})" if topic else "")
             return label, partial(web.read_url, url, topic=str(topic) if topic else None)
+        if name == "search_sessions":
+            query = str(args.get("query", "") or "")
+            session = str(args.get("session", "") or "").strip() or None
+            label = f"→ search_sessions: {query or '(no query)'}" + (
+                f" (session: {session})" if session else ""
+            )
+            return label, partial(self._search_sessions, query, session)
         return self._read_file_call(args)  # read_file
+
+    def _search_sessions(self, query: str, session: str | None) -> str:
+        if self.state_dir is None:
+            return "ERROR: session search is unavailable (no session store configured)"
+        exclude: set = set()
+        if self.current_session is not None:
+            exclude.add(Path(self.current_session()))
+        return SessionLog.search_excerpts(
+            Path(self.state_dir), query, session=session, exclude=exclude
+        )
 
     def _collect_source(self, call: dict, result: str) -> None:
         """Track pages actually fetched this task, so answers can cite them.

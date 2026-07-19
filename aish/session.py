@@ -14,6 +14,16 @@ FUZZY_WORD_CUTOFF = 0.75  # single query word vs single session word
 _PUNCT = ".,;:!?()[]{}<>'\"`"
 _BANG_RE = re.compile(r"^\[I ran `(.+?)` myself")
 
+# Model-facing search (the search_sessions tool): bounded so one call can
+# never flood a small context window.
+SEARCH_TOP = 5
+SNIPPET_CHARS = 200
+SNIPPETS_PER_SESSION = 3
+DETAIL_MESSAGE_CHARS = 700
+DETAIL_MAX_CHARS = 6000
+DETAIL_TAIL_MESSAGES = 20
+_SESSION_NAME_RE = re.compile(r"^session-[0-9-]+\.jsonl$")
+
 
 @dataclass
 class SessionInfo:
@@ -206,6 +216,102 @@ class SessionLog:
         if not query.split():
             return []
         return SessionLog.rank(SessionLog.load_entries(state_dir, exclude), query)
+
+    @staticmethod
+    def _snippet(content: str, words: list[str], width: int = SNIPPET_CHARS) -> str | None:
+        """One flattened line of context around the first query-word hit."""
+        flat = " ".join(content.split())
+        flat_cf = flat.casefold()
+        pos = min((p for w in words if (p := flat_cf.find(w)) >= 0), default=-1)
+        if pos < 0:
+            return None
+        start = max(0, pos - width // 3)
+        end = min(len(flat), start + width)
+        prefix = "…" if start > 0 else ""
+        suffix = "…" if end < len(flat) else ""
+        return f"{prefix}{flat[start:end]}{suffix}"
+
+    @staticmethod
+    def search_excerpts(
+        state_dir: Path, query: str, session: str | None = None, exclude: set | None = None
+    ) -> str:
+        """Model-facing session search (the search_sessions tool).
+
+        Without `session`: ranked sessions with excerpt lines around the
+        matches — enough to pick the right one. With `session`: that file's
+        matching messages (or its tail when the query is empty), trimmed and
+        capped so the result always fits a small context window.
+        """
+        words = query.casefold().split()
+        if session is not None:
+            return SessionLog._session_detail(state_dir, session, query, words)
+        if not words:
+            return (
+                "ERROR: search_sessions needs a query (or a session file name "
+                "from an earlier result)."
+            )
+        infos = SessionLog.search_sessions(state_dir, query, exclude=exclude)
+        if not infos:
+            return f"No past session matches {query!r}."
+        lines = [f"{len(infos)} past session(s) match {query!r} (best matches first):"]
+        for info in infos[:SEARCH_TOP]:
+            model = f" · {info.model}" if info.model else ""
+            lines.append(f"\n== {info.path.name} · {info.when} · {info.count} msgs{model}")
+            lines.append(f"   title: {info.title}")
+            shown = 0
+            for message in SessionLog.load_messages(info.path):
+                snippet = SessionLog._snippet(message.get("content") or "", words)
+                if snippet is None:
+                    continue
+                lines.append(f"   [{message.get('role', '?')}] {snippet}")
+                shown += 1
+                if shown >= SNIPPETS_PER_SESSION:
+                    break
+        if len(infos) > SEARCH_TOP:
+            lines.append(f"\n(…and {len(infos) - SEARCH_TOP} more, weaker matches)")
+        lines.append(
+            '\nCall search_sessions again with session="<file name>" for the full '
+            "matching messages from one session."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _session_detail(state_dir: Path, session: str, query: str, words: list[str]) -> str:
+        if not _SESSION_NAME_RE.match(session):
+            return (
+                f"ERROR: {session!r} is not a session file name — use a name "
+                "returned by search_sessions, like 'session-20260718-213000-000000.jsonl'."
+            )
+        path = state_dir / session
+        if not path.is_file():
+            return f"ERROR: no such session: {session}. Search first to find valid names."
+        messages = SessionLog.load_messages(path)
+        matching = [
+            m for m in messages
+            if any(w in (m.get("content") or "").casefold() for w in words)
+        ]
+        if words and matching:
+            header = f"Messages matching {query!r} in {session}:"
+            picked = matching
+        else:
+            note = f"no message matches {query!r}; " if words else ""
+            header = f"{session}: {note}showing the most recent messages:"
+            picked = messages[-DETAIL_TAIL_MESSAGES:]
+        lines = [header]
+        used = len(header)
+        for i, message in enumerate(picked):
+            content = (message.get("content") or "").strip()
+            snippet = SessionLog._snippet(content, words, width=DETAIL_MESSAGE_CHARS)
+            body = snippet if words and snippet else content[:DETAIL_MESSAGE_CHARS]
+            entry = f"\n[{message.get('role', '?')}] {body}"
+            if used + len(entry) > DETAIL_MAX_CHARS:
+                lines.append(
+                    f"\n[… {len(picked) - i} more messages omitted — refine the query]"
+                )
+                break
+            lines.append(entry)
+            used += len(entry)
+        return "\n".join(lines)
 
     def _record(self, kind: str, **fields) -> None:
         record = {

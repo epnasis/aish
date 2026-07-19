@@ -1351,3 +1351,52 @@ class TestStepLimitAndLoops:
         agent, chat = make_agent([endless], max_steps=1)  # wrap-up pops empty list
         result = agent.run_task("task")
         assert result.startswith("(stopped: hit the max-steps limit")
+
+
+class TestSearchSessionsTool:
+    """#14: past-session search is read-only, auto-approved, and excludes the
+    session being written right now."""
+
+    def _store(self, tmp_path, name="session-20260101-000000-000000.jsonl"):
+        from aish.session import SessionLog
+
+        log = SessionLog(tmp_path / name)
+        log.message({"role": "user", "content": "the uv fix was pinning the version"})
+        return log.path
+
+    def test_runs_without_approval_and_returns_matches(self, tmp_path):
+        self._store(tmp_path)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("search_sessions", query="uv fix")]),
+                model_says("found it"),
+            ],
+            approve=lambda _cmd: pytest.fail("search_sessions must not hit approval"),
+            state_dir=tmp_path,
+        )
+        assert agent.run_task("what did we do about uv?") == "found it"
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "session-20260101" in result and "uv fix" in result
+
+    def test_without_store_reports_unavailable(self):
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("search_sessions", query="x")]),
+                model_says("ok"),
+            ]
+        )
+        agent.run_task("search")
+        assert tool_messages(agent.messages)[0]["content"].startswith("ERROR")
+
+    def test_current_session_is_excluded_from_search(self, tmp_path):
+        current = self._store(tmp_path, "session-20260102-000000-000000.jsonl")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("search_sessions", query="uv fix")]),
+                model_says("nothing"),
+            ],
+            state_dir=tmp_path,
+            current_session=lambda: current,
+        )
+        agent.run_task("search")
+        assert "No past session matches" in tool_messages(agent.messages)[0]["content"]

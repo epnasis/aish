@@ -397,7 +397,10 @@ that is terminal-only by design.
 cannot be approved here at all (extendable in {deny_path}); suggest a safer \
 alternative when blocked.
 - Sessions: conversation + command audit trail logged to {state_dir} — the \
-same format as terminal aish, so sessions are interchangeable between both.
+same format as terminal aish, so sessions are interchangeable between both. \
+When the user refers to earlier work ("the fix from yesterday", "what went \
+wrong last time"), use the search_sessions tool to find and read the \
+relevant past conversation instead of asking them to repeat it.
 - File tools: prefer read_file/write_file/edit_file over cat/sed/heredocs; \
 the user approves a diff card before any write. Do NOT use sed -i or > \
 redirects to edit files.
@@ -1131,6 +1134,8 @@ def create_app(
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,
             status=WebStatus(bridge),
+            state_dir=state_dir,
+            current_session=lambda: logref.log.path,
         )
         agent: Agent | ClaudeMaxAgent
         if provider == "claude-max":

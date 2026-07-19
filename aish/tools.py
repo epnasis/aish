@@ -603,6 +603,42 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "search_sessions",
+            "description": (
+                "Search your PAST conversation sessions with this user (they all "
+                "persist on disk). Use when the user refers to earlier work — "
+                "'like we did yesterday', 'the fix from the other session', 'what "
+                "went wrong last time'. Returns matching sessions with excerpt "
+                "lines; call again with 'session' set to one of the returned file "
+                "names to read that session's matching messages in detail."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Keywords to find (matched against titles and full "
+                            "conversation contents)."
+                        ),
+                    },
+                    "session": {
+                        "type": "string",
+                        "description": (
+                            "Optional session file name from a previous result "
+                            "(e.g. 'session-20260718-213000-000000.jsonl'): return "
+                            "that session's matching messages — or its most recent "
+                            "messages when query is empty."
+                        ),
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command",
             "description": (
                 "Run a shell command on the user's machine. The user sees the exact "

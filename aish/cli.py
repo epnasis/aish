@@ -955,7 +955,10 @@ directory — when its contents matter to the task, read it with read_file \
 before answering.
 - Sessions: conversation + command audit trail logged to {state_dir}; \
 `aish --resume` opens the same session picker as /resume at launch (piped \
-input resumes the most recent session).
+input resumes the most recent session). When the user refers to earlier \
+work ("the fix from yesterday", "what went wrong last time"), use the \
+search_sessions tool to find and read the relevant past conversation \
+instead of asking them to repeat it.
 - Config file: {config_path} (TOML). Keys: vi_mode, model, num_ctx, \
 max_steps. vi_mode (prompt vi editing) is currently {str(vi_mode).lower()}; \
 enable it with the line `vi_mode = true`. Config is read at startup only — \
@@ -1186,6 +1189,8 @@ def main() -> int:
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,
             status=_timer,
+            state_dir=state_dir,
+            current_session=lambda: logref.log.path,
         )
     else:
         assert chat is not None  # None only for claude-max, handled above
@@ -1207,6 +1212,8 @@ def main() -> int:
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,
             status=_timer,
+            state_dir=state_dir,
+            current_session=lambda: logref.log.path,
         )
         agent.provider = provider
     agent_holder.append(agent)

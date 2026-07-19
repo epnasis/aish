@@ -48,6 +48,8 @@ class ClaudeMaxAgent:
         job_log_dir=None,
         lessons_path=None,
         status=None,
+        state_dir=None,
+        current_session=None,
         **_ignored,
     ):
         # The inner Agent supplies tool dispatch (approval, denylist, file
@@ -63,6 +65,8 @@ class ClaudeMaxAgent:
             cwd=cwd,
             job_log_dir=job_log_dir,
             lessons_path=lessons_path,
+            state_dir=state_dir,
+            current_session=current_session,
         )
         self.model = model  # "" = the claude CLI's configured default
         self.echo = echo

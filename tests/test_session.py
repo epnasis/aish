@@ -190,3 +190,82 @@ def test_load_skips_garbage_lines_and_system(tmp_path):
         '{"kind":"message","role":"user","content":"q"}\n'
     )
     assert SessionLog.load_messages(path) == [{"role": "user", "content": "q"}]
+
+
+class TestSearchExcerpts:
+    """#14: the model-facing search_sessions tool output."""
+
+    def test_search_mode_lists_sessions_with_snippets(self, tmp_path):
+        make_session(
+            tmp_path,
+            "session-20260101-000000-000000.jsonl",
+            ("user", "the uv sync kept failing"),
+            ("assistant", "the fix was to pin uv to 0.5 in pyproject"),
+        )
+        make_session(tmp_path, "session-20260102-000000-000000.jsonl", ("user", "pasta"))
+        out = SessionLog.search_excerpts(tmp_path, "uv sync failing")
+        assert "session-20260101-000000-000000.jsonl" in out
+        assert "uv sync kept failing" in out
+        assert "session=" in out  # tells the model how to drill down
+        assert "pasta" not in out
+
+    def test_search_mode_no_match(self, tmp_path):
+        make_session(tmp_path, "session-20260101-000000-000000.jsonl", ("user", "hello"))
+        assert "No past session matches" in SessionLog.search_excerpts(tmp_path, "zzz")
+
+    def test_search_mode_requires_query(self, tmp_path):
+        assert SessionLog.search_excerpts(tmp_path, "   ").startswith("ERROR")
+
+    def test_search_excludes_current_session(self, tmp_path):
+        path = make_session(
+            tmp_path, "session-20260101-000000-000000.jsonl", ("user", "unique needle")
+        )
+        out = SessionLog.search_excerpts(tmp_path, "unique needle", exclude={path})
+        assert "No past session matches" in out
+
+    def test_detail_mode_returns_matching_messages(self, tmp_path):
+        make_session(
+            tmp_path,
+            "session-20260101-000000-000000.jsonl",
+            ("user", "why does uv sync fail?"),
+            ("assistant", "because the lock file is stale"),
+            ("user", "unrelated chatter"),
+        )
+        out = SessionLog.search_excerpts(
+            tmp_path, "uv sync", session="session-20260101-000000-000000.jsonl"
+        )
+        assert "[user] why does uv sync fail?" in out
+        assert "unrelated chatter" not in out
+
+    def test_detail_mode_empty_query_shows_tail(self, tmp_path):
+        make_session(
+            tmp_path,
+            "session-20260101-000000-000000.jsonl",
+            ("user", "first message"),
+            ("assistant", "final answer here"),
+        )
+        out = SessionLog.search_excerpts(
+            tmp_path, "", session="session-20260101-000000-000000.jsonl"
+        )
+        assert "final answer here" in out and "most recent" in out
+
+    def test_detail_mode_rejects_bad_names(self, tmp_path):
+        for bad in ("../etc/passwd", "session-1/../x.jsonl", "notes.txt", "session-¤.jsonl"):
+            assert SessionLog.search_excerpts(tmp_path, "x", session=bad).startswith("ERROR")
+
+    def test_detail_mode_missing_file(self, tmp_path):
+        out = SessionLog.search_excerpts(
+            tmp_path, "x", session="session-20990101-000000-000000.jsonl"
+        )
+        assert out.startswith("ERROR: no such session")
+
+    def test_detail_mode_output_is_capped(self, tmp_path):
+        from aish.session import DETAIL_MAX_CHARS
+
+        big = [("assistant", f"needle block {i} " + "x" * 800) for i in range(30)]
+        make_session(tmp_path, "session-20260101-000000-000000.jsonl", *big)
+        out = SessionLog.search_excerpts(
+            tmp_path, "needle", session="session-20260101-000000-000000.jsonl"
+        )
+        assert len(out) < DETAIL_MAX_CHARS + 500
+        assert "more messages omitted" in out

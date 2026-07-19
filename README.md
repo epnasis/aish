@@ -93,6 +93,7 @@ in/out of it by restarting aish rather than `/model`.
 | `read_docs` | man page → `--help` fallback, full-text `topic` search | auto |
 | `remember` | save a lesson to `~/.config/aish/lessons.md` | auto (echoed) |
 | `read_skill` | load a playbook you wrote (see Skills) | auto |
+| `search_sessions` | search past sessions ("the fix from yesterday") and read the matching turns — ranked excerpts first, then per-session detail | auto (echoed); current session excluded |
 
 Independent lookups batched in one model turn (several searches, a few page
 reads) run **in parallel**. Fetched web pages are wrapped in an
