@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import uvicorn
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -113,6 +113,17 @@ TRANSCRIPT_KEEP = 500
 MAX_OPEN_SESSIONS = 6
 
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+
+# /file serves ONLY these — raster images the browser renders inertly in an
+# <img>. SVG is deliberately excluded: opened full-size it executes scripts
+# in the server's origin.
+IMAGE_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
 MEDIA_MAX_BYTES = 20 * 1024 * 1024  # inline base64 limit; larger files fall back to a path
 MAX_QUEUE = 5  # messages waiting behind a busy session
 
@@ -466,6 +477,12 @@ option, formatted [Label](aish-reply://answer text) — the UI renders them \
 as tap buttons that feed the answer text into the user's input box, so the \
 reply arrives as an ordinary user message (possibly edited). Only offer \
 them when short options genuinely cover the likely answers.
+- SHOWING IMAGES: markdown image syntax renders inline in the chat. \
+![caption](https://…) shows a web image; ![caption](/absolute/path.png) \
+shows a local image file (png/jpg/gif/webp) that is inside the session \
+roots — use it to display charts or diagrams you generate (e.g. with \
+matplotlib): save the file, then put its absolute path in the image link. \
+Files outside the session roots will not display.
 - Safety denylist: unrecoverable command classes are blocked outright and \
 cannot be approved here at all (extendable in {deny_path}); suggest a safer \
 alternative when blocked.
@@ -1146,6 +1163,33 @@ class WebServer:
         target.write_bytes(body)
         return JSONResponse({"path": str(target)})
 
+    async def handle_file(self, request) -> FileResponse | JSONResponse:
+        """GET /file?path=<abs> — serves an image file so the transcript can
+        render model-generated charts/diagrams inline (issue #9). Scoped like
+        approval: symlinks resolved BEFORE the containment check, and anything
+        outside the active session's roots is refused."""
+        if self.token and request.query_params.get("token") != self.token:
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        raw = request.query_params.get("path", "").strip()
+        if not raw:
+            return JSONResponse({"error": "missing path"}, status_code=400)
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            return JSONResponse({"error": "path must be absolute"}, status_code=400)
+        media_type = IMAGE_TYPES.get(path.suffix.lower())
+        if media_type is None:
+            return JSONResponse({"error": "unsupported file type"}, status_code=415)
+        path = path.resolve()
+        roots = [Path(r).resolve() for r in self.active.agent.roots]
+        if not any(path.is_relative_to(r) for r in roots):
+            return JSONResponse({"error": "outside session roots"}, status_code=403)
+        if not path.is_file():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(
+            path, media_type=media_type,
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
+
 
 def create_app(
     model: str,
@@ -1295,6 +1339,7 @@ def create_app(
         routes=[
             WebSocketRoute("/ws", server.handle_ws),
             Route("/upload", server.handle_upload, methods=["POST"]),
+            Route("/file", server.handle_file, methods=["GET"]),
             Route("/dirs", server.handle_dirs, methods=["GET"]),
             Route("/dirs/search", server.handle_dirs_search, methods=["GET"]),
             Route("/", serve_index, methods=["GET"]),
