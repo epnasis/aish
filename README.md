@@ -65,6 +65,10 @@ aish --resume                           # pick an earlier session (same picker a
 
 Smaller machines: `ollama pull qwen3:8b && export AISH_MODEL=qwen3:8b`.
 
+Recommended: `ollama pull embeddinggemma` (~600 MB) — enables semantic
+matching when preloading relevant skills/memories for a task; without it
+aish falls back to word matching.
+
 ## Cloud models (optional)
 
 The default is local-only. When a task needs a stronger model, the same agent
@@ -218,9 +222,13 @@ without bloating the context.
   `~/.config/aish/skills/` (global) or `./.aish/skills/` (project, wins on
   name clash) with `name:`/`description:`/`keywords:` frontmatter. The
   description states the trigger ("Use when the user asks to …") — that is
-  what makes it discoverable. Skills and memories matching the task (by
-  name, keyword, or description word — deterministic, word-boundary and
-  plural-insensitive) are **preloaded into context automatically**
+  what makes it discoverable. Skills and memories matching the task are
+  **preloaded into context automatically** — selected by embedding
+  similarity (local `embeddinggemma` via Ollama, multilingual, vectors
+  cached in the state dir; `ollama pull embeddinggemma` once to enable,
+  `AISH_EMBED_MODEL` overrides), with exact name/keyword hits always
+  included and lexical word-matching as the fallback when no embedding
+  model is reachable —
   before the model's first turn — no reliance on the model remembering to
   look; a skill too large to inject whole is truncated and other tools are
   refused until the model reads it in full (or explicitly says why it does

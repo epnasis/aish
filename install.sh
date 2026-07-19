@@ -26,4 +26,9 @@ elif ! ollama list 2>/dev/null | grep -q "^${MODEL}"; then
     echo "      ollama pull qwen3:8b && export AISH_MODEL=qwen3:8b"
 fi
 
+if command -v ollama >/dev/null 2>&1 && ! ollama list 2>/dev/null | grep -q "^embeddinggemma"; then
+    echo "==> recommended: semantic skill/memory matching needs an embedding model (~600 MB):"
+    echo "      ollama pull embeddinggemma"
+fi
+
 echo "==> done. Try:  aish \"what OS am I on?\""

@@ -28,6 +28,7 @@ from .approval import (
     suggest_prefix,
     unvetted_segments,
 )
+from .embeddings import SemanticIndex
 from .session import SessionInfo, SessionLog
 from .skills import GLOBAL_SKILLS_DIR
 
@@ -1311,6 +1312,7 @@ def main() -> int:
             status=_timer,
             state_dir=state_dir,
             current_session=lambda: logref.log.path,
+            semantic=SemanticIndex(state_dir),
         )
         agent.provider = provider
     agent_holder.append(agent)
