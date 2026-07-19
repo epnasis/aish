@@ -865,7 +865,9 @@ function inlineMd(text) {
 // speaker button expands into prev / pause / next / speed / stop controls.
 const TTS_OK = "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
 
-const TTS_RATES = [0.8, 1, 1.25, 1.5, 2];
+// Engines (iOS especially) speak faster than the nominal rate suggests, so
+// the ladder is finest around 1–1.5 where the felt sweet spot actually is.
+const TTS_RATES = [0.8, 0.9, 1, 1.1, 1.2, 1.3, 1.5, 2];
 const TTS_RATE_KEY = "aish-tts-rate"; // device-local, like the wrap toggle
 let ttsRate = parseFloat(localStorage.getItem(TTS_RATE_KEY));
 if (!TTS_RATES.includes(ttsRate)) ttsRate = 1;
