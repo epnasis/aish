@@ -1539,10 +1539,35 @@ if (localStorage.getItem(WRAP_KEY) === "1") {
   document.body.classList.add("wrap");
   $("wrap-chip").classList.add("active");
 }
+// Toggling wrap reflows every monospace block, so content heights above the
+// viewport change and the reader would land on different text (#21). Anchor
+// on the message at the top of the viewport and put it back at the same
+// on-screen offset after the reflow; a reader pinned to the tail stays there.
+function topVisibleAnchor() {
+  const top = messagesEl.getBoundingClientRect().top;
+  for (const el of messagesEl.children) {
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom > top) return { el, offset: rect.top - top };
+  }
+  return null;
+}
+
+function restoreAnchor(anchor) {
+  const top = messagesEl.getBoundingClientRect().top;
+  messagesEl.scrollTop += anchor.el.getBoundingClientRect().top - top - anchor.offset;
+  updateScrollButton();
+}
+
 $("wrap-chip").onclick = () => {
+  const wasAtBottom = nearBottom();
+  const anchor = topVisibleAnchor();
   const on = document.body.classList.toggle("wrap");
   $("wrap-chip").classList.toggle("active", on);
   localStorage.setItem(WRAP_KEY, on ? "1" : "0");
+  // Reading layout right after the class toggle forces a synchronous
+  // reflow, so the restored offset is computed against final geometry.
+  if (wasAtBottom) scrollToEnd(true);
+  else if (anchor) restoreAnchor(anchor);
   showToast(on ? "wrap on" : "wrap off");
 };
 
