@@ -669,6 +669,28 @@ class TestSessions:
             recv_until(ws, "done")
             assert "walrus" in json.dumps(chat2.calls[-1]["messages"])
 
+    def test_connect_with_session_param_reattaches_after_restart(self, app_env):
+        # The client names its session on (re)connect so a server restart
+        # doesn't strand it in the fresh startup session.
+        client, _ = make_client(app_env, [model_says("noted the walrus")])
+        with client, connected(client) as (ws, hello, _):
+            old_name = hello["session"]
+            ws.send_json({"type": "task", "text": "remember the walrus"})
+            recv_until(ws, "done")
+        client2, _ = make_client(app_env, [])
+        with client2, connected(client2, f"/ws?session={old_name}") as (_, hello, replay):
+            assert hello["session"] == old_name
+            history = [e for e in replay["events"] if e["type"] == "history"]
+            assert history and any(
+                m["role"] == "user" for m in history[0]["messages"]
+            )
+
+    def test_connect_with_unknown_session_falls_back_to_active(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client, "/ws?session=session-gone.jsonl") as (_, hello, _):
+            assert hello["session"].startswith("session-")
+            assert hello["session"] != "session-gone.jsonl"
+
     def test_parallel_sessions_run_and_finish_independently(self, app_env, tmp_path):
         # Session A blocks on an approval; session B runs a full task while A
         # is still waiting; switching back to A replays the pending card and

@@ -233,7 +233,9 @@ writes show the colored diff before anything lands on disk, answers stream
 live and render as markdown (tables, code blocks, links), command output
 keeps its ANSI colors, and locking your phone mid-task loses nothing (on
 reconnect the server replays the transcript, including any approval still
-waiting). Every finished answer gets a speaker button that reads it aloud
+waiting). Server restarts are survivable too: the client reconnects into
+the session it was on — not a fresh chat — and half-typed composer text is
+kept on the device across reconnects and app reloads. Every finished answer gets a speaker button that reads it aloud
 with the device's native text-to-speech — no cloud audio API involved. While
 reading it expands into a small player: pause/resume, skip to the previous
 or next paragraph, and a speed control (0.8×–2×, remembered on the device).

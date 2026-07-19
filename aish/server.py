@@ -612,7 +612,14 @@ class WebServer:
                 await old.close(code=CLOSE_REPLACED)
             except Exception:  # noqa: BLE001 — the old socket may already be dead
                 pass
-        await self._show(websocket, self.active)
+        # A reconnecting client names the session it was on (?session=...).
+        # Without this, a server restart lands every client in the fresh
+        # startup session — silently moving the user out of their chat.
+        wanted = websocket.query_params.get("session", "")
+        session = self.active
+        if wanted and wanted != session.name:
+            session = await self._open_by_name(wanted) or self.active
+        await self._show(websocket, session)
 
     async def _show(self, websocket: WebSocket, session: Session) -> None:
         """Point the client at `session`: hello + full transcript replay,
@@ -858,24 +865,31 @@ class WebServer:
             }
         )
 
-    async def _resume(self, websocket: WebSocket, name: str) -> None:
-        if name == self.active.name:
-            await self._show(websocket, self.active)
-            return
+    async def _open_by_name(self, name: str) -> Session | None:
+        """The open session called `name`, or loaded cold from disk; None when
+        no such session exists (or the name fails the path-safety checks)."""
         existing = self.sessions.get(name)
         if existing is not None:
-            await self._show(websocket, existing)
-            return
+            return existing
         safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
         path = self.state_dir / name
         if not safe or ".." in name or not path.is_file():
-            await websocket.send_json({"type": "error", "text": f"no such session: {name}"})
-            return
+            return None
         self._evict_idle()
         session, history = await asyncio.to_thread(self.open_session, path)
         # Recorded synchronously so the _show snapshot right below includes it.
         session.bridge.record({"type": "history", "messages": history})
         self.add_session(session, activate=False)
+        return session
+
+    async def _resume(self, websocket: WebSocket, name: str) -> None:
+        if name == self.active.name:
+            await self._show(websocket, self.active)
+            return
+        session = await self._open_by_name(name)
+        if session is None:
+            await websocket.send_json({"type": "error", "text": f"no such session: {name}"})
+            return
         await self._show(websocket, session)
 
     async def _new_session(self, websocket: WebSocket) -> None:

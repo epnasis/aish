@@ -66,7 +66,14 @@ let reconnectTimer = null;
 function connect() {
   clearTimeout(reconnectTimer);
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const query = token ? `?token=${encodeURIComponent(token)}` : "";
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
+  // Name the session this device was on: after a server restart the active
+  // session is a fresh empty chat, and without this every reconnect (and
+  // every rev-mismatch reload) would silently move the user there.
+  const lastSession = localStorage.getItem("aish-session");
+  if (lastSession) params.set("session", lastSession);
+  const query = params.size ? `?${params}` : "";
   ws = new WebSocket(`${proto}//${location.host}/ws${query}`);
   ws.onopen = () => {
     backoff = 1000;
@@ -212,6 +219,7 @@ function onHello(event) {
   setTitle(event.title);
   pagerSessions = event.pager || [];
   currentSession = event.session;
+  localStorage.setItem("aish-session", event.session); // reconnects return here
   renderWorkspace(event);
   setBusy(event.busy);
   if (!event.busy) setStatus(null);
@@ -1345,6 +1353,19 @@ function onApprovalResolved(event) {
 // ---- composer + autocomplete ---------------------------------------------
 const input = $("input");
 
+// Half-typed text must survive the reloads the app performs on itself (rev
+// mismatch after a server upgrade) and PWA relaunches. Saved while typing,
+// plus on pagehide to catch programmatically-set values (quick replies,
+// history recall) that don't fire input events; cleared once the text is
+// actually sent.
+input.value = localStorage.getItem("aish-draft") || "";
+if (input.value) requestAnimationFrame(() => resizeInput()); // grow to fit a multi-line draft
+function saveDraft() {
+  if (input.value) localStorage.setItem("aish-draft", input.value);
+  else localStorage.removeItem("aish-draft");
+}
+addEventListener("pagehide", saveDraft);
+
 // Prompt history recall (terminal/Slack convention): ArrowUp in an empty
 // composer steps back through earlier prompts, ArrowDown forward to the
 // saved draft. Seeded from replayed user events, so it survives reconnects.
@@ -1468,6 +1489,7 @@ input.addEventListener("keydown", (e) => {
 
 input.addEventListener("input", () => {
   historyIndex = null; // typing leaves history-recall mode
+  saveDraft();
   resizeInput();
   updateSuggest();
 });
@@ -1565,6 +1587,7 @@ function submitInput() {
   if (text.startsWith("/")) {
     rememberPrompt(text); // slash commands never echo back as user events
     input.value = "";
+    localStorage.removeItem("aish-draft");
     input.style.height = "auto";
     handleSlash(text);
     return;
@@ -1575,6 +1598,7 @@ function submitInput() {
   if (send({ type: "task", text, attachments: attachments.map((a) => a.path) })) {
     maybeRequestNotifyPermission();
     input.value = "";
+    localStorage.removeItem("aish-draft");
     input.style.height = "auto";
     attachments = [];
     renderAttachments();
