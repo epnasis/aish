@@ -132,10 +132,13 @@ collapsed **Sources (n)** row that expands to clickable page titles.
    `..` paths — symlinks resolved) and `read_file` outside them prompt, even
    when allowlisted. `/cd <dir>` moves the session to another project (cwd
    *and* root — Tab completes directories); `/add-dir <dir>` (alias
-   `/dir-add`) allows another tree as well; both are user-only — a model-issued
-   `cd` moves only the working directory and never widens the scope, and one
-   that would leave the session roots goes through the approval prompt first
-   (where `t` can trust the destination).
+   `/dir-add`) allows another tree as well; both are user-only. **Execution
+   is stateless for the model**: every command runs in the project directory,
+   a bare model-issued `cd` is rejected with guidance instead of executing,
+   and temporary excursions are `cd <dir> && <command>` subshells that revert
+   when the command ends — path-scoped by the same root rules (where `t` can
+   trust the destination). The model's anchor to the project can therefore
+   never silently drift.
    Launching aish (or `aish-web`) **from your home directory** re-anchors the
    session to `~/aish` (created on first use) instead — otherwise `~/.ssh`,
    `~/.aws`, shell history, and the rest of your home tree would sit inside
@@ -170,7 +173,8 @@ detaches it into a background job that survives aish exiting (`/jobs` lists
 them, logs in `~/.local/state/aish/jobs/`).
 
 **Escapes**: `!<command>` runs directly — no model, no approval. `!cd <dir>`
-moves the persistent working directory.
+moves the persistent working directory (user-only — the model's commands
+always run in the project directory).
 
 **Slash commands** (Tab completes): `/resume` — live picker over all earlier
 sessions (start date, message count, model used, first message): type to

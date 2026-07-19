@@ -620,54 +620,39 @@ class TestLiveStatus:
 
 
 class TestCwdAndCd:
-    def test_bare_cd_inside_roots_changes_cwd_without_approval(self, tmp_path):
+    def test_model_bare_cd_is_rejected_with_guidance(self, tmp_path):
+        """Stateless execution: a bare model cd never runs (no approval, no
+        cwd change) — the result tells the model how to chain instead."""
         (tmp_path / "sub").mkdir()
         agent, _ = make_agent(
             [
                 model_says(tool_calls=[tool_call("run_command", command="cd sub")]),
-                model_says("done"),
+                model_says("understood"),
             ],
-            approve=lambda _cmd: pytest.fail("in-root bare cd must not hit the approval gate"),
+            approve=lambda _cmd: pytest.fail("bare cd must not hit the approval gate"),
             cwd=str(tmp_path),
         )
         agent.run_task("go there")
-        assert agent.cwd == str(tmp_path / "sub")
-        assert "working directory is now" in tool_messages(agent.messages)[0]["content"]
+        assert agent.cwd == str(tmp_path)
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "cd was NOT run" in result
+        assert "cd <dir> && <command>" in result
+        assert str(tmp_path) in result  # names the anchor it stays in
 
-    def test_bare_cd_outside_roots_goes_through_approval(self, tmp_path):
-        root = tmp_path / "project"
-        elsewhere = tmp_path / "elsewhere"
-        root.mkdir()
-        elsewhere.mkdir()
-        seen = []
+    def test_compound_cd_runs_as_subshell_and_reverts(self, tmp_path):
+        """cd x && ... executes there but the agent cwd is untouched after."""
+        sub = tmp_path / "sub"
+        sub.mkdir()
         agent, _ = make_agent(
             [
-                model_says(tool_calls=[tool_call("run_command", command=f"cd {elsewhere}")]),
+                model_says(tool_calls=[tool_call("run_command", command="cd sub && pwd")]),
                 model_says("done"),
             ],
-            approve=lambda cmd: seen.append(cmd) or True,
-            cwd=str(root),
+            cwd=str(tmp_path),
         )
-        agent.run_task("go elsewhere")
-        assert seen == [f"cd {elsewhere}"]
-        assert agent.cwd == str(elsewhere)
-
-    def test_bare_cd_outside_roots_denied_keeps_cwd(self, tmp_path):
-        root = tmp_path / "project"
-        elsewhere = tmp_path / "elsewhere"
-        root.mkdir()
-        elsewhere.mkdir()
-        agent, _ = make_agent(
-            [
-                model_says(tool_calls=[tool_call("run_command", command=f"cd {elsewhere}")]),
-                model_says("staying"),
-            ],
-            approve=lambda _cmd: False,
-            cwd=str(root),
-        )
-        agent.run_task("go elsewhere")
-        assert agent.cwd == str(root)
-        assert tool_messages(agent.messages)[0]["content"] == DENIED_RESULT
+        agent.run_task("where is sub")
+        assert "sub" in tool_messages(agent.messages)[0]["content"]
+        assert agent.cwd == str(tmp_path)
 
     def test_trust_root_widens_roots_for_session(self, tmp_path):
         root = tmp_path / "project"
@@ -1219,18 +1204,18 @@ class TestRootScoping:
         agent.run_task("read env")
         assert asked == ["sensitive"]
 
-    def test_model_cd_moves_cwd_but_not_root(self, tmp_path):
+    def test_model_cd_moves_neither_cwd_nor_root(self, tmp_path):
         root = tmp_path / "project"
         elsewhere = tmp_path / "elsewhere"
         root.mkdir()
         elsewhere.mkdir()
         agent, _ = make_agent(
             [model_says(tool_calls=[tool_call("run_command", command=f"cd {elsewhere}")]),
-             model_says("moved")],
+             model_says("staying")],
             cwd=str(root),
         )
         agent.run_task("go elsewhere")
-        assert agent.cwd == str(elsewhere)
+        assert agent.cwd == str(root)
         assert agent.roots == [root.resolve()]
 
     def test_rebase_moves_cwd_and_root_and_tells_model(self, tmp_path):

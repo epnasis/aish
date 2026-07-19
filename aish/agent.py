@@ -60,11 +60,12 @@ Rules:
 5. Prefer read-only commands. Never bundle destructive operations
    (rm, mv, overwrite redirects) into a command unless the user explicitly
    asked for that operation.
-6. You have a persistent working directory. To change it, run exactly
-   `cd <dir>` as its own command — the new directory is echoed back and all
-   later commands run there. A cd that leaves the session's trusted
-   directories asks the user first; they may trust the new directory for the
-   rest of the session.
+6. Every command runs in the project directory — there is no persistent cd.
+   To run a command elsewhere, chain it in ONE call: `cd <dir> && <command>`
+   (the directory reverts when the command ends), or use flags like
+   `git -C <dir>` / `make -C <dir>`. Paths outside the project prompt the
+   user, who may trust that directory for the rest of the session. Only the
+   user can move the project directory itself.
 7. WEB: for information not on this machine (current events, releases,
    unfamiliar errors, general facts), call web_search, then read_url the most
    promising result and answer from what the page actually says, citing the
@@ -80,6 +81,13 @@ Rules:
 DENIED_RESULT = (
     "USER DENIED this command — it was NOT executed. "
     "Do not propose it again; change approach or ask the user."
+)
+
+CD_NOT_STICKY = (
+    "cd was NOT run: every command executes in the project directory ({cwd}) "
+    "— a bare cd does not persist. To run something elsewhere, chain it in "
+    "ONE command: cd <dir> && <command> (the directory reverts when the "
+    "command ends). Only the user can move the project directory (/cd)."
 )
 
 EMPTY_RESPONSE = (
@@ -225,7 +233,7 @@ def environment_context(cwd: str) -> str:
     return (
         "Environment:\n"
         f"- today's date: {datetime.date.today().isoformat()}\n"
-        f"- initial working directory: {cwd}\n"
+        f"- project directory (all commands run here): {cwd}\n"
         f"- user: {getpass.getuser()}\n"
         f"- OS: {os_desc} ({platform.machine()})"
     )
@@ -275,8 +283,8 @@ class Agent:
         # Session roots: auto-approved reads/commands are confined to these
         # trees. Seeded with the launch dir; they only widen on an explicit
         # user decision — /cd, /add-dir, or "trust this directory" answered on
-        # an approval prompt. A model-issued cd moves cwd only, and prompts
-        # first when the target leaves these roots.
+        # an approval prompt. Execution is stateless for the model: cwd moves
+        # only on user action (/cd, !cd) — a model-issued bare cd never runs.
         self.roots: list[Path] = [Path(self.cwd).resolve()]
         self.on_message = on_message
         self.on_token = on_token
@@ -838,13 +846,15 @@ class Agent:
         if name == "run_command":
             command = str(args.get("command", ""))
 
-            # A bare cd inside the session roots is free; one that crosses the
-            # root boundary goes through the approver like any other command,
-            # so the user is asked ONCE at the crossing (and can trust the
-            # destination) instead of on every command after a silent drift.
-            cd_target = self._parse_cd(command)
-            if cd_target is not None and not self._cd_escapes(cd_target):
-                return self._change_dir(cd_target)
+            # Stateless execution: a bare model-issued cd never runs — it
+            # would silently detach the model from the project directory, its
+            # one stable anchor across long conversations and context trims.
+            # Excursions are per-command subshells (cd x && ...), which revert
+            # on exit; only the user moves the project (/cd, !cd).
+            if self._parse_cd(command) is not None:
+                result = CD_NOT_STICKY.format(cwd=self.cwd)
+                self.echo(result)
+                return result
 
             decision = self.approve(command)
             if isinstance(decision, Blocked):
@@ -854,12 +864,6 @@ class Agent:
             if decision is None or decision is False:
                 return DENIED_RESULT
             final = command if decision is True else str(decision)
-            cd_final = self._parse_cd(final)
-            if cd_final is not None:
-                result = self._change_dir(cd_final)
-                if final != command:
-                    result = f"[user edited the command to: {final}]\n{result}"
-                return result
             if args.get("background"):
                 result = tools.start_background(final, cwd=self.cwd, log_dir=self.job_log_dir)
                 self.echo(result)
@@ -903,14 +907,10 @@ class Agent:
         self.echo(result)
         return result
 
-    def _cd_escapes(self, target: str) -> bool:
-        """Whether a model-issued bare cd would leave the session roots — the
-        boundary crossing that must go through the approver."""
-        return files.is_outside_roots(target, self.cwd, self.roots)
-
     def _parse_cd(self, command: str) -> str | None:
-        """A bare `cd <dir>` changes agent state instead of spawning a shell
-        (where it would be a no-op). Compound forms (cd x && ...) run normally."""
+        """Detect a bare `cd <dir>`. For the user (! prefix) it changes agent
+        state; from the model it is rejected with guidance — execution is
+        stateless. Compound forms (cd x && ...) run normally as subshells."""
         if any(ch in command for ch in ";&|<>`$(){}"):
             return None
         try:

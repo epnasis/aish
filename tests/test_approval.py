@@ -355,6 +355,18 @@ class TestRootScoping:
         )
         assert self.approvable("git log .", tmp_path, prefixes=["git log"])
 
+    def test_compound_cd_scoped_like_any_path(self, tmp_path):
+        """cd is a safe subshell segment; its path argument obeys root scoping,
+        so trusting a directory makes `cd <dir> && ls` auto-approve."""
+        root = tmp_path / "project"
+        other = tmp_path / "other"
+        root.mkdir()
+        other.mkdir()
+        (root / "sub").mkdir()
+        assert self.approvable("cd sub && ls", root)
+        assert not self.approvable(f"cd {other} && ls", root)
+        assert self.approvable(f"cd {other} && ls", root, extra_roots=[other])
+
     def test_added_root_widens_scope(self, tmp_path):
         root = tmp_path / "project"
         other = tmp_path / "other"

@@ -43,6 +43,11 @@ SAFE_COMMANDS = frozenset(
     {
         "basename",
         "cat",
+        # cd is subshell-scoped (execution is stateless — a bare model cd is
+        # rejected before it gets here) and its path argument still goes
+        # through root scoping, so `cd <in-root-or-trusted> && ...` may
+        # auto-approve when the other segments do.
+        "cd",
         "column",
         "cut",
         "date",
