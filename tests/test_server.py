@@ -188,6 +188,30 @@ class TestCommandApproval:
             assert not marker.exists()
             assert tool_results(chat)[-1]["content"] == DENIED_RESULT
 
+    def test_deny_with_comment_reaches_model(self, app_env, tmp_path):
+        """#13: feedback typed into the card comes back as model guidance."""
+        marker = tmp_path / "pwned2"
+        client, chat = make_client(app_env, self.responses(f"touch {marker}"))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "touch it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json(
+                {
+                    "type": "approval",
+                    "id": request["id"],
+                    "action": "deny",
+                    "comment": "wrong flag on macOS, use -f",
+                }
+            )
+            resolved = recv_until(ws, "approval_resolved")
+            assert resolved["decision"] == "denied"
+            assert resolved["comment"] == "wrong flag on macOS, use -f"
+            recv_until(ws, "done")
+            assert not marker.exists()
+            result = tool_results(chat)[-1]["content"]
+            assert result.startswith(DENIED_RESULT)
+            assert "wrong flag on macOS, use -f" in result
+
     def test_edit_runs_edited_command(self, app_env, tmp_path):
         original, edited = tmp_path / "original", tmp_path / "edited42"
         client, chat = make_client(app_env, self.responses(f"touch {original}"))
@@ -316,6 +340,26 @@ class TestWriteApproval:
             recv_until(ws, "done")
             assert not target.exists()
             assert tool_results(chat)[-1]["content"] == WRITE_DENIED
+
+    def test_deny_write_with_comment_reaches_model(self, app_env, tmp_path):
+        target = tmp_path / "note.txt"
+        client, chat = make_client(app_env, self.responses(str(target), "hello\n"))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "write it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json(
+                {
+                    "type": "approval",
+                    "id": request["id"],
+                    "action": "deny",
+                    "comment": "wrong file — put it in docs/",
+                }
+            )
+            recv_until(ws, "done")
+            assert not target.exists()
+            result = tool_results(chat)[-1]["content"]
+            assert result.startswith(WRITE_DENIED)
+            assert "wrong file — put it in docs/" in result
 
 
 class TestReconnect:

@@ -40,6 +40,7 @@ from .approval import (
     DEFAULT_ALLOWLIST,
     DEFAULT_DENYLIST,
     Blocked,
+    Denied,
     check_denied,
     is_auto_approvable,
     load_prefixes,
@@ -240,8 +241,11 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     def record(command: str, decision: str) -> None:
         logref.command(command, decision)
 
-    def resolve(uid: str, decision: str) -> None:
-        bridge.emit({"type": "approval_resolved", "id": uid, "decision": decision})
+    def resolve(uid: str, decision: str, comment: str = "") -> None:
+        event = {"type": "approval_resolved", "id": uid, "decision": decision}
+        if comment:
+            event["comment"] = comment
+        bridge.emit(event)
 
     def blocked(command: str, reason: str) -> Blocked:
         bridge.emit({"type": "echo", "text": f"✗ blocked ({reason}): {command}"})
@@ -299,11 +303,12 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
                 record(f"{command} => {edited}", "edited")
                 resolve(request["id"], "edited")
                 return edited
-        record(command, "denied")
-        resolve(request["id"], "denied")
-        return None
+        comment = str(answer.get("comment") or "").strip()
+        record(command, f"denied (feedback: {comment})" if comment else "denied")
+        resolve(request["id"], "denied", comment)
+        return Denied(comment) if comment else None
 
-    def approve_write(plan) -> bool:
+    def approve_write(plan) -> "bool | Denied":
         verb = "create" if plan.is_new else "edit"
         request: dict[str, Any] = {
             "type": "approval_request",
@@ -316,9 +321,16 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         }
         answer = bridge.ask(request)
         approved = answer.get("action") == "approve"
-        record(f"{verb} {plan.target}", "approved" if approved else "denied")
-        resolve(request["id"], "approved" if approved else "denied")
-        return approved
+        comment = "" if approved else str(answer.get("comment") or "").strip()
+        record(
+            f"{verb} {plan.target}",
+            f"denied (feedback: {comment})" if comment else
+            ("approved" if approved else "denied"),
+        )
+        resolve(request["id"], "approved" if approved else "denied", comment)
+        if approved:
+            return True
+        return Denied(comment) if comment else False
 
     def approve_read(path: str, reason: str = "sensitive") -> bool:
         request: dict[str, Any] = {
@@ -377,7 +389,9 @@ About aish (you) — use this to answer questions about your own usage:
 - The user talks to you through the aish WEB UI in a browser (often a phone), \
 not a terminal. Every command you propose appears as an approval card with \
 Approve / Allow this session / Edit / Deny buttons; file writes show a \
-unified diff before approval. Read-only commands auto-approve within the \
+unified diff before approval. Cards also carry an optional feedback field: \
+a denial may arrive WITH the user's explanation of what is wrong — treat \
+that text as direct instruction on what to do instead. Read-only commands auto-approve within the \
 session roots (allowlist: {allow_path}). "Allow this session" auto-approves \
 that command's prefixes until the session closes — in memory only.
 - There are NO slash commands and NO ! direct commands here. Model switching, \

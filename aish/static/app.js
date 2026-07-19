@@ -1048,8 +1048,32 @@ function answerCard(id, action, extra) {
   send({ type: "approval", id, action, ...extra });
   const card = cards.get(id);
   if (card) {
-    for (const b of card.querySelectorAll("button")) b.disabled = true;
+    for (const b of card.querySelectorAll("button, input, textarea")) b.disabled = true;
   }
+}
+
+// #13: optional feedback typed straight into the approval card. Deny picks
+// up whatever is in the field; Enter in the field is an explicit
+// "deny with this comment" — the text goes back to the model as guidance.
+function feedbackField(id) {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "feedback";
+  input.placeholder = "Optional feedback: why not / what to do instead";
+  input.enterKeyHint = "send";
+  input.autocomplete = "off";
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      answerCard(id, "deny", denyExtra(input));
+    }
+  });
+  return input;
+}
+
+function denyExtra(input) {
+  const comment = input.value.trim();
+  return comment ? { comment } : {};
 }
 
 function buildCommandCard(card, event) {
@@ -1064,6 +1088,8 @@ function buildCommandCard(card, event) {
   const code = document.createElement("code");
   code.textContent = event.command;
   card.appendChild(code);
+  const feedback = feedbackField(event.id);
+  card.appendChild(feedback);
   const prefixes = (event.prefixes || []).join(", ");
   const row = buttonRow(card, [
     ["Approve", "approve", () => answerCard(event.id, "approve")],
@@ -1071,7 +1097,7 @@ function buildCommandCard(card, event) {
       () => answerCard(event.id, "approve_session"),
       prefixes ? `auto-approve "${prefixes}" until the server restarts` : ""],
     ["Edit", "edit", () => showEditor()],
-    ["Deny", "deny", () => answerCard(event.id, "deny")],
+    ["Deny", "deny", () => answerCard(event.id, "deny", denyExtra(feedback))],
   ]);
   row.classList.add("grid2");
   function showEditor() {
@@ -1105,9 +1131,11 @@ function buildWriteCard(card, event) {
     diff.appendChild(el);
   }
   card.appendChild(diff);
+  const feedback = feedbackField(event.id);
+  card.appendChild(feedback);
   buttonRow(card, [
     ["Approve", "approve", () => answerCard(event.id, "approve")],
-    ["Deny", "deny", () => answerCard(event.id, "deny")],
+    ["Deny", "deny", () => answerCard(event.id, "deny", denyExtra(feedback))],
   ]);
 }
 
@@ -1136,6 +1164,12 @@ function onApprovalResolved(event) {
   verdict.className = `verdict ${event.decision === "denied" ? "denied" : "approved"}`;
   verdict.textContent = `${event.decision}: ${(card.dataset.summary || "").slice(0, 120)}`;
   card.appendChild(verdict);
+  if (event.comment) {
+    const note = document.createElement("div");
+    note.className = "verdict-comment";
+    note.textContent = `“${event.comment}”`;
+    card.appendChild(note);
+  }
 }
 
 // ---- composer + autocomplete ---------------------------------------------

@@ -214,7 +214,9 @@ ask aish about any of this — its own docs are in its system prompt.
 ## Web UI
 
 `aish-web` serves the same agent to a browser — built for phones: approvals
-become tap-able cards (Approve / Allow this session / Edit / Deny), file
+become tap-able cards (Approve / Allow this session / Edit / Deny — plus an
+optional feedback field: type *why* you're denying, or what to do instead,
+and Deny sends that straight back to the model as guidance), file
 writes show the colored diff before anything lands on disk, answers stream
 live and render as markdown (tables, code blocks, links), command output
 keeps its ANSI colors, and locking your phone mid-task loses nothing (on

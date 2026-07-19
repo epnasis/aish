@@ -348,6 +348,21 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .card .verdict { font-size: 13px; color: var(--dim); }
 .card .verdict.approved { color: var(--green); }
 .card .verdict.denied { color: var(--red); }
+.card .verdict-comment { font-size: 13px; color: var(--dim); margin-top: 2px; }
+.card .feedback {
+  width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  border: 0.5px solid var(--sep);
+  border-radius: var(--r-control);
+  padding: 9px 12px;
+  margin-bottom: 10px;
+  font: inherit;
+  font-size: 16px; /* prevents iOS focus zoom */
+}
+.card .feedback::placeholder { color: var(--dim); }
+.card .feedback:focus { outline: none; border-color: var(--blue); }
+.card .feedback:disabled { opacity: 0.5; }
 
 /* ---- sources under an answer ---- */
 .sources {

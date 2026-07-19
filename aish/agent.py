@@ -23,7 +23,7 @@ from typing import Any
 import ollama
 
 from . import files, skills, tools, web
-from .approval import Blocked
+from .approval import Blocked, Denied
 from .session import SessionLog
 
 _PLATFORM_NOTES = {
@@ -140,6 +140,12 @@ WRITE_DENIED = (
     "Do not retry the same change; adjust it or ask the user what they want."
 )
 
+FEEDBACK_NOTE = '\nThe user explains: "{comment}" — treat this as direct instruction.'
+
+
+def _with_feedback(base: str, comment: str) -> str:
+    return base + FEEDBACK_NOTE.format(comment=comment) if comment else base
+
 READ_DENIED = (
     "USER DENIED reading this sensitive file — its contents were NOT read. "
     "Do not retry; proceed without it or ask the user."
@@ -233,7 +239,7 @@ class Agent:
         self,
         model: str,
         approve: Callable[[str], Any],
-        approve_write: Callable[[Any], bool] = lambda _plan: False,
+        approve_write: Callable[[Any], Any] = lambda _plan: False,  # bool or Denied
         approve_read: Callable[[str, str], bool] = lambda _path, _reason: True,
         echo: Callable[[str], None] = lambda _: None,
         stream: Callable[[str], None] | None = None,
@@ -819,6 +825,8 @@ class Agent:
             decision = self.approve(command)
             if isinstance(decision, Blocked):
                 return BLOCKED_RESULT.format(reason=decision.reason)
+            if isinstance(decision, Denied):
+                return _with_feedback(DENIED_RESULT, decision.comment)
             if decision is None or decision is False:
                 return DENIED_RESULT
             final = command if decision is True else str(decision)
@@ -856,7 +864,10 @@ class Agent:
             )
         if plan.error:
             return f"ERROR: {plan.error}"
-        if not self.approve_write(plan):
+        decision = self.approve_write(plan)
+        if isinstance(decision, Denied):
+            return _with_feedback(WRITE_DENIED, decision.comment)
+        if not decision:
             return WRITE_DENIED
         result = files.commit(plan)
         self.echo(result)

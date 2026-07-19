@@ -30,6 +30,15 @@ class Blocked:
     def __init__(self, reason: str):
         self.reason = reason
 
+
+class Denied:
+    """Approver verdict for a refusal that carries the user's explanation
+    (typed into the approval card): the action did NOT run, and the comment
+    goes back to the model as direct guidance on what to do instead."""
+
+    def __init__(self, comment: str):
+        self.comment = comment
+
 SAFE_COMMANDS = frozenset(
     {
         "basename",
