@@ -526,8 +526,15 @@ class WebServer:
                 return " ".join((message.get("content") or "").split())[:80]
         return ""
 
-    def _hello(self) -> dict:
+    def _hello(self, pager: list[tuple[str, str]] | None = None) -> dict:
         session = self.active
+        # The swipe pager pages through recent chats oldest→newest by last
+        # interaction — open or not; resume loads cold ones from disk. The
+        # current session is always a page even before its first message
+        # (a fresh chat is the newest thing by definition).
+        pages = [{"name": name, "title": title} for name, title in pager or []]
+        if all(page["name"] != session.name for page in pages):
+            pages.append({"name": session.name, "title": self._title(session)})
         return {
             "type": "hello",
             "model": model_spec(session.agent),
@@ -538,15 +545,7 @@ class WebServer:
             "roots": [str(root) for root in session.agent.roots],
             "home": str(Path.home()),  # client abbreviates paths to ~
             "rev": STATIC_REV,
-            # Open sessions oldest→newest (names embed creation timestamps,
-            # so lexical order is chronological): the client's swipe pager
-            # uses this to know its neighbors (and titles) ahead of release —
-            # back = older chat, forward = newer, matching Safari's gesture.
-            # The set only changes through resume/new — both re-send hello.
-            "open": [
-                {"name": s.name, "title": self._title(s)}
-                for s in sorted(self.sessions.values(), key=lambda s: s.name)
-            ],
+            "pager": pages,
         }
 
     def _cwd_event(self) -> dict:
@@ -593,6 +592,9 @@ class WebServer:
     async def _show(self, websocket: WebSocket, session: Session) -> None:
         """Point the client at `session`: hello + full transcript replay,
         then live events from its bridge."""
+        # Disk scan for the pager happens before the attach block below: it
+        # must not sit between the queue swap and the transcript snapshot.
+        pager = await asyncio.to_thread(SessionLog.pager_titles, self.state_dir)
         if self.sender:
             self.sender.cancel()
             self.sender = None
@@ -606,7 +608,7 @@ class WebServer:
         bridge.attached = True
         bridge.reset_outbox()
         snapshot = list(bridge.transcript)
-        await websocket.send_json(self._hello())
+        await websocket.send_json(self._hello(pager))
         await websocket.send_json(
             {"type": "replay", "events": snapshot, "truncated": bridge.truncated}
         )

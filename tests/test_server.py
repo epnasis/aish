@@ -495,26 +495,56 @@ class TestSessions:
             contents = json.dumps(chat.calls[-1]["messages"])
             assert "zebra" in contents  # resumed context reached the model
 
-    def test_hello_lists_open_sessions_oldest_first(self, app_env):
-        # The swipe pager pages through hello["open"]: every open session
-        # oldest→newest (back = older, forward = newer), with the drawer's
-        # title derivation.
+    def test_hello_pager_pages_recent_chats_oldest_first(self, app_env):
+        # The swipe pager pages through hello["pager"]: recent chats by last
+        # interaction, oldest→newest (back = older, forward = newer). Chats
+        # with no user input are not pages — except the current one.
         client, _ = make_client(app_env, [model_says("ok")])
         with client, connected(client) as (ws, hello, _):
             first = hello["session"]
-            assert [s["name"] for s in hello["open"]] == [first]
+            assert [p["name"] for p in hello["pager"]] == [first]
             ws.send_json({"type": "task", "text": "remember the yak"})
             recv_until(ws, "done")
             ws.send_json({"type": "new"})
             hello = recv_until(ws, "hello")
             second = hello["session"]
-            assert [s["name"] for s in hello["open"]] == [first, second]
-            assert hello["open"][0]["title"] == "remember the yak"
+            assert [p["name"] for p in hello["pager"]] == [first, second]
+            assert hello["pager"][0]["title"] == "remember the yak"
             recv_until(ws, "replay")
-            # Switching back must not reorder the pager's pages.
+            # Back on the first chat, the still-empty new one is not a page.
             ws.send_json({"type": "resume", "path": first})
             hello = recv_until(ws, "hello")
-            assert [s["name"] for s in hello["open"]] == [first, second]
+            assert [p["name"] for p in hello["pager"]] == [first]
+
+    def test_pager_orders_by_last_interaction_and_spans_restarts(self, app_env):
+        # Interacting with an old chat moves it to the newest end, and a
+        # fresh server lists chats it never opened (swipe loads them from
+        # disk via resume) — same recency order as the sessions drawer.
+        responses = [model_says("a"), model_says("b"), model_says("a2")]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, hello, _):
+            session_a = hello["session"]
+            ws.send_json({"type": "task", "text": "alpha task"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "new"})
+            hello = recv_until(ws, "hello")
+            session_b = hello["session"]
+            ws.send_json({"type": "task", "text": "beta task"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "resume", "path": session_a})
+            recv_until(ws, "replay")
+            ws.send_json({"type": "task", "text": "alpha again"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "new"})
+            hello = recv_until(ws, "hello")
+            assert [p["name"] for p in hello["pager"]] == [
+                session_b, session_a, hello["session"]
+            ]
+        client2, _ = make_client(app_env, [])
+        with client2, connected(client2) as (_ws, hello, _):
+            names = [p["name"] for p in hello["pager"]]
+            assert names[:2] == [session_b, session_a]  # never opened here
+            assert names[-1] == hello["session"]
 
     def test_resume_from_disk_replays_history(self, app_env):
         # First server instance writes a session to disk…

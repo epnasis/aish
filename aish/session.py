@@ -65,8 +65,9 @@ class SessionLog:
 
     @staticmethod
     def latest(state_dir: Path) -> Path | None:
-        files = sorted(state_dir.glob("session-*.jsonl"))
-        return files[-1] if files else None
+        """Most recently interacted-with session (not most recently created)."""
+        files = SessionLog._by_recency(state_dir)
+        return files[0] if files else None
 
     @staticmethod
     def _parse(path: Path) -> tuple[list[dict], str]:
@@ -104,6 +105,53 @@ class SessionLog:
         return "(no user input)"
 
     @staticmethod
+    def _peek_title(path: Path) -> str | None:
+        """First user message without parsing the whole log — the pager needs
+        only a label per session. None = no user input yet (empty chat)."""
+        try:
+            with path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if record.get("kind") == "message" and record.get("role") == "user":
+                        title = SessionLog._derive_title([record])
+                        if len(title) > TITLE_MAX:
+                            title = title[: TITLE_MAX - 1] + "…"
+                        return title
+        except OSError:
+            return None
+        return None
+
+    @staticmethod
+    def _by_recency(state_dir: Path) -> list[Path]:
+        """Session files newest-first by last interaction (file mtime) — the
+        one ordering every session list shares (drawer, CLI picker, swipe
+        pager), so moving through any of them means the same thing."""
+        stamped = []
+        for path in state_dir.glob("session-*.jsonl"):
+            try:
+                stamped.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        stamped.sort(reverse=True)
+        return [path for _, path in stamped]
+
+    @staticmethod
+    def pager_titles(state_dir: Path, limit: int = 30) -> list[tuple[str, str]]:
+        """(name, title) pages for the web UI's swipe pager: the same recency
+        ordering as the drawer, flipped oldest→newest so back = older, and
+        capped to the most recent `limit`. Chats with no user input yet are
+        not pages."""
+        pages = []
+        for path in reversed(SessionLog._by_recency(state_dir)[:limit]):
+            title = SessionLog._peek_title(path)
+            if title is not None:
+                pages.append((path.name, title))
+        return pages
+
+    @staticmethod
     def _started_at(path: Path) -> datetime.datetime:
         try:  # session-YYYYmmdd-HHMMSS[-ffffff].jsonl
             _, day, clock = path.stem.split("-")[:3]
@@ -129,10 +177,11 @@ class SessionLog:
 
     @staticmethod
     def list_sessions(state_dir: Path, exclude: set | None = None) -> list[SessionInfo]:
-        """Non-empty sessions, newest first, minus excluded paths."""
+        """Non-empty sessions by last interaction, newest first, minus
+        excluded paths."""
         exclude = exclude or set()
         infos = []
-        for path in sorted(state_dir.glob("session-*.jsonl"), reverse=True):
+        for path in SessionLog._by_recency(state_dir):
             if path in exclude:
                 continue
             info = SessionLog.info(path)
@@ -142,11 +191,12 @@ class SessionLog:
 
     @staticmethod
     def load_entries(state_dir: Path, exclude: set | None = None) -> list["SessionEntry"]:
-        """Searchable sessions, newest first, read from disk once — so a live
-        picker can re-rank on every keystroke without touching files."""
+        """Searchable sessions by last interaction, newest first, read from
+        disk once — so a live picker can re-rank on every keystroke without
+        touching files."""
         exclude = exclude or set()
         entries = []
-        for path in sorted(state_dir.glob("session-*.jsonl"), reverse=True):
+        for path in SessionLog._by_recency(state_dir):
             if path in exclude:
                 continue
             messages, model = SessionLog._parse(path)

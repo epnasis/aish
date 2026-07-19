@@ -242,11 +242,14 @@ compose button, work on something else — the first task keeps running and
 the sessions drawer shows live badges (running / needs approval); a toast
 tells you when a background task finishes. Up to 6 sessions stay open in
 memory (idle ones beyond that are closed; their files persist and reopen
-on demand). On a phone, **swipe the transcript sideways** to page between
-open sessions, with Safari's direction semantics: swipe right goes back to
-an older chat, swipe left goes forward to a newer one — and swiping forward
-past the newest opens a fresh chat. The view follows your finger, a pill
-shows which session you're heading to, and it turns blue once letting go
+on demand). On a phone, **swipe the transcript sideways** to page through
+your recent chats — the same list, in the same last-interaction order, as
+the sessions drawer, so swiping back is exactly moving down that list (chats
+load from disk as needed, opened or not; the most recent 30 are reachable
+this way, search covers the rest). Directions follow Safari: swipe right
+goes back to an older chat, swipe left forward to a newer one — and swiping
+forward past the newest opens a fresh chat. The view follows your finger, a
+pill shows which chat you're heading to, and it turns blue once letting go
 will switch — release earlier and it snaps back. Code blocks still scroll
 sideways normally; the gesture only engages on a clearly horizontal drag.
 

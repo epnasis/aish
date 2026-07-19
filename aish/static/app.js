@@ -209,7 +209,7 @@ function onHello(event) {
   if (event.rev && event.rev !== PAGE_REV) { location.reload(); return; }
   $("model-chip").textContent = event.model;
   setTitle(event.title);
-  openSessions = event.open || [];
+  pagerSessions = event.pager || [];
   currentSession = event.session;
   renderWorkspace(event);
   setBusy(event.busy);
@@ -1651,14 +1651,15 @@ $("wrap-chip").onclick = () => {
 
 // ---- swipe pager between open sessions -----------------------------------
 // Horizontal pager gesture (the iOS Weather-app model): drag the transcript
-// sideways and it follows the finger; a pill names the neighboring open
-// session and turns blue once release would switch. Pages run oldest→newest
-// (hello.open, chronological) with Safari's direction semantics: swipe
-// right = back = older chat, swipe left = forward = newer — or a brand-new
-// chat once past the newest. Touches near the screen edges are left to
-// Safari's back/forward gesture, and pans starting inside horizontally
-// scrollable output stay scrolls.
-let openSessions = []; // [{name, title}] insertion-ordered, from hello
+// sideways and it follows the finger; a pill names the target chat and
+// turns blue once release would switch. Pages are the recent chats —
+// open or not, resume loads cold ones from disk — ordered oldest→newest
+// by last interaction (hello.pager), with Safari's direction semantics:
+// swipe right = back = older chat, swipe left = forward = newer — or a
+// brand-new chat once past the newest. Touches near the screen edges are
+// left to Safari's back/forward gesture, and pans starting inside
+// horizontally scrollable output stay scrolls.
+let pagerSessions = []; // [{name, title}] oldest→newest, from hello
 let currentSession = null;
 let swipeInFrom = 0; // set on commit; onReplay animates the new page in
 
@@ -1680,8 +1681,8 @@ const swipe = {
 };
 
 function sessionNeighbor(direction) {
-  const index = openSessions.findIndex((s) => s.name === currentSession);
-  return index < 0 ? null : openSessions[index + direction] || null;
+  const index = pagerSessions.findIndex((s) => s.name === currentSession);
+  return index < 0 ? null : pagerSessions[index + direction] || null;
 }
 
 // Safari semantics: back (swipe right, -1) = older chat, forward (swipe
@@ -1778,7 +1779,7 @@ function endSwipe(event) {
   } else {
     messagesEl.style.transform = "";
     if (!target && direction === -1 && Math.abs(dx) > 60) {
-      showToast("no older open chats — tap the title to browse all sessions");
+      showToast("no older chats — tap the title to search all sessions");
     }
   }
 }
@@ -1816,7 +1817,6 @@ const STATE_BADGES = {
   waiting: ["● needs approval", "st-waiting"],
   idle: ["○ open", "st-open"],
 };
-const STATE_ORDER = { waiting: 0, running: 1, idle: 2, "": 3 };
 
 function renderSessions(sessions) {
   const list = $("sessions-list");
@@ -1825,12 +1825,10 @@ function renderSessions(sessions) {
     list.textContent = "no matching sessions";
     return;
   }
-  // Open sessions surface first (needs-approval, then running), keeping the
-  // server's ranking within each group.
-  const sorted = [...sessions].sort(
-    (a, b) => STATE_ORDER[a.state || ""] - STATE_ORDER[b.state || ""]
-  );
-  for (const info of sorted) {
+  // Server order kept as-is: recency (same list the swipe pager pages
+  // through, newest at top — swiping back = moving down this list), or
+  // ranked when searching. Badges alone mark open-session state.
+  for (const info of sessions) {
     const row = document.createElement("button");
     row.className = "row";
     if (info.state) {
