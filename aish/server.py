@@ -65,6 +65,7 @@ from .cli import (
     rank_models,
     save_default_model,
 )
+from .embeddings import SemanticIndex
 from .prompt import ATFILE_IGNORED_DIRS, ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .session import SessionLog
 
@@ -1330,6 +1331,7 @@ def create_app(
             status=WebStatus(bridge),
             state_dir=state_dir,
             current_session=lambda: logref.log.path,
+            semantic=SemanticIndex(state_dir),
         )
         agent: Agent | ClaudeMaxAgent
         if provider == "claude-max":

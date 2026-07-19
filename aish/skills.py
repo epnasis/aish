@@ -51,6 +51,12 @@ PREFLIGHT_MIN_SCORE = 2  # fuzzy tier 1 is too weak to inject on
 PREFLIGHT_ENTRY_CHARS = 3000  # a bigger body is "oversized": teaser + read gate
 PREFLIGHT_TOTAL_CHARS = 12000  # hard cap; the agent may pass a smaller budget
 PREFLIGHT_HEAD_CHARS = 600  # teaser length for an oversized skill
+# Cosine floor for embedding-based selection (issue #43), calibrated on
+# embeddinggemma with retrieval prefixes against real tasks: true matches
+# score 0.27-0.41 (incl. Polish task vs English entries), unrelated tasks
+# peak near 0.21. Short identity lines compress the scale — do not expect
+# textbook 0.6+ values here.
+SEMANTIC_MIN_SIM = 0.24
 
 _PUNCT = ".,;:!?()[]{}<>'\"`"
 FUZZY_WORD_CUTOFF = 0.75  # single query word vs single entry word
@@ -396,6 +402,19 @@ def _reverse_score(entry: Entry, task_padded: str) -> int:
     `task_padded` is the space-padded, punctuation-stripped task from
     _pad_words, so matches respect word boundaries: skill "gh" must not
     fire on a task containing "night"."""
+    rail = _exact_rail(entry, task_padded)
+    if rail:
+        return rail
+    for word in _content_words(entry.description):
+        if _word_in(task_padded, word):
+            return 2
+    return 0
+
+
+def _exact_rail(entry: Entry, task_padded: str) -> int:
+    """Deliberate identity hits — the entry's name or a curated keyword
+    appearing in the task. These stay a guarantee even when semantic
+    selection is active: an author who writes `keywords: photo` means it."""
     name_cf = entry.name.casefold()
     if f" {name_cf} " in task_padded or f" {name_cf.replace('-', ' ')} " in task_padded:
         return 4
@@ -403,9 +422,6 @@ def _reverse_score(entry: Entry, task_padded: str) -> int:
         keyword_cf = keyword.casefold()
         if len(keyword_cf) >= 3 and _word_in(task_padded, keyword_cf):
             return 3
-    for word in _content_words(entry.description):
-        if _word_in(task_padded, word):
-            return 2
     return 0
 
 
@@ -426,29 +442,46 @@ class Preload:
 
 
 def preflight(
-    cwd: str, lessons_path, task: str, char_budget: int = PREFLIGHT_TOTAL_CHARS
+    cwd: str, lessons_path, task: str, char_budget: int = PREFLIGHT_TOTAL_CHARS, semantic=None
 ) -> Preload:
-    """Deterministic pre-flight retrieval: the top skills/memories matching a
-    task, rendered as blocks the agent injects directly — the model wakes up
-    with the content in context instead of having to remember to recall it.
+    """Pre-flight retrieval: the top skills/memories matching a task,
+    rendered as blocks the agent injects directly — the model wakes up with
+    the content in context instead of having to remember to recall it.
     A skill too large to inject gets a teaser and its name in `unread`, which
-    arms the agent's read gate until read_skill loads the full body."""
+    arms the agent's read gate until read_skill loads the full body.
+
+    `semantic` is `SemanticIndex.scores` (or None): embedding similarity
+    picks the entries, with exact name/keyword hits kept as a deterministic
+    guarantee rail. When it is absent or fails (returns None), the lexical
+    word-matching tiers below remain the floor."""
     if not task.split():
         return Preload()
     task_padded = _pad_words(task)
     entries = load_entries(cwd, lessons_path)
-    forward = {id(entry): score for score, entry in score_entries(entries, task)}
-    picked = []
-    for entry in entries:  # corpus order: project skills first, then newest
-        score = max(forward.get(id(entry), 0), _reverse_score(entry, task_padded))
-        if score >= PREFLIGHT_MIN_SCORE:
-            picked.append((score, entry))
-    picked.sort(key=lambda pair: -pair[0])  # stable: corpus order within a tier
+    sims = semantic(task, entries) if semantic is not None else None
+    if sims is not None:
+        ranked = []
+        for entry in entries:  # corpus order: project skills first, then newest
+            rail = _exact_rail(entry, task_padded)
+            sim = sims.get(id(entry), 0.0)
+            if rail or sim >= SEMANTIC_MIN_SIM:
+                ranked.append((rail, sim, entry))
+        ranked.sort(key=lambda t: (-t[0], -t[1]))
+        chosen = [entry for _, _, entry in ranked]
+    else:
+        forward = {id(entry): score for score, entry in score_entries(entries, task)}
+        picked = []
+        for entry in entries:  # corpus order: project skills first, then newest
+            score = max(forward.get(id(entry), 0), _reverse_score(entry, task_padded))
+            if score >= PREFLIGHT_MIN_SCORE:
+                picked.append((score, entry))
+        picked.sort(key=lambda pair: -pair[0])  # stable: corpus order within a tier
+        chosen = [entry for _, entry in picked]
     blocks: list[str] = []
     names: list[str] = []
     unread: list[str] = []
     remaining = char_budget
-    for _, entry in picked[:PREFLIGHT_TOP]:
+    for entry in chosen[:PREFLIGHT_TOP]:
         if remaining < 200:  # no room left for anything useful
             break
         if entry.kind == "memory" or len(entry.body) <= PREFLIGHT_ENTRY_CHARS:

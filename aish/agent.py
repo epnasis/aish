@@ -391,6 +391,7 @@ class Agent:
         status: Any = None,
         state_dir: os.PathLike | str | None = None,
         current_session: Callable[[], Path] | None = None,
+        semantic: Any = None,
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
@@ -419,6 +420,10 @@ class Agent:
         # excluded from ranking (its content is already this conversation).
         self.state_dir = state_dir
         self.current_session = current_session
+        # Embedding-based preflight selection (issue #43); opt-in from the
+        # entry points so tests and bare Agents stay network-free.
+        self.semantic = semantic
+        self._semantic_warned = False
         self.status = status if status is not None else _NoStatus()
         self._cancel = threading.Event()
         # Skill-read gate state: oversized preloaded skills the model must
@@ -495,7 +500,14 @@ class Agent:
                 skills.PREFLIGHT_TOTAL_CHARS,
                 self.num_ctx * CHARS_PER_TOKEN_BUDGET // 8,
             ),
+            semantic=self.semantic.scores if self.semantic is not None else None,
         )
+        if self.semantic is not None and self.semantic.error and not self._semantic_warned:
+            self._semantic_warned = True
+            self.echo(
+                "⚑ semantic recall unavailable "
+                f"({self.semantic.error[:80]}); falling back to word matching"
+            )
         self._pending_skill_reads = {n: GATE_MAX_REFUSALS for n in preload.unread}
         self.messages.append(
             {"role": "system", "content": task_reminder(index, preload.text)}
