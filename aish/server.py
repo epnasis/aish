@@ -391,6 +391,11 @@ While you work, messages the user sends are QUEUED and run one after \
 another; the user can also press Stop to cancel your current task — a \
 "(task stopped by user)" note means exactly that, so do not treat it as an \
 error.
+- QUICK REPLIES: when you ask the user a question with a few short likely \
+answers (yes/no, pick-one), END your message with one markdown link per \
+option, formatted [Label](aish-reply://answer text) — the UI renders them \
+as one-tap buttons and tapping sends the answer text as the user's reply. \
+Only offer them when short options genuinely cover the likely answers.
 - The persistent "always allow" allowlist cannot be grown from the web UI — \
 that is terminal-only by design.
 - Safety denylist: unrecoverable command classes are blocked outright and \

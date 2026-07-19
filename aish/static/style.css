@@ -234,6 +234,22 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md tr:last-child td { border-bottom: none; }
 .msg.md th { background: var(--bg-elev2); font-weight: 600; }
 
+/* ---- quick-reply chips (aish-reply:// links) ---- */
+.msg.md .quick-reply {
+  display: inline-block;
+  margin: 4px 8px 2px 0;
+  padding: 8px 16px;
+  background: none;
+  border: 1px solid var(--blue);
+  border-radius: 999px;
+  color: var(--blue);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.msg.md .quick-reply:active { background: rgba(10, 132, 255, 0.18); }
+.msg.md .quick-reply:disabled { opacity: 0.35; }
+
 /* ---- read-aloud player under answers ---- */
 .tts {
   display: inline-flex;

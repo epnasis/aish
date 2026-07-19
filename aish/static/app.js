@@ -681,8 +681,33 @@ const INLINE_RE = new RegExp(
   "|(\\*\\*[^*]+\\*\\*|__[^_]+__)" +
   "|(\\*[^*\\s][^*]*\\*)" +
   "|(~~[^~]+~~)" +
-  "|\\[([^\\]]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)"
+  "|\\[([^\\]]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)" +
+  "|\\[([^\\]]+)\\]\\(aish-reply:\\/\\/([^)]*)\\)"
 );
+
+// Quick replies (#17): [Label](aish-reply://answer text) links render as
+// one-tap chips; tapping submits the answer as the next user message. The
+// scheme is intercepted here — it never navigates and needs no JSON output
+// or schema support from the model, so small local models can use it too.
+function quickReplyChip(label, payload) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "quick-reply";
+  btn.textContent = label;
+  let reply = (payload || "").trim();
+  try { reply = decodeURIComponent(reply) || reply; } catch { /* keep raw */ }
+  if (!reply) reply = label;
+  btn.onclick = () => {
+    // One group, one answer: a tap retires every chip in this message.
+    const msg = btn.closest(".msg");
+    const siblings = msg ? msg.querySelectorAll(".quick-reply") : [btn];
+    for (const b of siblings) b.disabled = true;
+    if (!send({ type: "task", text: reply })) {
+      for (const b of siblings) b.disabled = false; // not connected — retryable
+    }
+  };
+  return btn;
+}
 
 function inlineMd(text) {
   const frag = document.createDocumentFragment();
@@ -712,6 +737,8 @@ function inlineMd(text) {
       const del = document.createElement("del");
       del.appendChild(inlineMd(match[4].slice(2, -2)));
       frag.appendChild(del);
+    } else if (match[7] !== undefined) {
+      frag.appendChild(quickReplyChip(match[7], match[8]));
     } else {
       const link = document.createElement("a");
       link.href = match[6];

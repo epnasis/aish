@@ -227,6 +227,13 @@ Code blocks are skipped, and the voice follows the answer's detected
 language — English or Polish. "Allow this session" auto-approves the command's prefixes until
 the session closes — in memory only, never written to the allowlist.
 
+**Quick replies**: when the model asks a question with a few short likely
+answers, it can end the message with `[Label](aish-reply://answer text)`
+links — the web UI renders them as one-tap chips and tapping one sends the
+answer as your reply, no keyboard needed. It's plain markdown (one system
+prompt sentence, no JSON schema), so even small local models can use it;
+tapping retires the other chips in that message.
+
 **Parallel sessions**: several sessions can be open at once, each with its
 own agent, model, working directory, and running task. Start a task, hit the
 compose button, work on something else — the first task keeps running and
