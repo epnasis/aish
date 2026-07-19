@@ -301,16 +301,20 @@ aish-web --host 0.0.0.0       # expose to your LAN (see security note below)
 aish-web --model gemini       # same --model forms as aish
 ```
 
-Header controls replace the slash commands: the **model chip** opens a
-searchable model picker (with a "make startup default" toggle), the **session
-title** opens the sessions drawer (search + resume + new chat), the **cwd
-subtitle** under the title shows the working directory at all times — tap it
-to browse or fuzzy-search folders and change directory without typing — and
-the **⋯ menu** shows the working directory, session roots (`/cd` /
-`/add-dir` equivalents), and background jobs; the **compose** button starts a fresh
-chat; the **wrap** button toggles line-wrapping for command output, code
-blocks, and diffs (default: scroll sideways; the choice is remembered per
-device). The input box autocompletes like the terminal: `/` pops up the command
+Header controls replace the slash commands: the **history button** (top
+left, the standard chat-app spot) opens the sessions drawer (search +
+resume) — the **session title with its ˅ caret** opens the same drawer, and
+a fresh empty chat shows a one-line hint pointing at both it and the swipe
+pager; the **model chip** opens a searchable model picker (with a "make
+startup default" toggle); the **folder breadcrumb** under the title shows
+the working directory at all times — tap it to browse or fuzzy-search
+folders and change directory without typing (recently used directories
+listed first; typing an absolute or `~` path in its search jumps straight
+there); the **⋯ menu** shows the working directory (with a Change… button
+into the same picker), session roots (`/add-dir` equivalent), and
+background jobs; the **compose** button starts a fresh chat; the **wrap**
+button toggles line-wrapping for command output, code blocks, and diffs
+(default: scroll sideways; the choice is remembered per device). The input box autocompletes like the terminal: `/` pops up the command
 list (unambiguous prefixes work — `/res` runs `/resume`) and `@` pops up
 project-file completion (same walk and ranking as the TUI). The paperclip
 uploads files (to `~/.local/state/aish/uploads/`, a session root).

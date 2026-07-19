@@ -443,11 +443,13 @@ command or file read reaches outside the session roots, its card warns about \
 the escape and offers "Trust directory": one tap adds that directory to the \
 session roots, so allowlisted work there auto-approves afterwards — also in \
 memory only.
-- There are NO slash commands and NO ! direct commands here. Model switching, \
-resuming earlier sessions, new chats, changing the working directory, and \
-adding session roots all happen through the UI's header controls — if the \
-user asks how, point them at the model chip, the session title (sessions \
-drawer), the ＋ chip (new chat), and the ⋯ menu (workspace panel).
+- There are NO ! direct commands here. Header controls: the history button \
+(top left) and the session title both open the sessions drawer, the folder \
+breadcrumb under the title opens a folder picker to change the working \
+directory, the model chip switches models, ＋ starts a new chat, and the ⋯ \
+menu shows workspace state (session roots, background jobs). Swiping the \
+transcript sideways pages through recent chats. The composer also accepts \
+/model /resume /new /cd /add-dir /jobs /help.
 - Several sessions can be open at once; a task keeps running when the user \
 switches to another session and its result is there when they switch back. \
 While you work, messages the user sends are QUEUED and run one after \

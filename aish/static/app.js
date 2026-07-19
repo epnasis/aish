@@ -200,7 +200,7 @@ let sessionTitled = false;
 
 function setTitle(text) {
   sessionTitled = Boolean(text);
-  $("session-chip").textContent = text || "New chat";
+  $("session-title").textContent = text || "New chat";
 }
 
 // The ?v= the server stamped into our own <script> tag — ground truth for
@@ -223,6 +223,7 @@ function onHello(event) {
   renderWorkspace(event);
   setBusy(event.busy);
   if (!event.busy) setStatus(null);
+  updateEmptyHint();
 }
 
 function onReplay(event) {
@@ -405,6 +406,14 @@ function nearBottom() {
 function scrollToEnd(force) {
   if (force || nearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight;
   updateScrollButton();
+  updateEmptyHint(); // every content-adding path funnels through here
+}
+
+// Empty-state education (#33): a fresh chat with earlier sessions to go back
+// to points at the two resume affordances (swipe pager, history button).
+function updateEmptyHint() {
+  const hasOthers = pagerSessions.some((s) => s.name !== currentSession);
+  $("empty-hint").hidden = !hasOthers || messagesEl.children.length > 0;
 }
 
 // iOS Safari settles keyboard-driven layout changes a beat after the gesture;
@@ -1641,7 +1650,7 @@ function handleSlash(text) {
     case "/model": openModelSheet(arg); break;
     case "/resume": openSessionsSheet(arg); break;
     case "/new": case "/clear": send({ type: "new" }); break;
-    case "/cd": arg ? send({ type: "cd", path: arg }) : openSheet("workspace-sheet"); break;
+    case "/cd": arg ? send({ type: "cd", path: arg }) : openDirSheet(); break;
     case "/add-dir": case "/dir-add":
       arg ? send({ type: "add_dir", path: arg }) : openSheet("workspace-sheet"); break;
     case "/jobs": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
@@ -2106,6 +2115,8 @@ document.addEventListener("keydown", (event) => {
 
 // sessions
 $("session-chip").onclick = () => openSessionsSheet("");
+$("history-chip").onclick = () => openSessionsSheet("");
+$("empty-hint").onclick = () => openSessionsSheet("");
 $("new-chip").onclick = () => send({ type: "new" });
 $("sessions-search").addEventListener(
   "input",
@@ -2207,10 +2218,7 @@ function onModelChanged(event) {
 
 // workspace
 $("menu-chip").onclick = () => { openSheet("workspace-sheet"); send({ type: "jobs" }); };
-$("cd-go").onclick = () => {
-  const path = $("cd-input").value.trim();
-  if (path) { send({ type: "cd", path }); $("cd-input").value = ""; }
-};
+$("ws-cd-change").onclick = () => openDirSheet();
 $("root-add").onclick = () => {
   const path = $("root-input").value.trim();
   if (path) { send({ type: "add_dir", path }); $("root-input").value = ""; }
@@ -2225,9 +2233,7 @@ function renderWorkspace(event) {
   if (event.cwd) {
     currentCwd = event.cwd;
     $("ws-cwd").textContent = event.cwd;
-    const chip = $("cwd-chip");
-    chip.textContent = abbreviatePath(event.cwd);
-    chip.hidden = false;
+    $("cwd-text").textContent = abbreviatePath(event.cwd);
   }
   if (event.roots) $("ws-roots").textContent = event.roots.join("\n");
 }
@@ -2310,7 +2316,15 @@ function renderDirList(deepResults = null) {
   $("dir-current").textContent = abbreviatePath(dirPath);
   const list = $("dir-list");
   list.replaceChildren();
-  const query = $("dir-search").value.trim().toLowerCase();
+  const raw = $("dir-search").value.trim();
+  const query = raw.toLowerCase();
+
+  // Escape hatch: a typed absolute (or ~) path jumps straight there —
+  // the rare case the browse/search flow doesn't cover.
+  if (raw.startsWith("/") || raw.startsWith("~")) {
+    const target = raw.startsWith("~") ? homeDir + raw.slice(1) : raw;
+    list.appendChild(dirRow(`Go to ${raw}`, null, () => browseDir(target), "up"));
+  }
 
   if (!query) {
     const recents = recentDirs().filter((p) => p !== dirPath);
@@ -2343,10 +2357,12 @@ function renderDirList(deepResults = null) {
   }
 }
 
-$("cwd-chip").onclick = () => {
+function openDirSheet() {
   openSheet("dir-sheet");
   browseDir(currentCwd || homeDir || "/");
-};
+}
+
+$("cwd-chip").onclick = () => openDirSheet();
 $("dir-use").onclick = () => {
   if (!dirPath) return;
   rememberDir(dirPath);
