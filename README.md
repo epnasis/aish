@@ -229,6 +229,13 @@ Code blocks are skipped, and the voice follows the answer's detected
 language — English or Polish. "Allow this session" auto-approves the command's prefixes until
 the session closes — in memory only, never written to the allowlist.
 
+**Copy buttons**: every code block, table, and command-output block carries a
+small copy chip in its corner, and each finished answer has a copy button next
+to the speaker. Code and output copy as plain text; tables and whole answers
+copy as their markdown source, so they paste as tables/formatting anywhere
+markdown is understood. Works over plain-HTTP LAN connections too, where the
+browser clipboard API is unavailable.
+
 **Quick replies**: when the model asks a question with a few short likely
 answers, it can end the message with `[Label](aish-reply://answer text)`
 links — the web UI renders them as one-tap chips and tapping one sends the

@@ -267,8 +267,8 @@ function onToken(text) {
 
 function closeAnswer() {
   // A finished answer (streaming ends, or something else interrupts the
-  // block) gets its read-aloud button; mid-stream re-renders would clobber it.
-  if (answerEl && answerText.trim()) attachSpeakButton(answerEl);
+  // block) gets its copy/read-aloud row; mid-stream re-renders would clobber it.
+  if (answerEl && answerText.trim()) attachAnswerTools(answerEl, answerText);
   answerEl = null;
   answerText = "";
 }
@@ -277,7 +277,7 @@ function onDone(event) {
   if (!sawAnswer && event.result) {
     const el = addMsg("answer md", "");
     el.replaceChildren(renderMarkdown(event.result));
-    attachSpeakButton(el);
+    attachAnswerTools(el, event.result);
   }
   closeAnswer();
   if (event.sources && event.sources.length) addSources(event.sources);
@@ -367,15 +367,26 @@ function addAnsiMsg(kind, text) {
 
 // Consecutive stream lines share one block so the output scrolls sideways as a
 // whole; any other message ending up last (echo, answer, card) starts a new one.
+// The block sits in a wrapper so its copy chip stays put while the pre-formatted
+// content scrolls sideways underneath.
 function addStreamLine(text) {
   const last = messagesEl.lastElementChild;
-  if (last && last.classList.contains("stream")) {
-    last.appendChild(document.createTextNode("\n"));
-    last.appendChild(ansiFragment(text));
+  if (last && last.classList.contains("stream-wrap")) {
+    const body = last.querySelector(".stream");
+    body.appendChild(document.createTextNode("\n"));
+    body.appendChild(ansiFragment(text));
     scrollToEnd();
-    return last;
+    return body;
   }
-  return addAnsiMsg("stream", text);
+  const wrap = document.createElement("div");
+  wrap.className = "stream-wrap";
+  const body = document.createElement("div");
+  body.className = "msg stream";
+  body.appendChild(ansiFragment(text));
+  wrap.append(copyChip(() => body.textContent, "copy output"), body);
+  messagesEl.appendChild(wrap);
+  scrollToEnd();
+  return body;
 }
 
 function nearBottom() {
@@ -501,7 +512,7 @@ function onHistory(history) {
     else if (message.role === "assistant") {
       const el = addMsg("answer md", "");
       el.replaceChildren(renderMarkdown(content));
-      attachSpeakButton(el);
+      attachAnswerTools(el, content);
     } else {
       const lines = content.split("\n");
       const shown = lines.slice(0, 4).join("\n");
@@ -597,7 +608,10 @@ function renderMarkdown(text) {
       if (fence[1]) code.dataset.lang = fence[1];
       code.textContent = body.join("\n");
       pre.appendChild(code);
-      frag.appendChild(pre);
+      const holder = document.createElement("div");
+      holder.className = "copywrap";
+      holder.append(copyChip(() => code.textContent, "copy code"), pre);
+      frag.appendChild(holder);
       continue;
     }
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
@@ -679,7 +693,9 @@ function mdTable(lines, start) {
   thead.appendChild(headRow);
   table.appendChild(thead);
   const tbody = document.createElement("tbody");
+  const sourceRows = [lines[start], lines[start + 1]];
   for (let row = start + 2; row < lines.length && /^\|.*\|\s*$/.test(lines[row]); row++) {
+    sourceRows.push(lines[row]);
     const tr = document.createElement("tr");
     for (const cell of splitRow(lines[row])) {
       const td = document.createElement("td");
@@ -690,7 +706,13 @@ function mdTable(lines, start) {
   }
   table.appendChild(tbody);
   wrap.appendChild(table);
-  return wrap;
+  // Copy hands back the markdown source, so the table pastes as a table
+  // anywhere markdown is understood — the chip lives outside the scroll box.
+  const source = sourceRows.join("\n");
+  const holder = document.createElement("div");
+  holder.className = "copywrap";
+  holder.append(copyChip(() => source, "copy table"), wrap);
+  return holder;
 }
 
 const INLINE_RE = new RegExp(
@@ -859,8 +881,80 @@ function xIcon() {
   });
 }
 
-function attachSpeakButton(el) {
-  if (!TTS_OK) return;
+// ---- copy to clipboard ---------------------------------------------------
+function copyIcon() {
+  return svgIcon("i-copy", (make, svg) => {
+    const g = make("g", { fill: "none", stroke: "currentColor", "stroke-width": "1.7",
+      "stroke-linecap": "round", "stroke-linejoin": "round" });
+    g.appendChild(make("rect", { x: "8.6", y: "8.6", width: "10.6", height: "10.6", rx: "2.4" }));
+    g.appendChild(make("path", { d: "M5.4 15.4h-.6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7.4a2 2 0 0 1 2 2v.6" }));
+    svg.appendChild(g);
+  });
+}
+
+function checkIcon() {
+  return svgIcon("i-check", (make, svg) => {
+    svg.appendChild(make("path", { d: "M5 12.8l4.4 4.4 9.4-10", fill: "none",
+      stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round",
+      "stroke-linejoin": "round" }));
+  });
+}
+
+async function copyText(text) {
+  // navigator.clipboard exists only in secure contexts; aish-web is often
+  // plain http on the LAN, so fall back to the execCommand-on-a-textarea
+  // trick (readonly keeps the iOS keyboard from flashing open).
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch { /* permission hiccup — try the fallback */ }
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "0";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.focus({ preventScroll: true });
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
+
+function copyChip(getText, label) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "copy-chip";
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.append(copyIcon(), checkIcon());
+  btn.onclick = async () => {
+    if (!(await copyText(getText()))) {
+      showToast("copy failed — select the text manually");
+      return;
+    }
+    btn.classList.add("ok");
+    setTimeout(() => btn.classList.remove("ok"), 1300);
+  };
+  return btn;
+}
+
+// Footer row under a finished answer: copy-as-markdown chip, plus the
+// read-aloud player where speech synthesis exists.
+function attachAnswerTools(el, source) {
+  const tools = document.createElement("div");
+  tools.className = "msg-tools";
+  tools.appendChild(copyChip(() => source, "copy answer"));
+  if (TTS_OK) tools.appendChild(buildTtsBox(el));
+  el.appendChild(tools);
+}
+
+function buildTtsBox(el) {
   const box = document.createElement("div");
   box.className = "tts";
   const mkBtn = (cls, label, ...icons) => {
@@ -887,7 +981,7 @@ function attachSpeakButton(el) {
     else startPlayback(box, el);
   };
   box.append(prev, main, next, rate, stop);
-  el.appendChild(box);
+  return box;
 }
 
 function speakableText(el) {
@@ -898,7 +992,7 @@ function speakableText(el) {
   const walk = (node) => {
     if (node.nodeType === Node.TEXT_NODE) { parts.push(node.nodeValue); return; }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
-    if (node.tagName === "PRE" || node.classList.contains("tts")) return;
+    if (node.tagName === "PRE" || node.classList.contains("msg-tools")) return;
     for (const child of node.childNodes) walk(child);
     if (/^(P|LI|H[1-6]|TR|BLOCKQUOTE)$/.test(node.tagName)) parts.push("\n");
   };

@@ -282,12 +282,61 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md .quick-reply:active { background: rgba(10, 132, 255, 0.18); }
 .msg.md .quick-reply:disabled { opacity: 0.35; }
 
+/* ---- copy-to-clipboard chips ---- */
+.copy-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--dim);
+}
+.copy-chip svg { width: 17px; height: 17px; }
+.copy-chip:active { opacity: 0.5; }
+/* copy → checkmark flash */
+.copy-chip .i-check { display: none; }
+.copy-chip.ok .i-copy { display: none; }
+.copy-chip.ok .i-check { display: block; color: var(--green); }
+/* overlay variant: pinned over a horizontally-scrolling block (code, table,
+   command output) — the wrapper, not the scroll box, anchors it */
+.copywrap { position: relative; }
+.copywrap > .copy-chip,
+.stream-wrap > .copy-chip {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  background: var(--bg-elev2);
+  border-radius: 8px;
+  opacity: 0.75;
+}
+.stream-wrap { position: relative; }
+.stream-wrap > .copy-chip {
+  top: 0;
+  right: 0;
+  width: 24px;
+  height: 24px;
+  opacity: 0.6;
+}
+.stream-wrap > .copy-chip svg { width: 14px; height: 14px; }
+
+/* ---- footer row under answers: copy + read-aloud ---- */
+.msg-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: 6px 0 0 -8px; /* optical: align icons with the answer's text edge */
+}
+.msg-tools > .copy-chip { width: 40px; height: 40px; border-radius: 10px; }
+.msg-tools > .copy-chip svg { width: 19px; height: 19px; }
+
 /* ---- read-aloud player under answers ---- */
 .tts {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  margin: 6px 0 0 -8px; /* optical: align icon with the answer's text edge */
 }
 .tts button {
   display: flex;
