@@ -589,26 +589,29 @@ class Agent:
 
     def run_user_command(self, command: str) -> str:
         """A command the user typed directly (! prefix): no approval needed,
-        but recorded in the conversation so the model has the context."""
+        but recorded in the conversation so the model has the context.
+        !cd is an alias for /cd — the user moving the directory always means
+        moving the project, so cwd and the primary root travel together and
+        the model's anchor stays coherent."""
         cd_target = self._parse_cd(command)
         if cd_target is not None:
-            result = self._change_dir(cd_target)
-        else:
-            result = tools.run_command(
-                command,
-                cwd=self.cwd,
-                on_line=self.stream,
-                allow_detach=True,
-                log_dir=self.job_log_dir,
-            )
+            return self.rebase(cd_target)
+        result = tools.run_command(
+            command,
+            cwd=self.cwd,
+            on_line=self.stream,
+            allow_detach=True,
+            log_dir=self.job_log_dir,
+        )
         self._append(
             {"role": "user", "content": f"[I ran `{command}` myself; output:]\n{result}"}
         )
         return result
 
     def rebase(self, target: str) -> str:
-        """User-typed /cd: move cwd AND re-anchor the primary session root.
-        Never reachable by the model — that's what keeps root scoping honest."""
+        """User-typed /cd (and its alias !cd): move cwd AND re-anchor the
+        primary session root. Never reachable by the model — that's what
+        keeps root scoping honest."""
         result = self._change_dir(target)
         if result.startswith("ERROR"):
             return result

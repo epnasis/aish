@@ -173,8 +173,9 @@ detaches it into a background job that survives aish exiting (`/jobs` lists
 them, logs in `~/.local/state/aish/jobs/`).
 
 **Escapes**: `!<command>` runs directly — no model, no approval. `!cd <dir>`
-moves the persistent working directory (user-only — the model's commands
-always run in the project directory).
+is an alias for `/cd`: it moves the project directory and re-anchors the
+session root (user-only — the model's commands always run in the project
+directory).
 
 **Slash commands** (Tab completes): `/resume` — live picker over all earlier
 sessions (start date, message count, model used, first message): type to

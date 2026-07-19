@@ -68,7 +68,7 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  /model --save alone persists the current model
   {CYAN}/cd <dir>{RESET}      move the session to another project: changes the working
                  directory AND re-anchors the auto-approval root there
-                 (Tab completes directories); !cd only moves the directory
+                 (Tab completes directories); !cd <dir> does the same
   {CYAN}/add-dir <dir>{RESET} allow auto-approved reads/commands in another directory
                  tree too (alias /dir-add); no arg lists current roots
   {CYAN}/jobs{RESET}          list background jobs started this session
@@ -77,7 +77,7 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
 {BOLD}input:{RESET} Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
 (iTerm2: set Option=Esc+) · pasted newlines are kept · @ mentions a project
 file (type to filter, Tab/Enter completes) · !<cmd> runs directly
-without the model · !cd <dir> moves the working directory
+without the model · !cd <dir> = /cd (moves the project)
 {BOLD}while a command runs:{RESET} Ctrl-C cancels it · Ctrl-B detaches it to a background
 job (keeps running, frees the prompt; see /jobs)"""
 
@@ -930,7 +930,8 @@ as readable text; 'topic' searches the full text). Both auto-approve as \
 read-only, and every query/URL is echoed to the user — but they send data off \
 this machine, so never put private local content into them.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
-`!cd <dir>` changes the shared working directory. Ctrl-C cancels only the \
+`!cd <dir>` is an alias for /cd — it moves the project directory and \
+re-anchors the session root. Ctrl-C cancels only the \
 running command. Ctrl-D or `exit` quits.
 - REPL slash commands (Tab autocompletes them; an unambiguous prefix works, \
 e.g. /res for /resume): /resume opens a live picker \
@@ -951,8 +952,9 @@ the picker offers that exact cloud model as a selectable row); adding --save \
 persists the choice as the startup default in the config file, and \
 /model --save alone persists the current model; /jobs lists \
 background jobs; /help lists commands; /quit or /exit quits; /cd <dir> \
-moves the working directory AND re-anchors the session root there (user \
-only; !cd and your cd move only the working directory); /add-dir <dir> \
+moves the project directory AND re-anchors the session root there (user \
+only — !cd is its alias; your commands always run in the project \
+directory and a bare cd from you is rejected); /add-dir <dir> \
 (alias /dir-add) adds another directory tree to the session roots.
 - Long-running commands (servers, watchers, big upgrades): set \
 background=true on run_command — it detaches, survives aish exiting, and \

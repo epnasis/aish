@@ -796,10 +796,12 @@ class TestBangCommands:
         assert "I ran `echo direct-hit` myself" in records[0]["content"]
         assert "direct-hit" in records[0]["content"]
 
-    def test_user_cd_changes_persistent_cwd(self, tmp_path):
+    def test_user_cd_moves_cwd_and_reanchors_root(self, tmp_path):
+        """!cd is an alias for /cd: the project (root) moves with the cwd."""
         agent, _ = make_agent([], approve=lambda _cmd: pytest.fail("no approval for !cd"))
         agent.run_user_command(f"cd {tmp_path}")
         assert agent.cwd == str(tmp_path)
+        assert agent.roots[0] == tmp_path.resolve()
         result = agent.run_user_command("pwd")
         assert tmp_path.name in result
 

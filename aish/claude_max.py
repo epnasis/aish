@@ -172,7 +172,7 @@ class ClaudeMaxAgent:
         """! escape: run locally now, tell the model on the next task."""
         cd_target = self.inner._parse_cd(command)
         if cd_target is not None:
-            return self.inner._change_dir(cd_target)
+            return self.rebase(cd_target)  # !cd aliases /cd: root moves too
         result = tools.run_command(
             command,
             cwd=self.cwd,
