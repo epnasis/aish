@@ -141,6 +141,7 @@ function handle(event) {
     case "replay": onReplay(event); break;
     case "user":
       closeAnswer();
+      retireQuickReplies();
       sawAnswer = false;
       setBusy(true);
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
@@ -508,7 +509,10 @@ function onHistory(history) {
   for (const message of history) {
     const content = (message.content || "").trim();
     if (!content) continue;
-    if (message.role === "user") makeRecallable(addMsg("user", content));
+    if (message.role === "user") {
+      retireQuickReplies();
+      makeRecallable(addMsg("user", content));
+    }
     else if (message.role === "assistant") {
       const el = addMsg("answer md", "");
       el.replaceChildren(renderMarkdown(content));
@@ -725,9 +729,11 @@ const INLINE_RE = new RegExp(
 );
 
 // Quick replies (#17): [Label](aish-reply://answer text) links render as
-// one-tap chips; tapping submits the answer as the next user message. The
-// scheme is intercepted here — it never navigates and needs no JSON output
-// or schema support from the model, so small local models can use it too.
+// tap chips; tapping feeds the answer into the composer (like tapping an
+// old prompt bubble) so the user can edit or just hit send — the sent text
+// then shows as a normal user message. The scheme is intercepted here — it
+// never navigates and needs no JSON output or schema support from the
+// model, so small local models can use it too.
 function quickReplyChip(label, payload) {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -737,15 +743,31 @@ function quickReplyChip(label, payload) {
   try { reply = decodeURIComponent(reply) || reply; } catch { /* keep raw */ }
   if (!reply) reply = label;
   btn.onclick = () => {
-    // One group, one answer: a tap retires every chip in this message.
-    const msg = btn.closest(".msg");
-    const siblings = msg ? msg.querySelectorAll(".quick-reply") : [btn];
-    for (const b of siblings) b.disabled = true;
-    if (!send({ type: "task", text: reply })) {
-      for (const b of siblings) b.disabled = false; // not connected — retryable
+    if (input.value.trim() && input.value.trim() !== reply) {
+      showToast("clear the input first to use a quick reply");
+      return;
     }
+    input.value = reply;
+    input.setSelectionRange(reply.length, reply.length);
+    resizeInput();
+    input.focus();
   };
   return btn;
+}
+
+// Chips are one-shot: once ANY user reply goes out — a fed chip or a typed
+// answer — every chip still on screen disappears. Paragraphs that held
+// nothing but chips collapse with them.
+function retireQuickReplies() {
+  for (const btn of messagesEl.querySelectorAll(".quick-reply:not(.spent)")) {
+    btn.classList.add("spent");
+    const p = btn.parentElement;
+    const emptied = p?.tagName === "P" && [...p.childNodes].every((node) =>
+      node.nodeType === Node.TEXT_NODE
+        ? !node.textContent.trim()
+        : node.classList?.contains("spent"));
+    if (emptied) p.classList.add("spent");
+  }
 }
 
 function inlineMd(text) {

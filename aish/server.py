@@ -408,8 +408,9 @@ error.
 - QUICK REPLIES: when you ask the user a question with a few short likely \
 answers (yes/no, pick-one), END your message with one markdown link per \
 option, formatted [Label](aish-reply://answer text) — the UI renders them \
-as one-tap buttons and tapping sends the answer text as the user's reply. \
-Only offer them when short options genuinely cover the likely answers.
+as tap buttons that feed the answer text into the user's input box, so the \
+reply arrives as an ordinary user message (possibly edited). Only offer \
+them when short options genuinely cover the likely answers.
 - The persistent "always allow" allowlist cannot be grown from the web UI — \
 that is terminal-only by design.
 - Safety denylist: unrecoverable command classes are blocked outright and \

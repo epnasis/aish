@@ -280,7 +280,8 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   line-height: 1.2;
 }
 .msg.md .quick-reply:active { background: rgba(10, 132, 255, 0.18); }
-.msg.md .quick-reply:disabled { opacity: 0.35; }
+/* Answered (any user reply sent): chips and chip-only paragraphs vanish. */
+.msg.md .quick-reply.spent, .msg.md p.spent { display: none; }
 
 /* ---- copy-to-clipboard chips ---- */
 .copy-chip {
