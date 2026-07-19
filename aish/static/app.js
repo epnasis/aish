@@ -168,7 +168,7 @@ function handle(event) {
     case "approval_resolved": onApprovalResolved(event); break;
     case "done": onDone(event); break;
     case "history": onHistory(event.messages); break;
-    case "session_list": renderSessions(event.sessions); break;
+    case "session_list": renderSessions(event); break;
     case "model_list": renderModels(event); break;
     case "model_changed": onModelChanged(event); break;
     case "cwd_changed": renderWorkspace(event); break;
@@ -1721,14 +1721,11 @@ function debounce(fn, ms) {
 
 // Arrow/Enter navigation for sheet result lists (same semantics as the
 // TUI picker: first row is the best match, Enter takes the highlight).
+// No row is pre-highlighted — a default cursor on row 0 reads as "you are
+// here" (#29); Enter still takes the top match, arrows start from it.
 function setActiveRow(rows, index) {
   rows.forEach((row, i) => row.classList.toggle("active", i === index));
   if (rows[index]) rows[index].scrollIntoView({ block: "nearest" });
-}
-
-function highlightFirstRow(listEl) {
-  const rows = [...listEl.querySelectorAll(".row")];
-  if (rows.length) setActiveRow(rows, 0);
 }
 
 function attachListNav(searchEl, listEl) {
@@ -1958,24 +1955,26 @@ const STATE_BADGES = {
   idle: ["○ open", "st-open"],
 };
 
-function renderSessions(sessions) {
+function renderSessions(event) {
   const list = $("sessions-list");
   list.replaceChildren();
-  if (!sessions.length) {
+  if (!event.sessions.length) {
     list.textContent = "no matching sessions";
     return;
   }
   // Server order kept as-is: recency (same list the swipe pager pages
   // through, newest at top — swiping back = moving down this list), or
-  // ranked when searching. Badges alone mark open-session state.
-  for (const info of sessions) {
+  // ranked when searching. The session being viewed carries the "current"
+  // mark ("you are here"); badges mark open-session state on the rest.
+  for (const info of event.sessions) {
     const row = document.createElement("button");
-    row.className = "row";
-    if (info.state) {
-      const [label, cls] = STATE_BADGES[info.state] || [];
+    const isCurrent = info.name === event.current;
+    row.className = "row" + (isCurrent ? " current" : "");
+    const badgeSpec = isCurrent ? ["● current", "st-current"] : STATE_BADGES[info.state];
+    if (badgeSpec) {
       const badge = document.createElement("span");
-      badge.className = `badge ${cls}`;
-      badge.textContent = label;
+      badge.className = `badge ${badgeSpec[1]}`;
+      badge.textContent = badgeSpec[0];
       row.appendChild(badge);
     }
     row.appendChild(document.createTextNode(info.title));
@@ -1986,7 +1985,6 @@ function renderSessions(sessions) {
     row.onclick = () => { send({ type: "resume", path: info.name }); closeSheets(); };
     list.appendChild(row);
   }
-  highlightFirstRow(list);
 }
 
 // models
@@ -2019,7 +2017,6 @@ function renderModels(event) {
       send({ type: "set_model", spec: model.name, save: $("model-save").checked });
     list.appendChild(row);
   }
-  highlightFirstRow(list);
 }
 
 function onModelChanged(event) {

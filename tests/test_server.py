@@ -505,6 +505,31 @@ class TestSessions:
             with connected(client) as (_ws, _, replay):
                 assert replay["events"] == []
 
+    def test_session_list_includes_and_names_current(self, app_env):
+        # The drawer lists the active session too (MRU: it sorts first) and
+        # names it in "current" so the UI can mark "you are here" (#29).
+        client, _ = make_client(app_env, [model_says("alpha done")])
+        with client, connected(client) as (ws, hello, _):
+            session_a = hello["session"]
+            ws.send_json({"type": "task", "text": "alpha task"})
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "sessions", "query": ""})
+            listing = recv_until(ws, "session_list")
+            assert listing["current"] == session_a
+            assert [s["name"] for s in listing["sessions"]][0] == session_a
+
+            # A brand-new chat is current but has no messages yet, so it is
+            # not listed — nothing carries the current mark.
+            ws.send_json({"type": "new"})
+            fresh = recv_until(ws, "hello")
+            ws.send_json({"type": "sessions", "query": ""})
+            listing = recv_until(ws, "session_list")
+            assert listing["current"] == fresh["session"]
+            names = [s["name"] for s in listing["sessions"]]
+            assert fresh["session"] not in names
+            assert session_a in names
+
     def test_list_and_resume_previous_session(self, app_env):
         client, chat = make_client(
             app_env, [model_says("first answer"), model_says("second answer")]

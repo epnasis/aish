@@ -765,6 +765,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   font-weight: 600;
   margin-bottom: 2px;
 }
+.badge.st-current { color: var(--green); }
 .badge.st-running { color: var(--green); }
 .badge.st-waiting { color: var(--orange); }
 .badge.st-open { color: var(--dim); }

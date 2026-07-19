@@ -262,7 +262,8 @@ chip-fed or typed — the chips disappear.
 **Parallel sessions**: several sessions can be open at once, each with its
 own agent, model, working directory, and running task. Start a task, hit the
 compose button, work on something else — the first task keeps running and
-the sessions drawer shows live badges (running / needs approval); a toast
+the sessions drawer shows live badges (running / needs approval) and marks
+the chat you're looking at as ● current; a toast
 tells you when a background task finishes. Up to 6 sessions stay open in
 memory (idle ones beyond that are closed; their files persist and reopen
 on demand). On a phone, **swipe the transcript sideways** to page through

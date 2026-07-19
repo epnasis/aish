@@ -829,10 +829,13 @@ class WebServer:
                     pass
 
     async def _send_sessions(self, websocket: WebSocket, query: str) -> None:
-        state_dir, exclude = self.state_dir, {self.active.logref.log.path}
+        # The active session is listed too (marked "current" in the drawer) —
+        # its log is flushed per record, so reading it live is safe; a brand
+        # new chat has no messages yet and drops out naturally.
+        state_dir = self.state_dir
 
         def load():
-            entries = SessionLog.load_entries(state_dir, exclude=exclude)
+            entries = SessionLog.load_entries(state_dir)
             return SessionLog.rank(entries, query)
 
         infos = await asyncio.to_thread(load)
@@ -840,6 +843,7 @@ class WebServer:
         await websocket.send_json(
             {
                 "type": "session_list",
+                "current": self.active.name,
                 "sessions": [
                     {
                         "name": info.path.name,
