@@ -302,6 +302,16 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md tr:last-child td { border-bottom: none; }
 .msg.md th { background: var(--bg-elev2); font-weight: 600; }
 
+/* ---- inline images (![alt](url), #9) ---- */
+.msg.md .md-img {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  border-radius: var(--r-card);
+  margin: 6px 0;
+}
+.msg.md .img-broken { color: var(--dim); font-size: 13px; }
+
 /* ---- quick-reply chips (aish-reply:// links) ---- */
 .msg.md .quick-reply {
   display: inline-block;

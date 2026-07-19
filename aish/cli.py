@@ -13,7 +13,7 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import backends, tools
+from . import backends, term_image, tools
 from .agent import Agent, ModelUnavailable, environment_context, format_tokens, learn_prompt
 from .approval import (
     DEFAULT_ALLOWLIST,
@@ -444,6 +444,17 @@ def print_sources(agent) -> None:
         title = source.get("title")
         line = f"{title} — {source['url']}" if title else source["url"]
         print(f"{DIM}  ↳ {line}{RESET}")
+
+
+def print_answer_images(agent, answer: str) -> None:
+    """Show local images the answer references (![alt](/abs/path.png))
+    inline, in terminals that support it (iTerm2, kitty protocol). Elsewhere
+    this is a no-op — the path in the answer text is the fallback."""
+    protocol = term_image.supports_images()
+    if not protocol:
+        return
+    for path in term_image.local_image_paths(answer, agent.roots):
+        term_image.emit(path, protocol)
 
 
 def replay_history(messages: list[dict]) -> None:
@@ -944,6 +955,11 @@ colored diff before any write. Do NOT use sed -i or > redirects to edit files.
 as readable text; 'topic' searches the full text). Both auto-approve as \
 read-only, and every query/URL is echoed to the user — but they send data off \
 this machine, so never put private local content into them.
+- Showing images: reference an image file with markdown image syntax and its \
+absolute path — ![caption](/absolute/path.png) — when it is inside the \
+session roots. Terminals that support inline graphics (iTerm2, kitty, \
+WezTerm, ghostty) display the image right under your answer; elsewhere the \
+path stays visible as text.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` is an alias for /cd — it moves the project directory and \
 re-anchors the session root. Ctrl-C cancels only the \
@@ -1272,6 +1288,7 @@ def main() -> int:
             return 1
         if not stream_answers:
             print(f"{GREEN}{result}{RESET}")
+        print_answer_images(agent, result)
         print_sources(agent)
         return 0
 
@@ -1314,6 +1331,7 @@ def main() -> int:
             result = agent.run_task(task)
             if not stream_answers:
                 print(f"\n{GREEN}{result}{RESET}")
+            print_answer_images(agent, result)
             print_sources(agent)
         except KeyboardInterrupt:
             print(f"\n{YELLOW}(task interrupted){RESET}")

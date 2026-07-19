@@ -755,8 +755,44 @@ const INLINE_RE = new RegExp(
   "|(\\*[^*\\s][^*]*\\*)" +
   "|(~~[^~]+~~)" +
   "|\\[([^\\]]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)" +
-  "|\\[([^\\]]+)\\]\\(aish-reply:\\/\\/([^)]*)\\)"
+  "|\\[([^\\]]+)\\]\\(aish-reply:\\/\\/([^)]*)\\)" +
+  "|!\\[([^\\]]*)\\]\\(([^)\\s]+)\\)"
 );
+
+// Images (#9): ![alt](https://…) embeds a web image; ![alt](/abs/path.png)
+// is rewritten to the token-gated /file endpoint, which only serves image
+// files inside the active session's roots. Any other scheme stays as the
+// literal text. Tap opens the full-size image in a new tab.
+function inlineImage(alt, target) {
+  let src;
+  if (/^https?:\/\//.test(target)) {
+    src = target;
+  } else if (target.startsWith("/")) {
+    const params = new URLSearchParams({ path: target });
+    if (token) params.set("token", token);
+    src = `/file?${params}`;
+  } else {
+    return document.createTextNode(`![${alt}](${target})`);
+  }
+  const link = document.createElement("a");
+  link.href = src;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.className = "img-link";
+  const img = document.createElement("img");
+  img.className = "md-img";
+  img.loading = "lazy";
+  img.alt = alt || target;
+  // A missing file (deleted since, or another session's roots) renders as a
+  // small broken-image note instead of the browser's default glyph.
+  img.onerror = () => {
+    link.textContent = `🖼 ${alt || target} (unavailable)`;
+    link.classList.add("img-broken");
+  };
+  img.src = src;
+  link.appendChild(img);
+  return link;
+}
 
 // Quick replies (#17): [Label](aish-reply://answer text) links render as
 // tap chips; tapping feeds the answer into the composer (like tapping an
@@ -830,6 +866,8 @@ function inlineMd(text) {
       frag.appendChild(del);
     } else if (match[7] !== undefined) {
       frag.appendChild(quickReplyChip(match[7], match[8]));
+    } else if (match[10] !== undefined) {
+      frag.appendChild(inlineImage(match[9], match[10]));
     } else {
       const link = document.createElement("a");
       link.href = match[6];

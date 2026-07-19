@@ -1068,6 +1068,62 @@ class TestUpload:
             )
 
 
+class TestFileEndpoint:
+    """GET /file (issue #9): images the model generated render inline in the
+    transcript — scoped to the active session's roots, like approval."""
+
+    def test_serves_image_inside_roots(self, app_env, tmp_path):
+        chart = tmp_path / "chart.png"
+        chart.write_bytes(b"\x89PNG-fake-chart")
+        client, _ = make_client(app_env, [])
+        with client:
+            response = client.get("/file", params={"path": str(chart)})
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "image/png"
+            assert response.headers["x-content-type-options"] == "nosniff"
+            assert response.content == b"\x89PNG-fake-chart"
+
+    def test_refuses_paths_outside_roots(self, app_env, tmp_path_factory):
+        outside = tmp_path_factory.mktemp("outside") / "private.png"
+        outside.write_bytes(b"\x89PNG-private")
+        client, _ = make_client(app_env, [])
+        with client:
+            response = client.get("/file", params={"path": str(outside)})
+            assert response.status_code == 403
+
+    def test_symlink_escaping_roots_refused(self, app_env, tmp_path, tmp_path_factory):
+        secret = tmp_path_factory.mktemp("elsewhere") / "secret.png"
+        secret.write_bytes(b"\x89PNG-secret")
+        link = tmp_path / "innocent.png"
+        link.symlink_to(secret)
+        client, _ = make_client(app_env, [])
+        with client:
+            # Resolved BEFORE the containment check, so the link's real
+            # target is what gets scoped.
+            response = client.get("/file", params={"path": str(link)})
+            assert response.status_code == 403
+
+    def test_only_image_types_served(self, app_env, tmp_path):
+        notes = tmp_path / "notes.txt"
+        notes.write_text("not an image", encoding="utf-8")
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.get("/file", params={"path": str(notes)}).status_code == 415
+            missing = tmp_path / "gone.png"
+            assert client.get("/file", params={"path": str(missing)}).status_code == 404
+            assert client.get("/file", params={"path": "rel.png"}).status_code == 400
+            assert client.get("/file").status_code == 400
+
+    def test_requires_token_when_set(self, app_env, tmp_path):
+        chart = tmp_path / "chart.png"
+        chart.write_bytes(b"\x89PNG")
+        client, _ = make_client(app_env, [], token="s3cret")
+        with client:
+            assert client.get("/file", params={"path": str(chart)}).status_code == 403
+            ok = client.get("/file", params={"path": str(chart), "token": "s3cret"})
+            assert ok.status_code == 200
+
+
 class TestDirListing:
     def make_tree(self, tmp_path):
         base = tmp_path / "tree"

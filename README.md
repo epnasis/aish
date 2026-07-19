@@ -290,6 +290,16 @@ user message. It's plain markdown (one system prompt sentence, no JSON
 schema), so even small local models can use it; once any reply is sent —
 chip-fed or typed — the chips disappear.
 
+**Inline images**: markdown image syntax in an answer renders right in the
+chat. `![caption](https://…)` embeds a web image; `![caption](/absolute/path.png)`
+displays a local image file (png/jpg/gif/webp) — the model saves a chart
+with matplotlib, references its path, and the picture appears in the
+transcript, lazy-loaded, tap for full size. Local files are served by the
+token-gated `/file` endpoint, which refuses anything outside the session
+roots (symlinks are resolved before that check). In the terminal, the same
+markdown displays the image inline on iTerm2, kitty, WezTerm, and ghostty;
+other terminals simply keep the path visible as text.
+
 **Parallel sessions**: several sessions can be open at once, each with its
 own agent, model, working directory, and running task. Start a task, hit the
 compose button, work on something else — the first task keeps running and
