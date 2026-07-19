@@ -7,6 +7,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 
 TITLE_MAX = 60
 FUZZY_THRESHOLD = 0.55  # whole query vs whole title
@@ -50,13 +51,14 @@ class SessionEntry:
 class SessionLog:
     def __init__(self, path: Path):
         self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = path.open("a", encoding="utf-8")
+        self._fh: TextIO | None = None
         self._pending_model: str | None = None
 
     def close(self) -> None:
-        """Release the append handle (the file itself always persists)."""
-        self._fh.close()
+        """Release the append handle; a session that never recorded anything
+        has no handle and leaves no file."""
+        if self._fh is not None:
+            self._fh.close()
 
     @classmethod
     def new(cls, state_dir: Path) -> "SessionLog":
@@ -141,15 +143,19 @@ class SessionLog:
 
     @staticmethod
     def pager_titles(state_dir: Path, limit: int = 30) -> list[tuple[str, str]]:
-        """(name, title) pages for the web UI's swipe pager: the same recency
-        ordering as the drawer, flipped oldest→newest so back = older, and
-        capped to the most recent `limit`. Chats with no user input yet are
-        not pages."""
+        """(name, title) pages for the web UI's swipe pager: the `limit` most
+        recent chats that have a title, same recency ordering as the drawer,
+        flipped oldest→newest so back = older. Chats with no user input yet
+        are not pages — the cap applies after skipping them, so blank files
+        can never crowd real chats out of the pager."""
         pages = []
-        for path in reversed(SessionLog._by_recency(state_dir)[:limit]):
+        for path in SessionLog._by_recency(state_dir):
             title = SessionLog._peek_title(path)
             if title is not None:
                 pages.append((path.name, title))
+                if len(pages) == limit:
+                    break
+        pages.reverse()
         return pages
 
     @staticmethod
@@ -373,6 +379,12 @@ class SessionLog:
             "kind": kind,
             **fields,
         }
+        if self._fh is None:
+            # Created on first record, not in __init__: a chat that never
+            # gets a message must leave no file — empty session files crowd
+            # every recency-ordered list and pile up across restarts.
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = self.path.open("a", encoding="utf-8")
         self._fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         self._fh.flush()
 

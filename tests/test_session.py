@@ -1,4 +1,5 @@
 import json
+import os
 
 from aish.session import SessionLog
 
@@ -34,13 +35,31 @@ def test_model_recorded_last_switch_wins(tmp_path):
 
 def test_model_note_alone_never_touches_the_file(tmp_path):
     # Session order everywhere is file mtime, so opening/resuming (which notes
-    # the model) must not write — only real activity reorders the lists.
+    # the model) must not write — only real activity reorders the lists. A
+    # session with no activity at all must not even create its file.
     log = SessionLog.new(tmp_path)
     log.model("qwen3:8b")
-    assert log.path.read_text() == ""
+    assert not log.path.exists()
     log.message({"role": "user", "content": "hi"})  # note flushes with activity
     kinds = [json.loads(line)["kind"] for line in log.path.read_text().splitlines()]
     assert kinds == ["model", "message"]
+
+
+def test_untouched_session_leaves_no_file(tmp_path):
+    # Phantom "new chat" sessions (swipe overshoot, server restarts) used to
+    # leave a blank file each; blank files must never reach disk.
+    log = SessionLog.new(tmp_path)
+    log.close()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_pager_cap_applies_after_skipping_blank_sessions(tmp_path):
+    old = make_session(tmp_path, "session-20260101-000000-000000.jsonl", ("user", "real chat"))
+    os.utime(old, (1, 1))
+    for i in range(5):  # newer blank files (pre-fix debris) must not crowd it out
+        (tmp_path / f"session-20260102-00000{i}-000000.jsonl").touch()
+    pages = SessionLog.pager_titles(tmp_path, limit=3)
+    assert [name for name, _ in pages] == [old.name]
 
 
 def test_model_empty_for_sessions_without_record(tmp_path):

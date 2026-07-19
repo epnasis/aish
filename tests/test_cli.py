@@ -582,8 +582,9 @@ def test_session_info_bang_first_and_truncation(tmp_path):
 def test_session_info_none_for_empty(tmp_path):
     from aish.session import SessionLog
 
-    empty = SessionLog(tmp_path / "session-20260712-000002-000000.jsonl")
-    assert SessionLog.info(empty.path) is None
+    empty = tmp_path / "session-20260712-000002-000000.jsonl"
+    empty.touch()  # legacy blank file from before lazy creation
+    assert SessionLog.info(empty) is None
 
 
 def test_clear_clears_screen(tmp_path, capsys):
