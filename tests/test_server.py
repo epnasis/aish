@@ -495,9 +495,10 @@ class TestSessions:
             contents = json.dumps(chat.calls[-1]["messages"])
             assert "zebra" in contents  # resumed context reached the model
 
-    def test_hello_lists_open_sessions_in_opening_order(self, app_env):
-        # The swipe pager pages through hello["open"]: every open session in
-        # the order it was opened, with the drawer's title derivation.
+    def test_hello_lists_open_sessions_oldest_first(self, app_env):
+        # The swipe pager pages through hello["open"]: every open session
+        # oldest→newest (back = older, forward = newer), with the drawer's
+        # title derivation.
         client, _ = make_client(app_env, [model_says("ok")])
         with client, connected(client) as (ws, hello, _):
             first = hello["session"]

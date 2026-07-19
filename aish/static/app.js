@@ -1652,10 +1652,12 @@ $("wrap-chip").onclick = () => {
 // ---- swipe pager between open sessions -----------------------------------
 // Horizontal pager gesture (the iOS Weather-app model): drag the transcript
 // sideways and it follows the finger; a pill names the neighboring open
-// session and turns blue once release would switch. Order = the order
-// sessions were opened (the server's table, sent in hello.open). Touches
-// near the screen edges are left to Safari's back/forward gesture, and pans
-// starting inside horizontally scrollable output stay scrolls.
+// session and turns blue once release would switch. Pages run oldest→newest
+// (hello.open, chronological) with Safari's direction semantics: swipe
+// right = back = older chat, swipe left = forward = newer — or a brand-new
+// chat once past the newest. Touches near the screen edges are left to
+// Safari's back/forward gesture, and pans starting inside horizontally
+// scrollable output stay scrolls.
 let openSessions = []; // [{name, title}] insertion-ordered, from hello
 let currentSession = null;
 let swipeInFrom = 0; // set on commit; onReplay animates the new page in
@@ -1663,6 +1665,14 @@ let swipeInFrom = 0; // set on commit; onReplay animates the new page in
 const EDGE_GUARD = 28; // px — Safari's back/forward gesture zone
 const DECIDE_AT = 12; // px of travel before the gesture picks an axis
 const COMMIT_AT = 0.3; // fraction of width that arms release-to-switch
+const DECIDE_WITHIN = 350; // ms — slower starts are long-press/selection
+
+// Text selection must win over paging: dragging selection handles (or the
+// drag right after a long-press) produces the same touch stream as a swipe.
+function selectionActive() {
+  const selection = document.getSelection();
+  return Boolean(selection && !selection.isCollapsed);
+}
 
 const swipe = {
   tracking: false, horizontal: false, blocked: false,
@@ -1672,6 +1682,17 @@ const swipe = {
 function sessionNeighbor(direction) {
   const index = openSessions.findIndex((s) => s.name === currentSession);
   return index < 0 ? null : openSessions[index + direction] || null;
+}
+
+// Safari semantics: back (swipe right, -1) = older chat, forward (swipe
+// left, +1) = newer — and one page past the newest is a fresh chat, gated
+// on the current one having content so empties never stack up.
+const NEW_CHAT_TARGET = { fresh: true, title: "New chat" };
+
+function swipeTarget(direction) {
+  const neighbor = sessionNeighbor(direction);
+  if (neighbor) return neighbor;
+  return direction === 1 && sessionTitled ? NEW_CHAT_TARGET : null;
 }
 
 function scrollsHorizontally(node) {
@@ -1684,13 +1705,13 @@ function scrollsHorizontally(node) {
   return false;
 }
 
-function updateSwipeHint(neighbor, dx) {
+function updateSwipeHint(target, dx) {
   const hint = $("swipe-hint");
-  if (!neighbor) { hint.hidden = true; return; }
+  if (!target) { hint.hidden = true; return; }
   hint.hidden = false;
   hint.classList.toggle("prev", dx > 0);
   hint.classList.toggle("commit", Math.abs(dx) > swipe.width * COMMIT_AT);
-  $("swipe-hint-title").textContent = neighbor.title || "New chat";
+  $("swipe-hint-title").textContent = target.title || "New chat";
   hint.style.opacity = Math.min(Math.abs(dx) / 60, 1);
 }
 
@@ -1700,6 +1721,7 @@ messagesEl.addEventListener("touchstart", (event) => {
   swipe.tracking =
     touch.clientX > EDGE_GUARD &&
     touch.clientX < innerWidth - EDGE_GUARD &&
+    !selectionActive() &&
     !scrollsHorizontally(event.target);
   swipe.horizontal = false;
   swipe.blocked = false;
@@ -1716,6 +1738,12 @@ messagesEl.addEventListener("touchmove", (event) => {
   const dx = touch.clientX - swipe.startX;
   const dy = touch.clientY - swipe.startY;
   if (!swipe.horizontal) {
+    // A selection appearing mid-touch (long-press) or a slow start means
+    // the finger is selecting text, not paging — stand down for this touch.
+    if (selectionActive() || event.timeStamp - swipe.startTime > DECIDE_WITHIN) {
+      swipe.blocked = true;
+      return;
+    }
     if (Math.abs(dx) < DECIDE_AT && Math.abs(dy) < DECIDE_AT) return;
     // Mostly-vertical (or diagonal) start: it's a scroll, stand down for the
     // rest of this touch — a late preventDefault can't stop iOS anyway.
@@ -1723,11 +1751,11 @@ messagesEl.addEventListener("touchmove", (event) => {
     swipe.horizontal = true;
   }
   event.preventDefault(); // page-drag now, not a scroll
-  const neighbor = sessionNeighbor(dx < 0 ? 1 : -1);
-  swipe.dx = neighbor ? dx : dx / 3; // rubber-band past the first/last session
+  const target = swipeTarget(dx < 0 ? 1 : -1);
+  swipe.dx = target ? dx : dx / 3; // rubber-band where no page exists
   messagesEl.style.transition = "none";
   messagesEl.style.transform = `translateX(${swipe.dx}px)`;
-  updateSwipeHint(neighbor, dx);
+  updateSwipeHint(target, dx);
 }, { passive: false });
 
 function endSwipe(event) {
@@ -1738,18 +1766,19 @@ function endSwipe(event) {
   $("swipe-hint").hidden = true;
   const dx = swipe.dx;
   const direction = dx < 0 ? 1 : -1;
-  const neighbor = sessionNeighbor(direction);
+  const target = swipeTarget(direction);
   const flick =
     Math.abs(dx) > 48 && event.timeStamp - swipe.startTime < 250;
   messagesEl.style.transition = "transform 0.18s ease-out";
-  if (neighbor && (Math.abs(dx) > swipe.width * COMMIT_AT || flick)) {
+  if (target && (Math.abs(dx) > swipe.width * COMMIT_AT || flick)) {
     swipeInFrom = direction; // the landing replay animates in from this side
     messagesEl.style.transform = `translateX(${-direction * swipe.width}px)`;
-    send({ type: "resume", path: neighbor.name });
+    if (target.fresh) send({ type: "new" });
+    else send({ type: "resume", path: target.name });
   } else {
     messagesEl.style.transform = "";
-    if (!neighbor && Math.abs(dx) > 60 && openSessions.length <= 1) {
-      showToast("no other open sessions — tap the title to browse");
+    if (!target && direction === -1 && Math.abs(dx) > 60) {
+      showToast("no older open chats — tap the title to browse all sessions");
     }
   }
 }

@@ -155,6 +155,8 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   pointer-events: none;
   transition: background 0.15s;
 }
+/* display:flex would silently defeat the hidden attribute's display:none */
+#swipe-hint[hidden] { display: none; }
 #swipe-hint svg { width: 16px; height: 16px; flex-shrink: 0; }
 #swipe-hint span {
   overflow: hidden;

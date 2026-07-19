@@ -538,12 +538,14 @@ class WebServer:
             "roots": [str(root) for root in session.agent.roots],
             "home": str(Path.home()),  # client abbreviates paths to ~
             "rev": STATIC_REV,
-            # Insertion-ordered open sessions: the client's swipe pager uses
-            # this to know its neighbors (and their titles) ahead of release.
+            # Open sessions oldest→newest (names embed creation timestamps,
+            # so lexical order is chronological): the client's swipe pager
+            # uses this to know its neighbors (and titles) ahead of release —
+            # back = older chat, forward = newer, matching Safari's gesture.
             # The set only changes through resume/new — both re-send hello.
             "open": [
                 {"name": s.name, "title": self._title(s)}
-                for s in self.sessions.values()
+                for s in sorted(self.sessions.values(), key=lambda s: s.name)
             ],
         }
 
