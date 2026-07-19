@@ -1442,3 +1442,69 @@ class TestSearchSessionsTool:
         )
         agent.run_task("search")
         assert "No past session matches" in tool_messages(agent.messages)[0]["content"]
+
+
+class TestSkillsFreshness:
+    """The skills index is rebuilt at every run_task (issue #31): a skill
+    created mid-session is advertised on the very next task, and the per-task
+    reminder keeps small models checking it (issue #12)."""
+
+    def _write_skill(self, cwd, name, description):
+        skills_dir = cwd / ".aish" / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\nbody"
+        )
+
+    def test_new_skill_appears_on_next_task_without_restart(self, tmp_path):
+        agent, _ = make_agent(
+            [model_says("first"), model_says("second")], cwd=str(tmp_path)
+        )
+        agent.run_task("task one")
+        assert "gh-issues" not in agent.messages[0]["content"]
+        self._write_skill(tmp_path, "gh-issues", "Use when asked to open a GitHub issue")
+        agent.run_task("task two")
+        assert "- gh-issues: Use when asked to open a GitHub issue" in agent.messages[0]["content"]
+
+    def test_reminder_present_exactly_once_before_user_message(self, tmp_path):
+        from aish.agent import TASK_REMINDER_MARK
+
+        self._write_skill(tmp_path, "demo", "Use when demoing")
+        agent, _ = make_agent(
+            [model_says("first"), model_says("second")], cwd=str(tmp_path)
+        )
+        agent.run_task("task one")
+        agent.run_task("task two")
+        reminders = [
+            i
+            for i, m in enumerate(agent.messages)
+            if m.get("role") == "system"
+            and str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
+            and i > 0
+        ]
+        assert len(reminders) == 1
+        # sits directly before the latest user message
+        assert agent.messages[reminders[0] + 1]["content"] == "task two"
+
+    def test_no_reminder_when_no_skills(self, tmp_path):
+        from aish.agent import TASK_REMINDER_MARK
+
+        agent, _ = make_agent([model_says("done")], cwd=str(tmp_path))
+        agent.run_task("task")
+        assert not any(
+            str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
+            for m in agent.messages[1:]
+        )
+
+    def test_reminder_stays_out_of_session_log(self, tmp_path):
+        from aish.agent import TASK_REMINDER_MARK
+
+        self._write_skill(tmp_path, "demo", "Use when demoing")
+        logged = []
+        agent, _ = make_agent(
+            [model_says("done")], cwd=str(tmp_path), on_message=logged.append
+        )
+        agent.run_task("task")
+        assert not any(
+            str(m.get("content", "")).startswith(TASK_REMINDER_MARK) for m in logged
+        )

@@ -63,7 +63,6 @@ from .cli import (
     model_spec,
     rank_models,
     save_default_model,
-    skills_context,
 )
 from .prompt import ATFILE_IGNORED_DIRS, ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .session import SessionLog
@@ -1180,7 +1179,6 @@ def create_app(
         for part in [
             environment_context(cwd),
             web_usage_context(model_name, provider, allow_path, deny_path, state_dir),
-            skills_context(cwd),
             *load_context_files(cwd, lessons_path),
         ]
         if part

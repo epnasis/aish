@@ -180,6 +180,21 @@ BLOCKED_RESULT = (
     "run it themselves with the ! prefix. Propose a safer alternative if one exists."
 )
 
+# The per-task nudge that makes small local models actually consult skills:
+# recency is what they obey, so the reminder is (re)inserted directly before
+# each user message instead of relying on the system prompt alone. It is
+# appended to self.messages directly (never via _append) so it stays out of
+# the session log and the web transcript, and the previous task's copy is
+# removed first so exactly one exists in history.
+TASK_REMINDER_MARK = "<system-reminder>"
+TASK_REMINDER = (
+    "<system-reminder>Before acting: scan the Skills index in your system "
+    "prompt. If a skill matches this task, your FIRST action MUST be "
+    "read_skill(<name>) — do not attempt the task from memory. Skills "
+    "override your general knowledge.</system-reminder>"
+)
+
+
 # No side effects and no approval prompt — safe to run concurrently.
 READ_ONLY_TOOLS = frozenset(
     {"read_docs", "read_skill", "web_search", "read_url", "read_file", "search_sessions"}
@@ -236,6 +251,18 @@ CHARS_PER_TOKEN_BUDGET = 3
 def system_prompt() -> str:
     note = _PLATFORM_NOTES.get(sys.platform, f"{sys.platform} (verify userland conventions).")
     return SYSTEM_PROMPT_TEMPLATE.format(platform_note=note)
+
+
+def compose_system_content(base_context: str, cwd: str, index: str | None = None) -> str:
+    """The full system message: static rules + caller context + the live
+    skills index. Rebuilt at every run_task so skills created mid-session
+    (or after /cd) are advertised without a restart. Deterministic: unchanged
+    skill files yield a byte-identical string, keeping API prompt caches
+    valid."""
+    if index is None:
+        index = skills.knowledge_index(cwd)
+    content = system_prompt() + (f"\n{base_context}" if base_context else "")
+    return content + (f"\n\n{index}" if index else "")
 
 
 def environment_context(cwd: str) -> str:
@@ -309,7 +336,8 @@ class Agent:
         self.current_session = current_session
         self.status = status if status is not None else _NoStatus()
         self._cancel = threading.Event()
-        content = system_prompt() + (f"\n{context}" if context else "")
+        self.base_context = context
+        content = compose_system_content(context, self.cwd)
         self.messages: list[dict] = [{"role": "system", "content": content}]
 
     def cancel(self) -> None:
@@ -339,6 +367,19 @@ class Agent:
         images: list[str] | None = None,
         documents: list[str] | None = None,
     ) -> str:
+        # Fresh scan every task: skills created mid-session (or after /cd)
+        # show up immediately, in every open session — no restart needed.
+        index = skills.knowledge_index(self.cwd)
+        self.messages[0]["content"] = compose_system_content(self.base_context, self.cwd, index)
+        self.messages[1:] = [
+            m
+            for m in self.messages[1:]
+            if not (
+                m.get("role") == "system"
+                and str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
+            )
+        ]
+
         # Old tasks' raw tool outputs are rarely needed verbatim again;
         # shrinking them keeps long REPL sessions inside the context window.
         task_start = len(self.messages)
@@ -352,6 +393,8 @@ class Agent:
             user_message["images"] = list(images)
         if documents:
             user_message["documents"] = list(documents)
+        if index:
+            self.messages.append({"role": "system", "content": TASK_REMINDER})
         self._append(user_message)
 
         self._cancel.clear()  # a stale stop must not kill the new task

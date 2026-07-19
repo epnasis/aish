@@ -29,7 +29,7 @@ from .approval import (
     unvetted_segments,
 )
 from .session import SessionInfo, SessionLog
-from .skills import GLOBAL_SKILLS_DIR, list_skills, skill_dirs
+from .skills import GLOBAL_SKILLS_DIR
 
 if TYPE_CHECKING:
     from .claude_max import ClaudeMaxAgent
@@ -995,27 +995,18 @@ $AISH_MODEL overrides the model key.
 ~/.config/aish/AISH.md is loaded into your system prompt — the right place \
 for host facts and user preferences.
 - Skills: markdown playbooks in {GLOBAL_SKILLS_DIR} (global) or \
-./.aish/skills/ (project; wins on name clash), listed in your context and \
-read via the read_skill tool. To create one when the user asks, write \
-<name>.md there with optional frontmatter lines (name:, description:) \
-between --- markers, then a body of workflows, exact commands, and safety \
-rules; it is picked up on the next aish start.
+./.aish/skills/ (project; wins on name clash), indexed in your context and \
+read via the read_skill tool. To create one when the user asks — or when \
+you have just learned a procedure worth keeping — write <name>.md there \
+with frontmatter lines (name:, description:) between --- markers, then a \
+body of workflows, exact commands, gotchas, and safety rules. The \
+description MUST state the trigger ("Use when the user asks to …") — it is \
+what makes the skill discoverable. The index refreshes every task, so a \
+new skill is available immediately, no restart needed.
 - Current model: {model} (change via --model, $AISH_MODEL, or config; \
 /model <name> --save persists a switch as the startup default).
 When the user asks you to change one of your settings, edit the config file \
 with a normal shell command (it goes through approval like any command)."""
-
-
-def skills_context(cwd: str) -> str:
-    found = list_skills(skill_dirs(cwd))
-    if not found:
-        return ""
-    lines = "\n".join(f"- {name}: {description}" for name, description in found)
-    return (
-        "Skills — task-specific playbooks with workflows and safety rules. "
-        "ALWAYS call read_skill for the relevant one BEFORE first using that "
-        "tool in a session:\n" + lines
-    )
 
 
 def load_context_files(cwd: str, lessons_path: Path = DEFAULT_LESSONS) -> list[str]:
@@ -1167,7 +1158,6 @@ def main() -> int:
                 model_name, args.vi_mode, allow_path, state_dir, config_path,
                 deny_path, lessons_path, provider=provider,
             ),
-            skills_context(cwd),
             *load_context_files(cwd, lessons_path),
         ]
         if part
