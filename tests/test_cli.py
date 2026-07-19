@@ -308,6 +308,8 @@ class TestSlashCommands:
 
         agent, logref = self.fake_agent(), self.logref(tmp_path)
         handle_slash("/new", agent, logref, tmp_path)
+        # The model note is lazy — it lands with the first real activity.
+        logref.message({"role": "user", "content": "hi"})
         records = [json.loads(line) for line in logref.log.path.read_text().splitlines()]
         assert records[0]["kind"] == "model" and records[0]["model"] == "fake"
 

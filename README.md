@@ -270,7 +270,9 @@ on demand). On a phone, **swipe the transcript sideways** to page through
 your recent chats — the same list, in the same last-interaction order, as
 the sessions drawer, so swiping back is exactly moving down that list (chats
 load from disk as needed, opened or not; the most recent 30 are reachable
-this way, search covers the rest). Directions follow Safari: swipe right
+this way, search covers the rest). Opening an older chat just to review it
+does not reorder the list — it stays in place, with its neighbors unchanged;
+only sending a message makes it the most recent again. Directions follow Safari: swipe right
 goes back to an older chat, swipe left forward to a newer one — and swiping
 forward past the newest opens a fresh chat. The view follows your finger, a
 pill shows which chat you're heading to, and it turns blue once letting go

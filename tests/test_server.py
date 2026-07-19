@@ -6,6 +6,8 @@ no network; the only real commands executed are harmless touch/ls in tmp dirs.
 
 import contextlib
 import json
+import os
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -529,6 +531,41 @@ class TestSessions:
             names = [s["name"] for s in listing["sessions"]]
             assert fresh["session"] not in names
             assert session_a in names
+
+    def test_reviewing_old_session_keeps_order_until_new_message(self, app_env):
+        # Resuming an older session only READS it: the file keeps its mtime,
+        # so the MRU order (drawer + swipe pager) is unchanged. Only a new
+        # message makes the session "latest" again.
+        state_dir = app_env["state_dir"]
+        state_dir.mkdir(parents=True, exist_ok=True)
+        old = state_dir / "session-20200101-000000-000000.jsonl"
+        old.write_text(
+            '{"kind": "message", "role": "user", "content": "old topic"}\n'
+            '{"kind": "message", "role": "assistant", "content": "old answer"}\n',
+            encoding="utf-8",
+        )
+        stale = time.time() - 3600
+        os.utime(old, (stale, stale))
+
+        client, _ = make_client(app_env, [model_says("fresh done"), model_says("revived")])
+        with client, connected(client) as (ws, hello, _):
+            fresh = hello["session"]
+            ws.send_json({"type": "task", "text": "fresh topic"})
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "resume", "path": old.name})
+            recv_until(ws, "hello")
+            assert os.path.getmtime(old) == pytest.approx(stale, abs=1)
+            ws.send_json({"type": "sessions", "query": ""})
+            listing = recv_until(ws, "session_list")
+            assert [s["name"] for s in listing["sessions"]] == [fresh, old.name]
+            assert listing["current"] == old.name
+
+            ws.send_json({"type": "task", "text": "revive it"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "sessions", "query": ""})
+            listing = recv_until(ws, "session_list")
+            assert [s["name"] for s in listing["sessions"]] == [old.name, fresh]
 
     def test_list_and_resume_previous_session(self, app_env):
         client, chat = make_client(

@@ -27,8 +27,20 @@ def test_model_recorded_last_switch_wins(tmp_path):
     log.model("qwen3:8b")
     log.message({"role": "user", "content": "hi"})
     log.model("gemini:gemini-2.5-pro")  # mid-session switch: last record wins
+    log.message({"role": "user", "content": "again"})
     assert SessionLog.info(log.path).model == "gemini:gemini-2.5-pro"
     assert SessionLog.load_entries(tmp_path)[0].info.model == "gemini:gemini-2.5-pro"
+
+
+def test_model_note_alone_never_touches_the_file(tmp_path):
+    # Session order everywhere is file mtime, so opening/resuming (which notes
+    # the model) must not write — only real activity reorders the lists.
+    log = SessionLog.new(tmp_path)
+    log.model("qwen3:8b")
+    assert log.path.read_text() == ""
+    log.message({"role": "user", "content": "hi"})  # note flushes with activity
+    kinds = [json.loads(line)["kind"] for line in log.path.read_text().splitlines()]
+    assert kinds == ["model", "message"]
 
 
 def test_model_empty_for_sessions_without_record(tmp_path):

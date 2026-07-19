@@ -52,6 +52,7 @@ class SessionLog:
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = path.open("a", encoding="utf-8")
+        self._pending_model: str | None = None
 
     def close(self) -> None:
         """Release the append handle (the file itself always persists)."""
@@ -364,6 +365,9 @@ class SessionLog:
         return "\n".join(lines)
 
     def _record(self, kind: str, **fields) -> None:
+        if self._pending_model is not None and kind != "model":
+            pending, self._pending_model = self._pending_model, None
+            self._record("model", model=pending)
         record = {
             "ts": datetime.datetime.now().isoformat(timespec="seconds"),
             "kind": kind,
@@ -376,9 +380,12 @@ class SessionLog:
         self._record("message", **message)
 
     def model(self, spec: str) -> None:
-        """Record the model in use; appended at session start and on every
-        /model switch, so the last record is the session's current model."""
-        self._record("model", model=spec)
+        """Note the model in use; written lazily, just before the next real
+        record, so the last model record is the session's current model — and
+        merely opening/resuming a session never touches its file. Session
+        order everywhere is file mtime ("last interaction"), so reviewing an
+        old session must not hoist it to most-recent; only new activity does."""
+        self._pending_model = spec
 
     def command(self, command: str, decision: str) -> None:
         self._record("command", command=command, decision=decision)
