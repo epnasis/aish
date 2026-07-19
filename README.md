@@ -232,10 +232,11 @@ ask aish about any of this — its own docs are in its system prompt.
 ## Web UI
 
 `aish-web` serves the same agent to a browser — built for phones: approvals
-become tap-able cards (Approve / Allow this session / Edit / Deny — plus an
-optional feedback field: type *why* you're denying, or what to do instead,
-and Deny sends that straight back to the model as guidance), file
-writes show the colored diff before anything lands on disk, answers stream
+become tap-able cards (Approve / Allow this session / Always allow / Edit /
+Deny — plus an optional feedback field whose text travels with *whichever*
+button you press: on Deny it tells the model why and what to do instead; on
+any approval it reaches the model as guidance for this and future actions),
+file writes show the colored diff before anything lands on disk, answers stream
 live and render as markdown (tables, code blocks, links), command output
 keeps its ANSI colors, and locking your phone mid-task loses nothing (on
 reconnect the server replays the transcript, including any approval still
@@ -247,7 +248,9 @@ reading it expands into a small player: pause/resume, skip to the previous
 or next paragraph, and a speed control (0.8×–2×, remembered on the device).
 Code blocks are skipped, and the voice follows the answer's detected
 language — English or Polish. "Allow this session" auto-approves the command's prefixes until
-the session closes — in memory only, never written to the allowlist. Cards for
+the session closes — in memory only; "Always allow" saves those same prefixes
+to the persistent allowlist (the card shows the exact rule being saved, e.g.
+`gh issue create` — never the full command line with its arguments). Cards for
 commands or reads that reach outside the session roots call out the escaping
 directory and add a "Trust directory" button — one tap adds it to the session
 roots, so allowlisted work there auto-approves afterwards (also in memory only).
@@ -336,9 +339,7 @@ approved commands on the host, so it binds to `127.0.0.1` unless you opt into
 `?token=<secret>` on first visit (stored by the browser) — recommended even on
 a home LAN. One task runs per session (open more sessions for parallel work);
 a second device connecting takes over the view. Deliberately **not**
-available from the web: `!` direct
-commands, and growing the "always allow" list — approving a card runs the
-command once, and the allowlist can only be extended from terminal aish.
+available from the web: `!` direct commands.
 Switching to/from `claude-max` needs a restart (`aish-web --model claude-max`),
 and there is no mid-task cancel yet — deny its next approval, or restart the
 server.

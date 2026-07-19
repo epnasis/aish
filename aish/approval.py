@@ -39,6 +39,16 @@ class Denied:
     def __init__(self, comment: str):
         self.comment = comment
 
+
+class Approved:
+    """Approver verdict for an approval that carries feedback typed into the
+    card: the action DID run (as `command` if the user edited it), and the
+    comment goes to the model as guidance to apply now and going forward."""
+
+    def __init__(self, comment: str, command: str | None = None):
+        self.comment = comment
+        self.command = command
+
 SAFE_COMMANDS = frozenset(
     {
         "basename",

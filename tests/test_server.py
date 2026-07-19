@@ -14,7 +14,7 @@ import pytest
 from starlette.testclient import TestClient
 
 import aish.server as server_module
-from aish.agent import DENIED_RESULT, WRITE_DENIED
+from aish.agent import APPROVED_NOTE, DENIED_RESULT, WRITE_DENIED
 from aish.server import create_app
 
 
@@ -214,6 +214,92 @@ class TestCommandApproval:
             assert result.startswith(DENIED_RESULT)
             assert "wrong flag on macOS, use -f" in result
 
+    def test_approve_with_comment_runs_and_guides(self, app_env, tmp_path):
+        """#34: feedback is button-agnostic — on an approval the command runs
+        AND the comment reaches the model as forward guidance."""
+        marker = tmp_path / "ran43"
+        client, chat = make_client(app_env, self.responses(f"touch {marker}"))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json(
+                {
+                    "type": "approval",
+                    "id": request["id"],
+                    "action": "approve",
+                    "comment": "prefer install -D next time",
+                }
+            )
+            resolved = recv_until(ws, "approval_resolved")
+            assert resolved["decision"] == "approved"
+            assert resolved["comment"] == "prefer install -D next time"
+            recv_until(ws, "done")
+            assert marker.exists()
+            result = tool_results(chat)[-1]["content"]
+            assert result.endswith(
+                APPROVED_NOTE.format(comment="prefer install -D next time")
+            )
+
+    def test_always_allow_persists_prefix_and_skips_future_prompts(
+        self, app_env, tmp_path
+    ):
+        """#34: "Always allow" writes the shown prefix to the allowlist file,
+        so the rule outlives the session and later calls auto-approve."""
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/a")]),
+            model_says("first done"),
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/b")]),
+            model_says("second done"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "touch a"})
+            request = recv_until(ws, "approval_request")
+            assert request["prefixes"] == ["touch"]
+            ws.send_json(
+                {"type": "approval", "id": request["id"], "action": "approve_always"}
+            )
+            assert recv_until(ws, "approval_resolved")["decision"] == "approved"
+            recv_until(ws, "done")
+            assert (tmp_path / "a").exists()
+            allowed = app_env["allow_path"].read_text(encoding="utf-8").splitlines()
+            assert "touch" in allowed
+
+            ws.send_json({"type": "task", "text": "touch b"})
+            auto = None
+            for _ in range(200):
+                event = ws.receive_json()
+                if event["type"] == "done":
+                    break
+                assert event["type"] != "approval_request"
+                if event["type"] == "echo" and "auto-approved" in event["text"]:
+                    auto = event
+            assert auto is not None
+            assert (tmp_path / "b").exists()
+
+    def test_edit_with_comment_carries_guidance(self, app_env, tmp_path):
+        original, edited = tmp_path / "orig43", tmp_path / "edited43"
+        client, chat = make_client(app_env, self.responses(f"touch {original}"))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json(
+                {
+                    "type": "approval",
+                    "id": request["id"],
+                    "action": "edit",
+                    "command": f"touch {edited}",
+                    "comment": "always use the edited name",
+                }
+            )
+            recv_until(ws, "done")
+            assert edited.exists() and not original.exists()
+            result = tool_results(chat)[-1]["content"]
+            assert "user edited the command" in result
+            assert result.endswith(
+                APPROVED_NOTE.format(comment="always use the edited name")
+            )
+
     def test_edit_runs_edited_command(self, app_env, tmp_path):
         original, edited = tmp_path / "original", tmp_path / "edited42"
         client, chat = make_client(app_env, self.responses(f"touch {original}"))
@@ -381,6 +467,27 @@ class TestWriteApproval:
             recv_until(ws, "done")
             assert not target.exists()
             assert tool_results(chat)[-1]["content"] == WRITE_DENIED
+
+    def test_approve_write_with_comment_carries_guidance(self, app_env, tmp_path):
+        target = tmp_path / "note.txt"
+        client, chat = make_client(app_env, self.responses(str(target), "hello\n"))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "write it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json(
+                {
+                    "type": "approval",
+                    "id": request["id"],
+                    "action": "approve",
+                    "comment": "keep future notes under docs/",
+                }
+            )
+            recv_until(ws, "done")
+            assert target.read_text(encoding="utf-8") == "hello\n"
+            result = tool_results(chat)[-1]["content"]
+            assert result.endswith(
+                APPROVED_NOTE.format(comment="keep future notes under docs/")
+            )
 
     def test_deny_write_with_comment_reaches_model(self, app_env, tmp_path):
         target = tmp_path / "note.txt"

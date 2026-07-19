@@ -23,7 +23,7 @@ from typing import Any
 import ollama
 
 from . import files, skills, tools, web
-from .approval import Blocked, Denied
+from .approval import Approved, Blocked, Denied
 from .session import SessionLog
 
 _PLATFORM_NOTES = {
@@ -156,9 +156,18 @@ WRITE_DENIED = (
 
 FEEDBACK_NOTE = '\nThe user explains: "{comment}" — treat this as direct instruction.'
 
+APPROVED_NOTE = (
+    '\n[The user approved this action and adds: "{comment}" — treat this as '
+    "guidance to apply now and to future actions.]"
+)
+
 
 def _with_feedback(base: str, comment: str) -> str:
     return base + FEEDBACK_NOTE.format(comment=comment) if comment else base
+
+
+def _with_approval_note(result: str, comment: str) -> str:
+    return result + APPROVED_NOTE.format(comment=comment) if comment else result
 
 READ_DENIED = (
     "USER DENIED reading this sensitive file — its contents were NOT read. "
@@ -253,7 +262,7 @@ class Agent:
         self,
         model: str,
         approve: Callable[[str], Any],
-        approve_write: Callable[[Any], Any] = lambda _plan: False,  # bool or Denied
+        approve_write: Callable[[Any], Any] = lambda _plan: False,  # bool, Approved or Denied
         approve_read: Callable[[str, str], bool] = lambda _path, _reason: True,
         echo: Callable[[str], None] = lambda _: None,
         stream: Callable[[str], None] | None = None,
@@ -870,11 +879,15 @@ class Agent:
                 return _with_feedback(DENIED_RESULT, decision.comment)
             if decision is None or decision is False:
                 return DENIED_RESULT
+            feedback = ""
+            if isinstance(decision, Approved):
+                feedback = decision.comment
+                decision = decision.command if decision.command else True
             final = command if decision is True else str(decision)
             if args.get("background"):
                 result = tools.start_background(final, cwd=self.cwd, log_dir=self.job_log_dir)
                 self.echo(result)
-                return result
+                return _with_approval_note(result, feedback)
             result = tools.run_command(
                 final,
                 cwd=self.cwd,
@@ -887,7 +900,7 @@ class Agent:
                 self.echo(result)
             if final != command:
                 result = f"[user edited the command to: {final}]\n{result}"
-            return result
+            return _with_approval_note(result, feedback)
 
         return f"ERROR: unknown tool '{name}'"
 
@@ -912,6 +925,8 @@ class Agent:
             return WRITE_DENIED
         result = files.commit(plan)
         self.echo(result)
+        if isinstance(decision, Approved):
+            result = _with_approval_note(result, decision.comment)
         return result
 
     def _parse_cd(self, command: str) -> str | None:

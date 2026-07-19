@@ -1206,26 +1206,28 @@ function answerCard(id, action, extra) {
   }
 }
 
-// #13: optional feedback typed straight into the approval card. Deny picks
-// up whatever is in the field; Enter in the field is an explicit
-// "deny with this comment" — the text goes back to the model as guidance.
-function feedbackField(id) {
+// #13/#34: optional feedback typed straight into the approval card. The text
+// rides along with WHICHEVER button is pressed — on Deny it explains the
+// refusal, on any approval it reaches the model as guidance for this and
+// future actions. Typing feedback implies no verdict: Enter just dismisses
+// the keyboard, the user still picks a button.
+function feedbackField() {
   const input = document.createElement("input");
   input.type = "text";
   input.className = "feedback";
-  input.placeholder = "Optional feedback: why not / what to do instead";
-  input.enterKeyHint = "send";
+  input.placeholder = "Optional feedback — sent with whichever button you press";
+  input.enterKeyHint = "done";
   input.autocomplete = "off";
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      answerCard(id, "deny", denyExtra(input));
+      input.blur();
     }
   });
   return input;
 }
 
-function denyExtra(input) {
+function feedbackExtra(input) {
   const comment = input.value.trim();
   return comment ? { comment } : {};
 }
@@ -1244,23 +1246,30 @@ function buildCommandCard(card, event) {
   card.appendChild(code);
   const escapes = event.escapes || [];
   if (escapes.length) card.appendChild(escapeNote(escapes));
-  const feedback = feedbackField(event.id);
-  card.appendChild(feedback);
   const prefixes = (event.prefixes || []).join(", ");
+  // The allow buttons save prefix rules, not this exact command line — show
+  // the rule on the card so the scope is clear before the user commits to it.
+  if (prefixes) card.appendChild(prefixNote(prefixes));
+  const feedback = feedbackField();
+  card.appendChild(feedback);
   const specs = [
-    ["Approve", "approve", () => answerCard(event.id, "approve")],
+    ["Approve", "approve",
+      () => answerCard(event.id, "approve", feedbackExtra(feedback))],
     ["Allow this session", "session",
-      () => answerCard(event.id, "approve_session"),
+      () => answerCard(event.id, "approve_session", feedbackExtra(feedback)),
       prefixes ? `auto-approve "${prefixes}" until the server restarts` : ""],
+    ["Always allow", "session",
+      () => answerCard(event.id, "approve_always", feedbackExtra(feedback)),
+      prefixes ? `save "${prefixes}" to the allowlist — persists across sessions` : ""],
   ];
   if (escapes.length) {
     specs.push(["Trust directory", "session",
-      () => answerCard(event.id, "approve_trust"),
+      () => answerCard(event.id, "approve_trust", feedbackExtra(feedback)),
       `add ${escapes.join(", ")} to the session roots until the session closes`]);
   }
   specs.push(
     ["Edit", "edit", () => showEditor()],
-    ["Deny", "deny", () => answerCard(event.id, "deny", denyExtra(feedback))],
+    ["Deny", "deny", () => answerCard(event.id, "deny", feedbackExtra(feedback))],
   );
   const row = buttonRow(card, specs);
   row.classList.add("grid2");
@@ -1271,7 +1280,7 @@ function buildCommandCard(card, event) {
     card.appendChild(area);
     const editRow = buttonRow(card, [
       ["Run edited", "approve", () =>
-        answerCard(event.id, "edit", { command: area.value })],
+        answerCard(event.id, "edit", { command: area.value, ...feedbackExtra(feedback) })],
       ["Cancel", "deny", () => { area.remove(); editRow.remove(); row.hidden = false; }],
     ]);
     area.focus();
@@ -1295,12 +1304,21 @@ function buildWriteCard(card, event) {
     diff.appendChild(el);
   }
   card.appendChild(diff);
-  const feedback = feedbackField(event.id);
+  const feedback = feedbackField();
   card.appendChild(feedback);
   buttonRow(card, [
-    ["Approve", "approve", () => answerCard(event.id, "approve")],
-    ["Deny", "deny", () => answerCard(event.id, "deny", denyExtra(feedback))],
+    ["Approve", "approve", () => answerCard(event.id, "approve", feedbackExtra(feedback))],
+    ["Deny", "deny", () => answerCard(event.id, "deny", feedbackExtra(feedback))],
   ]);
+}
+
+// What "Allow this session" / "Always allow" would actually allowlist: the
+// derived command prefix(es), not the full command line.
+function prefixNote(prefixes) {
+  const note = document.createElement("div");
+  note.className = "prefix-note";
+  note.textContent = `“Allow” buttons save the rule: ${prefixes}`;
+  return note;
 }
 
 // The out-of-roots warning shown on command/read cards whose target lives

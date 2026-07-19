@@ -39,6 +39,7 @@ from .agent import Agent, ModelUnavailable, environment_context
 from .approval import (
     DEFAULT_ALLOWLIST,
     DEFAULT_DENYLIST,
+    Approved,
     Blocked,
     Denied,
     check_denied,
@@ -46,6 +47,7 @@ from .approval import (
     is_auto_approvable,
     load_prefixes,
     looks_destructive,
+    save_prefix,
     suggest_prefix,
     unvetted_segments,
 )
@@ -233,7 +235,9 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     cli.make_approver semantics exactly: denylist first (also on edited
     commands), then auto-approval scoped to the live session roots, then a
     blocking approval card. session_prefixes backs the card's "Allow this
-    session" button — in-memory only, forgotten when the session closes.
+    session" button — in-memory only, forgotten when the session closes;
+    "Always allow" saves the card's shown prefixes to the persistent
+    allowlist, same file as the CLI's 'a' answer.
     trust_dir(path) -> note widens the live roots when the card's "Trust
     directory" button answers a command or read escaping them."""
     session_prefixes: set[str] = set()
@@ -283,24 +287,43 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         }
         answer = bridge.ask(request)
         action = answer.get("action")
+        # Feedback is button-agnostic: on deny it explains the refusal, on any
+        # approval it rides along as guidance the model applies going forward.
+        comment = str(answer.get("comment") or "").strip()
+
+        def tagged(decision: str) -> str:
+            return f"{decision} (feedback: {comment})" if comment else decision
+
+        def granted(final: str = command):
+            return Approved(comment, final) if comment else final
+
         if action == "approve":
-            record(command, "approved")
-            resolve(request["id"], "approved")
-            return command
+            record(command, tagged("approved"))
+            resolve(request["id"], "approved", comment)
+            return granted()
         if action == "approve_trust" and escapes:
             notes = [trust_dir(directory) for directory in escapes]
             bridge.emit({"type": "echo", "text": "✓ " + "; ".join(notes)})
-            record(command, f"approved+trusted:{','.join(escapes)}")
-            resolve(request["id"], "approved")
-            return command
+            record(command, tagged(f"approved+trusted:{','.join(escapes)}"))
+            resolve(request["id"], "approved", comment)
+            return granted()
         if action == "approve_session":
             session_prefixes.update(suggestions)
             bridge.emit(
                 {"type": "echo", "text": f"✓ session-allowed: {', '.join(suggestions)}"}
             )
-            record(command, "approved+session")
-            resolve(request["id"], "approved")
-            return command
+            record(command, tagged("approved+session"))
+            resolve(request["id"], "approved", comment)
+            return granted()
+        if action == "approve_always":
+            for prefix in suggestions:
+                save_prefix(allow_path, prefix)
+            bridge.emit(
+                {"type": "echo", "text": f"✓ always-allowed: {', '.join(suggestions)}"}
+            )
+            record(command, tagged(f"approved+always:{','.join(suggestions)}"))
+            resolve(request["id"], "approved", comment)
+            return granted()
         if action == "edit":
             edited = str(answer.get("command") or "").strip()
             if edited:
@@ -311,15 +334,14 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
                     record(f"{command} => {edited}", f"blocked: {reason}")
                     resolve(request["id"], "denied")
                     return blocked(edited, reason)
-                record(f"{command} => {edited}", "edited")
-                resolve(request["id"], "edited")
-                return edited
-        comment = str(answer.get("comment") or "").strip()
-        record(command, f"denied (feedback: {comment})" if comment else "denied")
+                record(f"{command} => {edited}", tagged("edited"))
+                resolve(request["id"], "edited", comment)
+                return granted(edited)
+        record(command, tagged("denied"))
         resolve(request["id"], "denied", comment)
         return Denied(comment) if comment else None
 
-    def approve_write(plan) -> "bool | Denied":
+    def approve_write(plan) -> "bool | Approved | Denied":
         verb = "create" if plan.is_new else "edit"
         request: dict[str, Any] = {
             "type": "approval_request",
@@ -332,15 +354,15 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         }
         answer = bridge.ask(request)
         approved = answer.get("action") == "approve"
-        comment = "" if approved else str(answer.get("comment") or "").strip()
+        comment = str(answer.get("comment") or "").strip()
+        decision = "approved" if approved else "denied"
         record(
             f"{verb} {plan.target}",
-            f"denied (feedback: {comment})" if comment else
-            ("approved" if approved else "denied"),
+            f"{decision} (feedback: {comment})" if comment else decision,
         )
-        resolve(request["id"], "approved" if approved else "denied", comment)
+        resolve(request["id"], decision, comment)
         if approved:
-            return True
+            return Approved(comment) if comment else True
         return Denied(comment) if comment else False
 
     def approve_read(path: str, reason: str = "sensitive") -> bool:
@@ -408,12 +430,15 @@ About aish (you) — use this to answer questions about your own usage:
 {identity_context(model, provider)}
 - The user talks to you through the aish WEB UI in a browser (often a phone), \
 not a terminal. Every command you propose appears as an approval card with \
-Approve / Allow this session / Edit / Deny buttons; file writes show a \
-unified diff before approval. Cards also carry an optional feedback field: \
-a denial may arrive WITH the user's explanation of what is wrong — treat \
-that text as direct instruction on what to do instead. Read-only commands auto-approve within the \
+Approve / Allow this session / Always allow / Edit / Deny buttons; file \
+writes show a unified diff before approval. Cards also carry an optional \
+feedback field whose text arrives with WHICHEVER button the user presses: \
+on a denial it explains what is wrong — treat it as direct instruction on \
+what to do instead; on an approval it is guidance to apply now and to \
+future actions. Read-only commands auto-approve within the \
 session roots (allowlist: {allow_path}). "Allow this session" auto-approves \
-that command's prefixes until the session closes — in memory only. When a \
+that command's prefixes until the session closes — in memory only. "Always \
+allow" saves those same prefixes to the persistent allowlist file. When a \
 command or file read reaches outside the session roots, its card warns about \
 the escape and offers "Trust directory": one tap adds that directory to the \
 session roots, so allowlisted work there auto-approves afterwards — also in \
@@ -435,8 +460,6 @@ option, formatted [Label](aish-reply://answer text) — the UI renders them \
 as tap buttons that feed the answer text into the user's input box, so the \
 reply arrives as an ordinary user message (possibly edited). Only offer \
 them when short options genuinely cover the likely answers.
-- The persistent "always allow" allowlist cannot be grown from the web UI — \
-that is terminal-only by design.
 - Safety denylist: unrecoverable command classes are blocked outright and \
 cannot be approved here at all (extendable in {deny_path}); suggest a safer \
 alternative when blocked.
