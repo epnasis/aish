@@ -736,14 +736,16 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   font-size: 16px;
 }
 .sheet-head input[type="search"]:focus { outline: none; }
-.sheet-head .close, .sheet-head .primary {
+/* iOS-style sheet dismiss: gray circle with an ✕ (xmark.circle.fill) */
+.sheet-head .close {
   border: none;
   background: none;
-  color: var(--blue);
-  font-size: 16px;
-  padding: 8px 6px;
+  color: var(--fg);
+  padding: 6px 2px;
+  display: flex;
+  align-items: center;
 }
-.sheet-head .close { font-weight: 600; }
+.sheet-head .close svg { width: 28px; height: 28px; }
 .sheet-list { overflow-y: auto; flex: 1; }
 .sheet-list .row {
   width: 100%;

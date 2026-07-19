@@ -1926,7 +1926,6 @@ messagesEl.addEventListener("touchcancel", endSwipe);
 // sessions
 $("session-chip").onclick = () => openSessionsSheet("");
 $("new-chip").onclick = () => send({ type: "new" });
-$("new-chat").onclick = () => { send({ type: "new" }); closeSheets(); };
 $("sessions-search").addEventListener(
   "input",
   debounce(() => send({ type: "sessions", query: $("sessions-search").value }), 150)
