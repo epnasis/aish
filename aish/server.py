@@ -42,6 +42,7 @@ from .approval import (
     Blocked,
     Denied,
     check_denied,
+    escaping_dirs,
     is_auto_approvable,
     load_prefixes,
     looks_destructive,
@@ -227,12 +228,14 @@ class WebStatus:
         self.bridge.emit({"type": "status", "state": "idle"}, record=False)
 
 
-def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope):
+def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir):
     """The three approval callbacks, backed by browser round trips. Mirrors
     cli.make_approver semantics exactly: denylist first (also on edited
     commands), then auto-approval scoped to the live session roots, then a
     blocking approval card. session_prefixes backs the card's "Allow this
-    session" button — in-memory only, forgotten when the session closes."""
+    session" button — in-memory only, forgotten when the session closes.
+    trust_dir(path) -> note widens the live roots when the card's "Trust
+    directory" button answers a command or read escaping them."""
     session_prefixes: set[str] = set()
 
     def known_prefixes() -> frozenset:
@@ -269,17 +272,25 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             suggest_prefix(segment)
             for segment in unvetted_segments(command, known_prefixes()) or [command]
         ]
+        escapes = escaping_dirs(command, cwd, roots) if cwd and roots else []
         request: dict[str, Any] = {
             "type": "approval_request",
             "kind": "command",
             "command": command,
             "destructive": looks_destructive(command),
             "prefixes": suggestions,
+            "escapes": escapes,
         }
         answer = bridge.ask(request)
         action = answer.get("action")
         if action == "approve":
             record(command, "approved")
+            resolve(request["id"], "approved")
+            return command
+        if action == "approve_trust" and escapes:
+            notes = [trust_dir(directory) for directory in escapes]
+            bridge.emit({"type": "echo", "text": "✓ " + "; ".join(notes)})
+            record(command, f"approved+trusted:{','.join(escapes)}")
             resolve(request["id"], "approved")
             return command
         if action == "approve_session":
@@ -333,14 +344,23 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         return Denied(comment) if comment else False
 
     def approve_read(path: str, reason: str = "sensitive") -> bool:
+        directory = os.path.dirname(os.path.expanduser(path)) or "."
+        escapes = [directory] if reason == "outside" else []
         request: dict[str, Any] = {
             "type": "approval_request",
             "kind": "read",
             "path": path,
             "reason": reason,
+            "escapes": escapes,
         }
         answer = bridge.ask(request)
-        approved = answer.get("action") == "approve"
+        action = answer.get("action")
+        if action == "approve_trust" and escapes:
+            bridge.emit({"type": "echo", "text": f"✓ {trust_dir(directory)}"})
+            record(f"read {path}", f"approved+trusted:{directory}")
+            resolve(request["id"], "approved")
+            return True
+        approved = action == "approve"
         record(f"read {path}", "approved" if approved else "denied")
         resolve(request["id"], "approved" if approved else "denied")
         return approved
@@ -393,7 +413,11 @@ unified diff before approval. Cards also carry an optional feedback field: \
 a denial may arrive WITH the user's explanation of what is wrong — treat \
 that text as direct instruction on what to do instead. Read-only commands auto-approve within the \
 session roots (allowlist: {allow_path}). "Allow this session" auto-approves \
-that command's prefixes until the session closes — in memory only.
+that command's prefixes until the session closes — in memory only. When a \
+command or file read reaches outside the session roots, its card warns about \
+the escape and offers "Trust directory": one tap adds that directory to the \
+session roots, so allowlisted work there auto-approves afterwards — also in \
+memory only.
 - There are NO slash commands and NO ! direct commands here. Model switching, \
 resuming earlier sessions, new chats, changing the working directory, and \
 adding session roots all happen through the UI's header controls — if the \
@@ -1147,8 +1171,13 @@ def create_app(
                 return agent_holder[0].cwd, agent_holder[0].roots
             return cwd, [Path(cwd).resolve()]
 
+        def trust_dir(path: str) -> str:
+            if agent_holder:
+                return agent_holder[0].trust_root(path)
+            return "ERROR: agent not ready"
+
         approve, approve_write, approve_read = make_web_approvers(
-            bridge, logref, allow_path, deny_path, ask_all, get_scope
+            bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir
         )
         common = dict(
             model=model_name,

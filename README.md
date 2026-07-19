@@ -111,6 +111,11 @@ collapsed **Sources (n)** row that expands to clickable page titles.
    `y` / `n` / `a`lways / `s`ession / `e`dit. `a` saves command prefixes to the
    persistent allowlist; `s` allows the same prefixes **for this session
    only** — kept in memory, forgotten on exit, never written to disk.
+   A command (or file read) reaching **outside the session roots** says so at
+   the prompt and adds a `t`rust option: it approves the command *and* adds
+   the escaping directory to the session roots, so allowlisted work there
+   auto-approves for the rest of the session — one prompt at the boundary
+   instead of one per command. In-memory only, like `s`.
    The suggested prefix is the command's **static subcommand path** — the
    binary's basename plus its subcommand words, stopping at the first flag or
    dynamic argument, with known multi-level CLIs (`gh`, `docker`, `npm`,
@@ -128,7 +133,9 @@ collapsed **Sources (n)** row that expands to clickable page titles.
    when allowlisted. `/cd <dir>` moves the session to another project (cwd
    *and* root — Tab completes directories); `/add-dir <dir>` (alias
    `/dir-add`) allows another tree as well; both are user-only — a model-issued
-   `cd` moves only the working directory and never widens the scope.
+   `cd` moves only the working directory and never widens the scope, and one
+   that would leave the session roots goes through the approval prompt first
+   (where `t` can trust the destination).
    Launching aish (or `aish-web`) **from your home directory** re-anchors the
    session to `~/aish` (created on first use) instead — otherwise `~/.ssh`,
    `~/.aws`, shell history, and the rest of your home tree would sit inside
@@ -227,7 +234,10 @@ reading it expands into a small player: pause/resume, skip to the previous
 or next paragraph, and a speed control (0.8×–2×, remembered on the device).
 Code blocks are skipped, and the voice follows the answer's detected
 language — English or Polish. "Allow this session" auto-approves the command's prefixes until
-the session closes — in memory only, never written to the allowlist.
+the session closes — in memory only, never written to the allowlist. Cards for
+commands or reads that reach outside the session roots call out the escaping
+directory and add a "Trust directory" button — one tap adds it to the session
+roots, so allowlisted work there auto-approves afterwards (also in memory only).
 
 **Copy buttons**: every code block, table, and command-output block carries a
 small copy chip in its corner, and each finished answer has a copy button next

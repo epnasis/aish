@@ -1221,17 +1221,27 @@ function buildCommandCard(card, event) {
   const code = document.createElement("code");
   code.textContent = event.command;
   card.appendChild(code);
+  const escapes = event.escapes || [];
+  if (escapes.length) card.appendChild(escapeNote(escapes));
   const feedback = feedbackField(event.id);
   card.appendChild(feedback);
   const prefixes = (event.prefixes || []).join(", ");
-  const row = buttonRow(card, [
+  const specs = [
     ["Approve", "approve", () => answerCard(event.id, "approve")],
     ["Allow this session", "session",
       () => answerCard(event.id, "approve_session"),
       prefixes ? `auto-approve "${prefixes}" until the server restarts` : ""],
+  ];
+  if (escapes.length) {
+    specs.push(["Trust directory", "session",
+      () => answerCard(event.id, "approve_trust"),
+      `add ${escapes.join(", ")} to the session roots until the session closes`]);
+  }
+  specs.push(
     ["Edit", "edit", () => showEditor()],
     ["Deny", "deny", () => answerCard(event.id, "deny", denyExtra(feedback))],
-  ]);
+  );
+  const row = buttonRow(card, specs);
   row.classList.add("grid2");
   function showEditor() {
     row.hidden = true;
@@ -1272,6 +1282,15 @@ function buildWriteCard(card, event) {
   ]);
 }
 
+// The out-of-roots warning shown on command/read cards whose target lives
+// outside the session roots — the "Trust directory" button's context.
+function escapeNote(escapes) {
+  const note = document.createElement("div");
+  note.className = "escape-note";
+  note.textContent = `⚠ outside the session roots: ${escapes.join(", ")}`;
+  return note;
+}
+
 function buildReadCard(card, event) {
   const label = event.reason === "outside"
     ? "▶ read file outside the project?"
@@ -1280,10 +1299,15 @@ function buildReadCard(card, event) {
   const code = document.createElement("code");
   code.textContent = event.path;
   card.appendChild(code);
-  buttonRow(card, [
-    ["Approve", "approve", () => answerCard(event.id, "approve")],
-    ["Deny", "deny", () => answerCard(event.id, "deny")],
-  ]);
+  const escapes = event.escapes || [];
+  const specs = [["Approve", "approve", () => answerCard(event.id, "approve")]];
+  if (escapes.length) {
+    specs.push(["Trust directory", "session",
+      () => answerCard(event.id, "approve_trust"),
+      `add ${escapes.join(", ")} to the session roots until the session closes`]);
+  }
+  specs.push(["Deny", "deny", () => answerCard(event.id, "deny")]);
+  buttonRow(card, specs);
 }
 
 function onApprovalResolved(event) {

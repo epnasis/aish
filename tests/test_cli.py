@@ -3,7 +3,7 @@
 import builtins
 
 from aish.approval import load_prefixes
-from aish.cli import make_approver
+from aish.cli import make_approver, make_read_approver
 
 
 def scripted_input(monkeypatch, answers):
@@ -55,6 +55,57 @@ def test_session_allow_is_per_approver_not_global(tmp_path, monkeypatch):
     fresh = make_approver(False, allow, None)
     scripted_input(monkeypatch, ["n"])
     assert fresh("cargo build") is None
+
+
+def test_trust_dir_approves_and_widens_roots(tmp_path, monkeypatch):
+    """'t' on a root-escaping command trusts the escaping directory: the
+    command runs AND allowlisted commands there auto-approve afterwards."""
+    root = tmp_path / "project"
+    other = tmp_path / "other"
+    root.mkdir()
+    other.mkdir()
+    roots = [root]
+    trusted = []
+
+    def trust_dir(path):
+        trusted.append(path)
+        roots.append(other)
+        return f"[trusted for this session: {path}]"
+
+    approve = make_approver(
+        False, tmp_path / "allow.txt", None,
+        get_scope=lambda: (str(root), roots), trust_dir=trust_dir,
+    )
+    scripted_input(monkeypatch, ["t"])
+    assert approve(f"ls {other}") == f"ls {other}"
+    assert trusted == [str(other)]
+    # the widened roots now auto-approve without any prompt
+    assert approve(f"ls {other}") == f"ls {other}"
+
+
+def test_trust_option_absent_inside_roots(tmp_path, monkeypatch, capsys):
+    """No escape → no 't' offer; a stray 't' answer counts as deny."""
+    approve = make_approver(
+        False, tmp_path / "allow.txt", None,
+        get_scope=lambda: (str(tmp_path), [tmp_path]),
+        trust_dir=lambda _p: "unreachable",
+    )
+    scripted_input(monkeypatch, ["t"])
+    assert approve("brew doctor") is None
+    assert "t(rust dir)" not in capsys.readouterr().out
+
+
+def test_read_approver_trust_widens_roots(tmp_path, monkeypatch):
+    trusted = []
+    approve_read = make_read_approver(
+        None, trust_dir=lambda p: trusted.append(p) or f"[trusted: {p}]"
+    )
+    scripted_input(monkeypatch, ["t"])
+    assert approve_read(str(tmp_path / "elsewhere" / "notes.txt"), "outside") is True
+    assert trusted == [str(tmp_path / "elsewhere")]
+    # sensitive reads never offer trust — 't' is just not-yes
+    scripted_input(monkeypatch, ["t"])
+    assert approve_read(str(tmp_path / ".env"), "sensitive") is False
 
 
 def test_slash_prefix_resolves_when_unambiguous(tmp_path, capsys):

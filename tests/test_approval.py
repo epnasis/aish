@@ -2,6 +2,7 @@ import pytest
 
 from aish.approval import (
     check_denied,
+    escaping_dirs,
     is_auto_approvable,
     is_read_only,
     load_prefixes,
@@ -377,3 +378,51 @@ class TestRootScoping:
 
     def test_no_scope_args_keeps_old_behavior(self):
         assert is_auto_approvable("cat /etc/hosts", [])
+
+
+class TestEscapingDirs:
+    """escaping_dirs names the out-of-root directories a prompt should offer
+    to trust — advisory only, so unresolvable escapes are omitted, never
+    guessed."""
+
+    def test_in_root_command_has_no_escapes(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        assert escaping_dirs("ls src", str(tmp_path), [tmp_path]) == []
+
+    def test_directory_argument_is_offered_directly(self, tmp_path):
+        root = tmp_path / "project"
+        other = tmp_path / "other"
+        root.mkdir()
+        other.mkdir()
+        assert escaping_dirs(f"ls {other}", str(root), [root]) == [str(other)]
+
+    def test_file_argument_offers_its_parent(self, tmp_path):
+        root = tmp_path / "project"
+        root.mkdir()
+        secret = tmp_path / "notes.txt"
+        secret.write_text("x")
+        assert escaping_dirs(f"cat {secret}", str(root), [root]) == [str(tmp_path)]
+
+    def test_drifted_cwd_is_offered(self, tmp_path):
+        root = tmp_path / "project"
+        elsewhere = tmp_path / "elsewhere"
+        root.mkdir()
+        elsewhere.mkdir()
+        assert escaping_dirs("ls", str(elsewhere), [root]) == [str(elsewhere)]
+
+    def test_duplicate_escapes_collapse(self, tmp_path):
+        root = tmp_path / "project"
+        other = tmp_path / "other"
+        root.mkdir()
+        other.mkdir()
+        (other / "a.txt").write_text("x")
+        (other / "b.txt").write_text("x")
+        command = f"cat {other / 'a.txt'} {other / 'b.txt'}"
+        assert escaping_dirs(command, str(root), [root]) == [str(other)]
+
+    def test_bare_cd_target_is_offered(self, tmp_path):
+        root = tmp_path / "project"
+        elsewhere = tmp_path / "elsewhere"
+        root.mkdir()
+        elsewhere.mkdir()
+        assert escaping_dirs(f"cd {elsewhere}", str(root), [root]) == [str(elsewhere)]

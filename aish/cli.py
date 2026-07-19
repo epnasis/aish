@@ -20,6 +20,7 @@ from .approval import (
     DEFAULT_DENYLIST,
     Blocked,
     check_denied,
+    escaping_dirs,
     is_auto_approvable,
     load_prefixes,
     looks_destructive,
@@ -158,12 +159,15 @@ def make_approver(
     deny_path: Path = DEFAULT_DENYLIST,
     get_scope=None,
     session_prefixes: set[str] | None = None,
+    trust_dir=None,
 ):
     """get_scope() -> (cwd, roots): the agent's live directory scope, bound
     late because the agent is constructed after its approver. When present,
     auto-approval is confined to the session roots. session_prefixes holds
     prefixes allowed for this session only ('s' at the prompt) — unioned with
-    the persistent allowlist but never written to disk."""
+    the persistent allowlist but never written to disk. trust_dir(path) -> note
+    widens the live roots when the user answers 't' on a command that escapes
+    them (also late-bound, in-memory only)."""
     session_prefixes = set() if session_prefixes is None else session_prefixes
 
     def known_prefixes() -> frozenset:
@@ -193,16 +197,27 @@ def make_approver(
 
         warning = f" {RED}⚠ destructive{RESET}" if looks_destructive(command) else ""
         print(f"\n{YELLOW}{BOLD}▶ run command?{RESET}{warning}\n  {BOLD}{command}{RESET}")
+        escapes = escaping_dirs(command, cwd, roots) if trust_dir and cwd and roots else []
+        if escapes:
+            print(f"{YELLOW}  ⚠ outside the session roots:{RESET} {', '.join(escapes)}")
+        options = (
+            "[y/N/a(lways)/s(ession)/t(rust dir)/e(dit)]"
+            if escapes
+            else "[y/N/a(lways)/s(ession)/e(dit)]"
+        )
         try:
-            answer = input(
-                f"{YELLOW}[y/N/a(lways)/s(ession)/e(dit)]{RESET} "
-            ).strip().lower()
+            answer = input(f"{YELLOW}{options}{RESET} ").strip().lower()
         except EOFError:
             record(command, "denied")
             return None
 
         if answer in ("y", "yes"):
             record(command, "approved")
+            return command
+        if answer == "t" and escapes:
+            for directory in escapes:
+                print(f"{DIM}  {trust_dir(directory)}{RESET}")
+            record(command, f"approved+trusted:{','.join(escapes)}")
             return command
         if answer == "a":
             allow_segments_flow(command, allow_path)
@@ -280,22 +295,32 @@ def make_write_approver(log):
     return approve_write
 
 
-def make_read_approver(log):
+def make_read_approver(log, trust_dir=None):
     """Prompt before an auto-approved read_file touches a secret-bearing path
     or one outside the session roots, so an injected read_file can't silently
-    pull keys — or arbitrary files elsewhere on the machine — into context."""
+    pull keys — or arbitrary files elsewhere on the machine — into context.
+    For out-of-root reads, 't' trusts the file's directory for the session
+    (via trust_dir, same late binding as make_approver's)."""
 
     def approve_read(path: str, reason: str = "sensitive") -> bool:
+        offer_trust = reason == "outside" and trust_dir is not None
         if reason == "outside":
             print(f"\n{YELLOW}{BOLD}▶ read file outside the project?{RESET} "
                   f"{BOLD}{path}{RESET} {DIM}(/cd or /add-dir widens the scope){RESET}")
         else:
             print(f"\n{YELLOW}{BOLD}▶ read sensitive file?{RESET} {BOLD}{path}{RESET} "
                   f"{RED}⚠ may contain secrets{RESET}")
+        options = "[y/N/t(rust dir)]" if offer_trust else "[y/N]"
         try:
-            answer = input(f"{YELLOW}[y/N]{RESET} ").strip().lower()
+            answer = input(f"{YELLOW}{options}{RESET} ").strip().lower()
         except EOFError:
             answer = ""
+        if answer == "t" and offer_trust:
+            directory = os.path.dirname(os.path.expanduser(path)) or "."
+            print(f"{DIM}  {trust_dir(directory)}{RESET}")
+            if log:
+                log.command(f"read {path}", f"approved+trusted:{directory}")
+            return True
         approved = answer in ("y", "yes")
         if log:
             log.command(f"read {path}", "approved" if approved else "denied")
@@ -1164,6 +1189,11 @@ def main() -> int:
             return agent_holder[0].cwd, agent_holder[0].roots
         return cwd, [Path(cwd).resolve()]
 
+    def trust_dir(path: str) -> str:
+        if agent_holder:
+            return agent_holder[0].trust_root(path)
+        return "ERROR: agent not ready"
+
     agent: Agent | ClaudeMaxAgent
     if provider == "claude-max":
         # aliased so the annotation above binds the TYPE_CHECKING import,
@@ -1176,9 +1206,11 @@ def main() -> int:
             print(f"{YELLOW}warning: {warning}{RESET}")
         agent = _ClaudeMaxAgent(
             model=model_name,
-            approve=make_approver(args.ask_all, allow_path, logref, deny_path, get_scope),
+            approve=make_approver(
+                args.ask_all, allow_path, logref, deny_path, get_scope, trust_dir=trust_dir
+            ),
             approve_write=make_write_approver(logref),
-            approve_read=make_read_approver(logref),
+            approve_read=make_read_approver(logref, trust_dir=trust_dir),
             echo=echo,
             stream=stream_line,
             max_steps=args.max_steps,
@@ -1197,9 +1229,11 @@ def main() -> int:
         agent = Agent(
             model=model_name,
             client_chat=chat,
-            approve=make_approver(args.ask_all, allow_path, logref, deny_path, get_scope),
+            approve=make_approver(
+                args.ask_all, allow_path, logref, deny_path, get_scope, trust_dir=trust_dir
+            ),
             approve_write=make_write_approver(logref),
-            approve_read=make_read_approver(logref),
+            approve_read=make_read_approver(logref, trust_dir=trust_dir),
             echo=echo,
             stream=stream_line,
             num_ctx=args.num_ctx,

@@ -295,6 +295,45 @@ class TestCommandApproval:
             assert auto is not None
             assert (tmp_path / "b").exists()
 
+    def test_trust_directory_widens_roots_for_session(self, app_env, tmp_path_factory):
+        """The card's "Trust directory" on a root-escaping command: the command
+        runs, and allowlisted commands in that directory auto-approve after."""
+        outside = tmp_path_factory.mktemp("elsewhere")
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"ls {outside}")]),
+            model_says("first done"),
+            model_says(tool_calls=[tool_call("run_command", command=f"ls {outside}")]),
+            model_says("second done"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "look elsewhere"})
+            request = recv_until(ws, "approval_request")
+            assert request["escapes"] == [str(outside)]
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve_trust"})
+            assert recv_until(ws, "approval_resolved")["decision"] == "approved"
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "task", "text": "look again"})
+            auto = None
+            for _ in range(200):
+                event = ws.receive_json()
+                if event["type"] == "done":
+                    break
+                assert event["type"] != "approval_request"
+                if event["type"] == "echo" and "auto-approved" in event["text"]:
+                    auto = event
+            assert auto is not None
+
+    def test_in_root_command_card_has_no_escapes(self, app_env, tmp_path):
+        client, _ = make_client(app_env, self.responses(f"touch {tmp_path}/plain"))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "touch it"})
+            request = recv_until(ws, "approval_request")
+            assert request["escapes"] == []
+            ws.send_json({"type": "approval", "id": request["id"], "action": "deny"})
+            recv_until(ws, "done")
+
     def test_allowlisted_readonly_auto_approves(self, app_env):
         client, _ = make_client(app_env, self.responses("ls"))
         with client, connected(client) as (ws, _, _):

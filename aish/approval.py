@@ -207,22 +207,30 @@ def _within_roots(target: Path, resolved_roots: list[Path]) -> bool:
     return any(target.is_relative_to(r) for r in resolved_roots)
 
 
-def _token_escapes(token: str, cwd: str, resolved_roots: list[Path]) -> bool:
+def _token_escape(token: str, cwd: str, resolved_roots: list[Path]) -> tuple[bool, Path | None]:
     """Conservative: only tokens that could name a path outside the session
     roots trip this — absolute, ~-anchored, or containing '..'. Plain relative
-    tokens can't leave the cwd (itself verified to be under a root)."""
+    tokens can't leave the cwd (itself verified to be under a root).
+    Returns (escapes, resolved target) — target is None when the escape can't
+    be resolved to a concrete path (fail closed, but nothing to offer trust on)."""
     candidate = token.split("=", 1)[1] if token.startswith("-") and "=" in token else token
     if token.startswith("-") and candidate is token:
-        return False
+        return False, None
     expanded = os.path.expanduser(candidate)
     anchored = os.path.isabs(expanded)
     if not anchored and ".." not in Path(candidate).parts:
-        return False
+        return False, None
     try:
         target = (Path(expanded) if anchored else Path(cwd) / expanded).resolve()
-        return not _within_roots(target, resolved_roots)
+        if _within_roots(target, resolved_roots):
+            return False, None
+        return True, target
     except OSError:
-        return True
+        return True, None
+
+
+def _token_escapes(token: str, cwd: str, resolved_roots: list[Path]) -> bool:
+    return _token_escape(token, cwd, resolved_roots)[0]
 
 
 def _segment_escapes_roots(segment: str, cwd: str, resolved_roots: list[Path]) -> bool:
@@ -247,6 +255,41 @@ def paths_escape_roots(command: str, cwd: str, roots) -> bool:
     if segments is None:
         return True
     return any(_segment_escapes_roots(s, cwd, resolved_roots) for s in segments)
+
+
+def escaping_dirs(command: str, cwd: str, roots) -> list[str]:
+    """Best-effort list of directories outside every session root that the
+    command's cwd or path-like arguments resolve into — what a
+    'trust this directory for this session' prompt should offer. Unlike
+    paths_escape_roots this is advisory display data, never a gate: escapes
+    that can't be resolved to a concrete path are simply omitted."""
+    dirs: list[str] = []
+
+    def offer(target: Path) -> None:
+        try:
+            directory = target if target.is_dir() else target.parent
+        except OSError:
+            return
+        if str(directory) not in dirs:
+            dirs.append(str(directory))
+
+    try:
+        resolved_roots = [Path(r).resolve() for r in roots]
+        resolved_cwd = Path(cwd).resolve()
+    except OSError:
+        return []
+    if not _within_roots(resolved_cwd, resolved_roots):
+        offer(resolved_cwd)
+    for segment in split_chain(command) or []:
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            continue
+        for token in tokens[1:]:
+            escaped, target = _token_escape(token, cwd, resolved_roots)
+            if escaped and target is not None:
+                offer(target)
+    return dirs
 
 
 def is_auto_approvable(

@@ -399,6 +399,12 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   overflow-x: auto;
   margin-bottom: 10px;
 }
+.card .escape-note {
+  font-size: 13px;
+  color: var(--orange);
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
 .card .buttons { display: flex; gap: 8px; }
 .card .buttons.grid2 { display: grid; grid-template-columns: 1fr 1fr; }
 .card .buttons button {

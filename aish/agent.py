@@ -62,7 +62,9 @@ Rules:
    asked for that operation.
 6. You have a persistent working directory. To change it, run exactly
    `cd <dir>` as its own command — the new directory is echoed back and all
-   later commands run there.
+   later commands run there. A cd that leaves the session's trusted
+   directories asks the user first; they may trust the new directory for the
+   rest of the session.
 7. WEB: for information not on this machine (current events, releases,
    unfamiliar errors, general facts), call web_search, then read_url the most
    promising result and answer from what the page actually says, citing the
@@ -271,8 +273,10 @@ class Agent:
         self.think = think
         self.cwd = cwd or os.getcwd()
         # Session roots: auto-approved reads/commands are confined to these
-        # trees. Seeded with the launch dir; only user-typed slash commands
-        # (/cd, /add-dir) may change them — model-issued cd moves cwd only.
+        # trees. Seeded with the launch dir; they only widen on an explicit
+        # user decision — /cd, /add-dir, or "trust this directory" answered on
+        # an approval prompt. A model-issued cd moves cwd only, and prompts
+        # first when the target leaves these roots.
         self.roots: list[Path] = [Path(self.cwd).resolve()]
         self.on_message = on_message
         self.on_token = on_token
@@ -623,6 +627,22 @@ class Agent:
         self._append({"role": "user", "content": note})
         return f"[added session root {path}]"
 
+    def trust_root(self, target: str) -> str:
+        """Approver-side 'trust this directory for this session': widens the
+        roots mid-approval. Unlike add_root it never touches the conversation —
+        it runs while a tool call is in flight, where an injected user message
+        could break providers that require tool results to follow tool calls."""
+        path = Path(os.path.expanduser(target))
+        if not path.is_absolute():
+            path = Path(self.cwd) / path
+        path = path.resolve()
+        if not path.is_dir():
+            return f"ERROR: no such directory: {path}"
+        if any(path.is_relative_to(root) for root in self.roots):
+            return f"[{path} is already inside a session root]"
+        self.roots.append(path)
+        return f"[trusted for this session: {path}]"
+
     def _execute_tool_calls(self, tool_calls: list[dict]) -> list[str]:
         """Run one model turn's tool calls; results keep the call order.
 
@@ -818,8 +838,12 @@ class Agent:
         if name == "run_command":
             command = str(args.get("command", ""))
 
+            # A bare cd inside the session roots is free; one that crosses the
+            # root boundary goes through the approver like any other command,
+            # so the user is asked ONCE at the crossing (and can trust the
+            # destination) instead of on every command after a silent drift.
             cd_target = self._parse_cd(command)
-            if cd_target is not None:
+            if cd_target is not None and not self._cd_escapes(cd_target):
                 return self._change_dir(cd_target)
 
             decision = self.approve(command)
@@ -830,6 +854,12 @@ class Agent:
             if decision is None or decision is False:
                 return DENIED_RESULT
             final = command if decision is True else str(decision)
+            cd_final = self._parse_cd(final)
+            if cd_final is not None:
+                result = self._change_dir(cd_final)
+                if final != command:
+                    result = f"[user edited the command to: {final}]\n{result}"
+                return result
             if args.get("background"):
                 result = tools.start_background(final, cwd=self.cwd, log_dir=self.job_log_dir)
                 self.echo(result)
@@ -872,6 +902,11 @@ class Agent:
         result = files.commit(plan)
         self.echo(result)
         return result
+
+    def _cd_escapes(self, target: str) -> bool:
+        """Whether a model-issued bare cd would leave the session roots — the
+        boundary crossing that must go through the approver."""
+        return files.is_outside_roots(target, self.cwd, self.roots)
 
     def _parse_cd(self, command: str) -> str | None:
         """A bare `cd <dir>` changes agent state instead of spawning a shell

@@ -620,17 +620,72 @@ class TestLiveStatus:
 
 
 class TestCwdAndCd:
-    def test_bare_cd_changes_cwd_without_approval(self, tmp_path):
+    def test_bare_cd_inside_roots_changes_cwd_without_approval(self, tmp_path):
+        (tmp_path / "sub").mkdir()
         agent, _ = make_agent(
             [
-                model_says(tool_calls=[tool_call("run_command", command=f"cd {tmp_path}")]),
+                model_says(tool_calls=[tool_call("run_command", command="cd sub")]),
                 model_says("done"),
             ],
-            approve=lambda _cmd: pytest.fail("bare cd must not hit the approval gate"),
+            approve=lambda _cmd: pytest.fail("in-root bare cd must not hit the approval gate"),
+            cwd=str(tmp_path),
         )
         agent.run_task("go there")
-        assert agent.cwd == str(tmp_path)
+        assert agent.cwd == str(tmp_path / "sub")
         assert "working directory is now" in tool_messages(agent.messages)[0]["content"]
+
+    def test_bare_cd_outside_roots_goes_through_approval(self, tmp_path):
+        root = tmp_path / "project"
+        elsewhere = tmp_path / "elsewhere"
+        root.mkdir()
+        elsewhere.mkdir()
+        seen = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"cd {elsewhere}")]),
+                model_says("done"),
+            ],
+            approve=lambda cmd: seen.append(cmd) or True,
+            cwd=str(root),
+        )
+        agent.run_task("go elsewhere")
+        assert seen == [f"cd {elsewhere}"]
+        assert agent.cwd == str(elsewhere)
+
+    def test_bare_cd_outside_roots_denied_keeps_cwd(self, tmp_path):
+        root = tmp_path / "project"
+        elsewhere = tmp_path / "elsewhere"
+        root.mkdir()
+        elsewhere.mkdir()
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"cd {elsewhere}")]),
+                model_says("staying"),
+            ],
+            approve=lambda _cmd: False,
+            cwd=str(root),
+        )
+        agent.run_task("go elsewhere")
+        assert agent.cwd == str(root)
+        assert tool_messages(agent.messages)[0]["content"] == DENIED_RESULT
+
+    def test_trust_root_widens_roots_for_session(self, tmp_path):
+        root = tmp_path / "project"
+        elsewhere = tmp_path / "elsewhere"
+        root.mkdir()
+        elsewhere.mkdir()
+        agent, _ = make_agent([], cwd=str(root))
+        note = agent.trust_root(str(elsewhere))
+        assert "trusted for this session" in note
+        assert agent.roots == [root.resolve(), elsewhere.resolve()]
+        # idempotent: a dir already under a root is not appended again
+        assert "already inside" in agent.trust_root(str(elsewhere))
+        assert len(agent.roots) == 2
+
+    def test_trust_root_rejects_missing_dir(self, tmp_path):
+        agent, _ = make_agent([], cwd=str(tmp_path))
+        assert agent.trust_root(str(tmp_path / "nope")).startswith("ERROR")
+        assert agent.roots == [tmp_path.resolve()]
 
     def test_relative_cd_resolves_against_agent_cwd(self, tmp_path):
         (tmp_path / "sub").mkdir()
