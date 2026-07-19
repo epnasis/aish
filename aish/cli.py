@@ -48,7 +48,7 @@ ECHO_PREVIEW_LINES = 12
 REPLAY_TOOL_LINES = 4
 
 SLASH_COMMANDS = (
-    "/add-dir", "/cd", "/clear", "/dir-add", "/exit", "/help", "/jobs",
+    "/add-dir", "/cd", "/clear", "/delete", "/dir-add", "/exit", "/help", "/jobs",
     "/learn", "/model", "/new", "/quit", "/resume",
 )
 
@@ -58,6 +58,10 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  ↑/↓ select, Enter loads, Esc cancels
   {CYAN}/resume <n>{RESET}    load the n-th newest session directly
   {CYAN}/resume <text>{RESET} open the picker with the filter pre-filled
+  {CYAN}/delete [n|text]{RESET} delete an earlier session permanently (same picker and
+                 argument forms as /resume, then a y/N confirm; removes the
+                 conversation AND its command audit log — the current
+                 session cannot be deleted)
   {CYAN}/new, /clear{RESET}   fresh conversation in a new session file (clears the screen;
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
@@ -697,6 +701,65 @@ def parse_learn(task: str, lessons_path=None) -> str | None:
     return learn_prompt(task.partition(" ")[2], lessons_path)
 
 
+def pick_session(state_dir: Path, arg: str, exclude: set, verb: str) -> SessionInfo | None:
+    """Session selection shared by /resume and /delete, so both mean the same
+    thing by construction: a live-filter picker when interactive, a one-shot
+    numbered flow for `<n>` arguments or piped input. Returns the chosen
+    session, or None after printing why (nothing to pick / cancelled)."""
+    if not arg.isdigit() and _box is not None:
+        # Interactive: live-filter picker — typing re-ranks, Enter selects.
+        entries = SessionLog.load_entries(state_dir, exclude=exclude)
+        if not entries:
+            print(f"{DIM}no earlier session to {verb}{RESET}")
+            return None
+        selected = _box.pick(
+            lambda query: SessionLog.rank(entries, query),
+            initial=arg,
+            render=session_row,
+        )
+        if selected is None:
+            print(f"{DIM}cancelled{RESET}")
+        return selected
+
+    # `<n>` argument, or no TTY (pipes/scripts): one-shot numbered flow.
+    searching = bool(arg) and not arg.isdigit()
+    if searching:
+        sessions = SessionLog.search_sessions(state_dir, arg, exclude=exclude)
+        if not sessions:
+            print(f"{DIM}no session matches '{arg}'{RESET}")
+            return None
+    else:
+        sessions = SessionLog.list_sessions(state_dir, exclude=exclude)
+        if not sessions:
+            print(f"{DIM}no earlier session to {verb}{RESET}")
+            return None
+
+    if arg.isdigit():
+        choice = int(arg)
+    elif len(sessions) == 1:
+        choice = 1
+    else:
+        default = "best match" if searching else "latest"
+        for i, info in enumerate(sessions, 1):
+            row = session_row(info)
+            head, _, title = row.rpartition(" · ")
+            print(f"{DIM}{i:>3}. {head} ·{RESET} {title}")
+        try:
+            answer = input(
+                f"{YELLOW}{verb} which?{RESET} [1={default}] (number, q=cancel) "
+            ).strip().lower()
+        except EOFError:
+            answer = "q"
+        if answer in ("q", "quit"):
+            print(f"{DIM}cancelled{RESET}")
+            return None
+        choice = int(answer) if answer.isdigit() else 1
+    if not 1 <= choice <= len(sessions):
+        print(f"{DIM}no such session number{RESET}")
+        return None
+    return sessions[choice - 1]
+
+
 def handle_slash(
     task: str,
     agent: "Agent | ClaudeMaxAgent",
@@ -728,60 +791,9 @@ def handle_slash(
     if command == "/resume":
         parts = task.split(maxsplit=1)
         arg = parts[1].strip() if len(parts) > 1 else ""
-        exclude = resumed | {logref.log.path}
-
-        if not arg.isdigit() and _box is not None:
-            # Interactive: live-filter picker — typing re-ranks, Enter loads.
-            entries = SessionLog.load_entries(state_dir, exclude=exclude)
-            if not entries:
-                print(f"{DIM}no earlier session to resume{RESET}")
-                return "handled"
-            selected = _box.pick(
-                lambda query: SessionLog.rank(entries, query),
-                initial=arg,
-                render=session_row,
-            )
-            if selected is None:
-                print(f"{DIM}cancelled{RESET}")
-                return "handled"
-        else:
-            # /resume <n>, or no TTY (pipes/scripts): one-shot numbered flow.
-            searching = bool(arg) and not arg.isdigit()
-            if searching:
-                sessions = SessionLog.search_sessions(state_dir, arg, exclude=exclude)
-                if not sessions:
-                    print(f"{DIM}no session matches '{arg}'{RESET}")
-                    return "handled"
-            else:
-                sessions = SessionLog.list_sessions(state_dir, exclude=exclude)
-                if not sessions:
-                    print(f"{DIM}no earlier session to resume{RESET}")
-                    return "handled"
-
-            if arg.isdigit():
-                choice = int(arg)
-            elif len(sessions) == 1:
-                choice = 1
-            else:
-                default = "best match" if searching else "latest"
-                for i, info in enumerate(sessions, 1):
-                    row = session_row(info)
-                    head, _, title = row.rpartition(" · ")
-                    print(f"{DIM}{i:>3}. {head} ·{RESET} {title}")
-                try:
-                    answer = input(
-                        f"{YELLOW}resume which?{RESET} [1={default}] (number, q=cancel) "
-                    ).strip().lower()
-                except EOFError:
-                    answer = "q"
-                if answer in ("q", "quit"):
-                    print(f"{DIM}cancelled{RESET}")
-                    return "handled"
-                choice = int(answer) if answer.isdigit() else 1
-            if not 1 <= choice <= len(sessions):
-                print(f"{DIM}no such session number{RESET}")
-                return "handled"
-            selected = sessions[choice - 1]
+        selected = pick_session(state_dir, arg, resumed | {logref.log.path}, "resume")
+        if selected is None:
+            return "handled"
         messages = SessionLog.load_messages(selected.path)
         resumed.add(selected.path)
         agent.load_history(messages)
@@ -789,6 +801,32 @@ def handle_slash(
             logref.message(message)
         print(f"{DIM}resumed {len(messages)} messages from {selected.path.name}:{RESET}")
         replay_history(messages)
+        return "handled"
+    if command == "/delete":
+        parts = task.split(maxsplit=1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        # The current session is mid-append (its file handle is open) and is
+        # excluded outright — /new first, then delete the old one.
+        selected = pick_session(state_dir, arg, {logref.log.path}, "delete")
+        if selected is None:
+            return "handled"
+        try:
+            answer = input(
+                f"{YELLOW}delete '{selected.title}' ({selected.count} msgs)?{RESET} "
+                f"removes its history and audit log [y/N] "
+            ).strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer not in ("y", "yes"):
+            print(f"{DIM}cancelled{RESET}")
+            return "handled"
+        try:
+            selected.path.unlink()
+        except OSError as exc:
+            print(f"{RED}cannot delete {selected.path.name}: {exc}{RESET}")
+            return "handled"
+        resumed.discard(selected.path)
+        print(f"{DIM}deleted {selected.path.name}{RESET}")
         return "handled"
     if command == "/model":
         parts = task.split()[1:]
@@ -977,8 +1015,9 @@ fuzzy — no LLM involved), arrow keys select, Enter loads, Esc cancels; \
 /resume <text> \
 pre-fills the filter and /resume N loads the N-th newest directly; the \
 chosen session is replayed into this conversation. Session \
-files are append-only and never deleted — every past session stays \
-available. /new or /clear (or plain 'clear') starts a \
+files are append-only; /delete opens the same picker to permanently remove \
+an earlier session (conversation and audit log, y/N confirm — the current \
+session cannot be deleted). /new or /clear (or plain 'clear') starts a \
 fresh conversation and clears the screen; /model <name> switches the model \
 for this session and /model alone opens the same type-to-filter picker over \
 installed Ollama models and the cloud providers (typing provider:model inside \

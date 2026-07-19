@@ -190,7 +190,11 @@ sessions (start date, message count, model used, first message): type to
 filter by title, contents, and model name
 (deterministic ranking: exact title, then phrase, all-words, fuzzy — never an
 LLM), ↑/↓ to select, Enter replays the session into the current conversation;
-`/resume <n>` picks directly, `/resume <text>` pre-fills the filter · `/new`
+`/resume <n>` picks directly, `/resume <text>` pre-fills the filter ·
+`/delete [n|text]` — delete an earlier session permanently (same picker and
+argument forms as `/resume`, then a y/N confirm; removes the conversation
+AND its command audit log; the current session is excluded — `/new` first
+to delete it) · `/new`
 or `/clear`
 (plain `clear` works too) · `/model [name]` — switch model mid-session; no
 arg opens the same type-to-filter picker over local models and cloud
@@ -338,7 +342,10 @@ aish-web --model gemini       # same --model forms as aish
 Header controls replace the slash commands (except `/learn`, which works by
 typing it as a message): the **history button** (top
 left, the standard chat-app spot) opens the sessions drawer — recent chats
-grouped by day, each with a preview of its last message, plus search —
+grouped by day, each with a preview of its last message, plus search; each
+row's trash icon deletes that session after an inline "Delete?" confirm
+(permanent: conversation and audit log; refused while the session is
+running; deleting the current chat lands you on a fresh one) —
 the **session title with its ˅ caret** opens the same drawer, and
 a fresh empty chat shows a one-line hint pointing at both it and the swipe
 pager; the **model chip** opens a searchable model picker (with a "make

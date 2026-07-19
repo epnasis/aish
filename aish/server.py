@@ -458,8 +458,8 @@ memory only.
 - There are NO ! direct commands here. A message starting with /learn \
 distills the conversation into saved skills/memory (an optional hint \
 follows, e.g. "/learn the gh flow"; "/learn lessons" migrates the legacy \
-lessons file); the composer also accepts /model /resume /new /cd /add-dir \
-/jobs /help. Header controls: the history button (top left) and the session \
+lessons file); the composer also accepts /model /resume /delete /new /cd \
+/add-dir /jobs /help. Header controls: the history button (top left) and the session \
 title both open the sessions drawer, the folder breadcrumb under the title \
 opens a folder picker to change the working directory, the model chip \
 switches models, ＋ starts a new chat, and the ⋯ menu shows workspace state \
@@ -491,6 +491,9 @@ cannot be approved here at all (extendable in {deny_path}); suggest a safer \
 alternative when blocked.
 - Sessions: conversation + command audit trail logged to {state_dir} — the \
 same format as terminal aish, so sessions are interchangeable between both. \
+Each drawer row has a trash icon: tap it, then its "Delete?" confirm, to \
+permanently delete that session (conversation and audit log; refused while \
+the session is running; deleting the current chat lands on a fresh one). \
 When the user refers to earlier work ("the fix from yesterday", "what went \
 wrong last time"), use the recall tool to find and read the \
 relevant past conversation instead of asking them to repeat it.
@@ -723,6 +726,8 @@ class WebServer:
             await self._resume(websocket, str(message.get("path", "")))
         elif kind == "new":
             await self._new_session(websocket)
+        elif kind == "delete_session":
+            await self._delete_session(websocket, str(message.get("name", "")))
         elif kind == "models":
             await self._send_models(websocket, str(message.get("query", "")))
         elif kind == "set_model":
@@ -962,6 +967,37 @@ class WebServer:
             session.logref.model(model_spec(session.agent))
         self.add_session(session, activate=False)
         await self._show(websocket, session)
+
+    async def _delete_session(self, websocket: WebSocket, name: str) -> None:
+        """Delete a session permanently: its conversation AND its command
+        audit trail — explicit and confirmed client-side, never bulk. Replies
+        with a refreshed session_list so the drawer re-renders."""
+        session = self.sessions.get(name)
+        safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
+        path = self.state_dir / name
+        if not safe or ".." in name or (session is None and not path.is_file()):
+            await websocket.send_json({"type": "error", "text": f"no such session: {name}"})
+            return
+        if session is not None and session.state() != "idle":
+            # Never kill work as a side effect of a delete.
+            await websocket.send_json(
+                {"type": "error", "text": "task still running in that session — "
+                 "stop it (or let it finish) before deleting"}
+            )
+            return
+        if session is self.active:
+            # "Delete this chat" lands on a fresh empty one (the ChatGPT/
+            # Claude-app mental model) — switch the client first.
+            await self._new_session(websocket)
+        if session is not None:
+            session.close()
+            self.sessions.pop(name, None)
+        # POSIX unlink only detaches the name: a terminal aish holding this
+        # file open via --resume keeps appending to the unlinked inode until
+        # it exits — harmless, the data just vanishes with the last handle.
+        await asyncio.to_thread(lambda: path.unlink(missing_ok=True))
+        await websocket.send_json({"type": "session_deleted", "name": name})
+        await self._send_sessions(websocket, "")
 
     async def _send_models(self, websocket: WebSocket, query: str) -> None:
         agent, state_dir = self.active.agent, self.state_dir

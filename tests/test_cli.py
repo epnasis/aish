@@ -501,6 +501,54 @@ def test_resume_search_no_match(tmp_path, capsys):
     assert len(agent.messages) == 1  # nothing loaded
 
 
+def test_delete_picker_confirms_and_unlinks(tmp_path, capsys, monkeypatch):
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+    scripted_input(monkeypatch, ["2", "y"])  # pick the older session, confirm
+    handle_slash("/delete", agent, logref, tmp_path, set())
+    out = capsys.readouterr().out
+    assert "1." in out and "2." in out  # same numbered picker as /resume
+    assert "deleted session-20260101" in out
+    assert not (tmp_path / "session-20260101-000000-000000.jsonl").exists()
+    assert (tmp_path / "session-20260201-000000-000000.jsonl").exists()
+
+
+def test_delete_default_answer_keeps_file(tmp_path, capsys, monkeypatch):
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+    scripted_input(monkeypatch, ["1", ""])  # Enter at the y/N confirm = No
+    handle_slash("/delete", agent, logref, tmp_path, set())
+    assert "cancelled" in capsys.readouterr().out
+    assert (tmp_path / "session-20260201-000000-000000.jsonl").exists()
+
+
+def test_delete_prefix_and_numeric_arg_skip_picker(tmp_path, capsys, monkeypatch):
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+    scripted_input(monkeypatch, ["y"])
+    handle_slash("/del 2", agent, logref, tmp_path, set())
+    out = capsys.readouterr().out
+    assert "1." not in out  # numeric arg: no numbered list shown
+    assert "deleted session-20260101" in out
+    assert not (tmp_path / "session-20260101-000000-000000.jsonl").exists()
+
+
+def test_delete_excludes_current_session(tmp_path, capsys):
+    from aish.agent import Agent
+    from aish.cli import LogRef, handle_slash
+    from aish.session import SessionLog
+
+    agent = Agent(model="fake", approve=lambda _c: None, client_chat=lambda **_k: None)
+    logref = LogRef(SessionLog.new(tmp_path))
+    logref.message({"role": "user", "content": "live conversation"})
+    handle_slash("/delete", agent, logref, tmp_path, set())
+    assert "no earlier session to delete" in capsys.readouterr().out
+    assert logref.log.path.exists()
+
+
 def test_resume_uses_live_picker_when_interactive(tmp_path, capsys, monkeypatch):
     import aish.cli as cli
     from aish.cli import handle_slash

@@ -872,6 +872,22 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   white-space: nowrap;
 }
 .session-row .stamp { flex-shrink: 0; color: var(--dim); font-size: 12px; }
+.session-row .row-delete {
+  flex-shrink: 0;
+  align-self: center;
+  color: var(--dim);
+  /* padding grows the tap target beyond the 15px glyph without moving it */
+  padding: 6px;
+  margin: -6px -6px -6px 0;
+  line-height: 0;
+}
+.session-row .row-delete svg { width: 15px; height: 15px; }
+.session-row .row-delete.armed {
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
 .session-row .snippet {
   display: block;
   margin-top: 2px;
