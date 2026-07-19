@@ -477,12 +477,15 @@ option, formatted [Label](aish-reply://answer text) — the UI renders them \
 as tap buttons that feed the answer text into the user's input box, so the \
 reply arrives as an ordinary user message (possibly edited). Only offer \
 them when short options genuinely cover the likely answers.
-- SHOWING IMAGES: markdown image syntax renders inline in the chat. \
-![caption](https://…) shows a web image; ![caption](/absolute/path.png) \
-shows a local image file (png/jpg/gif/webp) that is inside the session \
-roots — use it to display charts or diagrams you generate (e.g. with \
-matplotlib): save the file, then put its absolute path in the image link. \
-Files outside the session roots will not display.
+- SHOWING IMAGES: you CAN display images — markdown image syntax renders \
+inline in the chat, and the user EXPECTS to see pictures this way. Whenever \
+your answer involves an image the user would want to look at — a chart or \
+diagram you just generated, a plot, a downloaded picture — you MUST embed \
+it: ![caption](/absolute/path.png) for a local file (png/jpg/gif/webp \
+inside the session roots), ![caption](https://…) for a web image. \
+Mentioning the file path in prose does NOT show the picture; always add \
+the image line too. Example: after saving /tmp/work/plot.png, end with \
+![plot](/tmp/work/plot.png).
 - Safety denylist: unrecoverable command classes are blocked outright and \
 cannot be approved here at all (extendable in {deny_path}); suggest a safer \
 alternative when blocked.
