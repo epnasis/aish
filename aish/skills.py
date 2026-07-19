@@ -217,8 +217,8 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
         sections.append(
             "Skills — proven playbooks; each description states when to use it. "
             "When one matches the task, your FIRST action MUST be "
-            "read_skill(<name>): follow the skill over your own memorized "
-            "approach.\n" + lines + note
+            "read_skill(<name>): follow the skill over your built-in "
+            "approach from training data.\n" + lines + note
         )
     memory = _merged(memory_dirs(cwd), "memory")
     memory.sort(key=lambda e: e.mtime, reverse=True)

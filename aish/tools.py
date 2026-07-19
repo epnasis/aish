@@ -425,8 +425,9 @@ TOOL_SCHEMAS = [
             "description": (
                 "Read a skill — a proven playbook with workflows, exact commands, "
                 "and safety rules. When a skill in your context matches the task, "
-                "read it BEFORE acting and follow it over your own memorized "
-                "approach — skills encode what actually worked on this machine."
+                "read it BEFORE acting and follow it over your built-in approach "
+                "from training data — skills encode what actually worked on this "
+                "machine."
             ),
             "parameters": {
                 "type": "object",

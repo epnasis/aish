@@ -215,7 +215,7 @@ without bloating the context.
   name clash) with `name:`/`description:`/`keywords:` frontmatter. The
   description states the trigger ("Use when the user asks to …") — that is
   what makes it discoverable. aish is told to read a matching skill FIRST and
-  follow it over its own memorized approach, and to update a skill (append
+  follow it over its own training data, and to update a skill (append
   the gotcha) whenever one proves wrong. Ask aish to write one — it knows
   the format.
 - **memory** — one fact per file in `~/.config/aish/memory/` (or
