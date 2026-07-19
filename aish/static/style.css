@@ -593,14 +593,14 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .diff .head { font-weight: 700; }
 .diff .ctx { color: var(--dim); }
 
-/* ---- scroll-to-bottom arrow ---- */
-/* Horizontally centered (the chat-app convention) so it can never overlap
+/* ---- scroll-to-bottom / scroll-to-top arrows ---- */
+/* Horizontally centered (the chat-app convention) so they can never overlap
    the Stop button, which lives at the right edge of the status line. */
-#scroll-down {
+#scroll-down,
+#scroll-top {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(76px + env(safe-area-inset-bottom));
   width: 38px;
   height: 38px;
   border: none;
@@ -615,9 +615,11 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
   z-index: 15;
 }
-#scroll-down[hidden] { display: none; }
-#scroll-down svg { width: 20px; height: 20px; }
-#scroll-down:active { opacity: 0.6; }
+#scroll-down { bottom: calc(76px + env(safe-area-inset-bottom)); }
+#scroll-top { top: calc(72px + env(safe-area-inset-top)); }
+#scroll-down[hidden], #scroll-top[hidden] { display: none; }
+#scroll-down svg, #scroll-top svg { width: 20px; height: 20px; }
+#scroll-down:active, #scroll-top:active { opacity: 0.6; }
 
 /* ---- status + connection ---- */
 #statusline {

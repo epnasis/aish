@@ -594,14 +594,34 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) snapViewportSoon(); // app-switcher restore can land in the short-window state
 });
 
+// The top arrow only appears while the user is actively scrolling up (and is
+// far enough from the top for the jump to be worth a button); any downward
+// movement — including streaming content auto-scrolling to the tail — hides it.
+let lastScrollTop = 0;
+let scrollingToTop = false; // the button's own smooth scroll must not re-show it
+
 function updateScrollButton() {
   $("scroll-down").hidden = nearBottom();
+  const top = messagesEl.scrollTop;
+  if (top < 120 || top > lastScrollTop) scrollingToTop = false;
+  if (top < lastScrollTop && top > messagesEl.clientHeight && !scrollingToTop) {
+    $("scroll-top").hidden = false;
+  } else if (top > lastScrollTop || top < 120) {
+    $("scroll-top").hidden = true;
+  }
+  lastScrollTop = top;
 }
 
 messagesEl.addEventListener("scroll", updateScrollButton, { passive: true });
 
 $("scroll-down").onclick = () => {
   messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
+};
+
+$("scroll-top").onclick = () => {
+  $("scroll-top").hidden = true;
+  scrollingToTop = true;
+  messagesEl.scrollTo({ top: 0, behavior: "smooth" });
 };
 
 function onHistory(history) {
