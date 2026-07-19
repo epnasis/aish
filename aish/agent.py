@@ -48,10 +48,13 @@ Rules:
 2. If a command fails with a usage or unknown-flag error, call read_docs
    before retrying. If docs come back truncated, call read_docs again with a
    topic (e.g. the flag name) to search the full text.
-2b. LEARNING: consult saved knowledge BEFORE your training data — when a
-   task matches a skill in your context, read it FIRST and follow it over
-   your built-in approach (skills encode what actually worked on THIS
-   machine; same for the saved Memory facts in your context);
+2b. LEARNING: consult saved knowledge BEFORE your training data — highly
+   relevant skills and memories are preloaded into your context each task;
+   follow them over your built-in approach (they encode what actually worked
+   on THIS machine). A preloaded skill marked TRUNCATED must be loaded in
+   full with read_skill (or explicitly waived with a reason) before other
+   tools run; if a skill in the index matches but was not preloaded, read
+   it FIRST;
    when unsure whether something was solved before, call recall. And capture
    learnings as you go: when the user corrects you, when a skill's
    instructions proved wrong (update THAT skill — append the gotcha with
@@ -124,6 +127,20 @@ NOT_EXECUTED = "(not executed — the user stopped the task)"
 # job-status checks) has changing output, so it never trips this.
 LOOP_WARN_REPEATS = 3
 LOOP_STOP_REPEATS = 5
+
+# Skill-read gate (issue #40): while a preloaded-but-truncated skill is
+# unread, other tool calls are refused. Must stay < LOOP_WARN_REPEATS — an
+# identical refused call repeats at most GATE_MAX_REFUSALS times before the
+# gate lifts and its result changes, so the loop detector never fires on the
+# gate itself.
+GATE_MAX_REFUSALS = 2
+
+SKILL_GATE_REFUSAL = (
+    "NOT EXECUTED — required reading first: the preloaded skill(s) {names} "
+    "are truncated in your context. Call read_skill({first!r}) to load the "
+    "full playbook, or state explicitly why it does not apply and retry — "
+    "the call will then proceed."
+)
 
 LOOP_WARNING = (
     "[aish: you have issued this exact tool call {count} times and received "
@@ -201,14 +218,29 @@ TASK_REMINDER = (
     "what you think you know.</system-reminder>"
 )
 
+# When pre-flight retrieval finds matching knowledge (skills.preflight), the
+# reminder slot carries the content itself instead of a nudge to go look for
+# it. Shares TASK_REMINDER_MARK so the strip-previous logic treats both alike.
+PRELOAD_REMINDER = (
+    "<system-reminder>Saved knowledge relevant to this task, preloaded for "
+    "you — follow it over your training data:\n\n{knowledge}\n\n"
+    "If a block above is marked TRUNCATED you MUST read_skill it in full, "
+    "or state why it does not apply, before doing anything else. Also scan "
+    "the Skills index in your system prompt for other "
+    "matches.</system-reminder>"
+)
 
-def task_reminder(index: str) -> str:
+
+def task_reminder(index: str, preload_text: str = "") -> str:
     """The per-task system reminder: always the current local time (issue #36
     — it lives here, not in the system prompt, so messages[0] stays
     byte-stable for prompt caching and the time is fresh every task), plus
-    the skills nudge whenever any skills/memory are advertised."""
+    the preloaded knowledge when pre-flight retrieval found any (issue #40),
+    else the skills nudge whenever any skills/memory are advertised."""
     now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     time_note = f"{TASK_REMINDER_MARK}Current local time: {now}</system-reminder>"
+    if preload_text:
+        return f"{time_note}\n{PRELOAD_REMINDER.format(knowledge=preload_text)}"
     return f"{time_note}\n{TASK_REMINDER}" if index else time_note
 
 
@@ -389,6 +421,10 @@ class Agent:
         self.current_session = current_session
         self.status = status if status is not None else _NoStatus()
         self._cancel = threading.Event()
+        # Skill-read gate state: oversized preloaded skills the model must
+        # read_skill (or explicitly waive) before other tools run; values are
+        # refusals left before the gate auto-lifts. Rebuilt every run_task.
+        self._pending_skill_reads: dict[str, int] = {}
         self.base_context = context
         content = compose_system_content(context, self.cwd, self.lessons_path)
         self.messages: list[dict] = [{"role": "system", "content": content}]
@@ -448,7 +484,24 @@ class Agent:
             user_message["images"] = list(images)
         if documents:
             user_message["documents"] = list(documents)
-        self.messages.append({"role": "system", "content": task_reminder(index)})
+# Pre-flight retrieval (issue #40): inject matching knowledge bodies
+        # directly instead of hoping the model calls recall/read_skill. The
+        # /8 keeps the injection a small slice of the context-char budget.
+        preload = skills.preflight(
+            self.cwd,
+            self.lessons_path,
+            task,
+            char_budget=min(
+                skills.PREFLIGHT_TOTAL_CHARS,
+                self.num_ctx * CHARS_PER_TOKEN_BUDGET // 8,
+            ),
+        )
+        self._pending_skill_reads = {n: GATE_MAX_REFUSALS for n in preload.unread}
+        self.messages.append(
+            {"role": "system", "content": task_reminder(index, preload.text)}
+        )
+        if preload.names:
+            self.echo("⚑ preloaded knowledge: " + ", ".join(preload.names))
         self._append(user_message)
 
         self._cancel.clear()  # a stale stop must not kill the new task
@@ -778,7 +831,10 @@ class Agent:
             for i, (name, args) in enumerate(calls)
             if name in READ_ONLY_TOOLS and not self._read_needs_prompt(name, args)
         ]
-        if len(concurrent) < 2:
+        # While the skill-read gate is armed, everything goes through
+        # _dispatch sequentially — the parallel thunks below would bypass the
+        # gate (and the counter dict is not thread-safe).
+        if len(concurrent) < 2 or self._pending_skill_reads:
             return [
                 self._call_result(name, partial(self._timed, partial(self._dispatch, name, args)))
                 for name, args in calls
@@ -934,7 +990,35 @@ class Agent:
         label = f"→ read_file: {path}" + (f" (from line {offset})" if offset > 1 else "")
         return label, partial(files.read_file, path, self.cwd, offset=offset, limit=limit)
 
+    def _skill_gate(self, name: str, args: dict) -> str | None:
+        """Refusal text while a flagged oversized skill is unread, else None.
+
+        read_skill/recall targeting a flagged skill lifts its gate; any other
+        call decrements every counter so a model that ignores the directive
+        (or states why the skill does not apply and retries) is only held for
+        GATE_MAX_REFUSALS rounds — enforcement, not a wedge."""
+        if not self._pending_skill_reads:
+            return None
+        target = str(args.get("name", "") or "")
+        if name in ("read_skill", "recall") and target in self._pending_skill_reads:
+            del self._pending_skill_reads[target]
+            return None
+        names = ", ".join(self._pending_skill_reads)
+        first = next(iter(self._pending_skill_reads))
+        for key in list(self._pending_skill_reads):
+            self._pending_skill_reads[key] -= 1
+            if self._pending_skill_reads[key] <= 0:
+                del self._pending_skill_reads[key]
+        self.echo(f"✋ gated until read_skill: {names}")
+        return SKILL_GATE_REFUSAL.format(names=names, first=first)
+
     def _dispatch(self, name: str, args: dict) -> str:
+        # The gate runs before everything — a refusal must never reach an
+        # approval prompt or a tool implementation.
+        refusal = self._skill_gate(name, args)
+        if refusal is not None:
+            return refusal
+
         if name == "read_file":
             path = str(args.get("path", ""))
             label, thunk = self._read_file_call(args)

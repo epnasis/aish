@@ -1594,3 +1594,220 @@ class TestSkillsFreshness:
         assert not any(
             str(m.get("content", "")).startswith(TASK_REMINDER_MARK) for m in logged
         )
+
+
+class TestPreflightInjection:
+    """Pre-flight retrieval (issue #40): knowledge matching the task is
+    injected into the hidden reminder slot, not waited for via recall."""
+
+    def _write_skill(self, cwd, name, body, keywords=""):
+        skills_dir = cwd / ".aish" / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        kw = f"keywords: {keywords}\n" if keywords else ""
+        (skills_dir / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: Use when zzfrobbing\n{kw}---\n{body}"
+        )
+
+    def test_matching_skill_body_injected_before_user_message(self, tmp_path):
+        from aish.agent import TASK_REMINDER_MARK
+
+        self._write_skill(tmp_path, "zzfrob", "Pull the zzfrob lever twice.")
+        agent, _ = make_agent([model_says("done")], cwd=str(tmp_path))
+        agent.run_task("please zzfrob the thing")
+        reminders = [
+            i
+            for i, m in enumerate(agent.messages)
+            if i > 0
+            and m.get("role") == "system"
+            and str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
+        ]
+        assert len(reminders) == 1
+        content = agent.messages[reminders[0]]["content"]
+        assert "[skill: zzfrob]" in content
+        assert "Pull the zzfrob lever twice." in content
+        assert agent.messages[reminders[0] + 1]["content"] == "please zzfrob the thing"
+
+    def test_preload_reminder_stays_out_of_session_log(self, tmp_path):
+        from aish.agent import TASK_REMINDER_MARK
+
+        self._write_skill(tmp_path, "zzfrob", "Pull the lever.")
+        logged = []
+        agent, _ = make_agent(
+            [model_says("done")], cwd=str(tmp_path), on_message=logged.append
+        )
+        agent.run_task("please zzfrob the thing")
+        assert not any(
+            str(m.get("content", "")).startswith(TASK_REMINDER_MARK) for m in logged
+        )
+
+    def test_second_task_strips_first_preload(self, tmp_path):
+        self._write_skill(tmp_path, "zzfrob", "Pull the zzfrob lever twice.")
+        agent, _ = make_agent(
+            [model_says("first"), model_says("second")], cwd=str(tmp_path)
+        )
+        agent.run_task("please zzfrob the thing")
+        agent.run_task("unrelated follow-up request")
+        bodies = [
+            m
+            for m in agent.messages[1:]
+            if "Pull the zzfrob lever twice." in str(m.get("content", ""))
+        ]
+        assert bodies == []  # old injection gone; only the plain reminder remains
+
+    def test_echo_announces_preloaded_names(self, tmp_path):
+        self._write_skill(tmp_path, "zzfrob", "Pull the lever.")
+        lines = []
+        agent, _ = make_agent(
+            [model_says("done")], cwd=str(tmp_path), echo=lines.append
+        )
+        agent.run_task("please zzfrob the thing")
+        assert any("preloaded knowledge: zzfrob" in line for line in lines)
+
+    def test_non_matching_task_falls_back_to_plain_reminder(self, tmp_path):
+        from aish.agent import TASK_REMINDER
+
+        self._write_skill(tmp_path, "zzfrob", "Pull the lever.")
+        agent, _ = make_agent([model_says("done")], cwd=str(tmp_path))
+        agent.run_task("completely unrelated request")
+        assert any(
+            str(m.get("content", "")).endswith(TASK_REMINDER) for m in agent.messages[1:]
+        )
+
+
+class TestSkillGate:
+    """The read gate (issue #40): an oversized preloaded skill must be read
+    (or explicitly waived — the gate lifts after bounded refusals) before
+    other tools run."""
+
+    BODY = "zz step\n" * 500  # ~4000 chars > PREFLIGHT_ENTRY_CHARS
+
+    def _write_big_skill(self, cwd, name="zzbigplay"):
+        skills_dir = cwd / ".aish" / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: Use for zzbig work\n---\n{self.BODY}"
+        )
+
+    def test_gate_refuses_before_approval(self, tmp_path):
+        marker = tmp_path / "pwned"
+        self._write_big_skill(tmp_path)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("blocked"),
+            ],
+            approve=lambda _cmd: pytest.fail("gate must refuse before approval"),
+            cwd=str(tmp_path),
+        )
+        agent.run_task("do the zzbigplay procedure")
+        assert not marker.exists()
+        result = tool_messages(agent.messages)[0]["content"]
+        assert result.startswith("NOT EXECUTED")
+        assert "read_skill" in result
+
+    def test_read_skill_lifts_gate(self, tmp_path):
+        self._write_big_skill(tmp_path)
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="read_skill", arguments={"name": "zzbigplay"}
+                            )
+                        )
+                    ]
+                ),
+                model_says(tool_calls=[tool_call("run_command", command="echo freed")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        assert agent.run_task("do the zzbigplay procedure") == "done"
+        results = tool_messages(agent.messages)
+        assert "zz step" in results[0]["content"]  # full skill body served
+        assert "freed" in results[1]["content"]  # command ran after the read
+
+    def test_gate_auto_lifts_after_bounded_refusals(self, tmp_path):
+        from aish.agent import GATE_MAX_REFUSALS, LOOP_WARN_REPEATS
+
+        assert GATE_MAX_REFUSALS < LOOP_WARN_REPEATS  # refusals never trip loop detection
+        self._write_big_skill(tmp_path)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo pushy")]),
+                model_says(tool_calls=[tool_call("run_command", command="echo pushy")]),
+                model_says(tool_calls=[tool_call("run_command", command="echo pushy")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("do the zzbigplay procedure")
+        results = [m["content"] for m in tool_messages(agent.messages)]
+        assert results[0].startswith("NOT EXECUTED")
+        assert results[1].startswith("NOT EXECUTED")
+        assert "pushy" in results[2]  # third try executes: the model waived it
+
+    def test_gate_resets_per_task(self, tmp_path):
+        self._write_big_skill(tmp_path)
+        agent, _ = make_agent(
+            [
+                model_says("noted"),
+                model_says(tool_calls=[tool_call("run_command", command="echo clean")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("do the zzbigplay procedure")  # arms the gate, no tools used
+        agent.run_task("unrelated follow-up request")  # non-matching: gate rebuilt empty
+        assert "clean" in tool_messages(agent.messages)[0]["content"]
+
+    def test_parallel_readonly_batch_is_gated(self, tmp_path, monkeypatch):
+        import aish.agent as agent_module
+
+        self._write_big_skill(tmp_path)
+        monkeypatch.setattr(
+            agent_module.tools,
+            "read_docs",
+            lambda *a, **k: pytest.fail("gated tool must not execute"),
+        )
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("read_docs", command="ls"),
+                        tool_call("read_docs", command="cat"),
+                    ]
+                ),
+                model_says("blocked"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("do the zzbigplay procedure")
+        results = [m["content"] for m in tool_messages(agent.messages)]
+        assert len(results) == 2
+        assert all(r.startswith("NOT EXECUTED") for r in results)
+
+    def test_recall_by_name_lifts_gate(self, tmp_path):
+        self._write_big_skill(tmp_path)
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="recall",
+                                arguments={"query": "", "name": "zzbigplay"},
+                            )
+                        )
+                    ]
+                ),
+                model_says(tool_calls=[tool_call("run_command", command="echo freed")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("do the zzbigplay procedure")
+        results = tool_messages(agent.messages)
+        assert "zz step" in results[0]["content"]
+        assert "freed" in results[1]["content"]

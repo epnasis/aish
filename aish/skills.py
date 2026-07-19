@@ -44,6 +44,14 @@ RECALL_SESSIONS = 3
 RECALL_SNIPPET_CHARS = 200
 RECALL_DETAIL_CHARS = 6000
 
+# Pre-flight injection caps (issue #40): what run_task loads proactively
+# into the per-task reminder instead of waiting for the model to recall.
+PREFLIGHT_TOP = 4  # max entries injected per task
+PREFLIGHT_MIN_SCORE = 2  # fuzzy tier 1 is too weak to inject on
+PREFLIGHT_ENTRY_CHARS = 3000  # a bigger body is "oversized": teaser + read gate
+PREFLIGHT_TOTAL_CHARS = 12000  # hard cap; the agent may pass a smaller budget
+PREFLIGHT_HEAD_CHARS = 600  # teaser length for an oversized skill
+
 _PUNCT = ".,;:!?()[]{}<>'\"`"
 FUZZY_WORD_CUTOFF = 0.75  # single query word vs single entry word
 
@@ -232,9 +240,10 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
         )
         sections.append(
             "Skills — proven playbooks; each description states when to use it. "
-            "When one matches the task, your FIRST action MUST be "
-            "read_skill(<name>): follow the skill over your built-in "
-            "approach from training data.\n" + lines + note
+            "Highly relevant ones are preloaded into your context each task; "
+            "if one matches and was NOT preloaded, call read_skill(<name>) "
+            "before acting: follow the skill over your built-in approach "
+            "from training data.\n" + lines + note
         )
     memory = _merged(memory_dirs(cwd), "memory")
     memory.sort(key=lambda e: e.mtime, reverse=True)
@@ -271,7 +280,7 @@ def load_skill(name: str, dirs: list[Path]) -> str:
     return f"ERROR: no skill named {name!r}. Available skills: {available}"
 
 
-def rank_entries(entries: list[Entry], query: str) -> list[Entry]:
+def score_entries(entries: list[Entry], query: str) -> list[tuple[int, Entry]]:
     """Deterministic ranking, no LLM. Tiers: exact name, phrase in
     name/description/keywords, phrase in body, all words anywhere, fuzzy
     (difflib). Ties keep corpus order (project skills first, then newest)."""
@@ -303,7 +312,96 @@ def rank_entries(entries: list[Entry], query: str) -> list[Entry]:
             continue
         ranked.append((score, entry))
     ranked.sort(key=lambda pair: -pair[0])  # stable: corpus order within a tier
-    return [entry for _, entry in ranked]
+    return ranked
+
+
+def rank_entries(entries: list[Entry], query: str) -> list[Entry]:
+    return [entry for _, entry in score_entries(entries, query)]
+
+
+def _reverse_score(entry: Entry, task_padded: str) -> int:
+    """Does the entry's identity appear in the task text? The forward tiers
+    in score_entries need the whole query to appear inside the entry — right
+    for short recall queries, hopeless for a multi-sentence task. Name and
+    keyword hits land on the same tier scale so max(forward, reverse) works.
+    Descriptions are trigger-phrased prose — too noisy to reverse-match.
+
+    `task_padded` is the space-padded, punctuation-stripped task from
+    _pad_words, so matches respect word boundaries: skill "gh" must not
+    fire on a task containing "night"."""
+    name_cf = entry.name.casefold()
+    if f" {name_cf} " in task_padded or f" {name_cf.replace('-', ' ')} " in task_padded:
+        return 4
+    for keyword in entry.keywords:
+        keyword_cf = keyword.casefold()
+        if len(keyword_cf) >= 3 and f" {keyword_cf} " in task_padded:
+            return 3
+    return 0
+
+
+def _pad_words(text: str) -> str:
+    """Casefolded words, punctuation-stripped, space-padded at both ends —
+    the haystack for whole-word phrase matching."""
+    words = (w.strip(_PUNCT) for w in text.casefold().split())
+    return " " + " ".join(w for w in words if w) + " "
+
+
+@dataclass
+class Preload:
+    """What run_task injects ahead of the model's first turn (issue #40)."""
+
+    text: str = ""  # injectable knowledge blocks, "" when nothing qualifies
+    names: list[str] = field(default_factory=list)  # best first, for the status echo
+    unread: list[str] = field(default_factory=list)  # oversized skills the read gate enforces
+
+
+def preflight(
+    cwd: str, lessons_path, task: str, char_budget: int = PREFLIGHT_TOTAL_CHARS
+) -> Preload:
+    """Deterministic pre-flight retrieval: the top skills/memories matching a
+    task, rendered as blocks the agent injects directly — the model wakes up
+    with the content in context instead of having to remember to recall it.
+    A skill too large to inject gets a teaser and its name in `unread`, which
+    arms the agent's read gate until read_skill loads the full body."""
+    if not task.split():
+        return Preload()
+    task_padded = _pad_words(task)
+    entries = load_entries(cwd, lessons_path)
+    forward = {id(entry): score for score, entry in score_entries(entries, task)}
+    picked = []
+    for entry in entries:  # corpus order: project skills first, then newest
+        score = max(forward.get(id(entry), 0), _reverse_score(entry, task_padded))
+        if score >= PREFLIGHT_MIN_SCORE:
+            picked.append((score, entry))
+    picked.sort(key=lambda pair: -pair[0])  # stable: corpus order within a tier
+    blocks: list[str] = []
+    names: list[str] = []
+    unread: list[str] = []
+    remaining = char_budget
+    for _, entry in picked[:PREFLIGHT_TOP]:
+        if remaining < 200:  # no room left for anything useful
+            break
+        if entry.kind == "memory" or len(entry.body) <= PREFLIGHT_ENTRY_CHARS:
+            header = f"[{entry.kind}: {entry.name}]\n"
+            body = entry.body[: min(PREFLIGHT_ENTRY_CHARS, remaining - len(header) - 1)]
+            cut = "…" if len(body) < len(entry.body) else ""
+            block = f"{header}{body}{cut}"
+        else:  # oversized skill: teaser now, full body via the gated read_skill
+            head = entry.body[:PREFLIGHT_HEAD_CHARS]
+            block = (
+                f"[skill: {entry.name} — TRUNCATED: first {len(head)} chars of a "
+                "longer playbook]\n"
+                f"{head}…\n"
+                f'(REQUIRED: call read_skill("{entry.name}") for the full playbook '
+                "before other tools, or state explicitly why it does not apply.)"
+            )
+            if len(block) > remaining:
+                continue  # not even the teaser fits — leave it to recall
+            unread.append(entry.name)
+        blocks.append(block)
+        names.append(entry.name)
+        remaining -= len(block) + 2  # +2 covers the join's blank line
+    return Preload("\n\n".join(blocks), names, unread)
 
 
 def _snippet(text: str, words: list[str], width: int = RECALL_SNIPPET_CHARS) -> str | None:

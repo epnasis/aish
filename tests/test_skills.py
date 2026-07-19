@@ -4,12 +4,15 @@ from aish import skills as skills_module
 from aish.skills import (
     INDEX_MEMORY_MAX,
     INDEX_SKILLS_MAX,
+    PREFLIGHT_ENTRY_CHARS,
+    PREFLIGHT_TOP,
     RECALL_TOP,
     _parse,
     knowledge_index,
     list_skills,
     load_entries,
     load_skill,
+    preflight,
     rank_entries,
     recall_text,
     save_memory,
@@ -293,3 +296,104 @@ class TestMemoryIndexSection:
         assert f"fact {INDEX_MEMORY_MAX + 1}" in text  # newest shown
         assert "fact 0" not in text
         assert "recall" in text
+
+
+class TestPreflight:
+    """Pre-flight retrieval (issue #40): run_task injects matching knowledge
+    proactively; oversized skills arm the agent's read gate via `unread`."""
+
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", tmp_path / "gm")
+
+    def _skill(self, tmp_path, name, body, keywords=""):
+        kw = f"keywords: {keywords}\n" if keywords else ""
+        write_skill(
+            tmp_path / ".aish" / "skills",
+            f"{name}.md",
+            f"---\nname: {name}\ndescription: playbook for {name}\n{kw}---\n{body}\n",
+        )
+
+    def test_reverse_match_on_keyword_in_long_task(self, tmp_path, monkeypatch):
+        # A multi-sentence task never satisfies the forward all-words tiers;
+        # the entry's keyword appearing IN the task must be enough.
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "web-release", "Steps to release.", keywords="deploy")
+        preload = preflight(str(tmp_path), None, "please deploy the new version to the server")
+        assert preload.names == ["web-release"]
+        assert "[skill: web-release]" in preload.text
+        assert "Steps to release." in preload.text
+
+    def test_reverse_match_on_name_respects_word_boundaries(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "gh", "GitHub CLI usage.")
+        assert preflight(str(tmp_path), None, "work late into the night").names == []
+        assert preflight(str(tmp_path), None, "open a pr with gh please").names == ["gh"]
+
+    def test_dashed_name_matches_spaced_phrase(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "deploy-web", "How to deploy.")
+        preload = preflight(str(tmp_path), None, "time to deploy web again")
+        assert preload.names == ["deploy-web"]
+
+    def test_fuzzy_only_match_not_injected(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "sweepy", "Run the sweeper.")
+        assert preflight(str(tmp_path), None, "sweepi").names == []  # tier 1 only
+
+    def test_top_n_cap_and_order(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        for i in range(PREFLIGHT_TOP + 2):
+            self._skill(tmp_path, f"tool{i}", f"About tool{i}.", keywords="widget")
+        preload = preflight(str(tmp_path), None, "fix the widget on the page")
+        assert len(preload.names) == PREFLIGHT_TOP
+        assert preload.names == [f"tool{i}" for i in range(PREFLIGHT_TOP)]
+
+    def test_small_skill_injected_fully(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "tarball", "Use tar czf with care.")
+        preload = preflight(str(tmp_path), None, "make a tarball of the project")
+        assert "[skill: tarball]\nUse tar czf with care." in preload.text
+        assert preload.unread == []
+
+    def test_oversized_skill_truncated_and_flagged(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        body = "step\n" * 1000  # ~5000 chars > PREFLIGHT_ENTRY_CHARS
+        self._skill(tmp_path, "bigplay", body)
+        preload = preflight(str(tmp_path), None, "run bigplay now")
+        assert preload.unread == ["bigplay"]
+        assert "TRUNCATED" in preload.text
+        assert 'read_skill("bigplay")' in preload.text
+        assert len(preload.text) < len(body)
+
+    def test_memory_never_gated_and_capped(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        body = "fact " * 1000  # ~5000 chars, oversized for a memory too
+        write_skill(
+            tmp_path / ".aish" / "memory",
+            "serverfacts.md",
+            f"---\nname: serverfacts\ndescription: server facts\nkeywords: server\n---\n{body}\n",
+        )
+        preload = preflight(str(tmp_path), None, "restart the server for me")
+        assert preload.names == ["serverfacts"]
+        assert preload.unread == []
+        assert "[memory: serverfacts]" in preload.text
+        assert len(preload.text) <= PREFLIGHT_ENTRY_CHARS + 100  # header slack
+        assert preload.text.endswith("…")
+
+    def test_total_budget_respected(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        for i in range(PREFLIGHT_TOP):
+            self._skill(tmp_path, f"fat{i}", "x" * 2500, keywords="widget")
+        budget = 4000
+        preload = preflight(str(tmp_path), None, "widget work", char_budget=budget)
+        assert preload.text
+        assert len(preload.text) <= budget
+
+    def test_no_match_returns_empty_preload(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "tarball", "Use tar.")
+        preload = preflight(str(tmp_path), None, "completely unrelated request")
+        assert preload.text == ""
+        assert preload.names == []
+        assert preload.unread == []
