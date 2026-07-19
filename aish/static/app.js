@@ -1856,12 +1856,12 @@ function scrollsHorizontally(node) {
   return false;
 }
 
-function updateSwipeHint(target, dx) {
+function updateSwipeHint(target, dx, commitPx) {
   const hint = $("swipe-hint");
   if (!target) { hint.hidden = true; return; }
   hint.hidden = false;
   hint.classList.toggle("prev", dx > 0);
-  hint.classList.toggle("commit", Math.abs(dx) > swipe.width * COMMIT_AT);
+  hint.classList.toggle("commit", Math.abs(dx) > commitPx);
   $("swipe-hint-title").textContent = target.title || "New chat";
   hint.style.opacity = Math.min(Math.abs(dx) / 60, 1);
 }
@@ -1906,8 +1906,31 @@ messagesEl.addEventListener("touchmove", (event) => {
   swipe.dx = target ? dx : dx / 3; // rubber-band where no page exists
   messagesEl.style.transition = "none";
   messagesEl.style.transform = `translateX(${swipe.dx}px)`;
-  updateSwipeHint(target, dx);
+  updateSwipeHint(target, dx, swipe.width * COMMIT_AT);
 }, { passive: false });
+
+function commitPage(direction, target, width) {
+  // Ask the server before sliding the page away: the off-screen state is
+  // only safe while a replay is coming to bring the next page in. On a dead
+  // socket (server restart mid-deploy, tab detached by another device)
+  // send() fails — snap home instead of leaving the app blank.
+  const requested = target.fresh
+    ? send({ type: "new" })
+    : send({ type: "resume", path: target.name });
+  if (!requested) {
+    messagesEl.style.transform = "";
+    return;
+  }
+  swipeInFrom = direction; // the landing replay animates in from this side
+  messagesEl.style.transform = `translateX(${-direction * width}px)`;
+}
+
+function snapBack(direction, target, dx) {
+  messagesEl.style.transform = "";
+  if (!target && direction === -1 && Math.abs(dx) > 60) {
+    showToast("no older chats — tap the title to search all sessions");
+  }
+}
 
 function endSwipe(event) {
   const wasHorizontal = swipe.horizontal;
@@ -1922,19 +1945,85 @@ function endSwipe(event) {
     Math.abs(dx) > 48 && event.timeStamp - swipe.startTime < 250;
   messagesEl.style.transition = "transform 0.18s ease-out";
   if (target && (Math.abs(dx) > swipe.width * COMMIT_AT || flick)) {
-    swipeInFrom = direction; // the landing replay animates in from this side
-    messagesEl.style.transform = `translateX(${-direction * swipe.width}px)`;
-    if (target.fresh) send({ type: "new" });
-    else send({ type: "resume", path: target.name });
+    commitPage(direction, target, swipe.width);
   } else {
-    messagesEl.style.transform = "";
-    if (!target && direction === -1 && Math.abs(dx) > 60) {
-      showToast("no older chats — tap the title to search all sessions");
-    }
+    snapBack(direction, target, dx);
   }
 }
 messagesEl.addEventListener("touchend", endSwipe);
 messagesEl.addEventListener("touchcancel", endSwipe);
+
+// ---- trackpad pager (macOS Safari) ---------------------------------------
+// A two-finger horizontal swipe arrives as a wheel-event stream, not
+// touches. There is no lift-off signal, so the gesture ends when the
+// stream goes quiet — or immediately, once the drag crosses the commit
+// threshold (waiting out the momentum tail would feel sluggish). The
+// first horizontal-dominant event decides the stream's fate: cancelled
+// from event one it stays ours; uncancelled, Safari starts its own
+// back/forward navigation and no later preventDefault can stop it.
+const WHEEL_GAP = 120; // ms of silence = stream over (fingers up, no momentum)
+const WHEEL_COOLDOWN = 500; // ms after commit: swallow the momentum tail
+// Full COMMIT_AT on a wide desktop window is a lot of trackpad travel; cap it.
+const WHEEL_COMMIT_MAX = 200; // px
+
+const wheel = {
+  active: false, blocked: false, dx: 0, width: 1, cooldownUntil: 0, endTimer: 0,
+};
+
+function wheelStreamOver() {
+  const wasActive = wheel.active;
+  wheel.active = false;
+  wheel.blocked = false;
+  if (!wasActive) return;
+  $("swipe-hint").hidden = true;
+  messagesEl.style.transition = "transform 0.18s ease-out";
+  const direction = wheel.dx < 0 ? 1 : -1;
+  snapBack(direction, swipeTarget(direction), wheel.dx);
+}
+
+messagesEl.addEventListener("wheel", (event) => {
+  if (event.timeStamp < wheel.cooldownUntil) {
+    event.preventDefault();
+    return;
+  }
+  clearTimeout(wheel.endTimer);
+  wheel.endTimer = setTimeout(wheelStreamOver, WHEEL_GAP);
+  if (wheel.blocked) return; // vertical scroll or opted out — native until quiet
+  if (!wheel.active) {
+    if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) {
+      // Vertical-dominant start: a scroll. Stand down for the whole stream,
+      // matching the touch pager's axis lock.
+      if (event.deltaY !== 0) wheel.blocked = true;
+      return;
+    }
+    if (Math.abs(event.deltaX) < 4) return; // too faint to judge yet
+    if (selectionActive() || scrollsHorizontally(event.target)) {
+      wheel.blocked = true;
+      return;
+    }
+    wheel.active = true;
+    wheel.dx = 0;
+    wheel.width = messagesEl.clientWidth;
+  }
+  event.preventDefault(); // ours now — keeps Safari's history swipe out
+  // Scrolling right (deltaX > 0) drags the page left, like a leftward touch.
+  const dx = wheel.dx - event.deltaX;
+  const direction = dx < 0 ? 1 : -1;
+  const target = swipeTarget(direction);
+  wheel.dx = target ? dx : dx / 3; // rubber-band where no page exists
+  messagesEl.style.transition = "none";
+  messagesEl.style.transform = `translateX(${wheel.dx}px)`;
+  const commitPx = Math.min(wheel.width * COMMIT_AT, WHEEL_COMMIT_MAX);
+  updateSwipeHint(target, dx, commitPx);
+  if (target && Math.abs(wheel.dx) > commitPx) {
+    clearTimeout(wheel.endTimer);
+    wheel.active = false;
+    wheel.cooldownUntil = event.timeStamp + WHEEL_COOLDOWN;
+    $("swipe-hint").hidden = true;
+    messagesEl.style.transition = "transform 0.18s ease-out";
+    commitPage(direction, target, wheel.width);
+  }
+}, { passive: false });
 
 // sessions
 $("session-chip").onclick = () => openSessionsSheet("");
