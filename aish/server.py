@@ -465,7 +465,7 @@ alternative when blocked.
 - Sessions: conversation + command audit trail logged to {state_dir} — the \
 same format as terminal aish, so sessions are interchangeable between both. \
 When the user refers to earlier work ("the fix from yesterday", "what went \
-wrong last time"), use the search_sessions tool to find and read the \
+wrong last time"), use the recall tool to find and read the \
 relevant past conversation instead of asking them to repeat it.
 - File tools: prefer read_file/write_file/edit_file over cat/sed/heredocs; \
 the user approves a diff card before any write. Do NOT use sed -i or > \
@@ -1179,7 +1179,7 @@ def create_app(
         for part in [
             environment_context(cwd),
             web_usage_context(model_name, provider, allow_path, deny_path, state_dir),
-            *load_context_files(cwd, lessons_path),
+            *load_context_files(cwd),
         ]
         if part
     )

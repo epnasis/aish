@@ -260,25 +260,6 @@ def start_background(command: str, cwd: str | None = None, log_dir=None) -> str:
     )
 
 
-def remember(note: str, lessons_path) -> str:
-    """Append a one-line lesson to the lessons file (loaded every session).
-    Constrained to append short text to one known file — safe to auto-approve."""
-    text = " ".join(note.split()).strip()
-    if not text:
-        return "ERROR: empty note"
-    path = Path(lessons_path)
-    try:
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        if any(text == line.lstrip("- ").strip() for line in existing.splitlines()):
-            return "(already remembered)"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(f"- {text}\n")
-    except OSError as exc:
-        return f"ERROR: could not save lesson: {exc}"
-    return f"remembered: {text}"
-
-
 def jobs_table() -> str:
     if not JOBS:
         return "no background jobs this session"
@@ -464,18 +445,32 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "remember",
             "description": (
-                "Save a short, durable lesson so future sessions have it — ESPECIALLY "
-                "after you get a command wrong and find the working form (e.g. a BSD vs "
-                "GNU flag difference). Write the corrected, ready-to-use command. Loaded "
-                "into your context every session. Don't record one-off or secret details."
+                "Save one durable fact or lesson to your memory so future sessions "
+                "have it — ESPECIALLY after you get a command wrong and find the "
+                "working form, and whenever the user states a preference or a fact "
+                "about this machine. Write the corrected, ready-to-use form. Recent "
+                "memory is shown in your context; the rest is searchable with "
+                "recall. Don't record one-off or secret details. For multi-step "
+                "procedures, write a skill file instead."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "note": {
                         "type": "string",
-                        "description": "One-line lesson, e.g. 'macOS ps: sort by mem = ps aux -m'.",
-                    }
+                        "description": "One-line fact, e.g. 'macOS ps: sort by mem = ps aux -m'.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Optional stable slug (letters/digits/dashes). Reusing an "
+                            "existing name UPDATES that memory instead of duplicating it."
+                        ),
+                    },
+                    "keywords": {
+                        "type": "string",
+                        "description": "Optional comma-separated search keywords.",
+                    },
                 },
                 "required": ["note"],
             },
@@ -603,14 +598,17 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_sessions",
+            "name": "recall",
             "description": (
-                "Search your PAST conversation sessions with this user (they all "
-                "persist on disk). Use when the user refers to earlier work — "
-                "'like we did yesterday', 'the fix from the other session', 'what "
-                "went wrong last time'. Returns matching sessions with excerpt "
-                "lines; call again with 'session' set to one of the returned file "
-                "names to read that session's matching messages in detail."
+                "Search everything you know: saved skills (how-to playbooks), "
+                "memory (facts, preferences, past lessons), and past conversation "
+                "sessions with this user. Use it BEFORE guessing at a procedure "
+                "that might have been solved before, when the user refers to "
+                "earlier work ('like we did yesterday', 'what went wrong last "
+                "time'), and ALWAYS before creating a new skill or memory — update "
+                "the existing entry instead of duplicating it. Returns ranked "
+                "matches with snippets; call again with 'name' set to a returned "
+                "entry or session file name for its full text."
             ),
             "parameters": {
                 "type": "object",
@@ -618,17 +616,15 @@ TOOL_SCHEMAS = [
                     "query": {
                         "type": "string",
                         "description": (
-                            "Keywords to find (matched against titles and full "
-                            "conversation contents)."
+                            "Keywords describing the task, fact, or past work "
+                            "you are looking for."
                         ),
                     },
-                    "session": {
+                    "name": {
                         "type": "string",
                         "description": (
-                            "Optional session file name from a previous result "
-                            "(e.g. 'session-20260718-213000-000000.jsonl'): return "
-                            "that session's matching messages — or its most recent "
-                            "messages when query is empty."
+                            "Optional entry name or session file name from a "
+                            "previous result: return that item's full text."
                         ),
                     },
                 },

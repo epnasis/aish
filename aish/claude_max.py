@@ -214,7 +214,9 @@ class ClaudeMaxAgent:
             # picks up skills created mid-session. Mid-session skill edits do
             # invalidate the API prompt cache for the changed prefix — an
             # accepted cost, skills change rarely.
-            system_prompt=compose_system_content(self.base_context, self.cwd),
+            system_prompt=compose_system_content(
+                self.base_context, self.cwd, self.inner.lessons_path
+            ),
             model=self.model or None,
             tools=[],  # no Claude Code built-ins — aish tools only
             mcp_servers={"aish": self._server},

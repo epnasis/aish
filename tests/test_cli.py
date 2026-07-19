@@ -164,11 +164,9 @@ def test_read_only_auto_approves_without_input(tmp_path):
 def test_load_context_files_reads_cwd_aish_md(tmp_path, monkeypatch):
     from aish.cli import load_context_files
 
-    # explicit lessons path: the default is bound to the REAL home at import
-    # time, so a lessons file on the developer machine would leak in here
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "no-home")
     (tmp_path / "AISH.md").write_text("host facts here")
-    parts = load_context_files(str(tmp_path), tmp_path / "no-lessons.md")
+    parts = load_context_files(str(tmp_path))
     assert len(parts) == 1
     assert "host facts here" in parts[0]
     assert "AISH.md" in parts[0]
@@ -178,7 +176,7 @@ def test_load_context_files_empty_when_absent(tmp_path, monkeypatch):
     from aish.cli import load_context_files
 
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "no-home")
-    assert load_context_files(str(tmp_path), tmp_path / "no-lessons.md") == []
+    assert load_context_files(str(tmp_path)) == []
 
 
 class TestConfig:
@@ -809,14 +807,19 @@ class TestModelAndJobs:
         assert "no background jobs" in capsys.readouterr().out
 
 
-def test_lessons_file_loaded_into_context(tmp_path, monkeypatch):
+def test_lessons_surface_in_memory_index_not_bulk_context(tmp_path, monkeypatch):
+    """Lessons are no longer dumped wholesale into the prompt: they reach the
+    model through the capped Memory index (and recall) instead."""
     from aish.cli import load_context_files
+    from aish.skills import knowledge_index
 
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "no-home")
     lessons = tmp_path / "lessons.md"
     lessons.write_text("- macOS ps: ps aux -m\n")
-    parts = load_context_files(str(tmp_path), lessons)
-    assert any("lessons you saved" in p and "ps aux -m" in p for p in parts)
+    assert load_context_files(str(tmp_path)) == []
+    index = knowledge_index(str(tmp_path), lessons)
+    assert "Memory" in index
+    assert "ps aux -m" in index
 
 
 def test_darwin_note_has_ps_guidance():

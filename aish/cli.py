@@ -966,13 +966,15 @@ to raw devices, diskutil erase, git clean -f, git push --force) are blocked \
 outright — you cannot run them even with approval. The user can extend the \
 list with segment prefixes in {deny_path} and can run blocked commands \
 manually with the ! prefix. When blocked, suggest a safer alternative.
-- Learning: call the remember tool to save a one-line lesson — do this after \
-correcting any mistake, and whenever the user asks you to remember something \
-durable. Lessons live in {lessons_path} and are ALREADY loaded into your \
-context each session under "lessons you saved" — when the user asks about \
-your learnings, quote that section (or read the file); do not go hunting \
-elsewhere. For longer curated notes the user maintains, \
-~/.config/aish/AISH.md is also loaded each session.
+- Learning: call the remember tool to save a one-line fact or lesson — do \
+this after correcting any mistake, and whenever the user asks you to \
+remember something durable. Memory entries live in ~/.config/aish/memory/ \
+(one small markdown file each); the most recent are shown in the Memory \
+section of your context and the rest are searchable with recall. Legacy \
+one-line lessons from {lessons_path} still appear there too. When the user \
+asks about your learnings, quote the Memory section or search with recall. \
+For longer curated notes the user maintains, ~/.config/aish/AISH.md is \
+loaded each session.
 - Multiline input: Enter submits; a newline is inserted by Ctrl+J, by ending \
 the line with a backslash then Enter, or by Option/Alt+Enter (in iTerm2 only \
 with "Left Option key: Esc+"); pasted text keeps its newlines.
@@ -984,8 +986,8 @@ before answering.
 `aish --resume` opens the same session picker as /resume at launch (piped \
 input resumes the most recent session). When the user refers to earlier \
 work ("the fix from yesterday", "what went wrong last time"), use the \
-search_sessions tool to find and read the relevant past conversation \
-instead of asking them to repeat it.
+recall tool to find and read the relevant past conversation instead of \
+asking them to repeat it.
 - Config file: {config_path} (TOML). Keys: vi_mode, model, num_ctx, \
 max_steps. vi_mode (prompt vi editing) is currently {str(vi_mode).lower()}; \
 enable it with the line `vi_mode = true`. Config is read at startup only — \
@@ -1009,23 +1011,19 @@ When the user asks you to change one of your settings, edit the config file \
 with a normal shell command (it goes through approval like any command)."""
 
 
-def load_context_files(cwd: str, lessons_path: Path = DEFAULT_LESSONS) -> list[str]:
+def load_context_files(cwd: str) -> list[str]:
+    """User-curated AISH.md files, fully loaded — deliberately static.
+    Lessons/memory are NOT bulk-loaded anymore: they reach the model through
+    the capped Memory index and the recall tool (relevance-scoped)."""
     parts = []
     sources = (
         Path.home() / ".config" / "aish" / "AISH.md",
         Path(cwd) / "AISH.md",
-        lessons_path,
     )
     for path in sources:
         try:
             if path.is_file():
-                label = (
-                    "lessons you saved after earlier mistakes — apply them "
-                    "proactively whenever one is relevant"
-                    if path == lessons_path
-                    else f"context from {path}"
-                )
-                parts.append(f"[{label}]\n{path.read_text(encoding='utf-8')}")
+                parts.append(f"[context from {path}]\n{path.read_text(encoding='utf-8')}")
         except OSError:
             continue
     return parts
@@ -1158,7 +1156,7 @@ def main() -> int:
                 model_name, args.vi_mode, allow_path, state_dir, config_path,
                 deny_path, lessons_path, provider=provider,
             ),
-            *load_context_files(cwd, lessons_path),
+            *load_context_files(cwd),
         ]
         if part
     )

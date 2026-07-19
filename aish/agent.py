@@ -197,7 +197,7 @@ TASK_REMINDER = (
 
 # No side effects and no approval prompt — safe to run concurrently.
 READ_ONLY_TOOLS = frozenset(
-    {"read_docs", "read_skill", "web_search", "read_url", "read_file", "search_sessions"}
+    {"read_docs", "read_skill", "web_search", "read_url", "read_file", "recall"}
 )
 
 def format_secs(seconds: float) -> str:
@@ -253,14 +253,16 @@ def system_prompt() -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(platform_note=note)
 
 
-def compose_system_content(base_context: str, cwd: str, index: str | None = None) -> str:
+def compose_system_content(
+    base_context: str, cwd: str, lessons_path=None, index: str | None = None
+) -> str:
     """The full system message: static rules + caller context + the live
-    skills index. Rebuilt at every run_task so skills created mid-session
-    (or after /cd) are advertised without a restart. Deterministic: unchanged
-    skill files yield a byte-identical string, keeping API prompt caches
-    valid."""
+    skills/memory index. Rebuilt at every run_task so entries created
+    mid-session (or after /cd) are advertised without a restart.
+    Deterministic: unchanged files yield a byte-identical string, keeping
+    API prompt caches valid."""
     if index is None:
-        index = skills.knowledge_index(cwd)
+        index = skills.knowledge_index(cwd, lessons_path)
     content = system_prompt() + (f"\n{base_context}" if base_context else "")
     return content + (f"\n\n{index}" if index else "")
 
@@ -337,7 +339,7 @@ class Agent:
         self.status = status if status is not None else _NoStatus()
         self._cancel = threading.Event()
         self.base_context = context
-        content = compose_system_content(context, self.cwd)
+        content = compose_system_content(context, self.cwd, self.lessons_path)
         self.messages: list[dict] = [{"role": "system", "content": content}]
 
     def cancel(self) -> None:
@@ -367,10 +369,12 @@ class Agent:
         images: list[str] | None = None,
         documents: list[str] | None = None,
     ) -> str:
-        # Fresh scan every task: skills created mid-session (or after /cd)
-        # show up immediately, in every open session — no restart needed.
-        index = skills.knowledge_index(self.cwd)
-        self.messages[0]["content"] = compose_system_content(self.base_context, self.cwd, index)
+        # Fresh scan every task: skills/memory created mid-session (or after
+        # /cd) show up immediately, in every open session — no restart needed.
+        index = skills.knowledge_index(self.cwd, self.lessons_path)
+        self.messages[0]["content"] = compose_system_content(
+            self.base_context, self.cwd, self.lessons_path, index
+        )
         self.messages[1:] = [
             m
             for m in self.messages[1:]
@@ -813,23 +817,31 @@ class Agent:
             topic = args.get("topic") or None
             label = f"→ read_url: {url}" + (f" (topic: {topic})" if topic else "")
             return label, partial(web.read_url, url, topic=str(topic) if topic else None)
-        if name == "search_sessions":
+        if name == "recall":
             query = str(args.get("query", "") or "")
-            session = str(args.get("session", "") or "").strip() or None
-            label = f"→ search_sessions: {query or '(no query)'}" + (
-                f" (session: {session})" if session else ""
+            entry = str(args.get("name", "") or "").strip() or None
+            label = f"→ recall: {query or '(no query)'}" + (
+                f" (name: {entry})" if entry else ""
             )
-            return label, partial(self._search_sessions, query, session)
+            return label, partial(self._recall, query, entry)
         return self._read_file_call(args)  # read_file
 
-    def _search_sessions(self, query: str, session: str | None) -> str:
+    def _recall(self, query: str, name: str | None) -> str:
         if self.state_dir is None:
-            return "ERROR: session search is unavailable (no session store configured)"
+            return skills.recall_text(self.cwd, self.lessons_path, query, name=name)
+        state_dir = Path(self.state_dir)
         exclude: set = set()
         if self.current_session is not None:
             exclude.add(Path(self.current_session()))
-        return SessionLog.search_excerpts(
-            Path(self.state_dir), query, session=session, exclude=exclude
+        return skills.recall_text(
+            self.cwd,
+            self.lessons_path,
+            query,
+            name=name,
+            sessions_search=lambda q: SessionLog.recall_sessions(state_dir, q, exclude=exclude),
+            session_detail=lambda session, q: SessionLog.search_excerpts(
+                state_dir, q, session=session
+            ),
         )
 
     def _collect_source(self, call: dict, result: str) -> None:
@@ -893,9 +905,14 @@ class Agent:
 
         if name == "remember":
             note = str(args.get("note", ""))
-            if self.lessons_path is None:
-                return "ERROR: no lessons file configured"
-            result = tools.remember(note, self.lessons_path)
+            result = skills.save_memory(
+                note,
+                skills.GLOBAL_MEMORY_DIR,
+                name=str(args.get("name", "") or ""),
+                keywords=str(args.get("keywords", "") or ""),
+                cwd=self.cwd,
+                lessons_path=self.lessons_path,
+            )
             self.echo(f"→ {result}")
             return result
 

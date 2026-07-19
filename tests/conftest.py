@@ -12,3 +12,6 @@ def isolated_global_skills(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(
         skills_module, "GLOBAL_SKILLS_DIR", tmp_path_factory.mktemp("global-skills")
     )
+    monkeypatch.setattr(
+        skills_module, "GLOBAL_MEMORY_DIR", tmp_path_factory.mktemp("global-memory")
+    )

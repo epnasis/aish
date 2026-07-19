@@ -256,30 +256,3 @@ class TestDetach:
         lines = []
         tools._flush_buf(b"", lines, None)
         assert lines == []
-
-
-class TestRemember:
-    def test_appends_lesson(self, tmp_path):
-        path = tmp_path / "lessons.md"
-        msg = tools.remember("macOS ps: sort by mem with `ps aux -m`", path)
-        assert "remembered" in msg
-        assert "- macOS ps: sort by mem with `ps aux -m`\n" == path.read_text()
-
-    def test_normalizes_whitespace(self, tmp_path):
-        path = tmp_path / "lessons.md"
-        tools.remember("  use   ps aux -m\n  not --sort ", path)
-        assert path.read_text() == "- use ps aux -m not --sort\n"
-
-    def test_dedupes(self, tmp_path):
-        path = tmp_path / "lessons.md"
-        tools.remember("lesson one", path)
-        assert tools.remember("lesson one", path) == "(already remembered)"
-        assert path.read_text().count("lesson one") == 1
-
-    def test_empty_note_errors(self, tmp_path):
-        assert tools.remember("   ", tmp_path / "l.md").startswith("ERROR")
-
-    def test_creates_parent_dir(self, tmp_path):
-        path = tmp_path / "sub" / "lessons.md"
-        tools.remember("x", path)
-        assert path.exists()
