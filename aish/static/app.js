@@ -153,7 +153,7 @@ function handle(event) {
       setBusy(true);
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
       rememberPrompt(stripAttachmentNotes(event.text));
-      makeRecallable(addMsg("user", event.text));
+      addUserMsg(event.text);
       // Your own message always comes into view, even if you were scrolled up.
       if (!replaying) scrollToEnd(true);
       break;
@@ -366,6 +366,19 @@ function addMsg(kind, text) {
   return el;
 }
 
+// Your own prompt bubble: tap-to-recall plus a copy chip underneath (issue
+// #39). Copy hands back the prompt minus attachment notes — same text the
+// recall paths reuse.
+function addUserMsg(text) {
+  const el = addMsg("user", text);
+  makeRecallable(el);
+  const tools = document.createElement("div");
+  tools.className = "user-tools";
+  tools.appendChild(copyChip(() => stripAttachmentNotes(el.textContent), "copy prompt"));
+  messagesEl.appendChild(tools);
+  return el;
+}
+
 function addAnsiMsg(kind, text) {
   const el = document.createElement("div");
   el.className = `msg ${kind}`;
@@ -541,7 +554,7 @@ function onHistory(history) {
     if (!content) continue;
     if (message.role === "user") {
       retireQuickReplies();
-      makeRecallable(addMsg("user", content));
+      addUserMsg(content);
     }
     else if (message.role === "assistant") {
       const el = addMsg("answer md", "");

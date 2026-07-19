@@ -369,6 +369,15 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg-tools > .copy-chip { width: 40px; height: 40px; border-radius: 10px; }
 .msg-tools > .copy-chip svg { width: 19px; height: 19px; }
 
+/* copy chip under your own prompt bubble, right-aligned with it */
+.user-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin: -8px -8px 12px 0; /* optical: pull up to the bubble, align to its edge */
+}
+.user-tools > .copy-chip { width: 40px; height: 40px; border-radius: 10px; }
+.user-tools > .copy-chip svg { width: 17px; height: 17px; }
+
 /* ---- read-aloud player under answers ---- */
 .tts {
   display: inline-flex;
