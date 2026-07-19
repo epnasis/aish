@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import backends, tools
-from .agent import Agent, ModelUnavailable, environment_context, format_tokens
+from .agent import Agent, ModelUnavailable, environment_context, format_tokens, learn_prompt
 from .approval import (
     DEFAULT_ALLOWLIST,
     DEFAULT_DENYLIST,
@@ -29,7 +29,7 @@ from .approval import (
     unvetted_segments,
 )
 from .session import SessionInfo, SessionLog
-from .skills import GLOBAL_SKILLS_DIR, list_skills, skill_dirs
+from .skills import GLOBAL_SKILLS_DIR
 
 if TYPE_CHECKING:
     from .claude_max import ClaudeMaxAgent
@@ -49,7 +49,7 @@ REPLAY_TOOL_LINES = 4
 
 SLASH_COMMANDS = (
     "/add-dir", "/cd", "/clear", "/dir-add", "/exit", "/help", "/jobs",
-    "/model", "/new", "/quit", "/resume",
+    "/learn", "/model", "/new", "/quit", "/resume",
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
@@ -71,6 +71,9 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  (Tab completes directories); !cd <dir> does the same
   {CYAN}/add-dir <dir>{RESET} allow auto-approved reads/commands in another directory
                  tree too (alias /dir-add); no arg lists current roots
+  {CYAN}/learn [hint]{RESET}  distill this conversation into saved skills/memory (the
+                 model searches existing knowledge first and you approve
+                 each write); /learn lessons migrates the legacy lessons.md
   {CYAN}/jobs{RESET}          list background jobs started this session
   {CYAN}/help{RESET}          this help
   {CYAN}/quit, /exit{RESET}   quit (plain 'exit' works too)
@@ -671,6 +674,18 @@ def save_default_model(config_path: Path, spec: str) -> str | None:
     return None
 
 
+def parse_learn(task: str, lessons_path=None) -> str | None:
+    """/learn [hint] → the distillation prompt (run as a normal task so
+    recall and diff approvals apply); None for any other slash input.
+    Unambiguous prefixes resolve, matching handle_slash (/lea → /learn)."""
+    verb = task.split()[0].lower()
+    if verb != "/learn":
+        matches = [c for c in SLASH_COMMANDS if c.startswith(verb)]
+        if matches != ["/learn"]:
+            return None
+    return learn_prompt(task.partition(" ")[2], lessons_path)
+
+
 def handle_slash(
     task: str,
     agent: "Agent | ClaudeMaxAgent",
@@ -966,13 +981,15 @@ to raw devices, diskutil erase, git clean -f, git push --force) are blocked \
 outright — you cannot run them even with approval. The user can extend the \
 list with segment prefixes in {deny_path} and can run blocked commands \
 manually with the ! prefix. When blocked, suggest a safer alternative.
-- Learning: call the remember tool to save a one-line lesson — do this after \
-correcting any mistake, and whenever the user asks you to remember something \
-durable. Lessons live in {lessons_path} and are ALREADY loaded into your \
-context each session under "lessons you saved" — when the user asks about \
-your learnings, quote that section (or read the file); do not go hunting \
-elsewhere. For longer curated notes the user maintains, \
-~/.config/aish/AISH.md is also loaded each session.
+- Learning: call the remember tool to save a one-line fact or lesson — do \
+this after correcting any mistake, and whenever the user asks you to \
+remember something durable. Memory entries live in ~/.config/aish/memory/ \
+(one small markdown file each); the most recent are shown in the Memory \
+section of your context and the rest are searchable with recall. Legacy \
+one-line lessons from {lessons_path} still appear there too. When the user \
+asks about your learnings, quote the Memory section or search with recall. \
+For longer curated notes the user maintains, ~/.config/aish/AISH.md is \
+loaded each session.
 - Multiline input: Enter submits; a newline is inserted by Ctrl+J, by ending \
 the line with a backslash then Enter, or by Option/Alt+Enter (in iTerm2 only \
 with "Left Option key: Esc+"); pasted text keeps its newlines.
@@ -984,8 +1001,8 @@ before answering.
 `aish --resume` opens the same session picker as /resume at launch (piped \
 input resumes the most recent session). When the user refers to earlier \
 work ("the fix from yesterday", "what went wrong last time"), use the \
-search_sessions tool to find and read the relevant past conversation \
-instead of asking them to repeat it.
+recall tool to find and read the relevant past conversation instead of \
+asking them to repeat it.
 - Config file: {config_path} (TOML). Keys: vi_mode, model, num_ctx, \
 max_steps. vi_mode (prompt vi editing) is currently {str(vi_mode).lower()}; \
 enable it with the line `vi_mode = true`. Config is read at startup only — \
@@ -995,46 +1012,33 @@ $AISH_MODEL overrides the model key.
 ~/.config/aish/AISH.md is loaded into your system prompt — the right place \
 for host facts and user preferences.
 - Skills: markdown playbooks in {GLOBAL_SKILLS_DIR} (global) or \
-./.aish/skills/ (project; wins on name clash), listed in your context and \
-read via the read_skill tool. To create one when the user asks, write \
-<name>.md there with optional frontmatter lines (name:, description:) \
-between --- markers, then a body of workflows, exact commands, and safety \
-rules; it is picked up on the next aish start.
+./.aish/skills/ (project; wins on name clash), indexed in your context and \
+read via the read_skill tool. To create one when the user asks — or when \
+you have just learned a procedure worth keeping — write <name>.md there \
+with frontmatter lines (name:, description:) between --- markers, then a \
+body of workflows, exact commands, gotchas, and safety rules. The \
+description MUST state the trigger ("Use when the user asks to …") — it is \
+what makes the skill discoverable. The index refreshes every task, so a \
+new skill is available immediately, no restart needed.
 - Current model: {model} (change via --model, $AISH_MODEL, or config; \
 /model <name> --save persists a switch as the startup default).
 When the user asks you to change one of your settings, edit the config file \
 with a normal shell command (it goes through approval like any command)."""
 
 
-def skills_context(cwd: str) -> str:
-    found = list_skills(skill_dirs(cwd))
-    if not found:
-        return ""
-    lines = "\n".join(f"- {name}: {description}" for name, description in found)
-    return (
-        "Skills — task-specific playbooks with workflows and safety rules. "
-        "ALWAYS call read_skill for the relevant one BEFORE first using that "
-        "tool in a session:\n" + lines
-    )
-
-
-def load_context_files(cwd: str, lessons_path: Path = DEFAULT_LESSONS) -> list[str]:
+def load_context_files(cwd: str) -> list[str]:
+    """User-curated AISH.md files, fully loaded — deliberately static.
+    Lessons/memory are NOT bulk-loaded anymore: they reach the model through
+    the capped Memory index and the recall tool (relevance-scoped)."""
     parts = []
     sources = (
         Path.home() / ".config" / "aish" / "AISH.md",
         Path(cwd) / "AISH.md",
-        lessons_path,
     )
     for path in sources:
         try:
             if path.is_file():
-                label = (
-                    "lessons you saved after earlier mistakes — apply them "
-                    "proactively whenever one is relevant"
-                    if path == lessons_path
-                    else f"context from {path}"
-                )
-                parts.append(f"[{label}]\n{path.read_text(encoding='utf-8')}")
+                parts.append(f"[context from {path}]\n{path.read_text(encoding='utf-8')}")
         except OSError:
             continue
     return parts
@@ -1167,8 +1171,7 @@ def main() -> int:
                 model_name, args.vi_mode, allow_path, state_dir, config_path,
                 deny_path, lessons_path, provider=provider,
             ),
-            skills_context(cwd),
-            *load_context_files(cwd, lessons_path),
+            *load_context_files(cwd),
         ]
         if part
     )
@@ -1290,11 +1293,14 @@ def main() -> int:
         if not task:
             continue
         if task.startswith("/"):
-            if handle_slash(
-                task, agent, logref, state_dir, resumed, config_path=config_path
-            ) == "exit":
-                return 0
-            continue
+            learn = parse_learn(task, lessons_path)
+            if learn is None:
+                if handle_slash(
+                    task, agent, logref, state_dir, resumed, config_path=config_path
+                ) == "exit":
+                    return 0
+                continue
+            task = learn  # /learn runs as a normal task: recall + diff approvals apply
         if task.startswith("!"):
             command = task[1:].strip()
             if command:

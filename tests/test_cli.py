@@ -164,11 +164,9 @@ def test_read_only_auto_approves_without_input(tmp_path):
 def test_load_context_files_reads_cwd_aish_md(tmp_path, monkeypatch):
     from aish.cli import load_context_files
 
-    # explicit lessons path: the default is bound to the REAL home at import
-    # time, so a lessons file on the developer machine would leak in here
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "no-home")
     (tmp_path / "AISH.md").write_text("host facts here")
-    parts = load_context_files(str(tmp_path), tmp_path / "no-lessons.md")
+    parts = load_context_files(str(tmp_path))
     assert len(parts) == 1
     assert "host facts here" in parts[0]
     assert "AISH.md" in parts[0]
@@ -178,7 +176,7 @@ def test_load_context_files_empty_when_absent(tmp_path, monkeypatch):
     from aish.cli import load_context_files
 
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "no-home")
-    assert load_context_files(str(tmp_path), tmp_path / "no-lessons.md") == []
+    assert load_context_files(str(tmp_path)) == []
 
 
 class TestConfig:
@@ -598,21 +596,6 @@ def test_clear_clears_screen(tmp_path, capsys):
     assert "\033[2J" in capsys.readouterr().out
 
 
-def test_skills_context_lists_skills(tmp_path, monkeypatch):
-    from aish import skills as skills_module
-    from aish.cli import skills_context
-
-    monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "none")
-    assert skills_context(str(tmp_path)) == ""
-
-    local = tmp_path / ".aish" / "skills"
-    local.mkdir(parents=True)
-    (local / "demo.md").write_text("---\nname: demo\ndescription: demo things\n---\nbody")
-    text = skills_context(str(tmp_path))
-    assert "read_skill" in text
-    assert "- demo: demo things" in text
-
-
 class TestDenylistApprover:
     def test_blocked_without_prompting(self, tmp_path, capsys):
         from aish.approval import Blocked
@@ -824,14 +807,19 @@ class TestModelAndJobs:
         assert "no background jobs" in capsys.readouterr().out
 
 
-def test_lessons_file_loaded_into_context(tmp_path, monkeypatch):
+def test_lessons_surface_in_memory_index_not_bulk_context(tmp_path, monkeypatch):
+    """Lessons are no longer dumped wholesale into the prompt: they reach the
+    model through the capped Memory index (and recall) instead."""
     from aish.cli import load_context_files
+    from aish.skills import knowledge_index
 
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "no-home")
     lessons = tmp_path / "lessons.md"
     lessons.write_text("- macOS ps: ps aux -m\n")
-    parts = load_context_files(str(tmp_path), lessons)
-    assert any("lessons you saved" in p and "ps aux -m" in p for p in parts)
+    assert load_context_files(str(tmp_path)) == []
+    index = knowledge_index(str(tmp_path), lessons)
+    assert "Memory" in index
+    assert "ps aux -m" in index
 
 
 def test_darwin_note_has_ps_guidance():
@@ -1058,3 +1046,33 @@ class TestDefaultWorkspace:
         sub = home / "dev"
         sub.mkdir()
         assert default_workspace(str(sub)) == str(sub)
+
+
+class TestParseLearn:
+    def test_learn_returns_distillation_prompt(self):
+        from aish.cli import parse_learn
+
+        prompt = parse_learn("/learn")
+        assert prompt is not None
+        assert "recall" in prompt and "skills" in prompt
+
+    def test_hint_is_embedded(self):
+        from aish.cli import parse_learn
+
+        prompt = parse_learn("/learn the gh issue flow")
+        assert "the gh issue flow" in prompt
+
+    def test_lessons_hint_switches_to_migration(self, tmp_path):
+        from aish.cli import parse_learn
+
+        lessons = tmp_path / "lessons.md"
+        prompt = parse_learn("/learn lessons", lessons)
+        assert str(lessons) in prompt
+        assert "lessons.md.bak" in prompt
+
+    def test_prefix_resolves_and_other_commands_pass_through(self):
+        from aish.cli import parse_learn
+
+        assert parse_learn("/lea") is not None
+        assert parse_learn("/resume") is None
+        assert parse_learn("/model gemini") is None

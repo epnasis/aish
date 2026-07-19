@@ -23,6 +23,7 @@ SNIPPETS_PER_SESSION = 3
 DETAIL_MESSAGE_CHARS = 700
 DETAIL_MAX_CHARS = 6000
 DETAIL_TAIL_MESSAGES = 20
+RECALL_SESSIONS_TOP = 3  # sessions shown in the recall tool's fallback section
 _SESSION_NAME_RE = re.compile(r"^session-[0-9-]+\.jsonl$")
 
 
@@ -330,6 +331,25 @@ class SessionLog:
             '\nCall search_sessions again with session="<file name>" for the full '
             "matching messages from one session."
         )
+        return "\n".join(lines)
+
+    @staticmethod
+    def recall_sessions(state_dir: Path, query: str, exclude: set | None = None) -> str:
+        """Compact sessions section for the recall tool: top matches with a
+        title line and one snippet each, or "" when nothing matches — the
+        episodic fallback below skills/memory results."""
+        words = query.casefold().split()
+        if not words:
+            return ""
+        infos = SessionLog.search_sessions(state_dir, query, exclude=exclude)
+        lines = []
+        for info in infos[:RECALL_SESSIONS_TOP]:
+            lines.append(f"- {info.path.name} · {info.when} · {info.title}")
+            for message in SessionLog.load_messages(info.path):
+                snippet = SessionLog._snippet(message.get("content") or "", words)
+                if snippet is not None:
+                    lines.append(f"    [{message.get('role', '?')}] {snippet}")
+                    break
         return "\n".join(lines)
 
     @staticmethod

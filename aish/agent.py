@@ -48,11 +48,16 @@ Rules:
 2. If a command fails with a usage or unknown-flag error, call read_docs
    before retrying. If docs come back truncated, call read_docs again with a
    topic (e.g. the flag name) to search the full text.
-2b. LEARN FROM MISTAKES: whenever you get a command or approach wrong and then
-   find the form that works, call remember() with a one-line lesson holding the
-   corrected, ready-to-run command — so next session you get it right the first
-   time instead of re-deriving it. Applies to ANY tool or task, not just shell
-   flags. Check the "lessons you saved" in your context before guessing.
+2b. LEARNING: consult saved knowledge BEFORE your own memory — when a task
+   matches a skill in your context, read it FIRST and follow it over your
+   memorized approach (skills encode what actually worked on THIS machine);
+   when unsure whether something was solved before, call recall. And capture
+   learnings as you go: when the user corrects you, when a skill's
+   instructions proved wrong (update THAT skill — append the gotcha with
+   edit_file, never create a duplicate), or when a hard-won multi-step
+   procedure worked, save it — recall first to find an existing entry, then
+   write or update the skill file (the user approves the diff). One-line
+   facts, preferences, and corrected commands → remember().
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. If the
    user denies a command, do not retry it — change approach or ask.
@@ -180,9 +185,57 @@ BLOCKED_RESULT = (
     "run it themselves with the ! prefix. Propose a safer alternative if one exists."
 )
 
+# The per-task nudge that makes small local models actually consult skills:
+# recency is what they obey, so the reminder is (re)inserted directly before
+# each user message instead of relying on the system prompt alone. It is
+# appended to self.messages directly (never via _append) so it stays out of
+# the session log and the web transcript, and the previous task's copy is
+# removed first so exactly one exists in history.
+TASK_REMINDER_MARK = "<system-reminder>"
+TASK_REMINDER = (
+    "<system-reminder>Before acting: scan the Skills index in your system "
+    "prompt. If a skill matches this task, your FIRST action MUST be "
+    "read_skill(<name>) — do not attempt the task from memory. Skills "
+    "override your general knowledge.</system-reminder>"
+)
+
+
+# /learn — the user-triggered distillation pass. Runs as a normal task, so
+# recall/read/diff-approval all apply; shared by the CLI and the web server.
+LEARN_PROMPT = (
+    "Review this conversation for durable learnings{hint}. For each one: "
+    "call recall first to check for an existing skill or memory entry — if "
+    "one exists, UPDATE it (edit_file: append the gotcha or correct it) "
+    "instead of creating a duplicate. Save multi-step procedures as skills — "
+    "a markdown file in ~/.config/aish/skills/ (or ./.aish/skills/ when "
+    "project-specific) with a trigger-phrased description ('Use when the "
+    "user asks to …'); save one-line facts and preferences with remember(). "
+    "Then report what you saved and what you skipped and why. If nothing is "
+    "worth saving, say so plainly."
+)
+
+LEARN_LESSONS_PROMPT = (
+    "Migrate the legacy lessons file into structured knowledge — a conscious "
+    "review, not a mechanical copy. Read {path}, group related lines, and "
+    "flag obsolete ones to drop. For each keeper: recall first and UPDATE an "
+    "existing entry if one matches; otherwise save procedure-shaped lessons "
+    "as skills (trigger-phrased description) and fact-shaped ones with "
+    "remember(). Then list what was migrated and what was dropped, and ask "
+    "the user to confirm; once they confirm coverage, rename the file to "
+    "lessons.md.bak with a shell command so it stops being loaded."
+)
+
+
+def learn_prompt(hint: str, lessons_path=None) -> str:
+    if hint.strip().casefold() == "lessons" and lessons_path:
+        return LEARN_LESSONS_PROMPT.format(path=lessons_path)
+    clause = f", with attention to: {hint.strip()}" if hint.strip() else ""
+    return LEARN_PROMPT.format(hint=clause)
+
+
 # No side effects and no approval prompt — safe to run concurrently.
 READ_ONLY_TOOLS = frozenset(
-    {"read_docs", "read_skill", "web_search", "read_url", "read_file", "search_sessions"}
+    {"read_docs", "read_skill", "web_search", "read_url", "read_file", "recall"}
 )
 
 def format_secs(seconds: float) -> str:
@@ -236,6 +289,20 @@ CHARS_PER_TOKEN_BUDGET = 3
 def system_prompt() -> str:
     note = _PLATFORM_NOTES.get(sys.platform, f"{sys.platform} (verify userland conventions).")
     return SYSTEM_PROMPT_TEMPLATE.format(platform_note=note)
+
+
+def compose_system_content(
+    base_context: str, cwd: str, lessons_path=None, index: str | None = None
+) -> str:
+    """The full system message: static rules + caller context + the live
+    skills/memory index. Rebuilt at every run_task so entries created
+    mid-session (or after /cd) are advertised without a restart.
+    Deterministic: unchanged files yield a byte-identical string, keeping
+    API prompt caches valid."""
+    if index is None:
+        index = skills.knowledge_index(cwd, lessons_path)
+    content = system_prompt() + (f"\n{base_context}" if base_context else "")
+    return content + (f"\n\n{index}" if index else "")
 
 
 def environment_context(cwd: str) -> str:
@@ -309,7 +376,8 @@ class Agent:
         self.current_session = current_session
         self.status = status if status is not None else _NoStatus()
         self._cancel = threading.Event()
-        content = system_prompt() + (f"\n{context}" if context else "")
+        self.base_context = context
+        content = compose_system_content(context, self.cwd, self.lessons_path)
         self.messages: list[dict] = [{"role": "system", "content": content}]
 
     def cancel(self) -> None:
@@ -339,6 +407,21 @@ class Agent:
         images: list[str] | None = None,
         documents: list[str] | None = None,
     ) -> str:
+        # Fresh scan every task: skills/memory created mid-session (or after
+        # /cd) show up immediately, in every open session — no restart needed.
+        index = skills.knowledge_index(self.cwd, self.lessons_path)
+        self.messages[0]["content"] = compose_system_content(
+            self.base_context, self.cwd, self.lessons_path, index
+        )
+        self.messages[1:] = [
+            m
+            for m in self.messages[1:]
+            if not (
+                m.get("role") == "system"
+                and str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
+            )
+        ]
+
         # Old tasks' raw tool outputs are rarely needed verbatim again;
         # shrinking them keeps long REPL sessions inside the context window.
         task_start = len(self.messages)
@@ -352,6 +435,8 @@ class Agent:
             user_message["images"] = list(images)
         if documents:
             user_message["documents"] = list(documents)
+        if index:
+            self.messages.append({"role": "system", "content": TASK_REMINDER})
         self._append(user_message)
 
         self._cancel.clear()  # a stale stop must not kill the new task
@@ -770,23 +855,31 @@ class Agent:
             topic = args.get("topic") or None
             label = f"→ read_url: {url}" + (f" (topic: {topic})" if topic else "")
             return label, partial(web.read_url, url, topic=str(topic) if topic else None)
-        if name == "search_sessions":
+        if name == "recall":
             query = str(args.get("query", "") or "")
-            session = str(args.get("session", "") or "").strip() or None
-            label = f"→ search_sessions: {query or '(no query)'}" + (
-                f" (session: {session})" if session else ""
+            entry = str(args.get("name", "") or "").strip() or None
+            label = f"→ recall: {query or '(no query)'}" + (
+                f" (name: {entry})" if entry else ""
             )
-            return label, partial(self._search_sessions, query, session)
+            return label, partial(self._recall, query, entry)
         return self._read_file_call(args)  # read_file
 
-    def _search_sessions(self, query: str, session: str | None) -> str:
+    def _recall(self, query: str, name: str | None) -> str:
         if self.state_dir is None:
-            return "ERROR: session search is unavailable (no session store configured)"
+            return skills.recall_text(self.cwd, self.lessons_path, query, name=name)
+        state_dir = Path(self.state_dir)
         exclude: set = set()
         if self.current_session is not None:
             exclude.add(Path(self.current_session()))
-        return SessionLog.search_excerpts(
-            Path(self.state_dir), query, session=session, exclude=exclude
+        return skills.recall_text(
+            self.cwd,
+            self.lessons_path,
+            query,
+            name=name,
+            sessions_search=lambda q: SessionLog.recall_sessions(state_dir, q, exclude=exclude),
+            session_detail=lambda session, q: SessionLog.search_excerpts(
+                state_dir, q, session=session
+            ),
         )
 
     def _collect_source(self, call: dict, result: str) -> None:
@@ -850,9 +943,14 @@ class Agent:
 
         if name == "remember":
             note = str(args.get("note", ""))
-            if self.lessons_path is None:
-                return "ERROR: no lessons file configured"
-            result = tools.remember(note, self.lessons_path)
+            result = skills.save_memory(
+                note,
+                skills.GLOBAL_MEMORY_DIR,
+                name=str(args.get("name", "") or ""),
+                keywords=str(args.get("keywords", "") or ""),
+                cwd=self.cwd,
+                lessons_path=self.lessons_path,
+            )
             self.echo(f"→ {result}")
             return result
 

@@ -22,7 +22,7 @@ import os
 from typing import Any
 
 from . import tools
-from .agent import Agent, ModelUnavailable, format_secs, system_prompt
+from .agent import Agent, ModelUnavailable, compose_system_content, format_secs
 
 SESSION_NOTE = (
     "[note for the model: the user ran `{command}` directly; output:]\n{output}"
@@ -74,7 +74,7 @@ class ClaudeMaxAgent:
         self.on_message = on_message
         self.on_token = on_token
         self.status = status
-        self.system_prompt = system_prompt() + (f"\n{context}" if context else "")
+        self.base_context = context
         self.messages: list[dict] = []  # display-only history (replay/logs)
         self._session_id: str | None = None
         self._pending_notes: list[str] = []
@@ -94,6 +94,10 @@ class ClaudeMaxAgent:
     @property
     def roots(self):
         return self.inner.roots
+
+    @property
+    def lessons_path(self):
+        return self.inner.lessons_path
 
     def rebase(self, target: str) -> str:
         result = self.inner.rebase(target)
@@ -210,7 +214,13 @@ class ClaudeMaxAgent:
     def _options(self):
         sdk = self._sdk
         return sdk.ClaudeAgentOptions(
-            system_prompt=self.system_prompt,
+            # Recomposed every query: the skills index follows live cwd and
+            # picks up skills created mid-session. Mid-session skill edits do
+            # invalidate the API prompt cache for the changed prefix — an
+            # accepted cost, skills change rarely.
+            system_prompt=compose_system_content(
+                self.base_context, self.cwd, self.inner.lessons_path
+            ),
             model=self.model or None,
             tools=[],  # no Claude Code built-ins — aish tools only
             mcp_servers={"aish": self._server},

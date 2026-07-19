@@ -8,6 +8,7 @@ import contextlib
 import json
 import os
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1128,3 +1129,41 @@ class TestTokenGate:
                 assert exc.value.code == 4403
             with connected(client, "/ws?token=s3cret") as (_ws, hello, _):
                 assert hello["model"] == "fake"
+
+
+class TestSkillsRefresh:
+    def test_skill_added_after_boot_is_advertised(self, app_env):
+        """Issue #31: the skills index is rebuilt per task, not captured at
+        create_app time — a skill created while the server runs reaches the
+        model on the next task without a restart."""
+        client, chat = make_client(app_env, [model_says("ok")])
+        skills_dir = Path(app_env["cwd"]) / ".aish" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "late.md").write_text(
+            "---\nname: late\ndescription: Use when testing hot reload\n---\nbody"
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "anything"})
+            recv_until(ws, "done")
+        system = chat.calls[0]["messages"][0]
+        assert system["role"] == "system"
+        assert "- late: Use when testing hot reload" in system["content"]
+
+
+class TestLearnCommand:
+    def test_learn_text_is_rewritten_to_prompt(self, app_env):
+        client, chat = make_client(app_env, [model_says("saved nothing")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/learn"})
+            assert recv_until(ws, "user")["text"] == "/learn"  # transcript keeps the typed form
+            recv_until(ws, "done")
+        sent_user = [m for m in chat.calls[0]["messages"] if m["role"] == "user"]
+        assert "durable learnings" in sent_user[-1]["content"]
+
+    def test_other_slash_text_goes_through_verbatim(self, app_env):
+        client, chat = make_client(app_env, [model_says("ok")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/etc/hosts looks odd"})
+            recv_until(ws, "done")
+        sent_user = [m for m in chat.calls[0]["messages"] if m["role"] == "user"]
+        assert sent_user[-1]["content"] == "/etc/hosts looks odd"

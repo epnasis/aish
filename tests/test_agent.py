@@ -1136,25 +1136,37 @@ class TestWebTools:
 
 
 class TestRememberTool:
-    def test_remember_auto_approved_and_appends(self, tmp_path):
-        lessons = tmp_path / "lessons.md"
+    def test_remember_auto_approved_and_writes_memory_entry(self, tmp_path):
+        from aish import skills as skills_module
+
         call = SimpleNamespace(function=SimpleNamespace(
             name="remember", arguments={"note": "macOS ps: use ps aux -m"}))
         agent, _ = make_agent(
             [model_says(tool_calls=[call]), model_says("noted")],
             approve=lambda _c: pytest.fail("remember must not hit approval"),
-            lessons_path=lessons,
+            cwd=str(tmp_path),
         )
         agent.run_task("learn it")
-        assert "ps aux -m" in lessons.read_text()
+        files = list(skills_module.GLOBAL_MEMORY_DIR.glob("*.md"))
+        assert len(files) == 1
+        assert "ps aux -m" in files[0].read_text()
         assert "remembered" in tool_messages(agent.messages)[0]["content"]
 
-    def test_remember_without_path_errors_gracefully(self):
+    def test_remember_dedupes_against_legacy_lessons(self, tmp_path):
+        from aish import skills as skills_module
+
+        lessons = tmp_path / "lessons.md"
+        lessons.write_text("- macOS ps: use ps aux -m\n")
         call = SimpleNamespace(function=SimpleNamespace(
-            name="remember", arguments={"note": "x"}))
-        agent, _ = make_agent([model_says(tool_calls=[call]), model_says("ok")])
+            name="remember", arguments={"note": "macOS ps: use ps aux -m"}))
+        agent, _ = make_agent(
+            [model_says(tool_calls=[call]), model_says("ok")],
+            lessons_path=lessons,
+            cwd=str(tmp_path),
+        )
         agent.run_task("learn")
-        assert "no lessons file" in tool_messages(agent.messages)[0]["content"]
+        assert "already remembered" in tool_messages(agent.messages)[0]["content"]
+        assert list(skills_module.GLOBAL_MEMORY_DIR.glob("*.md")) == []
 
 
 class TestRootScoping:
@@ -1395,9 +1407,9 @@ class TestStepLimitAndLoops:
         assert result.startswith("(stopped: hit the max-steps limit")
 
 
-class TestSearchSessionsTool:
-    """#14: past-session search is read-only, auto-approved, and excludes the
-    session being written right now."""
+class TestRecallTool:
+    """recall is read-only and auto-approved; it searches skills + memory and
+    falls back to past sessions, excluding the session being written now."""
 
     def _store(self, tmp_path, name="session-20260101-000000-000000.jsonl"):
         from aish.session import SessionLog
@@ -1406,39 +1418,149 @@ class TestSearchSessionsTool:
         log.message({"role": "user", "content": "the uv fix was pinning the version"})
         return log.path
 
-    def test_runs_without_approval_and_returns_matches(self, tmp_path):
+    def test_runs_without_approval_and_returns_session_matches(self, tmp_path):
         self._store(tmp_path)
         agent, _ = make_agent(
             [
-                model_says(tool_calls=[tool_call("search_sessions", query="uv fix")]),
+                model_says(tool_calls=[tool_call("recall", query="uv fix")]),
                 model_says("found it"),
             ],
-            approve=lambda _cmd: pytest.fail("search_sessions must not hit approval"),
+            approve=lambda _cmd: pytest.fail("recall must not hit approval"),
             state_dir=tmp_path,
+            cwd=str(tmp_path),
         )
         assert agent.run_task("what did we do about uv?") == "found it"
         result = tool_messages(agent.messages)[0]["content"]
         assert "session-20260101" in result and "uv fix" in result
 
-    def test_without_store_reports_unavailable(self):
+    def test_finds_skills_and_memory_ahead_of_sessions(self, tmp_path):
+        skills_dir = tmp_path / ".aish" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "uv-fix.md").write_text(
+            "---\nname: uv-fix\ndescription: Use when uv breaks\n---\npin the version"
+        )
+        self._store(tmp_path)
         agent, _ = make_agent(
             [
-                model_says(tool_calls=[tool_call("search_sessions", query="x")]),
+                model_says(tool_calls=[tool_call("recall", query="uv fix")]),
                 model_says("ok"),
-            ]
+            ],
+            state_dir=tmp_path,
+            cwd=str(tmp_path),
+        )
+        agent.run_task("uv?")
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "[skill] uv-fix" in result
+        assert result.index("[skill]") < result.index("session-20260101")
+
+    def test_detail_by_entry_name(self, tmp_path):
+        skills_dir = tmp_path / ".aish" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "uv-fix.md").write_text(
+            "---\nname: uv-fix\ndescription: Use when uv breaks\n---\npin the version"
+        )
+        call = SimpleNamespace(
+            function=SimpleNamespace(
+                name="recall", arguments={"query": "uv", "name": "uv-fix"}
+            )
+        )
+        agent, _ = make_agent(
+            [model_says(tool_calls=[call]), model_says("ok")],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("uv?")
+        result = tool_messages(agent.messages)[0]["content"]
+        assert result.startswith("[skill: uv-fix]")
+        assert "pin the version" in result
+
+    def test_without_store_still_searches_knowledge(self, tmp_path):
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("recall", query="x")]),
+                model_says("ok"),
+            ],
+            cwd=str(tmp_path),
         )
         agent.run_task("search")
-        assert tool_messages(agent.messages)[0]["content"].startswith("ERROR")
+        assert "Nothing saved matches" in tool_messages(agent.messages)[0]["content"]
 
     def test_current_session_is_excluded_from_search(self, tmp_path):
         current = self._store(tmp_path, "session-20260102-000000-000000.jsonl")
         agent, _ = make_agent(
             [
-                model_says(tool_calls=[tool_call("search_sessions", query="uv fix")]),
+                model_says(tool_calls=[tool_call("recall", query="uv fix")]),
                 model_says("nothing"),
             ],
             state_dir=tmp_path,
             current_session=lambda: current,
+            cwd=str(tmp_path),
         )
         agent.run_task("search")
-        assert "No past session matches" in tool_messages(agent.messages)[0]["content"]
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "session-20260102" not in result
+
+
+class TestSkillsFreshness:
+    """The skills index is rebuilt at every run_task (issue #31): a skill
+    created mid-session is advertised on the very next task, and the per-task
+    reminder keeps small models checking it (issue #12)."""
+
+    def _write_skill(self, cwd, name, description):
+        skills_dir = cwd / ".aish" / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        (skills_dir / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\nbody"
+        )
+
+    def test_new_skill_appears_on_next_task_without_restart(self, tmp_path):
+        agent, _ = make_agent(
+            [model_says("first"), model_says("second")], cwd=str(tmp_path)
+        )
+        agent.run_task("task one")
+        assert "gh-issues" not in agent.messages[0]["content"]
+        self._write_skill(tmp_path, "gh-issues", "Use when asked to open a GitHub issue")
+        agent.run_task("task two")
+        assert "- gh-issues: Use when asked to open a GitHub issue" in agent.messages[0]["content"]
+
+    def test_reminder_present_exactly_once_before_user_message(self, tmp_path):
+        from aish.agent import TASK_REMINDER_MARK
+
+        self._write_skill(tmp_path, "demo", "Use when demoing")
+        agent, _ = make_agent(
+            [model_says("first"), model_says("second")], cwd=str(tmp_path)
+        )
+        agent.run_task("task one")
+        agent.run_task("task two")
+        reminders = [
+            i
+            for i, m in enumerate(agent.messages)
+            if m.get("role") == "system"
+            and str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
+            and i > 0
+        ]
+        assert len(reminders) == 1
+        # sits directly before the latest user message
+        assert agent.messages[reminders[0] + 1]["content"] == "task two"
+
+    def test_no_reminder_when_no_skills(self, tmp_path):
+        from aish.agent import TASK_REMINDER_MARK
+
+        agent, _ = make_agent([model_says("done")], cwd=str(tmp_path))
+        agent.run_task("task")
+        assert not any(
+            str(m.get("content", "")).startswith(TASK_REMINDER_MARK)
+            for m in agent.messages[1:]
+        )
+
+    def test_reminder_stays_out_of_session_log(self, tmp_path):
+        from aish.agent import TASK_REMINDER_MARK
+
+        self._write_skill(tmp_path, "demo", "Use when demoing")
+        logged = []
+        agent, _ = make_agent(
+            [model_says("done")], cwd=str(tmp_path), on_message=logged.append
+        )
+        agent.run_task("task")
+        assert not any(
+            str(m.get("content", "")).startswith(TASK_REMINDER_MARK) for m in logged
+        )
