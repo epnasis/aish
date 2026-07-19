@@ -214,10 +214,13 @@ without bloating the context.
   `~/.config/aish/skills/` (global) or `./.aish/skills/` (project, wins on
   name clash) with `name:`/`description:`/`keywords:` frontmatter. The
   description states the trigger ("Use when the user asks to …") — that is
-  what makes it discoverable. aish is told to read a matching skill FIRST and
-  follow it over its own training data, and to update a skill (append
-  the gotcha) whenever one proves wrong. Ask aish to write one — it knows
-  the format.
+  what makes it discoverable. Skills and memories matching the task (by
+  name/keyword, deterministic) are **preloaded into context automatically**
+  before the model's first turn — no reliance on the model remembering to
+  look; a skill too large to inject whole is truncated and other tools are
+  refused until the model reads it in full (or explicitly says why it does
+  not apply). aish also updates a skill (appends the gotcha) whenever one
+  proves wrong. Ask aish to write one — it knows the format.
 - **memory** — one fact per file in `~/.config/aish/memory/` (or
   `./.aish/memory/`), same format; the description line IS the fact. The 15
   newest show in context, the rest are searchable. Saved via `remember`.
