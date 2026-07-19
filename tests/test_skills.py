@@ -374,6 +374,32 @@ class TestPreflight:
         assert preload.names == ["hotels-use-trippy"]
         assert "always run trippy" in preload.text
 
+    def test_generic_description_word_does_not_fire(self, tmp_path, monkeypatch):
+        # Issue #42: "show me photo of BMW i3" preloaded the hotels memory
+        # because its description ended "…bookings and photos". Generic task
+        # vocabulary in a description must not trigger; topic words still do.
+        self._isolate(tmp_path, monkeypatch)
+        write_skill(
+            tmp_path / ".aish" / "memory",
+            "hotels-use-trippy.md",
+            "---\nname: hotels-use-trippy\n"
+            "description: For hotel or villa searches run trippy for live "
+            "bookings and photos.\n---\n",
+        )
+        assert preflight(str(tmp_path), None, "show me photo of BMW i3").names == []
+        assert preflight(str(tmp_path), None, "find a villa on Crete").names == [
+            "hotels-use-trippy"
+        ]
+
+    def test_keyword_overrides_stopword(self, tmp_path, monkeypatch):
+        # Stopwords only mute description prose — an author who WANTS a
+        # generic word to trigger puts it in keywords, which are unfiltered.
+        self._isolate(tmp_path, monkeypatch)
+        self._skill(tmp_path, "shotwell", "Photo library workflow.", keywords="photo")
+        assert preflight(str(tmp_path), None, "organize my photos please").names == [
+            "shotwell"
+        ]
+
     def test_description_stopwords_do_not_fire(self, tmp_path, monkeypatch):
         self._isolate(tmp_path, monkeypatch)
         write_skill(
