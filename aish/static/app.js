@@ -655,17 +655,26 @@ function traceStep(step) {
   if (step.kind === "knowledge") {
     t.started += 1;
     const items = step.items || [];
+    const nSkill = items.filter((i) => i.kind === "skill").length;
+    const nMem = items.length - nSkill;
+    const parts = [];
+    if (nSkill) parts.push(`${nSkill} skill${nSkill === 1 ? "" : "s"}`);
+    if (nMem) parts.push(`${nMem} ${nMem === 1 ? "memory" : "memories"}`);
     const { main } = traceRow(
-      t, traceSvg("knowledge", "var(--yellow)"), "Recalled from memory",
-      `${items.length} item${items.length === 1 ? "" : "s"} from past work`
+      t, traceSvg("knowledge", "var(--yellow)"), "Recalled knowledge",
+      `${parts.join(" · ") || items.length} from past work`
     );
     if (items.length) {
       const chips = document.createElement("div");
       chips.className = "know-chips";
       for (const it of items) {
+        const isSkill = it.kind === "skill";
         const chip = document.createElement("span");
-        chip.className = "know-chip";
-        chip.textContent = it.label || "";
+        chip.className = "know-chip " + (isSkill ? "skill" : "mem");
+        const tag = document.createElement("span");
+        tag.className = "know-tag";
+        tag.textContent = isSkill ? "SKILL" : "MEM";
+        chip.append(tag, document.createTextNode(it.label || ""));
         chips.appendChild(chip);
       }
       main.appendChild(chips);

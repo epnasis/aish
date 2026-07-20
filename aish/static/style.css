@@ -1227,12 +1227,22 @@ body.wrap .msg.echo, body.wrap .msg.stream {
    and scroll internally, pinned to the newest step. */
 .trace.live .trace-body { max-height: 46vh; overflow-y: auto; }
 /* Scroll-edge fades: hint that there's more above / below (#scroll indicators). */
+/* Scroll-edge hint: a fade (matched to the live tint so it doesn't leak as a
+   black bar) plus a chevron showing there's more above / below. */
+.trace.live .trace-body { --sfade: #010d1a; }
 .trace-body::before, .trace-body::after {
-  content: ""; display: block; position: sticky; left: 0; right: 0; height: 20px;
+  content: ""; display: block; position: sticky; left: 0; right: 0; height: 26px;
   pointer-events: none; z-index: 3; opacity: 0; transition: opacity 0.15s;
+  background-repeat: no-repeat; background-position: center; background-size: 16px 16px;
 }
-.trace-body::before { top: 0; margin-bottom: -20px; background: linear-gradient(var(--bg), transparent); }
-.trace-body::after { bottom: 0; margin-top: -20px; background: linear-gradient(transparent, var(--bg)); }
+.trace-body::before {
+  top: 0; margin-bottom: -26px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2398989e' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 15l6-6 6 6'/%3E%3C/svg%3E"), linear-gradient(var(--sfade, var(--bg)), transparent);
+}
+.trace-body::after {
+  bottom: 0; margin-top: -26px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2398989e' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"), linear-gradient(transparent, var(--sfade, var(--bg)));
+}
 .trace-body.more-above::before { opacity: 1; }
 .trace-body.more-below::after { opacity: 1; }
 /* Stop while live; chevron only once finished. */
@@ -1293,7 +1303,10 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .out-expand { width: 100%; padding: 8px; border: none; border-top: 0.5px solid var(--sep); background: none; color: var(--blue); font-size: 12.5px; font-weight: 600; }
 .out-expand[hidden] { display: none; }
 .know-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
-.know-chip { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 8px; background: var(--chip-bg); font-size: 11.5px; color: var(--fg); line-height: 1.3; }
+.know-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px 3px 6px; border-radius: 8px; background: var(--chip-bg); font-size: 11.5px; color: var(--fg); line-height: 1.3; }
+.know-tag { font-weight: 700; font-size: 9px; letter-spacing: 0.4px; }
+.know-chip.skill .know-tag { color: var(--green); }
+.know-chip.mem .know-tag { color: var(--yellow); }
 
 /* ---- composer actions popover ---- */
 .popover-menu.wide { min-width: 240px; padding: 6px; }
@@ -1390,13 +1403,20 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .trace-stop:disabled { opacity: 0.5; }
 .trace.stopping .trace-status .spin { border-color: var(--dim); border-top-color: transparent; }
 
-/* output box: scroll-edge fades (there's more above/below) */
+/* output box: scroll-edge fades + chevron (there's more above/below) */
 .out-scroll::before, .out-scroll::after {
-  content: ""; display: block; position: sticky; left: 0; right: 0; height: 16px;
+  content: ""; display: block; position: sticky; left: 0; right: 0; height: 20px;
   pointer-events: none; z-index: 2; opacity: 0; transition: opacity 0.15s;
+  background-repeat: no-repeat; background-position: center; background-size: 14px 14px;
 }
-.out-scroll::before { top: 0; margin-bottom: -16px; background: linear-gradient(var(--bg), transparent); }
-.out-scroll::after { bottom: 0; margin-top: -16px; background: linear-gradient(transparent, var(--bg)); }
+.out-scroll::before {
+  top: 0; margin-bottom: -20px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2398989e' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 15l6-6 6 6'/%3E%3C/svg%3E"), linear-gradient(var(--bg), transparent);
+}
+.out-scroll::after {
+  bottom: 0; margin-top: -20px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2398989e' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"), linear-gradient(transparent, var(--bg));
+}
 .out-scroll.more-above::before { opacity: 1; }
 .out-scroll.more-below::after { opacity: 1; }
 

@@ -439,6 +439,7 @@ class Preload:
     text: str = ""  # injectable knowledge blocks, "" when nothing qualifies
     names: list[str] = field(default_factory=list)  # best first, for the status echo
     unread: list[str] = field(default_factory=list)  # oversized skills the read gate enforces
+    items: list[dict] = field(default_factory=list)  # {name, kind} for a rich client's chips
 
 
 def preflight(
@@ -480,6 +481,7 @@ def preflight(
     blocks: list[str] = []
     names: list[str] = []
     unread: list[str] = []
+    items: list[dict] = []
     remaining = char_budget
     for entry in chosen[:PREFLIGHT_TOP]:
         if remaining < 200:  # no room left for anything useful
@@ -504,8 +506,9 @@ def preflight(
             unread.append(entry.name)
         blocks.append(block)
         names.append(entry.name)
+        items.append({"name": entry.name, "kind": entry.kind})
         remaining -= len(block) + 2  # +2 covers the join's blank line
-    return Preload("\n\n".join(blocks), names, unread)
+    return Preload("\n\n".join(blocks), names, unread, items)
 
 
 def _snippet(text: str, words: list[str], width: int = RECALL_SNIPPET_CHARS) -> str | None:

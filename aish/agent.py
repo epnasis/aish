@@ -554,7 +554,7 @@ class Agent:
             self._note("⚑ preloaded knowledge: " + ", ".join(preload.names))
             self._emit_step(
                 kind="knowledge",
-                items=[{"label": n} for n in preload.names],
+                items=[{"label": it["name"], "kind": it["kind"]} for it in preload.items],
             )
         self._append(user_message)
 
