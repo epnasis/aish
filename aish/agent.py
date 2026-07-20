@@ -1003,13 +1003,18 @@ class Agent:
     def _emit_tool_step(self, name: str, args: dict, result: str, secs: float) -> None:
         if self.on_step is None:
             return
+        ok = not (result.startswith("ERROR") or result.startswith("NOT EXECUTED"))
         step: dict[str, Any] = {
             "kind": "tool",
             "name": name,
             "secs": secs,
-            "ok": not result.startswith("ERROR"),
+            "ok": ok,
             "summary": self._arg_summary(name, args),
         }
+        if not ok and self._run_meta is None:
+            # Non-run_command failure (a read_url/web_search error, a gate
+            # refusal): carry the message so the trace can explain what broke.
+            step["error"] = result[:STEP_OUTPUT_CAP]
         if self._run_meta is not None:  # run_command: command, decision, output
             step.update(self._run_meta)
             self._run_meta = None

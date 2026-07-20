@@ -656,27 +656,86 @@ function toolFinish(t, step) {
     : step.name === "run_command" ? `Approved · ${fmtSecs(step.secs)}`
     : fmtSecs(step.secs);
   ref.titleEl.appendChild(tag);
-  if (denied && ref.row.querySelector(".step-cmd")) {
-    ref.row.querySelector(".step-cmd").classList.add("struck");
+  if (denied) {
+    if (ref.row.querySelector(".step-cmd")) ref.row.querySelector(".step-cmd").classList.add("struck");
+    // Why it was skipped/blocked (denial comment, gate reason) — #5, #12.
+    if (step.output) {
+      const why = document.createElement("span");
+      why.className = "step-sub";
+      why.textContent = step.output;
+      ref.main.appendChild(why);
+    }
   }
-  // command output block (if not already streamed live)
+  // command output block (finalize streamed output, or render from the step)
   if (step.name === "run_command" && step.output && !denied) {
     let out = ref.output;
     if (!out) { out = document.createElement("div"); out.className = "step-output"; ref.main.appendChild(out); }
-    if (!out.dataset.streamed) renderStepOutput(out, step.output);
+    const streamed = out.dataset.streamed && out.querySelector(".out-box");
+    if (streamed) finalizeOutBox(streamed, splitExit(step.output)[1]);
+    else renderStepOutput(out, step.output);
+  }
+  // error detail for a failed non-run_command tool (#18)
+  if (!step.ok && step.error && step.name !== "run_command") {
+    const errWrap = document.createElement("div");
+    errWrap.className = "step-output";
+    ref.main.appendChild(errWrap);
+    renderErrorBox(errWrap, step.error);
   }
   updateTraceHead(t);
 }
 
+const WRAP_SVG = '<svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h12a3.25 3.25 0 0 1 0 6.5h-2.5m0 0 2.2-2.2m-2.2 2.2 2.2 2.2M4 18.5h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+// The collapsible command-output box: header (label · wrap · copy), a scrolling
+// body, and a "Show full output · N lines" expander when it's tall.
+function outBox(errorMode) {
+  const box = document.createElement("div");
+  box.className = "out-box" + (errorMode ? " error" : "");
+  box.innerHTML =
+    `<div class="out-head"><span class="out-label">${errorMode ? "error" : "output"}</span>` +
+    `<div class="out-actions"><button type="button" class="out-wrap" title="Wrap lines">${WRAP_SVG}</button></div></div>` +
+    `<div class="out-scroll"><div class="out-body mono"></div><div class="out-fade"></div></div>` +
+    `<button type="button" class="out-expand" hidden></button>`;
+  const body = box.querySelector(".out-body");
+  box.querySelector(".out-wrap").onclick = () => box.classList.toggle("wrap-on");
+  box.querySelector(".out-actions").prepend(copyChip(() => body.textContent, "copy output"));
+  box.querySelector(".out-expand").onclick = () => { box.classList.toggle("expanded"); labelExpand(box); };
+  return box;
+}
+
+function outLines(box) {
+  return (box.querySelector(".out-body").textContent.match(/\n/g) || []).length + 1;
+}
+function labelExpand(box) {
+  box.querySelector(".out-expand").textContent =
+    box.classList.contains("expanded") ? "Collapse output" : `Show full output · ${outLines(box)} lines`;
+}
+function finalizeOutBox(box, label) {
+  if (label) box.querySelector(".out-label").textContent = label;
+  if (outLines(box) > 6) { box.classList.add("collapsible"); box.querySelector(".out-expand").hidden = false; labelExpand(box); }
+}
+
+// Peel a trailing "[exit code: N]" into the header label.
+function splitExit(text) {
+  const m = text.match(/\n?\[exit code: (-?\d+)\]\s*$/);
+  return m ? [text.slice(0, m.index), `stdout · exit ${m[1]}`] : [text, "stdout"];
+}
+
 function renderStepOutput(container, text) {
   container.replaceChildren();
-  const box = document.createElement("div");
-  box.className = "out-box";
-  const body = document.createElement("div");
-  body.className = "out-body mono";
-  body.appendChild(ansiFragment(text));
-  box.append(copyChip(() => body.textContent, "copy output"), body);
+  const [bodyText, label] = splitExit(text);
+  const box = outBox(false);
+  box.querySelector(".out-body").appendChild(ansiFragment(bodyText));
   container.appendChild(box);
+  finalizeOutBox(box, label);
+}
+
+function renderErrorBox(container, text) {
+  container.replaceChildren();
+  const box = outBox(true);
+  box.querySelector(".out-body").appendChild(ansiFragment(text));
+  container.appendChild(box);
+  finalizeOutBox(box, "error");
 }
 
 function traceStream(text) {
@@ -686,19 +745,12 @@ function traceStream(text) {
     const out = currentTrace.pending.output;
     out.dataset.streamed = "1";
     let box = out.querySelector(".out-box");
-    if (!box) {
-      out.replaceChildren();
-      box = document.createElement("div");
-      box.className = "out-box";
-      const body = document.createElement("div");
-      body.className = "out-body mono";
-      box.append(copyChip(() => body.textContent, "copy output"), body);
-      out.appendChild(box);
-    }
+    if (!box) { out.replaceChildren(); box = outBox(false); out.appendChild(box); }
     const body = box.querySelector(".out-body");
     if (body.childNodes.length) body.appendChild(document.createTextNode("\n"));
     body.appendChild(ansiFragment(text));
     scrollToEnd();
+    pinTrace(currentTrace);
     return;
   }
   addStreamLine(text);

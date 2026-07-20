@@ -1206,10 +1206,25 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .step-cmd { font-size: 12px; color: var(--dim); margin-top: 2px; overflow-x: auto; white-space: pre; }
 .step-cmd.struck { text-decoration: line-through; }
 .step-output { margin-top: 8px; }
-.out-box { position: relative; border-radius: 10px; background: var(--bg); border: 0.5px solid var(--sep); overflow: hidden; }
-.out-box .copy-chip { position: absolute; top: 4px; right: 6px; z-index: 1; }
-.out-body { max-height: 200px; overflow: auto; padding: 8px 26px 8px 10px; font-size: 11.5px; line-height: 1.6; color: var(--dim); white-space: pre; }
-body.wrap .out-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.out-box { border-radius: 10px; background: var(--bg); border: 0.5px solid var(--sep); overflow: hidden; }
+.out-box.error { border-color: var(--red-glow); }
+.out-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; }
+.out-label { flex: 1; font-family: ui-monospace, Menlo, monospace; font-size: 10px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--dim); }
+.out-box.error .out-label { color: var(--red); }
+.out-actions { display: flex; gap: 2px; align-items: center; }
+.out-wrap { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; background: none; border: none; border-radius: 7px; color: var(--dim); }
+.out-wrap svg { width: 16px; height: 16px; }
+.out-box.wrap-on .out-wrap { background: var(--blue-glow); color: var(--blue); }
+.out-actions .copy-chip { width: 28px; height: 28px; }
+.out-actions .copy-chip svg { width: 15px; height: 15px; }
+.out-scroll { position: relative; max-height: 96px; overflow: auto; border-top: 0.5px solid var(--sep); transition: max-height 0.2s; }
+.out-box.expanded .out-scroll { max-height: 360px; }
+.out-body { padding: 8px 12px; font-size: 11.5px; line-height: 1.6; color: var(--dim); white-space: pre; }
+.out-box.wrap-on .out-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.out-fade { position: absolute; left: 0; right: 0; bottom: 0; height: 26px; pointer-events: none; background: linear-gradient(transparent, var(--bg)); display: none; }
+.out-box.collapsible:not(.expanded) .out-fade { display: block; }
+.out-expand { width: 100%; padding: 8px; border: none; border-top: 0.5px solid var(--sep); background: none; color: var(--blue); font-size: 12.5px; font-weight: 600; }
+.out-expand[hidden] { display: none; }
 .know-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
 .know-chip { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 8px; background: var(--chip-bg); font-size: 11.5px; color: var(--fg); line-height: 1.3; }
 
