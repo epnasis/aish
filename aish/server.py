@@ -749,6 +749,8 @@ class WebServer:
             await self._send_files(websocket, str(message.get("query", "")))
         elif kind == "stop":
             await self._stop_task(websocket)
+        elif kind == "dequeue":
+            self._dequeue(str(message.get("text", "")))
         elif kind == "client_debug":
             # Device-side diagnostics (viewport state on iOS, etc.) — printed
             # to the server log because the phone has no reachable console.
@@ -816,6 +818,15 @@ class WebServer:
         for uid in list(session.bridge.pending):
             session.bridge.answer(uid, {"action": "deny"})
         session.bridge.emit({"type": "echo", "text": "✕ stop requested"})
+
+    def _dequeue(self, text: str) -> None:
+        """Drop the first still-waiting message matching `text` (the client's
+        queued-chip remove button). A running task is never affected."""
+        queue = self.active.queue
+        for i, (queued, _attachments) in enumerate(queue):
+            if queued == text:
+                del queue[i]
+                return
 
     async def _start_task(
         self, websocket: WebSocket, text: str, attachments: list[str] | None = None

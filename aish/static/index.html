@@ -105,12 +105,34 @@
 
 <div id="suggest" hidden></div>
 <div id="attachments" hidden></div>
+<div id="queue-list" hidden></div>
+
+<!-- composer + actions (attach / reference / slash / photo) -->
+<div id="composer-actions" class="popover-menu wide" hidden>
+  <button class="action-item" data-act="attach">
+    <span class="action-ico" style="background:var(--blue-glow)"><svg viewBox="0 0 24 24"><path d="M8 4.5h5.5L19 10v9.5a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V5.5a1 1 0 0 1 1-1z" fill="none" stroke="var(--blue)" stroke-width="1.7"/><path d="M13.5 4.5V10H19" fill="none" stroke="var(--blue)" stroke-width="1.7"/></svg></span>
+    <span class="action-text"><span class="action-title">Attach file</span><span class="action-sub">Add a file to context</span></span>
+  </button>
+  <button class="action-item" data-act="reference">
+    <span class="action-ico" style="background:var(--green-glow)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="var(--green)" stroke-width="1.7"/><path d="M16 12v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1" fill="none" stroke="var(--green)" stroke-width="1.7"/></svg></span>
+    <span class="action-text"><span class="action-title">Reference a file</span><span class="action-sub">Point aish at a path — @</span></span>
+  </button>
+  <button class="action-item" data-act="slash">
+    <span class="action-ico" style="background:var(--orange-glow)"><svg viewBox="0 0 24 24"><path d="M14.5 4.5 9.5 19.5" fill="none" stroke="var(--orange)" stroke-width="1.9" stroke-linecap="round"/></svg></span>
+    <span class="action-text"><span class="action-title">Slash command</span><span class="action-sub">Skills &amp; tools — /</span></span>
+  </button>
+  <button class="action-item" data-act="photo">
+    <span class="action-ico" style="background:var(--purple-glow)"><svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5" fill="none" stroke="var(--purple)" stroke-width="1.7"/><circle cx="9" cy="10" r="1.6" fill="var(--purple)"/><path d="M4.5 17 9 13l3 2.5 3-2.5 4.5 4" fill="none" stroke="var(--purple)" stroke-width="1.7" stroke-linejoin="round"/></svg></span>
+    <span class="action-text"><span class="action-title">Photo</span><span class="action-sub">Camera or library</span></span>
+  </button>
+</div>
 
 <form id="composer">
-  <button id="attach" type="button" aria-label="attach files">
-    <svg viewBox="0 0 24 24"><path d="M20.6 11.6 12.4 19.8a5 5 0 0 1-7.1-7.1l8.3-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.2a1.8 1.8 0 0 1-2.6-2.6l7.6-7.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <button id="attach" type="button" aria-label="actions">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
   </button>
   <input id="file-input" type="file" multiple hidden>
+  <input id="photo-input" type="file" accept="image/*" capture="environment" hidden>
   <textarea id="input" rows="1" placeholder="Ask aish"
             autocomplete="off" autocapitalize="sentences" spellcheck="true"></textarea>
   <button id="send" type="submit" aria-label="send">

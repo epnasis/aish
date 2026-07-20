@@ -163,6 +163,7 @@ function handle(event) {
     case "user":
       closeAnswer();
       finishTrace(); // close any trace from a prior turn before the new one
+      removeQueueChip(event.text); // a queued message that just started running
       retireQuickReplies();
       sawAnswer = false;
       setBusy(true);
@@ -173,7 +174,7 @@ function handle(event) {
       if (!replaying) scrollToEnd(true);
       break;
     case "queued":
-      showToast(`queued (#${event.position}) — runs after the current task`);
+      addQueueChip(event.text);
       break;
     case "token": onToken(event.text); break;
     case "echo":
@@ -2098,12 +2099,79 @@ function handleSlash(text) {
 // ---- attachments ---------------------------------------------------------
 let attachments = []; // {name, path}
 
-$("attach").onclick = () => $("file-input").click();
+// The + button opens the composer actions popover (attach / reference / slash
+// / photo); it sits above the button, iOS-style.
+$("attach").onclick = () => {
+  const menu = $("composer-actions");
+  if (!menu.hidden) { closeSheets(); return; }
+  menu.style.visibility = "hidden";
+  menu.hidden = false;
+  const anchor = $("attach").getBoundingClientRect();
+  menu.style.left = `${anchor.left}px`;
+  menu.style.top = `${anchor.top - menu.offsetHeight - 6}px`;
+  menu.style.visibility = "";
+  $("backdrop").hidden = false;
+};
+
+$("composer-actions").addEventListener("click", (e) => {
+  const item = e.target.closest(".action-item");
+  if (!item) return;
+  closeSheets();
+  switch (item.dataset.act) {
+    case "attach": $("file-input").click(); break;
+    case "photo": $("photo-input").click(); break;
+    case "reference": composerInsert("@"); break;
+    case "slash": composerInsert("/"); break;
+  }
+});
+
+// Insert a trigger char and fire the input flow (mention / slash suggestions).
+function composerInsert(ch) {
+  input.focus();
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  input.setRangeText(ch, start, end, "end");
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
 
 $("file-input").addEventListener("change", async () => {
   for (const file of $("file-input").files) await uploadFile(file);
   $("file-input").value = "";
 });
+
+$("photo-input").addEventListener("change", async () => {
+  for (const file of $("photo-input").files) await uploadFile(file);
+  $("photo-input").value = "";
+});
+
+// ---- message queue chips -------------------------------------------------
+// A message sent while the agent is busy waits its turn; show it above the
+// composer so it can be seen and cancelled (server-side dequeue).
+function addQueueChip(text) {
+  const list = $("queue-list");
+  const chip = document.createElement("div");
+  chip.className = "queue-chip";
+  chip.dataset.text = text;
+  chip.innerHTML =
+    '<svg class="queue-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v4.3l2.6 1.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+    '<span class="queue-body"><span class="queue-text"></span><span class="queue-sub">Queued · sends when aish finishes</span></span>' +
+    '<button class="queue-remove" type="button" aria-label="remove from queue"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></button>';
+  chip.querySelector(".queue-text").textContent = text;
+  chip.querySelector(".queue-remove").onclick = () => {
+    send({ type: "dequeue", text });
+    removeQueueChip(text);
+  };
+  list.appendChild(chip);
+  list.hidden = false;
+  scrollToEnd();
+}
+
+function removeQueueChip(text) {
+  const list = $("queue-list");
+  const chip = [...list.children].find((c) => c.dataset.text === text);
+  if (chip) chip.remove();
+  if (!list.children.length) list.hidden = true;
+}
 
 async function uploadFile(file) {
   const query = new URLSearchParams({ name: file.name });

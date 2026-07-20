@@ -1170,3 +1170,32 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 body.wrap .out-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 .know-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
 .know-chip { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 8px; background: var(--chip-bg); font-size: 11.5px; color: var(--fg); line-height: 1.3; }
+
+/* ---- composer actions popover ---- */
+.popover-menu.wide { min-width: 240px; padding: 6px; }
+.action-item {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  background: none; border: none; border-radius: 12px; padding: 9px 10px; text-align: left;
+}
+.action-item:active { background: var(--row-sel-bg); }
+.action-ico { width: 30px; height: 30px; border-radius: 9px; flex: none; display: flex; align-items: center; justify-content: center; }
+.action-ico svg { width: 18px; height: 18px; display: block; }
+.action-text { display: flex; flex-direction: column; min-width: 0; }
+.action-title { font-size: 15px; font-weight: 600; color: var(--fg); line-height: 1.25; }
+.action-sub { font-size: 11.5px; color: var(--dim); }
+
+/* ---- queued message chips ---- */
+#queue-list { flex: none; padding: 6px 12px 0; display: flex; flex-direction: column; gap: 6px; }
+#queue-list[hidden] { display: none; }
+.queue-chip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 8px 8px 12px; border-radius: 14px;
+  background: var(--queue-bg); border: 1px dashed var(--sep2);
+}
+.queue-ico { width: 16px; height: 16px; flex: none; color: var(--dim); }
+.queue-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.queue-text { font-size: 14px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-sub { font-size: 11px; color: var(--dim); }
+.queue-remove { flex: none; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: none; border: none; color: var(--dim); }
+.queue-remove svg { width: 17px; height: 17px; }
+.queue-remove:active { opacity: 0.5; }
