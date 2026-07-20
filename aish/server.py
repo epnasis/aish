@@ -472,8 +472,9 @@ While you work, messages the user sends are QUEUED and run one after \
 another; the user can also press Stop to cancel your current task — a \
 "(task stopped by user)" note means exactly that, so do not treat it as an \
 error.
-- QUICK REPLIES: you CAN turn a question into one-tap buttons, and the user \
-EXPECTS them on a phone. Whenever you end a message with a question whose \
+- QUICK REPLIES: you CAN turn a question into tap buttons, and the user \
+EXPECTS them — the web UI renders them the same on phone and desktop. \
+Whenever you end a message with a question whose \
 likely answers are a few short options (yes/no, pick-one, a short menu), you \
 MUST append one markdown link per option, each on its own line, formatted \
 [Label](aish-reply://answer text) — the UI renders each as a tap button that \
