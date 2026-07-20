@@ -657,7 +657,9 @@ class Agent:
                 self._note(
                     f"∑ total {format_secs(total)}{_tokens_note((tokens_in, tokens_out))}"
                 )
-                self._emit_step(kind="thinking_cancel")  # a plain answer needs no trace row
+                # a plain answer needs no "Thinking" row, but carry the turn time
+                # so the web trace can label the answer step ("Answered in Xs")
+                self._emit_step(kind="thinking_cancel", secs=turn_secs)
                 return result
 
             # Ollama buffers tool-call generation and streams nothing until it

@@ -666,7 +666,7 @@ function traceStep(step) {
     // into it (relabeled "Answering…"), keep it as a finalized "Answered" step
     // instead of dropping it.
     if (t.thinkingRow) {
-      if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow);
+      if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow, step.secs);
       else { t.thinkingRow.row.remove(); t.started -= 1; }
       t.thinkingRow = null;
     }
@@ -1180,11 +1180,12 @@ function updateTraceHead(t) {
 // The answer streamed into this (formerly "Thinking…") row — finalize it as a
 // permanent "Answered" step instead of dropping the live row, so the last step
 // on the timeline reflects that the reply landed.
-function finalizeAnswerRow(t, ref) {
+function finalizeAnswerRow(t, ref, secs) {
   clearStepTimer(t, ref);
   ref.row.classList.remove("running", "active-step");
   ref.badge.innerHTML = traceSvg("check", "var(--green)");
-  ref.titleEl.textContent = "Answered";
+  ref.titleEl.textContent =
+    typeof secs === "number" ? `Answered in ${fmtSecs(secs)}` : "Answered";
 }
 
 function finishTrace(errored) {
