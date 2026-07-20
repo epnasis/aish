@@ -2974,10 +2974,15 @@ async function browseDir(path) {
   renderDirList();
 }
 
-function dirRow(label, meta, onTap, cls = "") {
+const DIR_ICON_FOLDER = '<svg class="dir-ico" viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="var(--folder-fill)" stroke="var(--blue)" stroke-width="1.6"/></svg>';
+const DIR_ICON_UP = '<svg class="dir-ico" viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="var(--blue)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const DIR_CHEVRON = '<svg class="dir-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" fill="none" stroke="var(--sep2)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function dirRow(label, meta, onTap, kind = "folder") {
   const row = document.createElement("button");
   row.type = "button";
-  row.className = `row ${cls}`.trim();
+  row.className = "row dir-row" + (kind === "up" ? " up" : "");
+  row.innerHTML = kind === "up" ? DIR_ICON_UP : DIR_ICON_FOLDER;
   const name = document.createElement("span");
   name.className = "folder";
   name.textContent = label;
@@ -2988,6 +2993,7 @@ function dirRow(label, meta, onTap, cls = "") {
     metaEl.textContent = meta;
     row.appendChild(metaEl);
   }
+  if (kind === "folder" || kind === "recent") row.insertAdjacentHTML("beforeend", DIR_CHEVRON);
   row.onclick = onTap;
   return row;
 }
@@ -3001,6 +3007,7 @@ function sectionLabel(text) {
 
 function renderDirList(deepResults = null) {
   $("dir-current").textContent = abbreviatePath(dirPath);
+  $("dir-use-label").textContent = `Set working directory to “${baseName(dirPath)}”`;
   const list = $("dir-list");
   list.replaceChildren();
   const raw = $("dir-search").value.trim();
@@ -3018,14 +3025,14 @@ function renderDirList(deepResults = null) {
     if (recents.length) {
       list.appendChild(sectionLabel("Recent"));
       for (const p of recents) {
-        list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p)));
+        list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p), "recent"));
       }
       list.appendChild(sectionLabel("Folders"));
     }
   }
   if (dirPath !== "/") {
     list.appendChild(
-      dirRow("‹ ..", null, () => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/"), "up")
+      dirRow("..", null, () => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/"), "up")
     );
   }
   const visible = dirEntries.filter(
@@ -3039,7 +3046,7 @@ function renderDirList(deepResults = null) {
   if (deepResults && deepResults.length) {
     list.appendChild(sectionLabel("Everywhere"));
     for (const p of deepResults) {
-      list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p)));
+      list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p), "recent"));
     }
   }
 }

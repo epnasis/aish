@@ -199,15 +199,19 @@
     <strong class="grow">Working directory</strong>
     <button class="close" aria-label="close" data-close="dir-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
   </div>
+  <div class="dir-note">The folder aish reads &amp; runs commands in for <b>this session</b>.</div>
   <div class="ws-row">
     <input id="dir-search" placeholder="search folders" autocomplete="off"
            autocapitalize="off" spellcheck="false">
   </div>
-  <div class="ws-row dir-current-row">
-    <div id="dir-current" class="mono grow"></div>
-    <button id="dir-use" class="primary">Use</button>
-  </div>
   <div id="dir-list" class="sheet-list"></div>
+  <div class="dir-action">
+    <button id="dir-use" class="primary big">
+      <svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="#fff" stroke-width="1.8"/><path d="M12 10v5M9.5 12.5h5" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <span id="dir-use-label">Use this folder</span>
+    </button>
+    <div id="dir-current" class="mono"></div>
+  </div>
 </div>
 
 <div id="toast" hidden></div>

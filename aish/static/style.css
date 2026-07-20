@@ -32,6 +32,7 @@
   --red-glow: rgba(255, 69, 58, 0.16);
   --yellow-glow: rgba(255, 214, 10, 0.14);
   --purple-glow: rgba(191, 90, 242, 0.18);
+  --folder-fill: rgba(10, 132, 255, 0.16);   /* tinted folder glyphs in the picker */
   /* Live turn: the in-progress activity trace is tinted + outlined blue. */
   --live-bg: rgba(10, 132, 255, 0.10);
   --live-border: rgba(10, 132, 255, 0.30);
@@ -1049,17 +1050,30 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .ws-about { color: var(--dim); font-size: 12px; line-height: 1.5; }
 
 /* directory picker sheet */
-.dir-current-row { align-items: center; margin-bottom: 4px; }
-.dir-current-row .grow { flex: 1; min-width: 0; }
+.dir-note { font-size: 13px; color: var(--dim); padding: 0 4px 10px; }
+.dir-note b { color: var(--fg); font-weight: 600; }
+.dir-row { display: flex; align-items: center; gap: 12px; }
+.dir-row .dir-ico { width: 21px; height: 21px; flex: none; display: block; }
+.dir-row .folder { flex: 1; min-width: 0; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dir-row.up .folder { color: var(--blue); }
+.dir-row .meta { flex: none; color: var(--dim); font-size: 12px; margin-right: 4px; }
+.dir-row .dir-chev { width: 15px; height: 15px; flex: none; display: block; }
+.dir-action { flex: none; padding: 12px 4px 4px; border-top: 0.5px solid var(--sep); }
+.dir-action .primary.big {
+  width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 13px; border: none; border-radius: 13px;
+  background: var(--blue); color: #fff; font-size: 16px; font-weight: 600;
+}
+.dir-action .primary.big svg { width: 19px; height: 19px; }
+.dir-action .primary.big:active { opacity: 0.85; }
 #dir-current {
+  text-align: center; margin-top: 7px;
   color: var(--dim);
-  font-size: 12px;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap; /* abbreviatePath() already keeps the leaf visible */
 }
-#dir-list .row .folder { color: var(--fg); }
-#dir-list .row.up { color: var(--blue); }
 
 /* token gate */
 #token-gate {
