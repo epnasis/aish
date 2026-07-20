@@ -52,6 +52,13 @@ body {
      shrinks the body to the visual viewport while the keyboard is up, they
      must ride along instead of staying anchored behind the keyboard. */
   transform: translateZ(0);
+  /* Landscape iPhone: viewport-fit=cover draws edge-to-edge, so the Dynamic
+     Island (now on a side) would hide text under it and the curved corners
+     would sit over the send button. Inset the whole app — bars, transcript,
+     composer, and fixed fabs (positioned against this padding box) all clear
+     the island at once. Zero in portrait, so nothing changes there. */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
 /* Keyboard visible (JS-toggled): it covers the home-indicator area, so the
