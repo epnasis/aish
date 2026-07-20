@@ -53,6 +53,14 @@ function notify(title, body) {
   }
 }
 
+// ---- base path (subpath-mounted deploys) --------------------------------
+// The app is normally served at "/", but a reverse proxy may mount it under a
+// prefix (e.g. https://host/preview/ for a branch preview). Static assets and
+// the manifest are already relative; these are the endpoints that were rooted
+// at "/". Derive the mount point from the document's directory so ws + fetches
+// stay same-origin under whatever prefix served index.html. Always "/"-bounded.
+const BASE = location.pathname.replace(/[^/]*$/, "");
+
 // ---- token (optional auth) ----------------------------------------------
 const urlToken = new URLSearchParams(location.search).get("token");
 if (urlToken) localStorage.setItem("aish-token", urlToken);
@@ -74,7 +82,7 @@ function connect() {
   const lastSession = localStorage.getItem("aish-session");
   if (lastSession) params.set("session", lastSession);
   const query = params.size ? `?${params}` : "";
-  ws = new WebSocket(`${proto}//${location.host}/ws${query}`);
+  ws = new WebSocket(`${proto}//${location.host}${BASE}ws${query}`);
   ws.onopen = () => {
     backoff = 1000;
     $("connbar").hidden = true;
@@ -1834,7 +1842,7 @@ async function uploadFile(file) {
   if (token) query.set("token", token);
   let response;
   try {
-    response = await fetch(`/upload?${query}`, { method: "POST", body: file });
+    response = await fetch(`${BASE}upload?${query}`, { method: "POST", body: file });
   } catch {
     showToast(`upload failed: ${file.name}`);
     return;
@@ -2519,7 +2527,7 @@ let dirSearchTimer = null;
 
 async function dirsFetch(url, params) {
   if (token) params.set("token", token);
-  const response = await fetch(`${url}?${params}`);
+  const response = await fetch(`${BASE}${url.replace(/^\//, "")}?${params}`);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || response.status);
   return body;
