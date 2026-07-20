@@ -1981,6 +1981,79 @@ function copyChip(getText, label) {
   return btn;
 }
 
+// ---- export to PDF (issue #64) -------------------------------------------
+// Conversion is server-side but fully LOCAL (see export.py) — the markdown is
+// posted to /export/answer and comes back as a PDF blob the browser saves.
+function pdfIcon() {
+  return svgIcon("i-pdf", (make, svg) => {
+    const g = make("g", { fill: "none", stroke: "currentColor", "stroke-width": "1.7",
+      "stroke-linecap": "round", "stroke-linejoin": "round" });
+    g.appendChild(make("path", { d: "M12 4v9.5" }));
+    g.appendChild(make("path", { d: "M8.4 10.2 12 13.8l3.6-3.6" }));
+    g.appendChild(make("path", { d: "M5.5 16.5v1.5a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-1.5" }));
+    svg.appendChild(g);
+  });
+}
+
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+async function exportAnswerPdf(markdown, btn) {
+  const query = new URLSearchParams({ title: "aish answer" });
+  if (token) query.set("token", token);
+  if (btn) btn.disabled = true;
+  try {
+    const response = await fetch(`${BASE}export/answer?${query}`, {
+      method: "POST",
+      headers: { "Content-Type": "text/markdown" },
+      body: markdown,
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      showToast(`export failed: ${body.error || response.status}`);
+      return;
+    }
+    saveBlob(await response.blob(), "aish-answer.pdf");
+  } catch {
+    showToast("export failed — is the server reachable?");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Whole-session export (final answers only) — a plain GET the browser turns
+// into a download via Content-Disposition, so an anchor click is enough.
+function exportSessionPdf() {
+  if (!currentSession) return;
+  const query = new URLSearchParams({ session: currentSession });
+  if (token) query.set("token", token);
+  const a = document.createElement("a");
+  a.href = `${BASE}export/session?${query}`;
+  a.download = "aish-session.pdf";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function exportChip(getText) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "copy-chip";
+  btn.title = "export answer to PDF";
+  btn.setAttribute("aria-label", "export answer to PDF");
+  btn.appendChild(pdfIcon());
+  btn.onclick = () => exportAnswerPdf(getText(), btn);
+  return btn;
+}
+
 // Footer row under a finished answer: copy-as-markdown chip, plus the
 // read-aloud player where speech synthesis exists.
 let turnStart = 0;
@@ -1990,6 +2063,7 @@ function attachAnswerTools(el, source) {
   const tools = document.createElement("div");
   tools.className = "msg-tools";
   tools.appendChild(copyChip(() => source, "copy answer"));
+  tools.appendChild(exportChip(() => source));
   if (TTS_OK) tools.appendChild(buildTtsBox(el));
   // Regenerate: only the newest answer keeps it, so retire the previous one.
   retireRegen();
@@ -3491,6 +3565,7 @@ $("session-menu").addEventListener("click", (e) => {
     case "model": openModelSheet(""); break;
     case "cd": openDirSheet(); break;
     case "wrap": toggleWrap(); break;
+    case "export": exportSessionPdf(); break;
     case "workspace": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
   }
 });

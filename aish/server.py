@@ -29,12 +29,12 @@ from typing import TYPE_CHECKING, Any
 
 import uvicorn
 from starlette.applications import Starlette
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from . import backends, tools
+from . import backends, export, tools
 from .agent import Agent, ModelUnavailable, environment_context
 from .approval import (
     DEFAULT_ALLOWLIST,
@@ -114,6 +114,7 @@ TRANSCRIPT_KEEP = 500
 MAX_OPEN_SESSIONS = 6
 
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+EXPORT_MAX_BYTES = 5 * 1024 * 1024  # a single answer's markdown; generous ceiling
 
 # /file serves ONLY these — raster images the browser renders inertly in an
 # <img>. SVG is deliberately excluded: opened full-size it executes scripts
@@ -463,8 +464,13 @@ lessons file); the composer also accepts /model /resume /delete /new /cd \
 /add-dir /jobs /help. Header controls: a "‹ Sessions" back button (top left, \
 with a badge when a background session needs attention) opens the sessions \
 drawer; the centered session title opens a menu (new chat, switch model, \
-change directory, line wrap, workspace & jobs); the compose pencil (top right) \
-starts a new chat. A context bar under the title shows the working directory \
+change directory, line wrap, export the chat to PDF, workspace & jobs); the \
+compose pencil (top right) starts a new chat. Every finished answer has a \
+row of chips beneath it — copy, export that one answer to PDF, and (where \
+available) read-aloud. Both PDF exports render markdown to a file entirely \
+locally (no external service) and download it; the whole-chat export includes \
+only your final answers, not thinking or intermediate steps. A context bar \
+under the title shows the working directory \
 (tap to open a folder picker) and the model (tap to switch). In the composer, \
 the ＋ button opens attach file / reference a path (@) / slash command (/) / \
 photo. Your tool activity (thinking, recalled knowledge, commands and their \
@@ -1271,6 +1277,64 @@ class WebServer:
             headers={"X-Content-Type-Options": "nosniff"},
         )
 
+    @staticmethod
+    def _pdf_response(data: bytes, filename: str) -> Response:
+        return Response(
+            content=data,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    async def handle_export_answer(self, request) -> Response | JSONResponse:
+        """POST /export/answer?title=<title>, raw markdown body — renders one
+        answer to a PDF the browser downloads. Conversion is fully local (see
+        export.py); the markdown is what the user is already looking at, so it
+        never leaves the machine."""
+        if self.token and request.query_params.get("token") != self.token:
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        raw = await request.body()
+        if not raw:
+            return JSONResponse({"error": "empty answer"}, status_code=400)
+        if len(raw) > EXPORT_MAX_BYTES:
+            return JSONResponse({"error": "answer too large to export"}, status_code=413)
+        markdown_text = raw.decode("utf-8", errors="replace")
+        title = request.query_params.get("title", "").strip() or "aish answer"
+
+        def build() -> bytes:
+            return export.render_answer_pdf(markdown_text, title)
+
+        try:
+            data = await asyncio.to_thread(build)
+        except Exception as exc:  # noqa: BLE001 — a render failure is a 500, not a crash
+            return JSONResponse({"error": f"export failed: {exc}"}, status_code=500)
+        return self._pdf_response(data, export.safe_pdf_filename(title, "aish-answer"))
+
+    async def handle_export_session(self, request) -> Response | JSONResponse:
+        """GET /export/session?session=<name> — renders a session's FINAL
+        answers (thinking/tool steps excluded) to a downloadable PDF, sourced
+        from the persisted JSONL log. Conversion is fully local."""
+        if self.token and request.query_params.get("token") != self.token:
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        name = request.query_params.get("session", "").strip()
+        safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
+        path = self.state_dir / name
+        if not safe or ".." in name or not path.is_file():
+            return JSONResponse({"error": f"no such session: {name}"}, status_code=404)
+
+        def build() -> tuple[bytes, str]:
+            messages = SessionLog.load_messages(path)
+            title = SessionLog._derive_title(messages) or "aish session"
+            return export.render_session_pdf(messages, title), title
+
+        try:
+            data, title = await asyncio.to_thread(build)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"error": f"export failed: {exc}"}, status_code=500)
+        return self._pdf_response(data, export.safe_pdf_filename(title, "aish-session"))
+
 
 def create_app(
     model: str,
@@ -1430,6 +1494,8 @@ def create_app(
             WebSocketRoute("/ws", server.handle_ws),
             Route("/upload", server.handle_upload, methods=["POST"]),
             Route("/file", server.handle_file, methods=["GET"]),
+            Route("/export/answer", server.handle_export_answer, methods=["POST"]),
+            Route("/export/session", server.handle_export_session, methods=["GET"]),
             Route("/dirs", server.handle_dirs, methods=["GET"]),
             Route("/dirs/search", server.handle_dirs_search, methods=["GET"]),
             Route("/", serve_index, methods=["GET"]),

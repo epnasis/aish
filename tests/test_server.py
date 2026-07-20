@@ -1374,3 +1374,121 @@ class TestLearnCommand:
             recv_until(ws, "done")
         sent_user = [m for m in chat.calls[0]["messages"] if m["role"] == "user"]
         assert sent_user[-1]["content"] == "/etc/hosts looks odd"
+
+
+class TestExportAssembly:
+    """Issue #64: the pure markdown-assembly boundary — 'final answers only'
+    is a structural rule, tested here without touching a PDF."""
+
+    def test_session_answers_excludes_thinking_and_tool_steps(self):
+        from aish.export import session_answers
+
+        messages = [
+            {"role": "user", "content": "do a thing"},
+            # a working turn that narrated before calling a tool: it IS followed
+            # by a tool result, so it is not a final answer.
+            {"role": "assistant", "content": "let me check the files first"},
+            {"role": "tool", "tool_name": "run_command", "content": "file1 file2"},
+            # the real answer to the first question
+            {"role": "assistant", "content": "There are two files."},
+            {"role": "user", "content": "and now?"},
+            {"role": "assistant", "content": ""},  # empty turn — dropped
+            {"role": "assistant", "content": "All done — nothing else to do."},
+        ]
+        answers = session_answers(messages)
+        assert answers == ["There are two files.", "All done — nothing else to do."]
+        assert not any("check the files" in a for a in answers)  # working step gone
+        assert not any("file1 file2" in a for a in answers)  # tool output gone
+
+    def test_assemble_session_markdown_separates_answers(self):
+        from aish.export import assemble_session_markdown
+
+        messages = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "answer one"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "answer two"},
+        ]
+        doc = assemble_session_markdown(messages, "T")
+        assert "answer one" in doc and "answer two" in doc
+        assert "---" in doc  # a horizontal rule separates them
+
+    def test_render_answer_pdf_is_valid_pdf(self):
+        from aish.export import render_answer_pdf
+
+        data = render_answer_pdf("# Hi\n\nSome **markdown** — with an arrow →.", "t")
+        assert data.startswith(b"%PDF")
+        assert len(data) > 400
+
+    def test_safe_pdf_filename_slugs_and_defaults(self):
+        from aish.export import safe_pdf_filename
+
+        assert safe_pdf_filename("rename all/the photos!") == "rename-all-the-photos.pdf"
+        assert safe_pdf_filename("") == "aish-export.pdf"
+        assert safe_pdf_filename("   ", "fb") == "fb.pdf"
+
+
+class TestExportEndpoints:
+    def test_export_answer_returns_pdf_attachment(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            response = client.post(
+                "/export/answer?title=my+answer",
+                content="# Answer\n\nBody text — with unicode →.".encode(),
+            )
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "application/pdf"
+            assert 'attachment; filename="my-answer.pdf"' in (
+                response.headers["content-disposition"]
+            )
+            assert response.content.startswith(b"%PDF")
+
+    def test_export_answer_rejects_empty_body(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.post("/export/answer", content=b"").status_code == 400
+
+    def test_export_session_returns_final_answers_only(self, app_env):
+        # A task that calls a tool (auto-approved `ls`) then answers: the log
+        # then holds a tool step whose text must NOT reach the exported PDF.
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command="ls")]),
+            model_says("The exported final answer."),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client:
+            with connected(client) as (ws, hello, _):
+                name = hello["session"]
+                ws.send_json({"type": "task", "text": "list and answer"})
+                recv_until(ws, "done")
+            response = client.get(f"/export/session?session={name}")
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "application/pdf"
+            assert response.content.startswith(b"%PDF")
+            assert "attachment" in response.headers["content-disposition"]
+
+            # The pure assembly over the same log proves the tool step is gone.
+            from aish.export import session_answers
+            from aish.session import SessionLog
+
+            messages = SessionLog.load_messages(app_env["state_dir"] / name)
+            answers = session_answers(messages)
+            assert answers == ["The exported final answer."]
+
+    def test_export_session_unknown_name_404(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.get("/export/session?session=nope").status_code == 404
+            assert (
+                client.get("/export/session?session=../../etc/passwd").status_code == 404
+            )
+
+    def test_export_endpoints_require_token_when_set(self, app_env):
+        client, _ = make_client(app_env, [], token="s3cret")
+        with client:
+            assert client.post("/export/answer", content=b"x").status_code == 403
+            assert (
+                client.post("/export/answer?token=s3cret", content=b"# x").status_code
+                == 200
+            )
+            assert client.get("/export/session?session=x").status_code == 403

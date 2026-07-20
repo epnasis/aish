@@ -303,6 +303,13 @@ copy as their markdown source, so they paste as tables/formatting anywhere
 markdown is understood. Works over plain-HTTP LAN connections too, where the
 browser clipboard API is unavailable.
 
+**Export to PDF**: beside each answer's copy button is an export chip that
+saves that one answer as a PDF, and the session-title menu has an "Export to
+PDF" item that saves the whole chat — final answers only, without the thinking
+or intermediate working steps. Conversion is done entirely on the server
+(markdown rendered locally, never sent to any online service) and the file
+downloads straight to your device.
+
 **Quick replies**: when the model asks a question with a few short likely
 answers, it can end the message with `[Label](aish-reply://answer text)`
 links — the web UI renders them as tap chips. Tapping one puts the answer in
