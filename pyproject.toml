@@ -7,11 +7,13 @@ dependencies = [
     "anthropic>=0.60",
     "claude-agent-sdk>=0.2.121",
     "ddgs>=9.14.4",
+    "markdown>=3.5",
     "ollama>=0.5",
     "openai>=1.60",
     "prompt-toolkit>=3.0",
     "starlette>=0.40",
     "uvicorn[standard]>=0.30",
+    "xhtml2pdf>=0.2.16",
 ]
 
 [project.scripts]
