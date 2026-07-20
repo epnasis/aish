@@ -521,6 +521,20 @@ function pinTrace(t) {
   }
 }
 
+// A live "how long has THIS step run" timer on the active row.
+function startStepTimer(t, ref) {
+  const timer = document.createElement("span");
+  timer.className = "step-timer";
+  timer.textContent = "0s";
+  ref.titleEl.appendChild(timer);
+  t.activeStartedAt = Date.now();
+}
+function clearStepTimer(t, ref) {
+  const el = ref.titleEl.querySelector(".step-timer");
+  if (el) el.remove();
+  t.activeStartedAt = null;
+}
+
 function traceRow(t, iconHtml, title, sub) {
   const row = document.createElement("div");
   row.className = "step";
@@ -554,6 +568,7 @@ function traceStep(step) {
       t.started += 1;
       const ref = traceRow(t, '<span class="spin spin-purple"></span>', "Thinking…", "");
       ref.row.classList.add("running", "active-step");
+      startStepTimer(t, ref);
       t.thinkingRow = ref;
     }
     updateTraceHead(t);
@@ -570,6 +585,7 @@ function traceStep(step) {
     if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
     if (t.thinkingRow) { // finalize the live row in place
       const ref = t.thinkingRow;
+      clearStepTimer(t, ref);
       ref.row.classList.remove("running", "active-step");
       ref.badge.innerHTML = traceSvg("thinking", "var(--purple)");
       ref.titleEl.textContent = `Thought for ${fmtSecs(step.secs)}`;
@@ -611,6 +627,7 @@ function toolStart(t, step) {
   const [title, iconKey] = TOOL_META[step.name] || [step.name, "dot", "--dim"];
   const ref = traceRow(t, SPINNER, title, step.name === "run_command" ? "" : step.summary);
   ref.row.classList.add("running", "active-step");
+  startStepTimer(t, ref);
   if (step.name === "run_command" && step.command) {
     const cmd = document.createElement("div");
     cmd.className = "step-cmd mono";
@@ -640,6 +657,7 @@ function toolFinish(t, step) {
       ref.main.appendChild(cmd);
     }
   }
+  clearStepTimer(t, ref);
   t.pending = null;
   ref.row.classList.remove("running", "active-step");
   // finalize badge icon
@@ -777,6 +795,10 @@ function updateTraceHead(t) {
     title.textContent = "Working…";
     const elapsed = Math.floor((Date.now() - t.startedAt) / 1000);
     sub.textContent = `step ${t.started} · ${mmss(elapsed)}`;
+    if (t.activeStartedAt) {
+      const st = t.body.querySelector(".step.active-step .step-timer");
+      if (st) st.textContent = `${Math.floor((Date.now() - t.activeStartedAt) / 1000)}s`;
+    }
   } else {
     title.textContent = `Worked for ${fmtSecs(t.secs)}`;
     sub.textContent = `${t.started} step${t.started === 1 ? "" : "s"}`;

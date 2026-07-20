@@ -536,16 +536,16 @@ class TestReconnect:
                 )
                 recv_until(ws2, "done")
 
-    def test_config_ops_rejected_while_busy(self, app_env, tmp_path):
-        # Tasks queue now, but model/cwd changes mid-task would yank state
-        # from under the running agent — those still reject.
+    def test_cd_queued_while_busy(self, app_env, tmp_path):
+        # A /cd mid-task can't move state under the running agent, so it's
+        # queued and applied when the task finishes — not rejected.
         client, _ = make_client(app_env, self.pending_responses(tmp_path))
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "task", "text": "run it"})
             request = recv_until(ws, "approval_request")  # agent now blocked → busy
             ws.send_json({"type": "cd", "path": str(tmp_path)})
-            error = recv_until(ws, "error")
-            assert "busy" in error["text"]
+            echo = recv_until(ws, "echo")
+            assert "will switch" in echo["text"]
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
             recv_until(ws, "done")
 

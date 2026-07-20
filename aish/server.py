@@ -531,6 +531,7 @@ class Session:
         self.busy = False
         self.runner: asyncio.Task | None = None
         self.queue: list[tuple[str, list[str]]] = []  # (text, attachments) waiting
+        self.pending_cwd: str | None = None  # a /cd requested while busy; applied after
         self.last_shown = time.monotonic()
 
     @property
@@ -901,6 +902,13 @@ class WebServer:
             session.bridge.emit({"type": "error", "text": f"task failed: {exc!r}"})
         finally:
             session.busy = False
+            if session.pending_cwd:  # a /cd requested mid-task, applied now
+                target, session.pending_cwd = session.pending_cwd, None
+                result = session.agent.rebase(target)
+                shown = self.ws is not None and session is self.active
+                if not result.startswith("ERROR") and shown:
+                    with contextlib.suppress(Exception):
+                        await self.ws.send_json(self._cwd_event())
             if session.queue:
                 text, attachments = session.queue.pop(0)
                 self._launch(session, text, attachments)
@@ -1086,7 +1094,15 @@ class WebServer:
         )
 
     async def _cd(self, websocket: WebSocket, path: str) -> None:
-        if await self._reject_busy(websocket) or not path:
+        if not path:
+            return
+        # Changing cwd mid-task would move the ground under the running agent —
+        # queue it and apply the moment the task finishes, instead of failing.
+        if self.active.busy:
+            self.active.pending_cwd = path
+            self.active.bridge.emit(
+                {"type": "echo", "text": f"↪ will switch to {path} when this task finishes"}
+            )
             return
         result = await asyncio.to_thread(self.active.agent.rebase, path)
         if result.startswith("ERROR"):
