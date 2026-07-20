@@ -1775,6 +1775,108 @@ function retireQuickReplies() {
   }
 }
 
+// Rich embeds (#50): whitelisted YouTube / Google Maps links become inline
+// cards in the WEB transcript only — the CLI keeps plain markdown links.
+// Security: only strictly-matched ids/queries ever reach an iframe src, and
+// the value is decoded then re-encoded with encodeURIComponent, so raw
+// model/page text is never interpolated into a frame URL. Frames are
+// sandboxed, given no referrer, and share no origin with aish.
+const YOUTUBE_RE =
+  /^https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?(?:[^#]*&)?v=([a-zA-Z0-9_-]{11})|youtu\.be\/([a-zA-Z0-9_-]{11}))(?:[#&?/]|$)/;
+const MAPS_RE =
+  /^https?:\/\/(?:maps\.google\.com\/maps|(?:www\.)?google\.[a-z.]+\/maps)\?(?:[^#\s]*&)?q=([^&#\s]+)/;
+
+const YT_PLAY_SVG =
+  '<svg viewBox="0 0 68 48" aria-hidden="true"><path class="yt-btn" d="M66.52 7.74a8 8 0 0 0-5.63-5.66C55.94 1 34 1 34 1S12.06 1 7.11 2.08A8 8 0 0 0 1.48 7.74 83.7 83.7 0 0 0 .5 24a83.7 83.7 0 0 0 .98 16.26 8 8 0 0 0 5.63 5.66C12.06 47 34 47 34 47s21.94 0 26.89-1.08a8 8 0 0 0 5.63-5.66A83.7 83.7 0 0 0 67.5 24a83.7 83.7 0 0 0-.98-16.26z"/><path class="yt-arrow" d="M27 34l18-10-18-10z"/></svg>';
+
+// Returns an embed element for a whitelisted link, or null so the caller
+// falls back to a normal <a>. `label` is used as accessible text/alt.
+function embedForLink(label, url) {
+  const yt = url.match(YOUTUBE_RE);
+  if (yt) return youtubeEmbed(yt[1] || yt[2], label);
+  const maps = url.match(MAPS_RE);
+  if (maps) {
+    let query;
+    try {
+      query = encodeURIComponent(decodeURIComponent(maps[1].replace(/\+/g, " ")));
+    } catch {
+      query = encodeURIComponent(maps[1]);
+    }
+    return mapsEmbed(query, label);
+  }
+  return null;
+}
+
+function youtubeEmbed(id, label) {
+  const card = document.createElement("div");
+  card.className = "embed embed-youtube";
+  card.setAttribute("role", "button");
+  card.tabIndex = 0;
+  card.setAttribute("aria-label", `Play video: ${label}`);
+
+  const img = document.createElement("img");
+  img.className = "embed-thumb";
+  img.loading = "lazy";
+  img.alt = label;
+  img.src = `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
+  card.appendChild(img);
+
+  const play = document.createElement("div");
+  play.className = "embed-play";
+  play.innerHTML = YT_PLAY_SVG;
+  card.appendChild(play);
+
+  const activate = () => {
+    const frame = document.createElement("iframe");
+    frame.className = "embed-frame";
+    frame.src = `https://www.youtube-nocookie.com/embed/${id}?autoplay=1`;
+    frame.title = label;
+    frame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+    frame.allowFullscreen = true;
+    // Origin only, never the path: YouTube authorizes embedding by referrer,
+    // so no-referrer trips "error 153". strict-origin sends just the scheme+
+    // host (e.g. https://aish.example) — enough to authorize, while the aish
+    // path/session in the URL is withheld.
+    frame.referrerPolicy = "strict-origin-when-cross-origin";
+    // The player only bootstraps with allow-same-origin (it reads its own
+    // youtube-nocookie.com storage). That is safe here BECAUSE the frame is
+    // cross-origin to aish: allow-same-origin grants it YouTube's origin, not
+    // aish's, so it still can't touch aish's DOM/cookies. The "allow-scripts +
+    // allow-same-origin lets a frame drop its own sandbox" escape only matters
+    // when the framed content is same-origin AS THE PARENT — it isn't here.
+    frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation");
+    card.replaceChildren(frame);
+    card.classList.add("embed-active");
+    card.removeAttribute("role");
+    card.removeAttribute("tabindex");
+  };
+  card.addEventListener("click", activate);
+  card.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      activate();
+    }
+  });
+  return card;
+}
+
+function mapsEmbed(query, label) {
+  const card = document.createElement("div");
+  card.className = "embed embed-maps";
+  const frame = document.createElement("iframe");
+  frame.className = "embed-frame";
+  frame.src = `https://maps.google.com/maps?q=${query}&output=embed`;
+  frame.title = label;
+  frame.loading = "lazy";
+  frame.referrerPolicy = "no-referrer";
+  // Minimal sandbox: scripts drive pan/zoom, popups let "View larger map"
+  // open in a new tab. No allow-same-origin — the map renders without it and
+  // an opaque origin keeps a sandboxed+scripted frame from escaping.
+  frame.setAttribute("sandbox", "allow-scripts allow-popups");
+  card.appendChild(frame);
+  return card;
+}
+
 function inlineMd(text) {
   const frag = document.createDocumentFragment();
   let rest = text;
@@ -1808,12 +1910,17 @@ function inlineMd(text) {
     } else if (match[10] !== undefined) {
       frag.appendChild(inlineImage(match[9], match[10]));
     } else {
-      const link = document.createElement("a");
-      link.href = match[6];
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.appendChild(inlineMd(match[5]));
-      frag.appendChild(link);
+      const embed = embedForLink(match[5], match[6]);
+      if (embed) {
+        frag.appendChild(embed);
+      } else {
+        const link = document.createElement("a");
+        link.href = match[6];
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.appendChild(inlineMd(match[5]));
+        frag.appendChild(link);
+      }
     }
     rest = rest.slice(match.index + match[0].length);
   }
