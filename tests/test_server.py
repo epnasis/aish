@@ -972,6 +972,28 @@ class TestSessions:
             assert first not in [s["name"] for s in listing["sessions"]]
             assert not (app_env["state_dir"] / first).exists()
 
+    def test_delete_leaves_sibling_session_untouched(self, app_env):
+        # The title-menu "Delete chat" only ever names ONE session; a second
+        # real session (its file and its open in-memory entry) must survive.
+        client, _ = make_client(app_env, [model_says("a"), model_says("b")])
+        with client, connected(client) as (ws, hello, _):
+            first = hello["session"]
+            ws.send_json({"type": "task", "text": "first topic"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "new"})
+            second = recv_until(ws, "hello")["session"]
+            ws.send_json({"type": "task", "text": "second topic"})
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "delete_session", "name": first})
+            recv_until(ws, "session_deleted")
+            listing = recv_until(ws, "session_list")
+            names = [s["name"] for s in listing["sessions"]]
+            assert first not in names
+            assert second in names
+            assert not (app_env["state_dir"] / first).exists()
+            assert (app_env["state_dir"] / second).is_file()
+
     def test_delete_active_session_lands_on_new_chat(self, app_env):
         client, _ = make_client(app_env, [model_says("noted")])
         with client, connected(client) as (ws, hello, _):

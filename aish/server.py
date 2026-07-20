@@ -464,13 +464,13 @@ lessons file); the composer also accepts /model /resume /delete /new /cd \
 /add-dir /jobs /help. Header controls: a "‹ Sessions" back button (top left, \
 with a badge when a background session needs attention) opens the sessions \
 drawer; the centered session title opens a menu (new chat, switch model, \
-change directory, line wrap, export the chat to PDF, workspace & jobs); the \
-compose pencil (top right) starts a new chat. Every finished answer has a \
-row of chips beneath it — copy, export that one answer to PDF, and (where \
-available) read-aloud. Both PDF exports render markdown to a file entirely \
-locally (no external service) and download it; the whole-chat export includes \
-only your final answers, not thinking or intermediate steps. A context bar \
-under the title shows the working directory \
+change directory, line wrap, export the chat to PDF, delete this chat, \
+workspace & jobs); the compose pencil (top right) starts a new chat. Every \
+finished answer has a row of chips beneath it — copy, export that one answer \
+to PDF, and (where available) read-aloud. Both PDF exports render markdown to \
+a file entirely locally (no external service) and download it; the whole-chat \
+export includes only your final answers, not thinking or intermediate steps. A \
+context bar under the title shows the working directory \
 (tap to open a folder picker) and the model (tap to switch). In the composer, \
 the ＋ button opens attach file / reference a path (@) / slash command (/) / \
 photo. Your tool activity (thinking, recalled knowledge, commands and their \
@@ -511,6 +511,8 @@ same format as terminal aish, so sessions are interchangeable between both. \
 Each drawer row has a trash icon: tap it, then its "Delete?" confirm, to \
 permanently delete that session (conversation and audit log; refused while \
 the session is running; deleting the current chat lands on a fresh one). \
+The session-title menu also has a "Delete chat" item (same two-tap \
+"Confirm delete") that deletes the chat you are currently in. \
 When the user refers to earlier work ("the fix from yesterday", "what went \
 wrong last time"), use the recall tool to find and read the \
 relevant past conversation instead of asking them to repeat it.

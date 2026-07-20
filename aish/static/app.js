@@ -3542,6 +3542,8 @@ $("new-chip").onclick = () => send({ type: "new" });
 // convention: settings live behind the title, not a floating overflow chip).
 function openSessionMenu() {
   const menu = $("session-menu");
+  const del = menu.querySelector('[data-act="delete"]');
+  if (del) resetDeleteChat(del); // never open still armed from a prior dismissal
   $("wrap-state").textContent = document.body.classList.contains("wrap") ? "On" : "Off";
   // Measure while shown-but-invisible so width is known before centering.
   menu.style.visibility = "hidden";
@@ -3559,6 +3561,10 @@ function openSessionMenu() {
 $("session-menu").addEventListener("click", (e) => {
   const item = e.target.closest(".menu-item");
   if (!item) return;
+  // Deleting the current chat is destructive and unrecoverable, so it arms
+  // in place (first tap → red "Confirm delete", second tap sends it) instead
+  // of closing the menu — the same two-tap guard as the drawer trash icon.
+  if (item.dataset.act === "delete") { armDeleteChat(item); return; }
   closeSheets(); // hides the menu + backdrop
   switch (item.dataset.act) {
     case "new": send({ type: "new" }); break;
@@ -3569,6 +3575,29 @@ $("session-menu").addEventListener("click", (e) => {
     case "workspace": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
   }
 });
+
+// The current-chat delete item's two-step confirm. The server refuses a
+// running session and lands the client on a fresh chat when the active one is
+// deleted, so no client-side special cases are needed here (see server
+// _delete_session).
+let deleteChatTimer = null;
+function resetDeleteChat(item) {
+  clearTimeout(deleteChatTimer);
+  deleteChatTimer = null;
+  item.classList.remove("armed");
+  item.querySelector(".menu-label").textContent = "Delete chat";
+}
+function armDeleteChat(item) {
+  if (deleteChatTimer) {
+    resetDeleteChat(item);
+    closeSheets();
+    if (currentSession) send({ type: "delete_session", name: currentSession });
+    return;
+  }
+  item.classList.add("armed");
+  item.querySelector(".menu-label").textContent = "Confirm delete";
+  deleteChatTimer = setTimeout(() => resetDeleteChat(item), 4000);
+}
 
 // ---- attention badge ----------------------------------------------------
 // A background session that finished (or needs you) sets the durable badge on

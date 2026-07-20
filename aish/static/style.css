@@ -258,6 +258,9 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .menu-item:active { background: var(--row-sel-bg); }
 .menu-item.danger { color: var(--red); }
 .menu-item.danger svg { color: var(--red); }
+.menu-item.sep { margin-top: 5px; border-top: 0.5px solid var(--sep); padding-top: 13px; }
+.menu-item.danger.armed { background: var(--red-glow); }
+.menu-item.danger.armed .menu-label { font-weight: 600; }
 @keyframes sheet-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* ---- messages ---- */
