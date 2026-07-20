@@ -166,6 +166,7 @@ function handle(event) {
       removeQueueChip(event.text); // a queued message that just started running
       retireQuickReplies();
       sawAnswer = false;
+      turnStart = replaying ? 0 : Date.now(); // timing readout on the answer
       setBusy(true);
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
       rememberPrompt(stripAttachmentNotes(event.text));
@@ -361,6 +362,7 @@ function closeAnswer() {
 }
 
 function onDone(event) {
+  answerTiming = turnStart ? (Date.now() - turnStart) / 1000 : 0;
   if (!sawAnswer && event.result) {
     const el = addMsg("answer md", "");
     el.replaceChildren(renderMarkdown(event.result));
@@ -1414,11 +1416,21 @@ function copyChip(getText, label) {
 
 // Footer row under a finished answer: copy-as-markdown chip, plus the
 // read-aloud player where speech synthesis exists.
+let turnStart = 0;
+let answerTiming = 0;
+
 function attachAnswerTools(el, source) {
   const tools = document.createElement("div");
   tools.className = "msg-tools";
   tools.appendChild(copyChip(() => source, "copy answer"));
   if (TTS_OK) tools.appendChild(buildTtsBox(el));
+  if (answerTiming) {
+    const timing = document.createElement("span");
+    timing.className = "answer-timing";
+    timing.textContent = fmtSecs(answerTiming);
+    tools.appendChild(timing);
+    answerTiming = 0; // one readout per answer
+  }
   el.appendChild(tools);
 }
 

@@ -476,13 +476,14 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 
 /* ---- footer row under answers: copy + read-aloud ---- */
 .msg-tools {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 2px;
   margin: 6px 0 0 -8px; /* optical: align icons with the answer's text edge */
 }
 .msg-tools > .copy-chip { width: 40px; height: 40px; border-radius: 10px; }
 .msg-tools > .copy-chip svg { width: 19px; height: 19px; }
+.answer-timing { margin-left: auto; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--dim); padding-right: 6px; }
 
 /* copy chip under your own prompt bubble, right-aligned with it */
 .user-tools {
