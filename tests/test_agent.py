@@ -1960,6 +1960,45 @@ class TestActivityTraceSteps:
         assert tool["decision"] == "denied"
         assert tool["command"] == "rm -rf /"
 
+    def test_denied_write_step_records_denial_and_comment(self, tmp_path):
+        # #67: a denied write must render like a denied run_command — decision
+        # "denied", ok False, no file written, and the user's comment carried.
+        from aish.approval import Denied
+
+        target = tmp_path / "x.py"
+        steps, _ = run_with_steps(
+            [
+                model_says(tool_calls=[tool_call("write_file", path=str(target), content="x=1\n")]),
+                model_says("ok"),
+            ],
+            approve_write=lambda _plan: Denied("put it under docs/ instead"),
+        )
+        tool = next(s for s in steps if s["kind"] == "tool")
+        assert tool["name"] == "write_file"
+        assert tool["decision"] == "denied"
+        assert tool["ok"] is False
+        assert tool["comment"] == "put it under docs/ instead"
+        assert not target.exists()
+
+    def test_denied_edit_step_without_comment(self, tmp_path):
+        # A plain deny (no feedback) still marks the edit trace step denied.
+        target = tmp_path / "c.py"
+        target.write_text("a = 1\n")
+        steps, _ = run_with_steps(
+            [
+                model_says(tool_calls=[
+                    tool_call("edit_file", path=str(target), old_str="a = 1", new_str="a = 2"),
+                ]),
+                model_says("ok"),
+            ],
+            approve_write=lambda _plan: False,
+        )
+        tool = next(s for s in steps if s["kind"] == "tool")
+        assert tool["name"] == "edit_file"
+        assert tool["decision"] == "denied"
+        assert tool["ok"] is False
+        assert target.read_text() == "a = 1\n"
+
     def test_plain_answer_emits_only_thinking_lifecycle(self):
         # A plain answer opens a thinking row and cancels it (the client drops
         # the empty trace) — no tool/knowledge/finalized-thinking steps.

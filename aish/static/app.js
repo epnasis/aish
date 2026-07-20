@@ -813,6 +813,15 @@ function toolFinish(t, step) {
       cmd.textContent = step.command;
       ref.main.appendChild(cmd);
     }
+    // A denied write/edit never reached disk — the diff shown on the approval
+    // card was NOT applied. Say so plainly, mirroring the struck command above
+    // so the timeline doesn't read the change as written (#67).
+    if (step.name === "write_file" || step.name === "edit_file") {
+      const skipped = document.createElement("span");
+      skipped.className = "step-sub";
+      skipped.textContent = "Change not applied";
+      ref.main.appendChild(skipped);
+    }
     // Why it was skipped/blocked (denial comment, gate reason) — #5, #12.
     if (step.output) {
       const why = document.createElement("span");

@@ -1341,12 +1341,21 @@ class Agent:
             return f"ERROR: {plan.error}"
         decision = self.approve_write(plan)
         if isinstance(decision, Denied):
+            # A denied write never touches disk — the trace step must render
+            # denied (not a silent success) and carry the user's feedback,
+            # mirroring a denied run_command so the web timeline treats alike.
+            self._run_meta = {
+                "decision": "denied", "ok": False, "output": "", "comment": decision.comment,
+            }
             return _with_feedback(WRITE_DENIED, decision.comment)
         if not decision:
+            self._run_meta = {"decision": "denied", "ok": False, "output": ""}
             return WRITE_DENIED
         result = files.commit(plan)
         self.echo(result)
         if isinstance(decision, Approved):
+            if decision.comment:  # surface the approval note on the trace step too
+                self._run_meta = {"decision": "approved", "comment": decision.comment}
             result = _with_approval_note(result, decision.comment)
         return result
 
