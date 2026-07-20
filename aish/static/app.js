@@ -822,14 +822,9 @@ function toolFinish(t, step) {
     }
   }
   // An executed run_command's output lives in the terminal block that
-  // command_start/command_end drew and finalized; nothing to render here.
-  // Fallback for a stray replay with no framing events: render the step output.
-  if (step.name === "run_command" && step.output && !denied && !ref.main.querySelector(".term-block")) {
-    const out = document.createElement("div");
-    out.className = "step-output";
-    ref.main.appendChild(out);
-    renderStepOutput(out, step.output);
-  }
+  // command_start/command_end drew and finalized — live AND on cold replay,
+  // where reconstruct_events replays the same framing events. So there is
+  // nothing to render here, and no framing-less fallback path to diverge.
   // error detail for a failed non-run_command tool (#18)
   if (!step.ok && step.error && step.name !== "run_command") {
     const errWrap = document.createElement("div");
@@ -878,11 +873,6 @@ function finalizeOutBox(box, label) {
 }
 
 // Peel a trailing "[exit code: N]" into the header label.
-function splitExit(text) {
-  const m = text.match(/\n?\[exit code: (-?\d+)\]\s*$/);
-  return m ? [text.slice(0, m.index), `stdout · exit ${m[1]}`] : [text, "stdout"];
-}
-
 // A run_command approval note on the finished step: clamp long / multi-line
 // text to a few lines with a Show more/less toggle, mirroring the output box's
 // graceful handling instead of ellipsizing to a single line.
@@ -907,32 +897,6 @@ function clampNote(text) {
     if (note.scrollHeight - note.clientHeight > 4) more.hidden = false;
   });
   return wrap;
-}
-
-// An empty stdout/stderr reads as broken in the full output box (blank body +
-// copy/wrap/expand for nothing). Collapse it to a single "No output · exit N"
-// line, keeping the exit code so success and silent failure stay
-// distinguishable. Returns true when it handled an empty result.
-function renderEmptyOutput(container, text) {
-  const [bodyText, label] = splitExit(text);
-  if (bodyText.trim() !== "") return false;
-  container.replaceChildren();
-  const line = document.createElement("div");
-  line.className = "out-empty mono";
-  const exit = label.match(/exit (-?\d+)/);
-  line.textContent = exit ? `No output · exit ${exit[1]}` : "No output";
-  container.appendChild(line);
-  return true;
-}
-
-function renderStepOutput(container, text) {
-  container.replaceChildren();
-  if (renderEmptyOutput(container, text)) return;
-  const [bodyText, label] = splitExit(text);
-  const box = outBox(false);
-  box.querySelector(".out-body").appendChild(ansiFragment(bodyText));
-  container.appendChild(box);
-  finalizeOutBox(box, label);
 }
 
 function renderErrorBox(container, text) {

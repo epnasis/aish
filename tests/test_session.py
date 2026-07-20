@@ -39,15 +39,15 @@ def test_reconstruct_events_groups_by_task(tmp_path):
     # One task = one user event, its steps, then a single done carrying the
     # final assistant text — intermediate tool-call turns don't close it.
     log = SessionLog.new(tmp_path)
-    log.message({"role": "user", "content": "touch a file"})
+    log.message({"role": "user", "content": "read a file"})
     log.step({"kind": "thinking_start"})
     log.message({"role": "assistant", "content": ""})  # tool-call turn, no text
-    log.step({"kind": "tool", "name": "run_command", "ok": True})
-    log.message({"role": "tool", "tool_name": "run_command", "content": "done"})
-    log.message({"role": "assistant", "content": "created it"})
+    log.step({"kind": "tool", "name": "read_file", "ok": True})
+    log.message({"role": "tool", "tool_name": "read_file", "content": "..."})
+    log.message({"role": "assistant", "content": "read it"})
     log.message({"role": "user", "content": "again"})
-    log.step({"kind": "tool", "name": "run_command", "ok": True})
-    log.message({"role": "assistant", "content": "done again"})
+    log.step({"kind": "tool", "name": "read_file", "ok": True})
+    log.message({"role": "assistant", "content": "read again"})
 
     events = SessionLog.reconstruct_events(log.path)
     kinds = [(e["type"], e.get("kind")) for e in events]
@@ -61,7 +61,65 @@ def test_reconstruct_events_groups_by_task(tmp_path):
         ("done", None),
     ]
     dones = [e["result"] for e in events if e["type"] == "done"]
-    assert dones == ["created it", "done again"]  # final text per task, not ""
+    assert dones == ["read it", "read again"]  # final text per task, not ""
+
+
+def test_reconstruct_events_run_command_framing(tmp_path):
+    # A run_command reconstructs into the SAME command_start → stream →
+    # command_end → tool sequence a live session emits, so the terminal block
+    # rebuilds identically (not a plain fallback box).
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "list files"})
+    log.step({"kind": "tool_start", "name": "run_command", "command": "ls"})
+    log.command_event({"kind": "cmd_start", "cwd": "/proj", "command": "ls"})
+    log.command_event({"kind": "cmd_end", "status": "exit", "exit_code": 0})
+    # run_command's real output carries a trailing "[exit code: N]" marker.
+    log.step({"kind": "tool", "name": "run_command", "ok": True,
+              "command": "ls", "output": "a.txt\nb.txt\n[exit code: 0]"})
+    log.message({"role": "assistant", "content": "two files"})
+
+    events = SessionLog.reconstruct_events(log.path)
+    seq = [e["type"] for e in events]
+    assert seq == ["user", "step", "command_start", "stream", "command_end", "step", "done"]
+    cs = next(e for e in events if e["type"] == "command_start")
+    assert cs["cwd"] == "/proj" and cs["command"] == "ls"
+    # The exit marker is stripped so the terminal body matches the live stream,
+    # where the code arrives via command_end, not as an output line.
+    assert next(e for e in events if e["type"] == "stream")["text"] == "a.txt\nb.txt"
+    ce = next(e for e in events if e["type"] == "command_end")
+    assert ce["status"] == "exit" and ce["exit_code"] == 0
+    assert "kind" not in cs and "kind" not in ce  # framing records' kind is stripped
+
+
+def test_reconstruct_events_synthesizes_framing_for_legacy_command(tmp_path):
+    # A run_command logged before framing persistence (tool step only) still
+    # gets a synthesized command block, so the frontend needs no fallback path.
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "list files"})
+    log.step({"kind": "tool", "name": "run_command", "ok": True,
+              "command": "ls", "output": "a.txt"})
+    log.message({"role": "assistant", "content": "one file"})
+
+    events = SessionLog.reconstruct_events(log.path)
+    seq = [e["type"] for e in events]
+    assert seq == ["user", "command_start", "stream", "command_end", "step", "done"]
+    ce = next(e for e in events if e["type"] == "command_end")
+    assert ce["exit_code"] == 0  # ok=True → synthesized exit 0
+
+
+def test_reconstruct_events_command_no_output_emits_no_stream(tmp_path):
+    # A command with no output emits no stream event (matches the live path,
+    # where zero output lines stream) — the block collapses its middle zone.
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "touch f"})
+    log.command_event({"kind": "cmd_start", "cwd": "/proj", "command": "touch f"})
+    log.command_event({"kind": "cmd_end", "status": "exit", "exit_code": 0})
+    log.step({"kind": "tool", "name": "run_command", "ok": True,
+              "command": "touch f", "output": ""})
+    log.message({"role": "assistant", "content": "done"})
+
+    seq = [e["type"] for e in SessionLog.reconstruct_events(log.path)]
+    assert seq == ["user", "command_start", "command_end", "step", "done"]
 
 
 def test_reconstruct_events_none_for_legacy_log(tmp_path):

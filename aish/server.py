@@ -1448,9 +1448,11 @@ def create_app(
             # ...and persisted to disk so the trace survives eviction/restart
             # and cold-loads back into the same timeline (reconstruct_events).
             step_log=logref.step,
+            command_log=logref.command_event,
             # Terminal-block framing: command_start (cwd + command) and
-            # command_end (exit code / detached / interrupted). Recorded like
-            # steps so replay reconstructs the bounded block identically.
+            # command_end (exit code / detached / interrupted). Emitted live and
+            # persisted (command_log) so a cold replay rebuilds the bounded
+            # block identically instead of falling back to a plain output box.
             on_command_start=lambda ev: bridge.emit({"type": "command_start", **ev}),
             on_command_end=lambda ev: bridge.emit({"type": "command_end", **ev}),
             job_log_dir=state_dir / "jobs",

@@ -26,6 +26,10 @@ DETAIL_MAX_CHARS = 6000
 DETAIL_TAIL_MESSAGES = 20
 RECALL_SESSIONS_TOP = 3  # sessions shown in the recall tool's fallback section
 _SESSION_NAME_RE = re.compile(r"^session-[0-9-]+\.jsonl$")
+# run_command appends this exit marker to its returned output; the live stream
+# never carries it (the code comes via command_end), so reconstruction strips
+# it before replaying the output into the terminal block.
+_EXIT_MARKER_RE = re.compile(r"\n?\[exit code: -?\d+\]\s*$")
 
 
 @dataclass
@@ -102,12 +106,13 @@ class SessionLog:
 
     @staticmethod
     def reconstruct_events(path: Path) -> list[dict] | None:
-        """Rebuild the transcript event stream (user / step / done) a rich
-        client replays, so a cold-loaded session shows the SAME activity trace
-        a live one does. Groups the log by task: a user message opens a turn,
-        `trace` records become its steps, and the turn's final assistant text
-        becomes the `done` answer that collapses the trace — mirroring how the
-        live web flow emits exactly one `done` per completed task.
+        """Rebuild the EXACT transcript event stream a rich client replays, so
+        a cold-loaded session feeds the frontend the same events a live one
+        does — same data, same code, same rendered output. Groups the log by
+        task (a user message opens a turn; the turn's final assistant text is
+        its `done` answer), and reassembles each run_command into its full
+        `command_start → stream → command_end → tool` sequence so the terminal
+        block reconstructs identically instead of falling back to a plain box.
 
         Returns None when the log predates trace records (no `trace` kind), so
         the caller can fall back to a flat conversation history."""
@@ -116,6 +121,8 @@ class SessionLog:
         answer = ""
         open_turn = False
         has_trace = False
+        pending_start: dict | None = None
+        pending_end: dict | None = None
 
         def flush() -> None:
             nonlocal steps, answer, open_turn
@@ -127,15 +134,48 @@ class SessionLog:
             answer = ""
             open_turn = False
 
+        def emit_command(step: dict) -> None:
+            """Splice a run_command's terminal-block framing around its `tool`
+            step, so the reconstructed stream matches the live one exactly. The
+            command's output rides on the step (not duplicated in the framing
+            records); it is replayed as one `stream` chunk — the final panel is
+            identical whether the live output arrived in one piece or many."""
+            nonlocal pending_start, pending_end
+            start = pending_start
+            if start is None:  # legacy log (framing not yet persisted): synthesize
+                start = {"cwd": "", "command": step.get("command", "")}
+            steps.append({"type": "command_start", **start})
+            # The tool step's output carries run_command's trailing
+            # "[exit code: N]" marker; the live stream never does (the code
+            # arrives via command_end), so strip it for a byte-identical panel.
+            output = _EXIT_MARKER_RE.sub("", step.get("output") or "")
+            if output:
+                steps.append({"type": "stream", "text": output})
+            if pending_end is not None:
+                steps.append({"type": "command_end", **pending_end})
+            else:  # legacy: best-effort exit from the step's ok flag
+                steps.append({"type": "command_end", "status": "exit",
+                              "exit_code": 0 if step.get("ok") else 1})
+            steps.append({"type": "step", **step})
+            pending_start = pending_end = None
+
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
             kind = record.get("kind")
-            if kind == "trace":
+            if kind == "cmd_start":
+                pending_start = {k: v for k, v in record.items() if k not in ("kind", "ts")}
+            elif kind == "cmd_end":
+                pending_end = {k: v for k, v in record.items() if k not in ("kind", "ts")}
+            elif kind == "trace":
                 has_trace = True
-                steps.append({"type": "step", **record.get("step", {})})
+                step = record.get("step", {})
+                if step.get("kind") == "tool" and step.get("name") == "run_command":
+                    emit_command(step)
+                else:
+                    steps.append({"type": "step", **step})
             elif kind == "message" and record.get("role") == "user":
                 flush()  # close the previous turn before the next one opens
                 events.append({"type": "user", "text": record.get("content", "")})
@@ -512,3 +552,9 @@ class SessionLog:
         reconstructable in any UI, long after the in-memory transcript is
         evicted. The step dict is the same one the web renderer receives."""
         self._record("trace", step=step)
+
+    def command_event(self, event: dict) -> None:
+        """Persist a terminal-block framing event (cmd_start / cmd_end). The
+        event's `kind` names the record; reconstruct_events replays them as the
+        command_start / command_end a live session emits."""
+        self._record(event["kind"], **{k: v for k, v in event.items() if k != "kind"})
