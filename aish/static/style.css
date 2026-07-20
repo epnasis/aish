@@ -1380,7 +1380,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   padding: 8px 72px 8px 12px; line-height: 1.5; color: var(--fg);
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
 }
-.term-block.cmd-nowrap .term-prompt {
+.term-block.term-cnowrap .term-prompt {
   white-space: pre; overflow-wrap: normal; word-break: normal; overflow-x: auto;
 }
 .term-dir { color: var(--blue); }
@@ -1389,8 +1389,10 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-rule { height: 0; border-top: 0.5px solid var(--sep); }
 .term-out-wrap { position: relative; }
 .term-out { padding: 8px 12px; line-height: 1.6; color: var(--dim); white-space: pre; overflow-x: auto; }
-body.wrap .term-out,
-.term-block.out-wrapped .term-out { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Wrapping is owned solely by the per-block toggle (seeded from body.wrap at
+   build time) — do NOT also key it off body.wrap, or the global setting would
+   override the local toggle and it could never unwrap. */
+.term-block.term-owrap .term-out { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-block.capped:not(.expanded) .term-out { max-height: 40vh; overflow: hidden; }
 /* Per-zone tool cluster (wrap + copy), pinned top-right of the prompt line and
    the output. Copy on the command grabs the command text only; copy on the

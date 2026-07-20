@@ -969,6 +969,19 @@ function termWrapBtn(block, anchorSel, toggle, on) {
   return b;
 }
 
+// The global top-bar wrap toggle overrides every command block: force each
+// block's output wrap (and its button's lit state) to the global value, then
+// re-cap for the new line count. New blocks seed from the same global value at
+// build time; a per-block toggle diverges until the next global change.
+function syncTermWrap(on) {
+  for (const block of document.querySelectorAll(".term-block")) {
+    block.classList.toggle("term-owrap", on);
+    const btn = block.querySelector(".term-out-wrap .term-wrap");
+    if (btn) btn.classList.toggle("on", on);
+    recomputeTermCap(block);
+  }
+}
+
 // (Re)decide whether the output needs the "Show all" cap for its current
 // height — used at command_end and after a wrap toggle changes the line count.
 function recomputeTermCap(block) {
@@ -1005,7 +1018,7 @@ function buildTermBlock(cwd, command) {
   const cmdTools = document.createElement("div");
   cmdTools.className = "term-tools";
   cmdTools.append(
-    termWrapBtn(block, ".term-prompt", () => block.classList.toggle("cmd-nowrap"), true),
+    termWrapBtn(block, ".term-prompt", () => block.classList.toggle("term-cnowrap"), true),
     copyChip(() => cmd.textContent, "copy command"),
   );
   promptWrap.append(prompt, cmdTools);
@@ -1018,10 +1031,15 @@ function buildTermBlock(cwd, command) {
   fade.className = "term-fade";
   // Output tools: copy grabs the OUTPUT only (the two rules reinforce that the
   // prompt line and exit code aren't part of it); wrap soft-wraps the output.
+  // Seed the wrap state from the global top-bar wrap preference, but the
+  // per-block toggle then owns it independently (the term block ignores the
+  // global body.wrap so this button can always override it).
+  const outWrapped = document.body.classList.contains("wrap");
+  if (outWrapped) block.classList.add("term-owrap");
   const outTools = document.createElement("div");
   outTools.className = "term-tools";
   outTools.append(
-    termWrapBtn(block, ".term-out", () => block.classList.toggle("out-wrapped"), false),
+    termWrapBtn(block, ".term-out", () => block.classList.toggle("term-owrap"), outWrapped),
     copyChip(() => out.textContent, "copy output"),
   );
   outWrap.append(outTools, out, fade);
@@ -3147,6 +3165,7 @@ function toggleWrap() {
   const anchor = topVisibleAnchor();
   const on = document.body.classList.toggle("wrap");
   localStorage.setItem(WRAP_KEY, on ? "1" : "0");
+  syncTermWrap(on); // global overrides every command block's local wrap + button
   // Reading layout right after the class toggle forces a synchronous
   // reflow, so the restored offset is computed against final geometry.
   if (wasAtBottom) scrollToEnd(true);
