@@ -15,7 +15,27 @@
   --red: #ff453a;
   --yellow: #ffd60a;
   --orange: #ff9f0a;
+  --purple: #bf5af2;
   --cyan: #64d2ff;
+  /* Translucent iOS system fills — used for chips, selected rows, pill
+     backgrounds that must read on any surface (they are grey-neutral). */
+  --sep2: #48484a;
+  --bar-bg: rgba(22, 22, 24, 0.82);
+  --chip-bg: rgba(120, 120, 128, 0.28);
+  --input-bg2: rgba(120, 120, 128, 0.24);
+  --row-sel-bg: rgba(120, 120, 128, 0.16);
+  --rail: #3a3a3c;               /* the activity-trace timeline spine */
+  /* Accent "glow" tints — soft backgrounds behind status icons and badges. */
+  --blue-glow: rgba(10, 132, 255, 0.18);
+  --green-glow: rgba(48, 209, 88, 0.16);
+  --orange-glow: rgba(255, 159, 10, 0.18);
+  --red-glow: rgba(255, 69, 58, 0.16);
+  --yellow-glow: rgba(255, 214, 10, 0.14);
+  --purple-glow: rgba(191, 90, 242, 0.18);
+  /* Live turn: the in-progress activity trace is tinted + outlined blue. */
+  --live-bg: rgba(10, 132, 255, 0.10);
+  --live-border: rgba(10, 132, 255, 0.30);
+  --queue-bg: rgba(120, 120, 128, 0.16);
   --r-bubble: 18px;
   --r-card: 14px;
   --r-control: 10px;
