@@ -1803,7 +1803,7 @@ function retireQuickReplies() {
 const YOUTUBE_RE =
   /^https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?(?:[^#]*&)?v=([a-zA-Z0-9_-]{11})|youtu\.be\/([a-zA-Z0-9_-]{11}))(?:[#&?/]|$)/;
 const MAPS_RE =
-  /^https?:\/\/(?:maps\.google\.com\/maps|(?:www\.)?google\.[a-z.]+\/maps)\?(?:[^#\s]*&)?q=([^&#\s]+)/;
+  /^https?:\/\/(?:maps\.google\.com\/maps|(?:www\.)?google\.[a-z.]+\/maps)\?([^#\s]+)/;
 
 const YT_PLAY_SVG =
   '<svg viewBox="0 0 68 48" aria-hidden="true"><path class="yt-btn" d="M66.52 7.74a8 8 0 0 0-5.63-5.66C55.94 1 34 1 34 1S12.06 1 7.11 2.08A8 8 0 0 0 1.48 7.74 83.7 83.7 0 0 0 .5 24a83.7 83.7 0 0 0 .98 16.26 8 8 0 0 0 5.63 5.66C12.06 47 34 47 34 47s21.94 0 26.89-1.08a8 8 0 0 0 5.63-5.66A83.7 83.7 0 0 0 67.5 24a83.7 83.7 0 0 0-.98-16.26z"/><path class="yt-arrow" d="M27 34l18-10-18-10z"/></svg>';
@@ -1815,13 +1815,18 @@ function embedForLink(label, url) {
   if (yt) return youtubeEmbed(yt[1] || yt[2], label);
   const maps = url.match(MAPS_RE);
   if (maps) {
-    let query;
-    try {
-      query = encodeURIComponent(decodeURIComponent(maps[1].replace(/\+/g, " ")));
-    } catch {
-      query = encodeURIComponent(maps[1]);
+    const params = new URLSearchParams(maps[1]);
+    const saddr = params.get("saddr");
+    const daddr = params.get("daddr");
+    if (saddr && daddr) {
+      return mapsDirectionsEmbed(saddr, daddr, label);
     }
-    return mapsEmbed(query, label);
+    const q = params.get("q");
+    if (q) {
+      return mapsEmbed(encodeURIComponent(q), label);
+    }
+    // No renderable query (e.g. only @lat,lng / view params) — plain link.
+    return null;
   }
   return null;
 }
@@ -1891,6 +1896,22 @@ function mapsEmbed(query, label) {
   // Minimal sandbox: scripts drive pan/zoom, popups let "View larger map"
   // open in a new tab. No allow-same-origin — the map renders without it and
   // an opaque origin keeps a sandboxed+scripted frame from escaping.
+  frame.setAttribute("sandbox", "allow-scripts allow-popups");
+  card.appendChild(frame);
+  return card;
+}
+
+function mapsDirectionsEmbed(saddr, daddr, label) {
+  const card = document.createElement("div");
+  card.className = "embed embed-maps";
+  const frame = document.createElement("iframe");
+  frame.className = "embed-frame";
+  frame.src = `https://maps.google.com/maps?saddr=${encodeURIComponent(saddr)}&daddr=${encodeURIComponent(daddr)}&output=embed`;
+  frame.title = label;
+  frame.loading = "lazy";
+  frame.referrerPolicy = "no-referrer";
+  // Same minimal sandbox as mapsEmbed: scripts drive the route view, popups
+  // let "View larger map" / directions open in a new tab. No allow-same-origin.
   frame.setAttribute("sandbox", "allow-scripts allow-popups");
   card.appendChild(frame);
   return card;
