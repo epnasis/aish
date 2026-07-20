@@ -3203,9 +3203,41 @@ function sectionLabel(text) {
   return el;
 }
 
+// A tappable full-path breadcrumb at the top so you always know where you are
+// and can jump back up quickly (#13).
+function renderDirCrumb() {
+  const crumb = $("dir-crumb");
+  crumb.replaceChildren();
+  const isHome = homeDir && (dirPath === homeDir || dirPath.startsWith(homeDir + "/"));
+  const rel = (isHome ? dirPath.slice(homeDir.length) : dirPath).replace(/^\/+/, "");
+  const segs = rel ? rel.split("/") : [];
+  const seg = (label, path, last) => {
+    const el = document.createElement(last ? "span" : "button");
+    el.className = "crumb-seg" + (last ? " current" : "");
+    el.textContent = label;
+    if (!last) el.onclick = () => browseDir(path);
+    crumb.appendChild(el);
+  };
+  seg(isHome ? "~" : "/", isHome ? homeDir : "/", segs.length === 0);
+  let acc = isHome ? homeDir : "";
+  segs.forEach((s, i) => {
+    // The "/" root already reads as a separator, so skip it before the first
+    // segment of an absolute path (avoids a leading "/ /").
+    if (!(i === 0 && !isHome)) {
+      const sep = document.createElement("span");
+      sep.className = "crumb-sep";
+      sep.textContent = "/";
+      crumb.appendChild(sep);
+    }
+    acc = acc + "/" + s;
+    seg(s, acc, i === segs.length - 1);
+  });
+}
+
 function renderDirList(deepResults = null) {
   $("dir-current").textContent = abbreviatePath(dirPath);
   $("dir-use-label").textContent = `Set working directory to “${baseName(dirPath)}”`;
+  renderDirCrumb();
   const list = $("dir-list");
   list.replaceChildren();
   const raw = $("dir-search").value.trim();
