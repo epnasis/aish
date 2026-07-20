@@ -615,6 +615,29 @@ class TestSessions:
             with connected(client) as (_ws, _, replay):
                 assert replay["events"] == []
 
+    def test_session_list_reports_waiting_state_for_pending_approval(
+        self, app_env, tmp_path
+    ):
+        # The drawer's "Active now" grouping keys off this per-session state:
+        # a session blocked on an approval must surface as "waiting".
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+                model_says("done"),
+            ],
+        )
+        with client, connected(client) as (ws, hello, _):
+            current = hello["session"]
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")  # agent now blocked
+            ws.send_json({"type": "sessions", "query": ""})
+            listing = recv_until(ws, "session_list")
+            row = next(s for s in listing["sessions"] if s["name"] == current)
+            assert row["state"] == "waiting"
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+
     def test_session_list_includes_and_names_current(self, app_env):
         # The drawer lists the active session too (MRU: it sorts first) and
         # names it in "current" so the UI can mark "you are here" (#29).

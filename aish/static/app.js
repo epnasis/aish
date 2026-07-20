@@ -3319,7 +3319,7 @@ function dayStart(stamp) {
 function sessionGroup(ts) {
   const now = Date.now();
   const ms = ts * 1000;
-  if (now - ms < 8 * 3600 * 1000) return "Last 8 hours";
+  if (now - ms < 8 * 3600 * 1000) return "Recent";
   const today = dayStart(now);
   const day = dayStart(ms);
   if (day >= today) return "Today";
@@ -3328,10 +3328,19 @@ function sessionGroup(ts) {
   return "Older";
 }
 
+// Within the last hour, show relative time ("just now", "2m") — for something
+// touched minutes ago an absolute clock reading forces mental arithmetic.
+// Older entries fall back to a 24h absolute time (never AM/PM), gaining a
+// weekday past midnight and a date past a week.
 function sessionStamp(ts) {
-  const date = new Date(ts * 1000);
-  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const today = dayStart(Date.now());
+  const ms = ts * 1000;
+  const now = Date.now();
+  const delta = now - ms;
+  if (delta < 60 * 1000) return "just now";
+  if (delta < 3600 * 1000) return `${Math.floor(delta / 60000)}m`;
+  const date = new Date(ms);
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  const today = dayStart(now);
   const day = dayStart(date);
   if (day >= today) return time;
   if (day >= today - 6 * DAY_MS)
