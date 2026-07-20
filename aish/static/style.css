@@ -31,6 +31,11 @@ html, body {
   color: var(--fg);
   font: 16px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
+  /* Opt out of iOS text autosizing: rotating to landscape "boosts" font
+     sizes to the wider layout width, and the boost sticks after rotating
+     back to portrait, leaving text permanently oversized. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
