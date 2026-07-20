@@ -171,7 +171,7 @@ function handle(event) {
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
       rememberPrompt(stripAttachmentNotes(event.text));
       lastUserPrompt = stripAttachmentNotes(event.text); // for error Retry
-      addUserMsg(event.text);
+      turnAnchorEl = addUserMsg(event.text); // response-start anchor (until a trace supersedes it)
       // Your own message always comes into view, even if you were scrolled up.
       if (!replaying) scrollToEnd(true);
       break;
@@ -315,7 +315,25 @@ function renderAnswerFrame() {
   answerRenderQueued = false;
   if (!answerEl) return; // answer already closed (and flushed) this frame
   renderAnswerNow();
-  scrollToEnd();
+  anchorAnswer();
+}
+
+// The element that marks the START of the current turn's response — the
+// collapsed "Worked for Xs" trace, or (no trace) the user's own bubble.
+let turnAnchorEl = null;
+
+// Once the answer is streaming, keep that anchor pinned to the TOP of the
+// viewport and let the rest of the answer flow in below the fold — so you
+// read from the beginning (incl. how long it took), instead of the view
+// jumping to the bottom and making you scroll back up.
+function anchorAnswer(force) {
+  const anchor = turnAnchorEl && turnAnchorEl.isConnected ? turnAnchorEl : null;
+  if (!anchor) { scrollToEnd(force); return; }
+  const maxTop = Math.max(0, messagesEl.scrollHeight - messagesEl.clientHeight);
+  const target = Math.min(Math.max(0, anchor.offsetTop - 6), maxTop);
+  if (force || messagesEl.scrollTop < target) messagesEl.scrollTop = target;
+  updateScrollButton();
+  updateEmptyHint();
 }
 
 function renderAnswerNow() {
@@ -376,6 +394,9 @@ function onDone(event) {
   if (event.sources && event.sources.length) addSources(event.sources);
   setBusy(false);
   setStatus(null);
+  // Settle the view on the response start (the collapsed trace is now smaller);
+  // never on the bottom of a long answer.
+  if (!replaying) requestAnimationFrame(() => anchorAnswer(true));
   notify("aish — answer ready", event.result);
 }
 
@@ -516,6 +537,7 @@ function ensureTrace() {
     markStopping(currentTrace); // immediate "Stopping…" feedback in the header
   };
   messagesEl.appendChild(el);
+  turnAnchorEl = el; // the "Worked for Xs" box is the response-start anchor
   currentTrace = {
     el, head, body, inner: body.querySelector(".trace-inner"),
     started: 0, secs: 0, tokensIn: 0, tokensOut: 0,
