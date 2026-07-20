@@ -1332,6 +1332,9 @@ def create_app(
             context=context,
             on_message=logref.message,
             on_token=lambda text: bridge.emit({"type": "token", "text": text}),
+            # Structured activity-trace steps; recorded so a resumed/switched
+            # session replays the whole trace like every other event.
+            on_step=lambda step: bridge.emit({"type": "step", **step}),
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,
             status=WebStatus(bridge),

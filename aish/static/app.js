@@ -162,6 +162,7 @@ function handle(event) {
     case "replay": onReplay(event); break;
     case "user":
       closeAnswer();
+      finishTrace(); // close any trace from a prior turn before the new one
       retireQuickReplies();
       sawAnswer = false;
       setBusy(true);
@@ -175,8 +176,15 @@ function handle(event) {
       showToast(`queued (#${event.position}) — runs after the current task`);
       break;
     case "token": onToken(event.text); break;
-    case "echo": closeAnswer(); addAnsiMsg("echo", event.text); break;
-    case "stream": addStreamLine(event.text); break;
+    case "echo":
+      // The activity trace already shows a run_command's approval + result, so
+      // drop the approver's redundant confirmation line while a trace is open.
+      if (currentTrace && /^[✓✕] (auto-approved|session-allowed|always-allowed|blocked)/.test(event.text)) break;
+      closeAnswer();
+      addAnsiMsg("echo", event.text);
+      break;
+    case "stream": traceStream(event.text); break;
+    case "step": traceStep(event); break;
     case "error":
       closeAnswer();
       addMsg("error", event.text);
@@ -358,6 +366,7 @@ function onDone(event) {
     attachAnswerTools(el, event.result);
   }
   closeAnswer();
+  finishTrace();
   if (event.sources && event.sources.length) addSources(event.sources);
   setBusy(false);
   setStatus(null);
@@ -423,6 +432,263 @@ function refreshStatusline() {
 }
 
 $("stop-btn").onclick = () => send({ type: "stop" });
+
+// ---- activity trace ------------------------------------------------------
+// One collapsible group per task, built from structured `step` events. Live
+// while the task runs (spinner, streaming output into the running step),
+// collapsed to a one-line summary when it finishes. Replays deterministically
+// because the steps are recorded events like everything else.
+let currentTrace = null;
+
+const TRACE_ICONS = {
+  thinking: (c) => `<path d="M9 4.5A4 4 0 0 0 5.5 10 3.5 3.5 0 0 0 6 16.5 3.5 3.5 0 0 0 12 18a3.5 3.5 0 0 0 6-1.5A3.5 3.5 0 0 0 18.5 10 4 4 0 0 0 15 4.5a3 3 0 0 0-6 0z" fill="none" stroke="${c}" stroke-width="1.5"/><path d="M12 5v13" stroke="${c}" stroke-width="1.5"/>`,
+  knowledge: (c) => `<path d="M12 3.5 14 8.6l5.5.4-4.2 3.6 1.3 5.4L12 15.4 7.4 18l1.3-5.4L4.5 9l5.5-.4z" fill="${c}" stroke="${c}" stroke-width="1" stroke-linejoin="round"/>`,
+  web: (c) => `<circle cx="11" cy="11" r="6.5" fill="none" stroke="${c}" stroke-width="1.7"/><path d="M16 16l4 4" stroke="${c}" stroke-width="1.7" stroke-linecap="round"/>`,
+  command: (c) => `<path d="M4 17.5V6.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" fill="none" stroke="${c}" stroke-width="1.6"/><path d="M7.5 9l3 3-3 3M13 15h4" stroke="${c}" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`,
+  denied: (c) => `<path d="M4 17.5V6.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" fill="none" stroke="${c}" stroke-width="1.6"/><path d="M8.5 8.5l7 7M15.5 8.5l-7 7" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>`,
+  doc: (c) => `<path d="M7 3.5h6.5L18 8v11a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 6 19V5A1.5 1.5 0 0 1 7 3.5z" fill="none" stroke="${c}" stroke-width="1.6"/><path d="M13 3.5V8h4.5" fill="none" stroke="${c}" stroke-width="1.6"/>`,
+  write: (c) => `<path d="M12 19.5h8" stroke="${c}" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.2a1.7 1.7 0 0 1 2.4 2.4l-8.3 8.3-3.2.8.8-3.2z" fill="none" stroke="${c}" stroke-width="1.7" stroke-linejoin="round"/>`,
+  check: (c) => `<path d="M5 12.5l4 4 10-10.5" fill="none" stroke="${c}" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>`,
+  dot: (c) => `<circle cx="12" cy="12" r="3.5" fill="${c}"/>`,
+};
+
+function traceSvg(name, color) {
+  const build = TRACE_ICONS[name] || TRACE_ICONS.dot;
+  return `<svg viewBox="0 0 24 24" width="15" height="15">${build(color)}</svg>`;
+}
+
+const SPINNER = '<span class="spin"></span>';
+
+// tool name → (friendly title, icon key, accent css var)
+const TOOL_META = {
+  run_command: ["run_command", "command", "--green"],
+  web_search: ["Searched the web", "web", "--blue"],
+  read_url: ["Read a page", "web", "--blue"],
+  recall: ["Recalled from memory", "knowledge", "--yellow"],
+  read_docs: ["Read docs", "doc", "--dim"],
+  read_file: ["read_file", "doc", "--dim"],
+  read_skill: ["Read a skill", "knowledge", "--green"],
+  write_file: ["write_file", "write", "--green"],
+  edit_file: ["edit_file", "write", "--green"],
+  remember: ["Saved to memory", "knowledge", "--yellow"],
+};
+
+function ensureTrace() {
+  if (currentTrace) return currentTrace;
+  const el = document.createElement("div");
+  el.className = "trace live";
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "trace-head";
+  head.innerHTML =
+    `<span class="trace-status">${SPINNER}</span>` +
+    `<span class="trace-headtext"><span class="trace-title">Working…</span>` +
+    `<span class="trace-sub"></span></span>` +
+    `<span class="trace-tokens"></span>` +
+    `<svg class="trace-chev" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const body = document.createElement("div");
+  body.className = "trace-body";
+  body.innerHTML = '<div class="trace-rail"></div>';
+  el.append(head, body);
+  head.onclick = () => el.classList.toggle("open");
+  el.classList.add("open"); // live traces start expanded
+  messagesEl.appendChild(el);
+  currentTrace = {
+    el, head, body, steps: 0, secs: 0, tokensIn: 0, tokensOut: 0, pending: null,
+  };
+  scrollToEnd();
+  return currentTrace;
+}
+
+function traceRow(t, iconHtml, title, sub) {
+  const row = document.createElement("div");
+  row.className = "step";
+  const badge = document.createElement("span");
+  badge.className = "step-badge";
+  badge.innerHTML = iconHtml;
+  const main = document.createElement("div");
+  main.className = "step-main";
+  const titleEl = document.createElement("span");
+  titleEl.className = "step-title";
+  titleEl.append(title); // string or node
+  main.appendChild(titleEl);
+  if (sub) {
+    const subEl = document.createElement("span");
+    subEl.className = "step-sub";
+    subEl.textContent = sub;
+    main.appendChild(subEl);
+  }
+  row.append(badge, main);
+  t.body.appendChild(row);
+  scrollToEnd();
+  return { row, badge, main, titleEl };
+}
+
+function traceStep(step) {
+  const t = ensureTrace();
+  if (step.kind === "thinking") {
+    t.secs += step.secs || 0;
+    if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
+    traceRow(t, traceSvg("thinking", "var(--purple)"), `Thought for ${fmtSecs(step.secs)}`, "");
+    updateTraceHead(t);
+    return;
+  }
+  if (step.kind === "knowledge") {
+    t.steps += 1;
+    const items = step.items || [];
+    const { main } = traceRow(
+      t, traceSvg("knowledge", "var(--yellow)"), "Recalled from memory",
+      `${items.length} item${items.length === 1 ? "" : "s"} from past work`
+    );
+    if (items.length) {
+      const chips = document.createElement("div");
+      chips.className = "know-chips";
+      for (const it of items) {
+        const chip = document.createElement("span");
+        chip.className = "know-chip";
+        chip.textContent = it.label || "";
+        chips.appendChild(chip);
+      }
+      main.appendChild(chips);
+    }
+    updateTraceHead(t);
+    return;
+  }
+  if (step.kind === "tool_start") { toolStart(t, step); return; }
+  if (step.kind === "tool") { toolFinish(t, step); return; }
+}
+
+function toolStart(t, step) {
+  const [title, iconKey] = TOOL_META[step.name] || [step.name, "dot", "--dim"];
+  const ref = traceRow(t, SPINNER, title, step.name === "run_command" ? "" : step.summary);
+  ref.row.classList.add("running");
+  if (step.name === "run_command" && step.command) {
+    const cmd = document.createElement("div");
+    cmd.className = "step-cmd mono";
+    cmd.textContent = step.command;
+    ref.main.appendChild(cmd);
+    const out = document.createElement("div");
+    out.className = "step-output";
+    ref.main.appendChild(out);
+    ref.output = out;
+  }
+  t.pending = { ...ref, name: step.name };
+}
+
+function toolFinish(t, step) {
+  t.steps += 1;
+  t.secs += step.secs || 0;
+  const meta = TOOL_META[step.name] || [step.name, "dot", "--dim"];
+  const denied = step.decision === "denied" || step.decision === "blocked" || step.decision === "rejected";
+  let ref = t.pending && t.pending.name === step.name ? t.pending : null;
+  if (!ref) {
+    // No matching start (e.g. replay ordering): synthesize a completed row.
+    ref = traceRow(t, "", meta[0], step.name === "run_command" ? "" : step.summary);
+    if (step.name === "run_command" && step.command) {
+      const cmd = document.createElement("div");
+      cmd.className = "step-cmd mono";
+      cmd.textContent = step.command;
+      ref.main.appendChild(cmd);
+    }
+  }
+  t.pending = null;
+  ref.row.classList.remove("running");
+  // finalize badge icon
+  const iconName = denied ? "denied" : step.name === "run_command" ? "command"
+    : !step.ok ? "denied" : meta[1];
+  const color = denied || !step.ok ? "var(--red)" : `var(${meta[2]})`;
+  ref.badge.innerHTML = traceSvg(iconName, color);
+  // status tag on the title
+  const tag = document.createElement("span");
+  tag.className = "step-tag " + (denied || !step.ok ? "bad" : "ok");
+  tag.textContent = denied
+    ? (step.decision === "blocked" ? "Blocked" : "Denied")
+    : !step.ok ? "Error"
+    : step.name === "run_command" ? `Approved · ${fmtSecs(step.secs)}`
+    : fmtSecs(step.secs);
+  ref.titleEl.appendChild(tag);
+  if (denied && ref.row.querySelector(".step-cmd")) {
+    ref.row.querySelector(".step-cmd").classList.add("struck");
+  }
+  // command output block (if not already streamed live)
+  if (step.name === "run_command" && step.output && !denied) {
+    let out = ref.output;
+    if (!out) { out = document.createElement("div"); out.className = "step-output"; ref.main.appendChild(out); }
+    if (!out.dataset.streamed) renderStepOutput(out, step.output);
+  }
+  updateTraceHead(t);
+}
+
+function renderStepOutput(container, text) {
+  container.replaceChildren();
+  const box = document.createElement("div");
+  box.className = "out-box";
+  const body = document.createElement("div");
+  body.className = "out-body mono";
+  body.appendChild(ansiFragment(text));
+  box.append(copyChip(() => body.textContent, "copy output"), body);
+  container.appendChild(box);
+}
+
+function traceStream(text) {
+  // While a run_command step is live, its output streams into the trace row;
+  // otherwise (a user-run !command, no active trace) it renders inline.
+  if (currentTrace && currentTrace.pending && currentTrace.pending.output) {
+    const out = currentTrace.pending.output;
+    out.dataset.streamed = "1";
+    let box = out.querySelector(".out-box");
+    if (!box) {
+      out.replaceChildren();
+      box = document.createElement("div");
+      box.className = "out-box";
+      const body = document.createElement("div");
+      body.className = "out-body mono";
+      box.append(copyChip(() => body.textContent, "copy output"), body);
+      out.appendChild(box);
+    }
+    const body = box.querySelector(".out-body");
+    if (body.childNodes.length) body.appendChild(document.createTextNode("\n"));
+    body.appendChild(ansiFragment(text));
+    scrollToEnd();
+    return;
+  }
+  addStreamLine(text);
+}
+
+function updateTraceHead(t) {
+  const title = t.el.querySelector(".trace-title");
+  const sub = t.el.querySelector(".trace-sub");
+  const tokens = t.el.querySelector(".trace-tokens");
+  const live = t.el.classList.contains("live");
+  title.textContent = live ? "Working…" : `Worked for ${fmtSecs(t.secs)}`;
+  sub.textContent = `${t.steps} step${t.steps === 1 ? "" : "s"}`;
+  const parts = [];
+  if (t.tokensIn) parts.push("↑" + fmtTokens(t.tokensIn));
+  if (t.tokensOut) parts.push("↓" + fmtTokens(t.tokensOut));
+  tokens.textContent = parts.join(" ");
+}
+
+function finishTrace() {
+  if (!currentTrace) return;
+  const t = currentTrace;
+  t.pending = null;
+  t.el.classList.remove("live");
+  t.el.classList.remove("open"); // collapse to the summary; tap to expand
+  const status = t.el.querySelector(".trace-status");
+  status.innerHTML = traceSvg("check", "var(--green)");
+  updateTraceHead(t);
+  currentTrace = null;
+}
+
+function fmtSecs(s) {
+  if (s == null) return "";
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.round(s)}s`;
+  return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+}
+function fmtTokens(n) {
+  return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+}
 
 // ---- message rendering ---------------------------------------------------
 function addMsg(kind, text) {

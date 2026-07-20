@@ -343,6 +343,9 @@ TRIMMED_NOTE = "\n[trimmed: full output dropped to save context]"
 # Rough tokens→chars margin: ~4 chars/token, keep well under num_ctx so the
 # system prompt is never silently evicted by Ollama's own truncation.
 CHARS_PER_TOKEN_BUDGET = 3
+# Command output carried in an activity-trace step is a preview (the trace
+# collapses it); the full result still reaches the model and streams live.
+STEP_OUTPUT_CAP = 8000
 
 
 def system_prompt() -> str:
@@ -407,6 +410,7 @@ class Agent:
         state_dir: os.PathLike | str | None = None,
         current_session: Callable[[], Path] | None = None,
         semantic: Any = None,
+        on_step: Callable[[dict], None] | None = None,
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
@@ -440,6 +444,13 @@ class Agent:
         self.semantic = semantic
         self._semantic_warned = False
         self.status = status if status is not None else _NoStatus()
+        # Structured activity-trace steps for a rich client (the web UI). When
+        # wired, tool/thinking/knowledge progress flows through here as typed
+        # events; the terminal keeps its flat echo lines (see _note). Extra
+        # run_command detail (command, decision, output) is stashed here by the
+        # dispatch branch and read back when the completion step is emitted.
+        self.on_step = on_step
+        self._run_meta: dict | None = None
         self._cancel = threading.Event()
         # Skill-read gate state: oversized preloaded skills the model must
         # read_skill (or explicitly waive) before other tools run; values are
@@ -469,6 +480,18 @@ class Agent:
         self.messages.append(message)
         if self.on_message:
             self.on_message(_serialize(message))
+
+    def _note(self, text: str) -> None:
+        """Terminal progress chatter (✓ ran X, → read Y, ✓ thought for …).
+        A rich client gets the same information as structured `on_step` events
+        and renders its own activity trace, so this is suppressed there to
+        avoid showing every line twice."""
+        if self.on_step is None:
+            self.echo(text)
+
+    def _emit_step(self, **step: Any) -> None:
+        if self.on_step is not None:
+            self.on_step(step)
 
     def run_task(
         self,
@@ -528,7 +551,11 @@ class Agent:
             {"role": "system", "content": task_reminder(index, preload.text)}
         )
         if preload.names:
-            self.echo("⚑ preloaded knowledge: " + ", ".join(preload.names))
+            self._note("⚑ preloaded knowledge: " + ", ".join(preload.names))
+            self._emit_step(
+                kind="knowledge",
+                items=[{"label": n} for n in preload.names],
+            )
         self._append(user_message)
 
         self._cancel.clear()  # a stale stop must not kill the new task
@@ -565,16 +592,17 @@ class Agent:
                 result = content or EMPTY_RESPONSE
                 if not content and self.on_token:
                     self.on_token(result + "\n")
-                self.echo(f"✓ answered in {format_secs(turn_secs)}{_tokens_note(usage)}")
+                self._note(f"✓ answered in {format_secs(turn_secs)}{_tokens_note(usage)}")
                 total = time.perf_counter() - task_started
-                self.echo(
+                self._note(
                     f"∑ total {format_secs(total)}{_tokens_note((tokens_in, tokens_out))}"
                 )
                 return result
 
             # Ollama buffers tool-call generation and streams nothing until it
             # is done, so live counts are impossible here — report per turn.
-            self.echo(f"✓ thought for {format_secs(turn_secs)}{_tokens_note(usage)}")
+            self._note(f"✓ thought for {format_secs(turn_secs)}{_tokens_note(usage)}")
+            self._emit_step(kind="thinking", secs=turn_secs, tokens=list(usage))
             if content and self.on_token is None:
                 self.echo(content)
 
@@ -863,7 +891,9 @@ class Agent:
         # gate (and the counter dict is not thread-safe).
         if len(concurrent) < 2 or self._pending_skill_reads:
             return [
-                self._call_result(name, partial(self._timed, partial(self._dispatch, name, args)))
+                self._call_result(
+                    name, partial(self._timed, partial(self._dispatch, name, args)), args=args
+                )
                 for name, args in calls
             ]
 
@@ -873,7 +903,7 @@ class Agent:
             futures = {}
             for i in concurrent:
                 label, thunk = self._read_only_call(*calls[i])
-                self.echo(label)
+                self._note(label)
                 # _timed runs on the worker so the reported duration is the
                 # call's true runtime, not how long collection waited for it.
                 futures[i] = pool.submit(self._timed, thunk)
@@ -886,17 +916,19 @@ class Agent:
                 for i in futures:
                     # ⇉ marks overlapped runtimes: they exceed wall time when
                     # summed, so only the batch ✓ line below counts toward ∑.
-                    results[i] = self._call_result(calls[i][0], futures[i].result, mark="⇉")
+                    results[i] = self._call_result(
+                        calls[i][0], futures[i].result, mark="⇉", args=calls[i][1]
+                    )
             finally:
                 self.status.stop()
-            self.echo(
+            self._note(
                 f"✓ {len(futures)} parallel lookups "
                 f"{format_secs(time.perf_counter() - batch_start)}"
             )
             for i, (name, args) in enumerate(calls):
                 if i not in futures:
                     results[i] = self._call_result(
-                        name, partial(self._timed, partial(self._dispatch, name, args))
+                        name, partial(self._timed, partial(self._dispatch, name, args)), args=args
                     )
         return results
 
@@ -905,9 +937,40 @@ class Agent:
         start = time.perf_counter()
         return fn(), time.perf_counter() - start
 
+    @staticmethod
+    def _arg_summary(name: str, args: dict) -> str:
+        """A one-line human label for a tool call — the trace step subtitle."""
+        a = args or {}
+        if name == "read_skill":
+            return str(a.get("name", ""))
+        if name == "web_search":
+            return str(a.get("query", ""))
+        if name == "read_url":
+            return str(a.get("url", ""))
+        if name == "recall":
+            return str(a.get("query") or a.get("name") or "")
+        if name in ("read_file", "write_file", "edit_file"):
+            return str(a.get("path", ""))
+        if name == "remember":
+            return str(a.get("name") or "memory")
+        # read_docs, run_command, and anything else: the command/topic string.
+        return str(a.get("command", ""))
+
     def _call_result(
-        self, name: str, fn: Callable[[], tuple[str, float]], mark: str = "✓"
+        self,
+        name: str,
+        fn: Callable[[], tuple[str, float]],
+        mark: str = "✓",
+        args: dict | None = None,
     ) -> str:
+        args = args or {}
+        self._run_meta = None
+        self._emit_step(
+            kind="tool_start",
+            name=name,
+            summary=self._arg_summary(name, args),
+            command=str(args.get("command", "")) if name == "run_command" else "",
+        )
         try:
             result, elapsed = fn()
         except ModuleNotFoundError as exc:
@@ -921,13 +984,34 @@ class Agent:
                 "git+https://github.com/epnasis/aish.git) and restart."
             )
             self.echo(result)
+            self._emit_step(kind="tool", name=name, secs=0.0, ok=False, summary="unavailable")
             return result
         except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
             result = f"ERROR: tool '{name}' failed internally: {exc!r}"
             self.echo(result)
+            self._emit_step(kind="tool", name=name, secs=0.0, ok=False, summary="failed")
             return result
-        self.echo(f"{mark} {name} {format_secs(elapsed)}")
+        self._note(f"{mark} {name} {format_secs(elapsed)}")
+        self._emit_tool_step(name, args, result, elapsed)
         return result
+
+    def _emit_tool_step(self, name: str, args: dict, result: str, secs: float) -> None:
+        if self.on_step is None:
+            return
+        step: dict[str, Any] = {
+            "kind": "tool",
+            "name": name,
+            "secs": secs,
+            "ok": not result.startswith("ERROR"),
+            "summary": self._arg_summary(name, args),
+        }
+        if self._run_meta is not None:  # run_command: command, decision, output
+            step.update(self._run_meta)
+            self._run_meta = None
+            output = step.get("output") or ""
+            if len(output) > STEP_OUTPUT_CAP:  # the trace shows a preview, not the full log
+                step["output"] = output[:STEP_OUTPUT_CAP] + "\n… (truncated)"
+        self.on_step(step)
 
     def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
         """(echo label, execution thunk) for a READ_ONLY_TOOLS member — split
@@ -1049,7 +1133,7 @@ class Agent:
         if name == "read_file":
             path = str(args.get("path", ""))
             label, thunk = self._read_file_call(args)
-            self.echo(label)
+            self._note(label)
             reason = self._read_prompt_reason(path)
             if reason is not None and not self.approve_read(path, reason):
                 return READ_DENIED
@@ -1057,7 +1141,7 @@ class Agent:
 
         if name in READ_ONLY_TOOLS:
             label, thunk = self._read_only_call(name, args)
-            self.echo(label)
+            self._note(label)
             self.status.start(name)
             try:
                 return thunk()
@@ -1074,7 +1158,7 @@ class Agent:
                 cwd=self.cwd,
                 lessons_path=self.lessons_path,
             )
-            self.echo(f"→ {result}")
+            self._note(f"→ {result}")
             return result
 
         if name in ("write_file", "edit_file"):
@@ -1090,15 +1174,23 @@ class Agent:
             # on exit; only the user moves the project (/cd, !cd).
             if self._parse_cd(command) is not None:
                 result = CD_NOT_STICKY.format(cwd=self.cwd)
-                self.echo(result)
+                self._note(result)
+                self._run_meta = {"command": command, "decision": "rejected", "output": result}
                 return result
 
             decision = self.approve(command)
             if isinstance(decision, Blocked):
+                self._run_meta = {
+                    "command": command, "decision": "blocked", "output": decision.reason,
+                }
                 return BLOCKED_RESULT.format(reason=decision.reason)
             if isinstance(decision, Denied):
+                self._run_meta = {
+                    "command": command, "decision": "denied", "output": decision.comment or "",
+                }
                 return _with_feedback(DENIED_RESULT, decision.comment)
             if decision is None or decision is False:
+                self._run_meta = {"command": command, "decision": "denied", "output": ""}
                 return DENIED_RESULT
             feedback = ""
             if isinstance(decision, Approved):
@@ -1107,7 +1199,8 @@ class Agent:
             final = command if decision is True else str(decision)
             if args.get("background"):
                 result = tools.start_background(final, cwd=self.cwd, log_dir=self.job_log_dir)
-                self.echo(result)
+                self._note(result)
+                self._run_meta = {"command": final, "decision": "approved", "output": result}
                 return _with_approval_note(result, feedback)
             result = tools.run_command(
                 final,
@@ -1117,6 +1210,7 @@ class Agent:
                 log_dir=self.job_log_dir,
                 should_stop=self._cancel.is_set,
             )
+            self._run_meta = {"command": final, "decision": "approved", "output": result}
             if self.stream is None:
                 self.echo(result)
             if final != command:

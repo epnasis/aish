@@ -1811,3 +1811,71 @@ class TestSkillGate:
         results = tool_messages(agent.messages)
         assert "zz step" in results[0]["content"]
         assert "freed" in results[1]["content"]
+
+
+def run_with_steps(responses, approve=lambda _cmd: True, **kwargs):
+    """Run a task collecting the structured activity-trace steps."""
+    steps: list[dict] = []
+    agent, _ = make_agent(responses, approve=approve, on_step=steps.append, **kwargs)
+    result = agent.run_task("go")
+    return steps, result
+
+
+class TestActivityTraceSteps:
+    def test_tool_turn_emits_thinking_then_tool_step(self):
+        steps, _ = run_with_steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo hi")]),
+                model_says("done"),
+            ]
+        )
+        kinds = [s["kind"] for s in steps]
+        assert kinds == ["thinking", "tool_start", "tool"]
+        tool = steps[-1]
+        assert tool["name"] == "run_command"
+        assert tool["command"] == "echo hi"
+        assert tool["decision"] == "approved"
+        assert "hi" in tool["output"]
+        assert tool["ok"] is True
+
+    def test_denied_command_step_records_denial(self, tmp_path):
+        steps, _ = run_with_steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="rm -rf /")]),
+                model_says("ok"),
+            ],
+            approve=lambda _cmd: False,
+        )
+        tool = next(s for s in steps if s["kind"] == "tool")
+        assert tool["decision"] == "denied"
+        assert tool["command"] == "rm -rf /"
+
+    def test_plain_answer_emits_no_steps(self):
+        steps, result = run_with_steps([model_says("just a chat reply")])
+        assert result == "just a chat reply"
+        assert steps == []
+
+    def test_output_is_bounded_in_step(self):
+        from aish.agent import STEP_OUTPUT_CAP
+
+        big = "x" * (STEP_OUTPUT_CAP + 5000)
+        steps, _ = run_with_steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"printf '{big}'")]),
+                model_says("done"),
+            ]
+        )
+        tool = next(s for s in steps if s["kind"] == "tool")
+        # The step carries a preview, never an unbounded log (run_command's own
+        # cap may bound it first; STEP_OUTPUT_CAP is the backstop).
+        assert len(tool["output"]) <= STEP_OUTPUT_CAP + 40
+
+    def test_no_on_step_is_harmless(self):
+        # Default (no on_step): the terminal echo path still runs, no crash.
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo hi")]),
+                model_says("done"),
+            ]
+        )
+        assert agent.run_task("go") == "done"
