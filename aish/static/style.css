@@ -819,6 +819,11 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 
 /* diff rendering */
+/* The tools (wrap + copy) live on this NON-scrolling wrapper so horizontal
+   scroll of the diff below never slides them out of view; the `.diff` scroller
+   is a sibling of the pinned `.term-tools` cluster (same pattern as the
+   terminal block). */
+.diff-wrap { position: relative; }
 .diff {
   background: var(--bg);
   border-radius: 8px;
@@ -827,10 +832,21 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   max-height: 45dvh;
   overflow: auto;
 }
+/* The rows sit in an inner box sized to the WIDEST line (`width: max-content`,
+   floored to 100%); each row then fills that box, so every line's tint paints
+   edge-to-edge across the FULL scroll width — like a terminal — instead of
+   stopping at the viewport and exposing bare panel background when scrolled
+   right (#68). Soft-wrap mode drops it back to auto so lines reflow. */
+.diff-inner { min-width: 100%; width: max-content; }
+.diff.diff-soft .diff-inner { width: auto; }
 /* one row = line-number gutter + text; add/del rows carry a full-width tint */
 .dl { display: flex; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.55; }
 .dl-no { flex: none; width: 46px; padding: 0 10px 0 4px; text-align: right; color: var(--dim); opacity: 0.6; user-select: none; }
-.dl-tx { flex: 1; min-width: 0; padding-right: 12px; white-space: pre; }
+/* `flex: 0 0 auto` (not shrinkable) is what lets each row's max-content include
+   the full line, so the row — and its tinted background — grows past the
+   viewport to the true scroll width (#68). Soft-wrap mode below flips it back to
+   shrinkable so lines reflow instead of scrolling. */
+.dl-tx { flex: 0 0 auto; padding-right: 12px; white-space: pre; }
 .dl.add { background: rgba(48, 209, 88, 0.13); }
 .dl.del { background: rgba(255, 69, 58, 0.11); }
 .dl.add .dl-tx { color: var(--green); }
@@ -841,11 +857,16 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
    continuation lines tuck under the content, not the +/- gutter. */
 body.wrap .msg.echo, body.wrap .msg.stream,
 body.wrap .msg.md pre, body.wrap .msg.md pre code,
-body.wrap .diff .dl-tx,
 body.wrap .card code, body.wrap .card .cmd {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* diff wrap is owned by its own per-card toggle (`.diff-soft`, seeded from
+   body.wrap at build, kept in sync by the global top-bar toggle) — NOT keyed
+   off body.wrap directly, so the per-card wrap button can always override the
+   global setting, mirroring the terminal block. In soft mode the row drops back
+   to auto width so lines wrap instead of forcing horizontal scroll. */
+.diff.diff-soft .dl-tx { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 body.wrap .msg.echo, body.wrap .msg.stream {
   padding-left: 22px; /* 10px base + 12px hang */
   text-indent: -12px;
