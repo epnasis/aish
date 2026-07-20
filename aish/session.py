@@ -101,6 +101,55 @@ class SessionLog:
         return SessionLog._parse(path)[0]
 
     @staticmethod
+    def reconstruct_events(path: Path) -> list[dict] | None:
+        """Rebuild the transcript event stream (user / step / done) a rich
+        client replays, so a cold-loaded session shows the SAME activity trace
+        a live one does. Groups the log by task: a user message opens a turn,
+        `trace` records become its steps, and the turn's final assistant text
+        becomes the `done` answer that collapses the trace — mirroring how the
+        live web flow emits exactly one `done` per completed task.
+
+        Returns None when the log predates trace records (no `trace` kind), so
+        the caller can fall back to a flat conversation history."""
+        events: list[dict] = []
+        steps: list[dict] = []
+        answer = ""
+        open_turn = False
+        has_trace = False
+
+        def flush() -> None:
+            nonlocal steps, answer, open_turn
+            if not open_turn:
+                return
+            events.extend(steps)
+            events.append({"type": "done", "result": answer})
+            steps = []
+            answer = ""
+            open_turn = False
+
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            kind = record.get("kind")
+            if kind == "trace":
+                has_trace = True
+                steps.append({"type": "step", **record.get("step", {})})
+            elif kind == "message" and record.get("role") == "user":
+                flush()  # close the previous turn before the next one opens
+                events.append({"type": "user", "text": record.get("content", "")})
+                open_turn = True
+            elif kind == "message" and record.get("role") == "assistant":
+                # The task's answer is its last non-empty assistant text;
+                # intermediate tool-calling turns carry no visible content.
+                content = (record.get("content") or "").strip()
+                if content:
+                    answer = content
+        flush()
+        return events if has_trace else None
+
+    @staticmethod
     def _derive_title(messages: list[dict]) -> str:
         """Untruncated title: the first user message — cheap, deterministic,
         and it almost always names the task."""
@@ -457,3 +506,9 @@ class SessionLog:
 
     def command(self, command: str, decision: str) -> None:
         self._record("command", command=command, decision=decision)
+
+    def step(self, step: dict) -> None:
+        """Persist one structured activity-trace step so the trace is
+        reconstructable in any UI, long after the in-memory transcript is
+        evicted. The step dict is the same one the web renderer receives."""
+        self._record("trace", step=step)

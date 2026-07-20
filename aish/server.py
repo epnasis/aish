@@ -979,7 +979,16 @@ class WebServer:
         self._evict_idle()
         session, history = await asyncio.to_thread(self.open_session, path)
         # Recorded synchronously so the _show snapshot right below includes it.
-        session.bridge.record({"type": "history", "messages": history})
+        # A session logged with trace records reconstructs into the SAME
+        # user/step/done event stream a live one replays — rebuilding the
+        # collapsed "Worked for Xs" timeline. Older logs (no trace records)
+        # fall back to the flat conversation history.
+        events = await asyncio.to_thread(SessionLog.reconstruct_events, path)
+        if events:
+            for event in events:
+                session.bridge.record(event)
+        else:
+            session.bridge.record({"type": "history", "messages": history})
         self.add_session(session, activate=False)
         return session
 
@@ -1436,6 +1445,9 @@ def create_app(
             # Structured activity-trace steps; recorded so a resumed/switched
             # session replays the whole trace like every other event.
             on_step=lambda step: bridge.emit({"type": "step", **step}),
+            # ...and persisted to disk so the trace survives eviction/restart
+            # and cold-loads back into the same timeline (reconstruct_events).
+            step_log=logref.step,
             # Terminal-block framing: command_start (cwd + command) and
             # command_end (exit code / detached / interrupted). Recorded like
             # steps so replay reconstructs the bounded block identically.
