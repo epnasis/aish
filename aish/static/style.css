@@ -446,6 +446,49 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 /* Answered (any user reply sent): chips and chip-only paragraphs vanish. */
 .msg.md .quick-reply.spent, .msg.md p.spent { display: none; }
 
+/* ---- rich embeds (whitelisted YouTube / Google Maps, #50) ---- */
+.msg.md .embed {
+  display: block;
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  aspect-ratio: 16 / 9;
+  margin: 8px 0;
+  border-radius: var(--r-card);
+  overflow: hidden;
+  background: #000;
+}
+.msg.md .embed-maps { border: 0.5px solid var(--sep); background: var(--bg-elev2); }
+.msg.md .embed-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+.msg.md .embed-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.msg.md .embed-youtube { cursor: pointer; }
+.msg.md .embed-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 68px;
+  height: 48px;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+.msg.md .embed-play svg { width: 100%; height: 100%; display: block; }
+.msg.md .embed-play .yt-btn { fill: #212121; opacity: 0.8; }
+.msg.md .embed-play .yt-arrow { fill: #fff; }
+.msg.md .embed-youtube:hover .embed-play .yt-btn,
+.msg.md .embed-youtube:focus-visible .embed-play .yt-btn { fill: #f00; opacity: 1; }
+.msg.md .embed-youtube:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
 /* ---- copy-to-clipboard chips ---- */
 .copy-chip {
   display: flex;
