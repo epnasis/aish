@@ -942,22 +942,46 @@ function termRule(cls) {
 // A wrap toggle for a terminal zone: highlights while that zone is wrapped.
 // `on` is the zone's default wrap state (command wraps by default, output
 // doesn't), so the button's lit state always matches what the eye sees.
-function termWrapBtn(toggle, on) {
+// Toggling wrap reflows the output height, so anchor `anchorSel`'s top to the
+// same viewport position afterward — the content you were looking at stays put
+// instead of jumping — and re-measure the cap for the new line count.
+function termWrapBtn(block, anchorSel, toggle, on) {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "term-tool term-wrap" + (on ? " on" : "");
   b.title = "Wrap lines";
   b.innerHTML = WRAP_SVG;
-  b.onclick = () => { b.classList.toggle("on"); toggle(); };
+  b.onclick = () => {
+    const anchor = block.querySelector(anchorSel);
+    const before = anchor ? anchor.getBoundingClientRect().top : 0;
+    b.classList.toggle("on");
+    toggle();
+    recomputeTermCap(block);
+    if (anchor) messagesEl.scrollTop += anchor.getBoundingClientRect().top - before;
+  };
   return b;
+}
+
+// (Re)decide whether the output needs the "Show all" cap for its current
+// height — used at command_end and after a wrap toggle changes the line count.
+function recomputeTermCap(block) {
+  if (block.classList.contains("expanded")) return;
+  const out = block.querySelector(".term-out");
+  const hasOutput = out.textContent.trim() !== "";
+  const cap = (window.innerHeight * TERM_OUTPUT_CAP_VH) / 100;
+  block.classList.toggle("capped", hasOutput && out.scrollHeight > cap + 12);
 }
 
 function buildTermBlock(cwd, command) {
   const block = document.createElement("div");
   block.className = "term-block running";
 
+  // The prompt line scrolls horizontally in nowrap mode; its tools live on the
+  // non-scrolling wrapper so they stay pinned top-right instead of sliding away.
+  const promptWrap = document.createElement("div");
+  promptWrap.className = "term-prompt-wrap";
   const prompt = document.createElement("div");
-  prompt.className = "term-prompt mono has-tools";
+  prompt.className = "term-prompt mono";
   const dir = document.createElement("span");
   dir.className = "term-dir";
   dir.textContent = promptDir(cwd);
@@ -968,15 +992,16 @@ function buildTermBlock(cwd, command) {
   const cmd = document.createElement("span");
   cmd.className = "term-cmd";
   cmd.textContent = command || "";
+  prompt.append(dir, dollar, cmd);
   // Command tools: copy grabs the COMMAND only (no dir/$ prompt); wrap toggles
   // the prompt line between wrapping and single-line horizontal scroll.
   const cmdTools = document.createElement("div");
   cmdTools.className = "term-tools";
   cmdTools.append(
-    termWrapBtn(() => block.classList.toggle("cmd-nowrap"), true),
+    termWrapBtn(block, ".term-prompt", () => block.classList.toggle("cmd-nowrap"), true),
     copyChip(() => cmd.textContent, "copy command"),
   );
-  prompt.append(dir, dollar, cmd, cmdTools);
+  promptWrap.append(prompt, cmdTools);
 
   const outWrap = document.createElement("div");
   outWrap.className = "term-out-wrap";
@@ -989,7 +1014,7 @@ function buildTermBlock(cwd, command) {
   const outTools = document.createElement("div");
   outTools.className = "term-tools";
   outTools.append(
-    termWrapBtn(() => block.classList.toggle("out-wrap"), false),
+    termWrapBtn(block, ".term-out", () => block.classList.toggle("out-wrap"), false),
     copyChip(() => out.textContent, "copy output"),
   );
   outWrap.append(outTools, out, fade);
@@ -1007,10 +1032,10 @@ function buildTermBlock(cwd, command) {
   exit.className = "term-exit mono";
   const label = document.createElement("span");
   label.className = "term-exit-label";
-  label.innerHTML = SPINNER + "<span>running</span>";
+  label.innerHTML = SPINNER + '<span class="term-exit-cap">running</span>';
   exit.appendChild(label);
 
-  block.append(prompt, termRule("term-rule-top"), outWrap, showall,
+  block.append(promptWrap, termRule("term-rule-top"), outWrap, showall,
     termRule("term-rule-bot"), exit);
   return block;
 }
@@ -1044,27 +1069,36 @@ function finalizeTermBlock(block, event) {
   const hasOutput = out.textContent.trim() !== "";
   if (!hasOutput) block.classList.add("no-output"); // collapse the middle zone
 
+  // A dim uppercase caption + a colored value, so the status line never reads
+  // like part of the command (the old bare "exit 0" did). ok/bad color the
+  // value only.
   const label = block.querySelector(".term-exit-label");
-  let cls, text;
+  let cls, cap, val;
   if (event.status === "detached") {
-    cls = "detached"; text = event.job ? `detached · pid ${event.job}` : "detached";
+    cls = "detached"; cap = "job"; val = event.job ? `pid ${event.job}` : "detached";
   } else if (event.status === "interrupted") {
-    cls = "bad"; text = "interrupted";
+    cls = "bad"; cap = "status"; val = "interrupted";
   } else if (typeof event.exit_code === "number") {
-    cls = event.exit_code === 0 ? "ok" : "bad"; text = `exit ${event.exit_code}`;
+    cls = event.exit_code === 0 ? "ok" : "bad"; cap = "exit code"; val = String(event.exit_code);
   } else {
-    cls = "bad"; text = "error"; // e.g. the command never started
+    cls = "bad"; cap = "status"; val = "error"; // e.g. the command never started
   }
-  label.className = "term-exit-label " + cls;
-  label.textContent = text;
+  label.className = "term-exit-label";
+  label.replaceChildren();
+  const capEl = document.createElement("span");
+  capEl.className = "term-exit-cap";
+  capEl.textContent = cap;
+  const valEl = document.createElement("span");
+  valEl.className = "term-exit-val " + cls;
+  valEl.textContent = val;
+  label.append(capEl, valEl);
 
   // Cap tall output with a "Show all" expander instead of an inner scroll
   // region — expanding flows into the page's own scroll (iOS-safe). Measured
   // synchronously here, not in a rAF: command_end is processed just before the
   // turn's "done" collapses the trace (display:none), which would zero out
   // scrollHeight and defeat the check.
-  const cap = (window.innerHeight * TERM_OUTPUT_CAP_VH) / 100;
-  if (hasOutput && out.scrollHeight > cap + 12) block.classList.add("capped");
+  recomputeTermCap(block);
 }
 
 function traceStream(text) {

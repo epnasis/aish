@@ -1375,12 +1375,11 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   margin-top: 8px; border-radius: 10px; background: #000;
   border: 0.5px solid var(--sep); overflow: hidden; font-size: 11.5px;
 }
+.term-prompt-wrap { position: relative; }
 .term-prompt {
-  position: relative;
-  padding: 8px 12px; line-height: 1.5; color: var(--fg);
+  padding: 8px 72px 8px 12px; line-height: 1.5; color: var(--fg);
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
 }
-.term-prompt.has-tools { padding-right: 72px; }
 .term-block.cmd-nowrap .term-prompt {
   white-space: pre; overflow-wrap: normal; word-break: normal; overflow-x: auto;
 }
@@ -1422,9 +1421,11 @@ body.wrap .term-out,
 .term-block.no-output .term-rule-bot { display: none; }
 .term-exit { padding: 7px 12px; display: flex; align-items: center; }
 .term-exit-label { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.3px; }
-.term-exit-label.ok { color: var(--green); }
-.term-exit-label.bad { color: var(--red); }
-.term-exit-label.detached { color: var(--blue); }
+.term-exit-cap { color: var(--dim); text-transform: uppercase; }
+.term-exit-val { font-variant-numeric: tabular-nums; }
+.term-exit-val.ok { color: var(--green); }
+.term-exit-val.bad { color: var(--red); }
+.term-exit-val.detached { color: var(--blue); }
 .term-block.running .term-exit-label { color: var(--dim); }
 .term-exit-label .spin { width: 12px; height: 12px; border-color: var(--dim); border-top-color: transparent; }
 .know-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
