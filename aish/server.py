@@ -463,7 +463,7 @@ lessons file); the composer also accepts /model /resume /delete /new /cd \
 /add-dir /jobs /help. Header controls: a "‹ Sessions" back button (top left, \
 with a badge when a background session needs attention) opens the sessions \
 drawer; the centered session title opens a menu (new chat, switch model, \
-change directory, line wrap, workspace & jobs); the compose pencil (top right) \
+change directory, line wrap, workspace & jobs, delete this chat); the compose pencil (top right) \
 starts a new chat. A context bar under the title shows the working directory \
 (tap to open a folder picker) and the model (tap to switch). In the composer, \
 the ＋ button opens attach file / reference a path (@) / slash command (/) / \
@@ -505,6 +505,8 @@ same format as terminal aish, so sessions are interchangeable between both. \
 Each drawer row has a trash icon: tap it, then its "Delete?" confirm, to \
 permanently delete that session (conversation and audit log; refused while \
 the session is running; deleting the current chat lands on a fresh one). \
+The session-title menu also has a "Delete chat" item (same two-tap \
+"Confirm delete") that deletes the chat you are currently in. \
 When the user refers to earlier work ("the fix from yesterday", "what went \
 wrong last time"), use the recall tool to find and read the \
 relevant past conversation instead of asking them to repeat it.
