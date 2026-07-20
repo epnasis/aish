@@ -1991,3 +1991,129 @@ class TestActivityTraceSteps:
             ]
         )
         assert agent.run_task("go") == "done"
+
+
+class TestCommandFraming:
+    """#52: run_command surfaces command_start (cwd + command) and command_end
+    (exit code / detached / interrupted) so the web UI can draw a bounded
+    terminal block. The callbacks default to None, so the terminal path (which
+    never wires them) is unaffected."""
+
+    def _hooks(self):
+        starts: list[dict] = []
+        ends: list[dict] = []
+        return starts, ends, {"on_command_start": starts.append, "on_command_end": ends.append}
+
+    def test_start_and_end_carry_cwd_and_exit(self, tmp_path):
+        starts, ends, hooks = self._hooks()
+        marker = tmp_path / "framed"
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+            **hooks,
+        )
+        agent.run_task("touch it")
+        assert starts == [{"cwd": str(tmp_path), "command": f"touch {marker}"}]
+        assert ends == [{"status": "exit", "exit_code": 0}]
+
+    def test_edited_command_is_the_one_framed(self, tmp_path):
+        starts, _ends, hooks = self._hooks()
+        edited = tmp_path / "edited"
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="false")]),
+                model_says("done"),
+            ],
+            approve=lambda _cmd: f"touch {edited}",
+            cwd=str(tmp_path),
+            **hooks,
+        )
+        agent.run_task("run")
+        assert starts[0]["command"] == f"touch {edited}"
+        assert edited.exists()
+
+    def test_nonzero_exit_code_reported(self, tmp_path):
+        _starts, ends, hooks = self._hooks()
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="sh -c 'exit 3'")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+            **hooks,
+        )
+        agent.run_task("run")
+        assert ends == [{"status": "exit", "exit_code": 3}]
+
+    def test_denied_command_emits_no_framing(self, tmp_path):
+        starts, ends, hooks = self._hooks()
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+                model_says("ok"),
+            ],
+            approve=lambda _cmd: False,
+            cwd=str(tmp_path),
+            **hooks,
+        )
+        agent.run_task("run")
+        assert starts == [] and ends == []
+
+    def test_background_command_labels_detached(self, tmp_path, monkeypatch):
+        import aish.tools as tools_module
+
+        starts, ends, hooks = self._hooks()
+        monkeypatch.setattr(
+            tools_module,
+            "start_background",
+            lambda cmd, **_kw: "[background job started: pid 4242, log: /x]\nStill running",
+        )
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[tool_call("run_command", command="sleep 100", background=True)]
+                ),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+            **hooks,
+        )
+        agent.run_task("run")
+        assert starts[0]["command"] == "sleep 100"
+        assert ends == [{"status": "detached", "job": "4242"}]
+
+    def test_interrupted_command_labeled(self, tmp_path, monkeypatch):
+        import aish.tools as tools_module
+
+        starts, ends, hooks = self._hooks()
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("run_command", command="sleep 100")])],
+            cwd=str(tmp_path),
+            **hooks,
+        )
+
+        def cancel_midrun(cmd, **_kw):
+            # Emulate the web Stop button firing while the command runs.
+            agent.cancel()
+            return "partial\n[stopped by user — any partial output is above]\n[exit code: -15]"
+
+        monkeypatch.setattr(tools_module, "run_command", cancel_midrun)
+        agent.run_task("run")
+        assert starts[0]["command"] == "sleep 100"
+        assert ends == [{"status": "interrupted"}]
+
+    def test_default_hooks_are_none(self, tmp_path):
+        # No callbacks wired (the terminal's configuration): run_command still
+        # works and nothing tries to call a None hook.
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo hi")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        assert agent.on_command_start is None and agent.on_command_end is None
+        assert agent.run_task("go") == "done"

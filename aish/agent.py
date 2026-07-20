@@ -10,6 +10,7 @@ import datetime
 import getpass
 import os
 import platform
+import re
 import shlex
 import sys
 import threading
@@ -220,6 +221,23 @@ def _with_feedback(base: str, comment: str) -> str:
 
 def _with_approval_note(result: str, comment: str) -> str:
     return result + APPROVED_NOTE.format(comment=comment) if comment else result
+
+
+_EXIT_CODE_RE = re.compile(r"\[exit code: (-?\d+)\]\s*$")
+_JOB_PID_RE = re.compile(r"pid (\d+)")
+
+
+def _parse_exit_code(result: str) -> int | None:
+    """The trailing exit code tools.run_command appends, or None when the
+    command never started (a bare 'ERROR: failed to start …')."""
+    match = _EXIT_CODE_RE.search(result)
+    return int(match.group(1)) if match else None
+
+
+def _parse_job_id(result: str) -> str:
+    """The pid from a background/detach handle message, for the block label."""
+    match = _JOB_PID_RE.search(result)
+    return match.group(1) if match else ""
 
 READ_DENIED = (
     "USER DENIED reading this sensitive file — its contents were NOT read. "
@@ -432,6 +450,8 @@ class Agent:
         current_session: Callable[[], Path] | None = None,
         semantic: Any = None,
         on_step: Callable[[dict], None] | None = None,
+        on_command_start: Callable[[dict], None] | None = None,
+        on_command_end: Callable[[dict], None] | None = None,
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
@@ -471,6 +491,13 @@ class Agent:
         # run_command detail (command, decision, output) is stashed here by the
         # dispatch branch and read back when the completion step is emitted.
         self.on_step = on_step
+        # Terminal-block framing for a rich client (the web UI): command_start
+        # carries cwd + the (possibly edited) command, command_end the exit
+        # code (or a detached/interrupted label). Both are recorded so a
+        # session replay reconstructs the bounded block identically. Unused by
+        # the terminal, which streams output inline.
+        self.on_command_start = on_command_start
+        self.on_command_end = on_command_end
         self._run_meta: dict | None = None
         self._cancel = threading.Event()
         # Skill-read gate state: oversized preloaded skills the model must
@@ -513,6 +540,14 @@ class Agent:
     def _emit_step(self, **step: Any) -> None:
         if self.on_step is not None:
             self.on_step(step)
+
+    def _emit_command_start(self, command: str) -> None:
+        if self.on_command_start is not None:
+            self.on_command_start({"cwd": self.cwd, "command": command})
+
+    def _emit_command_end(self, **payload: Any) -> None:
+        if self.on_command_end is not None:
+            self.on_command_end(payload)
 
     def run_task(
         self,
@@ -622,7 +657,9 @@ class Agent:
                 self._note(
                     f"∑ total {format_secs(total)}{_tokens_note((tokens_in, tokens_out))}"
                 )
-                self._emit_step(kind="thinking_cancel")  # a plain answer needs no trace row
+                # a plain answer needs no "Thinking" row, but carry the turn time
+                # so the web trace can label the answer step ("Answered in Xs")
+                self._emit_step(kind="thinking_cancel", secs=turn_secs)
                 return result
 
             # Ollama buffers tool-call generation and streams nothing until it
@@ -1234,12 +1271,17 @@ class Agent:
                 feedback = decision.comment
                 decision = decision.command if decision.command else True
             final = command if decision is True else str(decision)
+            # command_start opens the bounded terminal block in the web UI:
+            # cwd + the (possibly edited) command that is about to run.
+            self._emit_command_start(final)
             if args.get("background"):
                 result = tools.start_background(final, cwd=self.cwd, log_dir=self.job_log_dir)
                 self._note(result)
                 self._run_meta = {
                     "command": final, "decision": "approved", "output": result, "comment": feedback,
                 }
+                # A detached job has no exit code — label the block instead.
+                self._emit_command_end(status="detached", job=_parse_job_id(result))
                 return _with_approval_note(result, feedback)
             result = tools.run_command(
                 final,
@@ -1252,6 +1294,13 @@ class Agent:
             self._run_meta = {
                 "command": final, "decision": "approved", "output": result, "comment": feedback,
             }
+            # command_end closes the block: a user cancel has no clean exit
+            # code, a failed-to-start command none at all; otherwise the code.
+            if self._cancel.is_set():
+                self._emit_command_end(status="interrupted")
+            else:
+                code = _parse_exit_code(result)
+                self._emit_command_end(status="exit", exit_code=code)
             if self.stream is None:
                 self.echo(result)
             if final != command:

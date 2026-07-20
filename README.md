@@ -370,7 +370,11 @@ in its search jumps straight there), and the **model chip** opens a
 searchable model picker (with a "make startup default" toggle). Your tool
 activity — thinking time, recalled knowledge, each command and its output —
 is grouped into one collapsible **activity trace** per turn, live while it
-runs and summarised ("Worked for Xs · N steps") once done. Line wrap (in the
+runs and summarised ("Worked for Xs · N steps") once done. Each executed
+command renders as a **terminal block**: a black panel with a pinned prompt
+line (`dir$ command`), the live ANSI output (capped with a "Show all output"
+expander when long), and a pinned exit code (or a "detached"/"interrupted"
+label). Line wrap (in the
 title menu) toggles wrapping for command output, code, and diffs (default:
 scroll sideways; remembered per device). The input box autocompletes like the
 terminal: `/` pops up the command list (unambiguous prefixes work — `/res`

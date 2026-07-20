@@ -438,6 +438,70 @@ class TestCommandApproval:
             assert auto is not None and auto["text"] == "✓ auto-approved: ls"
 
 
+class TestTerminalFraming:
+    """#52: run_command is framed by recorded command_start / command_end
+    events so the browser can draw a bounded terminal block, and a reconnect
+    replays the frame identically."""
+
+    def _drain(self, ws) -> list[dict]:
+        events = []
+        for _ in range(200):
+            event = ws.receive_json()
+            events.append(event)
+            if event["type"] == "done":
+                return events
+            if event["type"] == "error":
+                raise AssertionError(f"error: {event['text']}")
+        raise AssertionError("no done within 200 events")
+
+    def test_framing_events_emitted_live_and_recorded(self, app_env, tmp_path):
+        marker = tmp_path / "framed"
+        # `ls` is allowlisted, so it auto-approves and streams without a card.
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command="ls")]),
+            model_says("done"),
+        ]
+        _ = marker  # keep tmp_path scoping obvious
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "list it"})
+            events = self._drain(ws)
+            starts = [e for e in events if e["type"] == "command_start"]
+            ends = [e for e in events if e["type"] == "command_end"]
+            assert len(starts) == 1
+            assert starts[0]["cwd"] == app_env["cwd"]
+            assert starts[0]["command"] == "ls"
+            assert ends == [{"type": "command_end", "status": "exit", "exit_code": 0}]
+
+        # A reconnect replays the recorded frame identically (phone lock/unlock,
+        # session switch) — the block must reconstruct from the transcript.
+        with client, connected(client) as (_ws, _hello, replay):
+            kinds = [e["type"] for e in replay["events"]]
+            assert "command_start" in kinds and "command_end" in kinds
+            start = next(e for e in replay["events"] if e["type"] == "command_start")
+            end = next(e for e in replay["events"] if e["type"] == "command_end")
+            assert start["command"] == "ls" and start["cwd"] == app_env["cwd"]
+            assert end["status"] == "exit" and end["exit_code"] == 0
+
+    def test_denied_command_has_no_framing(self, app_env, tmp_path):
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+            model_says("ok"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "approval", "id": request["id"], "action": "deny"})
+            events = []
+            for _ in range(200):
+                event = ws.receive_json()
+                events.append(event)
+                if event["type"] == "done":
+                    break
+            assert not any(e["type"].startswith("command_") for e in events)
+
+
 class TestWriteApproval:
     def responses(self, path, content):
         return [

@@ -191,6 +191,8 @@ function handle(event) {
       addAnsiMsg("echo", event.text);
       break;
     case "stream": traceStream(event.text); break;
+    case "command_start": onCommandStart(event); break;
+    case "command_end": onCommandEnd(event); break;
     case "step": traceStep(event); break;
     case "error":
       closeAnswer();
@@ -315,6 +317,14 @@ function onToken(text) {
     // hold the page still so the text fills in from the top instead of the
     // view chasing the streaming bottom.
     answerFilling = true;
+    // The live "Thinking…" step is the last row on the timeline when the reply
+    // starts streaming; relabel it so it reads as the answer landing, not more
+    // thinking, and mark it so finishTrace finalizes it in place ("Answered")
+    // instead of dropping the live thinking row.
+    if (currentTrace && currentTrace.thinkingRow) {
+      currentTrace.thinkingRow.titleEl.textContent = "Answering…";
+      currentTrace.thinkingRow.isAnswer = true;
+    }
     requestAnimationFrame(() => anchorAnswer(true));
   }
   answerText += text;
@@ -652,8 +662,14 @@ function traceStep(step) {
     return;
   }
   if (step.kind === "thinking_cancel") {
-    // The turn was a plain answer — drop the active thinking row.
-    if (t.thinkingRow) { t.thinkingRow.row.remove(); t.thinkingRow = null; t.started -= 1; }
+    // A plain answer needs no thinking row — but if the answer already streamed
+    // into it (relabeled "Answering…"), keep it as a finalized "Answered" step
+    // instead of dropping it.
+    if (t.thinkingRow) {
+      if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow, step.secs);
+      else { t.thinkingRow.row.remove(); t.started -= 1; }
+      t.thinkingRow = null;
+    }
     updateTraceHead(t);
     return;
   }
@@ -725,16 +741,9 @@ function toolStart(t, step) {
   knowledgeTag(ref, step.name);
   ref.row.classList.add("running", "active-step");
   startStepTimer(t, ref);
-  if (step.name === "run_command" && step.command) {
-    const cmd = document.createElement("div");
-    cmd.className = "step-cmd mono";
-    cmd.textContent = step.command;
-    ref.main.appendChild(cmd);
-    const out = document.createElement("div");
-    out.className = "step-output";
-    ref.main.appendChild(out);
-    ref.output = out;
-  }
+  // The command + output + exit for run_command are drawn by the terminal
+  // block that command_start builds once the command is approved and runs;
+  // while the approval card is up the row is just the spinner.
   t.pending = { ...ref, name: step.name };
 }
 
@@ -775,7 +784,14 @@ function toolFinish(t, step) {
   // The user's approval note, shown back on the step (#3), clamped when long.
   if (step.comment) ref.main.appendChild(clampNote(step.comment));
   if (denied) {
-    if (ref.row.querySelector(".step-cmd")) ref.row.querySelector(".step-cmd").classList.add("struck");
+    // A denied/blocked command never runs, so no terminal block is built —
+    // show the command struck-through here with the reason it was skipped.
+    if (step.name === "run_command" && step.command && !ref.row.querySelector(".step-cmd")) {
+      const cmd = document.createElement("div");
+      cmd.className = "step-cmd mono struck";
+      cmd.textContent = step.command;
+      ref.main.appendChild(cmd);
+    }
     // Why it was skipped/blocked (denial comment, gate reason) — #5, #12.
     if (step.output) {
       const why = document.createElement("span");
@@ -784,13 +800,14 @@ function toolFinish(t, step) {
       ref.main.appendChild(why);
     }
   }
-  // command output block (finalize streamed output, or render from the step)
-  if (step.name === "run_command" && step.output && !denied) {
-    let out = ref.output;
-    if (!out) { out = document.createElement("div"); out.className = "step-output"; ref.main.appendChild(out); }
-    const streamed = out.dataset.streamed && out.querySelector(".out-box");
-    if (streamed) finalizeOutBox(streamed, splitExit(step.output)[1]);
-    else renderStepOutput(out, step.output);
+  // An executed run_command's output lives in the terminal block that
+  // command_start/command_end drew and finalized; nothing to render here.
+  // Fallback for a stray replay with no framing events: render the step output.
+  if (step.name === "run_command" && step.output && !denied && !ref.main.querySelector(".term-block")) {
+    const out = document.createElement("div");
+    out.className = "step-output";
+    ref.main.appendChild(out);
+    renderStepOutput(out, step.output);
   }
   // error detail for a failed non-run_command tool (#18)
   if (!step.ok && step.error && step.name !== "run_command") {
@@ -905,17 +922,226 @@ function renderErrorBox(container, text) {
   finalizeOutBox(box, "error");
 }
 
+// ---- terminal block (run_command) ---------------------------------------
+// A single black terminal panel per executed command: a pinned prompt line
+// (dir$ command), a rule, the ANSI output (capped with a "Show all" expander
+// once tall), a rule, and a pinned exit-code line. command_start builds it,
+// stream events fill the output live, command_end sets the exit label. The
+// framing events are recorded, so a session replay reconstructs it identically.
+
+const TERM_OUTPUT_CAP_VH = 40;
+
+// The prompt-line directory, Starship [directory]-style: keep the last
+// DIR_SEGMENTS path segments, prefixed with "…/" when anything was truncated
+// (repo root is not special — truncate_to_repo=false). Home is shown as ~.
+const DIR_SEGMENTS = 4;
+function promptDir(cwd) {
+  let p = (cwd || "").replace(/\/+$/, "");
+  if (!p) return "/";
+  if (homeDir && p === homeDir) return "~";
+  if (homeDir && p.startsWith(homeDir + "/")) p = "~" + p.slice(homeDir.length);
+  if (p === "/" || p === "~") return p;
+  const home = p.startsWith("~");
+  const segs = p.split("/").filter(Boolean);
+  if (segs.length <= DIR_SEGMENTS) return home ? segs.join("/") : "/" + segs.join("/");
+  return "…/" + segs.slice(-DIR_SEGMENTS).join("/");
+}
+
+function termRule(cls) {
+  const r = document.createElement("div");
+  r.className = "term-rule " + cls;
+  return r;
+}
+
+// A wrap toggle for a terminal zone: highlights while that zone is wrapped.
+// `on` is the zone's default wrap state (command wraps by default, output
+// doesn't), so the button's lit state always matches what the eye sees.
+// Toggling wrap reflows the output height, so anchor `anchorSel`'s top to the
+// same viewport position afterward — the content you were looking at stays put
+// instead of jumping — and re-measure the cap for the new line count.
+function termWrapBtn(block, anchorSel, toggle, on) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "term-tool term-wrap" + (on ? " on" : "");
+  b.title = "Wrap lines";
+  b.innerHTML = WRAP_SVG;
+  b.onclick = () => {
+    const anchor = block.querySelector(anchorSel);
+    const before = anchor ? anchor.getBoundingClientRect().top : 0;
+    b.classList.toggle("on");
+    toggle();
+    recomputeTermCap(block);
+    if (anchor) messagesEl.scrollTop += anchor.getBoundingClientRect().top - before;
+  };
+  return b;
+}
+
+// The global top-bar wrap toggle overrides every command block: force each
+// block's output wrap (and its button's lit state) to the global value, then
+// re-cap for the new line count. New blocks seed from the same global value at
+// build time; a per-block toggle diverges until the next global change.
+function syncTermWrap(on) {
+  for (const block of document.querySelectorAll(".term-block")) {
+    block.classList.toggle("term-owrap", on);
+    const btn = block.querySelector(".term-out-wrap .term-wrap");
+    if (btn) btn.classList.toggle("on", on);
+    recomputeTermCap(block);
+  }
+}
+
+// (Re)decide whether the output needs the "Show all" cap for its current
+// height — used at command_end and after a wrap toggle changes the line count.
+function recomputeTermCap(block) {
+  if (block.classList.contains("expanded")) return;
+  const out = block.querySelector(".term-out");
+  const hasOutput = out.textContent.trim() !== "";
+  const cap = (window.innerHeight * TERM_OUTPUT_CAP_VH) / 100;
+  block.classList.toggle("capped", hasOutput && out.scrollHeight > cap + 12);
+}
+
+function buildTermBlock(cwd, command) {
+  const block = document.createElement("div");
+  block.className = "term-block running";
+
+  // The prompt line scrolls horizontally in nowrap mode; its tools live on the
+  // non-scrolling wrapper so they stay pinned top-right instead of sliding away.
+  const promptWrap = document.createElement("div");
+  promptWrap.className = "term-prompt-wrap";
+  const prompt = document.createElement("div");
+  prompt.className = "term-prompt mono";
+  const dir = document.createElement("span");
+  dir.className = "term-dir";
+  dir.textContent = promptDir(cwd);
+  dir.title = cwd || "";
+  const dollar = document.createElement("span");
+  dollar.className = "term-dollar";
+  dollar.textContent = "$";
+  const cmd = document.createElement("span");
+  cmd.className = "term-cmd";
+  cmd.textContent = command || "";
+  prompt.append(dir, dollar, cmd);
+  // Command tools: copy grabs the COMMAND only (no dir/$ prompt); wrap toggles
+  // the prompt line between wrapping and single-line horizontal scroll.
+  const cmdTools = document.createElement("div");
+  cmdTools.className = "term-tools";
+  cmdTools.append(
+    termWrapBtn(block, ".term-prompt", () => block.classList.toggle("term-cnowrap"), true),
+    copyChip(() => cmd.textContent, "copy command"),
+  );
+  promptWrap.append(prompt, cmdTools);
+
+  const outWrap = document.createElement("div");
+  outWrap.className = "term-out-wrap";
+  const out = document.createElement("div");
+  out.className = "term-out mono";
+  const fade = document.createElement("div");
+  fade.className = "term-fade";
+  // Output tools: copy grabs the OUTPUT only (the two rules reinforce that the
+  // prompt line and exit code aren't part of it); wrap soft-wraps the output.
+  // Seed the wrap state from the global top-bar wrap preference, but the
+  // per-block toggle then owns it independently (the term block ignores the
+  // global body.wrap so this button can always override it).
+  const outWrapped = document.body.classList.contains("wrap");
+  if (outWrapped) block.classList.add("term-owrap");
+  const outTools = document.createElement("div");
+  outTools.className = "term-tools";
+  outTools.append(
+    termWrapBtn(block, ".term-out", () => block.classList.toggle("term-owrap"), outWrapped),
+    copyChip(() => out.textContent, "copy output"),
+  );
+  outWrap.append(outTools, out, fade);
+
+  const showall = document.createElement("button");
+  showall.type = "button";
+  showall.className = "term-showall";
+  showall.textContent = "Show all output";
+  showall.onclick = () => {
+    const on = block.classList.toggle("expanded");
+    showall.textContent = on ? "Show less" : "Show all output";
+  };
+
+  const exit = document.createElement("div");
+  exit.className = "term-exit mono";
+  const label = document.createElement("span");
+  label.className = "term-exit-label";
+  label.innerHTML = SPINNER + '<span class="term-exit-cap">running</span>';
+  exit.appendChild(label);
+
+  block.append(promptWrap, termRule("term-rule-top"), outWrap, showall,
+    termRule("term-rule-bot"), exit);
+  return block;
+}
+
+function onCommandStart(event) {
+  const t = ensureTrace();
+  const block = buildTermBlock(event.cwd, event.command);
+  const pending = t.pending && t.pending.name === "run_command" ? t.pending : null;
+  if (pending) {
+    pending.main.appendChild(block);
+    pending.term = block;
+  } else {
+    // No matching run_command row (unusual replay ordering): synthesize one.
+    const ref = traceRow(t, traceSvg("command", "var(--green)"), "run_command", "");
+    ref.main.appendChild(block);
+    t.pending = { ...ref, name: "run_command", term: block };
+  }
+  scrollToEnd();
+  pinTrace(t);
+}
+
+function onCommandEnd(event) {
+  const t = currentTrace;
+  const block = t && t.pending && t.pending.term;
+  if (block) finalizeTermBlock(block, event);
+}
+
+function finalizeTermBlock(block, event) {
+  block.classList.remove("running");
+  const out = block.querySelector(".term-out");
+  const hasOutput = out.textContent.trim() !== "";
+  if (!hasOutput) block.classList.add("no-output"); // collapse the middle zone
+
+  // A dim uppercase caption + a colored value, so the status line never reads
+  // like part of the command (the old bare "exit 0" did). ok/bad color the
+  // value only.
+  const label = block.querySelector(".term-exit-label");
+  let cls, cap, val;
+  if (event.status === "detached") {
+    cls = "detached"; cap = "job"; val = event.job ? `pid ${event.job}` : "detached";
+  } else if (event.status === "interrupted") {
+    cls = "bad"; cap = "status"; val = "interrupted";
+  } else if (typeof event.exit_code === "number") {
+    cls = event.exit_code === 0 ? "ok" : "bad"; cap = "exit code"; val = String(event.exit_code);
+  } else {
+    cls = "bad"; cap = "status"; val = "error"; // e.g. the command never started
+  }
+  label.className = "term-exit-label";
+  label.replaceChildren();
+  const capEl = document.createElement("span");
+  capEl.className = "term-exit-cap";
+  capEl.textContent = cap;
+  const valEl = document.createElement("span");
+  valEl.className = "term-exit-val " + cls;
+  valEl.textContent = val;
+  label.append(capEl, valEl);
+
+  // Cap tall output with a "Show all" expander instead of an inner scroll
+  // region — expanding flows into the page's own scroll (iOS-safe). Measured
+  // synchronously here, not in a rAF: command_end is processed just before the
+  // turn's "done" collapses the trace (display:none), which would zero out
+  // scrollHeight and defeat the check.
+  recomputeTermCap(block);
+}
+
 function traceStream(text) {
-  // While a run_command step is live, its output streams into the trace row;
-  // otherwise (a user-run !command, no active trace) it renders inline.
-  if (currentTrace && currentTrace.pending && currentTrace.pending.output) {
-    const out = currentTrace.pending.output;
-    out.dataset.streamed = "1";
-    let box = out.querySelector(".out-box");
-    if (!box) { out.replaceChildren(); box = outBox(false); out.appendChild(box); }
-    const body = box.querySelector(".out-body");
+  // While a run_command is live, its output streams into the terminal block
+  // command_start built; otherwise (no active block) it renders inline.
+  const term = currentTrace && currentTrace.pending && currentTrace.pending.term;
+  if (term) {
+    const body = term.querySelector(".term-out");
     if (body.childNodes.length) body.appendChild(document.createTextNode("\n"));
     body.appendChild(ansiFragment(text));
+    term.classList.add("has-output");
     scrollToEnd();
     pinTrace(currentTrace);
     return;
@@ -951,11 +1177,26 @@ function updateTraceHead(t) {
   tokens.textContent = parts.join(" ");
 }
 
+// The answer streamed into this (formerly "Thinking…") row — finalize it as a
+// permanent "Answered" step instead of dropping the live row, so the last step
+// on the timeline reflects that the reply landed.
+function finalizeAnswerRow(t, ref, secs) {
+  clearStepTimer(t, ref);
+  ref.row.classList.remove("running", "active-step");
+  ref.badge.innerHTML = traceSvg("check", "var(--green)");
+  ref.titleEl.textContent =
+    typeof secs === "number" ? `Answered in ${fmtSecs(secs)}` : "Answered";
+}
+
 function finishTrace(errored) {
   if (!currentTrace) return;
   const t = currentTrace;
   if (t.timer) { clearInterval(t.timer); t.timer = null; }
-  if (t.thinkingRow) { t.thinkingRow.row.remove(); t.thinkingRow = null; }
+  if (t.thinkingRow) {
+    if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow);
+    else t.thinkingRow.row.remove();
+    t.thinkingRow = null;
+  }
   t.pending = null;
   t.activeStartedAt = null;
   currentTrace = null;
@@ -2945,6 +3186,7 @@ function toggleWrap() {
   const anchor = topVisibleAnchor();
   const on = document.body.classList.toggle("wrap");
   localStorage.setItem(WRAP_KEY, on ? "1" : "0");
+  syncTermWrap(on); // global overrides every command block's local wrap + button
   // Reading layout right after the class toggle forces a synchronous
   // reflow, so the restored offset is computed against final geometry.
   if (wasAtBottom) scrollToEnd(true);

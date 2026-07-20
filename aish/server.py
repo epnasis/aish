@@ -1370,6 +1370,11 @@ def create_app(
             # Structured activity-trace steps; recorded so a resumed/switched
             # session replays the whole trace like every other event.
             on_step=lambda step: bridge.emit({"type": "step", **step}),
+            # Terminal-block framing: command_start (cwd + command) and
+            # command_end (exit code / detached / interrupted). Recorded like
+            # steps so replay reconstructs the bounded block identically.
+            on_command_start=lambda ev: bridge.emit({"type": "command_start", **ev}),
+            on_command_end=lambda ev: bridge.emit({"type": "command_end", **ev}),
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,
             status=WebStatus(bridge),
