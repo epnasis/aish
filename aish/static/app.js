@@ -939,12 +939,25 @@ function termRule(cls) {
   return r;
 }
 
+// A wrap toggle for a terminal zone: highlights while that zone is wrapped.
+// `on` is the zone's default wrap state (command wraps by default, output
+// doesn't), so the button's lit state always matches what the eye sees.
+function termWrapBtn(toggle, on) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "term-tool term-wrap" + (on ? " on" : "");
+  b.title = "Wrap lines";
+  b.innerHTML = WRAP_SVG;
+  b.onclick = () => { b.classList.toggle("on"); toggle(); };
+  return b;
+}
+
 function buildTermBlock(cwd, command) {
   const block = document.createElement("div");
   block.className = "term-block running";
 
   const prompt = document.createElement("div");
-  prompt.className = "term-prompt mono";
+  prompt.className = "term-prompt mono has-tools";
   const dir = document.createElement("span");
   dir.className = "term-dir";
   dir.textContent = promptDir(cwd);
@@ -955,7 +968,15 @@ function buildTermBlock(cwd, command) {
   const cmd = document.createElement("span");
   cmd.className = "term-cmd";
   cmd.textContent = command || "";
-  prompt.append(dir, dollar, cmd);
+  // Command tools: copy grabs the COMMAND only (no dir/$ prompt); wrap toggles
+  // the prompt line between wrapping and single-line horizontal scroll.
+  const cmdTools = document.createElement("div");
+  cmdTools.className = "term-tools";
+  cmdTools.append(
+    termWrapBtn(() => block.classList.toggle("cmd-nowrap"), true),
+    copyChip(() => cmd.textContent, "copy command"),
+  );
+  prompt.append(dir, dollar, cmd, cmdTools);
 
   const outWrap = document.createElement("div");
   outWrap.className = "term-out-wrap";
@@ -963,9 +984,15 @@ function buildTermBlock(cwd, command) {
   out.className = "term-out mono";
   const fade = document.createElement("div");
   fade.className = "term-fade";
-  // Copy grabs the OUTPUT only — the two rules reinforce that the prompt line
-  // and exit code aren't part of it.
-  outWrap.append(copyChip(() => out.textContent, "copy output"), out, fade);
+  // Output tools: copy grabs the OUTPUT only (the two rules reinforce that the
+  // prompt line and exit code aren't part of it); wrap soft-wraps the output.
+  const outTools = document.createElement("div");
+  outTools.className = "term-tools";
+  outTools.append(
+    termWrapBtn(() => block.classList.toggle("out-wrap"), false),
+    copyChip(() => out.textContent, "copy output"),
+  );
+  outWrap.append(outTools, out, fade);
 
   const showall = document.createElement("button");
   showall.type = "button";

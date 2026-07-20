@@ -1376,8 +1376,13 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   border: 0.5px solid var(--sep); overflow: hidden; font-size: 11.5px;
 }
 .term-prompt {
+  position: relative;
   padding: 8px 12px; line-height: 1.5; color: var(--fg);
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+}
+.term-prompt.has-tools { padding-right: 72px; }
+.term-block.cmd-nowrap .term-prompt {
+  white-space: pre; overflow-wrap: normal; word-break: normal; overflow-x: auto;
 }
 .term-dir { color: var(--blue); }
 .term-dollar { color: var(--green); margin: 0 6px 0 3px; }
@@ -1385,13 +1390,21 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-rule { height: 0; border-top: 0.5px solid var(--sep); }
 .term-out-wrap { position: relative; }
 .term-out { padding: 8px 12px; line-height: 1.6; color: var(--dim); white-space: pre; overflow-x: auto; }
-body.wrap .term-out { white-space: pre-wrap; overflow-wrap: anywhere; }
+body.wrap .term-out,
+.term-block.out-wrap .term-out { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-block.capped:not(.expanded) .term-out { max-height: 40vh; overflow: hidden; }
-.term-out-wrap > .copy-chip {
-  position: absolute; top: 4px; right: 4px; z-index: 2;
+/* Per-zone tool cluster (wrap + copy), pinned top-right of the prompt line and
+   the output. Copy on the command grabs the command text only; copy on the
+   output grabs the output only. */
+.term-tools { position: absolute; top: 4px; right: 4px; z-index: 2; display: flex; gap: 4px; }
+.term-tools .copy-chip, .term-tool {
   width: 28px; height: 28px; border-radius: 8px; background: var(--bg-elev2);
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; color: var(--dim); cursor: pointer;
 }
-.term-out-wrap > .copy-chip svg { width: 15px; height: 15px; }
+.term-tools .copy-chip svg { width: 15px; height: 15px; }
+.term-tool svg { width: 16px; height: 16px; }
+.term-tool.on { background: var(--blue-glow); color: var(--blue); }
 .term-fade {
   position: absolute; left: 0; right: 0; bottom: 0; height: 44px;
   pointer-events: none; background: linear-gradient(transparent, #000); display: none;
