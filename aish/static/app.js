@@ -319,10 +319,11 @@ function onToken(text) {
     answerFilling = true;
     // The live "Thinking…" step is the last row on the timeline when the reply
     // starts streaming; relabel it so it reads as the answer landing, not more
-    // thinking. It stays a running row until the turn ends and the trace
-    // collapses (or a `thinking` event finalizes it to "Thought for Xs").
+    // thinking, and mark it so finishTrace finalizes it in place ("Answered")
+    // instead of dropping the live thinking row.
     if (currentTrace && currentTrace.thinkingRow) {
       currentTrace.thinkingRow.titleEl.textContent = "Answering…";
+      currentTrace.thinkingRow.isAnswer = true;
     }
     requestAnimationFrame(() => anchorAnswer(true));
   }
@@ -661,8 +662,14 @@ function traceStep(step) {
     return;
   }
   if (step.kind === "thinking_cancel") {
-    // The turn was a plain answer — drop the active thinking row.
-    if (t.thinkingRow) { t.thinkingRow.row.remove(); t.thinkingRow = null; t.started -= 1; }
+    // A plain answer needs no thinking row — but if the answer already streamed
+    // into it (relabeled "Answering…"), keep it as a finalized "Answered" step
+    // instead of dropping it.
+    if (t.thinkingRow) {
+      if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow);
+      else { t.thinkingRow.row.remove(); t.started -= 1; }
+      t.thinkingRow = null;
+    }
     updateTraceHead(t);
     return;
   }
@@ -1170,11 +1177,25 @@ function updateTraceHead(t) {
   tokens.textContent = parts.join(" ");
 }
 
+// The answer streamed into this (formerly "Thinking…") row — finalize it as a
+// permanent "Answered" step instead of dropping the live row, so the last step
+// on the timeline reflects that the reply landed.
+function finalizeAnswerRow(t, ref) {
+  clearStepTimer(t, ref);
+  ref.row.classList.remove("running", "active-step");
+  ref.badge.innerHTML = traceSvg("check", "var(--green)");
+  ref.titleEl.textContent = "Answered";
+}
+
 function finishTrace(errored) {
   if (!currentTrace) return;
   const t = currentTrace;
   if (t.timer) { clearInterval(t.timer); t.timer = null; }
-  if (t.thinkingRow) { t.thinkingRow.row.remove(); t.thinkingRow = null; }
+  if (t.thinkingRow) {
+    if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow);
+    else t.thinkingRow.row.remove();
+    t.thinkingRow = null;
+  }
   t.pending = null;
   t.activeStartedAt = null;
   currentTrace = null;
