@@ -96,6 +96,111 @@ class TestApprovalGate:
         assert agent.run_task("check ls docs") == "done"
 
 
+class TestApprovalComment:
+    """#59: a comment on any decision must be answered before the model
+    proceeds — the guidance in the tool result imperatively orders an
+    answer-first reply, never a silent fold into the next command."""
+
+    def _must_answer(self, text: str) -> bool:
+        return "MUST answer" in text and "BEFORE issuing any further tool call" in text
+
+    def test_deny_with_comment_forces_answer_first(self, tmp_path):
+        from aish.approval import Denied
+
+        marker = tmp_path / "denied59"
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("acknowledged"),
+            ],
+            approve=lambda _cmd: Denied("wrong flag on macOS, use -f"),
+        )
+        agent.run_task("do it")
+        assert not marker.exists()  # denied — never ran
+        result = tool_messages(agent.messages)[0]["content"]
+        assert result.startswith(DENIED_RESULT)
+        assert "wrong flag on macOS, use -f" in result
+        assert self._must_answer(result)
+
+    def test_approve_with_comment_runs_and_forces_answer_first(self, tmp_path):
+        from aish.approval import Approved
+
+        marker = tmp_path / "approved59"
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("acknowledged"),
+            ],
+            approve=lambda _cmd: Approved("prefer install -D next time"),
+        )
+        agent.run_task("do it")
+        assert marker.exists()  # approved — the command ran
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "prefer install -D next time" in result
+        assert self._must_answer(result)
+
+    def test_no_comment_leaves_result_clean(self, tmp_path):
+        """A bare approval (no comment) must NOT carry the answer-first order —
+        the guidance appears only when the user actually typed something."""
+        marker = tmp_path / "plain59"
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("done"),
+            ],
+            approve=lambda _cmd: True,
+        )
+        agent.run_task("do it")
+        assert marker.exists()
+        assert not self._must_answer(tool_messages(agent.messages)[0]["content"])
+
+    def test_write_deny_with_comment_forces_answer_first(self, tmp_path):
+        from aish.agent import WRITE_DENIED
+        from aish.approval import Denied
+
+        target = tmp_path / "note59.txt"
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("write_file", path=str(target), content="hi"),
+                    ]
+                ),
+                model_says("acknowledged"),
+            ],
+            approve_write=lambda _plan: Denied("put it under docs/ instead"),
+            cwd=str(tmp_path),
+        )
+        agent.run_task("write it")
+        assert not target.exists()
+        result = tool_messages(agent.messages)[0]["content"]
+        assert result.startswith(WRITE_DENIED)
+        assert "put it under docs/ instead" in result
+        assert self._must_answer(result)
+
+    def test_write_approve_with_comment_writes_and_forces_answer_first(self, tmp_path):
+        from aish.approval import Approved
+
+        target = tmp_path / "note59b.txt"
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("write_file", path=str(target), content="hi"),
+                    ]
+                ),
+                model_says("acknowledged"),
+            ],
+            approve_write=lambda _plan: Approved("keep future notes under docs/"),
+            cwd=str(tmp_path),
+        )
+        agent.run_task("write it")
+        assert target.read_text().strip() == "hi"  # approved — the write landed
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "keep future notes under docs/" in result
+        assert self._must_answer(result)
+
+
 class TestLoop:
     def test_plain_text_response_ends_task(self):
         agent, chat = make_agent([model_says("just an answer")])
