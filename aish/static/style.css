@@ -29,6 +29,9 @@
   --blue-glow: rgba(10, 132, 255, 0.18);
   --green-glow: rgba(48, 209, 88, 0.16);
   --orange-glow: rgba(255, 159, 10, 0.18);
+  --orange-border: rgba(255, 159, 10, 0.4);   /* destructive approval-card outline */
+  --blue-border: rgba(10, 132, 255, 0.4);     /* write/diff approval-card outline */
+  --approve-fg: #00320f;                       /* text on the green Approve button */
   --red-glow: rgba(255, 69, 58, 0.16);
   --yellow-glow: rgba(255, 214, 10, 0.14);
   --purple-glow: rgba(191, 90, 242, 0.18);
@@ -475,6 +478,30 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   opacity: 0.6;
 }
 .stream-wrap > .copy-chip svg { width: 14px; height: 14px; }
+/* wrap toggle on a fenced code block — sits left of the copy chip; when active
+   the block soft-wraps instead of scrolling horizontally */
+.copywrap > .code-wrap {
+  position: absolute;
+  top: 6px;
+  right: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: var(--bg-elev2);
+  color: var(--dim);
+  opacity: 0.75;
+}
+.copywrap > .code-wrap svg { width: 16px; height: 16px; }
+.copywrap > .code-wrap:active { opacity: 0.5; }
+.copywrap.wrap-on > .code-wrap { background: var(--blue-glow); color: var(--blue); opacity: 1; }
+/* beat `.msg.md pre code { white-space: pre }` (equal specificity) by ordering */
+.copywrap.wrap-on pre,
+.copywrap.wrap-on pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---- footer row under answers: copy + read-aloud ---- */
 .msg-tools {
@@ -485,6 +512,20 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .msg-tools > .copy-chip { width: 40px; height: 40px; border-radius: 10px; }
 .msg-tools > .copy-chip svg { width: 19px; height: 19px; }
+.regen-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--dim);
+}
+.regen-chip svg { width: 19px; height: 19px; }
+.regen-chip:active { opacity: 0.5; }
 .answer-timing { margin-left: auto; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--dim); padding-right: 6px; }
 
 /* copy chip under your own prompt bubble, right-aligned with it */
@@ -543,14 +584,16 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .tts.active:not(.paused) .i-pause { display: block; }
 .tts.active.paused .i-play { display: block; }
 
-/* ---- approval cards ---- */
+/* ---- approval cards (design Screens 2c / 2d) ---- */
+/* Inline in the chat flow — an assistant turn that scrolls with the
+   conversation, not a pinned bottom modal. */
 .card {
   background: var(--bg-elev);
   border-radius: var(--r-card);
   padding: 12px;
   margin: 12px 0;
 }
-.card.resolved { padding: 8px 12px; }
+/* legacy read/sensitive-file card chrome (buildReadCard) */
 .card .card-title { font-size: 13px; font-weight: 600; color: var(--orange); margin-bottom: 8px; }
 .card .card-title .destructive { color: var(--red); }
 .card code, .card .cmd {
@@ -568,33 +611,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   margin-bottom: 10px;
   overflow-wrap: anywhere;
 }
-.card .cmd-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-.card .cmd-row code { flex: 1; min-width: 0; margin-bottom: 0; }
-.card .edit-pencil {
-  flex: none;
-  width: 38px;
-  height: 38px;
-  border: none;
-  border-radius: var(--r-control);
-  background: var(--bg-elev2);
-  color: var(--fg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.card .edit-pencil svg { width: 19px; height: 19px; }
-.card .edit-pencil:active { opacity: 0.7; }
-.card .edit-pencil:disabled { opacity: 0.5; }
-/* the hidden attribute must beat the display:flex/grid rules above */
-.card .buttons[hidden], .card .edit-pencil[hidden] { display: none !important; }
-.card .prefix-note {
-  font-size: 13px;
-  color: var(--dim);
-  margin-bottom: 10px;
-  overflow-wrap: anywhere;
-}
 .card .buttons { display: flex; gap: 8px; }
-.card .buttons.grid2 { display: grid; grid-template-columns: 1fr 1fr; }
 .card .buttons button {
   flex: 1;
   border: none;
@@ -602,30 +619,13 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   padding: 11px 4px;
   font-size: 15px;
   font-weight: 600;
-  color: #fff;
 }
 .card .buttons button:active { opacity: 0.7; }
-.card .approve { background: var(--green); color: #003514; }
-.card .deny { background: var(--red); color: #fff; }
+.card .approve { background: var(--green); color: var(--approve-fg); }
+.card .deny { background: var(--red-glow); color: var(--red); }
 .card .session { background: var(--bg-elev2); color: var(--blue); }
-.card .edit { background: var(--bg-elev2); color: var(--fg); }
-.card textarea {
-  width: 100%;
-  background: var(--bg);
-  color: var(--fg);
-  border: none;
-  border-radius: 8px;
-  padding: 10px;
-  margin-bottom: 10px;
-  min-height: 60px;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 13px;
-}
-.card .verdict { font-size: 13px; color: var(--dim); }
-.card .verdict.approved { color: var(--green); }
-.card .verdict.denied { color: var(--red); }
-.card .verdict-comment { font-size: 13px; color: var(--dim); margin-top: 2px; }
 .card .feedback {
+  display: block;
   width: 100%;
   background: var(--bg);
   color: var(--fg);
@@ -635,42 +635,92 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   margin-bottom: 10px;
   font: inherit;
   font-size: 16px; /* prevents iOS focus zoom */
+  line-height: 1.4;
+  resize: vertical;
 }
 .card .feedback::placeholder { color: var(--dim); }
 .card .feedback:focus { outline: none; border-color: var(--blue); }
 .card .feedback:disabled { opacity: 0.5; }
 
-/* ---- restyled approval card (design Screen 2c): visible option subtitles ---- */
-.approval-card { border: 1px solid var(--sep); box-shadow: 0 8px 26px -10px rgba(0, 0, 0, 0.5); }
-.card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+/* restyled command (2c) / write (2d) approval card */
+.approval-card {
+  padding: 0;
+  border: 1px solid var(--sep);
+  box-shadow: 0 8px 26px -10px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.approval-card.danger { border-color: var(--orange-border); }
+.approval-card.info { border-color: var(--blue-border); }
+
+.card-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px 10px; }
+.card-head.sep { border-bottom: 0.5px solid var(--sep); padding-bottom: 11px; }
 .card-ico { width: 30px; height: 30px; border-radius: 9px; flex: none; display: flex; align-items: center; justify-content: center; background: var(--blue-glow); color: var(--blue); }
 .card-head.danger .card-ico { background: var(--orange-glow); color: var(--orange); }
 .card-ico svg { width: 17px; height: 17px; }
-.card-htext { display: flex; flex-direction: column; min-width: 0; }
+.card-htext { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .card-htitle { font-size: 14.5px; font-weight: 700; color: var(--fg); }
-.card-hsub { font-size: 11.5px; color: var(--dim); font-weight: 600; }
+.card-hsub { font-size: 11.5px; color: var(--dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-head.danger .card-hsub { color: var(--orange); }
-.cmd-box { display: flex; align-items: center; gap: 8px; padding: 9px 6px 9px 12px; border-radius: 10px; background: var(--bg); border: 0.5px solid var(--sep); margin-bottom: 8px; }
+.card-hsub.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.card-count { font-size: 11px; font-weight: 700; font-family: ui-monospace, monospace; flex: none; }
+.card-count.add { color: var(--green); }
+.card-count.del { color: var(--red); }
+
+.cmd-box { display: flex; align-items: center; gap: 8px; margin: 0 14px; padding: 9px 6px 9px 12px; border-radius: 10px; background: var(--bg); border: 0.5px solid var(--sep); }
 .cmd-dollar { color: var(--green); font-family: ui-monospace, monospace; font-size: 13px; flex: none; }
 .cmd-text { flex: 1; min-width: 0; font-size: 13px; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.cmd-text.editing { outline: none; box-shadow: 0 0 0 2px var(--blue); border-radius: 5px; padding: 1px 5px; margin: -1px -5px; }
 .cmd-icon { flex: none; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: none; border: none; border-radius: 7px; color: var(--dim); }
 .cmd-icon svg { width: 15px; height: 15px; }
-.cmd-icon[hidden] { display: none; }
+.cmd-icon.active { color: var(--blue); }
 .cmd-box .copy-chip { flex: none; width: 30px; height: 30px; }
 .cmd-box .copy-chip svg { width: 15px; height: 15px; }
-.card-where { font-size: 12px; color: var(--dim); margin-bottom: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.opts { display: flex; flex-direction: column; gap: 8px; }
-.opts[hidden] { display: none; }
-.opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 11px 14px; border: none; border-radius: 12px; background: var(--bg-elev2); text-align: left; }
-.opt-title { font-size: 15px; font-weight: 600; color: var(--fg); }
-.opt-sub { font-size: 11.5px; color: var(--dim); }
-.opt:active { opacity: 0.7; }
-.opt:disabled { opacity: 0.5; }
-.opt.primary { align-items: center; background: var(--green); }
-.opt.primary .opt-title { color: #003514; }
-.opt.deny { align-items: center; background: none; }
-.opt.deny .opt-title { color: var(--red); }
+
+.card-where { display: flex; align-items: center; gap: 6px; padding: 9px 15px 2px; font-size: 12px; color: var(--dim); overflow: hidden; }
+.card-where svg { width: 12px; height: 12px; flex: none; }
+.card-where .where-path { font-family: ui-monospace, "SF Mono", Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.approval-card .escape-note { margin: 6px 14px 0; }
+
+/* width:auto on a textarea falls back to its intrinsic `cols` size, so set an
+   explicit fill between the card's 14px side insets */
+.approval-card .feedback { margin: 10px 14px 0; width: calc(100% - 28px); box-sizing: border-box; min-height: 58px; }
+
+/* scope: a segmented control that modifies what Approve remembers */
+.scope { margin: 10px 14px 0; }
+.scope-label { font-size: 11px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 6px; }
+.segmented { display: flex; background: var(--bg); border: 0.5px solid var(--sep); border-radius: 10px; padding: 3px; gap: 3px; }
+.seg { flex: 1; min-width: 0; text-align: center; padding: 7px 3px; border: none; border-radius: 8px; font-size: 12px; font-weight: 600; color: var(--dim); background: none; }
+.seg.active { color: var(--fg); font-weight: 700; background: var(--bg-elev3); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18); }
+.seg:active { opacity: 0.7; }
+.scope-explain { margin-top: 7px; font-size: 11.5px; color: var(--dim); line-height: 1.4; }
+.scope-explain b { color: var(--fg); }
+.scope-explain .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+.card-actions { display: flex; gap: 8px; padding: 13px 14px 14px; }
+.card-actions button { border: none; border-radius: 12px; padding: 13px; font-size: 16px; font-weight: 700; }
+.card-actions button:active { opacity: 0.8; }
+.card-actions button:disabled { opacity: 0.5; }
+.card-actions .approve { flex: 2; background: var(--green); color: var(--approve-fg); }
+.card-actions .deny { flex: 1; background: var(--red-glow); color: var(--red); }
+.card-actions.even .approve, .card-actions.even .deny { flex: 1; }
+
+/* the write-approval diff hunk sits flush inside the card body */
+.approval-card .diff { margin: 0; border-radius: 0; }
+
+/* the user's approval note on a finished step (#3): clamp long / multi-line
+   comments to a few lines with a show-more toggle, like the output box. */
 .step-note { font-style: italic; }
+.step-note-wrap { display: flex; flex-direction: column; align-items: flex-start; margin-top: 1px; }
+.step-note-wrap .step-note {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  white-space: normal;
+  margin-top: 0;
+}
+.step-note-wrap.expanded .step-note { -webkit-line-clamp: unset; }
+.note-more { background: none; border: none; color: var(--blue); font-size: 11.5px; font-weight: 600; padding: 3px 0 0; }
 
 /* ---- sources under an answer ---- */
 .sources {
@@ -704,34 +754,36 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .diff {
   background: var(--bg);
   border-radius: 8px;
-  padding: 10px;
-  overflow-x: auto;
+  padding: 6px 0;
   margin-bottom: 10px;
   max-height: 45dvh;
-  overflow-y: auto;
+  overflow: auto;
 }
-.diff div { white-space: pre; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
-.diff .add { color: var(--green); }
+/* one row = line-number gutter + text; add/del rows carry a full-width tint */
+.dl { display: flex; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.55; }
+.dl-no { flex: none; width: 46px; padding: 0 10px 0 4px; text-align: right; color: var(--dim); opacity: 0.6; user-select: none; }
+.dl-tx { flex: 1; min-width: 0; padding-right: 12px; white-space: pre; }
+.dl.add { background: rgba(48, 209, 88, 0.13); }
+.dl.del { background: rgba(255, 69, 58, 0.11); }
+.dl.add .dl-tx { color: var(--green); }
+.dl.gap { justify-content: center; color: var(--dim); opacity: 0.5; padding: 1px 0; }
 /* wrap mode (body.wrap, toggled from the top bar): monospace blocks wrap
    instead of scrolling sideways. pre-wrap keeps indentation; anywhere breaks
    unbroken tokens (URLs, hashes). Diff/echo lines get a hanging indent so
    continuation lines tuck under the content, not the +/- gutter. */
 body.wrap .msg.echo, body.wrap .msg.stream,
 body.wrap .msg.md pre, body.wrap .msg.md pre code,
-body.wrap .diff div,
+body.wrap .diff .dl-tx,
 body.wrap .card code, body.wrap .card .cmd {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-body.wrap .diff div { padding-left: 12px; text-indent: -12px; }
 body.wrap .msg.echo, body.wrap .msg.stream {
   padding-left: 22px; /* 10px base + 12px hang */
   text-indent: -12px;
 }
-.diff .del { color: var(--red); }
-.diff .hunk { color: var(--cyan); }
-.diff .head { font-weight: 700; }
-.diff .ctx { color: var(--dim); }
+.dl.del .dl-tx { color: var(--red); }
+.dl.ctx .dl-tx { color: var(--dim); }
 
 /* ---- scroll-to-bottom / scroll-to-top arrows ---- */
 /* Horizontally centered (the chat-app convention) so they can never overlap
@@ -1277,12 +1329,16 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .step-tag { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 6px; }
 .step-tag.ok { color: var(--green); background: var(--green-glow); }
 .step-tag.bad { color: var(--red); background: var(--red-glow); }
+.step-tag.know { color: var(--green); background: var(--green-glow); font-size: 9px; letter-spacing: 0.4px; }
 .step-cmd { font-size: 12px; color: var(--dim); margin-top: 2px; overflow-x: auto; white-space: pre; }
 /* Global wrap toggle (title menu) also wraps run_command's long command line
    and its output (#6, and long-command wrap). */
 body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .step-cmd.struck { text-decoration: line-through; }
 .step-output { margin-top: 8px; }
+/* empty stdout/stderr: a compact one-liner (with the exit code) instead of an
+   empty box carrying copy/wrap/expand controls for nothing. */
+.out-empty { font-size: 11.5px; color: var(--dim); padding: 2px 0; }
 .out-box { border-radius: 10px; background: var(--bg); border: 0.5px solid var(--sep); overflow: hidden; }
 .out-box.error { border-color: var(--red-glow); }
 .out-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; }
@@ -1419,15 +1475,6 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
 .out-scroll.more-above::before { opacity: 1; }
 .out-scroll.more-below::after { opacity: 1; }
-
-/* A pending approval card pins to the bottom of the transcript so it's always
-   fully reachable (was getting buried below the sticky live trace); the trace
-   shrinks to make room. Resolved cards return to normal flow. */
-.card:not(.resolved) {
-  position: sticky; bottom: 8px; z-index: 6;
-  box-shadow: 0 -6px 26px -6px rgba(0, 0, 0, 0.8);
-}
-body.card-pending .trace.live .trace-body { max-height: 26vh; }
 
 /* error message with a Retry button (re-runs the last prompt) */
 .error-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }

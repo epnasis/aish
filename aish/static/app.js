@@ -165,7 +165,10 @@ function handle(event) {
       finishTrace(); // close any trace from a prior turn before the new one
       removeQueueChip(event.text); // a queued message that just started running
       retireQuickReplies();
+      retireRegen(); // a new turn supersedes the prior answer's regenerate
+
       sawAnswer = false;
+      answerFilling = false;
       turnStart = replaying ? 0 : Date.now(); // timing readout on the answer
       setBusy(true);
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
@@ -296,6 +299,8 @@ function onReplay(event) {
   if (FINE_POINTER && $("backdrop").hidden) input.focus();
 }
 
+let answerFilling = false; // once the answer streams, the page stays put
+
 function onToken(text) {
   sawAnswer = true;
   if (!answerEl) {
@@ -303,6 +308,14 @@ function onToken(text) {
     answerText = "";
     answerStableLen = 0;
     answerStableNodes = 0;
+    // Content is streaming, but it may be mid-work narration before another
+    // tool call — NOT necessarily the final answer. So the live trace stays
+    // OPEN and keeps showing steps (and stays expandable); only finishTrace,
+    // when the turn actually ends, collapses it to "Worked for Xs". Meanwhile
+    // hold the page still so the text fills in from the top instead of the
+    // view chasing the streaming bottom.
+    answerFilling = true;
+    requestAnimationFrame(() => anchorAnswer(true));
   }
   answerText += text;
   if (!answerRenderQueued) {
@@ -315,7 +328,7 @@ function renderAnswerFrame() {
   answerRenderQueued = false;
   if (!answerEl) return; // answer already closed (and flushed) this frame
   renderAnswerNow();
-  anchorAnswer();
+  if (!answerFilling) anchorAnswer(); // once filling, the page holds still
 }
 
 // The element that marks the START of the current turn's response — the
@@ -329,8 +342,15 @@ let turnAnchorEl = null;
 function anchorAnswer(force) {
   const anchor = turnAnchorEl && turnAnchorEl.isConnected ? turnAnchorEl : null;
   if (!anchor) { scrollToEnd(force); return; }
-  const maxTop = Math.max(0, messagesEl.scrollHeight - messagesEl.clientHeight);
-  const target = Math.min(Math.max(0, anchor.offsetTop - 6), maxTop);
+  // getBoundingClientRect, not offsetTop: robust regardless of offsetParent —
+  // put the anchor's top a hair below the container's top.
+  const delta = anchor.getBoundingClientRect().top - messagesEl.getBoundingClientRect().top;
+  const target = Math.max(0, Math.min(
+    messagesEl.scrollTop + delta - 6,
+    messagesEl.scrollHeight - messagesEl.clientHeight
+  ));
+  // Scroll DOWN to bring the anchor to the top; never past it (don't chase the
+  // streaming answer's bottom — the reader starts from the top and scrolls).
   if (force || messagesEl.scrollTop < target) messagesEl.scrollTop = target;
   updateScrollButton();
   updateEmptyHint();
@@ -459,9 +479,6 @@ function refreshStatusline() {
   $("status-text").textContent =
     statusText || (pendingCards > 0 ? "waiting for approval" : "working…");
   $("stop-btn").hidden = !clientBusy;
-  // A pending approval card pins to the bottom (see CSS) and shrinks the live
-  // trace so the card is fully reachable, not buried below it.
-  document.body.classList.toggle("card-pending", pendingCards > 0);
 }
 
 $("stop-btn").onclick = () => send({ type: "stop" });
@@ -686,10 +703,21 @@ function traceStep(step) {
   if (step.kind === "tool") { toolFinish(t, step); return; }
 }
 
+// A "SKILL" pill on read_skill rows, mirroring the knowledge-preload chips so
+// recalling a specific skill reads consistently with them (vs. memory).
+function knowledgeTag(ref, name) {
+  if (name !== "read_skill") return;
+  const tag = document.createElement("span");
+  tag.className = "step-tag know";
+  tag.textContent = "SKILL";
+  ref.titleEl.appendChild(tag);
+}
+
 function toolStart(t, step) {
   t.started += 1;
   const [title, iconKey] = TOOL_META[step.name] || [step.name, "dot", "--dim"];
   const ref = traceRow(t, SPINNER, title, step.name === "run_command" ? "" : step.summary);
+  knowledgeTag(ref, step.name);
   ref.row.classList.add("running", "active-step");
   startStepTimer(t, ref);
   if (step.name === "run_command" && step.command) {
@@ -714,6 +742,7 @@ function toolFinish(t, step) {
     // No matching start (e.g. replay ordering): synthesize a completed row.
     t.started += 1;
     ref = traceRow(t, "", meta[0], step.name === "run_command" ? "" : step.summary);
+    knowledgeTag(ref, step.name);
     if (step.name === "run_command" && step.command) {
       const cmd = document.createElement("div");
       cmd.className = "step-cmd mono";
@@ -738,13 +767,8 @@ function toolFinish(t, step) {
     : step.name === "run_command" ? `${ref.manual ? "Approved" : "Auto-approved"} · ${fmtSecs(step.secs)}`
     : fmtSecs(step.secs);
   ref.titleEl.appendChild(tag);
-  // The user's approval note, shown back on the step (#3).
-  if (step.comment) {
-    const note = document.createElement("span");
-    note.className = "step-sub step-note";
-    note.textContent = `“${step.comment}”`;
-    ref.main.appendChild(note);
-  }
+  // The user's approval note, shown back on the step (#3), clamped when long.
+  if (step.comment) ref.main.appendChild(clampNote(step.comment));
   if (denied) {
     if (ref.row.querySelector(".step-cmd")) ref.row.querySelector(".step-cmd").classList.add("struck");
     // Why it was skipped/blocked (denial comment, gate reason) — #5, #12.
@@ -816,8 +840,51 @@ function splitExit(text) {
   return m ? [text.slice(0, m.index), `stdout · exit ${m[1]}`] : [text, "stdout"];
 }
 
+// A run_command approval note on the finished step: clamp long / multi-line
+// text to a few lines with a Show more/less toggle, mirroring the output box's
+// graceful handling instead of ellipsizing to a single line.
+function clampNote(text) {
+  const wrap = document.createElement("div");
+  wrap.className = "step-note-wrap";
+  const note = document.createElement("span");
+  note.className = "step-sub step-note";
+  note.textContent = `“${text}”`;
+  wrap.appendChild(note);
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "note-more";
+  more.textContent = "Show more";
+  more.hidden = true;
+  more.onclick = () => {
+    const expanded = wrap.classList.toggle("expanded");
+    more.textContent = expanded ? "Show less" : "Show more";
+  };
+  wrap.appendChild(more);
+  requestAnimationFrame(() => {
+    if (note.scrollHeight - note.clientHeight > 4) more.hidden = false;
+  });
+  return wrap;
+}
+
+// An empty stdout/stderr reads as broken in the full output box (blank body +
+// copy/wrap/expand for nothing). Collapse it to a single "No output · exit N"
+// line, keeping the exit code so success and silent failure stay
+// distinguishable. Returns true when it handled an empty result.
+function renderEmptyOutput(container, text) {
+  const [bodyText, label] = splitExit(text);
+  if (bodyText.trim() !== "") return false;
+  container.replaceChildren();
+  const line = document.createElement("div");
+  line.className = "out-empty mono";
+  const exit = label.match(/exit (-?\d+)/);
+  line.textContent = exit ? `No output · exit ${exit[1]}` : "No output";
+  container.appendChild(line);
+  return true;
+}
+
 function renderStepOutput(container, text) {
   container.replaceChildren();
+  if (renderEmptyOutput(container, text)) return;
   const [bodyText, label] = splitExit(text);
   const box = outBox(false);
   box.querySelector(".out-body").appendChild(ansiFragment(bodyText));
@@ -918,8 +985,11 @@ function addMsg(kind, text) {
   return el;
 }
 
-// The prompt that started the current turn, so an error can offer to re-run it.
+// The prompt that started the current turn, so an error (or a finished answer)
+// can offer to re-run it.
 let lastUserPrompt = "";
+const RERUN_SVG =
+  '<svg viewBox="0 0 24 24"><path d="M5 6.5v3.6h3.6M19 17.5v-3.6h-3.6M18.4 9.2A6.5 6.5 0 0 0 6.5 8M5.6 14.8A6.5 6.5 0 0 0 17.5 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 // An error message with a Retry button (resends the last prompt, Gemini-style).
 function addErrorMsg(text) {
@@ -932,14 +1002,21 @@ function addErrorMsg(text) {
     const retry = document.createElement("button");
     retry.type = "button";
     retry.className = "retry-btn";
-    retry.innerHTML =
-      '<svg viewBox="0 0 24 24"><path d="M5 6.5v3.6h3.6M19 17.5v-3.6h-3.6M18.4 9.2A6.5 6.5 0 0 0 6.5 8M5.6 14.8A6.5 6.5 0 0 0 17.5 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>Retry';
+    retry.innerHTML = RERUN_SVG + "Retry";
     retry.onclick = () => { if (!clientBusy) send({ type: "task", text: lastUserPrompt }); };
     wrap.appendChild(retry);
   }
   messagesEl.appendChild(wrap);
   scrollToEnd();
   return wrap;
+}
+
+// A regenerate control lives only on the MOST RECENT answer (re-runs the last
+// prompt as a fresh turn). Branching an arbitrary earlier message is a separate
+// feature; this one supersedes itself so only the latest answer carries it.
+let lastRegenBtn = null;
+function retireRegen() {
+  if (lastRegenBtn) { lastRegenBtn.remove(); lastRegenBtn = null; }
 }
 
 // Your own prompt bubble: tap-to-recall plus a copy chip underneath (issue
@@ -1253,7 +1330,13 @@ function renderMarkdown(text) {
       pre.appendChild(code);
       const holder = document.createElement("div");
       holder.className = "copywrap";
-      holder.append(copyChip(() => code.textContent, "copy code"), pre);
+      const wrapBtn = document.createElement("button");
+      wrapBtn.type = "button";
+      wrapBtn.className = "code-wrap";
+      wrapBtn.title = "Wrap lines";
+      wrapBtn.innerHTML = WRAP_SVG;
+      wrapBtn.onclick = () => holder.classList.toggle("wrap-on");
+      holder.append(wrapBtn, copyChip(() => code.textContent, "copy code"), pre);
       frag.appendChild(holder);
       continue;
     }
@@ -1663,6 +1746,19 @@ function attachAnswerTools(el, source) {
   tools.className = "msg-tools";
   tools.appendChild(copyChip(() => source, "copy answer"));
   if (TTS_OK) tools.appendChild(buildTtsBox(el));
+  // Regenerate: only the newest answer keeps it, so retire the previous one.
+  retireRegen();
+  if (lastUserPrompt) {
+    const regen = document.createElement("button");
+    regen.type = "button";
+    regen.className = "regen-chip";
+    regen.title = "regenerate";
+    regen.setAttribute("aria-label", "regenerate answer");
+    regen.innerHTML = RERUN_SVG;
+    regen.onclick = () => { if (!clientBusy) send({ type: "task", text: lastUserPrompt }); };
+    tools.appendChild(regen);
+    lastRegenBtn = regen;
+  }
   if (answerTiming) {
     const timing = document.createElement("span");
     timing.className = "answer-timing";
@@ -1894,19 +1990,15 @@ function answerCard(id, action, extra) {
 // future actions. Typing feedback implies no verdict: Enter just dismisses
 // the keyboard, the user still picks a button.
 function feedbackField() {
-  const input = document.createElement("input");
-  input.type = "text";
-  input.className = "feedback";
-  input.placeholder = "Optional comment";
-  input.enterKeyHint = "done";
-  input.autocomplete = "off";
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      input.blur();
-    }
-  });
-  return input;
+  // A full-width multi-line box (design 2c): room to type an actual note, not a
+  // cramped single line. Enter inserts a newline; the verdict still comes from a
+  // button press, so nothing here submits.
+  const ta = document.createElement("textarea");
+  ta.className = "feedback";
+  ta.rows = 2;
+  ta.placeholder = "Optional comment";
+  ta.autocomplete = "off";
+  return ta;
 }
 
 function feedbackExtra(input) {
@@ -1917,29 +2009,57 @@ function feedbackExtra(input) {
 const CARD_TRIANGLE = '<svg viewBox="0 0 24 24"><path d="M12 3.5 21 19H3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v3.5M12 16.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>';
 const CARD_SHIELD = '<svg viewBox="0 0 24 24"><path d="M12 3.5l7 2.5v5c0 4.2-2.9 7.5-7 9-4.1-1.5-7-4.8-7-9V6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>';
 
-function optRow(title, sub, cls, fn) {
-  const b = document.createElement("button");
-  b.type = "button";
-  b.className = "opt " + cls;
-  const t = document.createElement("span");
-  t.className = "opt-title";
-  t.textContent = title;
-  b.appendChild(t);
-  if (sub) {
-    const s = document.createElement("span");
-    s.className = "opt-sub";
-    s.textContent = sub;
-    b.appendChild(s);
+const FOLDER_SVG = '<svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+
+// Each scope segment maps to the SAME wire action the old per-scope buttons
+// sent (server contract in make_web_approvers): the segment picks what an
+// Approve remembers, it does not change the message shape.
+const SCOPE_LABELS = {
+  approve: "Just once",         // plain approve — this command, this time
+  approve_session: "Session",   // allowlist the shown prefix(es) for this session
+  approve_always: "Always",     // persist the prefix(es) to the allowlist file
+  approve_trust: "Trust dir",   // trust the escaping directory for this session
+};
+
+// The explanatory sentence under the segmented control. Dynamic parts
+// (prefixes, dirs) go in via textContent — never innerHTML — since they are
+// derived from the model-proposed command.
+function scopeExplain(action, prefixText, escapeText) {
+  const frag = document.createDocumentFragment();
+  const mono = (t) => { const s = document.createElement("span"); s.className = "mono"; s.textContent = t; return s; };
+  const strong = (t) => { const b = document.createElement("b"); b.textContent = t; return b; };
+  if (action === "approve_session") {
+    // "Session" is scoped to this conversation's approver (server_prefixes),
+    // not the process — so it lasts for this chat, not "until restart".
+    frag.append("Also auto-approve ", mono(prefixText), " for the rest of this session.");
+  } else if (action === "approve_always") {
+    frag.append("Save ", mono(prefixText), " to the allowlist — it persists across sessions.");
+  } else if (action === "approve_trust") {
+    frag.append("Trust ", mono(escapeText), " for this session — anything inside then runs without asking.");
+  } else {
+    // Default (Just once) mirrors the design: the safe choice, then a hint at
+    // what the broader segments would do.
+    frag.append("Approve ", strong("only this command, this time."));
+    if (prefixText && escapeText) {
+      frag.append(" Broader scopes allowlist ", mono(prefixText), " or trust ", mono(escapeText), ".");
+    } else if (prefixText) {
+      frag.append(" Broader scopes allowlist ", mono(prefixText), ".");
+    } else if (escapeText) {
+      frag.append(" A broader scope trusts ", mono(escapeText), ".");
+    }
   }
-  b.onclick = fn;
-  return b;
+  return frag;
 }
 
 function buildCommandCard(card, event) {
-  card.classList.add("approval-card");
+  // A command approval is an "attention needed" card: always the orange accent
+  // (border + icon + subtitle), per the design — gray reads as "safe/neutral",
+  // which an approval prompt never is. `destructive` only sharpens the icon and
+  // subtitle wording; write/diff cards use the blue accent instead.
+  card.classList.add("approval-card", "danger");
   const destructive = Boolean(event.destructive);
   const head = document.createElement("div");
-  head.className = "card-head" + (destructive ? " danger" : "");
+  head.className = "card-head danger";
   head.innerHTML =
     `<span class="card-ico">${destructive ? CARD_TRIANGLE : CARD_SHIELD}</span>` +
     `<span class="card-htext"><span class="card-htitle">Approval needed</span>` +
@@ -1948,7 +2068,7 @@ function buildCommandCard(card, event) {
     destructive ? "Destructive — review before running" : "Runs a shell command";
   card.appendChild(head);
 
-  // $ command box, with edit + copy
+  // $ command box: editable in place via the pencil, plus copy.
   const box = document.createElement("div");
   box.className = "cmd-box";
   const dollar = document.createElement("span");
@@ -1962,93 +2082,219 @@ function buildCommandCard(card, event) {
   editBtn.className = "cmd-icon";
   editBtn.title = "Edit the command before running";
   editBtn.appendChild(pencilIcon());
-  editBtn.onclick = () => showEditor();
-  box.append(dollar, code, editBtn, copyChip(() => event.command, "copy command"));
+  editBtn.onclick = () => toggleEdit();
+  box.append(dollar, code, editBtn, copyChip(() => code.textContent, "copy command"));
   card.appendChild(box);
+
+  function toggleEdit() {
+    if (code.isContentEditable) {
+      code.contentEditable = "false";
+      code.classList.remove("editing");
+      editBtn.classList.remove("active");
+      return;
+    }
+    code.contentEditable = "plaintext-only";
+    code.classList.add("editing");
+    editBtn.classList.add("active");
+    code.focus();
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    range.collapse(false);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
 
   // where it runs
   const where = document.createElement("div");
-  where.className = "card-where mono";
-  where.textContent = `runs in ${abbreviatePath(currentCwd || "")}`;
+  where.className = "card-where";
+  where.innerHTML = FOLDER_SVG;
+  where.append("runs in ");
+  const wpath = document.createElement("span");
+  wpath.className = "where-path";
+  wpath.textContent = abbreviatePath(currentCwd || "");
+  where.appendChild(wpath);
   card.appendChild(where);
 
   const escapes = event.escapes || [];
   if (escapes.length) card.appendChild(escapeNote(escapes));
-  const prefixes = (event.prefixes || []).join(", ");
 
   const feedback = feedbackField();
   card.appendChild(feedback);
 
-  const opts = document.createElement("div");
-  opts.className = "opts";
-  opts.appendChild(optRow("Approve", "", "primary",
-    () => answerCard(event.id, "approve", feedbackExtra(feedback))));
-  if (prefixes) {
-    opts.appendChild(optRow("Allow this session",
-      `auto-approve “${prefixes}” until the server restarts`, "",
-      () => answerCard(event.id, "approve_session", feedbackExtra(feedback))));
-    opts.appendChild(optRow("Always allow",
-      `save “${prefixes}” to the allowlist — persists across sessions`, "",
-      () => answerCard(event.id, "approve_always", feedbackExtra(feedback))));
+  // Scope segments, driven by what the backend actually offered: "Just once"
+  // is always available; Session/Always need allowlist prefixes; Trust dir
+  // needs an escaping directory. With nothing but "Just once", the control is
+  // pointless — omit it and let Approve mean a plain approve.
+  const prefixText = (event.prefixes || []).join(", ");
+  const escapeText = escapes.join(", ");
+  const actions = ["approve"];
+  if (prefixText) actions.push("approve_session", "approve_always");
+  if (escapes.length) actions.push("approve_trust");
+  let scopeAction = "approve";
+  if (actions.length > 1) {
+    const scope = document.createElement("div");
+    scope.className = "scope";
+    const label = document.createElement("div");
+    label.className = "scope-label";
+    label.textContent = "If approved, remember for";
+    const seg = document.createElement("div");
+    seg.className = "segmented";
+    const explain = document.createElement("div");
+    explain.className = "scope-explain";
+    const select = (action, btn) => {
+      scopeAction = action;
+      for (const b of seg.children) b.classList.toggle("active", b === btn);
+      explain.replaceChildren(scopeExplain(action, prefixText, escapeText));
+    };
+    let firstBtn = null;
+    for (const action of actions) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "seg";
+      b.textContent = SCOPE_LABELS[action];
+      b.onclick = () => select(action, b);
+      seg.appendChild(b);
+      firstBtn = firstBtn || b;
+    }
+    scope.append(label, seg, explain);
+    card.appendChild(scope);
+    select("approve", firstBtn);
   }
-  if (escapes.length) {
-    opts.appendChild(optRow("Trust directory",
-      `auto-approve anything in ${escapes.join(", ")}`, "",
-      () => answerCard(event.id, "approve_trust", feedbackExtra(feedback))));
-  }
-  opts.appendChild(optRow("Deny", "", "deny",
-    () => answerCard(event.id, "deny", feedbackExtra(feedback))));
-  card.appendChild(opts);
 
-  function showEditor() {
-    opts.hidden = true;
-    editBtn.hidden = true;
-    const area = document.createElement("textarea");
-    area.value = event.command;
-    card.appendChild(area);
-    const editRow = buttonRow(card, [
-      ["Run edited", "approve", () =>
-        answerCard(event.id, "edit", { command: area.value, ...feedbackExtra(feedback) })],
-      ["Cancel", "edit", () => {
-        area.remove(); editRow.remove(); opts.hidden = false; editBtn.hidden = false;
-      }],
-    ]);
-    area.focus();
-  }
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "card-actions";
+  const approveBtn = document.createElement("button");
+  approveBtn.type = "button";
+  approveBtn.className = "approve";
+  approveBtn.textContent = "Approve";
+  approveBtn.onclick = () => {
+    const edited = code.textContent.trim();
+    if (edited && edited !== event.command.trim()) {
+      // An edited command flows through the "edit" action exactly as before;
+      // the server re-checks the denylist on it. Editing takes precedence over
+      // the scope segment (the wire has no edit+scope combination).
+      answerCard(event.id, "edit", { command: edited, ...feedbackExtra(feedback) });
+    } else {
+      answerCard(event.id, scopeAction, feedbackExtra(feedback));
+    }
+  };
+  const denyBtn = document.createElement("button");
+  denyBtn.type = "button";
+  denyBtn.className = "deny";
+  denyBtn.textContent = "Deny";
+  denyBtn.onclick = () => answerCard(event.id, "deny", feedbackExtra(feedback));
+  actionsRow.append(approveBtn, denyBtn);
+  card.appendChild(actionsRow);
 }
 
 function buildWriteCard(card, event) {
-  title(card, [document.createTextNode(
-    `▶ ${event.verb} file? ${event.target} (+${event.added} −${event.removed})`
-  )]);
-  const diff = document.createElement("div");
-  diff.className = "diff";
-  for (const line of (event.diff || "").split("\n")) {
-    const el = document.createElement("div");
-    if (line.startsWith("+++") || line.startsWith("---")) el.className = "head";
-    else if (line.startsWith("+")) el.className = "add";
-    else if (line.startsWith("-")) el.className = "del";
-    else if (line.startsWith("@@")) el.className = "hunk";
-    else el.className = "ctx";
-    el.textContent = line || " ";
-    diff.appendChild(el);
-  }
-  card.appendChild(diff);
+  card.classList.add("approval-card", "info");
+  const head = document.createElement("div");
+  head.className = "card-head sep";
+  const ico = document.createElement("span");
+  ico.className = "card-ico";
+  ico.appendChild(pencilIcon());
+  const htext = document.createElement("span");
+  htext.className = "card-htext";
+  const htitle = document.createElement("span");
+  htitle.className = "card-htitle";
+  htitle.textContent = event.verb === "create" ? "Create file" : "Edit file";
+  const hsub = document.createElement("span");
+  hsub.className = "card-hsub mono";
+  hsub.textContent = relTarget(event.target);
+  hsub.title = event.target; // full path on hover
+  htext.append(htitle, hsub);
+  const added = document.createElement("span");
+  added.className = "card-count add";
+  added.textContent = `+${event.added}`;
+  const removed = document.createElement("span");
+  removed.className = "card-count del";
+  removed.textContent = `−${event.removed}`;
+  head.append(ico, htext, added, removed);
+  card.appendChild(head);
+
+  card.appendChild(renderDiff(event.diff || ""));
+
   const feedback = feedbackField();
   card.appendChild(feedback);
-  buttonRow(card, [
-    ["Approve", "approve", () => answerCard(event.id, "approve", feedbackExtra(feedback))],
-    ["Deny", "deny", () => answerCard(event.id, "deny", feedbackExtra(feedback))],
-  ]);
+
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "card-actions even";
+  const approveBtn = document.createElement("button");
+  approveBtn.type = "button";
+  approveBtn.className = "approve";
+  approveBtn.textContent = "Approve";
+  approveBtn.onclick = () => answerCard(event.id, "approve", feedbackExtra(feedback));
+  const denyBtn = document.createElement("button");
+  denyBtn.type = "button";
+  denyBtn.className = "deny";
+  denyBtn.textContent = "Deny";
+  denyBtn.onclick = () => answerCard(event.id, "deny", feedbackExtra(feedback));
+  actionsRow.append(approveBtn, denyBtn);
+  card.appendChild(actionsRow);
 }
 
-// What "Allow this session" / "Always allow" would actually allowlist: the
-// derived command prefix(es), not the full command line.
-function prefixNote(prefixes) {
-  const note = document.createElement("div");
-  note.className = "prefix-note";
-  note.textContent = `“Allow” buttons save the rule: ${prefixes}`;
-  return note;
+// The card header shows the file; a full absolute path is noise. Prefer the
+// path relative to the working directory (design shows `config/http.py`), else
+// the last couple of segments.
+function relTarget(target) {
+  const cwd = currentCwd || "";
+  if (cwd && target.startsWith(cwd + "/")) return target.slice(cwd.length + 1);
+  const parts = target.split("/").filter(Boolean);
+  return parts.length > 2 ? parts.slice(-2).join("/") : target;
+}
+
+// A unified diff rendered the way the design shows it (Screen 2d): no
+// `---/+++/@@` plumbing (the filename is already in the header), a line-number
+// gutter (old numbers for context/removals, new numbers for additions), and a
+// tinted row per add/remove. `@@` hunks only seed the counters; a thin divider
+// marks a gap between hunks.
+function renderDiff(text) {
+  const diff = document.createElement("div");
+  diff.className = "diff";
+  let oldNo = 0;
+  let newNo = 0;
+  let emitted = false;
+  const rowEl = (cls, no, body) => {
+    const row = document.createElement("div");
+    row.className = "dl " + cls;
+    const g = document.createElement("span");
+    g.className = "dl-no";
+    g.textContent = no == null ? "" : String(no);
+    const t = document.createElement("span");
+    t.className = "dl-tx";
+    t.textContent = body.length ? body : " ";
+    row.append(g, t);
+    diff.appendChild(row);
+    emitted = true;
+  };
+  const lines = text.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop(); // trailing newline artifact
+  for (const line of lines) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      oldNo = parseInt(hunk[1], 10);
+      newNo = parseInt(hunk[2], 10);
+      if (emitted) {
+        const sep = document.createElement("div");
+        sep.className = "dl gap";
+        sep.textContent = "⋯";
+        diff.appendChild(sep);
+      }
+      continue;
+    }
+    if (line.startsWith("+")) rowEl("add", newNo++, line.slice(1));
+    else if (line.startsWith("-")) rowEl("del", oldNo++, line.slice(1));
+    else if (line.startsWith("\\")) rowEl("ctx", null, line); // "\ No newline…"
+    else {
+      rowEl("ctx", oldNo, line.startsWith(" ") ? line.slice(1) : line);
+      oldNo++;
+      newNo++;
+    }
+  }
+  return diff;
 }
 
 // The out-of-roots warning shown on command/read cards whose target lives
@@ -2080,22 +2326,15 @@ function buildReadCard(card, event) {
 }
 
 function onApprovalResolved(event) {
+  // The activity trace already records the command and its "approved: <comment>"
+  // outcome, so the card just disappears once decided — no lingering verdict
+  // block duplicating what the timeline shows.
   const card = cards.get(event.id);
   if (!card) return;
   pendingCards = Math.max(0, pendingCards - 1);
   refreshStatusline();
-  card.replaceChildren();
-  card.className = "card resolved";
-  const verdict = document.createElement("div");
-  verdict.className = `verdict ${event.decision === "denied" ? "denied" : "approved"}`;
-  verdict.textContent = `${event.decision}: ${(card.dataset.summary || "").slice(0, 120)}`;
-  card.appendChild(verdict);
-  if (event.comment) {
-    const note = document.createElement("div");
-    note.className = "verdict-comment";
-    note.textContent = `“${event.comment}”`;
-    card.appendChild(note);
-  }
+  card.remove();
+  cards.delete(event.id);
 }
 
 // ---- composer + autocomplete ---------------------------------------------
