@@ -317,6 +317,13 @@ function onToken(text) {
     // hold the page still so the text fills in from the top instead of the
     // view chasing the streaming bottom.
     answerFilling = true;
+    // The live "Thinking…" step is the last row on the timeline when the reply
+    // starts streaming; relabel it so it reads as the answer landing, not more
+    // thinking. It stays a running row until the turn ends and the trace
+    // collapses (or a `thinking` event finalizes it to "Thought for Xs").
+    if (currentTrace && currentTrace.thinkingRow) {
+      currentTrace.thinkingRow.titleEl.textContent = "Answering…";
+    }
     requestAnimationFrame(() => anchorAnswer(true));
   }
   answerText += text;
