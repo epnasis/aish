@@ -773,9 +773,12 @@ class TestSessions:
             hello = recv_until(ws, "hello")
             assert hello["session"] == old_name
             replay = recv_until(ws, "replay")
-            history = [e for e in replay["events"] if e["type"] == "history"]
-            roles = [m["role"] for m in history[0]["messages"]]
-            assert "user" in roles and "assistant" in roles
+            # A logged session reconstructs into the same user/step/done event
+            # stream a live one replays — not a flat history blob.
+            user_ev = next(e for e in replay["events"] if e["type"] == "user")
+            assert "walrus" in user_ev["text"]
+            done_ev = next(e for e in replay["events"] if e["type"] == "done")
+            assert "noted the walrus" in done_ev["result"]
 
             ws.send_json({"type": "task", "text": "what animal?"})
             recv_until(ws, "done")
@@ -792,10 +795,8 @@ class TestSessions:
         client2, _ = make_client(app_env, [])
         with client2, connected(client2, f"/ws?session={old_name}") as (_, hello, replay):
             assert hello["session"] == old_name
-            history = [e for e in replay["events"] if e["type"] == "history"]
-            assert history and any(
-                m["role"] == "user" for m in history[0]["messages"]
-            )
+            user_evs = [e for e in replay["events"] if e["type"] == "user"]
+            assert user_evs and any("walrus" in e["text"] for e in user_evs)
 
     def test_connect_with_unknown_session_falls_back_to_active(self, app_env):
         client, _ = make_client(app_env, [])

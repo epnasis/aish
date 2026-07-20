@@ -432,6 +432,7 @@ class Agent:
         current_session: Callable[[], Path] | None = None,
         semantic: Any = None,
         on_step: Callable[[dict], None] | None = None,
+        step_log: Callable[[dict], None] | None = None,
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
@@ -471,6 +472,12 @@ class Agent:
         # run_command detail (command, decision, output) is stashed here by the
         # dispatch branch and read back when the completion step is emitted.
         self.on_step = on_step
+        # Persistence sink for the same trace steps, orthogonal to rendering:
+        # both entry points wire this to the session log so the activity trace
+        # survives eviction/restart and is reconstructable in any UI. The CLI
+        # sets step_log WITHOUT on_step, so its terminal chatter (see _note)
+        # stays while its steps are still logged for later web replay/analysis.
+        self.step_log = step_log
         self._run_meta: dict | None = None
         self._cancel = threading.Event()
         # Skill-read gate state: oversized preloaded skills the model must
@@ -510,9 +517,18 @@ class Agent:
         if self.on_step is None:
             self.echo(text)
 
-    def _emit_step(self, **step: Any) -> None:
+    def _sink_step(self, step: dict) -> None:
+        """Single delivery point for every structured trace step: persist it
+        (so any UI can reconstruct the trace later) and hand it to the rich
+        renderer if one is attached. Kept separate from on_step so the two
+        concerns — durable logging vs live rendering — stay independent."""
+        if self.step_log is not None:
+            self.step_log(step)
         if self.on_step is not None:
             self.on_step(step)
+
+    def _emit_step(self, **step: Any) -> None:
+        self._sink_step(step)
 
     def run_task(
         self,
@@ -1022,7 +1038,7 @@ class Agent:
         return result
 
     def _emit_tool_step(self, name: str, args: dict, result: str, secs: float) -> None:
-        if self.on_step is None:
+        if self.on_step is None and self.step_log is None:
             return
         ok = not (result.startswith("ERROR") or result.startswith("NOT EXECUTED"))
         step: dict[str, Any] = {
@@ -1042,7 +1058,7 @@ class Agent:
             output = step.get("output") or ""
             if len(output) > STEP_OUTPUT_CAP:  # the trace shows a preview, not the full log
                 step["output"] = output[:STEP_OUTPUT_CAP] + "\n… (truncated)"
-        self.on_step(step)
+        self._sink_step(step)
 
     def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
         """(echo label, execution thunk) for a READ_ONLY_TOOLS member — split

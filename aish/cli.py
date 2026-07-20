@@ -117,6 +117,9 @@ class LogRef:
     def model(self, spec: str) -> None:
         self.log.model(spec)
 
+    def step(self, step: dict) -> None:
+        self.log.step(step)
+
 
 def load_config(path: Path) -> dict:
     try:
@@ -1281,6 +1284,10 @@ def main() -> int:
             cwd=cwd,
             context=context,
             on_message=logref.message,
+            # Persist trace steps (no on_step: the terminal keeps its own flat
+            # progress lines) so a session started in the CLI still reconstructs
+            # its activity trace when later opened in the web UI.
+            step_log=logref.step,
             on_token=print_token if stream_answers else None,
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,
@@ -1306,6 +1313,10 @@ def main() -> int:
             cwd=cwd,
             context=context,
             on_message=logref.message,
+            # Persist trace steps (no on_step: the terminal keeps its own flat
+            # progress lines) so a session started in the CLI still reconstructs
+            # its activity trace when later opened in the web UI.
+            step_log=logref.step,
             on_token=print_token if stream_answers else None,
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,

@@ -23,6 +23,55 @@ def test_roundtrip_messages_and_commands(tmp_path):
     assert all("ts" in r for r in records)
 
 
+def test_trace_steps_excluded_from_conversation(tmp_path):
+    # Trace records must not leak into the model-facing conversation.
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "hello"})
+    log.step({"kind": "tool", "name": "run_command", "ok": True})
+    log.message({"role": "assistant", "content": "hi"})
+    assert SessionLog.load_messages(log.path) == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+
+
+def test_reconstruct_events_groups_by_task(tmp_path):
+    # One task = one user event, its steps, then a single done carrying the
+    # final assistant text — intermediate tool-call turns don't close it.
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "touch a file"})
+    log.step({"kind": "thinking_start"})
+    log.message({"role": "assistant", "content": ""})  # tool-call turn, no text
+    log.step({"kind": "tool", "name": "run_command", "ok": True})
+    log.message({"role": "tool", "tool_name": "run_command", "content": "done"})
+    log.message({"role": "assistant", "content": "created it"})
+    log.message({"role": "user", "content": "again"})
+    log.step({"kind": "tool", "name": "run_command", "ok": True})
+    log.message({"role": "assistant", "content": "done again"})
+
+    events = SessionLog.reconstruct_events(log.path)
+    kinds = [(e["type"], e.get("kind")) for e in events]
+    assert kinds == [
+        ("user", None),
+        ("step", "thinking_start"),
+        ("step", "tool"),
+        ("done", None),
+        ("user", None),
+        ("step", "tool"),
+        ("done", None),
+    ]
+    dones = [e["result"] for e in events if e["type"] == "done"]
+    assert dones == ["created it", "done again"]  # final text per task, not ""
+
+
+def test_reconstruct_events_none_for_legacy_log(tmp_path):
+    # A session logged before trace records falls back to flat history.
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "hi"})
+    log.message({"role": "assistant", "content": "hello"})
+    assert SessionLog.reconstruct_events(log.path) is None
+
+
 def test_model_recorded_last_switch_wins(tmp_path):
     log = SessionLog.new(tmp_path)
     log.model("qwen3:8b")
