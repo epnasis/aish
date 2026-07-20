@@ -62,6 +62,14 @@ Rules:
    procedure worked, save it — recall first to find an existing entry, then
    write or update the skill file (the user approves the diff). One-line
    facts, preferences, and corrected commands → remember().
+   Entries are FOUND by their name/description/keywords line, so you MUST
+   phrase the description like the tasks it should catch ("Use when the
+   user wants to find, buy, or compare a product …"), never as a bare rule
+   — generalized to the activity, not an item-by-item list — and give
+   keywords (topical words, no generic verbs) in every language the user
+   types. If saved knowledge should have applied to a task but was not
+   preloaded, that is a defect: repair that entry's description/keywords
+   (an improve-recall skill, if present, has the checklist).
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. If the
    user denies a command, do not retry it — change approach or ask.
@@ -254,6 +262,13 @@ LEARN_PROMPT = (
     "a markdown file in ~/.config/aish/skills/ (or ./.aish/skills/ when "
     "project-specific) with a trigger-phrased description ('Use when the "
     "user asks to …'); save one-line facts and preferences with remember(). "
+    "Entries are retrieved by matching their name/description/keywords "
+    "against future tasks: phrase every description like the tasks it must "
+    "catch (the activity and its task shapes, generalized — no item-by-item "
+    "lists; the rule after the trigger), and give keywords — topical nouns "
+    "and synonyms, no generic verbs — in every language the user types. If "
+    "this conversation shows saved knowledge that failed to trigger when it "
+    "should have, repair that entry's description/keywords too. "
     "Then report what you saved and what you skipped and why. If nothing is "
     "worth saving, say so plainly."
 )
