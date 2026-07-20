@@ -1171,6 +1171,24 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .trace-body { display: none; position: relative; padding: 2px 13px 12px; border-top: 0.5px solid var(--sep); }
 .trace.open .trace-body { display: block; }
 .trace-rail { position: absolute; left: 25px; top: 14px; bottom: 18px; width: 2px; background: var(--rail); }
+/* Live turn: cap the steps pane so the header (Stop + timer) stays on screen,
+   and scroll internally, pinned to the newest step. */
+.trace.live .trace-body { max-height: 46vh; overflow-y: auto; }
+/* Stop while live; chevron only once finished. */
+.trace-stop {
+  flex: none; display: inline-flex; align-items: center; gap: 5px;
+  height: 28px; padding: 0 11px 0 9px; border: none; border-radius: 999px;
+  font: 700 13px/1 -apple-system, system-ui, sans-serif;
+  background: var(--red-glow); color: var(--red);
+}
+.trace-stop svg { width: 12px; height: 12px; }
+.trace-stop:active { opacity: 0.6; }
+.trace:not(.live) .trace-stop { display: none; }
+.trace.live .trace-chev { display: none; }
+/* The active (in-progress) step, highlighted as the timeline's live last row. */
+.step.active-step { background: var(--live-bg); margin: 2px -8px 0; padding: 8px; border-radius: 10px; }
+.step.active-step .step-title { color: var(--blue); }
+.spin.spin-purple { width: 13px; height: 13px; border-color: var(--purple); border-top-color: transparent; }
 
 .step { position: relative; display: flex; gap: 11px; padding: 7px 0; }
 .step-badge {

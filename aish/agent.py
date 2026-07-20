@@ -568,6 +568,10 @@ class Agent:
                 return self._finish_cancelled()
             self._enforce_budget(task_start)
             turn_start = time.perf_counter()
+            # A live "Thinking…" row on the trace timeline; it finalizes to
+            # "Thought for Xs" when the turn produced tools, or is dropped when
+            # the turn was a plain answer (thinking_cancel below).
+            self._emit_step(kind="thinking_start")
             self.status.start("thinking")
             try:
                 content, tool_calls, usage, raw_blocks = self._chat_turn()
@@ -597,6 +601,7 @@ class Agent:
                 self._note(
                     f"∑ total {format_secs(total)}{_tokens_note((tokens_in, tokens_out))}"
                 )
+                self._emit_step(kind="thinking_cancel")  # a plain answer needs no trace row
                 return result
 
             # Ollama buffers tool-call generation and streams nothing until it
@@ -1120,7 +1125,7 @@ class Agent:
             self._pending_skill_reads[key] -= 1
             if self._pending_skill_reads[key] <= 0:
                 del self._pending_skill_reads[key]
-        self.echo(f"✋ gated until read_skill: {names}")
+        self._note(f"✋ gated until read_skill: {names}")
         return SKILL_GATE_REFUSAL.format(names=names, first=first)
 
     def _dispatch(self, name: str, args: dict) -> str:
@@ -1128,6 +1133,12 @@ class Agent:
         # approval prompt or a tool implementation.
         refusal = self._skill_gate(name, args)
         if refusal is not None:
+            if name == "run_command":  # so the trace shows why it was held, not a bare row
+                self._run_meta = {
+                    "command": str(args.get("command", "")),
+                    "decision": "blocked",
+                    "output": "Held until the required skill is read.",
+                }
             return refusal
 
         if name == "read_file":

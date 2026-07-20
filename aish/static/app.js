@@ -426,8 +426,11 @@ function setBusy(busy) {
 
 function refreshStatusline() {
   // Visible whenever the session is working — including parked on an
-  // approval card — so Stop is always reachable while something runs.
-  const visible = clientBusy || Boolean(statusText);
+  // approval card — so Stop is always reachable while something runs. A live
+  // activity trace has its own header Stop + status, so suppress the bottom
+  // bar then to avoid a duplicate "thinking…" line below the timeline (#10).
+  const traceLive = currentTrace && currentTrace.el.classList.contains("live");
+  const visible = (clientBusy || Boolean(statusText)) && !traceLive;
   $("statusline").hidden = !visible;
   $("status-text").textContent =
     statusText || (pendingCards > 0 ? "waiting for approval" : "working…");
@@ -479,7 +482,7 @@ const TOOL_META = {
 function ensureTrace() {
   if (currentTrace) return currentTrace;
   const el = document.createElement("div");
-  el.className = "trace live";
+  el.className = "trace live open"; // always expanded while the turn runs
   const head = document.createElement("button");
   head.type = "button";
   head.className = "trace-head";
@@ -488,19 +491,34 @@ function ensureTrace() {
     `<span class="trace-headtext"><span class="trace-title">Working…</span>` +
     `<span class="trace-sub"></span></span>` +
     `<span class="trace-tokens"></span>` +
+    `<button type="button" class="trace-stop"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>Stop</button>` +
     `<svg class="trace-chev" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const body = document.createElement("div");
   body.className = "trace-body";
   body.innerHTML = '<div class="trace-rail"></div>';
   el.append(head, body);
-  head.onclick = () => el.classList.toggle("open");
-  el.classList.add("open"); // live traces start expanded
+  // The head toggles expand ONLY when finished; a live trace stays open.
+  head.onclick = (e) => {
+    if (e.target.closest(".trace-stop")) return;
+    if (!el.classList.contains("live")) el.classList.toggle("open");
+  };
+  head.querySelector(".trace-stop").onclick = (e) => { e.stopPropagation(); send({ type: "stop" }); };
   messagesEl.appendChild(el);
   currentTrace = {
-    el, head, body, steps: 0, secs: 0, tokensIn: 0, tokensOut: 0, pending: null,
+    el, head, body, started: 0, secs: 0, tokensIn: 0, tokensOut: 0,
+    pending: null, thinkingRow: null, startedAt: Date.now(), timer: null,
   };
+  currentTrace.timer = setInterval(() => updateTraceHead(currentTrace), 1000);
+  refreshStatusline(); // the trace header owns Stop now; hide the bottom bar
   scrollToEnd();
   return currentTrace;
+}
+
+// Keep the newest step visible inside the height-capped live steps pane.
+function pinTrace(t) {
+  if (t.el.classList.contains("live")) {
+    requestAnimationFrame(() => { t.body.scrollTop = t.body.scrollHeight; });
+  }
 }
 
 function traceRow(t, iconHtml, title, sub) {
@@ -524,20 +542,47 @@ function traceRow(t, iconHtml, title, sub) {
   row.append(badge, main);
   t.body.appendChild(row);
   scrollToEnd();
+  pinTrace(t);
   return { row, badge, main, titleEl };
 }
 
 function traceStep(step) {
   const t = ensureTrace();
+  if (step.kind === "thinking_start") {
+    // A live, highlighted "Thinking…" row — the active step on the timeline.
+    if (!t.thinkingRow) {
+      t.started += 1;
+      const ref = traceRow(t, '<span class="spin spin-purple"></span>', "Thinking…", "");
+      ref.row.classList.add("running", "active-step");
+      t.thinkingRow = ref;
+    }
+    updateTraceHead(t);
+    return;
+  }
+  if (step.kind === "thinking_cancel") {
+    // The turn was a plain answer — drop the active thinking row.
+    if (t.thinkingRow) { t.thinkingRow.row.remove(); t.thinkingRow = null; t.started -= 1; }
+    updateTraceHead(t);
+    return;
+  }
   if (step.kind === "thinking") {
     t.secs += step.secs || 0;
     if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
-    traceRow(t, traceSvg("thinking", "var(--purple)"), `Thought for ${fmtSecs(step.secs)}`, "");
+    if (t.thinkingRow) { // finalize the live row in place
+      const ref = t.thinkingRow;
+      ref.row.classList.remove("running", "active-step");
+      ref.badge.innerHTML = traceSvg("thinking", "var(--purple)");
+      ref.titleEl.textContent = `Thought for ${fmtSecs(step.secs)}`;
+      t.thinkingRow = null;
+    } else {
+      t.started += 1;
+      traceRow(t, traceSvg("thinking", "var(--purple)"), `Thought for ${fmtSecs(step.secs)}`, "");
+    }
     updateTraceHead(t);
     return;
   }
   if (step.kind === "knowledge") {
-    t.steps += 1;
+    t.started += 1;
     const items = step.items || [];
     const { main } = traceRow(
       t, traceSvg("knowledge", "var(--yellow)"), "Recalled from memory",
@@ -562,9 +607,10 @@ function traceStep(step) {
 }
 
 function toolStart(t, step) {
+  t.started += 1;
   const [title, iconKey] = TOOL_META[step.name] || [step.name, "dot", "--dim"];
   const ref = traceRow(t, SPINNER, title, step.name === "run_command" ? "" : step.summary);
-  ref.row.classList.add("running");
+  ref.row.classList.add("running", "active-step");
   if (step.name === "run_command" && step.command) {
     const cmd = document.createElement("div");
     cmd.className = "step-cmd mono";
@@ -579,13 +625,13 @@ function toolStart(t, step) {
 }
 
 function toolFinish(t, step) {
-  t.steps += 1;
   t.secs += step.secs || 0;
   const meta = TOOL_META[step.name] || [step.name, "dot", "--dim"];
   const denied = step.decision === "denied" || step.decision === "blocked" || step.decision === "rejected";
   let ref = t.pending && t.pending.name === step.name ? t.pending : null;
   if (!ref) {
     // No matching start (e.g. replay ordering): synthesize a completed row.
+    t.started += 1;
     ref = traceRow(t, "", meta[0], step.name === "run_command" ? "" : step.summary);
     if (step.name === "run_command" && step.command) {
       const cmd = document.createElement("div");
@@ -595,7 +641,7 @@ function toolFinish(t, step) {
     }
   }
   t.pending = null;
-  ref.row.classList.remove("running");
+  ref.row.classList.remove("running", "active-step");
   // finalize badge icon
   const iconName = denied ? "denied" : step.name === "run_command" ? "command"
     : !step.ok ? "denied" : meta[1];
@@ -658,13 +704,24 @@ function traceStream(text) {
   addStreamLine(text);
 }
 
+function mmss(sec) {
+  const m = Math.floor(sec / 60);
+  return `${m}:${String(sec % 60).padStart(2, "0")}`;
+}
+
 function updateTraceHead(t) {
   const title = t.el.querySelector(".trace-title");
   const sub = t.el.querySelector(".trace-sub");
   const tokens = t.el.querySelector(".trace-tokens");
   const live = t.el.classList.contains("live");
-  title.textContent = live ? "Working…" : `Worked for ${fmtSecs(t.secs)}`;
-  sub.textContent = `${t.steps} step${t.steps === 1 ? "" : "s"}`;
+  if (live) {
+    title.textContent = "Working…";
+    const elapsed = Math.floor((Date.now() - t.startedAt) / 1000);
+    sub.textContent = `step ${t.started} · ${mmss(elapsed)}`;
+  } else {
+    title.textContent = `Worked for ${fmtSecs(t.secs)}`;
+    sub.textContent = `${t.started} step${t.started === 1 ? "" : "s"}`;
+  }
   const parts = [];
   if (t.tokensIn) parts.push("↑" + fmtTokens(t.tokensIn));
   if (t.tokensOut) parts.push("↓" + fmtTokens(t.tokensOut));
@@ -674,13 +731,17 @@ function updateTraceHead(t) {
 function finishTrace() {
   if (!currentTrace) return;
   const t = currentTrace;
+  if (t.timer) { clearInterval(t.timer); t.timer = null; }
+  if (t.thinkingRow) { t.thinkingRow.row.remove(); t.thinkingRow = null; }
   t.pending = null;
+  currentTrace = null;
+  // A pure-answer turn leaves no steps — drop the empty trace box entirely.
+  if (!t.body.querySelector(".step")) { t.el.remove(); refreshStatusline(); return; }
   t.el.classList.remove("live");
   t.el.classList.remove("open"); // collapse to the summary; tap to expand
-  const status = t.el.querySelector(".trace-status");
-  status.innerHTML = traceSvg("check", "var(--green)");
+  t.el.querySelector(".trace-status").innerHTML = traceSvg("check", "var(--green)");
   updateTraceHead(t);
-  currentTrace = null;
+  refreshStatusline();
 }
 
 function fmtSecs(s) {

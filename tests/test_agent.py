@@ -1830,8 +1830,13 @@ class TestActivityTraceSteps:
             ]
         )
         kinds = [s["kind"] for s in steps]
-        assert kinds == ["thinking", "tool_start", "tool"]
-        tool = steps[-1]
+        # tool turn: thinking_start → thinking (finalized) → tool_start → tool;
+        # then the final answer turn: thinking_start → thinking_cancel.
+        assert kinds == [
+            "thinking_start", "thinking", "tool_start", "tool",
+            "thinking_start", "thinking_cancel",
+        ]
+        tool = next(s for s in steps if s["kind"] == "tool")
         assert tool["name"] == "run_command"
         assert tool["command"] == "echo hi"
         assert tool["decision"] == "approved"
@@ -1850,10 +1855,12 @@ class TestActivityTraceSteps:
         assert tool["decision"] == "denied"
         assert tool["command"] == "rm -rf /"
 
-    def test_plain_answer_emits_no_steps(self):
+    def test_plain_answer_emits_only_thinking_lifecycle(self):
+        # A plain answer opens a thinking row and cancels it (the client drops
+        # the empty trace) — no tool/knowledge/finalized-thinking steps.
         steps, result = run_with_steps([model_says("just a chat reply")])
         assert result == "just a chat reply"
-        assert steps == []
+        assert [s["kind"] for s in steps] == ["thinking_start", "thinking_cancel"]
 
     def test_output_is_bounded_in_step(self):
         from aish.agent import STEP_OUTPUT_CAP
