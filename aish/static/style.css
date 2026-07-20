@@ -1314,7 +1314,6 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .trace-stop svg { width: 12px; height: 12px; }
 .trace-stop:active { opacity: 0.6; }
 .trace:not(.live) .trace-stop { display: none; }
-.trace.live .trace-chev { display: none; }
 /* The active (in-progress) step, highlighted as the timeline's live last row.
    Opaque background so the rail behind it is covered — the line visibly ends
    where the box starts, instead of running through it. */

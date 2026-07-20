@@ -543,10 +543,19 @@ function ensureTrace() {
   // (scrollable) content, not just the visible slice.
   body.innerHTML = '<div class="trace-inner"><div class="trace-rail"></div></div>';
   el.append(head, body);
-  // The head toggles expand ONLY when finished; a live trace stays open.
+  const t = {
+    el, head, body, inner: body.querySelector(".trace-inner"),
+    started: 0, secs: 0, tokensIn: 0, tokensOut: 0,
+    pending: null, thinkingRow: null, startedAt: Date.now(), timer: null,
+    autoCollapsed: false, // collapsed by an approval card, to be restored after
+  };
+  // The head toggles expand freely — even while the turn runs (#65). A manual
+  // toggle is the user's choice, so clear any pending auto-restore so the
+  // approval-resolved handler won't fight them by re-expanding.
   head.onclick = (e) => {
     if (e.target.closest(".trace-stop")) return;
-    if (!el.classList.contains("live")) el.classList.toggle("open");
+    el.classList.toggle("open");
+    t.autoCollapsed = false;
   };
   head.querySelector(".trace-stop").onclick = (e) => {
     e.stopPropagation();
@@ -555,11 +564,7 @@ function ensureTrace() {
   };
   messagesEl.appendChild(el);
   turnAnchorEl = el; // the "Worked for Xs" box is the response-start anchor
-  currentTrace = {
-    el, head, body, inner: body.querySelector(".trace-inner"),
-    started: 0, secs: 0, tokensIn: 0, tokensOut: 0,
-    pending: null, thinkingRow: null, startedAt: Date.now(), timer: null,
-  };
+  currentTrace = t;
   body.addEventListener("scroll", () => updateScrollHints(body));
   currentTrace.timer = setInterval(() => updateTraceHead(currentTrace), 1000);
   refreshStatusline(); // the trace header owns Stop now; hide the bottom bar
@@ -1931,6 +1936,14 @@ function onApprovalRequest(event) {
       && currentTrace.pending.name === "run_command") {
     currentTrace.pending.manual = true;
   }
+  // An expanded live timeline eats the vertical space the approval card needs,
+  // forcing a scroll (#65). Auto-collapse it and remember to restore once all
+  // pending cards are resolved — unless the user already collapsed it.
+  if (currentTrace && currentTrace.el.classList.contains("live")
+      && currentTrace.el.classList.contains("open")) {
+    currentTrace.el.classList.remove("open");
+    currentTrace.autoCollapsed = true;
+  }
   const card = document.createElement("div");
   card.className = "card";
   card.dataset.id = event.id;
@@ -2335,6 +2348,13 @@ function onApprovalResolved(event) {
   refreshStatusline();
   card.remove();
   cards.delete(event.id);
+  // Once nothing is left to decide, restore the timeline we auto-collapsed for
+  // the card (#65) — but only if the user hasn't taken over its open state.
+  if (pendingCards === 0 && currentTrace && currentTrace.autoCollapsed) {
+    currentTrace.el.classList.add("open");
+    currentTrace.autoCollapsed = false;
+    pinTrace(currentTrace);
+  }
 }
 
 // ---- composer + autocomplete ---------------------------------------------
