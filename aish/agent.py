@@ -72,7 +72,11 @@ Rules:
    (an improve-recall skill, if present, has the checklist).
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. If the
-   user denies a command, do not retry it — change approach or ask.
+   user denies a command, do not retry it — change approach or ask. If the
+   user attaches a COMMENT to any decision (approve OR deny), you MUST answer
+   that comment in your next reply, as plain text, BEFORE any further tool
+   call — address their point and say what you are doing about it; never fold
+   the feedback silently into your next command.
 4. After running commands, analyze the output and answer concisely.
 5. Prefer read-only commands. Never bundle destructive operations
    (rm, mv, overwrite redirects) into a command unless the user explicitly
@@ -185,11 +189,28 @@ WRITE_DENIED = (
     "Do not retry the same change; adjust it or ask the user what they want."
 )
 
-FEEDBACK_NOTE = '\nThe user explains: "{comment}" — treat this as direct instruction.'
+# Feedback verdicts (Denied/Approved with a typed comment) must never be
+# silently folded into the next tool call. Small local models ignore soft
+# phrasing (the "Prompt hints must be imperative" convention), so both notes
+# ORDER the model — MUST + a worked example — to answer the comment as plain
+# text on its NEXT turn, before issuing any further tool call.
+FEEDBACK_NOTE = (
+    '\n\n[The user left a COMMENT with this denial: "{comment}"\n'
+    "You MUST answer this comment in your NEXT reply, as plain text, BEFORE "
+    "issuing any further tool call. Address what the user said or asked and "
+    "explain what you will do differently. Do NOT silently fold it into your "
+    'next command. Example — comment "wrong flag on macOS, use -f" → reply '
+    '"You\'re right: on macOS that flag is -f. I\'ll switch to it." then '
+    "proceed.]"
+)
 
 APPROVED_NOTE = (
-    '\n[The user approved this action and adds: "{comment}" — treat this as '
-    "guidance to apply now and to future actions.]"
+    '\n\n[The user APPROVED this action and left a COMMENT: "{comment}"\n'
+    "The action has run. You MUST answer this comment in your NEXT reply, as "
+    "plain text, BEFORE issuing any further tool call: explain what is "
+    "happening and why, in direct response to the user's point. Do NOT "
+    "silently fold it into your next command. Apply the guidance now and to "
+    "future actions.]"
 )
 
 
