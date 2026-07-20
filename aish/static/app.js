@@ -917,17 +917,20 @@ function renderErrorBox(container, text) {
 
 const TERM_OUTPUT_CAP_VH = 40;
 
-// The prompt-line directory: the last path segment with an ellipsis marker
-// (…/aish), so a deep cwd stays short; a very long leaf is itself truncated.
+// The prompt-line directory, Starship [directory]-style: keep the last
+// DIR_SEGMENTS path segments, prefixed with "…/" when anything was truncated
+// (repo root is not special — truncate_to_repo=false). Home is shown as ~.
+const DIR_SEGMENTS = 4;
 function promptDir(cwd) {
   let p = (cwd || "").replace(/\/+$/, "");
   if (!p) return "/";
   if (homeDir && p === homeDir) return "~";
   if (homeDir && p.startsWith(homeDir + "/")) p = "~" + p.slice(homeDir.length);
   if (p === "/" || p === "~") return p;
-  let leaf = p.split("/").pop() || p;
-  if (leaf.length > 28) leaf = leaf.slice(0, 27) + "…";
-  return "…/" + leaf;
+  const home = p.startsWith("~");
+  const segs = p.split("/").filter(Boolean);
+  if (segs.length <= DIR_SEGMENTS) return home ? segs.join("/") : "/" + segs.join("/");
+  return "…/" + segs.slice(-DIR_SEGMENTS).join("/");
 }
 
 function termRule(cls) {
