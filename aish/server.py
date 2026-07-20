@@ -929,6 +929,9 @@ class WebServer:
 
         infos = await asyncio.to_thread(load)
         open_states = {name: s.state() for name, s in self.sessions.items()}
+        # The working directory is known for sessions currently open in memory;
+        # the drawer shows it so parallel agents are legible at a glance.
+        open_cwds = {name: s.agent.cwd for name, s in self.sessions.items()}
         await websocket.send_json(
             {
                 "type": "session_list",
@@ -940,6 +943,7 @@ class WebServer:
                         "snippet": info.snippet,
                         "ts": info.mtime,
                         "state": open_states.get(info.path.name, ""),
+                        "cwd": open_cwds.get(info.path.name, ""),
                     }
                     for info in infos
                 ],

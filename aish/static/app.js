@@ -2395,9 +2395,10 @@ function closeSheets() {
   // dismiss the keyboard on its own schedule, and the layout-viewport pan it
   // caused can then settle without any visualViewport event (#8).
   const active = document.activeElement;
-  if (active && active.closest(".sheet")) active.blur();
+  if (active && active.closest(".sheet, .screen")) active.blur();
   for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
   for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
+  $("sessions-sheet").hidden = true; // the full-page Sessions view
   $("backdrop").hidden = true;
   snapViewportSoon();
 }
@@ -2406,8 +2407,10 @@ for (const b of document.querySelectorAll("[data-close]")) {
 }
 $("backdrop").onclick = closeSheets;
 
+$("sessions-new").onclick = () => { send({ type: "new" }); closeSheets(); };
+
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("backdrop").hidden) closeSheets();
+  if (e.key === "Escape" && (!$("backdrop").hidden || !$("sessions-sheet").hidden)) closeSheets();
   // Cmd/Ctrl+Shift+O = new chat, Cmd/Ctrl+Shift+P = search sessions
   // (ChatGPT / command-palette conventions).
   if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "o") {
@@ -2843,7 +2846,12 @@ $("sessions-search").addEventListener(
 );
 
 function openSessionsSheet(query) {
-  openSheet("sessions-sheet");
+  // A full-page screen, not a bottom sheet — dismiss any open sheet/menu first,
+  // no backdrop (it covers the whole chat).
+  for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
+  for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
+  $("backdrop").hidden = true;
+  $("sessions-sheet").hidden = false;
   attentionSessions.clear();
   refreshBadge();
   $("sessions-search").value = query;
@@ -2946,6 +2954,13 @@ function sessionRow(info, current) {
     head.appendChild(badge);
   }
   body.appendChild(head);
+  if (info.cwd) {
+    const dir = document.createElement("span");
+    dir.className = "session-dir mono";
+    dir.innerHTML = '<svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+    dir.appendChild(document.createTextNode(abbreviatePath(info.cwd)));
+    body.appendChild(dir);
+  }
   if (info.snippet) {
     const snippet = document.createElement("span");
     snippet.className = "snippet";

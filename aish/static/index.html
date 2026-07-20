@@ -144,11 +144,18 @@
 <div id="backdrop" hidden></div>
 
 <!-- sessions drawer -->
-<div id="sessions-sheet" class="sheet" hidden>
-  <div class="grabber"></div>
-  <div class="sheet-head">
-    <input id="sessions-search" type="search" placeholder="Search sessions">
-    <button class="close" aria-label="close" data-close="sessions-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
+<div id="sessions-sheet" class="screen" hidden>
+  <div class="screen-head">
+    <div class="screen-title-row">
+      <div class="screen-title">Sessions</div>
+      <button id="sessions-new" class="bar-btn icon" title="new chat" aria-label="new chat">
+        <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+    <div class="screen-search">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <input id="sessions-search" type="search" placeholder="Search sessions">
+    </div>
   </div>
   <div id="sessions-list" class="sheet-list"></div>
 </div>
