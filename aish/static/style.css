@@ -1287,9 +1287,11 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .queue-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .queue-text { font-size: 14px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue-sub { font-size: 11px; color: var(--dim); }
-.queue-remove { flex: none; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: none; border: none; color: var(--dim); }
+.queue-remove, .queue-edit { flex: none; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: none; border: none; color: var(--dim); }
 .queue-remove svg { width: 17px; height: 17px; }
-.queue-remove:active { opacity: 0.5; }
+.queue-edit { color: var(--blue); }
+.queue-edit svg { width: 16px; height: 16px; }
+.queue-remove:active, .queue-edit:active { opacity: 0.5; }
 
 /* ---- full-page Sessions screen (design Screen 1) ---- */
 .screen {

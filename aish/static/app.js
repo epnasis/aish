@@ -2329,11 +2329,20 @@ function addQueueChip(text) {
   chip.innerHTML =
     '<svg class="queue-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v4.3l2.6 1.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
     '<span class="queue-body"><span class="queue-text"></span><span class="queue-sub">Queued · sends when aish finishes</span></span>' +
+    '<button class="queue-edit" type="button" aria-label="edit queued message"><svg viewBox="0 0 24 24"><path d="M12 19.5h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.2a1.7 1.7 0 0 1 2.4 2.4l-8.3 8.3-3.2.8.8-3.2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg></button>' +
     '<button class="queue-remove" type="button" aria-label="remove from queue"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></button>';
   chip.querySelector(".queue-text").textContent = text;
   chip.querySelector(".queue-remove").onclick = () => {
     send({ type: "dequeue", text });
     removeQueueChip(text);
+  };
+  // Edit: pull the message back into the composer to revise & resend (#14).
+  chip.querySelector(".queue-edit").onclick = () => {
+    send({ type: "dequeue", text });
+    removeQueueChip(text);
+    input.value = input.value ? `${text}\n${input.value}` : text;
+    resizeInput();
+    input.focus();
   };
   list.appendChild(chip);
   list.hidden = false;
