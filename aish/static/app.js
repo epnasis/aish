@@ -465,6 +465,8 @@ function setStatus(text) {
 
 function setBusy(busy) {
   clientBusy = busy;
+  // Drive the header status dot: glows only while the session is working (#61).
+  document.querySelector(".model-dot")?.classList.toggle("working", busy);
   refreshStatusline();
 }
 
