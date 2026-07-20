@@ -1466,6 +1466,17 @@ class TestExportAssembly:
         assert data.startswith(b"%PDF")
         assert len(data) > 400
 
+    def test_pdf_embeds_unicode_font_for_polish(self):
+        # Regression: the PDF built-in fonts (Helvetica/Courier) have no Polish
+        # glyphs and render them as black boxes. The bundled DejaVu font must be
+        # embedded so ą/ć/ę/ł/… actually draw.
+        from aish.export import render_answer_pdf
+
+        data = render_answer_pdf("Zażółć gęślą jaźń — → `ąęść`", "t")
+        assert data.startswith(b"%PDF")
+        assert b"DejaVuSans" in data  # embedded body font
+        assert b"DejaVuSansMono" in data  # embedded code font
+
     def test_safe_pdf_filename_slugs_and_defaults(self):
         from aish.export import safe_pdf_filename
 

@@ -15,17 +15,50 @@ thinking/tool/working steps and keeps just the answers the user saw.
 import io
 import re
 from datetime import datetime
+from pathlib import Path
 
 # The heavy imports (reportlab via xhtml2pdf) are deferred into the render
 # function so importing this module — and starting the server — stays cheap.
 
 _UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 
+# Bundled DejaVu (Unicode) fonts — the PDF built-ins (Helvetica/Courier) have
+# no Polish/CE glyphs and render them as black boxes. DejaVu covers Latin
+# Extended-A, arrows, typographic punctuation, etc. Embedded via @font-face
+# with absolute paths so the glyphs actually draw (and the PDF is portable).
+_FONT_DIR = Path(__file__).parent / "fonts"
+
+
+def _font_face_css() -> str:
+    faces = [
+        ("aishSans", "DejaVuSans.ttf", "normal", "normal"),
+        ("aishSans", "DejaVuSans-Bold.ttf", "bold", "normal"),
+        ("aishSans", "DejaVuSans-Oblique.ttf", "normal", "italic"),
+        ("aishMono", "DejaVuSansMono.ttf", "normal", "normal"),
+        ("aishMono", "DejaVuSansMono-Bold.ttf", "bold", "normal"),
+    ]
+    return "\n".join(
+        f'@font-face {{ font-family: "{fam}"; '
+        f'src: url("fonts/{fn}"); '
+        f"font-weight: {weight}; font-style: {style}; }}"
+        for fam, fn, weight, style in faces
+    )
+
+
+def _link_callback(uri: str, rel: str) -> str:  # noqa: ARG001 — xhtml2pdf signature
+    """Resolve the bundled-font URLs (fonts/<name>.ttf) to their real on-disk
+    path so reportlab can embed them. Everything the exporter references is
+    local and bundled; nothing hits the network."""
+    name = uri.rsplit("/", 1)[-1]
+    local = _FONT_DIR / name
+    return str(local) if local.exists() else uri
+
+
 # Kept simple and readable; xhtml2pdf supports only a CSS subset, so this
 # leans on what it renders reliably (fonts, colors, table borders, spacing).
 _PAGE_CSS = """
 @page { size: a4; margin: 2cm 1.8cm; }
-body { font-family: Helvetica, Arial, sans-serif; font-size: 11pt;
+body { font-family: "aishSans"; font-size: 11pt;
        line-height: 1.45; color: #1c1c1e; }
 h1 { font-size: 20pt; margin: 0 0 10pt; }
 h2 { font-size: 15pt; margin: 16pt 0 6pt; }
@@ -34,9 +67,9 @@ p { margin: 0 0 8pt; }
 a { color: #0a63c9; text-decoration: none; }
 ul, ol { margin: 0 0 8pt; }
 li { margin: 0 0 3pt; }
-code { font-family: Courier, monospace; font-size: 9.5pt;
+code { font-family: "aishMono"; font-size: 9.5pt;
        background: #f2f2f7; color: #1c1c1e; }
-pre { font-family: Courier, monospace; font-size: 9pt; background: #f2f2f7;
+pre { font-family: "aishMono"; font-size: 9pt; background: #f2f2f7;
       color: #1c1c1e; padding: 8pt; margin: 0 0 8pt; }
 blockquote { color: #6c6c70; margin: 0 0 8pt; padding: 0 0 0 10pt;
              border-left: 2pt solid #d1d1d6; }
@@ -128,7 +161,7 @@ def _document(title: str, answer_html_blocks: list[str]) -> str:
     body = "\n".join(body_parts)
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        f"<style>{_PAGE_CSS}</style></head><body>{body}</body></html>"
+        f"<style>{_font_face_css()}\n{_PAGE_CSS}</style></head><body>{body}</body></html>"
     )
 
 
@@ -142,7 +175,9 @@ def _html_to_pdf(html: str) -> bytes:
     from xhtml2pdf import pisa
 
     buffer = io.BytesIO()
-    result = pisa.CreatePDF(src=html, dest=buffer, encoding="utf-8")
+    result = pisa.CreatePDF(
+        src=html, dest=buffer, encoding="utf-8", link_callback=_link_callback
+    )
     if result.err:
         raise RuntimeError(f"PDF generation failed ({result.err} error(s))")
     return buffer.getvalue()
