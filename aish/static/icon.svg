@@ -8,6 +8,6 @@
   </defs>
   <rect x="0" y="0" width="1024" height="1024" rx="230" fill="url(#g)"/>
   <text x="506" y="536" text-anchor="middle" dominant-baseline="central"
-        font-family="ui-monospace,'SF Mono',Menlo,monospace" font-size="451"
+        font-family="ui-monospace,'SF Mono',Menlo,monospace" font-size="614"
         letter-spacing="-38"><tspan font-weight="600" fill="#fff">a</tspan><tspan font-weight="700" fill="#0A84FF">&gt;</tspan></text>
 </svg>
