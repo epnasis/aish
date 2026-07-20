@@ -204,8 +204,10 @@ function onSessionState(event) {
   const label = event.title
     ? `“${event.title.slice(0, 40)}”`
     : event.session.replace(/^session-|\.jsonl$/g, "").replace(/-\d{6}$/, "");
-  showToast(`${label}: task finished — tap the title to switch back`);
+  showToast(`${label}: task finished — tap ‹ Sessions to switch back`);
   notify("aish — background task finished", event.title || event.session);
+  attentionSessions.add(event.session);
+  refreshBadge();
   if (!$("sessions-sheet").hidden) {
     send({ type: "sessions", query: $("sessions-search").value });
   }
@@ -230,7 +232,7 @@ function onHello(event) {
   // Server code changed since this page was built (or the page predates rev
   // stamping entirely) — reload; the replay mechanism restores the view.
   if (event.rev && event.rev !== PAGE_REV) { location.reload(); return; }
-  $("model-chip").textContent = event.model;
+  $("model-name").textContent = event.model;
   setTitle(event.title);
   pagerSessions = event.pager || [];
   currentSession = event.session;
@@ -1887,6 +1889,7 @@ function closeSheets() {
   const active = document.activeElement;
   if (active && active.closest(".sheet")) active.blur();
   for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
+  for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
   $("backdrop").hidden = true;
   snapViewportSoon();
 }
@@ -1980,10 +1983,7 @@ function attachListNav(searchEl, listEl) {
 // wrap mode: device-local ergonomics (like the token), not session state.
 // Applied here, before any replay renders, so history draws in the chosen mode.
 const WRAP_KEY = "aish-wrap";
-if (localStorage.getItem(WRAP_KEY) === "1") {
-  document.body.classList.add("wrap");
-  $("wrap-chip").classList.add("active");
-}
+if (localStorage.getItem(WRAP_KEY) === "1") document.body.classList.add("wrap");
 // Toggling wrap reflows every monospace block, so content heights above the
 // viewport change and the reader would land on different text (#21). Anchor
 // on the message at the top of the viewport and put it back at the same
@@ -2003,18 +2003,17 @@ function restoreAnchor(anchor) {
   updateScrollButton();
 }
 
-$("wrap-chip").onclick = () => {
+function toggleWrap() {
   const wasAtBottom = nearBottom();
   const anchor = topVisibleAnchor();
   const on = document.body.classList.toggle("wrap");
-  $("wrap-chip").classList.toggle("active", on);
   localStorage.setItem(WRAP_KEY, on ? "1" : "0");
   // Reading layout right after the class toggle forces a synchronous
   // reflow, so the restored offset is computed against final geometry.
   if (wasAtBottom) scrollToEnd(true);
   else if (anchor) restoreAnchor(anchor);
   showToast(on ? "wrap on" : "wrap off");
-};
+}
 
 // ---- swipe pager between open sessions -----------------------------------
 // Horizontal pager gesture (the iOS Weather-app model): drag the transcript
@@ -2280,10 +2279,56 @@ document.addEventListener("keydown", (event) => {
 });
 
 // sessions
-$("session-chip").onclick = () => openSessionsSheet("");
-$("history-chip").onclick = () => openSessionsSheet("");
+$("back-chip").onclick = () => openSessionsSheet("");
+$("session-chip").onclick = () => openSessionMenu();
 $("empty-hint").onclick = () => openSessionsSheet("");
 $("new-chip").onclick = () => send({ type: "new" });
+
+// ---- session title menu -------------------------------------------------
+// The tappable title opens a small menu of session actions (iOS Messages
+// convention: settings live behind the title, not a floating overflow chip).
+function openSessionMenu() {
+  const menu = $("session-menu");
+  $("wrap-state").textContent = document.body.classList.contains("wrap") ? "On" : "Off";
+  // Measure while shown-but-invisible so width is known before centering.
+  menu.style.visibility = "hidden";
+  menu.hidden = false;
+  const anchor = $("session-chip").getBoundingClientRect();
+  const width = menu.offsetWidth;
+  let left = anchor.left + anchor.width / 2 - width / 2;
+  left = Math.max(12, Math.min(left, window.innerWidth - width - 12));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${anchor.bottom + 6}px`;
+  menu.style.visibility = "";
+  $("backdrop").hidden = false;
+}
+
+$("session-menu").addEventListener("click", (e) => {
+  const item = e.target.closest(".menu-item");
+  if (!item) return;
+  closeSheets(); // hides the menu + backdrop
+  switch (item.dataset.act) {
+    case "new": send({ type: "new" }); break;
+    case "model": openModelSheet(""); break;
+    case "cd": openDirSheet(); break;
+    case "wrap": toggleWrap(); break;
+    case "workspace": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
+  }
+});
+
+// ---- attention badge ----------------------------------------------------
+// A background session that finished (or needs you) sets the durable badge on
+// the ‹ Sessions button; opening the list clears it.
+const attentionSessions = new Set();
+function refreshBadge() {
+  const badge = $("back-badge");
+  if (attentionSessions.size) {
+    badge.textContent = String(attentionSessions.size);
+    badge.hidden = false;
+  } else {
+    badge.hidden = true;
+  }
+}
 $("sessions-search").addEventListener(
   "input",
   debounce(() => send({ type: "sessions", query: $("sessions-search").value }), 150)
@@ -2291,6 +2336,8 @@ $("sessions-search").addEventListener(
 
 function openSessionsSheet(query) {
   openSheet("sessions-sheet");
+  attentionSessions.clear();
+  refreshBadge();
   $("sessions-search").value = query;
   // Auto-focus only where a hardware keyboard is likely: on touch devices
   // focusing would throw the on-screen keyboard over the list before the
@@ -2471,13 +2518,12 @@ function renderModels(event) {
 }
 
 function onModelChanged(event) {
-  $("model-chip").textContent = event.model;
+  $("model-name").textContent = event.model;
   closeSheets();
   showToast(event.saved ? `model: ${event.model} (saved as default)` : `model: ${event.model}`);
 }
 
 // workspace
-$("menu-chip").onclick = () => { openSheet("workspace-sheet"); send({ type: "jobs" }); };
 $("ws-cd-change").onclick = () => openDirSheet();
 $("root-add").onclick = () => {
   const path = $("root-input").value.trim();
@@ -2493,6 +2539,7 @@ function renderWorkspace(event) {
   if (event.cwd) {
     currentCwd = event.cwd;
     $("ws-cwd").textContent = event.cwd;
+    $("cwd-name").textContent = baseName(event.cwd);
     $("cwd-text").textContent = abbreviatePath(event.cwd);
   }
   if (event.roots) $("ws-roots").textContent = event.roots.join("\n");
@@ -2509,6 +2556,12 @@ function abbreviatePath(path) {
   }
   // middle-free truncation keeping the leaf — the informative part
   return p.length > 38 ? "…" + p.slice(-37) : p;
+}
+
+// The directory's leaf name — the context bar's bold primary line.
+function baseName(path) {
+  const leaf = path.replace(/\/+$/, "").split("/").pop();
+  return leaf || path;
 }
 
 const RECENT_DIRS_KEY = "aish-recent-dirs";

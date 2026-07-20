@@ -86,87 +86,166 @@ body.kb-open .sheet { padding-bottom: 14px; }
 
 button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inherit; }
 
-/* ---- top bar (iOS navigation bar) ---- */
+/* ---- top navigation: nav row + context bar ---- */
 #topbar {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  padding: 10px 12px;
-  padding-top: calc(10px + env(safe-area-inset-top));
-  background: rgba(22, 22, 24, 0.85);
+  flex: none;
+  background: var(--bar-bg);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   border-bottom: 0.5px solid var(--sep);
+  padding-top: env(safe-area-inset-top);
 }
-.bar-btn {
+#nav-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 8px;
+  min-height: 44px;
+}
+/* generic bar icon button (compose) */
+.bar-btn { background: none; border: none; color: var(--blue); padding: 6px; border-radius: 8px; }
+.bar-btn.icon { flex: none; }
+.bar-btn.icon svg { width: 24px; height: 24px; display: block; }
+.bar-btn:active { opacity: 0.5; }
+
+/* back to the sessions list, with an attention badge */
+.nav-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
   background: none;
   border: none;
   color: var(--blue);
-  padding: 6px 8px;
-  border-radius: 8px;
-  font-size: 15px;
-  max-width: 34vw;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 16px;
+  padding: 6px 4px;
+  flex: none;
 }
-.bar-btn.icon { padding: 6px; flex-shrink: 0; }
-.bar-btn.icon svg { width: 22px; height: 22px; display: block; }
-.bar-btn:active { opacity: 0.5; }
-#wrap-chip { color: var(--dim); }
-#wrap-chip.active { color: var(--blue); }
-.bar-title {
-  flex: 1;
-  min-width: 0;
-  display: inline-flex;
+.nav-back:active { opacity: 0.5; }
+.back-ico { position: relative; display: inline-flex; flex: none; }
+.back-ico > svg { width: 22px; height: 22px; display: block; }
+.back-label { margin-left: 1px; }
+#back-badge {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--orange);
+  color: #fff;
+  font: 700 9.5px/1 -apple-system, system-ui, sans-serif;
+  display: flex;
   align-items: center;
   justify-content: center;
-  gap: 2px;
-  background: none;
-  border: none;
-  color: var(--fg);
-  font-size: 17px;
-  font-weight: 600;
-  padding: 6px 4px;
+  box-shadow: 0 0 0 2px var(--bg);
 }
-.bar-title:active { opacity: 0.6; }
-#session-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* the iOS "this title is a menu" signifier (Messages, model pickers) */
-.caret { flex-shrink: 0; color: var(--dim); }
-.bar-title .caret { width: 13px; height: 13px; margin-top: 2px; }
-#bar-center {
+#back-badge[hidden] { display: none; }
+
+/* centered tappable title → session menu */
+.nav-title {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
   align-items: center;
-}
-#bar-center .bar-title { flex: initial; max-width: 100%; padding-bottom: 0; }
-#cwd-chip {
-  max-width: 100%;
-  display: inline-flex;
-  align-items: center;
+  justify-content: center;
   gap: 3px;
   background: none;
   border: none;
-  color: var(--dim);
-  font-size: 11px;
-  padding: 0 4px 2px;
+  color: var(--fg);
+  font-size: 16px;
+  font-weight: 600;
+  padding: 2px 4px;
 }
-#cwd-chip svg { width: 11px; height: 11px; flex-shrink: 0; }
-#cwd-chip .caret { width: 9px; height: 9px; }
-#cwd-text {
+.nav-title:active { opacity: 0.6; }
+#session-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* the iOS "this is a menu" caret signifier */
+.caret { flex: none; color: var(--dim); }
+.nav-title .caret { width: 11px; height: 11px; margin-top: 2px; }
+
+/* context bar: working directory | model, comfortable hit targets.
+   Grid (not flex) so the directory track can shrink to 0 and ellipsize while
+   the model chip keeps its intrinsic width — flex-shrink through the nested
+   <button> was unreliable. */
+#context-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: stretch;
+  border-top: 0.5px solid var(--sep);
+}
+#cwd-chip {
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  padding: 8px 14px;
+  min-height: 44px;
+  text-align: left;
 }
-#cwd-chip:active { opacity: 0.6; }
+#cwd-chip .ctx-ico { width: 17px; height: 17px; flex: none; color: var(--blue); }
+.ctx-text { flex: 1 1 0; min-width: 0; overflow: hidden; display: flex; flex-direction: column; line-height: 1.2; }
+#cwd-name { font-size: 14px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#cwd-text { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#cwd-chip .caret { width: 12px; height: 12px; }
+#cwd-chip:active, #model-chip:active { opacity: 0.6; }
+.ctx-div { width: 0.5px; background: var(--sep); margin: 9px 0; flex: none; }
+#model-chip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: none;
+  border: none;
+  padding: 8px 15px;
+  min-height: 44px;
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+}
+.model-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px var(--green-glow); flex: none; }
+#model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
+#model-chip .caret { width: 12px; height: 12px; }
+
+@media (max-width: 360px) { .back-label { display: none; } }
+
+/* ---- popover menu (session title menu, composer actions) ---- */
+.popover-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 216px;
+  max-width: calc(100vw - 24px);
+  background: var(--bg-elev);
+  border: 0.5px solid var(--sep);
+  border-radius: 15px;
+  padding: 5px;
+  box-shadow: 0 12px 34px -8px rgba(0, 0, 0, 0.5);
+  animation: sheet-in 0.16s both;
+}
+.popover-menu[hidden] { display: none; }
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  background: none;
+  border: none;
+  border-radius: 11px;
+  padding: 10px 12px;
+  color: var(--fg);
+  font-size: 15px;
+  text-align: left;
+}
+.menu-item svg { width: 19px; height: 19px; flex: none; color: var(--dim); }
+.menu-item .grow { flex: 1; }
+.menu-item .menu-state { font-size: 13px; color: var(--dim); font-weight: 600; }
+.menu-item:active { background: var(--row-sel-bg); }
+.menu-item.danger { color: var(--red); }
+.menu-item.danger svg { color: var(--red); }
+@keyframes sheet-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* ---- messages ---- */
 #messages {

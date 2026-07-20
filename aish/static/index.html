@@ -18,31 +18,65 @@
 <body>
 
 <header id="topbar">
-  <button id="history-chip" class="bar-btn icon" title="session history" aria-label="session history">
-    <svg viewBox="0 0 24 24"><path d="M4.6 5.2v4.2h4.2M4.8 9.4a7.8 7.8 0 1 1-.6 3.4M12 8.2v4.1l2.9 1.7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-  </button>
-  <button id="model-chip" class="bar-btn tinted" title="switch model">…</button>
-  <div id="bar-center">
-    <button id="session-chip" class="bar-title" title="sessions">
+  <!-- nav row: back to sessions · session title (menu) · new chat -->
+  <div id="nav-row">
+    <button id="back-chip" class="nav-back" title="sessions" aria-label="sessions">
+      <span class="back-ico">
+        <svg viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span id="back-badge" hidden></span>
+      </span>
+      <span class="back-label">Sessions</span>
+    </button>
+    <button id="session-chip" class="nav-title" title="session menu">
       <span id="session-title">aish</span>
       <svg class="caret" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
+    <button id="new-chip" class="bar-btn icon" title="new chat" aria-label="new chat">
+      <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+    </button>
+  </div>
+  <!-- context bar: working directory · model -->
+  <div id="context-bar">
     <button id="cwd-chip" title="change directory">
-      <svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
-      <span id="cwd-text">…</span>
+      <svg class="ctx-ico" viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+      <span class="ctx-text">
+        <span id="cwd-name">aish</span>
+        <span id="cwd-text" class="mono">…</span>
+      </span>
+      <svg class="caret" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div class="ctx-div"></div>
+    <button id="model-chip" title="switch model">
+      <span class="model-dot"></span>
+      <span id="model-name">…</span>
       <svg class="caret" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
   </div>
-  <button id="wrap-chip" class="bar-btn icon" title="toggle line wrap" aria-label="toggle line wrap">
-    <svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h12a3.25 3.25 0 0 1 0 6.5h-2.5m0 0 2.2-2.2m-2.2 2.2 2.2 2.2M4 18.5h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-  </button>
-  <button id="new-chip" class="bar-btn icon" title="new chat" aria-label="new chat">
-    <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
-  </button>
-  <button id="menu-chip" class="bar-btn icon" title="workspace" aria-label="workspace">
-    <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="19" cy="12" r="1.7" fill="currentColor"/></svg>
-  </button>
 </header>
+
+<!-- session title menu (settings for the current session) -->
+<div id="session-menu" class="popover-menu" hidden>
+  <button class="menu-item" data-act="new">
+    <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+    New chat
+  </button>
+  <button class="menu-item" data-act="model">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v4.3l2.6 1.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Switch model…
+  </button>
+  <button class="menu-item" data-act="cd">
+    <svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+    Change directory…
+  </button>
+  <button class="menu-item" data-act="wrap">
+    <svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h12a3.25 3.25 0 0 1 0 6.5h-2.5m0 0 2.2-2.2m-2.2 2.2 2.2 2.2M4 18.5h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span class="grow">Line wrap</span><span id="wrap-state" class="menu-state"></span>
+  </button>
+  <button class="menu-item" data-act="workspace">
+    <svg viewBox="0 0 24 24"><path d="M4 7.5h16M4 12h16M4 16.5h16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+    Workspace &amp; jobs…
+  </button>
+</div>
 
 <main id="messages"></main>
 
