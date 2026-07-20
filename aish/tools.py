@@ -470,7 +470,13 @@ TOOL_SCHEMAS = [
                     },
                     "keywords": {
                         "type": "string",
-                        "description": "Optional comma-separated search keywords.",
+                        "description": (
+                            "Comma-separated retrieval keywords: singular topical "
+                            "nouns and synonyms a user would type in a task, in "
+                            "every language the user uses (e.g. 'price, buy, shop, "
+                            "cena, kup, sklep'). These make the memory findable — "
+                            "provide them."
+                        ),
                     },
                 },
                 "required": ["note"],

@@ -233,7 +233,10 @@ without bloating the context.
   look; a skill too large to inject whole is truncated and other tools are
   refused until the model reads it in full (or explicitly says why it does
   not apply). aish also updates a skill (appends the gotcha) whenever one
-  proves wrong. Ask aish to write one — it knows the format.
+  proves wrong, and when saved knowledge fails to trigger on a task it
+  should have matched, telling aish so makes it repair that entry's
+  description/keywords so retrieval finds it next time. Ask aish to write
+  a skill — it knows the format.
 - **memory** — one fact per file in `~/.config/aish/memory/` (or
   `./.aish/memory/`), same format; the description line IS the fact. The 15
   newest show in context, the rest are searchable. Saved via `remember`.
