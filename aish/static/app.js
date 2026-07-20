@@ -86,10 +86,14 @@ function connect() {
   ws.onopen = () => {
     backoff = 1000;
     $("connbar").hidden = true;
+    connOk = true;
+    updateDot();
     checkAppVersion(); // server restarts are when the UI code changes
   };
   ws.onmessage = (raw) => handle(JSON.parse(raw.data));
   ws.onclose = (event) => {
+    connOk = false; // socket down — dot goes red until we reconnect
+    updateDot();
     if (event.code === 4000) {
       showToast("another device connected — this tab is detached");
       return; // deliberate replacement: do not fight over the session
@@ -169,6 +173,7 @@ function handle(event) {
 
       sawAnswer = false;
       answerFilling = false;
+      taskErrored = false; // a new turn clears the prior error's red dot
       turnStart = replaying ? 0 : Date.now(); // timing readout on the answer
       setBusy(true);
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
@@ -198,6 +203,7 @@ function handle(event) {
       closeAnswer();
       finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
       addErrorMsg(event.text);
+      taskErrored = true; // couldn't complete — dot goes red until the next turn
       setBusy(false);
       setStatus(null);
       notify("aish — task failed", event.text);
@@ -256,6 +262,7 @@ function onHello(event) {
   currentSession = event.session;
   localStorage.setItem("aish-session", event.session); // reconnects return here
   renderWorkspace(event);
+  taskErrored = false; // fresh connected view — clear any stale red
   setBusy(event.busy);
   if (!event.busy) setStatus(null);
   updateEmptyHint();
@@ -473,10 +480,22 @@ function setStatus(text) {
   refreshStatusline();
 }
 
+// Header status dot (#61): red when the socket is down or the last turn
+// errored (can't reach/use the model), green + glow while working, green +
+// static when connected and idle.
+let connOk = false;
+let taskErrored = false;
+function updateDot() {
+  const dot = document.querySelector(".model-dot");
+  if (!dot) return;
+  const bad = !connOk || taskErrored;
+  dot.classList.toggle("bad", bad);
+  dot.classList.toggle("working", !bad && clientBusy);
+}
+
 function setBusy(busy) {
   clientBusy = busy;
-  // Drive the header status dot: glows only while the session is working (#61).
-  document.querySelector(".model-dot")?.classList.toggle("working", busy);
+  updateDot();
   refreshStatusline();
 }
 

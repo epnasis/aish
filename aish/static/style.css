@@ -219,8 +219,11 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 /* Status dot: dim + static at rest (carries no false "live" signal), green
    with a breathing glow only while the session is actually working (#61). */
-.model-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; transition: background 0.3s ease; }
-.model-dot.working { background: var(--green); animation: dot-glow 1.4s ease-in-out infinite; }
+/* Model status: green + static when connected & idle, green + glow while
+   working, red when the connection/model is unavailable (#61). */
+.model-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: none; transition: background 0.3s ease; }
+.model-dot.working { animation: dot-glow 1.4s ease-in-out infinite; }
+.model-dot.bad { background: var(--red); animation: none; box-shadow: none; }
 @keyframes dot-glow {
   0%, 100% { box-shadow: 0 0 0 0 var(--green-glow); }
   50%      { box-shadow: 0 0 0 4px var(--green-glow); }
