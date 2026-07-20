@@ -1021,7 +1021,7 @@ function buildTermBlock(cwd, command) {
   const outTools = document.createElement("div");
   outTools.className = "term-tools";
   outTools.append(
-    termWrapBtn(block, ".term-out", () => block.classList.toggle("out-wrap"), false),
+    termWrapBtn(block, ".term-out", () => block.classList.toggle("out-wrapped"), false),
     copyChip(() => out.textContent, "copy output"),
   );
   outWrap.append(outTools, out, fade);

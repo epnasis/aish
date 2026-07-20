@@ -1390,7 +1390,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-out-wrap { position: relative; }
 .term-out { padding: 8px 12px; line-height: 1.6; color: var(--dim); white-space: pre; overflow-x: auto; }
 body.wrap .term-out,
-.term-block.out-wrap .term-out { white-space: pre-wrap; overflow-wrap: anywhere; }
+.term-block.out-wrapped .term-out { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-block.capped:not(.expanded) .term-out { max-height: 40vh; overflow: hidden; }
 /* Per-zone tool cluster (wrap + copy), pinned top-right of the prompt line and
    the output. Copy on the command grabs the command text only; copy on the
