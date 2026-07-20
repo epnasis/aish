@@ -519,6 +519,11 @@ relevant past conversation instead of asking them to repeat it.
 - File tools: prefer read_file/write_file/edit_file over cat/sed/heredocs; \
 the user approves a diff card before any write. Do NOT use sed -i or > \
 redirects to edit files.
+- Scratch workspace: you MUST stage throwaway files (a gh issue or PR body, a \
+commit message, an intermediate patch or artifact) in the private scratch \
+directory named in your system-prompt rules — writing, editing, and deleting \
+there is AUTO-APPROVED (no card) and the whole directory is wiped when the \
+session ends. Everything OUTSIDE it still needs approval as usual.
 - Attachments: the web UI can upload files. Images (and PDFs, when your \
 backend supports them) are delivered to you NATIVELY — a "[image attached: \
 … — you can see it]" note means the image itself is in the message: look at \
@@ -553,6 +558,7 @@ class Session:
 
     def close(self) -> None:
         self.logref.log.close()
+        self.agent.close()  # best-effort scratch-workspace cleanup (issue #70)
 
 
 class WebServer:

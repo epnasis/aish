@@ -92,6 +92,13 @@ class ClaudeMaxAgent:
         return self.inner.cwd
 
     @property
+    def scratch_dir(self):
+        return self.inner.scratch_dir
+
+    def close(self) -> None:
+        self.inner.close()
+
+    @property
     def roots(self):
         return self.inner.roots
 
@@ -219,7 +226,10 @@ class ClaudeMaxAgent:
             # invalidate the API prompt cache for the changed prefix — an
             # accepted cost, skills change rarely.
             system_prompt=compose_system_content(
-                self.base_context, self.cwd, self.inner.lessons_path
+                self.base_context,
+                self.cwd,
+                self.inner.lessons_path,
+                scratch_dir=self.inner.scratch_dir,
             ),
             model=self.model or None,
             tools=[],  # no Claude Code built-ins — aish tools only

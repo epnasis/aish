@@ -5,8 +5,10 @@ from aish.approval import (
     escaping_dirs,
     is_auto_approvable,
     is_read_only,
+    is_scratch_delete,
     load_prefixes,
     looks_destructive,
+    path_within,
     save_prefix,
     split_chain,
     suggest_prefix,
@@ -438,3 +440,99 @@ class TestEscapingDirs:
         root.mkdir()
         elsewhere.mkdir()
         assert escaping_dirs(f"cd {elsewhere}", str(root), [root]) == [str(elsewhere)]
+
+
+class TestScratchWorkspace:
+    """Issue #70: writes and deletes are auto-approved ONLY when they resolve
+    strictly inside the ephemeral scratch dir. Everything else fails closed."""
+
+    @pytest.fixture
+    def scratch(self, tmp_path):
+        d = (tmp_path / "aish-scratch").resolve()
+        d.mkdir()
+        return d
+
+    # --- path_within (write scoping) ---
+
+    def test_write_inside_scratch_is_within(self, scratch):
+        assert path_within(str(scratch / "body.md"), str(scratch), scratch)
+
+    def test_write_inside_nested_scratch_is_within(self, scratch):
+        assert path_within(str(scratch / "sub" / "body.md"), str(scratch), scratch)
+
+    def test_relative_path_anchored_to_cwd_can_be_within(self, scratch):
+        # cwd == scratch, a bare relative name resolves inside it.
+        assert path_within("body.md", str(scratch), scratch)
+
+    def test_scratch_dir_itself_is_not_within(self, scratch):
+        assert not path_within(str(scratch), str(scratch), scratch)
+
+    def test_write_outside_scratch_is_not_within(self, tmp_path, scratch):
+        assert not path_within(str(tmp_path / "elsewhere.txt"), str(tmp_path), scratch)
+
+    def test_dotdot_escape_is_not_within(self, scratch):
+        assert not path_within(str(scratch / ".." / "escape.txt"), str(scratch), scratch)
+
+    def test_symlink_escape_is_not_within(self, tmp_path, scratch):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (scratch / "link").symlink_to(outside)
+        assert not path_within(str(scratch / "link" / "x.txt"), str(scratch), scratch)
+
+    # --- is_scratch_delete (rm scoping) ---
+
+    def test_rm_inside_scratch_auto_approves(self, scratch):
+        (scratch / "f.txt").write_text("x")
+        assert is_scratch_delete(f"rm {scratch / 'f.txt'}", str(scratch), scratch)
+
+    def test_rm_force_inside_scratch_auto_approves(self, scratch):
+        assert is_scratch_delete(f"rm -f {scratch / 'f.txt'}", str(scratch), scratch)
+
+    def test_rm_recursive_inside_scratch_auto_approves(self, scratch):
+        (scratch / "sub").mkdir()
+        assert is_scratch_delete(f"rm -r {scratch / 'sub'}", str(scratch), scratch)
+
+    def test_rm_rf_inside_scratch_still_prompts(self, scratch):
+        # recursive+force stays denylisted even inside scratch — fall through.
+        assert not is_scratch_delete(f"rm -rf {scratch / 'sub'}", str(scratch), scratch)
+
+    def test_rm_multiple_all_inside_auto_approves(self, scratch):
+        cmd = f"rm {scratch / 'a'} {scratch / 'b'}"
+        assert is_scratch_delete(cmd, str(scratch), scratch)
+
+    def test_rm_one_operand_outside_prompts(self, tmp_path, scratch):
+        cmd = f"rm {scratch / 'a'} {tmp_path / 'b'}"
+        assert not is_scratch_delete(cmd, str(scratch), scratch)
+
+    def test_rm_outside_scratch_prompts(self, tmp_path, scratch):
+        assert not is_scratch_delete(f"rm {tmp_path / 'x'}", str(tmp_path), scratch)
+
+    def test_rm_dotdot_escape_prompts(self, scratch):
+        assert not is_scratch_delete(f"rm {scratch / '..' / 'x'}", str(scratch), scratch)
+
+    def test_rm_symlink_escape_prompts(self, tmp_path, scratch):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "victim").write_text("x")
+        (scratch / "link").symlink_to(outside)
+        assert not is_scratch_delete(f"rm {scratch / 'link' / 'victim'}", str(scratch), scratch)
+
+    def test_rm_scratch_dir_itself_prompts(self, scratch):
+        assert not is_scratch_delete(f"rm -r {scratch}", str(scratch), scratch)
+
+    def test_bare_rm_no_operand_prompts(self, scratch):
+        assert not is_scratch_delete("rm", str(scratch), scratch)
+
+    def test_sudo_rm_inside_scratch_prompts(self, scratch):
+        # wrappers are not stripped — a non-bare-rm verb never auto-approves.
+        assert not is_scratch_delete(f"sudo rm {scratch / 'f'}", str(scratch), scratch)
+
+    def test_chained_command_prompts(self, scratch):
+        cmd = f"rm {scratch / 'a'} && rm /etc/passwd"
+        assert not is_scratch_delete(cmd, str(scratch), scratch)
+
+    def test_non_rm_command_prompts(self, scratch):
+        assert not is_scratch_delete(f"cat {scratch / 'a'}", str(scratch), scratch)
+
+    def test_metacharacter_prompts(self, scratch):
+        assert not is_scratch_delete(f"rm {scratch / 'a'}; rm /etc/passwd", str(scratch), scratch)

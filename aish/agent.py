@@ -12,9 +12,12 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import sys
+import tempfile
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -24,7 +27,7 @@ from typing import Any
 import ollama
 
 from . import files, skills, tools, web
-from .approval import Approved, Blocked, Denied
+from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
 from .session import SessionLog
 
 _PLATFORM_NOTES = {
@@ -101,8 +104,22 @@ Rules:
    never send it a URL containing tokens or other secrets.
    When researching, batch independent lookups: issue several web_search /
    read_url calls in a single reply — they run in parallel, which is much
-   faster than one per turn.
+   faster than one per turn.{scratch_note}
 """
+
+# Per-session scratch workspace (issue #70). Injected only when a path is
+# known, so the static prompt stays byte-identical for callers that render it
+# without one. Imperative phrasing on purpose — small local models ignore
+# capability-style hints (the "prompt hints must be imperative" convention).
+SCRATCH_RULE = """
+8. SCRATCH WORKSPACE: {scratch_dir} is your OWN private scratch directory. You
+   MUST use it for throwaway files — staging a gh issue or PR body, a commit
+   message, an intermediate patch or artifact — instead of writing them into
+   the project tree. Creating, editing, AND deleting files inside that
+   directory is AUTO-APPROVED (no prompt); the whole directory is deleted
+   automatically when the session ends, so never leave anything there you need
+   to keep. Writing or deleting ANYWHERE ELSE still requires user approval
+   exactly as above — the auto-approval applies ONLY inside this directory."""
 
 DENIED_RESULT = (
     "USER DENIED this command — it was NOT executed. "
@@ -387,22 +404,27 @@ CHARS_PER_TOKEN_BUDGET = 3
 STEP_OUTPUT_CAP = 8000
 
 
-def system_prompt() -> str:
+def system_prompt(scratch_dir: os.PathLike | str | None = None) -> str:
     note = _PLATFORM_NOTES.get(sys.platform, f"{sys.platform} (verify userland conventions).")
-    return SYSTEM_PROMPT_TEMPLATE.format(platform_note=note)
+    scratch_note = SCRATCH_RULE.format(scratch_dir=scratch_dir) if scratch_dir else ""
+    return SYSTEM_PROMPT_TEMPLATE.format(platform_note=note, scratch_note=scratch_note)
 
 
 def compose_system_content(
-    base_context: str, cwd: str, lessons_path=None, index: str | None = None
+    base_context: str,
+    cwd: str,
+    lessons_path=None,
+    index: str | None = None,
+    scratch_dir: os.PathLike | str | None = None,
 ) -> str:
     """The full system message: static rules + caller context + the live
     skills/memory index. Rebuilt at every run_task so entries created
     mid-session (or after /cd) are advertised without a restart.
-    Deterministic: unchanged files yield a byte-identical string, keeping
-    API prompt caches valid."""
+    Deterministic: unchanged inputs yield a byte-identical string (the scratch
+    path is stable for a session's life), keeping API prompt caches valid."""
     if index is None:
         index = skills.knowledge_index(cwd, lessons_path)
-    content = system_prompt() + (f"\n{base_context}" if base_context else "")
+    content = system_prompt(scratch_dir) + (f"\n{base_context}" if base_context else "")
     return content + (f"\n\n{index}" if index else "")
 
 
@@ -419,6 +441,12 @@ def environment_context(cwd: str) -> str:
         f"- user: {getpass.getuser()}\n"
         f"- OS: {os_desc} ({platform.machine()})"
     )
+
+
+def _remove_scratch(path: Path) -> None:
+    """Delete the per-session scratch workspace, ignoring errors — cleanup is
+    best-effort and must never raise from a finalizer/close()."""
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _serialize(message: dict) -> dict:
@@ -512,8 +540,25 @@ class Agent:
         # refusals left before the gate auto-lifts. Rebuilt every run_task.
         self._pending_skill_reads: dict[str, int] = {}
         self.base_context = context
-        content = compose_system_content(context, self.cwd, self.lessons_path)
+        # Per-session scratch workspace (issue #70): a private temp dir where
+        # the model may create AND delete throwaway files without prompting.
+        # Resolved so it matches operand realpaths on macOS (/var → /private).
+        # A weakref.finalize cleans it up when the Agent is dropped or at
+        # interpreter exit; server sessions also close() it on eviction.
+        self.scratch_dir = Path(tempfile.mkdtemp(prefix="aish-scratch-")).resolve()
+        self._scratch_finalizer = weakref.finalize(
+            self, _remove_scratch, self.scratch_dir
+        )
+        content = compose_system_content(
+            context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir
+        )
         self.messages: list[dict] = [{"role": "system", "content": content}]
+
+    def close(self) -> None:
+        """Best-effort scratch-workspace cleanup. Idempotent; also runs
+        automatically when the Agent is garbage-collected or the interpreter
+        exits (weakref.finalize)."""
+        self._scratch_finalizer()
 
     def cancel(self) -> None:
         """Stop the running task at the next boundary: mid-stream (the token
@@ -575,7 +620,7 @@ class Agent:
         # /cd) show up immediately, in every open session — no restart needed.
         index = skills.knowledge_index(self.cwd, self.lessons_path)
         self.messages[0]["content"] = compose_system_content(
-            self.base_context, self.cwd, self.lessons_path, index
+            self.base_context, self.cwd, self.lessons_path, index, scratch_dir=self.scratch_dir
         )
         self.messages[1:] = [
             m
@@ -1268,7 +1313,15 @@ class Agent:
                 self._run_meta = {"command": command, "decision": "rejected", "output": result}
                 return result
 
-            decision = self.approve(command)
+            # Auto-approve a delete confined strictly to the scratch workspace
+            # (issue #70): rm inside the ephemeral scratch dir is throwaway
+            # cleanup, so it skips the prompt. is_scratch_delete fails closed —
+            # anything ambiguous or escaping falls through to self.approve, so
+            # the denylist and prompt still guard every other rm.
+            if is_scratch_delete(command, self.cwd, self.scratch_dir):
+                decision: Any = command
+            else:
+                decision = self.approve(command)
             if isinstance(decision, Blocked):
                 self._run_meta = {
                     "command": command, "decision": "blocked", "output": decision.reason,
@@ -1339,6 +1392,13 @@ class Agent:
             )
         if plan.error:
             return f"ERROR: {plan.error}"
+        # Writes into the ephemeral scratch workspace are auto-approved (issue
+        # #70) — no diff card. Confined strictly inside the scratch dir;
+        # anything resolving outside falls through to the normal approval gate.
+        if path_within(str(plan.target), self.cwd, self.scratch_dir):
+            result = files.commit(plan)
+            self.echo(result)
+            return result
         decision = self.approve_write(plan)
         if isinstance(decision, Denied):
             return _with_feedback(WRITE_DENIED, decision.comment)
