@@ -120,6 +120,9 @@ class LogRef:
     def step(self, step: dict) -> None:
         self.log.step(step)
 
+    def command_event(self, event: dict) -> None:
+        self.log.command_event(event)
+
 
 def load_config(path: Path) -> dict:
     try:
@@ -1288,6 +1291,7 @@ def main() -> int:
             # progress lines) so a session started in the CLI still reconstructs
             # its activity trace when later opened in the web UI.
             step_log=logref.step,
+            command_log=logref.command_event,
             on_token=print_token if stream_answers else None,
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,
@@ -1317,6 +1321,7 @@ def main() -> int:
             # progress lines) so a session started in the CLI still reconstructs
             # its activity trace when later opened in the web UI.
             step_log=logref.step,
+            command_log=logref.command_event,
             on_token=print_token if stream_answers else None,
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,

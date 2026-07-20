@@ -453,6 +453,7 @@ class Agent:
         on_command_start: Callable[[dict], None] | None = None,
         on_command_end: Callable[[dict], None] | None = None,
         step_log: Callable[[dict], None] | None = None,
+        command_log: Callable[[dict], None] | None = None,
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
@@ -505,6 +506,12 @@ class Agent:
         # sets step_log WITHOUT on_step, so its terminal chatter (see _note)
         # stays while its steps are still logged for later web replay/analysis.
         self.step_log = step_log
+        # Persistence sink for the terminal-block framing events, so a
+        # cold-loaded session reconstructs the SAME command_start/command_end
+        # event stream a live one emits — byte-identical panel, not a fallback.
+        # The command's output is not duplicated here; it rides on the `tool`
+        # trace step, and reconstruct_events splices it back in as one stream.
+        self.command_log = command_log
         self._run_meta: dict | None = None
         self._cancel = threading.Event()
         # Skill-read gate state: oversized preloaded skills the model must
@@ -555,10 +562,15 @@ class Agent:
             self.on_step(step)
 
     def _emit_command_start(self, command: str) -> None:
+        event = {"cwd": self.cwd, "command": command}
+        if self.command_log is not None:
+            self.command_log({"kind": "cmd_start", **event})
         if self.on_command_start is not None:
-            self.on_command_start({"cwd": self.cwd, "command": command})
+            self.on_command_start(event)
 
     def _emit_command_end(self, **payload: Any) -> None:
+        if self.command_log is not None:
+            self.command_log({"kind": "cmd_end", **payload})
         if self.on_command_end is not None:
             self.on_command_end(payload)
 
