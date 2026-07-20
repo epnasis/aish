@@ -1216,7 +1216,9 @@ class Agent:
             if args.get("background"):
                 result = tools.start_background(final, cwd=self.cwd, log_dir=self.job_log_dir)
                 self._note(result)
-                self._run_meta = {"command": final, "decision": "approved", "output": result}
+                self._run_meta = {
+                    "command": final, "decision": "approved", "output": result, "comment": feedback,
+                }
                 return _with_approval_note(result, feedback)
             result = tools.run_command(
                 final,
@@ -1226,7 +1228,9 @@ class Agent:
                 log_dir=self.job_log_dir,
                 should_stop=self._cancel.is_set,
             )
-            self._run_meta = {"command": final, "decision": "approved", "output": result}
+            self._run_meta = {
+                "command": final, "decision": "approved", "output": result, "comment": feedback,
+            }
             if self.stream is None:
                 self.echo(result)
             if final != command:

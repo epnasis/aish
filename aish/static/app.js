@@ -653,9 +653,16 @@ function toolFinish(t, step) {
   tag.textContent = denied
     ? (step.decision === "blocked" ? "Blocked" : "Denied")
     : !step.ok ? "Error"
-    : step.name === "run_command" ? `Approved · ${fmtSecs(step.secs)}`
+    : step.name === "run_command" ? `${ref.manual ? "Approved" : "Auto-approved"} · ${fmtSecs(step.secs)}`
     : fmtSecs(step.secs);
   ref.titleEl.appendChild(tag);
+  // The user's approval note, shown back on the step (#3).
+  if (step.comment) {
+    const note = document.createElement("span");
+    note.className = "step-sub step-note";
+    note.textContent = `“${step.comment}”`;
+    ref.main.appendChild(note);
+  }
   if (denied) {
     if (ref.row.querySelector(".step-cmd")) ref.row.querySelector(".step-cmd").classList.add("struck");
     // Why it was skipped/blocked (denial comment, gate reason) — #5, #12.
@@ -1703,6 +1710,12 @@ function cycleRate() {
 // ---- approval cards ------------------------------------------------------
 function onApprovalRequest(event) {
   closeAnswer();
+  // A card means the user is deciding — mark the pending run_command step so
+  // the trace can say "Approved" (manual) vs "Auto-approved" later (#2).
+  if (event.kind === "command" && currentTrace && currentTrace.pending
+      && currentTrace.pending.name === "run_command") {
+    currentTrace.pending.manual = true;
+  }
   const card = document.createElement("div");
   card.className = "card";
   card.dataset.id = event.id;
@@ -1782,58 +1795,94 @@ function feedbackExtra(input) {
   return comment ? { comment } : {};
 }
 
-function buildCommandCard(card, event) {
-  const parts = [document.createTextNode("▶ run command? ")];
-  if (event.destructive) {
-    const warn = document.createElement("span");
-    warn.className = "destructive";
-    warn.textContent = "⚠ destructive";
-    parts.push(warn);
+const CARD_TRIANGLE = '<svg viewBox="0 0 24 24"><path d="M12 3.5 21 19H3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v3.5M12 16.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>';
+const CARD_SHIELD = '<svg viewBox="0 0 24 24"><path d="M12 3.5l7 2.5v5c0 4.2-2.9 7.5-7 9-4.1-1.5-7-4.8-7-9V6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>';
+
+function optRow(title, sub, cls, fn) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "opt " + cls;
+  const t = document.createElement("span");
+  t.className = "opt-title";
+  t.textContent = title;
+  b.appendChild(t);
+  if (sub) {
+    const s = document.createElement("span");
+    s.className = "opt-sub";
+    s.textContent = sub;
+    b.appendChild(s);
   }
-  title(card, parts);
-  const code = document.createElement("code");
+  b.onclick = fn;
+  return b;
+}
+
+function buildCommandCard(card, event) {
+  card.classList.add("approval-card");
+  const destructive = Boolean(event.destructive);
+  const head = document.createElement("div");
+  head.className = "card-head" + (destructive ? " danger" : "");
+  head.innerHTML =
+    `<span class="card-ico">${destructive ? CARD_TRIANGLE : CARD_SHIELD}</span>` +
+    `<span class="card-htext"><span class="card-htitle">Approval needed</span>` +
+    `<span class="card-hsub"></span></span>`;
+  head.querySelector(".card-hsub").textContent =
+    destructive ? "Destructive — review before running" : "Runs a shell command";
+  card.appendChild(head);
+
+  // $ command box, with edit + copy
+  const box = document.createElement("div");
+  box.className = "cmd-box";
+  const dollar = document.createElement("span");
+  dollar.className = "cmd-dollar";
+  dollar.textContent = "$";
+  const code = document.createElement("span");
+  code.className = "cmd-text mono";
   code.textContent = event.command;
-  const cmdRow = document.createElement("div");
-  cmdRow.className = "cmd-row";
-  cmdRow.appendChild(code);
   const editBtn = document.createElement("button");
   editBtn.type = "button";
-  editBtn.className = "edit-pencil";
+  editBtn.className = "cmd-icon";
   editBtn.title = "Edit the command before running";
   editBtn.appendChild(pencilIcon());
   editBtn.onclick = () => showEditor();
-  cmdRow.appendChild(editBtn);
-  card.appendChild(cmdRow);
+  box.append(dollar, code, editBtn, copyChip(() => event.command, "copy command"));
+  card.appendChild(box);
+
+  // where it runs
+  const where = document.createElement("div");
+  where.className = "card-where mono";
+  where.textContent = `runs in ${abbreviatePath(currentCwd || "")}`;
+  card.appendChild(where);
+
   const escapes = event.escapes || [];
   if (escapes.length) card.appendChild(escapeNote(escapes));
   const prefixes = (event.prefixes || []).join(", ");
-  // The allow buttons save prefix rules, not this exact command line — show
-  // the rule on the card so the scope is clear before the user commits to it.
-  if (prefixes) card.appendChild(prefixNote(prefixes));
+
   const feedback = feedbackField();
   card.appendChild(feedback);
-  const specs = [
-    ["Approve", "approve",
-      () => answerCard(event.id, "approve", feedbackExtra(feedback))],
-    ["Allow this session", "session",
-      () => answerCard(event.id, "approve_session", feedbackExtra(feedback)),
-      prefixes ? `auto-approve "${prefixes}" until the server restarts` : ""],
-    ["Always allow", "session",
-      () => answerCard(event.id, "approve_always", feedbackExtra(feedback)),
-      prefixes ? `save "${prefixes}" to the allowlist — persists across sessions` : ""],
-  ];
-  if (escapes.length) {
-    specs.push(["Trust directory", "session",
-      () => answerCard(event.id, "approve_trust", feedbackExtra(feedback)),
-      `add ${escapes.join(", ")} to the session roots until the session closes`]);
+
+  const opts = document.createElement("div");
+  opts.className = "opts";
+  opts.appendChild(optRow("Approve", "", "primary",
+    () => answerCard(event.id, "approve", feedbackExtra(feedback))));
+  if (prefixes) {
+    opts.appendChild(optRow("Allow this session",
+      `auto-approve “${prefixes}” until the server restarts`, "",
+      () => answerCard(event.id, "approve_session", feedbackExtra(feedback))));
+    opts.appendChild(optRow("Always allow",
+      `save “${prefixes}” to the allowlist — persists across sessions`, "",
+      () => answerCard(event.id, "approve_always", feedbackExtra(feedback))));
   }
-  specs.push(
-    ["Deny", "deny", () => answerCard(event.id, "deny", feedbackExtra(feedback))],
-  );
-  const row = buttonRow(card, specs);
-  row.classList.add("grid2");
+  if (escapes.length) {
+    opts.appendChild(optRow("Trust directory",
+      `auto-approve anything in ${escapes.join(", ")}`, "",
+      () => answerCard(event.id, "approve_trust", feedbackExtra(feedback))));
+  }
+  opts.appendChild(optRow("Deny", "", "deny",
+    () => answerCard(event.id, "deny", feedbackExtra(feedback))));
+  card.appendChild(opts);
+
   function showEditor() {
-    row.hidden = true;
+    opts.hidden = true;
     editBtn.hidden = true;
     const area = document.createElement("textarea");
     area.value = event.command;
@@ -1842,7 +1891,7 @@ function buildCommandCard(card, event) {
       ["Run edited", "approve", () =>
         answerCard(event.id, "edit", { command: area.value, ...feedbackExtra(feedback) })],
       ["Cancel", "edit", () => {
-        area.remove(); editRow.remove(); row.hidden = false; editBtn.hidden = false;
+        area.remove(); editRow.remove(); opts.hidden = false; editBtn.hidden = false;
       }],
     ]);
     area.focus();

@@ -638,6 +638,38 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .card .feedback:focus { outline: none; border-color: var(--blue); }
 .card .feedback:disabled { opacity: 0.5; }
 
+/* ---- restyled approval card (design Screen 2c): visible option subtitles ---- */
+.approval-card { border: 1px solid var(--sep); box-shadow: 0 8px 26px -10px rgba(0, 0, 0, 0.5); }
+.card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.card-ico { width: 30px; height: 30px; border-radius: 9px; flex: none; display: flex; align-items: center; justify-content: center; background: var(--blue-glow); color: var(--blue); }
+.card-head.danger .card-ico { background: var(--orange-glow); color: var(--orange); }
+.card-ico svg { width: 17px; height: 17px; }
+.card-htext { display: flex; flex-direction: column; min-width: 0; }
+.card-htitle { font-size: 14.5px; font-weight: 700; color: var(--fg); }
+.card-hsub { font-size: 11.5px; color: var(--dim); font-weight: 600; }
+.card-head.danger .card-hsub { color: var(--orange); }
+.cmd-box { display: flex; align-items: center; gap: 8px; padding: 9px 6px 9px 12px; border-radius: 10px; background: var(--bg); border: 0.5px solid var(--sep); margin-bottom: 8px; }
+.cmd-dollar { color: var(--green); font-family: ui-monospace, monospace; font-size: 13px; flex: none; }
+.cmd-text { flex: 1; min-width: 0; font-size: 13px; color: var(--fg); overflow-x: auto; white-space: pre; }
+.cmd-icon { flex: none; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: none; border: none; border-radius: 7px; color: var(--dim); }
+.cmd-icon svg { width: 15px; height: 15px; }
+.cmd-icon[hidden] { display: none; }
+.cmd-box .copy-chip { flex: none; width: 30px; height: 30px; }
+.cmd-box .copy-chip svg { width: 15px; height: 15px; }
+.card-where { font-size: 12px; color: var(--dim); margin-bottom: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opts { display: flex; flex-direction: column; gap: 8px; }
+.opts[hidden] { display: none; }
+.opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 11px 14px; border: none; border-radius: 12px; background: var(--bg-elev2); text-align: left; }
+.opt-title { font-size: 15px; font-weight: 600; color: var(--fg); }
+.opt-sub { font-size: 11.5px; color: var(--dim); }
+.opt:active { opacity: 0.7; }
+.opt:disabled { opacity: 0.5; }
+.opt.primary { align-items: center; background: var(--green); }
+.opt.primary .opt-title { color: #003514; }
+.opt.deny { align-items: center; background: none; }
+.opt.deny .opt-title { color: var(--red); }
+.step-note { font-style: italic; }
+
 /* ---- sources under an answer ---- */
 .sources {
   margin: 2px 0 10px;
