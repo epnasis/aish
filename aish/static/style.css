@@ -217,7 +217,17 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   font-size: 14px;
   font-weight: 600;
 }
-.model-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px var(--green-glow); flex: none; }
+/* Status dot: dim + static at rest (carries no false "live" signal), green
+   with a breathing glow only while the session is actually working (#61). */
+.model-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; transition: background 0.3s ease; }
+.model-dot.working { background: var(--green); animation: dot-glow 1.4s ease-in-out infinite; }
+@keyframes dot-glow {
+  0%, 100% { box-shadow: 0 0 0 0 var(--green-glow); }
+  50%      { box-shadow: 0 0 0 4px var(--green-glow); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .model-dot.working { animation: none; box-shadow: 0 0 0 3px var(--green-glow); }
+}
 #model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
 #model-chip .caret { width: 12px; height: 12px; }
 
