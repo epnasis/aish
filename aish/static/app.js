@@ -170,6 +170,7 @@ function handle(event) {
       setBusy(true);
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
       rememberPrompt(stripAttachmentNotes(event.text));
+      lastUserPrompt = stripAttachmentNotes(event.text); // for error Retry
       addUserMsg(event.text);
       // Your own message always comes into view, even if you were scrolled up.
       if (!replaying) scrollToEnd(true);
@@ -191,7 +192,7 @@ function handle(event) {
     case "error":
       closeAnswer();
       finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
-      addMsg("error", event.text);
+      addErrorMsg(event.text);
       setBusy(false);
       setStatus(null);
       notify("aish — task failed", event.text);
@@ -437,6 +438,9 @@ function refreshStatusline() {
   $("status-text").textContent =
     statusText || (pendingCards > 0 ? "waiting for approval" : "working…");
   $("stop-btn").hidden = !clientBusy;
+  // A pending approval card pins to the bottom (see CSS) and shrinks the live
+  // trace so the card is fully reachable, not buried below it.
+  document.body.classList.toggle("card-pending", pendingCards > 0);
 }
 
 $("stop-btn").onclick = () => send({ type: "stop" });
@@ -881,6 +885,30 @@ function addMsg(kind, text) {
   messagesEl.appendChild(el);
   scrollToEnd();
   return el;
+}
+
+// The prompt that started the current turn, so an error can offer to re-run it.
+let lastUserPrompt = "";
+
+// An error message with a Retry button (resends the last prompt, Gemini-style).
+function addErrorMsg(text) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg error error-wrap";
+  const body = document.createElement("div");
+  body.textContent = text;
+  wrap.appendChild(body);
+  if (lastUserPrompt) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "retry-btn";
+    retry.innerHTML =
+      '<svg viewBox="0 0 24 24"><path d="M5 6.5v3.6h3.6M19 17.5v-3.6h-3.6M18.4 9.2A6.5 6.5 0 0 0 6.5 8M5.6 14.8A6.5 6.5 0 0 0 17.5 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>Retry';
+    retry.onclick = () => { if (!clientBusy) send({ type: "task", text: lastUserPrompt }); };
+    wrap.appendChild(retry);
+  }
+  messagesEl.appendChild(wrap);
+  scrollToEnd();
+  return wrap;
 }
 
 // Your own prompt bubble: tap-to-recall plus a copy chip underneath (issue

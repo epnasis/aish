@@ -1399,3 +1399,22 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .out-scroll::after { bottom: 0; margin-top: -16px; background: linear-gradient(transparent, var(--bg)); }
 .out-scroll.more-above::before { opacity: 1; }
 .out-scroll.more-below::after { opacity: 1; }
+
+/* A pending approval card pins to the bottom of the transcript so it's always
+   fully reachable (was getting buried below the sticky live trace); the trace
+   shrinks to make room. Resolved cards return to normal flow. */
+.card:not(.resolved) {
+  position: sticky; bottom: 8px; z-index: 6;
+  box-shadow: 0 -6px 26px -6px rgba(0, 0, 0, 0.8);
+}
+body.card-pending .trace.live .trace-body { max-height: 26vh; }
+
+/* error message with a Retry button (re-runs the last prompt) */
+.error-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.retry-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 15px;
+  border: 1px solid var(--blue); border-radius: 999px; background: none;
+  color: var(--blue); font-size: 14px; font-weight: 600; line-height: 1.2;
+}
+.retry-btn svg { width: 16px; height: 16px; }
+.retry-btn:active { opacity: 0.6; }
