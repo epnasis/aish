@@ -1226,7 +1226,6 @@ $("scroll-top").onclick = () => {
 };
 
 function onHistory(history) {
-  addMsg("notice", `— resumed ${history.length} messages —`);
   for (const message of history) {
     const content = (message.content || "").trim();
     if (!content) continue;
