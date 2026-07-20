@@ -3259,7 +3259,39 @@ async function browseDir(path) {
   dirPath = body.path;
   dirEntries = body.dirs;
   $("dir-search").value = "";
+  $("dir-sheet").classList.add("browsing");
   renderDirList();
+}
+
+// Step 1 of the picker: recent folders + "Choose another folder…" → the
+// browser. Recents SELECT the directory directly; matches the design flow.
+function showDirRecents() {
+  $("dir-sheet").classList.remove("browsing");
+  const list = $("dir-list");
+  list.replaceChildren();
+  const recents = recentDirs();
+  if (recents.length) {
+    list.appendChild(sectionLabel("Recent"));
+    for (const p of recents) {
+      const row = dirRow(baseName(p), abbreviatePath(p), () => selectDir(p), "recent");
+      row.querySelector(".dir-chev").remove(); // a selection, not a descent
+      if (p === currentCwd) row.classList.add("selected");
+      list.appendChild(row);
+    }
+  }
+  const choose = document.createElement("button");
+  choose.type = "button";
+  choose.className = "dir-choose";
+  choose.innerHTML =
+    '<svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 10v5M9.5 12.5h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Choose another folder…';
+  choose.onclick = () => browseDir(currentCwd || homeDir || "/");
+  list.appendChild(choose);
+}
+
+function selectDir(path) {
+  rememberDir(path);
+  send({ type: "cd", path });
+  closeSheets();
 }
 
 const DIR_ICON_FOLDER = '<svg class="dir-ico" viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="var(--folder-fill)" stroke="var(--blue)" stroke-width="1.6"/></svg>';
@@ -3333,6 +3365,8 @@ function renderDirList(deepResults = null) {
   const raw = $("dir-search").value.trim();
   const query = raw.toLowerCase();
 
+  if (!query) list.appendChild(dirRow("Recent folders", null, showDirRecents, "up"));
+
   // Escape hatch: a typed absolute (or ~) path jumps straight there —
   // the rare case the browse/search flow doesn't cover.
   if (raw.startsWith("/") || raw.startsWith("~")) {
@@ -3340,16 +3374,7 @@ function renderDirList(deepResults = null) {
     list.appendChild(dirRow(`Go to ${raw}`, null, () => browseDir(target), "up"));
   }
 
-  if (!query) {
-    const recents = recentDirs().filter((p) => p !== dirPath);
-    if (recents.length) {
-      list.appendChild(sectionLabel("Recent"));
-      for (const p of recents) {
-        list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p), "recent"));
-      }
-      list.appendChild(sectionLabel("Folders"));
-    }
-  }
+  if (!query) list.appendChild(sectionLabel("Folders"));
   if (dirPath !== "/") {
     list.appendChild(
       dirRow("..", null, () => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/"), "up")
@@ -3373,7 +3398,8 @@ function renderDirList(deepResults = null) {
 
 function openDirSheet() {
   openSheet("dir-sheet");
-  browseDir(currentCwd || homeDir || "/");
+  dirPath = currentCwd || homeDir || "/";
+  showDirRecents(); // step 1: recents + "Choose another folder…"
 }
 
 $("cwd-chip").onclick = () => openDirSheet();

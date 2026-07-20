@@ -1357,3 +1357,17 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .swipe-wrap .session-row { position: relative; background: var(--bg); transition: transform 0.18s ease-out; touch-action: pan-y; }
 .swipe-wrap .session-row.current { background: #0b1016; }
 .swipe-wrap .session-row.dragging { transition: none; }
+
+/* ---- directory picker: step 1 (recents) vs step 2 (browse) ---- */
+#dir-sheet:not(.browsing) #dir-crumb,
+#dir-sheet:not(.browsing) .ws-row,
+#dir-sheet:not(.browsing) .dir-action { display: none; }
+.dir-choose {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: calc(100% - 8px); margin: 12px 4px 4px; padding: 13px;
+  border: none; border-radius: 13px; background: var(--blue); color: #fff;
+  font-size: 16px; font-weight: 600;
+}
+.dir-choose svg { width: 19px; height: 19px; }
+.dir-choose:active { opacity: 0.85; }
+.dir-row.selected { background: var(--row-sel-bg); }

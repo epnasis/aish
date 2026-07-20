@@ -905,10 +905,10 @@ class WebServer:
             if session.pending_cwd:  # a /cd requested mid-task, applied now
                 target, session.pending_cwd = session.pending_cwd, None
                 result = session.agent.rebase(target)
-                shown = self.ws is not None and session is self.active
-                if not result.startswith("ERROR") and shown:
+                ws = self.ws
+                if ws is not None and session is self.active and not result.startswith("ERROR"):
                     with contextlib.suppress(Exception):
-                        await self.ws.send_json(self._cwd_event())
+                        await ws.send_json(self._cwd_event())
             if session.queue:
                 text, attachments = session.queue.pop(0)
                 self._launch(session, text, attachments)
