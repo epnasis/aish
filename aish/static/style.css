@@ -709,6 +709,8 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .card-actions button:disabled { opacity: 0.5; }
 .card-actions .approve { flex: 2; background: var(--green); color: var(--approve-fg); }
 .card-actions .deny { flex: 1; background: var(--red-glow); color: var(--red); }
+/* read-card "Trust dir" — a secondary approve, tied to the orange accent */
+.card-actions .trust { flex: 1; background: var(--orange-glow); color: var(--orange); }
 .card-actions.even .approve, .card-actions.even .deny { flex: 1; }
 
 /* the write-approval diff hunk sits flush inside the card body */

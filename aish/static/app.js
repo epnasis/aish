@@ -2307,22 +2307,62 @@ function escapeNote(escapes) {
 }
 
 function buildReadCard(card, event) {
-  const label = event.reason === "outside"
-    ? "▶ read file outside the project?"
-    : "▶ read sensitive file? ⚠ may contain secrets";
-  title(card, [document.createTextNode(label)]);
-  const code = document.createElement("code");
+  // A read gate is still an "attention needed" card — the model wants a file
+  // that is either sensitive (may hold secrets) or outside the project roots.
+  // Same orange accent + structure as the command card so the two read as one
+  // family; only the header wording and the missing $-command box differ.
+  card.classList.add("approval-card", "danger");
+  const outside = event.reason === "outside";
+  const head = document.createElement("div");
+  head.className = "card-head danger";
+  head.innerHTML =
+    `<span class="card-ico">${outside ? CARD_SHIELD : CARD_TRIANGLE}</span>` +
+    `<span class="card-htext"><span class="card-htitle">Read file</span>` +
+    `<span class="card-hsub"></span></span>`;
+  head.querySelector(".card-hsub").textContent =
+    outside ? "Outside the project directory" : "Sensitive — may contain secrets";
+  card.appendChild(head);
+
+  // The path in the same inset the command card uses for its $-line, minus the
+  // shell dollar (nothing runs) — just the mono path and a copy chip.
+  const box = document.createElement("div");
+  box.className = "cmd-box";
+  const code = document.createElement("span");
+  code.className = "cmd-text mono";
   code.textContent = event.path;
-  card.appendChild(code);
+  box.append(code, copyChip(() => code.textContent, "copy path"));
+  card.appendChild(box);
+
   const escapes = event.escapes || [];
-  const specs = [["Approve", "approve", () => answerCard(event.id, "approve")]];
+  if (escapes.length) card.appendChild(escapeNote(escapes));
+
+  const feedback = feedbackField();
+  card.appendChild(feedback);
+
+  const actionsRow = document.createElement("div");
+  actionsRow.className = escapes.length ? "card-actions" : "card-actions even";
+  const approveBtn = document.createElement("button");
+  approveBtn.type = "button";
+  approveBtn.className = "approve";
+  approveBtn.textContent = "Approve";
+  approveBtn.onclick = () => answerCard(event.id, "approve", feedbackExtra(feedback));
+  actionsRow.appendChild(approveBtn);
   if (escapes.length) {
-    specs.push(["Trust directory", "session",
-      () => answerCard(event.id, "approve_trust"),
-      `add ${escapes.join(", ")} to the session roots until the session closes`]);
+    const trustBtn = document.createElement("button");
+    trustBtn.type = "button";
+    trustBtn.className = "trust";
+    trustBtn.textContent = "Trust dir";
+    trustBtn.title = `add ${escapes.join(", ")} to the session roots until the session closes`;
+    trustBtn.onclick = () => answerCard(event.id, "approve_trust", feedbackExtra(feedback));
+    actionsRow.appendChild(trustBtn);
   }
-  specs.push(["Deny", "deny", () => answerCard(event.id, "deny")]);
-  buttonRow(card, specs);
+  const denyBtn = document.createElement("button");
+  denyBtn.type = "button";
+  denyBtn.className = "deny";
+  denyBtn.textContent = "Deny";
+  denyBtn.onclick = () => answerCard(event.id, "deny", feedbackExtra(feedback));
+  actionsRow.appendChild(denyBtn);
+  card.appendChild(actionsRow);
 }
 
 function onApprovalResolved(event) {
