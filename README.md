@@ -351,27 +351,32 @@ aish-web --model gemini       # same --model forms as aish
 ```
 
 Header controls replace the slash commands (except `/learn`, which works by
-typing it as a message): the **history button** (top
-left, the standard chat-app spot) opens the sessions drawer — recent chats
-grouped by day, each with a preview of its last message, plus search; each
-row's trash icon deletes that session after an inline "Delete?" confirm
-(permanent: conversation and audit log; refused while the session is
-running; deleting the current chat lands you on a fresh one) —
-the **session title with its ˅ caret** opens the same drawer, and
-a fresh empty chat shows a one-line hint pointing at both it and the swipe
-pager; the **model chip** opens a searchable model picker (with a "make
-startup default" toggle); the **folder breadcrumb** under the title shows
-the working directory at all times — tap it to browse or fuzzy-search
-folders and change directory without typing (recently used directories
-listed first; typing an absolute or `~` path in its search jumps straight
-there); the **⋯ menu** shows the working directory (with a Change… button
-into the same picker), session roots (`/add-dir` equivalent), and
-background jobs; the **compose** button starts a fresh chat; the **wrap**
-button toggles line-wrapping for command output, code blocks, and diffs
-(default: scroll sideways; the choice is remembered per device). The input box autocompletes like the terminal: `/` pops up the command
-list (unambiguous prefixes work — `/res` runs `/resume`) and `@` pops up
-project-file completion (same walk and ranking as the TUI). The paperclip
-uploads files (to `~/.local/state/aish/uploads/`, a session root).
+typing it as a message). The nav bar has two rows. On top: a **‹ Sessions**
+back button (top left, the standard chat-app spot — it carries an orange
+badge when a background session needs your attention) opens the sessions
+drawer — recent chats grouped by day (running/waiting ones under "Active
+now"), each row a status icon, title, last-message preview and time, plus
+search; each row's trash icon deletes that session after an inline "Delete?"
+confirm (permanent: conversation and audit log; refused while running;
+deleting the current chat lands you on a fresh one). The **centered session
+title** (with its ˅ caret) opens a menu: new chat, switch model, change
+directory, line wrap, and workspace & jobs. The **compose pencil** (top
+right) starts a fresh chat. The second row is a context bar: the **working
+directory** chip (folder name + path) taps into a folder picker to browse or
+fuzzy-search folders without typing (recents first; an absolute or `~` path
+in its search jumps straight there), and the **model chip** opens a
+searchable model picker (with a "make startup default" toggle). Your tool
+activity — thinking time, recalled knowledge, each command and its output —
+is grouped into one collapsible **activity trace** per turn, live while it
+runs and summarised ("Worked for Xs · N steps") once done. Line wrap (in the
+title menu) toggles wrapping for command output, code, and diffs (default:
+scroll sideways; remembered per device). The input box autocompletes like the
+terminal: `/` pops up the command list (unambiguous prefixes work — `/res`
+runs `/resume`) and `@` pops up project-file completion (same walk and
+ranking as the TUI). The composer's **＋** button opens attach file, reference
+a path (@), slash command (/), and photo; attachments upload to
+`~/.local/state/aish/uploads/` (a session root). Messages sent while a task
+runs queue as chips above the composer (tap ✕ to cancel one).
 **Images go to the model natively** when the backend supports vision
 (Gemini, OpenAI, Claude, and Ollama vision models like llava/qwen-vl) — the
 model actually sees them: it can describe a photo, read text off a

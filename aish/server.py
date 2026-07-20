@@ -460,12 +460,16 @@ memory only.
 distills the conversation into saved skills/memory (an optional hint \
 follows, e.g. "/learn the gh flow"; "/learn lessons" migrates the legacy \
 lessons file); the composer also accepts /model /resume /delete /new /cd \
-/add-dir /jobs /help. Header controls: the history button (top left) and the session \
-title both open the sessions drawer, the folder breadcrumb under the title \
-opens a folder picker to change the working directory, the model chip \
-switches models, ＋ starts a new chat, and the ⋯ menu shows workspace state \
-(session roots, background jobs). Swiping the transcript sideways pages \
-through recent chats.
+/add-dir /jobs /help. Header controls: a "‹ Sessions" back button (top left, \
+with a badge when a background session needs attention) opens the sessions \
+drawer; the centered session title opens a menu (new chat, switch model, \
+change directory, line wrap, workspace & jobs); the compose pencil (top right) \
+starts a new chat. A context bar under the title shows the working directory \
+(tap to open a folder picker) and the model (tap to switch). In the composer, \
+the ＋ button opens attach file / reference a path (@) / slash command (/) / \
+photo. Your tool activity (thinking, recalled knowledge, commands and their \
+output) is grouped into one collapsible activity trace per turn. Swiping the \
+transcript sideways pages through recent chats.
 - Several sessions can be open at once; a task keeps running when the user \
 switches to another session and its result is there when they switch back. \
 While you work, messages the user sends are QUEUED and run one after \
