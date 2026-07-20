@@ -351,27 +351,32 @@ aish-web --model gemini       # same --model forms as aish
 ```
 
 Header controls replace the slash commands (except `/learn`, which works by
-typing it as a message): the **history button** (top
-left, the standard chat-app spot) opens the sessions drawer — recent chats
-grouped by day, each with a preview of its last message, plus search; each
-row's trash icon deletes that session after an inline "Delete?" confirm
-(permanent: conversation and audit log; refused while the session is
-running; deleting the current chat lands you on a fresh one) —
-the **session title with its ˅ caret** opens the same drawer, and
-a fresh empty chat shows a one-line hint pointing at both it and the swipe
-pager; the **model chip** opens a searchable model picker (with a "make
-startup default" toggle); the **folder breadcrumb** under the title shows
-the working directory at all times — tap it to browse or fuzzy-search
-folders and change directory without typing (recently used directories
-listed first; typing an absolute or `~` path in its search jumps straight
-there); the **⋯ menu** shows the working directory (with a Change… button
-into the same picker), session roots (`/add-dir` equivalent), and
-background jobs; the **compose** button starts a fresh chat; the **wrap**
-button toggles line-wrapping for command output, code blocks, and diffs
-(default: scroll sideways; the choice is remembered per device). The input box autocompletes like the terminal: `/` pops up the command
-list (unambiguous prefixes work — `/res` runs `/resume`) and `@` pops up
-project-file completion (same walk and ranking as the TUI). The paperclip
-uploads files (to `~/.local/state/aish/uploads/`, a session root).
+typing it as a message). The nav bar has two rows. On top: a **‹ Sessions**
+back button (top left, the standard chat-app spot — it carries an orange
+badge when a background session needs your attention) opens the sessions
+drawer — recent chats grouped by day (running/waiting ones under "Active
+now"), each row a status icon, title, last-message preview and time, plus
+search; each row's trash icon deletes that session after an inline "Delete?"
+confirm (permanent: conversation and audit log; refused while running;
+deleting the current chat lands you on a fresh one). The **centered session
+title** (with its ˅ caret) opens a menu: new chat, switch model, change
+directory, line wrap, and workspace & jobs. The **compose pencil** (top
+right) starts a fresh chat. The second row is a context bar: the **working
+directory** chip (folder name + path) taps into a folder picker to browse or
+fuzzy-search folders without typing (recents first; an absolute or `~` path
+in its search jumps straight there), and the **model chip** opens a
+searchable model picker (with a "make startup default" toggle). Your tool
+activity — thinking time, recalled knowledge, each command and its output —
+is grouped into one collapsible **activity trace** per turn, live while it
+runs and summarised ("Worked for Xs · N steps") once done. Line wrap (in the
+title menu) toggles wrapping for command output, code, and diffs (default:
+scroll sideways; remembered per device). The input box autocompletes like the
+terminal: `/` pops up the command list (unambiguous prefixes work — `/res`
+runs `/resume`) and `@` pops up project-file completion (same walk and
+ranking as the TUI). The composer's **＋** button opens attach file, reference
+a path (@), slash command (/), and photo; attachments upload to
+`~/.local/state/aish/uploads/` (a session root). Messages sent while a task
+runs queue as chips above the composer (tap ✕ to cancel one).
 **Images go to the model natively** when the backend supports vision
 (Gemini, OpenAI, Claude, and Ollama vision models like llava/qwen-vl) — the
 model actually sees them: it can describe a photo, read text off a
@@ -425,6 +430,44 @@ only one of the machine's networks); omit it for `0.0.0.0`. Pass whichever
 provider key your default model needs — secrets go only into the remote
 plist (chmod 600), never into the repo. Then open
 `http://<host>:8787/?token=<your-token>` and Add to Home Screen.
+
+### Preview a branch beside production
+
+To try a feature branch's web UI without disturbing the running service, serve
+the working tree on a second port and reverse-proxy it under a path on the same
+origin as production. `make preview` runs the current checkout on `:8788` from
+source (production stays on `:8787`), reading the token/provider key from your
+environment or, as a convenience on the server, from the prod launchd plist:
+
+```sh
+make preview          # this tree on :8788, sharing prod's sessions
+```
+
+Add one stable block to the production `server { server_name aish.<domain>; … }`
+so the preview is reachable at `https://aish.<domain>/preview/` — same origin,
+so the browser token is shared and no separate login is needed. Configured once,
+reused for every branch:
+
+```nginx
+# http { } scope — needed for the WebSocket upgrade:
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+
+# inside the existing aish server { } block:
+location /preview/ {
+    proxy_pass http://192.168.10.20:8788/;   # trailing slash strips /preview/
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header Host $host;
+}
+```
+
+The web client derives its API/WebSocket base from the page path, so it works
+mounted under `/preview/` unchanged. **Shared state:** preview uses production's
+`AISH_STATE_DIR`, so both UIs show the same sessions and knowledge — but the
+append-only logs have no cross-process lock, so don't drive the *same* session
+from `/` and `/preview/` at once (use different or throwaway sessions on
+preview).
 
 ## Development
 

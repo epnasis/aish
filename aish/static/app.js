@@ -53,6 +53,14 @@ function notify(title, body) {
   }
 }
 
+// ---- base path (subpath-mounted deploys) --------------------------------
+// The app is normally served at "/", but a reverse proxy may mount it under a
+// prefix (e.g. https://host/preview/ for a branch preview). Static assets and
+// the manifest are already relative; these are the endpoints that were rooted
+// at "/". Derive the mount point from the document's directory so ws + fetches
+// stay same-origin under whatever prefix served index.html. Always "/"-bounded.
+const BASE = location.pathname.replace(/[^/]*$/, "");
+
 // ---- token (optional auth) ----------------------------------------------
 const urlToken = new URLSearchParams(location.search).get("token");
 if (urlToken) localStorage.setItem("aish-token", urlToken);
@@ -74,7 +82,7 @@ function connect() {
   const lastSession = localStorage.getItem("aish-session");
   if (lastSession) params.set("session", lastSession);
   const query = params.size ? `?${params}` : "";
-  ws = new WebSocket(`${proto}//${location.host}/ws${query}`);
+  ws = new WebSocket(`${proto}//${location.host}${BASE}ws${query}`);
   ws.onopen = () => {
     backoff = 1000;
     $("connbar").hidden = true;
@@ -154,24 +162,40 @@ function handle(event) {
     case "replay": onReplay(event); break;
     case "user":
       closeAnswer();
+      finishTrace(); // close any trace from a prior turn before the new one
+      removeQueueChip(event.text); // a queued message that just started running
       retireQuickReplies();
+      retireRegen(); // a new turn supersedes the prior answer's regenerate
+
       sawAnswer = false;
+      answerFilling = false;
+      turnStart = replaying ? 0 : Date.now(); // timing readout on the answer
       setBusy(true);
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
       rememberPrompt(stripAttachmentNotes(event.text));
-      addUserMsg(event.text);
+      lastUserPrompt = stripAttachmentNotes(event.text); // for error Retry
+      turnAnchorEl = addUserMsg(event.text); // response-start anchor (until a trace supersedes it)
       // Your own message always comes into view, even if you were scrolled up.
       if (!replaying) scrollToEnd(true);
       break;
     case "queued":
-      showToast(`queued (#${event.position}) — runs after the current task`);
+      addQueueChip(event.text);
       break;
     case "token": onToken(event.text); break;
-    case "echo": closeAnswer(); addAnsiMsg("echo", event.text); break;
-    case "stream": addStreamLine(event.text); break;
+    case "echo":
+      // The activity trace already shows a run_command's approval + result and
+      // its own Stop/Stopping state, so drop the approver's redundant
+      // confirmation and the "stop requested" line while a trace is open.
+      if (currentTrace && /^[✓✕] (auto-approved|session-allowed|always-allowed|blocked|stop requested)/.test(event.text)) break;
+      closeAnswer();
+      addAnsiMsg("echo", event.text);
+      break;
+    case "stream": traceStream(event.text); break;
+    case "step": traceStep(event); break;
     case "error":
       closeAnswer();
-      addMsg("error", event.text);
+      finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
+      addErrorMsg(event.text);
       setBusy(false);
       setStatus(null);
       notify("aish — task failed", event.text);
@@ -196,8 +220,10 @@ function onSessionState(event) {
   const label = event.title
     ? `“${event.title.slice(0, 40)}”`
     : event.session.replace(/^session-|\.jsonl$/g, "").replace(/-\d{6}$/, "");
-  showToast(`${label}: task finished — tap the title to switch back`);
+  showToast(`${label}: task finished — tap ‹ Sessions to switch back`);
   notify("aish — background task finished", event.title || event.session);
+  attentionSessions.add(event.session);
+  refreshBadge();
   if (!$("sessions-sheet").hidden) {
     send({ type: "sessions", query: $("sessions-search").value });
   }
@@ -222,7 +248,7 @@ function onHello(event) {
   // Server code changed since this page was built (or the page predates rev
   // stamping entirely) — reload; the replay mechanism restores the view.
   if (event.rev && event.rev !== PAGE_REV) { location.reload(); return; }
-  $("model-chip").textContent = event.model;
+  $("model-name").textContent = event.model;
   setTitle(event.title);
   pagerSessions = event.pager || [];
   currentSession = event.session;
@@ -273,6 +299,8 @@ function onReplay(event) {
   if (FINE_POINTER && $("backdrop").hidden) input.focus();
 }
 
+let answerFilling = false; // once the answer streams, the page stays put
+
 function onToken(text) {
   sawAnswer = true;
   if (!answerEl) {
@@ -280,6 +308,14 @@ function onToken(text) {
     answerText = "";
     answerStableLen = 0;
     answerStableNodes = 0;
+    // Content is streaming, but it may be mid-work narration before another
+    // tool call — NOT necessarily the final answer. So the live trace stays
+    // OPEN and keeps showing steps (and stays expandable); only finishTrace,
+    // when the turn actually ends, collapses it to "Worked for Xs". Meanwhile
+    // hold the page still so the text fills in from the top instead of the
+    // view chasing the streaming bottom.
+    answerFilling = true;
+    requestAnimationFrame(() => anchorAnswer(true));
   }
   answerText += text;
   if (!answerRenderQueued) {
@@ -292,7 +328,32 @@ function renderAnswerFrame() {
   answerRenderQueued = false;
   if (!answerEl) return; // answer already closed (and flushed) this frame
   renderAnswerNow();
-  scrollToEnd();
+  if (!answerFilling) anchorAnswer(); // once filling, the page holds still
+}
+
+// The element that marks the START of the current turn's response — the
+// collapsed "Worked for Xs" trace, or (no trace) the user's own bubble.
+let turnAnchorEl = null;
+
+// Once the answer is streaming, keep that anchor pinned to the TOP of the
+// viewport and let the rest of the answer flow in below the fold — so you
+// read from the beginning (incl. how long it took), instead of the view
+// jumping to the bottom and making you scroll back up.
+function anchorAnswer(force) {
+  const anchor = turnAnchorEl && turnAnchorEl.isConnected ? turnAnchorEl : null;
+  if (!anchor) { scrollToEnd(force); return; }
+  // getBoundingClientRect, not offsetTop: robust regardless of offsetParent —
+  // put the anchor's top a hair below the container's top.
+  const delta = anchor.getBoundingClientRect().top - messagesEl.getBoundingClientRect().top;
+  const target = Math.max(0, Math.min(
+    messagesEl.scrollTop + delta - 6,
+    messagesEl.scrollHeight - messagesEl.clientHeight
+  ));
+  // Scroll DOWN to bring the anchor to the top; never past it (don't chase the
+  // streaming answer's bottom — the reader starts from the top and scrolls).
+  if (force || messagesEl.scrollTop < target) messagesEl.scrollTop = target;
+  updateScrollButton();
+  updateEmptyHint();
 }
 
 function renderAnswerNow() {
@@ -342,15 +403,20 @@ function closeAnswer() {
 }
 
 function onDone(event) {
+  answerTiming = turnStart ? (Date.now() - turnStart) / 1000 : 0;
   if (!sawAnswer && event.result) {
     const el = addMsg("answer md", "");
     el.replaceChildren(renderMarkdown(event.result));
     attachAnswerTools(el, event.result);
   }
   closeAnswer();
+  finishTrace();
   if (event.sources && event.sources.length) addSources(event.sources);
   setBusy(false);
   setStatus(null);
+  // Settle the view on the response start (the collapsed trace is now smaller);
+  // never on the bottom of a long answer.
+  if (!replaying) requestAnimationFrame(() => anchorAnswer(true));
   notify("aish — answer ready", event.result);
 }
 
@@ -404,8 +470,11 @@ function setBusy(busy) {
 
 function refreshStatusline() {
   // Visible whenever the session is working — including parked on an
-  // approval card — so Stop is always reachable while something runs.
-  const visible = clientBusy || Boolean(statusText);
+  // approval card — so Stop is always reachable while something runs. A live
+  // activity trace has its own header Stop + status, so suppress the bottom
+  // bar then to avoid a duplicate "thinking…" line below the timeline (#10).
+  const traceLive = currentTrace && currentTrace.el.classList.contains("live");
+  const visible = (clientBusy || Boolean(statusText)) && !traceLive;
   $("statusline").hidden = !visible;
   $("status-text").textContent =
     statusText || (pendingCards > 0 ? "waiting for approval" : "working…");
@@ -413,6 +482,498 @@ function refreshStatusline() {
 }
 
 $("stop-btn").onclick = () => send({ type: "stop" });
+
+// ---- activity trace ------------------------------------------------------
+// One collapsible group per task, built from structured `step` events. Live
+// while the task runs (spinner, streaming output into the running step),
+// collapsed to a one-line summary when it finishes. Replays deterministically
+// because the steps are recorded events like everything else.
+let currentTrace = null;
+
+const TRACE_ICONS = {
+  thinking: (c) => `<path d="M9 4.5A4 4 0 0 0 5.5 10 3.5 3.5 0 0 0 6 16.5 3.5 3.5 0 0 0 12 18a3.5 3.5 0 0 0 6-1.5A3.5 3.5 0 0 0 18.5 10 4 4 0 0 0 15 4.5a3 3 0 0 0-6 0z" fill="none" stroke="${c}" stroke-width="1.5"/><path d="M12 5v13" stroke="${c}" stroke-width="1.5"/>`,
+  knowledge: (c) => `<path d="M12 3.5 14 8.6l5.5.4-4.2 3.6 1.3 5.4L12 15.4 7.4 18l1.3-5.4L4.5 9l5.5-.4z" fill="${c}" stroke="${c}" stroke-width="1" stroke-linejoin="round"/>`,
+  web: (c) => `<circle cx="11" cy="11" r="6.5" fill="none" stroke="${c}" stroke-width="1.7"/><path d="M16 16l4 4" stroke="${c}" stroke-width="1.7" stroke-linecap="round"/>`,
+  command: (c) => `<path d="M4 17.5V6.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" fill="none" stroke="${c}" stroke-width="1.6"/><path d="M7.5 9l3 3-3 3M13 15h4" stroke="${c}" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`,
+  denied: (c) => `<path d="M4 17.5V6.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" fill="none" stroke="${c}" stroke-width="1.6"/><path d="M8.5 8.5l7 7M15.5 8.5l-7 7" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>`,
+  doc: (c) => `<path d="M7 3.5h6.5L18 8v11a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 6 19V5A1.5 1.5 0 0 1 7 3.5z" fill="none" stroke="${c}" stroke-width="1.6"/><path d="M13 3.5V8h4.5" fill="none" stroke="${c}" stroke-width="1.6"/>`,
+  write: (c) => `<path d="M12 19.5h8" stroke="${c}" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.2a1.7 1.7 0 0 1 2.4 2.4l-8.3 8.3-3.2.8.8-3.2z" fill="none" stroke="${c}" stroke-width="1.7" stroke-linejoin="round"/>`,
+  check: (c) => `<path d="M5 12.5l4 4 10-10.5" fill="none" stroke="${c}" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>`,
+  dot: (c) => `<circle cx="12" cy="12" r="3.5" fill="${c}"/>`,
+};
+
+function traceSvg(name, color) {
+  const build = TRACE_ICONS[name] || TRACE_ICONS.dot;
+  return `<svg viewBox="0 0 24 24" width="15" height="15">${build(color)}</svg>`;
+}
+
+const SPINNER = '<span class="spin"></span>';
+
+// tool name → (friendly title, icon key, accent css var)
+const TOOL_META = {
+  run_command: ["run_command", "command", "--green"],
+  web_search: ["Searched the web", "web", "--blue"],
+  read_url: ["Read a page", "web", "--blue"],
+  recall: ["Recalled from memory", "knowledge", "--yellow"],
+  read_docs: ["Read docs", "doc", "--dim"],
+  read_file: ["read_file", "doc", "--dim"],
+  read_skill: ["Read a skill", "knowledge", "--green"],
+  write_file: ["write_file", "write", "--green"],
+  edit_file: ["edit_file", "write", "--green"],
+  remember: ["Saved to memory", "knowledge", "--yellow"],
+};
+
+function ensureTrace() {
+  if (currentTrace) return currentTrace;
+  const el = document.createElement("div");
+  el.className = "trace live open"; // always expanded while the turn runs
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "trace-head";
+  head.innerHTML =
+    `<span class="trace-status">${SPINNER}</span>` +
+    `<span class="trace-headtext"><span class="trace-title">Working…</span>` +
+    `<span class="trace-sub"></span></span>` +
+    `<span class="trace-tokens"></span>` +
+    `<button type="button" class="trace-stop"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>Stop</button>` +
+    `<svg class="trace-chev" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const body = document.createElement("div");
+  body.className = "trace-body";
+  // Steps live in an inner content div so the timeline rail spans the FULL
+  // (scrollable) content, not just the visible slice.
+  body.innerHTML = '<div class="trace-inner"><div class="trace-rail"></div></div>';
+  el.append(head, body);
+  // The head toggles expand ONLY when finished; a live trace stays open.
+  head.onclick = (e) => {
+    if (e.target.closest(".trace-stop")) return;
+    if (!el.classList.contains("live")) el.classList.toggle("open");
+  };
+  head.querySelector(".trace-stop").onclick = (e) => {
+    e.stopPropagation();
+    send({ type: "stop" });
+    markStopping(currentTrace); // immediate "Stopping…" feedback in the header
+  };
+  messagesEl.appendChild(el);
+  turnAnchorEl = el; // the "Worked for Xs" box is the response-start anchor
+  currentTrace = {
+    el, head, body, inner: body.querySelector(".trace-inner"),
+    started: 0, secs: 0, tokensIn: 0, tokensOut: 0,
+    pending: null, thinkingRow: null, startedAt: Date.now(), timer: null,
+  };
+  body.addEventListener("scroll", () => updateScrollHints(body));
+  currentTrace.timer = setInterval(() => updateTraceHead(currentTrace), 1000);
+  refreshStatusline(); // the trace header owns Stop now; hide the bottom bar
+  scrollToEnd();
+  return currentTrace;
+}
+
+// The Stop button was pressed: reflect it in the header until `done` lands.
+function markStopping(t) {
+  if (!t) return;
+  t.el.classList.add("stopping");
+  const title = t.el.querySelector(".trace-title");
+  if (title) title.textContent = "Stopping…";
+  const btn = t.el.querySelector(".trace-stop");
+  if (btn) btn.disabled = true;
+}
+
+// Fade the top/bottom edge of a scroll box when there's more content there.
+function updateScrollHints(box) {
+  box.classList.toggle("more-above", box.scrollTop > 4);
+  box.classList.toggle("more-below", box.scrollTop + box.clientHeight < box.scrollHeight - 4);
+}
+
+// Keep the newest step visible inside the height-capped live steps pane.
+function pinTrace(t) {
+  if (t.el.classList.contains("live")) {
+    requestAnimationFrame(() => {
+      t.body.scrollTop = t.body.scrollHeight;
+      updateScrollHints(t.body);
+    });
+  }
+}
+
+// A live "how long has THIS step run" timer on the active row.
+function startStepTimer(t, ref) {
+  const timer = document.createElement("span");
+  timer.className = "step-timer";
+  timer.textContent = "0s";
+  ref.titleEl.appendChild(timer);
+  t.activeStartedAt = Date.now();
+}
+function clearStepTimer(t, ref) {
+  const el = ref.titleEl.querySelector(".step-timer");
+  if (el) el.remove();
+  t.activeStartedAt = null;
+}
+
+function traceRow(t, iconHtml, title, sub) {
+  const row = document.createElement("div");
+  row.className = "step";
+  const badge = document.createElement("span");
+  badge.className = "step-badge";
+  badge.innerHTML = iconHtml;
+  const main = document.createElement("div");
+  main.className = "step-main";
+  const titleEl = document.createElement("span");
+  titleEl.className = "step-title";
+  titleEl.append(title); // string or node
+  main.appendChild(titleEl);
+  if (sub) {
+    const subEl = document.createElement("span");
+    subEl.className = "step-sub";
+    subEl.textContent = sub;
+    main.appendChild(subEl);
+  }
+  row.append(badge, main);
+  t.inner.appendChild(row);
+  scrollToEnd();
+  pinTrace(t);
+  return { row, badge, main, titleEl };
+}
+
+function traceStep(step) {
+  const t = ensureTrace();
+  if (step.kind === "thinking_start") {
+    // A live, highlighted "Thinking…" row — the active step on the timeline.
+    if (!t.thinkingRow) {
+      t.started += 1;
+      const ref = traceRow(t, '<span class="spin spin-purple"></span>', "Thinking…", "");
+      ref.row.classList.add("running", "active-step");
+      startStepTimer(t, ref);
+      t.thinkingRow = ref;
+    }
+    updateTraceHead(t);
+    return;
+  }
+  if (step.kind === "thinking_cancel") {
+    // The turn was a plain answer — drop the active thinking row.
+    if (t.thinkingRow) { t.thinkingRow.row.remove(); t.thinkingRow = null; t.started -= 1; }
+    updateTraceHead(t);
+    return;
+  }
+  if (step.kind === "thinking") {
+    t.secs += step.secs || 0;
+    if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
+    if (t.thinkingRow) { // finalize the live row in place
+      const ref = t.thinkingRow;
+      clearStepTimer(t, ref);
+      ref.row.classList.remove("running", "active-step");
+      ref.badge.innerHTML = traceSvg("thinking", "var(--purple)");
+      ref.titleEl.textContent = `Thought for ${fmtSecs(step.secs)}`;
+      t.thinkingRow = null;
+    } else {
+      t.started += 1;
+      traceRow(t, traceSvg("thinking", "var(--purple)"), `Thought for ${fmtSecs(step.secs)}`, "");
+    }
+    updateTraceHead(t);
+    return;
+  }
+  if (step.kind === "knowledge") {
+    t.started += 1;
+    const items = step.items || [];
+    const nSkill = items.filter((i) => i.kind === "skill").length;
+    const nMem = items.length - nSkill;
+    const parts = [];
+    if (nSkill) parts.push(`${nSkill} skill${nSkill === 1 ? "" : "s"}`);
+    if (nMem) parts.push(`${nMem} ${nMem === 1 ? "memory" : "memories"}`);
+    const { main } = traceRow(
+      t, traceSvg("knowledge", "var(--yellow)"), "Recalled knowledge",
+      `${parts.join(" · ") || items.length} from past work`
+    );
+    if (items.length) {
+      const chips = document.createElement("div");
+      chips.className = "know-chips";
+      for (const it of items) {
+        const isSkill = it.kind === "skill";
+        const chip = document.createElement("span");
+        chip.className = "know-chip " + (isSkill ? "skill" : "mem");
+        const tag = document.createElement("span");
+        tag.className = "know-tag";
+        tag.textContent = isSkill ? "SKILL" : "MEM";
+        chip.append(tag, document.createTextNode(it.label || ""));
+        chips.appendChild(chip);
+      }
+      main.appendChild(chips);
+    }
+    updateTraceHead(t);
+    return;
+  }
+  if (step.kind === "tool_start") { toolStart(t, step); return; }
+  if (step.kind === "tool") { toolFinish(t, step); return; }
+}
+
+// A "SKILL" pill on read_skill rows, mirroring the knowledge-preload chips so
+// recalling a specific skill reads consistently with them (vs. memory).
+function knowledgeTag(ref, name) {
+  if (name !== "read_skill") return;
+  const tag = document.createElement("span");
+  tag.className = "step-tag know";
+  tag.textContent = "SKILL";
+  ref.titleEl.appendChild(tag);
+}
+
+function toolStart(t, step) {
+  t.started += 1;
+  const [title, iconKey] = TOOL_META[step.name] || [step.name, "dot", "--dim"];
+  const ref = traceRow(t, SPINNER, title, step.name === "run_command" ? "" : step.summary);
+  knowledgeTag(ref, step.name);
+  ref.row.classList.add("running", "active-step");
+  startStepTimer(t, ref);
+  if (step.name === "run_command" && step.command) {
+    const cmd = document.createElement("div");
+    cmd.className = "step-cmd mono";
+    cmd.textContent = step.command;
+    ref.main.appendChild(cmd);
+    const out = document.createElement("div");
+    out.className = "step-output";
+    ref.main.appendChild(out);
+    ref.output = out;
+  }
+  t.pending = { ...ref, name: step.name };
+}
+
+function toolFinish(t, step) {
+  t.secs += step.secs || 0;
+  const meta = TOOL_META[step.name] || [step.name, "dot", "--dim"];
+  const denied = step.decision === "denied" || step.decision === "blocked" || step.decision === "rejected";
+  let ref = t.pending && t.pending.name === step.name ? t.pending : null;
+  if (!ref) {
+    // No matching start (e.g. replay ordering): synthesize a completed row.
+    t.started += 1;
+    ref = traceRow(t, "", meta[0], step.name === "run_command" ? "" : step.summary);
+    knowledgeTag(ref, step.name);
+    if (step.name === "run_command" && step.command) {
+      const cmd = document.createElement("div");
+      cmd.className = "step-cmd mono";
+      cmd.textContent = step.command;
+      ref.main.appendChild(cmd);
+    }
+  }
+  clearStepTimer(t, ref);
+  t.pending = null;
+  ref.row.classList.remove("running", "active-step");
+  // finalize badge icon
+  const iconName = denied ? "denied" : step.name === "run_command" ? "command"
+    : !step.ok ? "denied" : meta[1];
+  const color = denied || !step.ok ? "var(--red)" : `var(${meta[2]})`;
+  ref.badge.innerHTML = traceSvg(iconName, color);
+  // status tag on the title
+  const tag = document.createElement("span");
+  tag.className = "step-tag " + (denied || !step.ok ? "bad" : "ok");
+  tag.textContent = denied
+    ? (step.decision === "blocked" ? "Blocked" : "Denied")
+    : !step.ok ? "Error"
+    : step.name === "run_command" ? `${ref.manual ? "Approved" : "Auto-approved"} · ${fmtSecs(step.secs)}`
+    : fmtSecs(step.secs);
+  ref.titleEl.appendChild(tag);
+  // The user's approval note, shown back on the step (#3), clamped when long.
+  if (step.comment) ref.main.appendChild(clampNote(step.comment));
+  if (denied) {
+    if (ref.row.querySelector(".step-cmd")) ref.row.querySelector(".step-cmd").classList.add("struck");
+    // Why it was skipped/blocked (denial comment, gate reason) — #5, #12.
+    if (step.output) {
+      const why = document.createElement("span");
+      why.className = "step-sub";
+      why.textContent = step.output;
+      ref.main.appendChild(why);
+    }
+  }
+  // command output block (finalize streamed output, or render from the step)
+  if (step.name === "run_command" && step.output && !denied) {
+    let out = ref.output;
+    if (!out) { out = document.createElement("div"); out.className = "step-output"; ref.main.appendChild(out); }
+    const streamed = out.dataset.streamed && out.querySelector(".out-box");
+    if (streamed) finalizeOutBox(streamed, splitExit(step.output)[1]);
+    else renderStepOutput(out, step.output);
+  }
+  // error detail for a failed non-run_command tool (#18)
+  if (!step.ok && step.error && step.name !== "run_command") {
+    const errWrap = document.createElement("div");
+    errWrap.className = "step-output";
+    ref.main.appendChild(errWrap);
+    renderErrorBox(errWrap, step.error);
+  }
+  updateTraceHead(t);
+}
+
+const WRAP_SVG = '<svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h12a3.25 3.25 0 0 1 0 6.5h-2.5m0 0 2.2-2.2m-2.2 2.2 2.2 2.2M4 18.5h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+// The collapsible command-output box: header (label · wrap · copy), a scrolling
+// body, and a "Show full output · N lines" expander when it's tall.
+function outBox(errorMode) {
+  const box = document.createElement("div");
+  box.className = "out-box" + (errorMode ? " error" : "");
+  box.innerHTML =
+    `<div class="out-head"><span class="out-label">${errorMode ? "error" : "output"}</span>` +
+    `<div class="out-actions"><button type="button" class="out-wrap" title="Wrap lines">${WRAP_SVG}</button></div></div>` +
+    `<div class="out-scroll"><div class="out-body mono"></div><div class="out-fade"></div></div>` +
+    `<button type="button" class="out-expand" hidden></button>`;
+  const body = box.querySelector(".out-body");
+  box.querySelector(".out-wrap").onclick = () => box.classList.toggle("wrap-on");
+  box.querySelector(".out-actions").prepend(copyChip(() => body.textContent, "copy output"));
+  const scroll = box.querySelector(".out-scroll");
+  box.querySelector(".out-expand").onclick = () => {
+    box.classList.toggle("expanded"); labelExpand(box);
+    requestAnimationFrame(() => updateScrollHints(scroll));
+  };
+  scroll.addEventListener("scroll", () => updateScrollHints(scroll));
+  return box;
+}
+
+function outLines(box) {
+  return (box.querySelector(".out-body").textContent.match(/\n/g) || []).length + 1;
+}
+function labelExpand(box) {
+  box.querySelector(".out-expand").textContent =
+    box.classList.contains("expanded") ? "Collapse output" : `Show full output · ${outLines(box)} lines`;
+}
+function finalizeOutBox(box, label) {
+  if (label) box.querySelector(".out-label").textContent = label;
+  if (outLines(box) > 6) { box.classList.add("collapsible"); box.querySelector(".out-expand").hidden = false; labelExpand(box); }
+  requestAnimationFrame(() => updateScrollHints(box.querySelector(".out-scroll")));
+}
+
+// Peel a trailing "[exit code: N]" into the header label.
+function splitExit(text) {
+  const m = text.match(/\n?\[exit code: (-?\d+)\]\s*$/);
+  return m ? [text.slice(0, m.index), `stdout · exit ${m[1]}`] : [text, "stdout"];
+}
+
+// A run_command approval note on the finished step: clamp long / multi-line
+// text to a few lines with a Show more/less toggle, mirroring the output box's
+// graceful handling instead of ellipsizing to a single line.
+function clampNote(text) {
+  const wrap = document.createElement("div");
+  wrap.className = "step-note-wrap";
+  const note = document.createElement("span");
+  note.className = "step-sub step-note";
+  note.textContent = `“${text}”`;
+  wrap.appendChild(note);
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "note-more";
+  more.textContent = "Show more";
+  more.hidden = true;
+  more.onclick = () => {
+    const expanded = wrap.classList.toggle("expanded");
+    more.textContent = expanded ? "Show less" : "Show more";
+  };
+  wrap.appendChild(more);
+  requestAnimationFrame(() => {
+    if (note.scrollHeight - note.clientHeight > 4) more.hidden = false;
+  });
+  return wrap;
+}
+
+// An empty stdout/stderr reads as broken in the full output box (blank body +
+// copy/wrap/expand for nothing). Collapse it to a single "No output · exit N"
+// line, keeping the exit code so success and silent failure stay
+// distinguishable. Returns true when it handled an empty result.
+function renderEmptyOutput(container, text) {
+  const [bodyText, label] = splitExit(text);
+  if (bodyText.trim() !== "") return false;
+  container.replaceChildren();
+  const line = document.createElement("div");
+  line.className = "out-empty mono";
+  const exit = label.match(/exit (-?\d+)/);
+  line.textContent = exit ? `No output · exit ${exit[1]}` : "No output";
+  container.appendChild(line);
+  return true;
+}
+
+function renderStepOutput(container, text) {
+  container.replaceChildren();
+  if (renderEmptyOutput(container, text)) return;
+  const [bodyText, label] = splitExit(text);
+  const box = outBox(false);
+  box.querySelector(".out-body").appendChild(ansiFragment(bodyText));
+  container.appendChild(box);
+  finalizeOutBox(box, label);
+}
+
+function renderErrorBox(container, text) {
+  container.replaceChildren();
+  const box = outBox(true);
+  box.querySelector(".out-body").appendChild(ansiFragment(text));
+  container.appendChild(box);
+  finalizeOutBox(box, "error");
+}
+
+function traceStream(text) {
+  // While a run_command step is live, its output streams into the trace row;
+  // otherwise (a user-run !command, no active trace) it renders inline.
+  if (currentTrace && currentTrace.pending && currentTrace.pending.output) {
+    const out = currentTrace.pending.output;
+    out.dataset.streamed = "1";
+    let box = out.querySelector(".out-box");
+    if (!box) { out.replaceChildren(); box = outBox(false); out.appendChild(box); }
+    const body = box.querySelector(".out-body");
+    if (body.childNodes.length) body.appendChild(document.createTextNode("\n"));
+    body.appendChild(ansiFragment(text));
+    scrollToEnd();
+    pinTrace(currentTrace);
+    return;
+  }
+  addStreamLine(text);
+}
+
+function mmss(sec) {
+  const m = Math.floor(sec / 60);
+  return `${m}:${String(sec % 60).padStart(2, "0")}`;
+}
+
+function updateTraceHead(t) {
+  const title = t.el.querySelector(".trace-title");
+  const sub = t.el.querySelector(".trace-sub");
+  const tokens = t.el.querySelector(".trace-tokens");
+  const live = t.el.classList.contains("live");
+  if (live) {
+    title.textContent = "Working…";
+    const elapsed = Math.floor((Date.now() - t.startedAt) / 1000);
+    sub.textContent = `step ${t.started} · ${mmss(elapsed)}`;
+    if (t.activeStartedAt) {
+      const st = t.body.querySelector(".step.active-step .step-timer");
+      if (st) st.textContent = `${Math.floor((Date.now() - t.activeStartedAt) / 1000)}s`;
+    }
+  } else {
+    title.textContent = `Worked for ${fmtSecs(t.secs)}`;
+    sub.textContent = `${t.started} step${t.started === 1 ? "" : "s"}`;
+  }
+  const parts = [];
+  if (t.tokensIn) parts.push("↑" + fmtTokens(t.tokensIn));
+  if (t.tokensOut) parts.push("↓" + fmtTokens(t.tokensOut));
+  tokens.textContent = parts.join(" ");
+}
+
+function finishTrace(errored) {
+  if (!currentTrace) return;
+  const t = currentTrace;
+  if (t.timer) { clearInterval(t.timer); t.timer = null; }
+  if (t.thinkingRow) { t.thinkingRow.row.remove(); t.thinkingRow = null; }
+  t.pending = null;
+  t.activeStartedAt = null;
+  currentTrace = null;
+  // A pure-answer turn leaves no steps — drop the empty trace box entirely.
+  if (!t.body.querySelector(".step")) { t.el.remove(); refreshStatusline(); return; }
+  t.el.classList.remove("live", "stopping");
+  t.el.classList.remove("open"); // collapse to the summary; tap to expand
+  t.el.querySelector(".trace-status").innerHTML = errored
+    ? traceSvg("denied", "var(--red)")
+    : traceSvg("check", "var(--green)");
+  updateTraceHead(t);
+  refreshStatusline();
+}
+
+function fmtSecs(s) {
+  if (s == null) return "";
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.round(s)}s`;
+  return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+}
+function fmtTokens(n) {
+  return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+}
 
 // ---- message rendering ---------------------------------------------------
 function addMsg(kind, text) {
@@ -422,6 +983,40 @@ function addMsg(kind, text) {
   messagesEl.appendChild(el);
   scrollToEnd();
   return el;
+}
+
+// The prompt that started the current turn, so an error (or a finished answer)
+// can offer to re-run it.
+let lastUserPrompt = "";
+const RERUN_SVG =
+  '<svg viewBox="0 0 24 24"><path d="M5 6.5v3.6h3.6M19 17.5v-3.6h-3.6M18.4 9.2A6.5 6.5 0 0 0 6.5 8M5.6 14.8A6.5 6.5 0 0 0 17.5 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+// An error message with a Retry button (resends the last prompt, Gemini-style).
+function addErrorMsg(text) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg error error-wrap";
+  const body = document.createElement("div");
+  body.textContent = text;
+  wrap.appendChild(body);
+  if (lastUserPrompt) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "retry-btn";
+    retry.innerHTML = RERUN_SVG + "Retry";
+    retry.onclick = () => { if (!clientBusy) send({ type: "task", text: lastUserPrompt }); };
+    wrap.appendChild(retry);
+  }
+  messagesEl.appendChild(wrap);
+  scrollToEnd();
+  return wrap;
+}
+
+// A regenerate control lives only on the MOST RECENT answer (re-runs the last
+// prompt as a fresh turn). Branching an arbitrary earlier message is a separate
+// feature; this one supersedes itself so only the latest answer carries it.
+let lastRegenBtn = null;
+function retireRegen() {
+  if (lastRegenBtn) { lastRegenBtn.remove(); lastRegenBtn = null; }
 }
 
 // Your own prompt bubble: tap-to-recall plus a copy chip underneath (issue
@@ -735,7 +1330,13 @@ function renderMarkdown(text) {
       pre.appendChild(code);
       const holder = document.createElement("div");
       holder.className = "copywrap";
-      holder.append(copyChip(() => code.textContent, "copy code"), pre);
+      const wrapBtn = document.createElement("button");
+      wrapBtn.type = "button";
+      wrapBtn.className = "code-wrap";
+      wrapBtn.title = "Wrap lines";
+      wrapBtn.innerHTML = WRAP_SVG;
+      wrapBtn.onclick = () => holder.classList.toggle("wrap-on");
+      holder.append(wrapBtn, copyChip(() => code.textContent, "copy code"), pre);
       frag.appendChild(holder);
       continue;
     }
@@ -1137,11 +1738,34 @@ function copyChip(getText, label) {
 
 // Footer row under a finished answer: copy-as-markdown chip, plus the
 // read-aloud player where speech synthesis exists.
+let turnStart = 0;
+let answerTiming = 0;
+
 function attachAnswerTools(el, source) {
   const tools = document.createElement("div");
   tools.className = "msg-tools";
   tools.appendChild(copyChip(() => source, "copy answer"));
   if (TTS_OK) tools.appendChild(buildTtsBox(el));
+  // Regenerate: only the newest answer keeps it, so retire the previous one.
+  retireRegen();
+  if (lastUserPrompt) {
+    const regen = document.createElement("button");
+    regen.type = "button";
+    regen.className = "regen-chip";
+    regen.title = "regenerate";
+    regen.setAttribute("aria-label", "regenerate answer");
+    regen.innerHTML = RERUN_SVG;
+    regen.onclick = () => { if (!clientBusy) send({ type: "task", text: lastUserPrompt }); };
+    tools.appendChild(regen);
+    lastRegenBtn = regen;
+  }
+  if (answerTiming) {
+    const timing = document.createElement("span");
+    timing.className = "answer-timing";
+    timing.textContent = fmtSecs(answerTiming);
+    tools.appendChild(timing);
+    answerTiming = 0; // one readout per answer
+  }
   el.appendChild(tools);
 }
 
@@ -1301,6 +1925,12 @@ function cycleRate() {
 // ---- approval cards ------------------------------------------------------
 function onApprovalRequest(event) {
   closeAnswer();
+  // A card means the user is deciding — mark the pending run_command step so
+  // the trace can say "Approved" (manual) vs "Auto-approved" later (#2).
+  if (event.kind === "command" && currentTrace && currentTrace.pending
+      && currentTrace.pending.name === "run_command") {
+    currentTrace.pending.manual = true;
+  }
   const card = document.createElement("div");
   card.className = "card";
   card.dataset.id = event.id;
@@ -1360,19 +1990,15 @@ function answerCard(id, action, extra) {
 // future actions. Typing feedback implies no verdict: Enter just dismisses
 // the keyboard, the user still picks a button.
 function feedbackField() {
-  const input = document.createElement("input");
-  input.type = "text";
-  input.className = "feedback";
-  input.placeholder = "Optional comment";
-  input.enterKeyHint = "done";
-  input.autocomplete = "off";
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      input.blur();
-    }
-  });
-  return input;
+  // A full-width multi-line box (design 2c): room to type an actual note, not a
+  // cramped single line. Enter inserts a newline; the verdict still comes from a
+  // button press, so nothing here submits.
+  const ta = document.createElement("textarea");
+  ta.className = "feedback";
+  ta.rows = 2;
+  ta.placeholder = "Optional comment";
+  ta.autocomplete = "off";
+  return ta;
 }
 
 function feedbackExtra(input) {
@@ -1380,105 +2006,295 @@ function feedbackExtra(input) {
   return comment ? { comment } : {};
 }
 
-function buildCommandCard(card, event) {
-  const parts = [document.createTextNode("▶ run command? ")];
-  if (event.destructive) {
-    const warn = document.createElement("span");
-    warn.className = "destructive";
-    warn.textContent = "⚠ destructive";
-    parts.push(warn);
+const CARD_TRIANGLE = '<svg viewBox="0 0 24 24"><path d="M12 3.5 21 19H3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v3.5M12 16.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>';
+const CARD_SHIELD = '<svg viewBox="0 0 24 24"><path d="M12 3.5l7 2.5v5c0 4.2-2.9 7.5-7 9-4.1-1.5-7-4.8-7-9V6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>';
+
+const FOLDER_SVG = '<svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+
+// Each scope segment maps to the SAME wire action the old per-scope buttons
+// sent (server contract in make_web_approvers): the segment picks what an
+// Approve remembers, it does not change the message shape.
+const SCOPE_LABELS = {
+  approve: "Just once",         // plain approve — this command, this time
+  approve_session: "Session",   // allowlist the shown prefix(es) for this session
+  approve_always: "Always",     // persist the prefix(es) to the allowlist file
+  approve_trust: "Trust dir",   // trust the escaping directory for this session
+};
+
+// The explanatory sentence under the segmented control. Dynamic parts
+// (prefixes, dirs) go in via textContent — never innerHTML — since they are
+// derived from the model-proposed command.
+function scopeExplain(action, prefixText, escapeText) {
+  const frag = document.createDocumentFragment();
+  const mono = (t) => { const s = document.createElement("span"); s.className = "mono"; s.textContent = t; return s; };
+  const strong = (t) => { const b = document.createElement("b"); b.textContent = t; return b; };
+  if (action === "approve_session") {
+    // "Session" is scoped to this conversation's approver (server_prefixes),
+    // not the process — so it lasts for this chat, not "until restart".
+    frag.append("Also auto-approve ", mono(prefixText), " for the rest of this session.");
+  } else if (action === "approve_always") {
+    frag.append("Save ", mono(prefixText), " to the allowlist — it persists across sessions.");
+  } else if (action === "approve_trust") {
+    frag.append("Trust ", mono(escapeText), " for this session — anything inside then runs without asking.");
+  } else {
+    // Default (Just once) mirrors the design: the safe choice, then a hint at
+    // what the broader segments would do.
+    frag.append("Approve ", strong("only this command, this time."));
+    if (prefixText && escapeText) {
+      frag.append(" Broader scopes allowlist ", mono(prefixText), " or trust ", mono(escapeText), ".");
+    } else if (prefixText) {
+      frag.append(" Broader scopes allowlist ", mono(prefixText), ".");
+    } else if (escapeText) {
+      frag.append(" A broader scope trusts ", mono(escapeText), ".");
+    }
   }
-  title(card, parts);
-  const code = document.createElement("code");
+  return frag;
+}
+
+function buildCommandCard(card, event) {
+  // A command approval is an "attention needed" card: always the orange accent
+  // (border + icon + subtitle), per the design — gray reads as "safe/neutral",
+  // which an approval prompt never is. `destructive` only sharpens the icon and
+  // subtitle wording; write/diff cards use the blue accent instead.
+  card.classList.add("approval-card", "danger");
+  const destructive = Boolean(event.destructive);
+  const head = document.createElement("div");
+  head.className = "card-head danger";
+  head.innerHTML =
+    `<span class="card-ico">${destructive ? CARD_TRIANGLE : CARD_SHIELD}</span>` +
+    `<span class="card-htext"><span class="card-htitle">Approval needed</span>` +
+    `<span class="card-hsub"></span></span>`;
+  head.querySelector(".card-hsub").textContent =
+    destructive ? "Destructive — review before running" : "Runs a shell command";
+  card.appendChild(head);
+
+  // $ command box: editable in place via the pencil, plus copy.
+  const box = document.createElement("div");
+  box.className = "cmd-box";
+  const dollar = document.createElement("span");
+  dollar.className = "cmd-dollar";
+  dollar.textContent = "$";
+  const code = document.createElement("span");
+  code.className = "cmd-text mono";
   code.textContent = event.command;
-  const cmdRow = document.createElement("div");
-  cmdRow.className = "cmd-row";
-  cmdRow.appendChild(code);
   const editBtn = document.createElement("button");
   editBtn.type = "button";
-  editBtn.className = "edit-pencil";
+  editBtn.className = "cmd-icon";
   editBtn.title = "Edit the command before running";
   editBtn.appendChild(pencilIcon());
-  editBtn.onclick = () => showEditor();
-  cmdRow.appendChild(editBtn);
-  card.appendChild(cmdRow);
+  editBtn.onclick = () => toggleEdit();
+  box.append(dollar, code, editBtn, copyChip(() => code.textContent, "copy command"));
+  card.appendChild(box);
+
+  function toggleEdit() {
+    if (code.isContentEditable) {
+      code.contentEditable = "false";
+      code.classList.remove("editing");
+      editBtn.classList.remove("active");
+      return;
+    }
+    code.contentEditable = "plaintext-only";
+    code.classList.add("editing");
+    editBtn.classList.add("active");
+    code.focus();
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    range.collapse(false);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  // where it runs
+  const where = document.createElement("div");
+  where.className = "card-where";
+  where.innerHTML = FOLDER_SVG;
+  where.append("runs in ");
+  const wpath = document.createElement("span");
+  wpath.className = "where-path";
+  wpath.textContent = abbreviatePath(currentCwd || "");
+  where.appendChild(wpath);
+  card.appendChild(where);
+
   const escapes = event.escapes || [];
   if (escapes.length) card.appendChild(escapeNote(escapes));
-  const prefixes = (event.prefixes || []).join(", ");
-  // The allow buttons save prefix rules, not this exact command line — show
-  // the rule on the card so the scope is clear before the user commits to it.
-  if (prefixes) card.appendChild(prefixNote(prefixes));
+
   const feedback = feedbackField();
   card.appendChild(feedback);
-  const specs = [
-    ["Approve", "approve",
-      () => answerCard(event.id, "approve", feedbackExtra(feedback))],
-    ["Allow this session", "session",
-      () => answerCard(event.id, "approve_session", feedbackExtra(feedback)),
-      prefixes ? `auto-approve "${prefixes}" until the server restarts` : ""],
-    ["Always allow", "session",
-      () => answerCard(event.id, "approve_always", feedbackExtra(feedback)),
-      prefixes ? `save "${prefixes}" to the allowlist — persists across sessions` : ""],
-  ];
-  if (escapes.length) {
-    specs.push(["Trust directory", "session",
-      () => answerCard(event.id, "approve_trust", feedbackExtra(feedback)),
-      `add ${escapes.join(", ")} to the session roots until the session closes`]);
+
+  // Scope segments, driven by what the backend actually offered: "Just once"
+  // is always available; Session/Always need allowlist prefixes; Trust dir
+  // needs an escaping directory. With nothing but "Just once", the control is
+  // pointless — omit it and let Approve mean a plain approve.
+  const prefixText = (event.prefixes || []).join(", ");
+  const escapeText = escapes.join(", ");
+  const actions = ["approve"];
+  if (prefixText) actions.push("approve_session", "approve_always");
+  if (escapes.length) actions.push("approve_trust");
+  let scopeAction = "approve";
+  if (actions.length > 1) {
+    const scope = document.createElement("div");
+    scope.className = "scope";
+    const label = document.createElement("div");
+    label.className = "scope-label";
+    label.textContent = "If approved, remember for";
+    const seg = document.createElement("div");
+    seg.className = "segmented";
+    const explain = document.createElement("div");
+    explain.className = "scope-explain";
+    const select = (action, btn) => {
+      scopeAction = action;
+      for (const b of seg.children) b.classList.toggle("active", b === btn);
+      explain.replaceChildren(scopeExplain(action, prefixText, escapeText));
+    };
+    let firstBtn = null;
+    for (const action of actions) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "seg";
+      b.textContent = SCOPE_LABELS[action];
+      b.onclick = () => select(action, b);
+      seg.appendChild(b);
+      firstBtn = firstBtn || b;
+    }
+    scope.append(label, seg, explain);
+    card.appendChild(scope);
+    select("approve", firstBtn);
   }
-  specs.push(
-    ["Deny", "deny", () => answerCard(event.id, "deny", feedbackExtra(feedback))],
-  );
-  const row = buttonRow(card, specs);
-  row.classList.add("grid2");
-  function showEditor() {
-    row.hidden = true;
-    editBtn.hidden = true;
-    const area = document.createElement("textarea");
-    area.value = event.command;
-    card.appendChild(area);
-    const editRow = buttonRow(card, [
-      ["Run edited", "approve", () =>
-        answerCard(event.id, "edit", { command: area.value, ...feedbackExtra(feedback) })],
-      ["Cancel", "edit", () => {
-        area.remove(); editRow.remove(); row.hidden = false; editBtn.hidden = false;
-      }],
-    ]);
-    area.focus();
-  }
+
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "card-actions";
+  const approveBtn = document.createElement("button");
+  approveBtn.type = "button";
+  approveBtn.className = "approve";
+  approveBtn.textContent = "Approve";
+  approveBtn.onclick = () => {
+    const edited = code.textContent.trim();
+    if (edited && edited !== event.command.trim()) {
+      // An edited command flows through the "edit" action exactly as before;
+      // the server re-checks the denylist on it. Editing takes precedence over
+      // the scope segment (the wire has no edit+scope combination).
+      answerCard(event.id, "edit", { command: edited, ...feedbackExtra(feedback) });
+    } else {
+      answerCard(event.id, scopeAction, feedbackExtra(feedback));
+    }
+  };
+  const denyBtn = document.createElement("button");
+  denyBtn.type = "button";
+  denyBtn.className = "deny";
+  denyBtn.textContent = "Deny";
+  denyBtn.onclick = () => answerCard(event.id, "deny", feedbackExtra(feedback));
+  actionsRow.append(approveBtn, denyBtn);
+  card.appendChild(actionsRow);
 }
 
 function buildWriteCard(card, event) {
-  title(card, [document.createTextNode(
-    `▶ ${event.verb} file? ${event.target} (+${event.added} −${event.removed})`
-  )]);
-  const diff = document.createElement("div");
-  diff.className = "diff";
-  for (const line of (event.diff || "").split("\n")) {
-    const el = document.createElement("div");
-    if (line.startsWith("+++") || line.startsWith("---")) el.className = "head";
-    else if (line.startsWith("+")) el.className = "add";
-    else if (line.startsWith("-")) el.className = "del";
-    else if (line.startsWith("@@")) el.className = "hunk";
-    else el.className = "ctx";
-    el.textContent = line || " ";
-    diff.appendChild(el);
-  }
-  card.appendChild(diff);
+  card.classList.add("approval-card", "info");
+  const head = document.createElement("div");
+  head.className = "card-head sep";
+  const ico = document.createElement("span");
+  ico.className = "card-ico";
+  ico.appendChild(pencilIcon());
+  const htext = document.createElement("span");
+  htext.className = "card-htext";
+  const htitle = document.createElement("span");
+  htitle.className = "card-htitle";
+  htitle.textContent = event.verb === "create" ? "Create file" : "Edit file";
+  const hsub = document.createElement("span");
+  hsub.className = "card-hsub mono";
+  hsub.textContent = relTarget(event.target);
+  hsub.title = event.target; // full path on hover
+  htext.append(htitle, hsub);
+  const added = document.createElement("span");
+  added.className = "card-count add";
+  added.textContent = `+${event.added}`;
+  const removed = document.createElement("span");
+  removed.className = "card-count del";
+  removed.textContent = `−${event.removed}`;
+  head.append(ico, htext, added, removed);
+  card.appendChild(head);
+
+  card.appendChild(renderDiff(event.diff || ""));
+
   const feedback = feedbackField();
   card.appendChild(feedback);
-  buttonRow(card, [
-    ["Approve", "approve", () => answerCard(event.id, "approve", feedbackExtra(feedback))],
-    ["Deny", "deny", () => answerCard(event.id, "deny", feedbackExtra(feedback))],
-  ]);
+
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "card-actions even";
+  const approveBtn = document.createElement("button");
+  approveBtn.type = "button";
+  approveBtn.className = "approve";
+  approveBtn.textContent = "Approve";
+  approveBtn.onclick = () => answerCard(event.id, "approve", feedbackExtra(feedback));
+  const denyBtn = document.createElement("button");
+  denyBtn.type = "button";
+  denyBtn.className = "deny";
+  denyBtn.textContent = "Deny";
+  denyBtn.onclick = () => answerCard(event.id, "deny", feedbackExtra(feedback));
+  actionsRow.append(approveBtn, denyBtn);
+  card.appendChild(actionsRow);
 }
 
-// What "Allow this session" / "Always allow" would actually allowlist: the
-// derived command prefix(es), not the full command line.
-function prefixNote(prefixes) {
-  const note = document.createElement("div");
-  note.className = "prefix-note";
-  note.textContent = `“Allow” buttons save the rule: ${prefixes}`;
-  return note;
+// The card header shows the file; a full absolute path is noise. Prefer the
+// path relative to the working directory (design shows `config/http.py`), else
+// the last couple of segments.
+function relTarget(target) {
+  const cwd = currentCwd || "";
+  if (cwd && target.startsWith(cwd + "/")) return target.slice(cwd.length + 1);
+  const parts = target.split("/").filter(Boolean);
+  return parts.length > 2 ? parts.slice(-2).join("/") : target;
+}
+
+// A unified diff rendered the way the design shows it (Screen 2d): no
+// `---/+++/@@` plumbing (the filename is already in the header), a line-number
+// gutter (old numbers for context/removals, new numbers for additions), and a
+// tinted row per add/remove. `@@` hunks only seed the counters; a thin divider
+// marks a gap between hunks.
+function renderDiff(text) {
+  const diff = document.createElement("div");
+  diff.className = "diff";
+  let oldNo = 0;
+  let newNo = 0;
+  let emitted = false;
+  const rowEl = (cls, no, body) => {
+    const row = document.createElement("div");
+    row.className = "dl " + cls;
+    const g = document.createElement("span");
+    g.className = "dl-no";
+    g.textContent = no == null ? "" : String(no);
+    const t = document.createElement("span");
+    t.className = "dl-tx";
+    t.textContent = body.length ? body : " ";
+    row.append(g, t);
+    diff.appendChild(row);
+    emitted = true;
+  };
+  const lines = text.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop(); // trailing newline artifact
+  for (const line of lines) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      oldNo = parseInt(hunk[1], 10);
+      newNo = parseInt(hunk[2], 10);
+      if (emitted) {
+        const sep = document.createElement("div");
+        sep.className = "dl gap";
+        sep.textContent = "⋯";
+        diff.appendChild(sep);
+      }
+      continue;
+    }
+    if (line.startsWith("+")) rowEl("add", newNo++, line.slice(1));
+    else if (line.startsWith("-")) rowEl("del", oldNo++, line.slice(1));
+    else if (line.startsWith("\\")) rowEl("ctx", null, line); // "\ No newline…"
+    else {
+      rowEl("ctx", oldNo, line.startsWith(" ") ? line.slice(1) : line);
+      oldNo++;
+      newNo++;
+    }
+  }
+  return diff;
 }
 
 // The out-of-roots warning shown on command/read cards whose target lives
@@ -1510,22 +2326,15 @@ function buildReadCard(card, event) {
 }
 
 function onApprovalResolved(event) {
+  // The activity trace already records the command and its "approved: <comment>"
+  // outcome, so the card just disappears once decided — no lingering verdict
+  // block duplicating what the timeline shows.
   const card = cards.get(event.id);
   if (!card) return;
   pendingCards = Math.max(0, pendingCards - 1);
   refreshStatusline();
-  card.replaceChildren();
-  card.className = "card resolved";
-  const verdict = document.createElement("div");
-  verdict.className = `verdict ${event.decision === "denied" ? "denied" : "approved"}`;
-  verdict.textContent = `${event.decision}: ${(card.dataset.summary || "").slice(0, 120)}`;
-  card.appendChild(verdict);
-  if (event.comment) {
-    const note = document.createElement("div");
-    note.className = "verdict-comment";
-    note.textContent = `“${event.comment}”`;
-    card.appendChild(note);
-  }
+  card.remove();
+  cards.delete(event.id);
 }
 
 // ---- composer + autocomplete ---------------------------------------------
@@ -1822,19 +2631,95 @@ function handleSlash(text) {
 // ---- attachments ---------------------------------------------------------
 let attachments = []; // {name, path}
 
-$("attach").onclick = () => $("file-input").click();
+// The + button opens the composer actions popover (attach / reference / slash
+// / photo); it sits above the button, iOS-style.
+$("attach").onclick = () => {
+  const menu = $("composer-actions");
+  if (!menu.hidden) { closeSheets(); return; }
+  menu.style.visibility = "hidden";
+  menu.hidden = false;
+  const anchor = $("attach").getBoundingClientRect();
+  menu.style.left = `${anchor.left}px`;
+  menu.style.top = `${anchor.top - menu.offsetHeight - 6}px`;
+  menu.style.visibility = "";
+  $("backdrop").hidden = false;
+};
+
+$("composer-actions").addEventListener("click", (e) => {
+  const item = e.target.closest(".action-item");
+  if (!item) return;
+  closeSheets();
+  switch (item.dataset.act) {
+    case "attach": $("file-input").click(); break;
+    case "photo": $("photo-input").click(); break;
+    case "reference": composerInsert("@"); break;
+    case "slash": composerInsert("/"); break;
+  }
+});
+
+// Insert a trigger char and fire the input flow (mention / slash suggestions).
+function composerInsert(ch) {
+  input.focus();
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  input.setRangeText(ch, start, end, "end");
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
 
 $("file-input").addEventListener("change", async () => {
   for (const file of $("file-input").files) await uploadFile(file);
   $("file-input").value = "";
 });
 
+$("photo-input").addEventListener("change", async () => {
+  for (const file of $("photo-input").files) await uploadFile(file);
+  $("photo-input").value = "";
+});
+
+// ---- message queue chips -------------------------------------------------
+// A message sent while the agent is busy waits its turn; show it above the
+// composer so it can be seen and cancelled (server-side dequeue).
+function addQueueChip(text) {
+  const list = $("queue-list");
+  const chip = document.createElement("div");
+  chip.className = "queue-chip";
+  chip.dataset.text = text;
+  chip.innerHTML =
+    '<svg class="queue-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v4.3l2.6 1.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+    '<span class="queue-body"><span class="queue-text"></span><span class="queue-sub">Queued · sends when aish finishes</span></span>' +
+    '<button class="queue-edit" type="button" aria-label="edit queued message"><svg viewBox="0 0 24 24"><path d="M12 19.5h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.2a1.7 1.7 0 0 1 2.4 2.4l-8.3 8.3-3.2.8.8-3.2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg></button>' +
+    '<button class="queue-remove" type="button" aria-label="remove from queue"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></button>';
+  chip.querySelector(".queue-text").textContent = text;
+  chip.querySelector(".queue-remove").onclick = () => {
+    send({ type: "dequeue", text });
+    removeQueueChip(text);
+  };
+  // Edit: pull the message back into the composer to revise & resend (#14).
+  chip.querySelector(".queue-edit").onclick = () => {
+    send({ type: "dequeue", text });
+    removeQueueChip(text);
+    input.value = input.value ? `${text}\n${input.value}` : text;
+    resizeInput();
+    input.focus();
+  };
+  list.appendChild(chip);
+  list.hidden = false;
+  scrollToEnd();
+}
+
+function removeQueueChip(text) {
+  const list = $("queue-list");
+  const chip = [...list.children].find((c) => c.dataset.text === text);
+  if (chip) chip.remove();
+  if (!list.children.length) list.hidden = true;
+}
+
 async function uploadFile(file) {
   const query = new URLSearchParams({ name: file.name });
   if (token) query.set("token", token);
   let response;
   try {
-    response = await fetch(`/upload?${query}`, { method: "POST", body: file });
+    response = await fetch(`${BASE}upload?${query}`, { method: "POST", body: file });
   } catch {
     showToast(`upload failed: ${file.name}`);
     return;
@@ -1877,8 +2762,10 @@ function closeSheets() {
   // dismiss the keyboard on its own schedule, and the layout-viewport pan it
   // caused can then settle without any visualViewport event (#8).
   const active = document.activeElement;
-  if (active && active.closest(".sheet")) active.blur();
+  if (active && active.closest(".sheet, .screen")) active.blur();
   for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
+  for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
+  $("sessions-sheet").hidden = true; // the full-page Sessions view
   $("backdrop").hidden = true;
   snapViewportSoon();
 }
@@ -1887,8 +2774,10 @@ for (const b of document.querySelectorAll("[data-close]")) {
 }
 $("backdrop").onclick = closeSheets;
 
+$("sessions-new").onclick = () => { send({ type: "new" }); closeSheets(); };
+
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("backdrop").hidden) closeSheets();
+  if (e.key === "Escape" && (!$("backdrop").hidden || !$("sessions-sheet").hidden)) closeSheets();
   // Cmd/Ctrl+Shift+O = new chat, Cmd/Ctrl+Shift+P = search sessions
   // (ChatGPT / command-palette conventions).
   if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "o") {
@@ -1972,10 +2861,7 @@ function attachListNav(searchEl, listEl) {
 // wrap mode: device-local ergonomics (like the token), not session state.
 // Applied here, before any replay renders, so history draws in the chosen mode.
 const WRAP_KEY = "aish-wrap";
-if (localStorage.getItem(WRAP_KEY) === "1") {
-  document.body.classList.add("wrap");
-  $("wrap-chip").classList.add("active");
-}
+if (localStorage.getItem(WRAP_KEY) === "1") document.body.classList.add("wrap");
 // Toggling wrap reflows every monospace block, so content heights above the
 // viewport change and the reader would land on different text (#21). Anchor
 // on the message at the top of the viewport and put it back at the same
@@ -1995,18 +2881,17 @@ function restoreAnchor(anchor) {
   updateScrollButton();
 }
 
-$("wrap-chip").onclick = () => {
+function toggleWrap() {
   const wasAtBottom = nearBottom();
   const anchor = topVisibleAnchor();
   const on = document.body.classList.toggle("wrap");
-  $("wrap-chip").classList.toggle("active", on);
   localStorage.setItem(WRAP_KEY, on ? "1" : "0");
   // Reading layout right after the class toggle forces a synchronous
   // reflow, so the restored offset is computed against final geometry.
   if (wasAtBottom) scrollToEnd(true);
   else if (anchor) restoreAnchor(anchor);
   showToast(on ? "wrap on" : "wrap off");
-};
+}
 
 // ---- swipe pager between open sessions -----------------------------------
 // Horizontal pager gesture (the iOS Weather-app model): drag the transcript
@@ -2272,17 +3157,70 @@ document.addEventListener("keydown", (event) => {
 });
 
 // sessions
-$("session-chip").onclick = () => openSessionsSheet("");
-$("history-chip").onclick = () => openSessionsSheet("");
+$("back-chip").onclick = () => openSessionsSheet("");
+$("session-chip").onclick = () => openSessionMenu();
 $("empty-hint").onclick = () => openSessionsSheet("");
 $("new-chip").onclick = () => send({ type: "new" });
+
+// ---- session title menu -------------------------------------------------
+// The tappable title opens a small menu of session actions (iOS Messages
+// convention: settings live behind the title, not a floating overflow chip).
+function openSessionMenu() {
+  const menu = $("session-menu");
+  $("wrap-state").textContent = document.body.classList.contains("wrap") ? "On" : "Off";
+  // Measure while shown-but-invisible so width is known before centering.
+  menu.style.visibility = "hidden";
+  menu.hidden = false;
+  const anchor = $("session-chip").getBoundingClientRect();
+  const width = menu.offsetWidth;
+  let left = anchor.left + anchor.width / 2 - width / 2;
+  left = Math.max(12, Math.min(left, window.innerWidth - width - 12));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${anchor.bottom + 6}px`;
+  menu.style.visibility = "";
+  $("backdrop").hidden = false;
+}
+
+$("session-menu").addEventListener("click", (e) => {
+  const item = e.target.closest(".menu-item");
+  if (!item) return;
+  closeSheets(); // hides the menu + backdrop
+  switch (item.dataset.act) {
+    case "new": send({ type: "new" }); break;
+    case "model": openModelSheet(""); break;
+    case "cd": openDirSheet(); break;
+    case "wrap": toggleWrap(); break;
+    case "workspace": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
+  }
+});
+
+// ---- attention badge ----------------------------------------------------
+// A background session that finished (or needs you) sets the durable badge on
+// the ‹ Sessions button; opening the list clears it.
+const attentionSessions = new Set();
+function refreshBadge() {
+  const badge = $("back-badge");
+  if (attentionSessions.size) {
+    badge.textContent = String(attentionSessions.size);
+    badge.hidden = false;
+  } else {
+    badge.hidden = true;
+  }
+}
 $("sessions-search").addEventListener(
   "input",
   debounce(() => send({ type: "sessions", query: $("sessions-search").value }), 150)
 );
 
 function openSessionsSheet(query) {
-  openSheet("sessions-sheet");
+  // A full-page screen, not a bottom sheet — dismiss any open sheet/menu first,
+  // no backdrop (it covers the whole chat).
+  for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
+  for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
+  $("backdrop").hidden = true;
+  $("sessions-sheet").hidden = false;
+  attentionSessions.clear();
+  refreshBadge();
   $("sessions-search").value = query;
   // Auto-focus only where a hardware keyboard is likely: on touch devices
   // focusing would throw the on-screen keyboard over the list before the
@@ -2307,8 +3245,8 @@ function openSessionsSheet(query) {
 // Only the states the user can act on. "idle but open in server memory" is
 // an implementation detail — resume behaves identically either way.
 const STATE_BADGES = {
-  running: ["● running", "st-running"],
-  waiting: ["● needs approval", "st-waiting"],
+  running: ["Running", "st-running"],
+  waiting: ["Needs approval", "st-waiting"],
 };
 
 const DAY_MS = 86400000;
@@ -2319,8 +3257,11 @@ function dayStart(stamp) {
 }
 
 function sessionGroup(ts) {
-  const today = dayStart(Date.now());
-  const day = dayStart(ts * 1000);
+  const now = Date.now();
+  const ms = ts * 1000;
+  if (now - ms < 8 * 3600 * 1000) return "Last 8 hours";
+  const today = dayStart(now);
+  const day = dayStart(ms);
   if (day >= today) return "Today";
   if (day >= today - DAY_MS) return "Yesterday";
   if (day >= today - 7 * DAY_MS) return "Previous 7 days";
@@ -2338,6 +3279,117 @@ function sessionStamp(ts) {
   return `${date.toLocaleDateString([], { day: "numeric", month: "short" })}, ${time}`;
 }
 
+const SESSION_ICONS = {
+  waiting: `<svg viewBox="0 0 24 24"><path d="M12 3.5 21 19H3z" fill="none" stroke="var(--orange)" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v3.6M12 16.4v.1" stroke="var(--orange)" stroke-width="1.9" stroke-linecap="round"/></svg>`,
+  current: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="var(--blue)" stroke-width="1.8"/><path d="M8.5 12.5l2.3 2.3 4.7-5" stroke="var(--blue)" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  idle: `<svg viewBox="0 0 24 24"><path d="M5 6h13M5 12h14M5 18h9" stroke="var(--dim)" stroke-width="1.9" stroke-linecap="round"/></svg>`,
+};
+
+function sessionIcon(info, isCurrent) {
+  const wrap = document.createElement("span");
+  wrap.className = "row-icon";
+  if (info.state === "running") {
+    wrap.style.background = "var(--green-glow)";
+    wrap.innerHTML = '<span class="spin"></span>';
+  } else if (info.state === "waiting") {
+    wrap.style.background = "var(--orange-glow)";
+    wrap.innerHTML = SESSION_ICONS.waiting;
+  } else if (isCurrent) {
+    wrap.style.background = "var(--blue-glow)";
+    wrap.innerHTML = SESSION_ICONS.current;
+  } else {
+    wrap.style.background = "var(--chip-bg)";
+    wrap.innerHTML = SESSION_ICONS.idle;
+  }
+  return wrap;
+}
+
+function sessionRow(info, current) {
+  const isCurrent = info.name === current;
+  const row = document.createElement("button");
+  row.className = "row session-row" + (isCurrent ? " current" : "");
+  const body = document.createElement("span");
+  body.className = "session-body";
+  const head = document.createElement("span");
+  head.className = "line";
+  const title = document.createElement("span");
+  title.className = "title";
+  title.textContent = info.title;
+  head.appendChild(title);
+  const badgeSpec = STATE_BADGES[info.state];
+  if (badgeSpec) {
+    const badge = document.createElement("span");
+    badge.className = `badge ${badgeSpec[1]}`;
+    badge.textContent = badgeSpec[0];
+    head.appendChild(badge);
+  }
+  body.appendChild(head);
+  if (info.cwd) {
+    const dir = document.createElement("span");
+    dir.className = "session-dir mono";
+    dir.innerHTML = '<svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+    dir.appendChild(document.createTextNode(abbreviatePath(info.cwd)));
+    body.appendChild(dir);
+  }
+  if (info.snippet) {
+    const snippet = document.createElement("span");
+    snippet.className = "snippet";
+    snippet.textContent = info.snippet;
+    body.appendChild(snippet);
+  }
+  const right = document.createElement("span");
+  right.className = "session-right";
+  const stamp = document.createElement("span");
+  stamp.className = "stamp";
+  stamp.textContent = sessionStamp(info.ts);
+  right.append(stamp, sessionDeleteControl(info));
+  row.append(sessionIcon(info, isCurrent), body, right);
+  return wrapSwipeDelete(row, info);
+}
+
+// iOS swipe-left-to-delete. The row rides over a red Delete button; a tap on
+// an open row snaps it shut, a tap on a closed row resumes the session.
+function wrapSwipeDelete(row, info) {
+  const wrap = document.createElement("div");
+  wrap.className = "swipe-wrap";
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "swipe-del";
+  del.textContent = "Delete";
+  del.onclick = (e) => { e.stopPropagation(); send({ type: "delete_session", name: info.name }); };
+  wrap.append(del, row);
+  let startX = null, dx = 0, open = false;
+  const set = (x) => { row.style.transform = x ? `translateX(${x}px)` : ""; };
+  row.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    startX = e.clientX; dx = 0;
+  });
+  row.addEventListener("pointermove", (e) => {
+    if (startX === null) return;
+    dx = e.clientX - startX;
+    if (Math.abs(dx) > 6) row.classList.add("dragging");
+    set(Math.min(0, Math.max(-100, (open ? -88 : 0) + dx)));
+  });
+  const finish = () => {
+    if (startX === null) return;
+    const moved = Math.abs(dx) > 6;
+    open = (open ? -88 : 0) + dx < -44;
+    row.classList.remove("dragging");
+    set(open ? -88 : 0);
+    startX = null;
+    if (moved) { row.dataset.swiped = "1"; requestAnimationFrame(() => delete row.dataset.swiped); }
+  };
+  row.addEventListener("pointerup", finish);
+  row.addEventListener("pointercancel", finish);
+  row.onclick = () => {
+    if (row.dataset.swiped) return;      // this "click" was really a swipe
+    if (open) { open = false; set(0); return; } // tap an open row → close it
+    send({ type: "resume", path: info.name });
+    closeSheets();
+  };
+  return wrap;
+}
+
 function renderSessions(event) {
   const list = $("sessions-list");
   list.replaceChildren();
@@ -2345,50 +3397,28 @@ function renderSessions(event) {
     list.textContent = "no matching sessions";
     return;
   }
-  // Server order kept as-is: recency (same list the swipe pager pages
-  // through, newest at top — swiping back = moving down this list), or
-  // ranked when searching. Day headers only while browsing: search results
-  // are ordered by relevance, so grouping them by date would lie.
+  // Ranked search results are ordered by relevance, so date/status grouping
+  // would lie — render a flat list there. While browsing, running/waiting
+  // sessions surface under "Active now"; the rest keep date headers.
   const grouped = !$("sessions-search").value.trim();
+  if (!grouped) {
+    for (const info of event.sessions) list.appendChild(sessionRow(info, event.current));
+    return;
+  }
+  const active = event.sessions.filter((s) => s.state === "running" || s.state === "waiting");
+  const rest = event.sessions.filter((s) => !(s.state === "running" || s.state === "waiting"));
+  if (active.length) {
+    list.appendChild(sectionLabel("Active now"));
+    for (const info of active) list.appendChild(sessionRow(info, event.current));
+  }
   let lastGroup = null;
-  for (const info of event.sessions) {
-    if (grouped) {
-      const group = sessionGroup(info.ts);
-      if (group !== lastGroup) {
-        list.appendChild(sectionLabel(group));
-        lastGroup = group;
-      }
+  for (const info of rest) {
+    const group = sessionGroup(info.ts);
+    if (group !== lastGroup) {
+      list.appendChild(sectionLabel(group));
+      lastGroup = group;
     }
-    const row = document.createElement("button");
-    const isCurrent = info.name === event.current;
-    row.className = "row session-row" + (isCurrent ? " current" : "");
-    const head = document.createElement("span");
-    head.className = "line";
-    const title = document.createElement("span");
-    title.className = "title";
-    title.textContent = info.title;
-    head.appendChild(title);
-    const badgeSpec = STATE_BADGES[info.state];
-    if (badgeSpec) {
-      const badge = document.createElement("span");
-      badge.className = `badge ${badgeSpec[1]}`;
-      badge.textContent = badgeSpec[0];
-      head.appendChild(badge);
-    }
-    const stamp = document.createElement("span");
-    stamp.className = "stamp";
-    stamp.textContent = sessionStamp(info.ts);
-    head.appendChild(stamp);
-    head.appendChild(sessionDeleteControl(info));
-    row.appendChild(head);
-    if (info.snippet) {
-      const snippet = document.createElement("span");
-      snippet.className = "snippet";
-      snippet.textContent = info.snippet;
-      row.appendChild(snippet);
-    }
-    row.onclick = () => { send({ type: "resume", path: info.name }); closeSheets(); };
-    list.appendChild(row);
+    list.appendChild(sessionRow(info, event.current));
   }
 }
 
@@ -2445,10 +3475,20 @@ function openModelSheet(query) {
   send({ type: "models", query });
 }
 
+const RECENT_MODELS_KEY = "aish-recent-models";
+function recentModels() {
+  try { return JSON.parse(localStorage.getItem(RECENT_MODELS_KEY)) || []; }
+  catch { return []; }
+}
+function rememberModel(name) {
+  const list = [name, ...recentModels().filter((n) => n !== name)].slice(0, 5);
+  localStorage.setItem(RECENT_MODELS_KEY, JSON.stringify(list));
+}
+
 function renderModels(event) {
   const list = $("model-list");
   list.replaceChildren();
-  for (const model of event.models) {
+  const modelRow = (model) => {
     const row = document.createElement("button");
     row.className = "row" + (model.name === event.current ? " current" : "");
     row.textContent = model.name;
@@ -2456,20 +3496,32 @@ function renderModels(event) {
     meta.className = "meta";
     meta.textContent = model.desc;
     row.appendChild(meta);
-    row.onclick = () =>
+    row.onclick = () => {
+      rememberModel(model.name);
       send({ type: "set_model", spec: model.name, save: $("model-save").checked });
-    list.appendChild(row);
+    };
+    return row;
+  };
+  // Browsing (no search): surface recently-chosen models up top.
+  if (!$("model-search").value.trim()) {
+    const recents = recentModels()
+      .filter((n) => n !== event.current && event.models.some((m) => m.name === n));
+    if (recents.length) {
+      list.appendChild(sectionLabel("Recent"));
+      for (const n of recents) list.appendChild(modelRow(event.models.find((m) => m.name === n)));
+      list.appendChild(sectionLabel("All models"));
+    }
   }
+  for (const model of event.models) list.appendChild(modelRow(model));
 }
 
 function onModelChanged(event) {
-  $("model-chip").textContent = event.model;
+  $("model-name").textContent = event.model;
   closeSheets();
   showToast(event.saved ? `model: ${event.model} (saved as default)` : `model: ${event.model}`);
 }
 
 // workspace
-$("menu-chip").onclick = () => { openSheet("workspace-sheet"); send({ type: "jobs" }); };
 $("ws-cd-change").onclick = () => openDirSheet();
 $("root-add").onclick = () => {
   const path = $("root-input").value.trim();
@@ -2485,6 +3537,7 @@ function renderWorkspace(event) {
   if (event.cwd) {
     currentCwd = event.cwd;
     $("ws-cwd").textContent = event.cwd;
+    $("cwd-name").textContent = baseName(event.cwd);
     $("cwd-text").textContent = abbreviatePath(event.cwd);
   }
   if (event.roots) $("ws-roots").textContent = event.roots.join("\n");
@@ -2503,6 +3556,12 @@ function abbreviatePath(path) {
   return p.length > 38 ? "…" + p.slice(-37) : p;
 }
 
+// The directory's leaf name — the context bar's bold primary line.
+function baseName(path) {
+  const leaf = path.replace(/\/+$/, "").split("/").pop();
+  return leaf || path;
+}
+
 const RECENT_DIRS_KEY = "aish-recent-dirs";
 function recentDirs() {
   try { return JSON.parse(localStorage.getItem(RECENT_DIRS_KEY)) || []; }
@@ -2519,7 +3578,7 @@ let dirSearchTimer = null;
 
 async function dirsFetch(url, params) {
   if (token) params.set("token", token);
-  const response = await fetch(`${url}?${params}`);
+  const response = await fetch(`${BASE}${url.replace(/^\//, "")}?${params}`);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || response.status);
   return body;
@@ -2536,13 +3595,50 @@ async function browseDir(path) {
   dirPath = body.path;
   dirEntries = body.dirs;
   $("dir-search").value = "";
+  $("dir-sheet").classList.add("browsing");
   renderDirList();
 }
 
-function dirRow(label, meta, onTap, cls = "") {
+// Step 1 of the picker: recent folders + "Choose another folder…" → the
+// browser. Recents SELECT the directory directly; matches the design flow.
+function showDirRecents() {
+  $("dir-sheet").classList.remove("browsing");
+  const list = $("dir-list");
+  list.replaceChildren();
+  const recents = recentDirs();
+  if (recents.length) {
+    list.appendChild(sectionLabel("Recent"));
+    for (const p of recents) {
+      const row = dirRow(baseName(p), abbreviatePath(p), () => selectDir(p), "recent");
+      row.querySelector(".dir-chev").remove(); // a selection, not a descent
+      if (p === currentCwd) row.classList.add("selected");
+      list.appendChild(row);
+    }
+  }
+  const choose = document.createElement("button");
+  choose.type = "button";
+  choose.className = "dir-choose";
+  choose.innerHTML =
+    '<svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 10v5M9.5 12.5h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Choose another folder…';
+  choose.onclick = () => browseDir(currentCwd || homeDir || "/");
+  list.appendChild(choose);
+}
+
+function selectDir(path) {
+  rememberDir(path);
+  send({ type: "cd", path });
+  closeSheets();
+}
+
+const DIR_ICON_FOLDER = '<svg class="dir-ico" viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="var(--folder-fill)" stroke="var(--blue)" stroke-width="1.6"/></svg>';
+const DIR_ICON_UP = '<svg class="dir-ico" viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="var(--blue)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const DIR_CHEVRON = '<svg class="dir-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" fill="none" stroke="var(--sep2)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function dirRow(label, meta, onTap, kind = "folder") {
   const row = document.createElement("button");
   row.type = "button";
-  row.className = `row ${cls}`.trim();
+  row.className = "row dir-row" + (kind === "up" ? " up" : "");
+  row.innerHTML = kind === "up" ? DIR_ICON_UP : DIR_ICON_FOLDER;
   const name = document.createElement("span");
   name.className = "folder";
   name.textContent = label;
@@ -2553,6 +3649,7 @@ function dirRow(label, meta, onTap, cls = "") {
     metaEl.textContent = meta;
     row.appendChild(metaEl);
   }
+  if (kind === "folder" || kind === "recent") row.insertAdjacentHTML("beforeend", DIR_CHEVRON);
   row.onclick = onTap;
   return row;
 }
@@ -2564,12 +3661,47 @@ function sectionLabel(text) {
   return el;
 }
 
+// A tappable full-path breadcrumb at the top so you always know where you are
+// and can jump back up quickly (#13).
+function renderDirCrumb() {
+  const crumb = $("dir-crumb");
+  crumb.replaceChildren();
+  const isHome = homeDir && (dirPath === homeDir || dirPath.startsWith(homeDir + "/"));
+  const rel = (isHome ? dirPath.slice(homeDir.length) : dirPath).replace(/^\/+/, "");
+  const segs = rel ? rel.split("/") : [];
+  const seg = (label, path, last) => {
+    const el = document.createElement(last ? "span" : "button");
+    el.className = "crumb-seg" + (last ? " current" : "");
+    el.textContent = label;
+    if (!last) el.onclick = () => browseDir(path);
+    crumb.appendChild(el);
+  };
+  seg(isHome ? "~" : "/", isHome ? homeDir : "/", segs.length === 0);
+  let acc = isHome ? homeDir : "";
+  segs.forEach((s, i) => {
+    // The "/" root already reads as a separator, so skip it before the first
+    // segment of an absolute path (avoids a leading "/ /").
+    if (!(i === 0 && !isHome)) {
+      const sep = document.createElement("span");
+      sep.className = "crumb-sep";
+      sep.textContent = "/";
+      crumb.appendChild(sep);
+    }
+    acc = acc + "/" + s;
+    seg(s, acc, i === segs.length - 1);
+  });
+}
+
 function renderDirList(deepResults = null) {
   $("dir-current").textContent = abbreviatePath(dirPath);
+  $("dir-use-label").textContent = `Set working directory to “${baseName(dirPath)}”`;
+  renderDirCrumb();
   const list = $("dir-list");
   list.replaceChildren();
   const raw = $("dir-search").value.trim();
   const query = raw.toLowerCase();
+
+  if (!query) list.appendChild(dirRow("Recent folders", null, showDirRecents, "up"));
 
   // Escape hatch: a typed absolute (or ~) path jumps straight there —
   // the rare case the browse/search flow doesn't cover.
@@ -2578,19 +3710,10 @@ function renderDirList(deepResults = null) {
     list.appendChild(dirRow(`Go to ${raw}`, null, () => browseDir(target), "up"));
   }
 
-  if (!query) {
-    const recents = recentDirs().filter((p) => p !== dirPath);
-    if (recents.length) {
-      list.appendChild(sectionLabel("Recent"));
-      for (const p of recents) {
-        list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p)));
-      }
-      list.appendChild(sectionLabel("Folders"));
-    }
-  }
+  if (!query) list.appendChild(sectionLabel("Folders"));
   if (dirPath !== "/") {
     list.appendChild(
-      dirRow("‹ ..", null, () => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/"), "up")
+      dirRow("..", null, () => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/"), "up")
     );
   }
   const visible = dirEntries.filter(
@@ -2604,14 +3727,15 @@ function renderDirList(deepResults = null) {
   if (deepResults && deepResults.length) {
     list.appendChild(sectionLabel("Everywhere"));
     for (const p of deepResults) {
-      list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p)));
+      list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p), "recent"));
     }
   }
 }
 
 function openDirSheet() {
   openSheet("dir-sheet");
-  browseDir(currentCwd || homeDir || "/");
+  dirPath = currentCwd || homeDir || "/";
+  showDirRecents(); // step 1: recents + "Choose another folder…"
 }
 
 $("cwd-chip").onclick = () => openDirSheet();

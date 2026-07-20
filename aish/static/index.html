@@ -11,38 +11,73 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>aish</title>
 <link rel="manifest" href="manifest.json">
-<link rel="icon" href="icon-192.png">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="apple-touch-icon" href="icon-180.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <header id="topbar">
-  <button id="history-chip" class="bar-btn icon" title="session history" aria-label="session history">
-    <svg viewBox="0 0 24 24"><path d="M4.6 5.2v4.2h4.2M4.8 9.4a7.8 7.8 0 1 1-.6 3.4M12 8.2v4.1l2.9 1.7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-  </button>
-  <button id="model-chip" class="bar-btn tinted" title="switch model">…</button>
-  <div id="bar-center">
-    <button id="session-chip" class="bar-title" title="sessions">
+  <!-- nav row: back to sessions · session title (menu) · new chat -->
+  <div id="nav-row">
+    <button id="back-chip" class="nav-back" title="sessions" aria-label="sessions">
+      <span class="back-ico">
+        <svg viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span id="back-badge" hidden></span>
+      </span>
+      <span class="back-label">Sessions</span>
+    </button>
+    <button id="session-chip" class="nav-title" title="session menu">
       <span id="session-title">aish</span>
       <svg class="caret" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
+    <button id="new-chip" class="bar-btn icon" title="new chat" aria-label="new chat">
+      <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+    </button>
+  </div>
+  <!-- context bar: working directory · model -->
+  <div id="context-bar">
     <button id="cwd-chip" title="change directory">
-      <svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
-      <span id="cwd-text">…</span>
+      <svg class="ctx-ico" viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+      <span class="ctx-text">
+        <span id="cwd-name">aish</span>
+        <span id="cwd-text" class="mono">…</span>
+      </span>
+      <svg class="caret" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div class="ctx-div"></div>
+    <button id="model-chip" title="switch model">
+      <span class="model-dot"></span>
+      <span id="model-name">…</span>
       <svg class="caret" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
   </div>
-  <button id="wrap-chip" class="bar-btn icon" title="toggle line wrap" aria-label="toggle line wrap">
-    <svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h12a3.25 3.25 0 0 1 0 6.5h-2.5m0 0 2.2-2.2m-2.2 2.2 2.2 2.2M4 18.5h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-  </button>
-  <button id="new-chip" class="bar-btn icon" title="new chat" aria-label="new chat">
-    <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
-  </button>
-  <button id="menu-chip" class="bar-btn icon" title="workspace" aria-label="workspace">
-    <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="19" cy="12" r="1.7" fill="currentColor"/></svg>
-  </button>
 </header>
+
+<!-- session title menu (settings for the current session) -->
+<div id="session-menu" class="popover-menu" hidden>
+  <button class="menu-item" data-act="new">
+    <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+    New chat
+  </button>
+  <button class="menu-item" data-act="model">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v4.3l2.6 1.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Switch model…
+  </button>
+  <button class="menu-item" data-act="cd">
+    <svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+    Change directory…
+  </button>
+  <button class="menu-item" data-act="wrap">
+    <svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h12a3.25 3.25 0 0 1 0 6.5h-2.5m0 0 2.2-2.2m-2.2 2.2 2.2 2.2M4 18.5h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span class="grow">Line wrap</span><span id="wrap-state" class="menu-state"></span>
+  </button>
+  <button class="menu-item" data-act="workspace">
+    <svg viewBox="0 0 24 24"><path d="M4 7.5h16M4 12h16M4 16.5h16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+    Workspace &amp; jobs…
+  </button>
+</div>
 
 <main id="messages"></main>
 
@@ -71,12 +106,34 @@
 
 <div id="suggest" hidden></div>
 <div id="attachments" hidden></div>
+<div id="queue-list" hidden></div>
+
+<!-- composer + actions (attach / reference / slash / photo) -->
+<div id="composer-actions" class="popover-menu wide" hidden>
+  <button class="action-item" data-act="attach">
+    <span class="action-ico" style="background:var(--blue-glow)"><svg viewBox="0 0 24 24"><path d="M8 4.5h5.5L19 10v9.5a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V5.5a1 1 0 0 1 1-1z" fill="none" stroke="var(--blue)" stroke-width="1.7"/><path d="M13.5 4.5V10H19" fill="none" stroke="var(--blue)" stroke-width="1.7"/></svg></span>
+    <span class="action-text"><span class="action-title">Attach file</span><span class="action-sub">Add a file to context</span></span>
+  </button>
+  <button class="action-item" data-act="reference">
+    <span class="action-ico" style="background:var(--green-glow)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="var(--green)" stroke-width="1.7"/><path d="M16 12v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1" fill="none" stroke="var(--green)" stroke-width="1.7"/></svg></span>
+    <span class="action-text"><span class="action-title">Reference a file</span><span class="action-sub">Point aish at a path — @</span></span>
+  </button>
+  <button class="action-item" data-act="slash">
+    <span class="action-ico" style="background:var(--orange-glow)"><svg viewBox="0 0 24 24"><path d="M14.5 4.5 9.5 19.5" fill="none" stroke="var(--orange)" stroke-width="1.9" stroke-linecap="round"/></svg></span>
+    <span class="action-text"><span class="action-title">Slash command</span><span class="action-sub">Skills &amp; tools — /</span></span>
+  </button>
+  <button class="action-item" data-act="photo">
+    <span class="action-ico" style="background:var(--purple-glow)"><svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5" fill="none" stroke="var(--purple)" stroke-width="1.7"/><circle cx="9" cy="10" r="1.6" fill="var(--purple)"/><path d="M4.5 17 9 13l3 2.5 3-2.5 4.5 4" fill="none" stroke="var(--purple)" stroke-width="1.7" stroke-linejoin="round"/></svg></span>
+    <span class="action-text"><span class="action-title">Photo</span><span class="action-sub">Camera or library</span></span>
+  </button>
+</div>
 
 <form id="composer">
-  <button id="attach" type="button" aria-label="attach files">
-    <svg viewBox="0 0 24 24"><path d="M20.6 11.6 12.4 19.8a5 5 0 0 1-7.1-7.1l8.3-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.2a1.8 1.8 0 0 1-2.6-2.6l7.6-7.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <button id="attach" type="button" aria-label="actions">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
   </button>
   <input id="file-input" type="file" multiple hidden>
+  <input id="photo-input" type="file" accept="image/*" capture="environment" hidden>
   <textarea id="input" rows="1" placeholder="Ask aish"
             autocomplete="off" autocapitalize="sentences" spellcheck="true"></textarea>
   <button id="send" type="submit" aria-label="send">
@@ -87,11 +144,18 @@
 <div id="backdrop" hidden></div>
 
 <!-- sessions drawer -->
-<div id="sessions-sheet" class="sheet" hidden>
-  <div class="grabber"></div>
-  <div class="sheet-head">
-    <input id="sessions-search" type="search" placeholder="Search sessions">
-    <button class="close" aria-label="close" data-close="sessions-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
+<div id="sessions-sheet" class="screen" hidden>
+  <div class="screen-head">
+    <div class="screen-title-row">
+      <div class="screen-title">Sessions</div>
+      <button id="sessions-new" class="bar-btn icon" title="new chat" aria-label="new chat">
+        <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+    <div class="screen-search">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <input id="sessions-search" type="search" placeholder="Search sessions">
+    </div>
   </div>
   <div id="sessions-list" class="sheet-list"></div>
 </div>
@@ -143,15 +207,20 @@
     <strong class="grow">Working directory</strong>
     <button class="close" aria-label="close" data-close="dir-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
   </div>
+  <div class="dir-note">The folder aish reads &amp; runs commands in for <b>this session</b>.</div>
+  <div id="dir-crumb" class="dir-crumb mono"></div>
   <div class="ws-row">
     <input id="dir-search" placeholder="search folders" autocomplete="off"
            autocapitalize="off" spellcheck="false">
   </div>
-  <div class="ws-row dir-current-row">
-    <div id="dir-current" class="mono grow"></div>
-    <button id="dir-use" class="primary">Use</button>
-  </div>
   <div id="dir-list" class="sheet-list"></div>
+  <div class="dir-action">
+    <button id="dir-use" class="primary big">
+      <svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="#fff" stroke-width="1.8"/><path d="M12 10v5M9.5 12.5h5" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <span id="dir-use-label">Use this folder</span>
+    </button>
+    <div id="dir-current" class="mono"></div>
+  </div>
 </div>
 
 <div id="toast" hidden></div>

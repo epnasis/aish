@@ -460,12 +460,16 @@ memory only.
 distills the conversation into saved skills/memory (an optional hint \
 follows, e.g. "/learn the gh flow"; "/learn lessons" migrates the legacy \
 lessons file); the composer also accepts /model /resume /delete /new /cd \
-/add-dir /jobs /help. Header controls: the history button (top left) and the session \
-title both open the sessions drawer, the folder breadcrumb under the title \
-opens a folder picker to change the working directory, the model chip \
-switches models, ＋ starts a new chat, and the ⋯ menu shows workspace state \
-(session roots, background jobs). Swiping the transcript sideways pages \
-through recent chats.
+/add-dir /jobs /help. Header controls: a "‹ Sessions" back button (top left, \
+with a badge when a background session needs attention) opens the sessions \
+drawer; the centered session title opens a menu (new chat, switch model, \
+change directory, line wrap, workspace & jobs); the compose pencil (top right) \
+starts a new chat. A context bar under the title shows the working directory \
+(tap to open a folder picker) and the model (tap to switch). In the composer, \
+the ＋ button opens attach file / reference a path (@) / slash command (/) / \
+photo. Your tool activity (thinking, recalled knowledge, commands and their \
+output) is grouped into one collapsible activity trace per turn. Swiping the \
+transcript sideways pages through recent chats.
 - Several sessions can be open at once; a task keeps running when the user \
 switches to another session and its result is there when they switch back. \
 While you work, messages the user sends are QUEUED and run one after \
@@ -527,6 +531,7 @@ class Session:
         self.busy = False
         self.runner: asyncio.Task | None = None
         self.queue: list[tuple[str, list[str]]] = []  # (text, attachments) waiting
+        self.pending_cwd: str | None = None  # a /cd requested while busy; applied after
         self.last_shown = time.monotonic()
 
     @property
@@ -749,6 +754,8 @@ class WebServer:
             await self._send_files(websocket, str(message.get("query", "")))
         elif kind == "stop":
             await self._stop_task(websocket)
+        elif kind == "dequeue":
+            self._dequeue(str(message.get("text", "")))
         elif kind == "client_debug":
             # Device-side diagnostics (viewport state on iOS, etc.) — printed
             # to the server log because the phone has no reachable console.
@@ -816,6 +823,15 @@ class WebServer:
         for uid in list(session.bridge.pending):
             session.bridge.answer(uid, {"action": "deny"})
         session.bridge.emit({"type": "echo", "text": "✕ stop requested"})
+
+    def _dequeue(self, text: str) -> None:
+        """Drop the first still-waiting message matching `text` (the client's
+        queued-chip remove button). A running task is never affected."""
+        queue = self.active.queue
+        for i, (queued, _attachments) in enumerate(queue):
+            if queued == text:
+                del queue[i]
+                return
 
     async def _start_task(
         self, websocket: WebSocket, text: str, attachments: list[str] | None = None
@@ -886,6 +902,13 @@ class WebServer:
             session.bridge.emit({"type": "error", "text": f"task failed: {exc!r}"})
         finally:
             session.busy = False
+            if session.pending_cwd:  # a /cd requested mid-task, applied now
+                target, session.pending_cwd = session.pending_cwd, None
+                result = session.agent.rebase(target)
+                ws = self.ws
+                if ws is not None and session is self.active and not result.startswith("ERROR"):
+                    with contextlib.suppress(Exception):
+                        await ws.send_json(self._cwd_event())
             if session.queue:
                 text, attachments = session.queue.pop(0)
                 self._launch(session, text, attachments)
@@ -914,6 +937,9 @@ class WebServer:
 
         infos = await asyncio.to_thread(load)
         open_states = {name: s.state() for name, s in self.sessions.items()}
+        # The working directory is known for sessions currently open in memory;
+        # the drawer shows it so parallel agents are legible at a glance.
+        open_cwds = {name: s.agent.cwd for name, s in self.sessions.items()}
         await websocket.send_json(
             {
                 "type": "session_list",
@@ -925,6 +951,7 @@ class WebServer:
                         "snippet": info.snippet,
                         "ts": info.mtime,
                         "state": open_states.get(info.path.name, ""),
+                        "cwd": open_cwds.get(info.path.name, ""),
                     }
                     for info in infos
                 ],
@@ -1067,7 +1094,15 @@ class WebServer:
         )
 
     async def _cd(self, websocket: WebSocket, path: str) -> None:
-        if await self._reject_busy(websocket) or not path:
+        if not path:
+            return
+        # Changing cwd mid-task would move the ground under the running agent —
+        # queue it and apply the moment the task finishes, instead of failing.
+        if self.active.busy:
+            self.active.pending_cwd = path
+            self.active.bridge.emit(
+                {"type": "echo", "text": f"↪ will switch to {path} when this task finishes"}
+            )
             return
         result = await asyncio.to_thread(self.active.agent.rebase, path)
         if result.startswith("ERROR"):
@@ -1332,6 +1367,9 @@ def create_app(
             context=context,
             on_message=logref.message,
             on_token=lambda text: bridge.emit({"type": "token", "text": text}),
+            # Structured activity-trace steps; recorded so a resumed/switched
+            # session replays the whole trace like every other event.
+            on_step=lambda step: bridge.emit({"type": "step", **step}),
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,
             status=WebStatus(bridge),
