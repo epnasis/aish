@@ -1217,12 +1217,24 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .trace-tokens { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--dim); flex: none; }
 .trace-chev { width: 16px; height: 16px; flex: none; color: var(--dim); transition: transform 0.2s; }
 .trace.open .trace-chev { transform: rotate(180deg); }
-.trace-body { display: none; position: relative; padding: 2px 13px 12px; border-top: 0.5px solid var(--sep); }
+.trace-body { display: none; padding: 2px 13px 12px; border-top: 0.5px solid var(--sep); }
 .trace.open .trace-body { display: block; }
-.trace-rail { position: absolute; left: 25px; top: 14px; bottom: 18px; width: 2px; background: var(--rail); }
+/* Steps live in an inner content div; the rail spans its FULL height so it
+   never runs out on a long, scrolled timeline. */
+.trace-inner { position: relative; }
+.trace-rail { position: absolute; left: 12px; top: 6px; bottom: 6px; width: 2px; background: var(--rail); }
 /* Live turn: cap the steps pane so the header (Stop + timer) stays on screen,
    and scroll internally, pinned to the newest step. */
 .trace.live .trace-body { max-height: 46vh; overflow-y: auto; }
+/* Scroll-edge fades: hint that there's more above / below (#scroll indicators). */
+.trace-body::before, .trace-body::after {
+  content: ""; display: block; position: sticky; left: 0; right: 0; height: 20px;
+  pointer-events: none; z-index: 3; opacity: 0; transition: opacity 0.15s;
+}
+.trace-body::before { top: 0; margin-bottom: -20px; background: linear-gradient(var(--bg), transparent); }
+.trace-body::after { bottom: 0; margin-top: -20px; background: linear-gradient(transparent, var(--bg)); }
+.trace-body.more-above::before { opacity: 1; }
+.trace-body.more-below::after { opacity: 1; }
 /* Stop while live; chevron only once finished. */
 .trace-stop {
   flex: none; display: inline-flex; align-items: center; gap: 5px;
@@ -1234,8 +1246,10 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .trace-stop:active { opacity: 0.6; }
 .trace:not(.live) .trace-stop { display: none; }
 .trace.live .trace-chev { display: none; }
-/* The active (in-progress) step, highlighted as the timeline's live last row. */
-.step.active-step { background: var(--live-bg); margin: 2px -8px 0; padding: 8px; border-radius: 10px; }
+/* The active (in-progress) step, highlighted as the timeline's live last row.
+   Opaque background so the rail behind it is covered — the line visibly ends
+   where the box starts, instead of running through it. */
+.step.active-step { background: #10203a; margin: 2px -8px 0; padding: 8px; border-radius: 10px; }
 .step.active-step .step-title { color: var(--blue); }
 .step-timer { font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 600; color: var(--blue); margin-left: auto; padding-left: 8px; }
 .spin.spin-purple { width: 13px; height: 13px; border-color: var(--purple); border-top-color: transparent; }
@@ -1371,3 +1385,17 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .dir-choose svg { width: 19px; height: 19px; }
 .dir-choose:active { opacity: 0.85; }
 .dir-row.selected { background: var(--row-sel-bg); }
+
+/* Stop → Stopping… (button dims until `done` lands) */
+.trace-stop:disabled { opacity: 0.5; }
+.trace.stopping .trace-status .spin { border-color: var(--dim); border-top-color: transparent; }
+
+/* output box: scroll-edge fades (there's more above/below) */
+.out-scroll::before, .out-scroll::after {
+  content: ""; display: block; position: sticky; left: 0; right: 0; height: 16px;
+  pointer-events: none; z-index: 2; opacity: 0; transition: opacity 0.15s;
+}
+.out-scroll::before { top: 0; margin-bottom: -16px; background: linear-gradient(var(--bg), transparent); }
+.out-scroll::after { bottom: 0; margin-top: -16px; background: linear-gradient(transparent, var(--bg)); }
+.out-scroll.more-above::before { opacity: 1; }
+.out-scroll.more-below::after { opacity: 1; }

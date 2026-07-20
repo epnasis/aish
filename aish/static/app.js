@@ -179,9 +179,10 @@ function handle(event) {
       break;
     case "token": onToken(event.text); break;
     case "echo":
-      // The activity trace already shows a run_command's approval + result, so
-      // drop the approver's redundant confirmation line while a trace is open.
-      if (currentTrace && /^[✓✕] (auto-approved|session-allowed|always-allowed|blocked)/.test(event.text)) break;
+      // The activity trace already shows a run_command's approval + result and
+      // its own Stop/Stopping state, so drop the approver's redundant
+      // confirmation and the "stop requested" line while a trace is open.
+      if (currentTrace && /^[✓✕] (auto-approved|session-allowed|always-allowed|blocked|stop requested)/.test(event.text)) break;
       closeAnswer();
       addAnsiMsg("echo", event.text);
       break;
@@ -189,6 +190,7 @@ function handle(event) {
     case "step": traceStep(event); break;
     case "error":
       closeAnswer();
+      finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
       addMsg("error", event.text);
       setBusy(false);
       setStatus(null);
@@ -495,29 +497,56 @@ function ensureTrace() {
     `<svg class="trace-chev" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const body = document.createElement("div");
   body.className = "trace-body";
-  body.innerHTML = '<div class="trace-rail"></div>';
+  // Steps live in an inner content div so the timeline rail spans the FULL
+  // (scrollable) content, not just the visible slice.
+  body.innerHTML = '<div class="trace-inner"><div class="trace-rail"></div></div>';
   el.append(head, body);
   // The head toggles expand ONLY when finished; a live trace stays open.
   head.onclick = (e) => {
     if (e.target.closest(".trace-stop")) return;
     if (!el.classList.contains("live")) el.classList.toggle("open");
   };
-  head.querySelector(".trace-stop").onclick = (e) => { e.stopPropagation(); send({ type: "stop" }); };
+  head.querySelector(".trace-stop").onclick = (e) => {
+    e.stopPropagation();
+    send({ type: "stop" });
+    markStopping(currentTrace); // immediate "Stopping…" feedback in the header
+  };
   messagesEl.appendChild(el);
   currentTrace = {
-    el, head, body, started: 0, secs: 0, tokensIn: 0, tokensOut: 0,
+    el, head, body, inner: body.querySelector(".trace-inner"),
+    started: 0, secs: 0, tokensIn: 0, tokensOut: 0,
     pending: null, thinkingRow: null, startedAt: Date.now(), timer: null,
   };
+  body.addEventListener("scroll", () => updateScrollHints(body));
   currentTrace.timer = setInterval(() => updateTraceHead(currentTrace), 1000);
   refreshStatusline(); // the trace header owns Stop now; hide the bottom bar
   scrollToEnd();
   return currentTrace;
 }
 
+// The Stop button was pressed: reflect it in the header until `done` lands.
+function markStopping(t) {
+  if (!t) return;
+  t.el.classList.add("stopping");
+  const title = t.el.querySelector(".trace-title");
+  if (title) title.textContent = "Stopping…";
+  const btn = t.el.querySelector(".trace-stop");
+  if (btn) btn.disabled = true;
+}
+
+// Fade the top/bottom edge of a scroll box when there's more content there.
+function updateScrollHints(box) {
+  box.classList.toggle("more-above", box.scrollTop > 4);
+  box.classList.toggle("more-below", box.scrollTop + box.clientHeight < box.scrollHeight - 4);
+}
+
 // Keep the newest step visible inside the height-capped live steps pane.
 function pinTrace(t) {
   if (t.el.classList.contains("live")) {
-    requestAnimationFrame(() => { t.body.scrollTop = t.body.scrollHeight; });
+    requestAnimationFrame(() => {
+      t.body.scrollTop = t.body.scrollHeight;
+      updateScrollHints(t.body);
+    });
   }
 }
 
@@ -554,7 +583,7 @@ function traceRow(t, iconHtml, title, sub) {
     main.appendChild(subEl);
   }
   row.append(badge, main);
-  t.body.appendChild(row);
+  t.inner.appendChild(row);
   scrollToEnd();
   pinTrace(t);
   return { row, badge, main, titleEl };
@@ -724,7 +753,12 @@ function outBox(errorMode) {
   const body = box.querySelector(".out-body");
   box.querySelector(".out-wrap").onclick = () => box.classList.toggle("wrap-on");
   box.querySelector(".out-actions").prepend(copyChip(() => body.textContent, "copy output"));
-  box.querySelector(".out-expand").onclick = () => { box.classList.toggle("expanded"); labelExpand(box); };
+  const scroll = box.querySelector(".out-scroll");
+  box.querySelector(".out-expand").onclick = () => {
+    box.classList.toggle("expanded"); labelExpand(box);
+    requestAnimationFrame(() => updateScrollHints(scroll));
+  };
+  scroll.addEventListener("scroll", () => updateScrollHints(scroll));
   return box;
 }
 
@@ -738,6 +772,7 @@ function labelExpand(box) {
 function finalizeOutBox(box, label) {
   if (label) box.querySelector(".out-label").textContent = label;
   if (outLines(box) > 6) { box.classList.add("collapsible"); box.querySelector(".out-expand").hidden = false; labelExpand(box); }
+  requestAnimationFrame(() => updateScrollHints(box.querySelector(".out-scroll")));
 }
 
 // Peel a trailing "[exit code: N]" into the header label.
@@ -809,18 +844,21 @@ function updateTraceHead(t) {
   tokens.textContent = parts.join(" ");
 }
 
-function finishTrace() {
+function finishTrace(errored) {
   if (!currentTrace) return;
   const t = currentTrace;
   if (t.timer) { clearInterval(t.timer); t.timer = null; }
   if (t.thinkingRow) { t.thinkingRow.row.remove(); t.thinkingRow = null; }
   t.pending = null;
+  t.activeStartedAt = null;
   currentTrace = null;
   // A pure-answer turn leaves no steps — drop the empty trace box entirely.
   if (!t.body.querySelector(".step")) { t.el.remove(); refreshStatusline(); return; }
-  t.el.classList.remove("live");
+  t.el.classList.remove("live", "stopping");
   t.el.classList.remove("open"); // collapse to the summary; tap to expand
-  t.el.querySelector(".trace-status").innerHTML = traceSvg("check", "var(--green)");
+  t.el.querySelector(".trace-status").innerHTML = errored
+    ? traceSvg("denied", "var(--red)")
+    : traceSvg("check", "var(--green)");
   updateTraceHead(t);
   refreshStatusline();
 }
