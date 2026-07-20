@@ -2921,8 +2921,11 @@ function dayStart(stamp) {
 }
 
 function sessionGroup(ts) {
-  const today = dayStart(Date.now());
-  const day = dayStart(ts * 1000);
+  const now = Date.now();
+  const ms = ts * 1000;
+  if (now - ms < 8 * 3600 * 1000) return "Last 8 hours";
+  const today = dayStart(now);
+  const day = dayStart(ms);
   if (day >= today) return "Today";
   if (day >= today - DAY_MS) return "Yesterday";
   if (day >= today - 7 * DAY_MS) return "Previous 7 days";
@@ -3005,8 +3008,50 @@ function sessionRow(info, current) {
   stamp.textContent = sessionStamp(info.ts);
   right.append(stamp, sessionDeleteControl(info));
   row.append(sessionIcon(info, isCurrent), body, right);
-  row.onclick = () => { send({ type: "resume", path: info.name }); closeSheets(); };
-  return row;
+  return wrapSwipeDelete(row, info);
+}
+
+// iOS swipe-left-to-delete. The row rides over a red Delete button; a tap on
+// an open row snaps it shut, a tap on a closed row resumes the session.
+function wrapSwipeDelete(row, info) {
+  const wrap = document.createElement("div");
+  wrap.className = "swipe-wrap";
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "swipe-del";
+  del.textContent = "Delete";
+  del.onclick = (e) => { e.stopPropagation(); send({ type: "delete_session", name: info.name }); };
+  wrap.append(del, row);
+  let startX = null, dx = 0, open = false;
+  const set = (x) => { row.style.transform = x ? `translateX(${x}px)` : ""; };
+  row.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    startX = e.clientX; dx = 0;
+  });
+  row.addEventListener("pointermove", (e) => {
+    if (startX === null) return;
+    dx = e.clientX - startX;
+    if (Math.abs(dx) > 6) row.classList.add("dragging");
+    set(Math.min(0, Math.max(-100, (open ? -88 : 0) + dx)));
+  });
+  const finish = () => {
+    if (startX === null) return;
+    const moved = Math.abs(dx) > 6;
+    open = (open ? -88 : 0) + dx < -44;
+    row.classList.remove("dragging");
+    set(open ? -88 : 0);
+    startX = null;
+    if (moved) { row.dataset.swiped = "1"; requestAnimationFrame(() => delete row.dataset.swiped); }
+  };
+  row.addEventListener("pointerup", finish);
+  row.addEventListener("pointercancel", finish);
+  row.onclick = () => {
+    if (row.dataset.swiped) return;      // this "click" was really a swipe
+    if (open) { open = false; set(0); return; } // tap an open row → close it
+    send({ type: "resume", path: info.name });
+    closeSheets();
+  };
+  return wrap;
 }
 
 function renderSessions(event) {
@@ -3094,10 +3139,20 @@ function openModelSheet(query) {
   send({ type: "models", query });
 }
 
+const RECENT_MODELS_KEY = "aish-recent-models";
+function recentModels() {
+  try { return JSON.parse(localStorage.getItem(RECENT_MODELS_KEY)) || []; }
+  catch { return []; }
+}
+function rememberModel(name) {
+  const list = [name, ...recentModels().filter((n) => n !== name)].slice(0, 5);
+  localStorage.setItem(RECENT_MODELS_KEY, JSON.stringify(list));
+}
+
 function renderModels(event) {
   const list = $("model-list");
   list.replaceChildren();
-  for (const model of event.models) {
+  const modelRow = (model) => {
     const row = document.createElement("button");
     row.className = "row" + (model.name === event.current ? " current" : "");
     row.textContent = model.name;
@@ -3105,10 +3160,23 @@ function renderModels(event) {
     meta.className = "meta";
     meta.textContent = model.desc;
     row.appendChild(meta);
-    row.onclick = () =>
+    row.onclick = () => {
+      rememberModel(model.name);
       send({ type: "set_model", spec: model.name, save: $("model-save").checked });
-    list.appendChild(row);
+    };
+    return row;
+  };
+  // Browsing (no search): surface recently-chosen models up top.
+  if (!$("model-search").value.trim()) {
+    const recents = recentModels()
+      .filter((n) => n !== event.current && event.models.some((m) => m.name === n));
+    if (recents.length) {
+      list.appendChild(sectionLabel("Recent"));
+      for (const n of recents) list.appendChild(modelRow(event.models.find((m) => m.name === n)));
+      list.appendChild(sectionLabel("All models"));
+    }
   }
+  for (const model of event.models) list.appendChild(modelRow(model));
 }
 
 function onModelChanged(event) {
