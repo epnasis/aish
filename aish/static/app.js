@@ -191,6 +191,8 @@ function handle(event) {
       addAnsiMsg("echo", event.text);
       break;
     case "stream": traceStream(event.text); break;
+    case "command_start": onCommandStart(event); break;
+    case "command_end": onCommandEnd(event); break;
     case "step": traceStep(event); break;
     case "error":
       closeAnswer();
@@ -725,16 +727,9 @@ function toolStart(t, step) {
   knowledgeTag(ref, step.name);
   ref.row.classList.add("running", "active-step");
   startStepTimer(t, ref);
-  if (step.name === "run_command" && step.command) {
-    const cmd = document.createElement("div");
-    cmd.className = "step-cmd mono";
-    cmd.textContent = step.command;
-    ref.main.appendChild(cmd);
-    const out = document.createElement("div");
-    out.className = "step-output";
-    ref.main.appendChild(out);
-    ref.output = out;
-  }
+  // The command + output + exit for run_command are drawn by the terminal
+  // block that command_start builds once the command is approved and runs;
+  // while the approval card is up the row is just the spinner.
   t.pending = { ...ref, name: step.name };
 }
 
@@ -775,7 +770,14 @@ function toolFinish(t, step) {
   // The user's approval note, shown back on the step (#3), clamped when long.
   if (step.comment) ref.main.appendChild(clampNote(step.comment));
   if (denied) {
-    if (ref.row.querySelector(".step-cmd")) ref.row.querySelector(".step-cmd").classList.add("struck");
+    // A denied/blocked command never runs, so no terminal block is built —
+    // show the command struck-through here with the reason it was skipped.
+    if (step.name === "run_command" && step.command && !ref.row.querySelector(".step-cmd")) {
+      const cmd = document.createElement("div");
+      cmd.className = "step-cmd mono struck";
+      cmd.textContent = step.command;
+      ref.main.appendChild(cmd);
+    }
     // Why it was skipped/blocked (denial comment, gate reason) — #5, #12.
     if (step.output) {
       const why = document.createElement("span");
@@ -784,13 +786,14 @@ function toolFinish(t, step) {
       ref.main.appendChild(why);
     }
   }
-  // command output block (finalize streamed output, or render from the step)
-  if (step.name === "run_command" && step.output && !denied) {
-    let out = ref.output;
-    if (!out) { out = document.createElement("div"); out.className = "step-output"; ref.main.appendChild(out); }
-    const streamed = out.dataset.streamed && out.querySelector(".out-box");
-    if (streamed) finalizeOutBox(streamed, splitExit(step.output)[1]);
-    else renderStepOutput(out, step.output);
+  // An executed run_command's output lives in the terminal block that
+  // command_start/command_end drew and finalized; nothing to render here.
+  // Fallback for a stray replay with no framing events: render the step output.
+  if (step.name === "run_command" && step.output && !denied && !ref.main.querySelector(".term-block")) {
+    const out = document.createElement("div");
+    out.className = "step-output";
+    ref.main.appendChild(out);
+    renderStepOutput(out, step.output);
   }
   // error detail for a failed non-run_command tool (#18)
   if (!step.ok && step.error && step.name !== "run_command") {
@@ -905,17 +908,144 @@ function renderErrorBox(container, text) {
   finalizeOutBox(box, "error");
 }
 
+// ---- terminal block (run_command) ---------------------------------------
+// A single black terminal panel per executed command: a pinned prompt line
+// (dir$ command), a rule, the ANSI output (capped with a "Show all" expander
+// once tall), a rule, and a pinned exit-code line. command_start builds it,
+// stream events fill the output live, command_end sets the exit label. The
+// framing events are recorded, so a session replay reconstructs it identically.
+
+const TERM_OUTPUT_CAP_VH = 40;
+
+// The prompt-line directory: the last path segment with an ellipsis marker
+// (…/aish), so a deep cwd stays short; a very long leaf is itself truncated.
+function promptDir(cwd) {
+  let p = (cwd || "").replace(/\/+$/, "");
+  if (!p) return "/";
+  if (homeDir && p === homeDir) return "~";
+  if (homeDir && p.startsWith(homeDir + "/")) p = "~" + p.slice(homeDir.length);
+  if (p === "/" || p === "~") return p;
+  let leaf = p.split("/").pop() || p;
+  if (leaf.length > 28) leaf = leaf.slice(0, 27) + "…";
+  return "…/" + leaf;
+}
+
+function termRule(cls) {
+  const r = document.createElement("div");
+  r.className = "term-rule " + cls;
+  return r;
+}
+
+function buildTermBlock(cwd, command) {
+  const block = document.createElement("div");
+  block.className = "term-block running";
+
+  const prompt = document.createElement("div");
+  prompt.className = "term-prompt mono";
+  const dir = document.createElement("span");
+  dir.className = "term-dir";
+  dir.textContent = promptDir(cwd);
+  dir.title = cwd || "";
+  const dollar = document.createElement("span");
+  dollar.className = "term-dollar";
+  dollar.textContent = "$";
+  const cmd = document.createElement("span");
+  cmd.className = "term-cmd";
+  cmd.textContent = command || "";
+  prompt.append(dir, dollar, cmd);
+
+  const outWrap = document.createElement("div");
+  outWrap.className = "term-out-wrap";
+  const out = document.createElement("div");
+  out.className = "term-out mono";
+  const fade = document.createElement("div");
+  fade.className = "term-fade";
+  // Copy grabs the OUTPUT only — the two rules reinforce that the prompt line
+  // and exit code aren't part of it.
+  outWrap.append(copyChip(() => out.textContent, "copy output"), out, fade);
+
+  const showall = document.createElement("button");
+  showall.type = "button";
+  showall.className = "term-showall";
+  showall.textContent = "Show all output";
+  showall.onclick = () => {
+    const on = block.classList.toggle("expanded");
+    showall.textContent = on ? "Show less" : "Show all output";
+  };
+
+  const exit = document.createElement("div");
+  exit.className = "term-exit mono";
+  const label = document.createElement("span");
+  label.className = "term-exit-label";
+  label.innerHTML = SPINNER + "<span>running</span>";
+  exit.appendChild(label);
+
+  block.append(prompt, termRule("term-rule-top"), outWrap, showall,
+    termRule("term-rule-bot"), exit);
+  return block;
+}
+
+function onCommandStart(event) {
+  const t = ensureTrace();
+  const block = buildTermBlock(event.cwd, event.command);
+  const pending = t.pending && t.pending.name === "run_command" ? t.pending : null;
+  if (pending) {
+    pending.main.appendChild(block);
+    pending.term = block;
+  } else {
+    // No matching run_command row (unusual replay ordering): synthesize one.
+    const ref = traceRow(t, traceSvg("command", "var(--green)"), "run_command", "");
+    ref.main.appendChild(block);
+    t.pending = { ...ref, name: "run_command", term: block };
+  }
+  scrollToEnd();
+  pinTrace(t);
+}
+
+function onCommandEnd(event) {
+  const t = currentTrace;
+  const block = t && t.pending && t.pending.term;
+  if (block) finalizeTermBlock(block, event);
+}
+
+function finalizeTermBlock(block, event) {
+  block.classList.remove("running");
+  const out = block.querySelector(".term-out");
+  const hasOutput = out.textContent.trim() !== "";
+  if (!hasOutput) block.classList.add("no-output"); // collapse the middle zone
+
+  const label = block.querySelector(".term-exit-label");
+  let cls, text;
+  if (event.status === "detached") {
+    cls = "detached"; text = event.job ? `detached · pid ${event.job}` : "detached";
+  } else if (event.status === "interrupted") {
+    cls = "bad"; text = "interrupted";
+  } else if (typeof event.exit_code === "number") {
+    cls = event.exit_code === 0 ? "ok" : "bad"; text = `exit ${event.exit_code}`;
+  } else {
+    cls = "bad"; text = "error"; // e.g. the command never started
+  }
+  label.className = "term-exit-label " + cls;
+  label.textContent = text;
+
+  // Cap tall output with a "Show all" expander instead of an inner scroll
+  // region — expanding flows into the page's own scroll (iOS-safe). Measured
+  // synchronously here, not in a rAF: command_end is processed just before the
+  // turn's "done" collapses the trace (display:none), which would zero out
+  // scrollHeight and defeat the check.
+  const cap = (window.innerHeight * TERM_OUTPUT_CAP_VH) / 100;
+  if (hasOutput && out.scrollHeight > cap + 12) block.classList.add("capped");
+}
+
 function traceStream(text) {
-  // While a run_command step is live, its output streams into the trace row;
-  // otherwise (a user-run !command, no active trace) it renders inline.
-  if (currentTrace && currentTrace.pending && currentTrace.pending.output) {
-    const out = currentTrace.pending.output;
-    out.dataset.streamed = "1";
-    let box = out.querySelector(".out-box");
-    if (!box) { out.replaceChildren(); box = outBox(false); out.appendChild(box); }
-    const body = box.querySelector(".out-body");
+  // While a run_command is live, its output streams into the terminal block
+  // command_start built; otherwise (no active block) it renders inline.
+  const term = currentTrace && currentTrace.pending && currentTrace.pending.term;
+  if (term) {
+    const body = term.querySelector(".term-out");
     if (body.childNodes.length) body.appendChild(document.createTextNode("\n"));
     body.appendChild(ansiFragment(text));
+    term.classList.add("has-output");
     scrollToEnd();
     pinTrace(currentTrace);
     return;
