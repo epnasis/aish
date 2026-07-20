@@ -2696,8 +2696,8 @@ function openSessionsSheet(query) {
 // Only the states the user can act on. "idle but open in server memory" is
 // an implementation detail — resume behaves identically either way.
 const STATE_BADGES = {
-  running: ["● running", "st-running"],
-  waiting: ["● needs approval", "st-waiting"],
+  running: ["Running", "st-running"],
+  waiting: ["Needs approval", "st-waiting"],
 };
 
 const DAY_MS = 86400000;
@@ -2727,6 +2727,68 @@ function sessionStamp(ts) {
   return `${date.toLocaleDateString([], { day: "numeric", month: "short" })}, ${time}`;
 }
 
+const SESSION_ICONS = {
+  waiting: `<svg viewBox="0 0 24 24"><path d="M12 3.5 21 19H3z" fill="none" stroke="var(--orange)" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v3.6M12 16.4v.1" stroke="var(--orange)" stroke-width="1.9" stroke-linecap="round"/></svg>`,
+  current: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="var(--blue)" stroke-width="1.8"/><path d="M8.5 12.5l2.3 2.3 4.7-5" stroke="var(--blue)" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  idle: `<svg viewBox="0 0 24 24"><path d="M5 6h13M5 12h14M5 18h9" stroke="var(--dim)" stroke-width="1.9" stroke-linecap="round"/></svg>`,
+};
+
+function sessionIcon(info, isCurrent) {
+  const wrap = document.createElement("span");
+  wrap.className = "row-icon";
+  if (info.state === "running") {
+    wrap.style.background = "var(--green-glow)";
+    wrap.innerHTML = '<span class="spin"></span>';
+  } else if (info.state === "waiting") {
+    wrap.style.background = "var(--orange-glow)";
+    wrap.innerHTML = SESSION_ICONS.waiting;
+  } else if (isCurrent) {
+    wrap.style.background = "var(--blue-glow)";
+    wrap.innerHTML = SESSION_ICONS.current;
+  } else {
+    wrap.style.background = "var(--chip-bg)";
+    wrap.innerHTML = SESSION_ICONS.idle;
+  }
+  return wrap;
+}
+
+function sessionRow(info, current) {
+  const isCurrent = info.name === current;
+  const row = document.createElement("button");
+  row.className = "row session-row" + (isCurrent ? " current" : "");
+  const body = document.createElement("span");
+  body.className = "session-body";
+  const head = document.createElement("span");
+  head.className = "line";
+  const title = document.createElement("span");
+  title.className = "title";
+  title.textContent = info.title;
+  head.appendChild(title);
+  const badgeSpec = STATE_BADGES[info.state];
+  if (badgeSpec) {
+    const badge = document.createElement("span");
+    badge.className = `badge ${badgeSpec[1]}`;
+    badge.textContent = badgeSpec[0];
+    head.appendChild(badge);
+  }
+  body.appendChild(head);
+  if (info.snippet) {
+    const snippet = document.createElement("span");
+    snippet.className = "snippet";
+    snippet.textContent = info.snippet;
+    body.appendChild(snippet);
+  }
+  const right = document.createElement("span");
+  right.className = "session-right";
+  const stamp = document.createElement("span");
+  stamp.className = "stamp";
+  stamp.textContent = sessionStamp(info.ts);
+  right.append(stamp, sessionDeleteControl(info));
+  row.append(sessionIcon(info, isCurrent), body, right);
+  row.onclick = () => { send({ type: "resume", path: info.name }); closeSheets(); };
+  return row;
+}
+
 function renderSessions(event) {
   const list = $("sessions-list");
   list.replaceChildren();
@@ -2734,50 +2796,28 @@ function renderSessions(event) {
     list.textContent = "no matching sessions";
     return;
   }
-  // Server order kept as-is: recency (same list the swipe pager pages
-  // through, newest at top — swiping back = moving down this list), or
-  // ranked when searching. Day headers only while browsing: search results
-  // are ordered by relevance, so grouping them by date would lie.
+  // Ranked search results are ordered by relevance, so date/status grouping
+  // would lie — render a flat list there. While browsing, running/waiting
+  // sessions surface under "Active now"; the rest keep date headers.
   const grouped = !$("sessions-search").value.trim();
+  if (!grouped) {
+    for (const info of event.sessions) list.appendChild(sessionRow(info, event.current));
+    return;
+  }
+  const active = event.sessions.filter((s) => s.state === "running" || s.state === "waiting");
+  const rest = event.sessions.filter((s) => !(s.state === "running" || s.state === "waiting"));
+  if (active.length) {
+    list.appendChild(sectionLabel("Active now"));
+    for (const info of active) list.appendChild(sessionRow(info, event.current));
+  }
   let lastGroup = null;
-  for (const info of event.sessions) {
-    if (grouped) {
-      const group = sessionGroup(info.ts);
-      if (group !== lastGroup) {
-        list.appendChild(sectionLabel(group));
-        lastGroup = group;
-      }
+  for (const info of rest) {
+    const group = sessionGroup(info.ts);
+    if (group !== lastGroup) {
+      list.appendChild(sectionLabel(group));
+      lastGroup = group;
     }
-    const row = document.createElement("button");
-    const isCurrent = info.name === event.current;
-    row.className = "row session-row" + (isCurrent ? " current" : "");
-    const head = document.createElement("span");
-    head.className = "line";
-    const title = document.createElement("span");
-    title.className = "title";
-    title.textContent = info.title;
-    head.appendChild(title);
-    const badgeSpec = STATE_BADGES[info.state];
-    if (badgeSpec) {
-      const badge = document.createElement("span");
-      badge.className = `badge ${badgeSpec[1]}`;
-      badge.textContent = badgeSpec[0];
-      head.appendChild(badge);
-    }
-    const stamp = document.createElement("span");
-    stamp.className = "stamp";
-    stamp.textContent = sessionStamp(info.ts);
-    head.appendChild(stamp);
-    head.appendChild(sessionDeleteControl(info));
-    row.appendChild(head);
-    if (info.snippet) {
-      const snippet = document.createElement("span");
-      snippet.className = "snippet";
-      snippet.textContent = info.snippet;
-      row.appendChild(snippet);
-    }
-    row.onclick = () => { send({ type: "resume", path: info.name }); closeSheets(); };
-    list.appendChild(row);
+    list.appendChild(sessionRow(info, event.current));
   }
 }
 
