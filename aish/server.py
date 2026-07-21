@@ -506,7 +506,10 @@ command or file read reaches outside the session roots, its card warns about \
 the escape and offers "Trust directory": one tap adds that directory to the \
 session roots, so allowlisted work there auto-approves afterwards — also in \
 memory only.
-- There are NO ! direct commands here. A message starting with /learn \
+- A message the user prefixes with ! runs directly as a shell command — their \
+own action, without you and without an approval card (just as in the terminal); \
+!cd <dir> is the /cd alias that moves the project directory. A message starting \
+with /learn \
 distills the conversation into saved skills/memory (an optional hint \
 follows, e.g. "/learn the gh flow"; "/learn lessons" migrates the legacy \
 lessons file); the composer also accepts /model /resume /delete /new /fork \
@@ -679,12 +682,13 @@ class WebServer:
 
     @staticmethod
     def _title(session: Session) -> str:
-        """The conversation title, same derivation as the sessions drawer:
-        the first user message ('' while the session is still empty)."""
-        for message in session.agent.messages[1:]:
-            if message.get("role") == "user":
-                return " ".join((message.get("content") or "").split())[:80]
-        return ""
+        """The conversation title, same derivation as the sessions drawer
+        (SessionLog._derive_title) so a ! command reads as '! <cmd>' rather than
+        its internal '[I ran … myself]' annotation. '' while still empty."""
+        messages = session.agent.messages[1:]
+        if not any(m.get("role") == "user" for m in messages):
+            return ""
+        return SessionLog._derive_title(messages)[:80]
 
     def _hello(self, pager: list[tuple[str, str]] | None = None) -> dict:
         session = self.active
@@ -933,6 +937,18 @@ class WebServer:
         self._launch(session, text, attachments or [])
 
     def _launch(self, session: Session, text: str, attachments: list[str]) -> None:
+        # A ! prefix runs the typed text directly as a shell command — the
+        # user's own action, no model and no approval gate — mirroring the CLI's
+        # ! escape (cli.main). It is checked before the / slash handling and the
+        # model task path so a general !command never reaches the model; !cd
+        # stays the /cd alias and is dispatched below inside _run_user_command.
+        if text.startswith("!"):
+            session.busy = True
+            session.bridge.emit({"type": "user", "text": text})
+            session.runner = asyncio.ensure_future(
+                self._run_user_command(session, text[1:].strip())
+            )
+            return
         # Attachments classify at start time so a model switch while queued
         # is honored (vision support is per-backend).
         images, documents, notes = self._classify_attachments(session.agent, attachments)
@@ -987,29 +1003,67 @@ class WebServer:
         except Exception as exc:  # noqa: BLE001 — a task bug must not kill the server
             session.bridge.emit({"type": "error", "text": f"task failed: {exc!r}"})
         finally:
-            session.busy = False
-            if session.pending_cwd:  # a /cd requested mid-task, applied now
-                target, session.pending_cwd = session.pending_cwd, None
-                result = session.agent.rebase(target)
+            await self._finish_turn(session)
+
+    async def _run_user_command(self, session: Session, command: str) -> None:
+        """A ! command: run the typed text directly as the user's own action —
+        no model, no approval gate — exactly like the CLI's ! escape. !cd is the
+        /cd alias, so it moves cwd + re-anchors the root AND refreshes the UI
+        cwd (like the / slash /cd path); any other command streams into a
+        terminal block. Nothing here is model-driven, so the approval gate is
+        untouched — the user typing a command is its own authorization."""
+        try:
+            if not command:
+                return
+            session.logref.command(command, "user-direct")
+            cd_target = session.agent._parse_cd(command)
+            if cd_target is not None:
+                result = await asyncio.to_thread(session.agent.rebase, cd_target)
                 ws = self.ws
-                if ws is not None and session is self.active and not result.startswith("ERROR"):
+                if (
+                    ws is not None
+                    and session is self.active
+                    and not result.startswith("ERROR")
+                ):
                     with contextlib.suppress(Exception):
                         await ws.send_json(self._cwd_event())
-            if session.queue:
-                text, attachments = session.queue.pop(0)
-                self._launch(session, text, attachments)
-            elif session is not self.active and self.ws is not None:
-                try:  # heads-up toast; the drawer badge is the durable signal
-                    await self.ws.send_json(
-                        {
-                            "type": "session_state",
-                            "session": session.name,
-                            "title": self._title(session),
-                            "state": "idle",
-                        }
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
+            else:
+                await asyncio.to_thread(session.agent.run_user_command, command)
+            # The output already streamed into its terminal block; an empty
+            # `done` just clears the busy state without a duplicate answer bubble.
+            session.bridge.emit({"type": "done", "result": ""})
+        except Exception as exc:  # noqa: BLE001 — a bad command must not kill the server
+            session.bridge.emit({"type": "error", "text": f"command failed: {exc!r}"})
+        finally:
+            await self._finish_turn(session)
+
+    async def _finish_turn(self, session: Session) -> None:
+        """Shared end-of-turn drain for both the model task and ! command paths:
+        clear busy, apply a /cd requested mid-turn, then start the next queued
+        message or signal a background session's return to idle."""
+        session.busy = False
+        if session.pending_cwd:  # a /cd requested mid-turn, applied now
+            target, session.pending_cwd = session.pending_cwd, None
+            result = session.agent.rebase(target)
+            ws = self.ws
+            if ws is not None and session is self.active and not result.startswith("ERROR"):
+                with contextlib.suppress(Exception):
+                    await ws.send_json(self._cwd_event())
+        if session.queue:
+            text, attachments = session.queue.pop(0)
+            self._launch(session, text, attachments)
+        elif session is not self.active and self.ws is not None:
+            try:  # heads-up toast; the drawer badge is the durable signal
+                await self.ws.send_json(
+                    {
+                        "type": "session_state",
+                        "session": session.name,
+                        "title": self._title(session),
+                        "state": "idle",
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _send_sessions(self, websocket: WebSocket, query: str) -> None:
         # The active session is listed too (marked "current" in the drawer) —
