@@ -208,6 +208,7 @@ function handle(event) {
       setStatus(null);
       notify("aish — task failed", event.text);
       break;
+    case "stopped": onStopped(); break;
     case "status": onStatus(event); break;
     case "approval_request": onApprovalRequest(event); break;
     case "approval_resolved": onApprovalResolved(event); break;
@@ -435,6 +436,18 @@ function onDone(event) {
   // never on the bottom of a long answer.
   if (!replaying) requestAnimationFrame(() => anchorAnswer(true));
   notify("aish — answer ready", event.result);
+}
+
+// The server had nothing running for this session when Stop was pressed (#48).
+// The foreground may be wedged showing "working" (e.g. a terminal event that
+// never landed) — reconcile it to idle quietly: collapse any live trace and
+// clear busy WITHOUT the red "task failed" box, red dot, or notification a
+// real `error` carries. Stop thus always succeeds instead of dead-ending.
+function onStopped() {
+  closeAnswer();
+  finishTrace();
+  setBusy(false);
+  setStatus(null);
 }
 
 function addSources(sources) {
