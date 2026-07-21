@@ -7,12 +7,18 @@ browser answers — the approval gate is identical to the terminal's, only the
 transport differs.
 
 Process model: one process holds MANY open sessions (each its own Agent +
-SessionLog + transcript + busy flag) but shows ONE to the single connected
-client. Tasks keep running in background sessions; switching sessions just
-replays the target's transcript, so a task started in one session finishes
-while you work in another. A new connection replaces the old one and receives
-the active session's buffered transcript, which is what makes phone
-lock/unlock mid-task lossless.
+SessionLog + transcript + busy flag) and serves MANY connections at once
+(#102). Each connection is a Client with its own socket, outbox, and
+independently-chosen session view; a session's events fan out to every Client
+currently viewing it. Connections coexist without preempting — same token, one
+user, many tabs/devices. Tasks keep running in background sessions; switching a
+Client's view just replays the target's transcript, so a task started in one
+session finishes while you work in another, and a reconnect (or a second tab)
+receives the buffered transcript — which is what makes phone lock/unlock
+mid-task lossless. Control is last-actor-drives: acting on a session stamps that
+Client as its controller (a `role` event tells the other viewers); there is no
+locked role and no disabled UI — the approval gate itself is unchanged, only
+fanned out.
 """
 
 import argparse
@@ -188,19 +194,22 @@ CLOSE_BAD_TOKEN = 4403
 class Bridge:
     """Bridges one session's agent worker thread to the event loop.
 
-    Outbound events go through call_soon_threadsafe into an asyncio queue a
-    sender coroutine drains — but only while this session is the one shown
-    (`attached`); a background session's events land in its transcript alone
-    and surface on the next switch. Approval requests additionally block the
-    worker on a plain queue.Queue slot until the client's answer fills it.
-    The transcript buffer is only ever touched on the loop thread (inside
-    _put), so replay snapshots need no locking.
+    Outbound events go through call_soon_threadsafe into `_put`, which appends
+    to the transcript and fans the event out to EVERY client currently viewing
+    this session (each Client drains its own outbox to its own socket). A
+    background session with no viewers still records into its transcript alone
+    and surfaces on the next switch. Approval requests additionally block the
+    worker on a plain queue.Queue slot until a viewer's answer fills it.
+
+    The transcript buffer and the viewer set are only ever touched on the loop
+    thread (inside _put, or in _show which runs on the loop) — every
+    viewer-outbox push therefore happens on the loop thread too, so replay
+    snapshots and fan-out both need no locking.
     """
 
     def __init__(self, get_loop):
         self._get_loop = get_loop
-        self.attached = False
-        self.outbox: asyncio.Queue = asyncio.Queue()
+        self.viewers: set = set()  # Clients currently viewing this session
         self.pending: dict[str, queue.Queue] = {}
         self.transcript: list[dict] = []
         self.truncated = False
@@ -227,8 +236,11 @@ class Bridge:
                 if len(self.transcript) > TRANSCRIPT_MAX:
                     del self.transcript[: len(self.transcript) - TRANSCRIPT_KEEP]
                     self.truncated = True
-        if self.attached:
-            self.outbox.put_nowait(event)
+        # Fan the event out to every attached viewer. Runs on the loop thread
+        # (call_soon_threadsafe / _show), so mutating a Client's asyncio queue
+        # is safe and the viewer set can't change underfoot.
+        for client in self.viewers:
+            client.outbox.put_nowait(event)
 
     def ask(self, event: dict) -> dict:
         """Emit an approval_request (id added in place) and block the calling
@@ -247,15 +259,12 @@ class Bridge:
     def answer(self, uid: str, value: dict) -> bool:
         slot = self.pending.get(uid)
         if slot is None:
-            return False  # stale/duplicate answer (e.g. from a replaced tab)
+            return False  # stale/duplicate answer (already answered, or gone)
         try:
             slot.put_nowait(value)
         except queue.Full:
             return False
         return True
-
-    def reset_outbox(self) -> None:
-        self.outbox = asyncio.Queue()
 
 
 class WebStatus:
@@ -613,6 +622,21 @@ files with read_file, process binaries with shell tools — in that mode you \
 cannot see image contents, and should say so if asked to describe one."""
 
 
+class Client:
+    """One WebSocket connection. Per-connection state that used to live on
+    WebServer (the socket, its sender task, and which session it shows) lives
+    here so N connections coexist without preempting each other. Each Client
+    drains its OWN outbox to its OWN socket, so a session's events fan out to
+    every viewer independently."""
+
+    def __init__(self, ws: WebSocket):
+        self.id = uuid.uuid4().hex
+        self.ws = ws
+        self.outbox: asyncio.Queue = asyncio.Queue()
+        self.viewing: Session | None = None
+        self.sender: asyncio.Task | None = None
+
+
 class Session:
     """One open conversation: its own agent, log, transcript, and busy flag."""
 
@@ -627,6 +651,16 @@ class Session:
         self.pending_retry: str | None = None  # a retry requested while busy; run after stop
         self.last_shown = time.monotonic()
         self.custom_title: str | None = None  # a user-set name; overrides the derived title
+        # last-actor-drives (#102): whoever last performed a session-affecting
+        # action. Observers viewing this session see a "another tab is active"
+        # hint; acting claims control. Never persisted — replay re-derives it.
+        self.controller: Client | None = None
+
+    @property
+    def viewers(self) -> set:
+        """Clients currently viewing this session. Owned by the bridge (it fans
+        events out to them); exposed here so callers read it off the Session."""
+        return self.bridge.viewers
 
     @property
     def name(self) -> str:
@@ -643,7 +677,13 @@ class Session:
 
 
 class WebServer:
-    """Per-process state: open sessions, the one being shown, one client."""
+    """Per-process SHARED state: open sessions and the connected clients.
+
+    Multi-connection (#102): N sockets (phone, laptop, headless test) coexist
+    without preempting. Per-connection state — the socket, its sender, and which
+    session it shows — lives on each Client; the WebServer holds only what is
+    shared across them. A default session is opened at startup and is where a
+    bare (no ?session=) connection lands."""
 
     def __init__(self, open_session, state_dir, config_path, token):
         self.open_session = open_session  # (path | None) -> Session
@@ -653,20 +693,19 @@ class WebServer:
         self.token = token
         self.loop: asyncio.AbstractEventLoop | None = None
         self.sessions: dict[str, Session] = {}
-        self._active: Session | None = None
-        self.ws: WebSocket | None = None
-        self.sender: asyncio.Task | None = None
+        self.clients: set[Client] = set()
+        self._default: Session | None = None  # bare-connection landing session
 
     @property
     def active(self) -> Session:
-        """The session shown to the client. Set before the server accepts any
-        traffic (a session is opened at startup), so None only during init."""
-        assert self._active is not None, "no active session yet"
-        return self._active
-
-    @active.setter
-    def active(self, session: Session) -> None:
-        self._active = session
+        """A representative session for HTTP endpoints (no socket context) and
+        for tests. With one connection this is that client's view; otherwise it
+        falls back to the default startup session. Never None after startup."""
+        for client in self.clients:
+            if client.viewing is not None:
+                return client.viewing
+        assert self._default is not None, "no active session yet"
+        return self._default
 
     async def startup(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -678,28 +717,59 @@ class WebServer:
         for session in self.sessions.values():
             for uid in list(session.bridge.pending):
                 session.bridge.answer(uid, {"action": "deny"})
-        if self.ws is not None:
+        for client in list(self.clients):
             with contextlib.suppress(Exception):
-                await self.ws.close()
+                await client.ws.close()
 
-    def add_session(self, session: Session, activate: bool = True) -> None:
+    def add_session(self, session: Session, default: bool = True) -> None:
         self.sessions[session.name] = session
-        if activate:
-            self.active = session
+        if default:
+            self._default = session
 
     def _evict_idle(self) -> None:
-        """Close the longest-idle non-busy background session past the cap.
-        Running sessions are never closed — the cap can be exceeded by work."""
+        """Close the longest-idle background session past the cap. Sessions that
+        are busy, have a viewer, or are the default landing session are never
+        closed — the cap can be exceeded by work or by open views (#102)."""
         while len(self.sessions) >= MAX_OPEN_SESSIONS:
             idle = [
                 s for s in self.sessions.values()
-                if not s.busy and s is not self._active
+                if not s.busy and not s.viewers and s is not self._default
             ]
             if not idle:
                 return
             oldest = min(idle, key=lambda s: s.last_shown)
             oldest.close()
             del self.sessions[oldest.name]
+
+    def _claim(self, client: Client) -> None:
+        """last-actor-drives (#102): an action from `client` stamps it as the
+        controller of the session it is viewing. Broadcasts a fresh `role` to
+        that session's viewers when control actually changes, so every tab
+        learns whether IT is now the driver. A no-op if it was already driving
+        (idempotent — most actions in a row come from the same tab)."""
+        session = client.viewing
+        if session is None or session.controller is client:
+            return
+        session.controller = client
+        self._broadcast_role(session)
+
+    @staticmethod
+    def _broadcast_role(session: Session) -> None:
+        """Tell each viewer who currently drives `session`. NON-recorded (like
+        status/cwd_changed): control is live membership state, so a cold replay
+        re-derives it rather than resurrecting a stale controller. Pushed
+        straight to each viewer's outbox — callers run on the loop thread."""
+        controller = session.controller
+        cid = controller.id if controller is not None else None
+        for viewer in session.viewers:
+            viewer.outbox.put_nowait(
+                {
+                    "type": "role",
+                    "session": session.name,
+                    "controller": cid,
+                    "you": controller is viewer,
+                }
+            )
 
     @staticmethod
     def _title(session: Session) -> str:
@@ -714,8 +784,7 @@ class WebServer:
             return ""
         return SessionLog._derive_title(messages)[:80]
 
-    def _hello(self, pager: list[tuple[str, str]] | None = None) -> dict:
-        session = self.active
+    def _hello(self, session: Session, pager: list[tuple[str, str]] | None = None) -> dict:
         # The swipe pager pages through recent chats oldest→newest by last
         # interaction — open or not; resume loads cold ones from disk. The
         # current session is always a page even before its first message
@@ -736,11 +805,12 @@ class WebServer:
             "pager": pages,
         }
 
-    def _cwd_event(self) -> dict:
+    @staticmethod
+    def _cwd_event(session: Session) -> dict:
         return {
             "type": "cwd_changed",
-            "cwd": self.active.agent.cwd,
-            "roots": [str(root) for root in self.active.agent.roots],
+            "cwd": session.agent.cwd,
+            "roots": [str(root) for root in session.agent.roots],
         }
 
     async def handle_ws(self, websocket: WebSocket) -> None:
@@ -752,59 +822,82 @@ class WebServer:
             await websocket.close(code=CLOSE_BAD_TOKEN)
             return
         await websocket.accept()
-        await self._attach(websocket)
+        # A new connection NEVER preempts an existing one (#102): it becomes its
+        # own Client and coexists. The old single-client CLOSE_REPLACED path is
+        # gone — many tabs/devices share the same token and drive by acting.
+        client = Client(websocket)
+        self.clients.add(client)
+        await self._attach(client)
         try:
             while True:
                 message = await websocket.receive_json()
                 if isinstance(message, dict):
-                    await self._handle(websocket, message)
+                    await self._handle(client, message)
         except WebSocketDisconnect:
             pass
         finally:
-            if self.ws is websocket:
-                if self.sender:
-                    self.sender.cancel()
-                    self.sender = None
-                self.ws = None
+            self._detach(client)
 
-    async def _attach(self, websocket: WebSocket) -> None:
-        old = self.ws
-        self.ws = websocket
-        if old is not None:
-            try:
-                await old.close(code=CLOSE_REPLACED)
-            except Exception:  # noqa: BLE001 — the old socket may already be dead
-                pass
+    def _detach(self, client: Client) -> None:
+        """Tear a disconnected client down: stop its sender, drop it from the
+        session it viewed, and hand off control if it was the driver."""
+        if client.sender:
+            client.sender.cancel()
+            client.sender = None
+        self.clients.discard(client)
+        self._leave(client)
+
+    def _leave(self, client: Client) -> None:
+        """Remove `client` from its viewed session's viewer set. If it was that
+        session's controller, control is released (controller = None) and a
+        fresh `role` tells the remaining viewers nobody is driving now. A plain
+        observer leaving changes no one's role, so it emits nothing."""
+        session = client.viewing
+        if session is None:
+            return
+        session.viewers.discard(client)
+        client.viewing = None
+        if session.controller is client:
+            session.controller = None
+            self._broadcast_role(session)
+
+    async def _attach(self, client: Client) -> None:
         # A reconnecting client names the session it was on (?session=...).
         # Without this, a server restart lands every client in the fresh
         # startup session — silently moving the user out of their chat.
-        wanted = websocket.query_params.get("session", "")
-        session = self.active
+        wanted = client.ws.query_params.get("session", "")
+        session = self._default
+        assert session is not None, "no default session yet"
         if wanted and wanted != session.name:
-            session = await self._open_by_name(wanted) or self.active
-        await self._show(websocket, session)
+            session = await self._open_by_name(wanted) or session
+        await self._show(client, session)
 
-    async def _show(self, websocket: WebSocket, session: Session) -> None:
-        """Point the client at `session`: hello + full transcript replay,
-        then live events from its bridge."""
+    async def _show(self, client: Client, session: Session) -> None:
+        """Point `client` at `session`: hello + full transcript replay, then
+        live events from its own outbox. Does NOT affect other clients — each
+        views independently (#102)."""
         # Disk scan for the pager happens before the attach block below: it
-        # must not sit between the queue swap and the transcript snapshot.
+        # must not sit between joining the viewer set and the transcript
+        # snapshot.
         pager = await asyncio.to_thread(SessionLog.pager_titles, self.state_dir)
-        if self.sender:
-            self.sender.cancel()
-            self.sender = None
-        for other in self.sessions.values():
-            other.bridge.attached = False
-        self.active = session
+        if client.sender:
+            client.sender.cancel()
+            client.sender = None
+        # Leave whatever this client was viewing before pointing it at the new
+        # session (drops it from the old viewer set; releases control there).
+        self._leave(client)
+        client.viewing = session
         session.last_shown = time.monotonic()
         bridge = session.bridge
-        # Same synchronous block: no _put callback can land between the queue
-        # swap and the snapshot, so replay + live stream never duplicate.
-        bridge.attached = True
-        bridge.reset_outbox()
+        # Fresh outbox so events buffered for the previous view don't leak into
+        # this one; join the viewer set and snapshot in the SAME synchronous
+        # block — no _put can land between join and snapshot (single loop
+        # thread), so replay + live stream never duplicate or drop an event.
+        client.outbox = asyncio.Queue()
+        session.viewers.add(client)
         snapshot = list(bridge.transcript)
-        await websocket.send_json(self._hello(pager))
-        await websocket.send_json(
+        await client.ws.send_json(self._hello(session, pager))
+        await client.ws.send_json(
             {"type": "replay", "events": snapshot, "truncated": bridge.truncated}
         )
         # The queued-cwd card is backend-authoritative (single pending_cwd), so
@@ -812,79 +905,103 @@ class WebServer:
         # (#92) — this survives reconnects and session switches. Sent after the
         # replay so it lands on top of the freshly-rebuilt queue list.
         if session.pending_cwd:
-            await websocket.send_json({"type": "cwd_queued", "path": session.pending_cwd})
-        self.sender = asyncio.ensure_future(self._send_loop(websocket, bridge))
+            await client.ws.send_json({"type": "cwd_queued", "path": session.pending_cwd})
+        client.sender = asyncio.ensure_future(self._send_loop(client))
+        # A viewer joined: announce role ONLY when someone is already driving,
+        # so the fresh tab learns it's an observer. With no controller yet
+        # (the common single-connection case) the frontend's default is already
+        # "no indicator", so an all-null role would be pure noise.
+        if session.controller is not None:
+            self._broadcast_role(session)
 
-    async def _send_loop(self, websocket: WebSocket, bridge: Bridge) -> None:
+    async def _send_loop(self, client: Client) -> None:
         try:
             while True:
-                event = await bridge.outbox.get()
-                await websocket.send_json(event)
+                event = await client.outbox.get()
+                await client.ws.send_json(event)
         except Exception:  # noqa: BLE001 — a dead socket ends the loop; replay recovers
             pass
 
-    async def _handle(self, websocket: WebSocket, message: dict) -> None:
+    async def _handle(self, client: Client, message: dict) -> None:
+        # ACTION messages (#102) claim control of the client's viewed session
+        # before executing (last-actor-drives); VIEW messages — switching which
+        # session is shown, file/jobs queries, dequeue, reconnect — never do.
         kind = message.get("type")
         if kind == "task":
             attachments = [
                 str(p) for p in (message.get("attachments") or []) if isinstance(p, str)
             ]
+            self._claim(client)
             await self._start_task(
-                websocket, str(message.get("text", "")).strip(), attachments
+                client, str(message.get("text", "")).strip(), attachments
             )
         elif kind == "approval":
             uid = str(message.get("id", ""))
             for session in self.sessions.values():
                 if session.bridge.answer(uid, message):
                     break
+            # Answering the gate is an action — claim control (the card lives in
+            # the client's own view). The event loop serializes all incoming
+            # messages, so exactly one answer() ever fills the blocked slot;
+            # answer()'s pending-slot guard drops any duplicate.
+            self._claim(client)
         elif kind == "sessions":
-            await self._send_sessions(websocket, str(message.get("query", "")))
+            await self._send_sessions(client, str(message.get("query", "")))
         elif kind == "resume":
-            await self._resume(websocket, str(message.get("path", "")))
+            await self._resume(client, str(message.get("path", "")))
         elif kind == "new":
-            await self._new_session(websocket)
+            await self._new_session(client)
         elif kind == "fork":
             after = message.get("after")
-            await self._fork_session(websocket, after if isinstance(after, int) else None)
+            self._claim(client)
+            await self._fork_session(client, after if isinstance(after, int) else None)
         elif kind == "delete_session":
-            await self._delete_session(websocket, str(message.get("name", "")))
+            await self._delete_session(client, str(message.get("name", "")))
         elif kind == "rename_session":
+            self._claim(client)
             await self._rename_session(
-                websocket, str(message.get("name", "")), str(message.get("title", ""))
+                client, str(message.get("name", "")), str(message.get("title", ""))
             )
         elif kind == "models":
-            await self._send_models(websocket, str(message.get("query", "")))
+            await self._send_models(client, str(message.get("query", "")))
         elif kind == "set_model":
-            await self._set_model(websocket, message)
+            self._claim(client)
+            await self._set_model(client, message)
         elif kind == "cd":
-            await self._cd(websocket, str(message.get("path", "")).strip())
+            self._claim(client)
+            await self._cd(client, str(message.get("path", "")).strip())
         elif kind == "add_dir":
-            await self._add_dir(websocket, str(message.get("path", "")).strip())
+            self._claim(client)
+            await self._add_dir(client, str(message.get("path", "")).strip())
         elif kind == "jobs":
-            await websocket.send_json({"type": "job_list", "text": tools.jobs_table()})
+            await client.ws.send_json({"type": "job_list", "text": tools.jobs_table()})
         elif kind == "files":
-            await self._send_files(websocket, str(message.get("query", "")))
+            await self._send_files(client, str(message.get("query", "")))
         elif kind == "stop":
-            await self._stop_task(websocket)
+            self._claim(client)
+            await self._stop_task(client)
         elif kind == "retry":
-            await self._retry_task(websocket, str(message.get("text", "")).strip())
+            self._claim(client)
+            await self._retry_task(client, str(message.get("text", "")).strip())
         elif kind == "dequeue":
-            self._dequeue(str(message.get("text", "")))
+            self._dequeue(client, str(message.get("text", "")))
         elif kind == "dequeue_cwd":
-            self.active.pending_cwd = None
-            self.active.bridge.emit({"type": "cwd_dequeued"}, record=False)
+            viewed = client.viewing
+            if viewed is not None:
+                viewed.pending_cwd = None
+                viewed.bridge.emit({"type": "cwd_dequeued"}, record=False)
         elif kind == "client_debug":
             # Device-side diagnostics (viewport state on iOS, etc.) — printed
             # to the server log because the phone has no reachable console.
             print(f"CLIENT_DEBUG: {message.get('text', '')}", flush=True)
         else:
-            await websocket.send_json(
+            await client.ws.send_json(
                 {"type": "error", "text": f"unknown message type {kind!r}"}
             )
 
-    async def _reject_busy(self, websocket: WebSocket) -> bool:
-        if self.active.busy:
-            await websocket.send_json(
+    async def _reject_busy(self, client: Client, session: Session) -> bool:
+        if session.busy:
+            await client.ws.send_json(
                 {
                     "type": "error",
                     "text": "this session is busy — wait, or start a new "
@@ -925,20 +1042,23 @@ class WebServer:
                 notes.append(f"[attached file: {path}]")
         return images, documents, notes
 
-    async def _stop_task(self, websocket: WebSocket) -> None:
-        session = self.active
+    async def _stop_task(self, client: Client) -> None:
+        session = client.viewing
+        if session is None:
+            return
         if not session.busy:
             # Nothing is running server-side, but the foreground may be wedged
             # showing "working" — e.g. a terminal event that never reached this
             # client. Stop must never dead-end (#48): reconcile the view to the
             # authoritative idle state instead of erroring. A plain `stopped`
             # sync clears busy/working WITHOUT the red "task failed" treatment a
-            # real error carries.
+            # real error carries. Sent only to the requesting client (its own
+            # foreground); other viewers already track busy via status events.
             session.bridge.emit({"type": "status", "state": "idle"}, record=False)
-            await websocket.send_json({"type": "stopped"})
+            await client.ws.send_json({"type": "stopped"})
             return
         if not hasattr(session.agent, "cancel"):
-            await websocket.send_json(
+            await client.ws.send_json(
                 {"type": "error", "text": "stop is not supported on this backend"}
             )
             return
@@ -948,17 +1068,19 @@ class WebServer:
             session.bridge.answer(uid, {"action": "deny"})
         session.bridge.emit({"type": "echo", "text": "✕ stop requested"})
 
-    async def _retry_task(self, websocket: WebSocket, text: str) -> None:
+    async def _retry_task(self, client: Client, text: str) -> None:
         """Regenerate the last answer from scratch (#60): the previous attempt is
         discarded from the model's context, the on-disk log, AND the transcript
         so the rerun is not informed by it. While a turn is still running (or
         wedged on an approval), the rollback can't touch agent.messages under the
         worker thread — cancel first and defer the rerun to _finish_turn, exactly
         how Retry already recovers a stuck turn."""
-        session = self.active
+        session = client.viewing
+        if session is None:
+            return
         if session.busy:
             session.pending_retry = text
-            await self._stop_task(websocket)
+            await self._stop_task(client)
             return
         await self._launch_retry(session, text)
 
@@ -997,29 +1119,35 @@ class WebServer:
                 del transcript[i + 1:]
                 return
 
-    def _dequeue(self, text: str) -> None:
+    def _dequeue(self, client: Client, text: str) -> None:
         """Drop the first still-waiting message matching `text` (the client's
         queued-chip remove button). A running task is never affected."""
-        queue = self.active.queue
-        for i, (queued, _attachments) in enumerate(queue):
+        session = client.viewing
+        if session is None:
+            return
+        for i, (queued, _attachments) in enumerate(session.queue):
             if queued == text:
-                del queue[i]
+                del session.queue[i]
                 return
 
     async def _start_task(
-        self, websocket: WebSocket, text: str, attachments: list[str] | None = None
+        self, client: Client, text: str, attachments: list[str] | None = None
     ) -> None:
         if not text and not attachments:
             return
-        session = self.active
+        session = client.viewing
+        if session is None:
+            return
         if session.busy:
             if len(session.queue) >= MAX_QUEUE:
-                await websocket.send_json(
+                await client.ws.send_json(
                     {"type": "error", "text": f"queue full ({MAX_QUEUE} waiting)"}
                 )
                 return
             session.queue.append((text, attachments or []))
-            await websocket.send_json(
+            # The queued chip is the requesting client's own composer echo — the
+            # message hasn't run yet, so only that client needs it.
+            await client.ws.send_json(
                 {"type": "queued", "position": len(session.queue), "text": text}
             )
             return
@@ -1142,20 +1270,25 @@ class WebServer:
         if session.queue:
             text, attachments = session.queue.pop(0)
             self._launch(session, text, attachments)
-        elif session is not self.active and self.ws is not None:
-            try:  # heads-up toast; the drawer badge is the durable signal
-                await self.ws.send_json(
-                    {
-                        "type": "session_state",
-                        "session": session.name,
-                        "title": self._title(session),
-                        "state": "idle",
-                    }
-                )
-            except Exception:  # noqa: BLE001
+            return
+        # A background session returned to idle: nudge every client NOT viewing
+        # it (a viewer already saw the `done`). The drawer badge is the durable
+        # signal; this toast is a heads-up.
+        notice = {
+            "type": "session_state",
+            "session": session.name,
+            "title": self._title(session),
+            "state": "idle",
+        }
+        for client in list(self.clients):
+            if client.viewing is session:
+                continue
+            try:
+                await client.ws.send_json(notice)
+            except Exception:  # noqa: BLE001 — a dead socket is dropped on its own disconnect
                 pass
 
-    async def _send_sessions(self, websocket: WebSocket, query: str) -> None:
+    async def _send_sessions(self, client: Client, query: str) -> None:
         # The active session is listed too (marked "current" in the drawer) —
         # its log is flushed per record, so reading it live is safe; a brand
         # new chat has no messages yet and drops out naturally.
@@ -1170,10 +1303,11 @@ class WebServer:
         # The working directory is known for sessions currently open in memory;
         # the drawer shows it so parallel agents are legible at a glance.
         open_cwds = {name: s.agent.cwd for name, s in self.sessions.items()}
-        await websocket.send_json(
+        current = client.viewing.name if client.viewing is not None else ""
+        await client.ws.send_json(
             {
                 "type": "session_list",
-                "current": self.active.name,
+                "current": current,
                 "sessions": [
                     {
                         "name": info.path.name,
@@ -1211,37 +1345,38 @@ class WebServer:
                 session.bridge.record(event)
         else:
             session.bridge.record({"type": "history", "messages": history})
-        self.add_session(session, activate=False)
+        self.add_session(session, default=False)
         return session
 
-    async def _resume(self, websocket: WebSocket, name: str) -> None:
-        if name == self.active.name:
-            await self._show(websocket, self.active)
+    async def _resume(self, client: Client, name: str) -> None:
+        if client.viewing is not None and name == client.viewing.name:
+            await self._show(client, client.viewing)
             return
         session = await self._open_by_name(name)
         if session is None:
-            await websocket.send_json({"type": "error", "text": f"no such session: {name}"})
+            await client.ws.send_json({"type": "error", "text": f"no such session: {name}"})
             return
-        await self._show(websocket, session)
+        await self._show(client, session)
 
-    async def _new_session(self, websocket: WebSocket) -> None:
+    async def _new_session(self, client: Client) -> None:
         self._evict_idle()
         session, _ = await asyncio.to_thread(self.open_session, None)
-        # A new chat inherits the model you're currently using (like ChatGPT/
-        # Claude apps); the saved default applies only at server start.
-        source = self.active.agent
+        # A new chat inherits the model this client is currently using (like
+        # ChatGPT/Claude apps); the saved default applies only at server start.
+        source = client.viewing.agent if client.viewing is not None else None
         if (
-            getattr(source, "provider", "ollama") != "claude-max"
+            source is not None
+            and getattr(source, "provider", "ollama") != "claude-max"
             and getattr(session.agent, "provider", "ollama") != "claude-max"
         ):
             session.agent.chat = source.chat
             session.agent.model = source.model
             session.agent.provider = getattr(source, "provider", "ollama")
             session.logref.model(model_spec(session.agent))
-        self.add_session(session, activate=False)
-        await self._show(websocket, session)
+        self.add_session(session, default=False)
+        await self._show(client, session)
 
-    async def _fork_session(self, websocket: WebSocket, after: int | None = None) -> None:
+    async def _fork_session(self, client: Client, after: int | None = None) -> None:
         """Branch the current conversation into a NEW session seeded with the
         history so far, leaving the original untouched — the "explore a tangent
         without polluting the main thread" move (issue #47).
@@ -1258,9 +1393,11 @@ class WebServer:
 
         Refused while the source is busy (a mid-task snapshot would capture a
         half-finished turn) and when there's nothing to fork yet."""
-        source = self.active
+        source = client.viewing
+        if source is None:
+            return
         if source.busy:
-            await websocket.send_json(
+            await client.ws.send_json(
                 {
                     "type": "error",
                     "text": "can't fork while this session is working — wait for "
@@ -1273,7 +1410,7 @@ class WebServer:
             m.get("role") in ("user", "assistant") for m in source.agent.messages[1:]
         )
         if not has_history or not src_path.is_file():
-            await websocket.send_json(
+            await client.ws.send_json(
                 {
                     "type": "error",
                     "text": "nothing to fork yet — send a message first, then fork "
@@ -1301,13 +1438,13 @@ class WebServer:
 
         new_path = await asyncio.to_thread(copy_log)
         if new_path is None:
-            await websocket.send_json(
+            await client.ws.send_json(
                 {"type": "error", "text": "can't fork from there — that answer is out of range"}
             )
             return
         session = await self._open_by_name(new_path.name)
         if session is None:  # pragma: no cover — we just wrote a valid session file
-            await websocket.send_json({"type": "error", "text": "fork failed"})
+            await client.ws.send_json({"type": "error", "text": "fork failed"})
             return
         # Continue in the fork with the source's LIVE model/backend (it may have
         # switched model since the last logged record); mirrors _new_session.
@@ -1327,9 +1464,9 @@ class WebServer:
                 "untouched; continue the tangent here",
             }
         )
-        await self._show(websocket, session)
+        await self._show(client, session)
 
-    async def _delete_session(self, websocket: WebSocket, name: str) -> None:
+    async def _delete_session(self, client: Client, name: str) -> None:
         """Delete a session permanently: its conversation AND its command
         audit trail — explicit and confirmed client-side, never bulk. Replies
         with a refreshed session_list so the drawer re-renders."""
@@ -1337,37 +1474,39 @@ class WebServer:
         safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
         path = self.state_dir / name
         if not safe or ".." in name or (session is None and not path.is_file()):
-            await websocket.send_json({"type": "error", "text": f"no such session: {name}"})
+            await client.ws.send_json({"type": "error", "text": f"no such session: {name}"})
             return
         if session is not None and session.state() != "idle":
             # Never kill work as a side effect of a delete.
-            await websocket.send_json(
+            await client.ws.send_json(
                 {"type": "error", "text": "task still running in that session — "
                  "stop it (or let it finish) before deleting"}
             )
             return
-        if session is self.active:
-            # "Delete this chat" lands on a fresh empty one (the ChatGPT/
-            # Claude-app mental model) — switch the client first.
-            await self._new_session(websocket)
         if session is not None:
+            # Any client viewing the doomed session lands on a fresh empty one
+            # (the ChatGPT/Claude-app mental model) — move each viewer first so
+            # nobody is left pointing at a closed session. Snapshot the set: each
+            # _new_session → _show → _leave mutates it.
+            for viewer in list(session.viewers):
+                await self._new_session(viewer)
             session.close()
             self.sessions.pop(name, None)
         # POSIX unlink only detaches the name: a terminal aish holding this
         # file open via --resume keeps appending to the unlinked inode until
         # it exits — harmless, the data just vanishes with the last handle.
         await asyncio.to_thread(lambda: path.unlink(missing_ok=True))
-        await websocket.send_json({"type": "session_deleted", "name": name})
-        await self._send_sessions(websocket, "")
+        await client.ws.send_json({"type": "session_deleted", "name": name})
+        await self._send_sessions(client, "")
 
-    async def _rename_session(self, websocket: WebSocket, name: str, title: str) -> None:
+    async def _rename_session(self, client: Client, name: str, title: str) -> None:
         """Give a chat a custom title. Persisted as an append-only
         `kind:"title"` record (no rewrite of the log). If the session is open
         its in-memory title is updated too, so the drawer AND the header both
         reflect the new name at once."""
         title = title.strip()[:RENAME_MAX]
         if not title:
-            await websocket.send_json(
+            await client.ws.send_json(
                 {"type": "error", "text": "a chat title can't be empty"}
             )
             return
@@ -1375,7 +1514,7 @@ class WebServer:
         safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
         path = self.state_dir / name
         if not safe or ".." in name or (session is None and not path.is_file()):
-            await websocket.send_json({"type": "error", "text": f"no such session: {name}"})
+            await client.ws.send_json({"type": "error", "text": f"no such session: {name}"})
             return
         if session is not None:
             # Append through the session's own open handle so a single writer
@@ -1393,30 +1532,33 @@ class WebServer:
                     log.close()
 
             await asyncio.to_thread(write_cold)
-        await websocket.send_json(
+        await client.ws.send_json(
             {"type": "session_renamed", "name": name, "title": title}
         )
-        await self._send_sessions(websocket, "")
+        await self._send_sessions(client, "")
 
-    async def _send_models(self, websocket: WebSocket, query: str) -> None:
-        agent, state_dir = self.active.agent, self.state_dir
+    async def _send_models(self, client: Client, query: str) -> None:
+        session = client.viewing
+        if session is None:
+            return
+        agent, state_dir = session.agent, self.state_dir
 
         def load():
             return rank_models(available_models(agent, state_dir), query)
 
         ranked = await asyncio.to_thread(load)
-        await websocket.send_json(
+        await client.ws.send_json(
             {
                 "type": "model_list",
-                "current": model_spec(self.active.agent),
+                "current": model_spec(session.agent),
                 "models": [{"name": name, "desc": desc} for name, desc in ranked],
             }
         )
 
-    async def _set_model(self, websocket: WebSocket, message: dict) -> None:
-        if await self._reject_busy(websocket):
+    async def _set_model(self, client: Client, message: dict) -> None:
+        session = client.viewing
+        if session is None or await self._reject_busy(client, session):
             return
-        session = self.active
         spec = str(message.get("spec", "")).strip()
         if not spec:
             return
@@ -1424,7 +1566,7 @@ class WebServer:
             getattr(session.agent, "provider", "ollama") == "claude-max"
         )
         if crossing_max:
-            await websocket.send_json(
+            await client.ws.send_json(
                 {
                     "type": "error",
                     "text": "claude-max runs a different agent loop — restart with "
@@ -1435,7 +1577,7 @@ class WebServer:
         try:
             chat, provider, name = await asyncio.to_thread(backends.make_chat, spec)
         except backends.BackendError as exc:
-            await websocket.send_json({"type": "error", "text": str(exc)})
+            await client.ws.send_json({"type": "error", "text": str(exc)})
             return
         session.agent.chat = chat
         session.agent.model = name
@@ -1444,55 +1586,60 @@ class WebServer:
         saved = False
         if message.get("save"):
             if self.config_path is None:
-                await websocket.send_json(
+                await client.ws.send_json(
                     {"type": "error", "text": "no config path available — cannot save"}
                 )
             else:
                 error = save_default_model(self.config_path, spec)
                 if error:
-                    await websocket.send_json({"type": "error", "text": error})
+                    await client.ws.send_json({"type": "error", "text": error})
                 else:
                     saved = True
         session.bridge.emit({"type": "echo", "text": f"model switched to {spec}"})
-        await websocket.send_json(
+        await client.ws.send_json(
             {"type": "model_changed", "model": model_spec(session.agent), "saved": saved}
         )
 
-    async def _cd(self, websocket: WebSocket, path: str) -> None:
-        if not path:
+    async def _cd(self, client: Client, path: str) -> None:
+        session = client.viewing
+        if session is None or not path:
             return
         # Changing cwd mid-task would move the ground under the running agent —
         # queue it and apply the moment the task finishes, instead of failing.
-        if self.active.busy:
+        if session.busy:
             # Surface the pending change as a single deduplicated queue card
             # (#92): the backend keeps at most one pending_cwd, so overwriting
             # and re-emitting updates the existing card in place. record=False —
             # the card is reconstructed from pending_cwd on attach (see _show),
             # not from transcript noise.
-            self.active.pending_cwd = path
-            self.active.bridge.emit({"type": "cwd_queued", "path": path}, record=False)
+            session.pending_cwd = path
+            session.bridge.emit({"type": "cwd_queued", "path": path}, record=False)
             return
-        result = await asyncio.to_thread(self.active.agent.rebase, path)
+        result = await asyncio.to_thread(session.agent.rebase, path)
         if result.startswith("ERROR"):
-            await websocket.send_json({"type": "error", "text": result})
+            await client.ws.send_json({"type": "error", "text": result})
             return
         # rebase fired on_state → the top-bar chip + queue-card refresh; no
         # manual _cwd_event needed (issue #95 unified that path).
 
-    async def _add_dir(self, websocket: WebSocket, path: str) -> None:
-        if await self._reject_busy(websocket) or not path:
+    async def _add_dir(self, client: Client, path: str) -> None:
+        session = client.viewing
+        if session is None or await self._reject_busy(client, session) or not path:
             return
-        result = await asyncio.to_thread(self.active.agent.add_root, path)
+        result = await asyncio.to_thread(session.agent.add_root, path)
         if result.startswith("ERROR"):
-            await websocket.send_json({"type": "error", "text": result})
+            await client.ws.send_json({"type": "error", "text": result})
             return
-        self.active.bridge.emit({"type": "echo", "text": result})
-        await websocket.send_json(self._cwd_event())
+        session.bridge.emit({"type": "echo", "text": result})
+        await client.ws.send_json(self._cwd_event(session))
 
-    async def _send_files(self, websocket: WebSocket, query: str) -> None:
-        cwd = self.active.agent.cwd
+    async def _send_files(self, client: Client, query: str) -> None:
+        session = client.viewing
+        if session is None:
+            return
+        cwd = session.agent.cwd
         paths = await asyncio.to_thread(list_files, cwd, query)
-        await websocket.send_json({"type": "file_list", "query": query, "files": paths})
+        await client.ws.send_json({"type": "file_list", "query": query, "files": paths})
 
     # Directory picker backend (top-bar cwd control). Deliberately NOT scoped
     # to session roots: /cd already accepts any path the server user can
@@ -1627,7 +1774,10 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         """GET /file?path=<abs> — serves an image file so the transcript can
         render model-generated charts/diagrams inline (issue #9). Scoped like
         approval: symlinks resolved BEFORE the containment check, and anything
-        outside the active session's roots is refused."""
+        outside the roots of ANY open session is refused. (This HTTP endpoint
+        has no socket context, so with many concurrent viewers it must accept a
+        path in scope for the session that produced it — the union of open
+        sessions' roots, which for a single session is exactly that session.)"""
         if self.token and request.query_params.get("token") != self.token:
             return JSONResponse({"error": "bad token"}, status_code=403)
         raw = request.query_params.get("path", "").strip()
@@ -1640,7 +1790,11 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         if media_type is None:
             return JSONResponse({"error": "unsupported file type"}, status_code=415)
         path = path.resolve()
-        roots = [Path(r).resolve() for r in self.active.agent.roots]
+        roots = {
+            Path(r).resolve()
+            for session in self.sessions.values()
+            for r in session.agent.roots
+        }
         if not any(path.is_relative_to(r) for r in roots):
             return JSONResponse({"error": "outside session roots"}, status_code=403)
         if not path.is_file():

@@ -1118,6 +1118,155 @@ class TestStopAndQueue:
             )
 
 
+class TestMultiConnection:
+    """#102: N connections (phone, laptop, headless test) share one token and
+    coexist WITHOUT preempting — each views a session independently, events fan
+    out to every viewer, and control is last-actor-drives."""
+
+    def test_second_connection_does_not_preempt_and_both_get_events(self, app_env):
+        # Two sockets viewing the same session both receive its events, and the
+        # first is NOT closed when the second connects (the old CLOSE_REPLACED
+        # behaviour is gone).
+        client, _ = make_client(app_env, [model_says("shared answer")])
+        with client, connected(client) as (ws_a, hello_a, _):
+            name = hello_a["session"]
+            with connected(client, f"/ws?session={name}") as (ws_b, hello_b, _):
+                assert hello_b["session"] == name  # B joined the SAME session
+                # A is still alive (not preempted): its action drives both views.
+                ws_a.send_json({"type": "task", "text": "go"})
+                assert recv_until(ws_a, "user")["text"] == "go"
+                assert recv_until(ws_b, "user")["text"] == "go"  # fanned to B too
+                assert recv_until(ws_a, "done")["result"] == "shared answer"
+                assert recv_until(ws_b, "done")["result"] == "shared answer"
+
+    def test_action_stamps_control_and_broadcasts_role_to_both(self, app_env, tmp_path):
+        # An action from B claims control; both viewers get a `role` event so
+        # each tab knows whether IT drives.
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws_a, hello_a, _):
+            name = hello_a["session"]
+            with connected(client, f"/ws?session={name}") as (ws_b, _, _):
+                # B acts (a /cd — no model needed) → B becomes the controller.
+                ws_b.send_json({"type": "cd", "path": str(tmp_path)})
+                role_b = recv_until(ws_b, "role")
+                role_a = recv_until(ws_a, "role")
+                assert role_b["you"] is True  # B drives
+                assert role_a["you"] is False  # A is now an observer
+                # Same controller id reported to both tabs.
+                assert role_a["controller"] == role_b["controller"]
+                assert role_b["controller"] is not None
+                server = client.app.state.server
+                assert server.sessions[name].controller is not None
+
+    def test_either_client_can_answer_approval_exactly_once(self, app_env, tmp_path):
+        # The approval card fans out to both viewers; the NON-initiating client
+        # answers it and the command runs exactly once (the event loop
+        # serializes messages, so only one answer() reaches the blocked worker).
+        marker = tmp_path / "shared-ran"
+        client, chat = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("finished"),
+            ],
+        )
+        with client, connected(client) as (ws_a, hello_a, _):
+            name = hello_a["session"]
+            with connected(client, f"/ws?session={name}") as (ws_b, _, _):
+                ws_a.send_json({"type": "task", "text": "run it"})
+                req_a = recv_until(ws_a, "approval_request")
+                req_b = recv_until(ws_b, "approval_request")
+                assert req_a["id"] == req_b["id"]  # same card on both
+                # B (not the initiator) approves.
+                ws_b.send_json({"type": "approval", "id": req_b["id"], "action": "approve"})
+                assert recv_until(ws_a, "done")["result"] == "finished"
+                assert recv_until(ws_b, "done")["result"] == "finished"
+                assert marker.exists()
+                # Exactly two model calls (initial + post-tool) proves the
+                # command ran once — a double answer would have re-run it and
+                # over-run the scripted responses into an error.
+                assert len(chat.calls) == 2
+                # A stale duplicate answer from A is a harmless no-op: the slot
+                # was consumed, so it neither errors nor re-runs anything.
+                ws_a.send_json({"type": "approval", "id": req_a["id"], "action": "approve"})
+                ws_a.send_json({"type": "jobs"})
+                assert recv_until(ws_a, "job_list")  # A's stream stays healthy
+
+    def test_viewers_of_different_sessions_are_isolated(self, app_env):
+        # A client viewing session X receives nothing from activity in session Y.
+        client, _ = make_client(app_env, [model_says("beta answer")])
+        with client, connected(client) as (ws_a, _, _):
+            # B opens a brand-new session and runs a whole task there.
+            with connected(client) as (ws_b, _, _):
+                ws_b.send_json({"type": "new"})
+                recv_until(ws_b, "hello")
+                recv_until(ws_b, "replay")
+                ws_b.send_json({"type": "task", "text": "beta"})
+                assert recv_until(ws_b, "done")["result"] == "beta answer"
+                # A viewed the original session throughout. It may get a
+                # cross-session `session_state` heads-up (the drawer badge), but
+                # NONE of Y's transcript events (user/token/step/done/command)
+                # leak into A's stream. Drain up to A's own jobs reply.
+                ws_a.send_json({"type": "jobs"})
+                leaked = {"user", "token", "step", "done", "command_start",
+                          "command_end", "stream", "approval_request"}
+                for _ in range(50):
+                    ev = ws_a.receive_json()
+                    if ev["type"] == "job_list":
+                        break
+                    assert ev["type"] not in leaked, f"leaked Y event: {ev['type']}"
+                else:
+                    raise AssertionError("A never got its jobs reply")
+
+    def test_disconnect_clears_viewer_and_releases_control(self, app_env, tmp_path):
+        # When the controller disconnects, control is released and the remaining
+        # viewer is told (role → controller null); the viewer set drops it. B is
+        # the OUTER (surviving) connection so it can observe A leaving.
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws_b, hello_b, _):
+            name = hello_b["session"]
+            with connected(client, f"/ws?session={name}") as (ws_a, _, _):
+                ws_a.send_json({"type": "cd", "path": str(tmp_path)})  # A claims control
+                recv_until(ws_a, "role")  # A: you=true
+                recv_until(ws_b, "role")  # B: you=false, controller = A
+                server = client.app.state.server
+                assert len(server.sessions[name].viewers) == 2
+            # A disconnected (inner scope exited). B, still open, is told control
+            # was released — a deterministic signal that _detach ran.
+            released = recv_until(ws_b, "role")
+            assert released["controller"] is None
+            assert released["you"] is False
+            sess = client.app.state.server.sessions[name]
+            assert sess.controller is None
+            assert len(sess.viewers) == 1  # only B remains
+
+    def test_eviction_skips_sessions_with_viewers(self, app_env, monkeypatch):
+        # A non-default session that still has a viewer is never evicted, even as
+        # other viewerless sessions are churned past the cap.
+        monkeypatch.setattr(server_module, "MAX_OPEN_SESSIONS", 3)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws_a, _, _):
+            # A moves onto its own non-default session and stays there.
+            ws_a.send_json({"type": "new"})
+            held = recv_until(ws_a, "hello")["session"]
+            recv_until(ws_a, "replay")
+            server = client.app.state.server
+            with connected(client) as (ws_b, _, _):
+                # B churns sessions to drive eviction. Capture the first one it
+                # abandons — it is the viewerless candidate that must be evicted.
+                ws_b.send_json({"type": "new"})
+                churned = recv_until(ws_b, "hello")["session"]
+                recv_until(ws_b, "replay")
+                ws_b.send_json({"type": "new"})  # abandons `churned` (now viewerless)
+                recv_until(ws_b, "hello")
+                recv_until(ws_b, "replay")
+                ws_b.send_json({"type": "new"})  # cap hit → eviction runs
+                recv_until(ws_b, "hello")
+                recv_until(ws_b, "replay")
+                assert held in server.sessions  # kept: A still views it
+                assert churned not in server.sessions  # evicted: viewerless
+
+
 class RaisingChat:
     """A backend that always raises, simulating a model/transport failure. The
     agent retries once then surfaces ModelUnavailable, so run_task raises and
@@ -1211,7 +1360,10 @@ class TestSessions:
                 # The empty replay is the client's clear-screen signal.
                 cleared = recv_until(ws, "replay")
                 assert cleared["events"] == []
-            with connected(client) as (_ws, _, replay):
+            # A reconnect naming the fresh session (as the real client does via
+            # ?session=) replays it empty. A BARE reconnect now lands on the
+            # default startup session instead (#102), not the last-shown one.
+            with connected(client, f"/ws?session={fresh['session']}") as (_ws, _, replay):
                 assert replay["events"] == []
 
     def test_session_list_reports_waiting_state_for_pending_approval(
@@ -1811,8 +1963,8 @@ class TestRename:
         with client, connected(client) as (ws, _, _):
             for name in ("../../../etc/passwd", "session-nonexistent.jsonl"):
                 ws.send_json({"type": "rename_session", "name": name, "title": "x"})
-                error = ws.receive_json()
-                assert error["type"] == "error"
+                # rename stamps control first (a `role` event) before rejecting.
+                error = recv_until(ws, "error")
                 assert "no such session" in error["text"]
 
 
@@ -1888,8 +2040,8 @@ class TestFork:
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "fork"})
-            error = ws.receive_json()
-            assert error["type"] == "error"
+            # fork stamps control first (a `role` event) before refusing (#102).
+            error = recv_until(ws, "error")
             assert "nothing to fork" in error["text"]
 
     def test_fork_while_busy_refused(self, app_env, tmp_path):
@@ -2061,8 +2213,9 @@ class TestModels:
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "set_model", "spec": "claude-max"})
-            error = ws.receive_json()
-            assert error["type"] == "error"
+            # set_model is an action → it stamps control first (a `role` event),
+            # so skip to the error rather than reading the raw next frame (#102).
+            error = recv_until(ws, "error")
             assert "restart" in error["text"]
 
 

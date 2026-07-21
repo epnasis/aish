@@ -268,6 +268,7 @@ function handle(event) {
     case "session_state": onSessionState(event); break;
     case "session_deleted": showToast("session deleted"); break;
     case "session_renamed": onSessionRenamed(event); break;
+    case "role": onRole(event); break;
   }
 }
 
@@ -338,7 +339,25 @@ function onHello(event) {
   taskErrored = false; // fresh connected view — clear any stale red
   setBusy(event.busy);
   if (!event.busy) setStatus(null);
+  // A fresh view starts with no known role: the server sends a `role` event
+  // only when ANOTHER tab is already driving this session (#102). Until then,
+  // hide the indicator — this tab is the presumed driver.
+  setRolePill(false);
   updateEmptyHint();
+}
+
+// Multi-connection (#102): a subtle top-bar pill shows when ANOTHER tab/device
+// is the current driver of the session THIS tab is viewing. It clears the
+// instant this tab acts (the server sends a fresh `role` with you:true). No
+// disabled composer, no "take control" button — acting IS how you take over.
+function onRole(event) {
+  if (event.session && event.session !== currentSession) return; // not our view
+  setRolePill(!!event.controller && !event.you);
+}
+
+function setRolePill(active) {
+  const pill = $("role-pill");
+  if (pill) pill.hidden = !active;
 }
 
 function onReplay(event) {
