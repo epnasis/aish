@@ -237,6 +237,7 @@ function handle(event) {
     case "command_start": onCommandStart(event); break;
     case "command_end": onCommandEnd(event); break;
     case "step": traceStep(event); break;
+    case "workspace": addWorkspaceNote(event.change, event.path); break;
     case "error":
       closeAnswer();
       finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
@@ -1449,6 +1450,28 @@ function retireRegen() {
 // Your own prompt bubble: tap-to-recall plus a copy chip underneath (issue
 // #39). Copy hands back the prompt minus attachment notes — same text the
 // recall paths reuse.
+// A compact audit marker for a user-driven workspace change (issue #94):
+// "Working directory → <path>" on a /cd, "Trusted <path>" on a dir trust. Same
+// row whether emitted live (on_state) or replayed (reconstruct_events). The
+// folder glyph is static markup; the path is user data, so it goes in via
+// textContent.
+function addWorkspaceNote(change, path) {
+  const el = document.createElement("div");
+  el.className = "msg workspace-note";
+  const ico = document.createElement("span");
+  ico.className = "wsnote-ico";
+  ico.innerHTML = FOLDER_SVG;
+  const label = document.createElement("span");
+  label.textContent = change === "cwd"
+    ? `Working directory → ${abbreviatePath(path)}`
+    : `Trusted ${abbreviatePath(path)}`;
+  el.appendChild(ico);
+  el.appendChild(label);
+  messagesEl.appendChild(el);
+  scrollToEnd();
+  return el;
+}
+
 function addUserMsg(text) {
   const el = addMsg("user", text);
   makeRecallable(el);

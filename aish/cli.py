@@ -128,6 +128,9 @@ class LogRef:
     def command_event(self, event: dict) -> None:
         self.log.command_event(event)
 
+    def workspace(self, record: dict) -> None:
+        self.log.workspace(record)
+
     def rewind_last_turn(self) -> bool:
         return self.log.rewind_last_turn()
 
@@ -1309,6 +1312,8 @@ def main() -> int:
             # its activity trace when later opened in the web UI.
             step_log=logref.step,
             command_log=logref.command_event,
+            # Persist cwd moves / dir trusts so resume restores the workspace.
+            state_log=logref.workspace,
             on_token=print_token if stream_answers else None,
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,
@@ -1339,6 +1344,8 @@ def main() -> int:
             # its activity trace when later opened in the web UI.
             step_log=logref.step,
             command_log=logref.command_event,
+            # Persist cwd moves / dir trusts so resume restores the workspace.
+            state_log=logref.workspace,
             on_token=print_token if stream_answers else None,
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,
@@ -1353,6 +1360,10 @@ def main() -> int:
         _box.get_cwd = lambda: agent.cwd  # /cd path completion follows the agent
     if history:
         agent.load_history(history)
+        # Restore the workspace the session left off in (cwd + trusted dirs)
+        # rather than reverting to the launch dir (issue #94).
+        restored_cwd, trusted = SessionLog.restore_state(log.path)
+        agent.restore_workspace(restored_cwd, trusted)
         print(f"{DIM}resumed {len(history)} messages from {log.path.name}"
               f" · model {args.model} · /help:{RESET}")
         replay_history(history)

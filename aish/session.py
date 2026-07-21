@@ -121,6 +121,28 @@ class SessionLog:
         return SessionLog._parse(path)[0]
 
     @staticmethod
+    def restore_state(path: Path) -> tuple[str | None, list[str]]:
+        """Workspace state to reapply on resume/cold-open: the LATEST logged
+        cwd (None if the session never moved) and the ACCUMULATED set of
+        trusted dirs, in first-seen order. Existence is not checked here — the
+        agent's restore_workspace degrades missing paths gracefully."""
+        cwd: str | None = None
+        trusted: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            kind = record.get("kind")
+            if kind == "cwd":
+                cwd = record.get("cwd") or cwd
+            elif kind == "trust_dir":
+                trust_path = record.get("path")
+                if trust_path and trust_path not in trusted:
+                    trusted.append(trust_path)
+        return cwd, trusted
+
+    @staticmethod
     def reconstruct_events(path: Path) -> list[dict] | None:
         """Rebuild the EXACT transcript event stream a rich client replays, so
         a cold-loaded session feeds the frontend the same events a live one
@@ -220,7 +242,21 @@ class SessionLog:
             except ValueError:
                 continue
             kind = record.get("kind")
-            if kind == "cmd_start":
+            if kind == "cwd":
+                # Workspace marker (issue #94): identical to the live `workspace`
+                # event on_state emits. Buffered with the open turn's steps so it
+                # keeps timeline order (a mid-task trust falls between traces);
+                # between tasks it goes straight to the event stream. A workspace
+                # record is a modern log, so it counts as a reconstructable
+                # trace — a /cd-only session must not fall back to a flat blob.
+                has_trace = True
+                ev = {"type": "workspace", "change": "cwd", "path": record.get("cwd", "")}
+                (steps if open_turn else events).append(ev)
+            elif kind == "trust_dir":
+                has_trace = True
+                ev = {"type": "workspace", "change": "trust", "path": record.get("path", "")}
+                (steps if open_turn else events).append(ev)
+            elif kind == "cmd_start":
                 pending_start = {k: v for k, v in record.items() if k not in ("kind", "ts")}
             elif kind == "cmd_end":
                 pending_end = {k: v for k, v in record.items() if k not in ("kind", "ts")}
@@ -733,3 +769,9 @@ class SessionLog:
         event's `kind` names the record; reconstruct_events replays them as the
         command_start / command_end a live session emits."""
         self._record(event["kind"], **{k: v for k, v in event.items() if k != "kind"})
+
+    def workspace(self, record: dict) -> None:
+        """Persist a workspace change (kind:"cwd" / kind:"trust_dir") so resume
+        restores it and reconstruct_events replays it as a timeline marker. The
+        record's `kind` names it; the rest is its single path field."""
+        self._record(record["kind"], **{k: v for k, v in record.items() if k != "kind"})

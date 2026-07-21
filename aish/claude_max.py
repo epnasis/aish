@@ -50,10 +50,14 @@ class ClaudeMaxAgent:
         status=None,
         state_dir=None,
         current_session=None,
+        state_log=None,
+        on_state=None,
         **_ignored,
     ):
         # The inner Agent supplies tool dispatch (approval, denylist, file
-        # diffs, cd tracking); its chat client is never invoked.
+        # diffs, cd tracking); its chat client is never invoked. Workspace
+        # sinks flow to it so /cd + dir-trust persist and emit for claude-max
+        # too (rebase/add_root/trust_root all delegate to the inner Agent).
         self.inner = Agent(
             model="unused",
             approve=approve or (lambda _c: None),
@@ -67,6 +71,8 @@ class ClaudeMaxAgent:
             lessons_path=lessons_path,
             state_dir=state_dir,
             current_session=current_session,
+            state_log=state_log,
+            on_state=on_state,
         )
         self.model = model  # "" = the claude CLI's configured default
         self.echo = echo
@@ -123,6 +129,12 @@ class ClaudeMaxAgent:
                 "you may work there too]"
             )
         return result
+
+    def trust_root(self, target: str) -> str:
+        return self.inner.trust_root(target)
+
+    def restore_workspace(self, cwd: str | None, trusted: list[str]) -> None:
+        self.inner.restore_workspace(cwd, trusted)
 
     @staticmethod
     def _load_sdk():
