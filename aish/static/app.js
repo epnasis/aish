@@ -974,6 +974,18 @@ function syncTermWrap(on) {
   }
 }
 
+// The global top-bar wrap toggle also overrides every diff card: force each
+// diff's soft-wrap and its button's lit state to the global value. New diffs
+// seed from the same global value at build time; a per-card toggle diverges
+// until the next global change (same contract as syncTermWrap).
+function syncDiffWrap(on) {
+  for (const diff of document.querySelectorAll(".diff")) {
+    diff.classList.toggle("diff-soft", on);
+    const btn = diff.parentElement && diff.parentElement.querySelector(".diff-wrap-btn");
+    if (btn) btn.classList.toggle("on", on);
+  }
+}
+
 // (Re)decide whether the output needs the "Show all" cap for its current
 // height — used at command_end and after a wrap toggle changes the line count.
 function recomputeTermCap(block) {
@@ -2672,6 +2684,18 @@ function relTarget(target) {
 function renderDiff(text) {
   const diff = document.createElement("div");
   diff.className = "diff";
+  // Rows live in an inner box sized to the WIDEST line (`width: max-content`,
+  // 100% floor); every row then fills that box, so each line's tinted
+  // background paints uniformly across the full scroll width — like a terminal —
+  // instead of stopping at its own (or the viewport's) edge and exposing bare
+  // panel background when scrolled right (#68).
+  const inner = document.createElement("div");
+  inner.className = "diff-inner";
+  diff.appendChild(inner);
+  // Copy grabs the resulting file CONTENT (added + context lines, no +/-
+  // markers or removed lines) — for a create that is the whole new file, for an
+  // edit the post-edit view — which is far more useful to paste than raw diff.
+  const contentLines = [];
   let oldNo = 0;
   let newNo = 0;
   let emitted = false;
@@ -2685,7 +2709,7 @@ function renderDiff(text) {
     t.className = "dl-tx";
     t.textContent = body.length ? body : " ";
     row.append(g, t);
-    diff.appendChild(row);
+    inner.appendChild(row);
     emitted = true;
   };
   const lines = text.split("\n");
@@ -2700,20 +2724,55 @@ function renderDiff(text) {
         const sep = document.createElement("div");
         sep.className = "dl gap";
         sep.textContent = "⋯";
-        diff.appendChild(sep);
+        inner.appendChild(sep);
       }
       continue;
     }
-    if (line.startsWith("+")) rowEl("add", newNo++, line.slice(1));
-    else if (line.startsWith("-")) rowEl("del", oldNo++, line.slice(1));
+    if (line.startsWith("+")) {
+      rowEl("add", newNo++, line.slice(1));
+      contentLines.push(line.slice(1));
+    } else if (line.startsWith("-")) rowEl("del", oldNo++, line.slice(1));
     else if (line.startsWith("\\")) rowEl("ctx", null, line); // "\ No newline…"
     else {
-      rowEl("ctx", oldNo, line.startsWith(" ") ? line.slice(1) : line);
+      const body = line.startsWith(" ") ? line.slice(1) : line;
+      rowEl("ctx", oldNo, body);
+      contentLines.push(body);
       oldNo++;
       newNo++;
     }
   }
-  return diff;
+
+  // Pin wrap + copy top-right of a non-scrolling wrapper (tools stay put while
+  // the diff scrolls sideways). Seed wrap from the global top-bar preference;
+  // the per-card toggle then owns it (see syncDiffWrap for global overrides).
+  const wrap = document.createElement("div");
+  wrap.className = "diff-wrap";
+  const softed = document.body.classList.contains("wrap");
+  if (softed) diff.classList.add("diff-soft");
+  const tools = document.createElement("div");
+  tools.className = "term-tools";
+  tools.append(
+    diffWrapBtn(diff, softed),
+    copyChip(() => contentLines.join("\n"), "copy file content"),
+  );
+  wrap.append(tools, diff);
+  return wrap;
+}
+
+// The diff card's own wrap toggle: flips the diff between horizontal scroll
+// (`white-space: pre`) and soft wrap (`pre-wrap`) via the `.diff-soft` class,
+// independent of the global body.wrap (kept in sync by syncDiffWrap).
+function diffWrapBtn(diff, on) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "term-tool term-wrap diff-wrap-btn" + (on ? " on" : "");
+  b.title = "Wrap lines";
+  b.innerHTML = WRAP_SVG;
+  b.onclick = () => {
+    b.classList.toggle("on");
+    diff.classList.toggle("diff-soft");
+  };
+  return b;
 }
 
 // The out-of-roots warning shown on command/read cards whose target lives
@@ -3353,6 +3412,7 @@ function toggleWrap() {
   const on = document.body.classList.toggle("wrap");
   localStorage.setItem(WRAP_KEY, on ? "1" : "0");
   syncTermWrap(on); // global overrides every command block's local wrap + button
+  syncDiffWrap(on); // ...and every diff card's local wrap + button
   // Reading layout right after the class toggle forces a synchronous
   // reflow, so the restored offset is computed against final geometry.
   if (wasAtBottom) scrollToEnd(true);
