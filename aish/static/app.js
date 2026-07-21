@@ -3406,8 +3406,10 @@ input.addEventListener("keydown", (e) => {
     }
     if (e.key === "Tab" || e.key === "Enter") {
       const chosen = suggest.items[suggest.index];
-      // Enter on an exactly-typed command submits instead of re-completing.
-      if (e.key === "Tab" || !(suggest.kind === "slash" && chosen[0] === input.value.trim())) {
+      // Enter on an exactly-typed command/slash submits instead of re-completing.
+      const exact = (suggest.kind === "slash" || suggest.kind === "cmd")
+        && chosen[0] === input.value.trim();
+      if (e.key === "Tab" || !exact) {
         e.preventDefault();
         acceptSuggestion(chosen);
         return;
@@ -3432,8 +3434,9 @@ input.addEventListener("input", () => {
   // `!` as the sole character of an empty composer enters terminal mode (#100),
   // consuming the `!` — the mode's prompt implies it from then on.
   if (!cmdMode && input.value === "!") { enterCmdMode(); return; }
-  // Terminal mode owns the input: no chat draft, history-recall, or suggestions.
-  if (cmdMode) { resizeInput(); return; }
+  // Terminal mode owns the input: no chat draft or history-recall, but it has
+  // its own command/file autocomplete (updateSuggest branches on cmdMode).
+  if (cmdMode) { resizeInput(); updateSuggest(); return; }
   historyIndex = null; // typing leaves history-recall mode
   saveDraft();
   resizeInput();
@@ -3449,8 +3452,15 @@ function atFragment(text) {
 
 const requestFiles = debounce((query) => send({ type: "files", query }), 120);
 
+// Common shell commands offered as first-word completions in terminal mode.
+const SHELL_COMMANDS = [
+  "cat", "cd", "cp", "curl", "echo", "find", "git", "grep", "head", "less",
+  "ls", "make", "mkdir", "mv", "node", "npm", "pwd", "python", "rm", "tail",
+  "touch", "uv",
+];
+
 function updateSuggest() {
-  if (cmdMode) { hideSuggest(); return; } // command autocomplete is step 2 (#100)
+  if (cmdMode) { updateCmdSuggest(); return; }
   const text = input.value;
   const before = text.slice(0, input.selectionStart ?? text.length);
   if (text.startsWith("/") && !text.includes("\n") && !before.includes(" ")) {
@@ -3474,8 +3484,35 @@ function updateSuggest() {
   hideSuggest();
 }
 
+// Terminal-mode completion: first word → shell command list; later tokens →
+// files/folders in the current dir via the existing `files` backend, no `@`.
+function updateCmdSuggest() {
+  const text = input.value;
+  const before = text.slice(0, input.selectionStart ?? text.length);
+  if (!before.includes(" ")) {
+    const items = before
+      ? SHELL_COMMANDS.filter((c) => c.startsWith(before)).map((c) => [c, ""])
+      : [];
+    if (items.length) {
+      suggest.items = items;
+      suggest.index = 0;
+      suggest.kind = "cmd";
+      paintSuggest();
+      return;
+    }
+    hideSuggest();
+    return;
+  }
+  const token = before.slice(before.lastIndexOf(" ") + 1);
+  if (!token) { hideSuggest(); return; } // don't query on a bare argument space
+  suggest.fragment = token;
+  suggest.kind = "cmdfile";
+  requestFiles(token); // popover shows when file_list arrives
+}
+
 function onFileList(event) {
-  if (suggest.kind !== "file" || event.query !== suggest.fragment) return;
+  const fileKind = suggest.kind === "file" || suggest.kind === "cmdfile";
+  if (!fileKind || event.query !== suggest.fragment) return;
   if (!event.files.length) { hideSuggest(); return; }
   suggest.items = event.files.map((path) => [path, ""]);
   suggest.index = 0;
@@ -3512,20 +3549,31 @@ function hideSuggest() {
 }
 
 function acceptSuggestion([value]) {
-  if (suggest.kind === "slash") {
+  const kind = suggest.kind; // hideSuggest() clears it below
+  if (kind === "slash") {
     input.value = value + " ";
+  } else if (kind === "cmd") {
+    // Replace the first word (everything before the caret) with the command.
+    const pos = input.selectionStart ?? input.value.length;
+    input.value = value + " " + input.value.slice(pos);
+    const caret = value.length + 1;
+    input.setSelectionRange(caret, caret);
   } else {
+    // file (@-mention) and cmdfile (bare path token): replace the current
+    // token. Mentions keep their leading @; command args have no prefix.
     const pos = input.selectionStart ?? input.value.length;
     const before = input.value.slice(0, pos);
-    const at = before.lastIndexOf("@");
+    const start = kind === "cmdfile"
+      ? before.lastIndexOf(" ") + 1
+      : before.lastIndexOf("@") + 1;
     const inserted = value.endsWith("/") ? value : value + " ";
-    input.value = before.slice(0, at + 1) + inserted + input.value.slice(pos);
-    const caret = at + 1 + inserted.length;
+    input.value = input.value.slice(0, start) + inserted + input.value.slice(pos);
+    const caret = start + inserted.length;
     input.setSelectionRange(caret, caret);
   }
   hideSuggest();
   input.focus();
-  if (suggest.kind !== "slash") updateSuggest();
+  if (kind !== "slash") updateSuggest();
 }
 
 function submitInput() {
@@ -3654,6 +3702,17 @@ function refreshCmdPrompt() {
   if (cmdMode) $("cmd-prompt").textContent = cmdPromptLabel();
 }
 
+// iOS reads autocapitalize/autocorrect/spellcheck when the field gains focus,
+// so a blur+refocus is needed for a mid-focus mode switch to take effect —
+// otherwise the terminal keyboard would still capitalise and autocorrect
+// commands. `raw` = command-line typing; false restores chat-message typing.
+function setInputTyping(raw) {
+  input.setAttribute("autocapitalize", raw ? "none" : "sentences");
+  input.setAttribute("autocorrect", raw ? "off" : "on");
+  input.setAttribute("spellcheck", raw ? "false" : "true");
+  if (document.activeElement === input) { input.blur(); input.focus(); }
+}
+
 function enterCmdMode() {
   if (cmdMode) return;
   cmdMode = true;
@@ -3665,6 +3724,7 @@ function enterCmdMode() {
   input.value = "";
   resizeInput();
   input.focus();
+  setInputTyping(true);
 }
 
 function exitCmdMode() {
@@ -3672,11 +3732,13 @@ function exitCmdMode() {
   cmdMode = false;
   $("composer").classList.remove("cmd-mode");
   $("cmd-prompt").hidden = true;
+  hideSuggest();
   $("attach").setAttribute("aria-label", "actions");
   input.placeholder = "Ask aish";
   input.value = "";
   resizeInput();
   input.focus();
+  setInputTyping(false);
 }
 
 // Insert a trigger char and fire the input flow (mention / slash suggestions).
