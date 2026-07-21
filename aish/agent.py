@@ -377,6 +377,39 @@ def learn_prompt(hint: str, lessons_path=None) -> str:
     return LEARN_PROMPT.format(hint=clause)
 
 
+# /feedback (CLI and web) expands to this so both entry points share one flow.
+# It leans on the `gh_issue` skill for the gh mechanics rather than a permanent
+# feedback skill, so nothing is added to the always-on skill index.
+FEEDBACK_PROMPT = (
+    "The user wants to send feedback about aish — a bug report, a feature "
+    "request, or an improvement idea — that will become a GitHub issue on the "
+    "`epnasis/aish` repository (checked out at /Users/epnasis/dev/aish). "
+    "You MUST follow this flow:\n"
+    "1. Read the `gh_issue` skill (read_skill) and follow it for the repo "
+    "context and the exact `gh issue create` mechanics.\n"
+    "2. If the request is unclear or thin, ask focused clarifying questions "
+    "FIRST — one short round, not an interrogation. If they already described "
+    "it{clause}, go straight to a draft.\n"
+    "3. Present the draft issue as ordinary rendered markdown — a bold title "
+    "line and a structured body. Do NOT wrap the draft in a code block; the "
+    "user reads it rendered.\n"
+    "4. End that same message with exactly these two quick-reply chips, each on "
+    "its own line:\n"
+    "[Create the issue](aish-reply://Create the issue)\n"
+    "[Edit — change something](aish-reply://I'd like to change the draft: )\n"
+    "5. Run `gh issue create` ONLY after the user approves. Then show the new "
+    "issue's URL.\n"
+    "If the user attached logs, screenshots, or files, incorporate them and "
+    "upload them to the issue per the `gh_issue` skill's asset workflow."
+)
+
+
+def feedback_prompt(hint: str = "") -> str:
+    hint = hint.strip()
+    clause = f" (their words: {hint})" if hint else ""
+    return FEEDBACK_PROMPT.format(clause=clause)
+
+
 # No side effects and no approval prompt — safe to run concurrently.
 READ_ONLY_TOOLS = frozenset(
     {"read_docs", "read_skill", "web_search", "read_url", "read_file", "recall"}

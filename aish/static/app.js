@@ -3606,6 +3606,9 @@ $("composer-actions").addEventListener("click", (e) => {
     case "photo": $("photo-input").click(); break;
     case "reference": composerInsert("@"); break;
     case "slash": composerInsert("/"); break;
+    // Prefill the trigger and let the user add detail (or just send) — the
+    // server expands /feedback into the issue-filing flow (parse_feedback).
+    case "feedback": composerInsert("/feedback "); break;
   }
 });
 

@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import backends, term_image, tools
-from .agent import Agent, ModelUnavailable, environment_context, format_tokens, learn_prompt
+from .agent import (
+    Agent,
+    ModelUnavailable,
+    environment_context,
+    feedback_prompt,
+    format_tokens,
+    learn_prompt,
+)
 from .approval import (
     DEFAULT_ALLOWLIST,
     DEFAULT_DENYLIST,
@@ -49,8 +56,8 @@ ECHO_PREVIEW_LINES = 12
 REPLAY_TOOL_LINES = 4
 
 SLASH_COMMANDS = (
-    "/add-dir", "/cd", "/clear", "/delete", "/dir-add", "/exit", "/help", "/jobs",
-    "/learn", "/model", "/new", "/quit", "/rename", "/resume",
+    "/add-dir", "/cd", "/clear", "/delete", "/dir-add", "/exit", "/feedback",
+    "/help", "/jobs", "/learn", "/model", "/new", "/quit", "/rename", "/resume",
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
@@ -81,6 +88,8 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
   {CYAN}/learn [hint]{RESET}  distill this conversation into saved skills/memory (the
                  model searches existing knowledge first and you approve
                  each write); /learn lessons migrates the legacy lessons.md
+  {CYAN}/feedback [text]{RESET} file a bug/idea as a GitHub issue on epnasis/aish —
+                 aish drafts it, you approve, it creates the issue
   {CYAN}/jobs{RESET}          list background jobs started this session
   {CYAN}/help{RESET}          this help
   {CYAN}/quit, /exit{RESET}   quit (plain 'exit' works too)
@@ -717,6 +726,18 @@ def parse_learn(task: str, lessons_path=None) -> str | None:
         if matches != ["/learn"]:
             return None
     return learn_prompt(task.partition(" ")[2], lessons_path)
+
+
+def parse_feedback(task: str) -> str | None:
+    """/feedback [details] → the feedback-flow prompt (run as a normal task so
+    the gh_issue skill, chips, and approval gate all apply); None for any other
+    slash input. Unambiguous prefixes resolve, matching handle_slash."""
+    verb = task.split()[0].lower()
+    if verb != "/feedback":
+        matches = [c for c in SLASH_COMMANDS if c.startswith(verb)]
+        if matches != ["/feedback"]:
+            return None
+    return feedback_prompt(task.partition(" ")[2])
 
 
 def pick_session(state_dir: Path, arg: str, exclude: set, verb: str) -> SessionInfo | None:
@@ -1400,14 +1421,16 @@ def main() -> int:
         if not task:
             continue
         if task.startswith("/"):
-            learn = parse_learn(task, lessons_path)
-            if learn is None:
+            # /learn and /feedback expand to a task prompt (recall + diff
+            # approvals apply); every other slash is handled inline.
+            expanded = parse_learn(task, lessons_path) or parse_feedback(task)
+            if expanded is None:
                 if handle_slash(
                     task, agent, logref, state_dir, resumed, config_path=config_path
                 ) == "exit":
                     return 0
                 continue
-            task = learn  # /learn runs as a normal task: recall + diff approvals apply
+            task = expanded
         if task.startswith("!"):
             command = task[1:].strip()
             if command:

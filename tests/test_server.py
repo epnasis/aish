@@ -2355,6 +2355,16 @@ class TestLearnCommand:
         sent_user = [m for m in chat.calls[0]["messages"] if m["role"] == "user"]
         assert sent_user[-1]["content"] == "/etc/hosts looks odd"
 
+    def test_feedback_text_is_rewritten_to_flow_prompt(self, app_env):
+        client, chat = make_client(app_env, [model_says("drafted")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/feedback dark mode is broken"})
+            assert recv_until(ws, "user")["text"] == "/feedback dark mode is broken"
+            recv_until(ws, "done")
+        sent_user = [m for m in chat.calls[0]["messages"] if m["role"] == "user"]
+        assert "GitHub issue" in sent_user[-1]["content"]
+        assert "dark mode is broken" in sent_user[-1]["content"]
+
 
 class TestExportAssembly:
     """Issue #64: the pure markdown-assembly boundary — 'final answers only'

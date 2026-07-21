@@ -221,6 +221,8 @@ providers; add `--save` to persist the choice as the startup default in
 `config.toml` (`/model --save` alone persists the current model) ·
 `/learn [hint]` — save this conversation's learnings as skills/memory
 (`/learn lessons` migrates the legacy lessons file) ·
+`/feedback [text]` — file a bug or idea as a GitHub issue: aish gathers
+details, drafts the issue, and (on your approval) creates it via `gh` ·
 `/jobs` · `/help` · `/quit` (or `exit`).
 
 **Multiline input**: Enter submits; newline via Ctrl+J, trailing `\`, or
