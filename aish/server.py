@@ -83,8 +83,8 @@ def _static_rev() -> str:
     so deployed frontend fixes would otherwise not reach the device."""
     try:
         stats = sorted(
-            (p.name, s.st_mtime_ns, s.st_size)
-            for p in STATIC_DIR.iterdir()
+            (str(p.relative_to(STATIC_DIR)), s.st_mtime_ns, s.st_size)
+            for p in STATIC_DIR.rglob("*")
             if p.is_file() and (s := p.stat())
         )
         return hashlib.md5(repr(stats).encode()).hexdigest()[:12]
