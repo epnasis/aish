@@ -1724,6 +1724,7 @@ def create_app(
     ask_all: bool = False,
     token: str | None = None,
     cwd: str | None = None,
+    aliases: dict[str, str] | None = None,
 ) -> Starlette:
     """The Starlette app; client_chat injects a scripted backend (tests)."""
     if cwd is None:
@@ -1857,6 +1858,7 @@ def create_app(
             max_steps=max_steps,
             cwd=cwd,
             context=context,
+            aliases=aliases,
             on_message=logref.message,
             on_token=lambda text: bridge.emit({"type": "token", "text": text}),
             # Structured activity-trace steps; recorded so a resumed/switched
@@ -2015,6 +2017,7 @@ def main() -> int:
             think=args.think,
             ask_all=args.ask_all,
             token=token,
+            aliases=config.get("aliases"),
         )
     except backends.BackendError as exc:
         print(f"error: {exc}", file=sys.stderr)

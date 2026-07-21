@@ -52,6 +52,7 @@ class ClaudeMaxAgent:
         current_session=None,
         state_log=None,
         on_state=None,
+        aliases=None,
         **_ignored,
     ):
         # The inner Agent supplies tool dispatch (approval, denylist, file
@@ -73,6 +74,7 @@ class ClaudeMaxAgent:
             current_session=current_session,
             state_log=state_log,
             on_state=on_state,
+            aliases=aliases,
         )
         self.model = model  # "" = the claude CLI's configured default
         self.echo = echo
@@ -107,6 +109,10 @@ class ClaudeMaxAgent:
     @property
     def roots(self):
         return self.inner.roots
+
+    @property
+    def aliases(self):
+        return self.inner.aliases
 
     @property
     def lessons_path(self):
@@ -193,6 +199,7 @@ class ClaudeMaxAgent:
 
     def run_user_command(self, command: str) -> str:
         """! escape: run locally now, tell the model on the next task."""
+        command = self.inner.expand_alias(command)
         cd_target = self.inner._parse_cd(command)
         if cd_target is not None:
             return self.rebase(cd_target)  # !cd aliases /cd: root moves too
