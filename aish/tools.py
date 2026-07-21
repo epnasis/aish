@@ -6,12 +6,14 @@ auto-approved, so it never accepts a shell string — only a bare command
 name, validated and resolved against PATH before anything is executed.
 """
 
+import contextlib
 import datetime
 import os
 import re
 import select
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -51,6 +53,35 @@ def _decode(data: bytes | None) -> str:
     return (data or b"").decode("utf-8", errors="replace")
 
 
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """Send `sig` to the child's whole process group so its descendants die too,
+    not just the shell. The child leads its own group (start_new_session=True),
+    so its pgid equals its pid. Best-effort: the group may already be gone, or
+    the platform may lack process groups — fall back to the bare process."""
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError, AttributeError, OSError):
+        with contextlib.suppress(ProcessLookupError, OSError, ValueError):
+            proc.send_signal(sig)
+
+
+def _stop_group(proc: subprocess.Popen) -> None:
+    """Cancel a running command by signaling its process group, escalating
+    SIGINT → SIGTERM → SIGKILL and giving each a moment to land. SIGINT first
+    mirrors an interactive Ctrl-C; SIGKILL is the last resort for a process that
+    ignores the gentler signals. Reaps the child so its returncode is set."""
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        _signal_group(proc, sig)
+        try:
+            proc.wait(timeout=2)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    _signal_group(proc, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=2)
+
+
 def run_command(
     command: str,
     timeout: float = 120,
@@ -75,6 +106,10 @@ def run_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
+            # Own process group so a cancel/timeout can signal the whole group —
+            # the shell AND everything it spawned — not just the shell (a bare
+            # terminate leaves grandchildren like a `sleep` inside `sh -c` alive).
+            start_new_session=True,
         )
     except OSError as exc:
         return f"ERROR: failed to start command: {exc}"
@@ -96,18 +131,13 @@ def run_command(
         while True:
             if deadline is not None and time.monotonic() >= deadline:
                 timed_out = True
-                proc.kill()
+                _signal_group(proc, signal.SIGKILL)
                 break
             # Cooperative cancel (web UI Stop button): checked once per
             # select slice, so a stop lands within ~0.5s.
             if should_stop is not None and should_stop():
                 cancelled = True
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
+                _stop_group(proc)
                 break
             slice_t = 0.5
             if deadline is not None:
@@ -134,12 +164,7 @@ def run_command(
         proc.wait()
     except KeyboardInterrupt:
         cancelled = True
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+        _stop_group(proc)
     finally:
         if saved_term is not None:
             termios.tcsetattr(stdin_fd, termios.TCSADRAIN, saved_term)
