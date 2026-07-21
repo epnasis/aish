@@ -542,6 +542,7 @@ function onDone(event) {
     attachAnswerTools(el, event.result, lastUserPrompt);
   }
   closeAnswer();
+  maybeSpeakReply(); // voice-in → voice-out: auto-read a reply to a dictated message (#97)
   finishTrace();
   if (event.sources && event.sources.length) addSources(event.sources);
   setBusy(false);
@@ -3457,6 +3458,7 @@ input.addEventListener("input", () => {
   // Terminal mode owns the input: no chat draft or history-recall, but it has
   // its own command/file autocomplete (updateSuggest branches on cmdMode).
   if (cmdMode) { resizeInput(); updateSuggest(); return; }
+  if (!input.value) pendingSpeak = false; // cleared a dictated draft → don't speak the reply
   historyIndex = null; // typing leaves history-recall mode
   saveDraft();
   resizeInput();
@@ -3598,6 +3600,7 @@ function acceptSuggestion([value]) {
 
 function submitInput() {
   hideSuggest();
+  if (dictating) stopDictation(); // tapping send finishes an in-progress dictation
   if (cmdMode) { submitCommand(); return; }
   let text = input.value.trim();
   if (text.startsWith("/")) {
@@ -3615,6 +3618,7 @@ function submitInput() {
   // The server decides per-backend whether attachments go to the model
   // natively (vision) or as path notes for the gated tools.
   if (send({ type: "task", text, attachments: attachments.map((a) => a.path) })) {
+    if (pendingSpeak) { speakNextReply = true; pendingSpeak = false; } // dictated → speak reply
     maybeRequestNotifyPermission();
     input.value = "";
     localStorage.removeItem("aish-draft");
@@ -4013,6 +4017,126 @@ for (const btn of document.querySelectorAll(".mic-lang")) {
     if (micListening) { stopMic(); startMic(); } // restart so the new lang takes
   };
 }
+
+// ---- dictation (mic-to-composer, #97) ------------------------------------
+// A mic button that dictates into the composer instead of typing. It keeps
+// listening THROUGH pauses (iOS ends recognition on silence — we restart it)
+// and finishes only when you say "stop" or tap the mic, so there's time to
+// think mid-sentence. Interim words stream into the input live. When a dictated
+// message is sent, its reply is auto-read via TTS (voice in → voice out), the
+// reply language auto-detected by the existing TTS heuristic. Language can't be
+// auto-detected for input, so a small EN/PL chip picks it.
+let dictating = false;
+let dictateRec = null;
+let dictateLang = localStorage.getItem("aish-dict-lang") || "en-US";
+let dictateBase = "";     // composer text present before dictation began (append)
+let dictateFinal = "";    // finalized transcript, accumulated across restarts
+let dictateEnded = false; // set on stop-word / tap so onend won't restart
+let pendingSpeak = false; // current composer text came from dictation
+let speakNextReply = false; // armed when a dictated message is sent
+
+function setDictLang() {
+  $("dict-lang").textContent = dictateLang === "pl-PL" ? "PL" : "EN";
+}
+
+function dictJoin(a, b) {
+  return a && b && !/\s$/.test(a) ? `${a} ${b}` : a + b;
+}
+
+function renderDictation(interim) {
+  input.value = dictJoin(dictateBase, dictJoin(dictateFinal, interim));
+  resizeInput(); // note: never touch the "Ask aish" placeholder
+}
+
+// A trailing standalone "stop" ends dictation (deliberately NOT a silence timer,
+// so pauses don't cut you off). Returns the text with that word removed.
+function stripStopWord(text) {
+  const m = text.match(/(^|\s)stop[\s.!?,]*$/i);
+  return m ? text.slice(0, m.index).trimEnd() : text;
+}
+
+function beginRec() {
+  dictateRec = new SpeechRec();
+  dictateRec.lang = dictateLang;
+  dictateRec.continuous = true;
+  dictateRec.interimResults = true;
+  dictateRec.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const chunk = e.results[i][0].transcript;
+      if (e.results[i].isFinal) dictateFinal = dictJoin(dictateFinal, chunk.trim());
+      else interim += chunk;
+    }
+    const stripped = stripStopWord(dictateFinal);
+    if (stripped !== dictateFinal) { dictateFinal = stripped; stopDictation(); return; }
+    renderDictation(interim);
+  };
+  dictateRec.onerror = (e) => {
+    if (e.error === "no-speech" || e.error === "aborted") return; // benign; onend restarts
+    showToast(e.error === "not-allowed" ? "microphone permission denied" : `mic: ${e.error}`);
+    stopDictation();
+  };
+  dictateRec.onend = () => {
+    // iOS ends on silence — keep listening through pauses unless we ended on purpose.
+    if (dictating && !dictateEnded) { try { dictateRec.start(); } catch { beginRec(); } }
+  };
+  try { dictateRec.start(); }
+  catch { showToast("couldn't start the mic"); stopDictation(); }
+}
+
+function startDictation() {
+  if (!SpeechRec || dictating) return;
+  dictateBase = input.value.trim();
+  dictateFinal = "";
+  dictateEnded = false;
+  dictating = true;
+  $("dictate").classList.add("recording");
+  beginRec();
+}
+
+function restartDictation() { // e.g. after a language switch mid-dictation
+  if (dictateRec) { dictateRec.onend = null; try { dictateRec.stop(); } catch { /* gone */ } }
+  beginRec();
+}
+
+function stopDictation() {
+  dictateEnded = true;
+  dictating = false;
+  if (dictateRec) {
+    dictateRec.onend = null; // don't let the pending onend restart us
+    try { dictateRec.stop(); } catch { /* already stopped */ }
+    dictateRec = null;
+  }
+  $("dictate").classList.remove("recording");
+  renderDictation(""); // commit the final text, drop any trailing interim
+  if (input.value.trim()) pendingSpeak = true; // a reply to this should be spoken
+  input.focus();
+}
+
+// Voice-in → voice-out: after a dictated message's reply lands, read it aloud.
+function maybeSpeakReply() {
+  if (!speakNextReply) return;
+  speakNextReply = false;
+  if (!TTS_OK) return;
+  const answers = document.querySelectorAll(".msg.answer");
+  const el = answers[answers.length - 1];
+  const box = el && el.querySelector(".tts");
+  if (box) startPlayback(box, el);
+}
+
+if (SpeechRec) {
+  $("dictate").hidden = false;
+  $("dict-lang").hidden = false;
+  setDictLang();
+  $("dictate").onclick = () => (dictating ? stopDictation() : startDictation());
+  $("dict-lang").onclick = () => {
+    dictateLang = dictateLang === "pl-PL" ? "en-US" : "pl-PL";
+    localStorage.setItem("aish-dict-lang", dictateLang);
+    setDictLang();
+    if (dictating) restartDictation();
+  };
+}
+
 function closeSheets() {
   // Blur a focused sheet input before hiding it: merely hiding leaves iOS to
   // dismiss the keyboard on its own schedule, and the layout-viewport pan it
