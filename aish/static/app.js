@@ -291,7 +291,25 @@ let sessionTitled = false;
 function setTitle(text) {
   sessionTitled = Boolean(text);
   $("session-title").textContent = text || "New chat";
+  updateBackLabel();
 }
+
+// Collapse "‹ Sessions" to just "‹" when the title is long enough to be
+// truncated — freeing header room at any width, on top of the ≤430px viewport
+// rule (#83). "Long" is content- not viewport-dependent, so it's measured:
+// clear the class (label shown), read whether the title overflows, re-add it if
+// so. Synchronous, so the transient label-shown state never paints.
+function updateBackLabel() {
+  const nav = $("nav-row");
+  const title = $("session-title");
+  nav.classList.remove("crowded");
+  if (title.scrollWidth > title.clientWidth + 1) nav.classList.add("crowded");
+}
+let backLabelResizeTimer;
+window.addEventListener("resize", () => {
+  clearTimeout(backLabelResizeTimer);
+  backLabelResizeTimer = setTimeout(updateBackLabel, 100);
+});
 
 // The ?v= the server stamped into our own <script> tag — ground truth for
 // which code revision this page actually runs (unlike any value learned at

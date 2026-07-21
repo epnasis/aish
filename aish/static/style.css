@@ -237,6 +237,9 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 /* Narrow phones: the back button collapses to just "‹" (the badge still
    shows on the chevron); the label returns when there's room (#15). */
 @media (max-width: 430px) { .back-label { display: none; } }
+/* Also collapse the label when a long title crowds the header at any width (#83,
+   toggled by updateBackLabel). */
+#nav-row.crowded .back-label { display: none; }
 
 /* ---- popover menu (session title menu, composer actions) ---- */
 .popover-menu {
