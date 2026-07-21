@@ -636,6 +636,7 @@ const TRACE_ICONS = {
   write: (c) => `<path d="M12 19.5h8" stroke="${c}" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.2a1.7 1.7 0 0 1 2.4 2.4l-8.3 8.3-3.2.8.8-3.2z" fill="none" stroke="${c}" stroke-width="1.7" stroke-linejoin="round"/>`,
   check: (c) => `<path d="M5 12.5l4 4 10-10.5" fill="none" stroke="${c}" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>`,
   chat: (c) => `<path d="M4.5 6.5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H10l-4 3.5V15.5H6.5a2 2 0 0 1-2-2z" fill="none" stroke="${c}" stroke-width="1.6" stroke-linejoin="round"/>`,
+  folder: (c) => `<path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="${c}" stroke-width="1.6"/>`,
   dot: (c) => `<circle cx="12" cy="12" r="3.5" fill="${c}"/>`,
 };
 
@@ -1468,21 +1469,30 @@ function retireRegen() {
 // folder glyph is static markup; the path is user data, so it goes in via
 // textContent.
 function addWorkspaceNote(change, path) {
-  // Styled like the "You added" steering note (blue icon + bold label + value)
-  // so a cwd/trust change reads as a first-class timeline event, not a grey
-  // system line (#94/#95).
+  const label = change === "cwd" ? "Working directory" : "Trusted directory";
+  // During a task, show it INLINE in the activity trace at the moment it
+  // happened — exactly like the "You added" steering note — so it sits on the
+  // timeline where it occurred, not as a detached row after the answer (#94/#95).
+  if (currentTrace) {
+    currentTrace.started += 1;
+    traceRow(currentTrace, traceSvg("folder", "var(--blue)"), label, abbreviatePath(path));
+    updateTraceHead(currentTrace);
+    scrollToEnd();
+    return;
+  }
+  // Idle (no live trace): a standalone note, still styled like "You added".
   const el = document.createElement("div");
   el.className = "msg workspace-note";
   const ico = document.createElement("span");
   ico.className = "wsnote-ico";
   ico.innerHTML = FOLDER_SVG;
-  const label = document.createElement("span");
-  label.className = "wsnote-label";
-  label.textContent = change === "cwd" ? "Working directory" : "Trusted directory";
+  const lab = document.createElement("span");
+  lab.className = "wsnote-label";
+  lab.textContent = label;
   const val = document.createElement("span");
   val.className = "wsnote-path mono";
   val.textContent = abbreviatePath(path);
-  el.append(ico, label, val);
+  el.append(ico, lab, val);
   messagesEl.appendChild(el);
   scrollToEnd();
   return el;

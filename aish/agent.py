@@ -743,7 +743,11 @@ class Agent:
         target = self.check_pending_cwd()
         if not target:
             return
-        result = self.rebase(target)
+        # announce=False: mid-task, do NOT inject a user-turn note — the model
+        # would treat it as a new prompt and abandon the running task. The cwd
+        # still moves (commands run in the new dir) and the skills index below is
+        # rebuilt for it; the model just isn't disruptively interrupted (#95).
+        result = self.rebase(target, announce=False)
         if result.startswith("ERROR"):
             return  # a vanished/invalid dir: rebase already reported it
         self.messages[0]["content"] = compose_system_content(
@@ -1148,19 +1152,26 @@ class Agent:
         )
         return result
 
-    def rebase(self, target: str) -> str:
+    def rebase(self, target: str, announce: bool = True) -> str:
         """User-typed /cd (and its alias !cd): move cwd AND re-anchor the
         primary session root. Never reachable by the model — that's what
-        keeps root scoping honest."""
+        keeps root scoping honest.
+
+        `announce` appends a user-turn note telling the model the project moved.
+        It's suppressed mid-task (announce=False from _apply_pending_cwd): a fresh
+        user turn injected mid-flight reads as a new prompt, so the model
+        abandons the running task to answer it. Between tasks (immediate /cd,
+        post-task apply, CLI) it's fine — it's the model's cwd signal there."""
         result = self._change_dir(target)
         if result.startswith("ERROR"):
             return result
         self.roots[0] = Path(self.cwd).resolve()
         self._emit_workspace("cwd", self.cwd)  # the timeline marker; no grey echo
-        self._append(
-            {"role": "user", "content": f"[I moved the session to {self.cwd} with /cd — "
-             "this directory is the project now]"}
-        )
+        if announce:
+            self._append(
+                {"role": "user", "content": f"[I moved the session to {self.cwd} with /cd — "
+                 "this directory is the project now]"}
+            )
         return result
 
     def add_root(self, target: str) -> str:

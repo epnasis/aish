@@ -2515,6 +2515,27 @@ class TestMidTaskSteering:
         assert agent.run_task("go") == "done"
         assert agent.cwd == str(moved)  # rebased mid-task
         assert agent.roots[0] == moved.resolve()  # root re-anchored too
+        # Mid-task must NOT inject a "[I moved the session]" user turn — the model
+        # would treat it as a fresh prompt and abandon the running task (#95 fix).
+        assert not any(
+            m.get("role") == "user" and "I moved the session" in str(m.get("content", ""))
+            for m in agent.messages
+        )
+
+    def test_rebase_announce_flag(self, tmp_path):
+        a, b = tmp_path / "a", tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        agent, _ = make_agent([], cwd=str(tmp_path))
+        agent.rebase(str(a))  # default announce=True — tells the model
+        assert any(
+            m.get("role") == "user" and "I moved the session" in str(m.get("content", ""))
+            for m in agent.messages
+        )
+        n = len(agent.messages)
+        agent.rebase(str(b), announce=False)  # suppressed
+        assert agent.cwd == str(b)  # still moved
+        assert len(agent.messages) == n  # but no user turn appended
 
     def test_pending_cwd_rebuilds_system_prompt_for_new_dir(self, tmp_path):
         start = tmp_path / "start"
