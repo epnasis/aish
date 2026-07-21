@@ -176,6 +176,20 @@ SKILL_GATE_REFUSAL = (
     "the call will then proceed."
 )
 
+# Comment gate (issue #81): the system prompt and the feedback notes ORDER the
+# model to answer a verdict comment in plain text before its next tool call,
+# but eager models (Gemini, small local ones) fire another tool first anyway.
+# This is the hard backstop — while a comment is unanswered every tool call is
+# refused, so the user's feedback is never silently folded into a command. One
+# line of plain text lifts it (the main loop clears the flag on any content),
+# and the step budget bounds a model that never replies.
+COMMENT_GATE_REFUSAL = (
+    "NOT EXECUTED — the user attached a COMMENT to their last decision and you "
+    "have not answered it yet. Reply to the user in plain text FIRST — address "
+    "their point and say what you will do about it — then issue your tool call "
+    "again. No further command runs until you have responded to their comment."
+)
+
 LOOP_WARNING = (
     "[aish: you have issued this exact tool call {count} times and received "
     "identical output every time — repeating it cannot make progress. Change "
@@ -552,6 +566,10 @@ class Agent:
         # read_skill (or explicitly waive) before other tools run; values are
         # refusals left before the gate auto-lifts. Rebuilt every run_task.
         self._pending_skill_reads: dict[str, int] = {}
+        # Comment gate (issue #81): armed when a verdict carries a user comment,
+        # cleared by the main loop the moment a turn produces any plain text.
+        # While armed, _comment_gate refuses every tool call.
+        self._pending_comment_response = False
         self.base_context = context
         # Per-session scratch workspace (issue #70): a private temp dir where
         # the model may create AND delete throwaway files without prompting.
@@ -687,6 +705,9 @@ class Agent:
                 f"({self.semantic.error[:80]}); falling back to word matching"
             )
         self._pending_skill_reads = {n: GATE_MAX_REFUSALS for n in preload.unread}
+        # A new task starts un-gated: any pending comment belonged to the last
+        # task and would otherwise stall the first tool call of this one.
+        self._pending_comment_response = False
         self.messages.append(
             {"role": "system", "content": task_reminder(index, preload.text)}
         )
@@ -731,6 +752,11 @@ class Agent:
                 # request instead of reconstructing the turn.
                 entry["raw_blocks"] = raw_blocks
             self._append(entry)
+
+            # A plain-text reply answers any pending user comment, so the gate
+            # lifts before this turn's tool calls (if any) are dispatched.
+            if content:
+                self._pending_comment_response = False
 
             if not tool_calls:
                 result = content or EMPTY_RESPONSE
@@ -1040,10 +1066,10 @@ class Agent:
             for i, (name, args) in enumerate(calls)
             if name in READ_ONLY_TOOLS and not self._read_needs_prompt(name, args)
         ]
-        # While the skill-read gate is armed, everything goes through
-        # _dispatch sequentially — the parallel thunks below would bypass the
-        # gate (and the counter dict is not thread-safe).
-        if len(concurrent) < 2 or self._pending_skill_reads:
+        # While either gate is armed, everything goes through _dispatch
+        # sequentially — the parallel thunks below would bypass the gate (and
+        # the skill-counter dict is not thread-safe).
+        if len(concurrent) < 2 or self._pending_skill_reads or self._pending_comment_response:
             return [
                 self._call_result(
                     name, partial(self._timed, partial(self._dispatch, name, args)), args=args
@@ -1260,6 +1286,33 @@ class Agent:
         label = f"→ read_file: {path}" + (f" (from line {offset})" if offset > 1 else "")
         return label, partial(files.read_file, path, self.cwd, offset=offset, limit=limit)
 
+    def _arm_comment_gate(self, comment: str) -> None:
+        """A verdict carried user feedback — hold every further tool call until
+        the model answers it in plain text (issue #81). No-op for a bare
+        approval/denial, matching the feedback notes that only fire on a comment."""
+        if comment:
+            self._pending_comment_response = True
+
+    def _comment_gate(self, name: str, args: dict) -> str | None:
+        """Refusal while a user's verdict comment is unanswered, else None.
+
+        A Denied/Approved comment arms this (see _dispatch/_dispatch_write); the
+        main loop clears the flag the instant a turn produces any plain text, so
+        a single reply lifts it. Until then every tool call is refused — the
+        model cannot silently fold feedback into its next command. No countdown:
+        the flag survives only across gated (text-free) turns, and the step
+        budget bounds a model that never replies."""
+        if not self._pending_comment_response:
+            return None
+        if name == "run_command":  # so the trace shows why it was held, not a bare row
+            self._run_meta = {
+                "command": str(args.get("command", "")),
+                "decision": "blocked",
+                "output": "Held until you reply to the user's comment.",
+            }
+        self._note("✋ gated until you answer the user's comment")
+        return COMMENT_GATE_REFUSAL
+
     def _skill_gate(self, name: str, args: dict) -> str | None:
         """Refusal text while a flagged oversized skill is unread, else None.
 
@@ -1283,8 +1336,14 @@ class Agent:
         return SKILL_GATE_REFUSAL.format(names=names, first=first)
 
     def _dispatch(self, name: str, args: dict) -> str:
-        # The gate runs before everything — a refusal must never reach an
-        # approval prompt or a tool implementation.
+        # The gates run before everything — a refusal must never reach an
+        # approval prompt or a tool implementation. The comment gate goes first:
+        # the user's feedback outranks every other rule and must be answered
+        # before any tool runs.
+        refusal = self._comment_gate(name, args)
+        if refusal is not None:
+            return refusal
+
         refusal = self._skill_gate(name, args)
         if refusal is not None:
             if name == "run_command":  # so the trace shows why it was held, not a bare row
@@ -1370,6 +1429,7 @@ class Agent:
                 self._run_meta = {
                     "command": command, "decision": "denied", "output": decision.comment or "",
                 }
+                self._arm_comment_gate(decision.comment)
                 return _with_feedback(DENIED_RESULT, decision.comment)
             if decision is None or decision is False:
                 self._run_meta = {"command": command, "decision": "denied", "output": ""}
@@ -1377,6 +1437,7 @@ class Agent:
             feedback = ""
             if isinstance(decision, Approved):
                 feedback = decision.comment
+                self._arm_comment_gate(feedback)
                 decision = decision.command if decision.command else True
             final = command if decision is True else str(decision)
             # command_start opens the bounded terminal block in the web UI:
@@ -1446,6 +1507,7 @@ class Agent:
             self._run_meta = {
                 "decision": "denied", "ok": False, "output": "", "comment": decision.comment,
             }
+            self._arm_comment_gate(decision.comment)
             return _with_feedback(WRITE_DENIED, decision.comment)
         if not decision:
             self._run_meta = {"decision": "denied", "ok": False, "output": ""}
@@ -1455,6 +1517,7 @@ class Agent:
         if isinstance(decision, Approved):
             if decision.comment:  # surface the approval note on the trace step too
                 self._run_meta = {"decision": "approved", "comment": decision.comment}
+            self._arm_comment_gate(decision.comment)
             result = _with_approval_note(result, decision.comment)
         return result
 

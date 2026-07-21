@@ -201,6 +201,105 @@ class TestApprovalComment:
         assert self._must_answer(result)
 
 
+class TestCommentGate:
+    """#81: the answer-first rule is enforced programmatically, not just asked
+    for — while a verdict comment is unanswered, every tool call is refused so
+    the model cannot silently fold feedback into its next command."""
+
+    def test_tool_after_comment_is_refused_until_text(self, tmp_path):
+        """Model denies-with-comment, then (eagerly) fires another command
+        before replying: the gate refuses it. Only once the model answers in
+        plain text (here, alongside its retry) does the command run."""
+        from aish.agent import COMMENT_GATE_REFUSAL
+        from aish.approval import Denied
+
+        marker = tmp_path / "gated"
+        seen: list[str] = []
+
+        def approve(cmd):
+            seen.append(cmd)
+            # Deny the first command with a comment; approve anything after.
+            return Denied("use -f on macOS") if len(seen) == 1 else True
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="rm x")]),
+                # Eager: no text, straight to another command — must be refused.
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                # Now the model replies AND retries in one turn — the text lifts
+                # the gate so this command runs.
+                model_says(
+                    "You're right — switching to -f.",
+                    tool_calls=[tool_call("run_command", command=f"touch {marker}")],
+                ),
+                model_says("done"),
+            ],
+            approve=approve,
+        )
+        assert agent.run_task("clean up") == "done"
+        results = [m["content"] for m in tool_messages(agent.messages)]
+        assert results[1] == COMMENT_GATE_REFUSAL  # eager command blocked
+        assert marker.exists()  # ran only after the model replied
+        # The blocked command never reached the approver: two approver calls,
+        # not three — the refused turn short-circuited before approval.
+        assert seen == ["rm x", f"touch {marker}"]
+
+    def test_text_with_tool_same_turn_is_allowed(self, tmp_path):
+        """A turn that carries BOTH a text reply and a tool call satisfies the
+        gate — the comment is answered, so the tool runs."""
+        from aish.approval import Approved
+
+        marker = tmp_path / "same_turn"
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says(
+                    "Noted, doing it now.",
+                    tool_calls=[tool_call("run_command", command=f"touch {marker}")],
+                ),
+                model_says("done"),
+            ],
+            approve=lambda _cmd: Approved("prefer -D next time"),
+        )
+        assert agent.run_task("go") == "done"
+        assert marker.exists()  # the same-turn command ran, not refused
+
+    def test_bare_denial_does_not_gate(self, tmp_path):
+        """No comment → no gate: a plain deny must not block the next command."""
+        marker = tmp_path / "not_gated"
+        calls = {"n": 0}
+
+        def approve(_cmd):
+            calls["n"] += 1
+            return False if calls["n"] == 1 else True  # deny first, approve next
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="rm x")]),
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("done"),
+            ],
+            approve=approve,
+        )
+        assert agent.run_task("go") == "done"
+        assert marker.exists()  # second command ran without a text reply in between
+
+    def test_gate_does_not_leak_across_tasks(self, tmp_path):
+        """A comment left armed at a task boundary (e.g. a prior task stopped
+        before the model replied) must not gate the next task's first tool
+        call — run_task resets the flag."""
+        marker = tmp_path / "next_task"
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("done"),
+            ],
+        )
+        agent._pending_comment_response = True  # simulate a stale armed gate
+        assert agent.run_task("go") == "done"
+        assert marker.exists()  # reset let the first command through
+
+
 class TestLoop:
     def test_plain_text_response_ends_task(self):
         agent, chat = make_agent([model_says("just an answer")])
