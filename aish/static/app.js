@@ -1866,8 +1866,11 @@ function retireQuickReplies() {
 // sandboxed, given no referrer, and share no origin with aish.
 const YOUTUBE_RE =
   /^https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?(?:[^#]*&)?v=([a-zA-Z0-9_-]{11})|youtu\.be\/([a-zA-Z0-9_-]{11}))(?:[#&?/]|$)/;
+// The path segment after /maps varies by link type (bare, /search/, /dir/,
+// /place/…) — (?:\/[^?#\s]*)? absorbs any of it so the query string (the part
+// that actually gets parsed below) is still reached.
 const MAPS_RE =
-  /^https?:\/\/(?:maps\.google\.com\/maps|(?:www\.)?google\.[a-z.]+\/maps)\?([^#\s]+)/;
+  /^https?:\/\/(?:maps\.google\.com\/maps|(?:www\.)?google\.[a-z.]+\/maps)(?:\/[^?#\s]*)?\?([^#\s]+)/;
 
 const YT_PLAY_SVG =
   '<svg viewBox="0 0 68 48" aria-hidden="true"><path class="yt-btn" d="M66.52 7.74a8 8 0 0 0-5.63-5.66C55.94 1 34 1 34 1S12.06 1 7.11 2.08A8 8 0 0 0 1.48 7.74 83.7 83.7 0 0 0 .5 24a83.7 83.7 0 0 0 .98 16.26 8 8 0 0 0 5.63 5.66C12.06 47 34 47 34 47s21.94 0 26.89-1.08a8 8 0 0 0 5.63-5.66A83.7 83.7 0 0 0 67.5 24a83.7 83.7 0 0 0-.98-16.26z"/><path class="yt-arrow" d="M27 34l18-10-18-10z"/></svg>';
@@ -1885,7 +1888,9 @@ function embedForLink(label, url) {
     if (saddr && daddr) {
       return mapsDirectionsEmbed(saddr, daddr, label);
     }
-    const q = params.get("q");
+    // "q" is the classic ?q= link param; "query" is what the standard
+    // /maps/search/?api=1&query=... share links use instead.
+    const q = params.get("q") || params.get("query");
     if (q) {
       return mapsEmbed(encodeURIComponent(q), label);
     }
@@ -1957,10 +1962,17 @@ function mapsEmbed(query, label) {
   frame.title = label;
   frame.loading = "lazy";
   frame.referrerPolicy = "no-referrer";
-  // Minimal sandbox: scripts drive pan/zoom, popups let "View larger map"
-  // open in a new tab. No allow-same-origin — the map renders without it and
-  // an opaque origin keeps a sandboxed+scripted frame from escaping.
-  frame.setAttribute("sandbox", "allow-scripts allow-popups");
+  frame.allowFullscreen = true;
+  // Same sandbox level as the YouTube embed above: allow-same-origin is safe
+  // here BECAUSE maps.google.com is cross-origin to aish, so it grants Maps
+  // its own origin (needed to bootstrap its "View larger map"/Directions UI)
+  // without any ability to reach aish's origin. allow-popups-to-escape-sandbox
+  // keeps the tab those buttons open from inheriting this sandbox; allow-forms
+  // lets Maps' own search/route boxes submit.
+  frame.setAttribute(
+    "sandbox",
+    "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-forms"
+  );
   card.appendChild(frame);
   return card;
 }
@@ -1974,9 +1986,13 @@ function mapsDirectionsEmbed(saddr, daddr, label) {
   frame.title = label;
   frame.loading = "lazy";
   frame.referrerPolicy = "no-referrer";
-  // Same minimal sandbox as mapsEmbed: scripts drive the route view, popups
-  // let "View larger map" / directions open in a new tab. No allow-same-origin.
-  frame.setAttribute("sandbox", "allow-scripts allow-popups");
+  frame.allowFullscreen = true;
+  // Same sandbox as mapsEmbed above — see its comment for the allow-same-origin
+  // rationale (cross-origin to aish) and why each flag is needed.
+  frame.setAttribute(
+    "sandbox",
+    "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-forms"
+  );
   card.appendChild(frame);
   return card;
 }
