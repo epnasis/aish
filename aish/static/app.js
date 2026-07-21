@@ -4080,6 +4080,26 @@ function setDictLang() {
   $("dict-lang").textContent = dictateLang === "pl-PL" ? "PL" : "EN";
 }
 
+function toggleDictLang() {
+  dictateLang = dictateLang === "pl-PL" ? "en-US" : "pl-PL";
+  localStorage.setItem("aish-dict-lang", dictateLang);
+  setDictLang();
+  showToast(dictateLang === "pl-PL" ? "Dictation: Polski" : "Dictation: English");
+  if (dictating) restartDictation();
+}
+
+// iOS mutes speechSynthesis unless it was first spoken inside a user gesture,
+// and the reply is spoken seconds later (not in a gesture) — so we "unlock" it
+// with a silent utterance on the mic tap. After that, later speak() calls play.
+function primeTts() {
+  if (!TTS_OK) return;
+  try {
+    const u = new SpeechSynthesisUtterance(" ");
+    u.volume = 0;
+    speechSynthesis.speak(u);
+  } catch { /* best-effort unlock */ }
+}
+
 function dictJoin(a, b) {
   return a && b && !/\s$/.test(a) ? `${a} ${b}` : a + b;
 }
@@ -4127,6 +4147,7 @@ function beginRec() {
 
 function startDictation() {
   if (!SpeechRec || dictating) return;
+  primeTts(); // unlock iOS audio now (this runs inside the mic-tap gesture)
   dictateBase = input.value.trim();
   dictateFinal = "";
   dictateEnded = false;
@@ -4167,15 +4188,23 @@ function maybeSpeakReply() {
 
 if (SpeechRec) {
   $("dictate").hidden = false;
-  $("dict-lang").hidden = false;
   setDictLang();
-  $("dictate").onclick = () => (dictating ? stopDictation() : startDictation());
-  $("dict-lang").onclick = () => {
-    dictateLang = dictateLang === "pl-PL" ? "en-US" : "pl-PL";
-    localStorage.setItem("aish-dict-lang", dictateLang);
-    setDictLang();
-    if (dictating) restartDictation();
-  };
+  // Tap = start/stop dictation; hold (500ms) = switch input language. A hold
+  // suppresses the tap so it doesn't also toggle dictation.
+  const mic = $("dictate");
+  let holdTimer = null;
+  let wasHold = false;
+  mic.addEventListener("pointerdown", () => {
+    wasHold = false;
+    holdTimer = setTimeout(() => { wasHold = true; toggleDictLang(); }, 500);
+  });
+  const cancelHold = () => clearTimeout(holdTimer);
+  mic.addEventListener("pointerup", () => {
+    clearTimeout(holdTimer);
+    if (!wasHold) (dictating ? stopDictation() : startDictation());
+  });
+  mic.addEventListener("pointercancel", cancelHold);
+  mic.addEventListener("pointerleave", cancelHold);
 }
 
 function closeSheets() {
