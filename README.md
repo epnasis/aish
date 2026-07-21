@@ -331,7 +331,11 @@ chip-fed or typed — the chips disappear. As a safety net, if a final answer
 ends in a question but the model forgot to add chips, a generic
 Yes / No / Tell-me-more set is appended automatically; the model suppresses
 this on a genuinely open-ended question by ending with a `[no-chips]` tag,
-which is hidden from you.
+which is hidden from you. Chips are never a sign-off — the model is
+instructed not to generate "Thanks, that's all" / "Finish this chat" style
+chips, since you can end the chat yourself anytime; every chip must offer a
+real next step instead (a continuation, an alternative, or a concrete
+action).
 
 **Inline images**: markdown image syntax in an answer renders right in the
 chat. `![caption](https://…)` embeds a web image; `![caption](/absolute/path.png)`
