@@ -630,6 +630,9 @@ class TestBangCommands:
             starts = [e for e in events if e["type"] == "command_start"]
             assert starts and starts[0]["command"] == "echo direct-hit"
             assert starts[0]["cwd"] == app_env["cwd"]
+            # user=True so the web renders it inline in the transcript, not
+            # inside the model's activity trace (it's a direct user action).
+            assert starts[0].get("user") is True
             streamed = " ".join(e["text"] for e in events if e["type"] == "stream")
             assert "direct-hit" in streamed
             ends = [e for e in events if e["type"] == "command_end"]
@@ -694,6 +697,7 @@ class TestBangCommands:
             assert user_ev["text"] == "!echo cold-hit"
             start = next(e for e in replay["events"] if e["type"] == "command_start")
             assert start["command"] == "echo cold-hit"
+            assert start.get("user") is True  # inline transcript block on cold replay too
             streamed = " ".join(
                 e["text"] for e in replay["events"] if e["type"] == "stream"
             )

@@ -169,7 +169,9 @@ class SessionLog:
             command_start/end; older logs synthesize a best-effort block."""
             nonlocal pending_start, pending_end
             start = pending_start or {"cwd": "", "command": command}
-            steps.append({"type": "command_start", **start})
+            # user=True so cold replay renders it inline (transcript), not in a
+            # trace — matching the live path; older logs lack it in the record.
+            steps.append({"type": "command_start", **start, "user": True})
             _, _, output = content.partition("]\n")  # drop the annotation prefix
             output = _EXIT_MARKER_RE.sub("", output)
             if output:

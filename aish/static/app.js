@@ -173,6 +173,7 @@ function handle(event) {
 
       sawAnswer = false;
       answerFilling = false;
+      userCmdBlock = null; // a new turn supersedes any dangling ! command block
       taskErrored = false; // a new turn clears the prior error's red dot
       turnStart = replaying ? 0 : Date.now(); // timing readout on the answer
       setBusy(true);
@@ -1092,9 +1093,21 @@ function buildTermBlock(cwd, command) {
   return block;
 }
 
+// A user-typed ! command runs directly (not model work), so its terminal block
+// renders inline in the transcript rather than inside the activity trace. This
+// holds that standalone block while its output streams (#51 follow-up).
+let userCmdBlock = null;
+
 function onCommandStart(event) {
-  const t = ensureTrace();
   const block = buildTermBlock(event.cwd, event.command);
+  if (event.user) {
+    // Direct user command: stand it in the main chat, no trace wrapper.
+    messagesEl.appendChild(block);
+    userCmdBlock = block;
+    scrollToEnd();
+    return;
+  }
+  const t = ensureTrace();
   const pending = t.pending && t.pending.name === "run_command" ? t.pending : null;
   if (pending) {
     pending.main.appendChild(block);
@@ -1110,9 +1123,9 @@ function onCommandStart(event) {
 }
 
 function onCommandEnd(event) {
-  const t = currentTrace;
-  const block = t && t.pending && t.pending.term;
+  const block = userCmdBlock || (currentTrace && currentTrace.pending && currentTrace.pending.term);
   if (block) finalizeTermBlock(block, event);
+  userCmdBlock = null;
 }
 
 function finalizeTermBlock(block, event) {
@@ -1155,15 +1168,16 @@ function finalizeTermBlock(block, event) {
 
 function traceStream(text) {
   // While a run_command is live, its output streams into the terminal block
-  // command_start built; otherwise (no active block) it renders inline.
-  const term = currentTrace && currentTrace.pending && currentTrace.pending.term;
+  // command_start built — the standalone user-command block if one is live,
+  // else the model's trace block; otherwise (no active block) it renders inline.
+  const term = userCmdBlock || (currentTrace && currentTrace.pending && currentTrace.pending.term);
   if (term) {
     const body = term.querySelector(".term-out");
     if (body.childNodes.length) body.appendChild(document.createTextNode("\n"));
     body.appendChild(ansiFragment(text));
     term.classList.add("has-output");
     scrollToEnd();
-    pinTrace(currentTrace);
+    if (currentTrace) pinTrace(currentTrace);
     return;
   }
   addStreamLine(text);

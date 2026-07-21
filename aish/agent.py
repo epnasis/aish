@@ -612,8 +612,13 @@ class Agent:
         if self.on_step is not None:
             self.on_step(step)
 
-    def _emit_command_start(self, command: str) -> None:
-        event = {"cwd": self.cwd, "command": command}
+    def _emit_command_start(self, command: str, user: bool = False) -> None:
+        # `user` marks a command the user typed directly (! prefix): the web UI
+        # renders it as a standalone terminal block in the transcript, not
+        # nested in the model's activity trace.
+        event: dict = {"cwd": self.cwd, "command": command}
+        if user:
+            event["user"] = True
         if self.command_log is not None:
             self.command_log({"kind": "cmd_start", **event})
         if self.on_command_start is not None:
@@ -959,7 +964,7 @@ class Agent:
         # Framing brackets the output as a terminal block for rich clients (the
         # web UI) and records it for cold replay, exactly like a model command;
         # on the CLI on_command_start/end are unset, so it stays log-only.
-        self._emit_command_start(command)
+        self._emit_command_start(command, user=True)
         result = tools.run_command(
             command,
             cwd=self.cwd,
