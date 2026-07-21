@@ -108,7 +108,7 @@ _EPHEMERAL_EVENTS = {
     "token", "echo", "status", "error", "hello", "replay", "history",
     "queued", "approval_request", "approval_resolved", "cwd_changed",
     "model_changed", "session_state", "file_list", "job_list",
-    "model_list", "session_list", "session_deleted",
+    "model_list", "session_list", "session_deleted", "session_renamed",
 }
 
 
@@ -1393,6 +1393,81 @@ class TestSessions:
         with client, connected(client) as (ws, _, _):
             for name in ("../../../etc/passwd", "session-nonexistent.jsonl"):
                 ws.send_json({"type": "delete_session", "name": name})
+                error = ws.receive_json()
+                assert error["type"] == "error"
+                assert "no such session" in error["text"]
+
+
+class TestRename:
+    def test_rename_active_session_updates_header_and_list(self, app_env):
+        client, _ = make_client(app_env, [model_says("noted")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "the original derived title"})
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "rename_session", "name": name, "title": "My Custom Name"})
+            renamed = recv_until(ws, "session_renamed")
+            assert renamed["name"] == name
+            assert renamed["title"] == "My Custom Name"
+            listing = recv_until(ws, "session_list")
+            row = next(s for s in listing["sessions"] if s["name"] == name)
+            assert row["title"] == "My Custom Name"
+
+    def test_latest_rename_wins_across_reconnect(self, app_env):
+        client, _ = make_client(app_env, [model_says("ok")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "first message"})
+            recv_until(ws, "done")
+            for title in ("one", "two", "three"):
+                ws.send_json({"type": "rename_session", "name": name, "title": title})
+                recv_until(ws, "session_renamed")
+                recv_until(ws, "session_list")
+
+        # A fresh server (nothing in memory) must show the LATEST title on hello.
+        client2, _ = make_client(app_env, [])
+        with client2, client2.websocket_connect(f"/ws?session={name}") as ws:
+            hello2 = ws.receive_json()
+            assert hello2["type"] == "hello"
+            assert hello2["title"] == "three"
+
+    def test_rename_cold_session_from_disk(self, app_env):
+        state_dir = app_env["state_dir"]
+        state_dir.mkdir(parents=True, exist_ok=True)
+        old = state_dir / "session-20200101-000000-000000.jsonl"
+        old.write_text(
+            '{"kind": "message", "role": "user", "content": "old topic"}\n',
+            encoding="utf-8",
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "rename_session", "name": old.name, "title": "Archived"})
+            recv_until(ws, "session_renamed")
+            listing = recv_until(ws, "session_list")
+            row = next(s for s in listing["sessions"] if s["name"] == old.name)
+            assert row["title"] == "Archived"
+        # The renamed cold session still reconstructs its conversation cleanly.
+        messages, _, custom_title = SessionLog._parse(old)
+        assert custom_title == "Archived"
+        assert messages == [{"role": "user", "content": "old topic"}]
+
+    def test_rename_rejects_empty_title(self, app_env):
+        client, _ = make_client(app_env, [model_says("ok")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "hi"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "rename_session", "name": name, "title": "   "})
+            error = ws.receive_json()
+            assert error["type"] == "error"
+            assert "empty" in error["text"]
+
+    def test_rename_rejects_path_escape_and_unknown_names(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            for name in ("../../../etc/passwd", "session-nonexistent.jsonl"):
+                ws.send_json({"type": "rename_session", "name": name, "title": "x"})
                 error = ws.receive_json()
                 assert error["type"] == "error"
                 assert "no such session" in error["text"]

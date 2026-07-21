@@ -50,7 +50,7 @@ REPLAY_TOOL_LINES = 4
 
 SLASH_COMMANDS = (
     "/add-dir", "/cd", "/clear", "/delete", "/dir-add", "/exit", "/help", "/jobs",
-    "/learn", "/model", "/new", "/quit", "/resume",
+    "/learn", "/model", "/new", "/quit", "/rename", "/resume",
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
@@ -63,6 +63,8 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  argument forms as /resume, then a y/N confirm; removes the
                  conversation AND its command audit log — the current
                  session cannot be deleted)
+  {CYAN}/rename <title>{RESET} give this chat a custom title (overrides the one derived
+                 from the first message; shown in /resume and the web drawer)
   {CYAN}/new, /clear{RESET}   fresh conversation in a new session file (clears the screen;
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
@@ -113,6 +115,9 @@ class LogRef:
 
     def command(self, command: str, decision: str) -> None:
         self.log.command(command, decision)
+
+    def set_title(self, title: str) -> None:
+        self.log.set_title(title)
 
     def model(self, spec: str) -> None:
         self.log.model(spec)
@@ -834,6 +839,15 @@ def handle_slash(
             return "handled"
         resumed.discard(selected.path)
         print(f"{DIM}deleted {selected.path.name}{RESET}")
+        return "handled"
+    if command == "/rename":
+        parts = task.split(maxsplit=1)
+        title = parts[1].strip() if len(parts) > 1 else ""
+        if not title:
+            print(f"{DIM}usage: /rename <new title> — gives this chat a custom name{RESET}")
+            return "handled"
+        logref.set_title(title)
+        print(f"{DIM}renamed to '{title}'{RESET}")
         return "handled"
     if command == "/model":
         parts = task.split()[1:]

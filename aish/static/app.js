@@ -223,7 +223,16 @@ function handle(event) {
     case "file_list": onFileList(event); break;
     case "session_state": onSessionState(event); break;
     case "session_deleted": showToast("session deleted"); break;
+    case "session_renamed": onSessionRenamed(event); break;
   }
+}
+
+function onSessionRenamed(event) {
+  // The header follows only when the renamed chat is the one on screen; the
+  // drawer refreshes via the session_list the server sends right after.
+  if (event.name === currentSession) setTitle(event.title);
+  const page = pagerSessions.find((s) => s.name === event.name);
+  if (page) page.title = event.title; // keep the swipe pager label in sync
 }
 
 function onSessionState(event) {
@@ -3826,6 +3835,39 @@ function openSessionMenu() {
   $("backdrop").hidden = false;
 }
 
+// Inline rename: a small titled input anchored under the chat title, opened
+// from the session menu. Optimistically updates the header; the server's
+// session_renamed confirms and refreshes the drawer.
+function openRenameBox() {
+  $("session-menu").hidden = true;
+  const box = $("rename-box");
+  const input = $("rename-input");
+  const current = $("session-title").textContent;
+  input.value = current === "New chat" ? "" : current;
+  box.style.visibility = "hidden";
+  box.hidden = false;
+  const anchor = $("session-chip").getBoundingClientRect();
+  const width = box.offsetWidth;
+  let left = anchor.left + anchor.width / 2 - width / 2;
+  left = Math.max(12, Math.min(left, window.innerWidth - width - 12));
+  box.style.left = `${left}px`;
+  box.style.top = `${anchor.bottom + 6}px`;
+  box.style.visibility = "";
+  $("backdrop").hidden = false;
+  input.focus();
+  input.select();
+}
+
+$("rename-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const title = $("rename-input").value.trim();
+  if (!title) { $("rename-input").focus(); return; }
+  if (currentSession) send({ type: "rename_session", name: currentSession, title });
+  setTitle(title); // optimistic; session_renamed reconfirms (and updates the drawer)
+  closeSheets();
+});
+$("rename-cancel").onclick = () => closeSheets();
+
 $("session-menu").addEventListener("click", (e) => {
   const item = e.target.closest(".menu-item");
   if (!item) return;
@@ -3833,6 +3875,9 @@ $("session-menu").addEventListener("click", (e) => {
   // in place (first tap → red "Confirm delete", second tap sends it) instead
   // of closing the menu — the same two-tap guard as the drawer trash icon.
   if (item.dataset.act === "delete") { armDeleteChat(item); return; }
+  // Rename swaps the menu for an inline title field (keeps the backdrop) —
+  // no blocking window.prompt, which would also trap automation.
+  if (item.dataset.act === "rename") { openRenameBox(); return; }
   closeSheets(); // hides the menu + backdrop
   switch (item.dataset.act) {
     case "new": send({ type: "new" }); break;
