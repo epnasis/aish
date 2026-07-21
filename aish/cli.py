@@ -13,7 +13,7 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import backends, term_image, tools
+from . import aliases, backends, term_image, tools
 from .agent import (
     Agent,
     ModelUnavailable,
@@ -56,8 +56,9 @@ ECHO_PREVIEW_LINES = 12
 REPLAY_TOOL_LINES = 4
 
 SLASH_COMMANDS = (
-    "/add-dir", "/cd", "/clear", "/delete", "/dir-add", "/exit", "/feedback",
-    "/help", "/jobs", "/learn", "/model", "/new", "/quit", "/rename", "/resume",
+    "/add-dir", "/aliases", "/cd", "/clear", "/delete", "/dir-add", "/exit",
+    "/feedback", "/help", "/jobs", "/learn", "/model", "/new", "/quit",
+    "/rename", "/resume",
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
@@ -90,6 +91,9 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  each write); /learn lessons migrates the legacy lessons.md
   {CYAN}/feedback [text]{RESET} file a bug/idea as a GitHub issue on epnasis/aish —
                  aish drafts it, you approve, it creates the issue
+  {CYAN}/aliases{RESET}       list command aliases (config.toml [aliases]); expanded on
+                 the first word before the approval gate — {CYAN}/aliases import{RESET}
+                 pulls your zsh aliases in (existing entries are kept)
   {CYAN}/jobs{RESET}          list background jobs started this session
   {CYAN}/help{RESET}          this help
   {CYAN}/quit, /exit{RESET}   quit (plain 'exit' works too)
@@ -799,6 +803,61 @@ def pick_session(state_dir: Path, arg: str, exclude: set, verb: str) -> SessionI
     return sessions[choice - 1]
 
 
+def print_aliases(agent: "Agent | ClaudeMaxAgent") -> None:
+    entries = agent.aliases
+    if not entries:
+        print(f"{DIM}no aliases — add an [aliases] table to config.toml, or "
+              f"run /aliases import{RESET}")
+        return
+    width = max(len(name) for name in entries)
+    for name in sorted(entries):
+        print(f"  {CYAN}{name:<{width}}{RESET}  {DIM}{entries[name]}{RESET}")
+
+
+def import_aliases(agent: "Agent | ClaudeMaxAgent", config_path: Path | None) -> None:
+    """Pull the user's real zsh aliases into config + the live agent, keeping
+    every existing entry (theirs always wins — imports only ADD)."""
+    if config_path is None:
+        print(f"{RED}no config path available — cannot import{RESET}")
+        return
+    imported = aliases.sanitize(aliases.import_from_zsh())
+    if not imported:
+        print(f"{DIM}nothing imported (zsh returned no parseable aliases){RESET}")
+        return
+    current = agent.aliases
+    new = {name: value for name, value in imported.items() if name not in current}
+    if not new:
+        print(f"{DIM}all {len(imported)} zsh aliases are already defined — nothing "
+              f"to add{RESET}")
+        return
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    except OSError as exc:
+        print(f"{RED}cannot read {config_path}: {exc}{RESET}")
+        return
+    merged = aliases.merge_into_config_text(text, new)
+    try:
+        tomllib.loads(merged)  # never write a config we can't read back
+    except tomllib.TOMLDecodeError as exc:
+        print(f"{RED}refusing to write {config_path}: edit would produce invalid "
+              f"TOML ({exc}){RESET}")
+        return
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = config_path.with_name(config_path.name + ".tmp")
+        tmp_path.write_text(merged, encoding="utf-8")
+        tmp_path.replace(config_path)
+    except OSError as exc:
+        print(f"{RED}cannot write {config_path}: {exc}{RESET}")
+        return
+    current.update(new)  # live, no restart needed
+    print(f"{DIM}imported {len(new)} alias(es) into {config_path}:{RESET}")
+    for name in sorted(new):
+        print(f"  {CYAN}{name}{RESET}  {DIM}{new[name]}{RESET}")
+
+
 def handle_slash(
     task: str,
     agent: "Agent | ClaudeMaxAgent",
@@ -939,6 +998,15 @@ def handle_slash(
         result = agent.add_root(parts[1].strip())
         color = RED if result.startswith("ERROR") else DIM
         print(f"{color}{result}{RESET}")
+        return "handled"
+    if command == "/aliases":
+        arg = task.partition(" ")[2].strip().lower()
+        if arg in ("import", "import-zsh"):
+            import_aliases(agent, config_path)
+        elif arg:
+            print(f"{DIM}usage: /aliases (list) or /aliases import{RESET}")
+        else:
+            print_aliases(agent)
         return "handled"
     if command == "/jobs":
         print(f"{DIM}{tools.jobs_table()}{RESET}")
@@ -1112,10 +1180,14 @@ work ("the fix from yesterday", "what went wrong last time"), use the \
 recall tool to find and read the relevant past conversation instead of \
 asking them to repeat it.
 - Config file: {config_path} (TOML). Keys: vi_mode, model, num_ctx, \
-max_steps. vi_mode (prompt vi editing) is currently {str(vi_mode).lower()}; \
-enable it with the line `vi_mode = true`. Config is read at startup only — \
-changes take effect on the next aish start. CLI flags override config; \
-$AISH_MODEL overrides the model key.
+max_steps, and an [aliases] table. vi_mode (prompt vi editing) is currently \
+{str(vi_mode).lower()}; enable it with the line `vi_mode = true`. The \
+[aliases] table maps a command name to an expansion string (e.g. \
+`ll = "ls -l"`); aish rewrites a command's FIRST word from it BEFORE the \
+approval gate, so the gate still sees the real command. `/aliases` lists \
+them; `/aliases import` pulls the user's zsh aliases in. Config is read at \
+startup only — changes take effect on the next aish start. CLI flags \
+override config; $AISH_MODEL overrides the model key.
 - Durable context: an AISH.md file in the working directory or \
 ~/.config/aish/AISH.md is loaded into your system prompt — the right place \
 for host facts and user preferences.
@@ -1376,6 +1448,7 @@ def main() -> int:
             state_dir=state_dir,
             current_session=lambda: logref.log.path,
             semantic=SemanticIndex(state_dir),
+            aliases=config.get("aliases"),
         )
         agent.provider = provider
     agent_holder.append(agent)

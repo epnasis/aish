@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -26,6 +26,7 @@ from typing import Any
 
 import ollama
 
+from . import aliases as alias_map
 from . import files, skills, tools, web
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
 from .session import SessionLog
@@ -548,6 +549,7 @@ class Agent:
         on_state: Callable[[dict], None] | None = None,
         check_pending_cwd: Callable[[], str | None] | None = None,
         check_pending_messages: Callable[[], list[str]] | None = None,
+        aliases: Mapping[str, str] | None = None,
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
@@ -558,6 +560,10 @@ class Agent:
         self.echo = echo
         self.stream = stream
         self.chat = client_chat
+        # aish-owned command aliases, expanded on the first word BEFORE the
+        # approval gate (see aliases.py and expand_alias). Sanitized so a
+        # malformed config entry can never make a command un-runnable.
+        self.aliases: dict[str, str] = alias_map.sanitize(aliases or {})
         self.num_ctx = num_ctx
         self.max_steps = max_steps
         self.think = think
@@ -1165,12 +1171,21 @@ class Agent:
             if self._trim_tool_message(self.messages[i]) and self._total_chars() <= budget:
                 return
 
+    def expand_alias(self, command: str) -> str:
+        """Rewrite the first word via the aish alias map, BEFORE approval sees
+        it. The single chokepoint both entry points (_dispatch for model-issued
+        commands, run_user_command for ! commands) route through, so the gate,
+        denylist, and cd-check always classify the REAL command — never an
+        opaque alias name."""
+        return alias_map.expand(command, self.aliases)
+
     def run_user_command(self, command: str) -> str:
         """A command the user typed directly (! prefix): no approval needed,
         but recorded in the conversation so the model has the context.
         !cd is an alias for /cd — the user moving the directory always means
         moving the project, so cwd and the primary root travel together and
         the model's anchor stays coherent."""
+        command = self.expand_alias(command)
         cd_target = self._parse_cd(command)
         if cd_target is not None:
             return self.rebase(cd_target)
@@ -1605,7 +1620,9 @@ class Agent:
             return self._dispatch_write(name, args)
 
         if name == "run_command":
-            command = str(args.get("command", ""))
+            # Expand any aish alias on the first word BEFORE the gate, so the
+            # denylist/approval/cd-check all classify the real command.
+            command = self.expand_alias(str(args.get("command", "")))
 
             # Stateless execution: a bare model-issued cd never runs — it
             # would silently detach the model from the project directory, its

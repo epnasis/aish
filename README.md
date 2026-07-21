@@ -276,13 +276,33 @@ the task with a diagnostic summary instead of burning the rest of the
 budget (polling a growing log never trips this — its output changes).
 
 **Config** — `~/.config/aish/config.toml`: `model`, `num_ctx`, `max_steps`,
-`vi_mode` (vi editing at the prompt; or `--vi`/`--no-vi`). CLI flags override
+`vi_mode` (vi editing at the prompt; or `--vi`/`--no-vi`), and an `[aliases]`
+table. CLI flags override
 config; `$AISH_MODEL` overrides the model. `/model <name> --save` writes the
 `model` key for you (comments and other keys are left untouched). Paths
 override via `$AISH_CONFIG`,
 `$AISH_STATE_DIR`, `$AISH_ALLOWLIST`, `$AISH_DENYLIST`, `$AISH_LESSONS`.
 `--think` enables model thinking (slower, rarely worth it). You can also just
 ask aish about any of this — its own docs are in its system prompt.
+
+**Aliases** — commands run through a non-interactive shell that never sources
+your `~/.zshrc`, so your shell aliases don't exist there. Define aish-level
+aliases in the `[aliases]` table instead:
+
+```toml
+[aliases]
+ll = "ls -l"
+gs = "git status"
+```
+
+aish rewrites a command's **first word** from this map — and only the first
+word, on an exact match — **before** the approval gate, so the gate and
+denylist still classify (and you still see) the real command: `ll -a src`
+runs as `ls -l -a src`. Expansion is recursive with a cycle guard, so an alias
+pointing at another alias resolves and `a→b, b→a` can't loop. This applies to
+both model-issued commands and your own `!`-prefixed ones. `/aliases` lists the
+current map; `/aliases import` pulls your existing zsh aliases into the config
+(interactive `zsh -ic 'alias'`), keeping any entries you already defined.
 
 ## Web UI
 
