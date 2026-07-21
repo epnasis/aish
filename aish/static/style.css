@@ -418,7 +418,16 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .msg.md hr { border: none; border-top: 0.5px solid var(--sep); margin: 12px 0; }
 .msg.md a { color: var(--blue); text-decoration: none; }
-.msg.md .md-table { overflow-x: auto; margin: 10px 0; border-radius: var(--r-card); }
+.msg.md .md-table {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 10px 0;
+  border-radius: var(--r-card);
+}
+/* Size to the WIDEST content (`width: max-content`) so columns keep their
+   natural width and the .md-table CONTAINER scrolls horizontally, instead of
+   the table squeezing to the viewport and wrapping cells letter-by-letter on
+   narrow phones (#38). `min-width: 100%` keeps a narrow table full-width. */
 .msg.md table {
   border-collapse: separate;
   border-spacing: 0;
@@ -426,11 +435,14 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   background: var(--bg-elev);
   border-radius: var(--r-card);
   overflow: hidden;
+  min-width: 100%;
+  width: max-content;
 }
 .msg.md th, .msg.md td {
   padding: 8px 12px;
   text-align: left;
   border-bottom: 0.5px solid var(--sep);
+  white-space: nowrap;
 }
 .msg.md tr:last-child td { border-bottom: none; }
 .msg.md th { background: var(--bg-elev2); font-weight: 600; }
