@@ -115,6 +115,38 @@ function connect() {
   };
 }
 
+// Manual nudge (#18): standalone PWA mode has no browser chrome to refresh
+// from, so a stalled connection otherwise strands the user until they
+// force-quit. A socket can also look OPEN to the browser long after the
+// underlying connection actually died (e.g. the phone slept through a
+// network change) — drop whatever we have unconditionally and retry now
+// instead of waiting out the backoff ladder.
+function reconnect() {
+  clearTimeout(reconnectTimer);
+  backoff = 1000;
+  connOk = false;
+  updateDot();
+  if (ws) {
+    ws.onclose = null; // this close is deliberate; the connect() below replaces it
+    ws.close();
+  }
+  connect();
+}
+
+// New chat over a socket that already knows it's dead (CLOSING/CLOSED/
+// CONNECTING) would otherwise just toast "not connected" and go nowhere —
+// reconnect first and ask for the fresh chat once the new socket is up. A
+// "zombie" socket (readyState still OPEN, dead underneath) isn't detectable
+// here; the manual Reconnect control covers that case (#18).
+function requestNewChat() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    reconnect();
+    ws.addEventListener("open", () => send({ type: "new" }), { once: true });
+    return;
+  }
+  send({ type: "new" });
+}
+
 let appVersion = null;
 
 async function checkAppVersion() {
@@ -3936,7 +3968,8 @@ document.addEventListener("keydown", (event) => {
 $("back-chip").onclick = () => openSessionsSheet("");
 $("session-chip").onclick = () => openSessionMenu();
 $("empty-hint").onclick = () => openSessionsSheet("");
-$("new-chip").onclick = () => send({ type: "new" });
+$("new-chip").onclick = () => requestNewChat();
+$("connbar").onclick = () => reconnect();
 
 // ---- session title menu -------------------------------------------------
 // The tappable title opens a small menu of session actions (iOS Messages
@@ -4004,12 +4037,13 @@ $("session-menu").addEventListener("click", (e) => {
   if (item.dataset.act === "rename") { openRenameBox(); return; }
   closeSheets(); // hides the menu + backdrop
   switch (item.dataset.act) {
-    case "new": send({ type: "new" }); break;
+    case "new": requestNewChat(); break;
     case "model": openModelSheet(""); break;
     case "cd": openDirSheet(); break;
     case "wrap": toggleWrap(); break;
     case "export": exportSessionPdf(); break;
     case "workspace": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
+    case "reconnect": reconnect(); break;
   }
 });
 
