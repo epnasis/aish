@@ -635,6 +635,7 @@ const TRACE_ICONS = {
   doc: (c) => `<path d="M7 3.5h6.5L18 8v11a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 6 19V5A1.5 1.5 0 0 1 7 3.5z" fill="none" stroke="${c}" stroke-width="1.6"/><path d="M13 3.5V8h4.5" fill="none" stroke="${c}" stroke-width="1.6"/>`,
   write: (c) => `<path d="M12 19.5h8" stroke="${c}" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.2a1.7 1.7 0 0 1 2.4 2.4l-8.3 8.3-3.2.8.8-3.2z" fill="none" stroke="${c}" stroke-width="1.7" stroke-linejoin="round"/>`,
   check: (c) => `<path d="M5 12.5l4 4 10-10.5" fill="none" stroke="${c}" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>`,
+  chat: (c) => `<path d="M4.5 6.5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H10l-4 3.5V15.5H6.5a2 2 0 0 1-2-2z" fill="none" stroke="${c}" stroke-width="1.6" stroke-linejoin="round"/>`,
   dot: (c) => `<circle cx="12" cy="12" r="3.5" fill="${c}"/>`,
 };
 
@@ -848,6 +849,17 @@ function traceStep(step) {
       }
       main.appendChild(chips);
     }
+    updateTraceHead(t);
+    return;
+  }
+  if (step.kind === "injected") {
+    // A message the user typed mid-task (issue #95): injected as steering into
+    // the running task, not deferred as a separate follow-up. Render a distinct
+    // note in the trace and retire its queued chip (a no-op on cold replay,
+    // where no chip exists). Emitted identically live and by reconstruct_events.
+    t.started += 1;
+    traceRow(t, traceSvg("chat", "var(--blue)"), "You added", step.text || "");
+    removeQueueChip(step.text);
     updateTraceHead(t);
     return;
   }

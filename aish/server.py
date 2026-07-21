@@ -1106,15 +1106,9 @@ class WebServer:
             session.logref.command(command, "user-direct")
             cd_target = session.agent._parse_cd(command)
             if cd_target is not None:
-                result = await asyncio.to_thread(session.agent.rebase, cd_target)
-                ws = self.ws
-                if (
-                    ws is not None
-                    and session is self.active
-                    and not result.startswith("ERROR")
-                ):
-                    with contextlib.suppress(Exception):
-                        await ws.send_json(self._cwd_event())
+                # rebase fires on_state → the unified cwd chip + card refresh
+                # (issue #95); no manual _cwd_event send needed.
+                await asyncio.to_thread(session.agent.rebase, cd_target)
             else:
                 await asyncio.to_thread(session.agent.run_user_command, command)
             # The output already streamed into its terminal block; an empty
@@ -1130,16 +1124,12 @@ class WebServer:
         clear busy, apply a /cd requested mid-turn, then start the next queued
         message or signal a background session's return to idle."""
         session.busy = False
-        if session.pending_cwd:  # a /cd requested mid-turn, applied now
+        if session.pending_cwd:  # a /cd that arrived after the last step's poll
             target, session.pending_cwd = session.pending_cwd, None
-            result = session.agent.rebase(target)
-            # Retire the queued-cwd card (#92): the change has landed. The
-            # header cwd chip is refreshed separately via _cwd_event below.
-            session.bridge.emit({"type": "cwd_dequeued"}, record=False)
-            ws = self.ws
-            if ws is not None and session is self.active and not result.startswith("ERROR"):
-                with contextlib.suppress(Exception):
-                    await ws.send_json(self._cwd_event())
+            # rebase fires on_state, which retires the #92 queue card and
+            # refreshes the top-bar cwd chip — the SAME unified path as the
+            # mid-task apply, so post-task and mid-task moves render identically.
+            session.agent.rebase(target)
         if session.pending_retry is not None:  # a Retry that had to cancel a stuck turn
             text, session.pending_retry = session.pending_retry, None
             await self._launch_retry(session, text)
@@ -1481,7 +1471,8 @@ class WebServer:
         if result.startswith("ERROR"):
             await websocket.send_json({"type": "error", "text": result})
             return
-        await websocket.send_json(self._cwd_event())
+        # rebase fired on_state → the top-bar chip + queue-card refresh; no
+        # manual _cwd_event needed (issue #95 unified that path).
 
     async def _add_dir(self, websocket: WebSocket, path: str) -> None:
         if await self._reject_busy(websocket) or not path:
@@ -1783,11 +1774,65 @@ def create_app(
         bridge = Bridge(get_loop)
 
         agent_holder: list = []
+        session_holder: list = []
 
         def get_scope():
             if agent_holder:
                 return agent_holder[0].cwd, agent_holder[0].roots
             return cwd, [Path(cwd).resolve()]
+
+        def check_pending_cwd() -> str | None:
+            """Get-and-clear the /cd queued while this task runs (issue #95), so
+            run_task applies it between steps. Lock-free, matching the rest of
+            pending_cwd (#92): the event loop is the only setter, the agent
+            worker thread the only clearer, and each attribute access is atomic
+            under CPython — the worst a race could do is defer one move to
+            _finish_turn, which applies the same rebase."""
+            if not session_holder:
+                return None
+            session = session_holder[0]
+            target, session.pending_cwd = session.pending_cwd, None
+            return target
+
+        def check_pending_messages() -> list[str]:
+            """Drain the text the user typed while this task runs (issue #95) so
+            run_task can inject it mid-task as steering. Only text-only items are
+            taken; a queued message carrying attachments stays in the queue and
+            runs as a normal follow-up task at _finish_turn (native attachment
+            delivery needs a fresh task, not a mid-turn user line). Consume-once:
+            an item is injected here OR relaunched by _finish_turn, never both."""
+            if not session_holder:
+                return []
+            session = session_holder[0]
+            drained: list[str] = []
+            kept: list[tuple[str, list[str]]] = []
+            for text, attachments in session.queue:
+                if attachments or not text:
+                    kept.append((text, attachments))
+                else:
+                    drained.append(text)
+            session.queue[:] = kept
+            return drained
+
+        def on_state(ev: dict) -> None:
+            # Every workspace change surfaces as a timeline marker (issue #94).
+            bridge.emit({"type": "workspace", **ev})
+            # A cwd move — mid-task (#95), immediate /cd, or the post-task drain —
+            # always flows through rebase → here, so this is the ONE place that
+            # retires the #92 queue card and refreshes the top-bar cwd chip.
+            # record=False: both are transient UI state (the card is rebuilt from
+            # pending_cwd on attach, the chip from the hello cwd).
+            if ev.get("change") == "cwd" and agent_holder:
+                agent = agent_holder[0]
+                bridge.emit({"type": "cwd_dequeued"}, record=False)
+                bridge.emit(
+                    {
+                        "type": "cwd_changed",
+                        "cwd": agent.cwd,
+                        "roots": [str(root) for root in agent.roots],
+                    },
+                    record=False,
+                )
 
         def trust_dir(path: str) -> str:
             if agent_holder:
@@ -1820,7 +1865,14 @@ def create_app(
             # restores cwd + trusted dirs, and emitted live as a timeline marker
             # identical to the one reconstruct_events replays.
             state_log=logref.workspace,
-            on_state=lambda ev: bridge.emit({"type": "workspace", **ev}),
+            on_state=on_state,
+            # Between-steps steering (issue #95): a /cd or a message typed while
+            # a task runs is applied/injected mid-task instead of only after it,
+            # so a long task stays responsive. Both are get/drain callbacks the
+            # agent's step loop polls; the event loop fills them from _cd /
+            # _start_task's queue.
+            check_pending_cwd=check_pending_cwd,
+            check_pending_messages=check_pending_messages,
             # Terminal-block framing: command_start (cwd + command) and
             # command_end (exit code / detached / interrupted). Emitted live and
             # persisted (command_log) so a cold replay rebuilds the bounded
@@ -1872,6 +1924,7 @@ def create_app(
         logref.model(model_spec(agent))  # record what this session actually runs
         session = Session(agent, logref, bridge)
         session.custom_title = custom_title  # a renamed chat keeps its name hot
+        session_holder.append(session)  # #95: the mid-task get/drain callbacks read it
         return session, history
 
     server = WebServer(open_session, state_dir, config_path, token)
