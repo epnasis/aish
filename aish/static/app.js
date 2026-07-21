@@ -770,6 +770,10 @@ function traceStep(step) {
     // A plain answer needs no thinking row — but if the answer already streamed
     // into it (relabeled "Answering…"), keep it as a finalized "Answered" step
     // instead of dropping it.
+    // A text-only turn never emits a "thinking" step (that only fires when the
+    // turn has tool calls), so this is the only place its token usage lands —
+    // without it the "↑N ↓M tokens" header goes missing on plain answers (#84).
+    if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
     if (t.thinkingRow) {
       if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow, step.secs);
       else { t.thinkingRow.row.remove(); t.started -= 1; }
@@ -1339,8 +1343,14 @@ function finishTrace(errored) {
       main.appendChild(note);
     }
   });
-  // A pure-answer turn leaves no steps — drop the empty trace box entirely.
-  if (!t.body.querySelector(".step")) { t.el.remove(); refreshStatusline(); return; }
+  // A pure-answer turn leaves no steps — drop the empty trace box entirely,
+  // unless it still carries token usage (#84): that's the only place those
+  // counts are shown, so an empty-but-billed turn must keep its header.
+  if (!t.body.querySelector(".step") && !t.tokensIn && !t.tokensOut) {
+    t.el.remove();
+    refreshStatusline();
+    return;
+  }
   t.el.classList.remove("live", "stopping");
   t.el.classList.remove("open"); // collapse to the summary; tap to expand
   t.el.querySelector(".trace-status").innerHTML = errored
