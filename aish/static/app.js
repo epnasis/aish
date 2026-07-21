@@ -2571,15 +2571,18 @@ function attachAnswerTools(el, source, prompt) {
   tools.appendChild(exportChip(() => source, () => prompt || ""));
   tools.appendChild(forkChip(ordinal));
   // Regenerate: only the newest answer keeps it, so retire the previous one.
+  // Gate on the per-answer `prompt` (populated by both the live and the
+  // history-replay paths) — the global lastUserPrompt is unset during a cold
+  // reload's onHistory rebuild, which used to drop the button after reconnect.
   retireRegen();
-  if (lastUserPrompt) {
+  if (prompt) {
     const regen = document.createElement("button");
     regen.type = "button";
     regen.className = "regen-chip";
     regen.title = "regenerate";
     regen.setAttribute("aria-label", "regenerate answer");
     regen.innerHTML = RERUN_SVG;
-    regen.onclick = () => rerunPrompt(lastUserPrompt);
+    regen.onclick = () => rerunPrompt(prompt);
     tools.appendChild(regen);
     lastRegenBtn = regen;
   }
