@@ -1230,6 +1230,71 @@ class TestSessions:
                 assert "no such session" in error["text"]
 
 
+class TestFork:
+    def test_fork_seeds_new_session_and_leaves_source_untouched(self, app_env):
+        # /fork copies the whole conversation into a NEW session, switches
+        # there, replays the prior transcript, and leaves the original intact.
+        client, chat = make_client(
+            app_env,
+            [model_says("the answer is zebra"), model_says("still zebra")],
+        )
+        with client, connected(client) as (ws, hello, _):
+            source = hello["session"]
+            ws.send_json({"type": "task", "text": "remember the zebra"})
+            recv_until(ws, "done")
+            source_bytes = (app_env["state_dir"] / source).read_bytes()
+
+            ws.send_json({"type": "fork"})
+            forked = recv_until(ws, "hello")
+            assert forked["session"] != source  # a genuinely new session
+            replay = recv_until(ws, "replay")
+            users = [e for e in replay["events"] if e["type"] == "user"]
+            assert users and "zebra" in users[0]["text"]  # history seeded
+            assert any(e["type"] == "done" for e in replay["events"])
+
+            # The source file is byte-for-byte unchanged (read-only snapshot).
+            assert (app_env["state_dir"] / source).read_bytes() == source_bytes
+
+            # Both sessions are listed; the fork is current.
+            ws.send_json({"type": "sessions", "query": ""})
+            listing = recv_until(ws, "session_list")
+            names = [s["name"] for s in listing["sessions"]]
+            assert source in names and forked["session"] in names
+            assert listing["current"] == forked["session"]
+
+            # Continuing in the fork carries the seeded context to the model.
+            ws.send_json({"type": "task", "text": "what animal?"})
+            recv_until(ws, "done")
+            assert "zebra" in json.dumps(chat.calls[-1]["messages"])
+
+    def test_fork_empty_conversation_refused(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "fork"})
+            error = ws.receive_json()
+            assert error["type"] == "error"
+            assert "nothing to fork" in error["text"]
+
+    def test_fork_while_busy_refused(self, app_env, tmp_path):
+        # A task blocked on an approval keeps the session busy; forking then
+        # would snapshot a half-finished turn, so it is refused.
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+                model_says("done"),
+            ],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")  # now busy, blocked
+            ws.send_json({"type": "fork"})
+            error = recv_until(ws, "error")
+            assert "can't fork while this session is working" in error["text"]
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+
+
 class TestModels:
     def test_model_list_ranked(self, app_env, monkeypatch):
         monkeypatch.setattr(
