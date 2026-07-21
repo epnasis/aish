@@ -784,7 +784,12 @@ class WebServer:
             return ""
         return SessionLog._derive_title(messages)[:80]
 
-    def _hello(self, session: Session, pager: list[tuple[str, str]] | None = None) -> dict:
+    def _hello(
+        self,
+        session: Session,
+        pager: list[tuple[str, str]] | None = None,
+        cmd_history: list[str] | None = None,
+    ) -> dict:
         # The swipe pager pages through recent chats oldest→newest by last
         # interaction — open or not; resume loads cold ones from disk. The
         # current session is always a page even before its first message
@@ -803,6 +808,9 @@ class WebServer:
             "home": str(Path.home()),  # client abbreviates paths to ~
             "rev": STATIC_REV,
             "pager": pages,
+            # The user's own successful ! commands, cross-session, most-run first:
+            # terminal-mode autocomplete draws from this personal palette (#104).
+            "cmd_history": cmd_history or [],
         }
 
     @staticmethod
@@ -880,6 +888,11 @@ class WebServer:
         # must not sit between joining the viewer set and the transcript
         # snapshot.
         pager = await asyncio.to_thread(SessionLog.pager_titles, self.state_dir)
+        # Cross-session command palette for terminal-mode autocomplete (#104),
+        # scanned off-thread alongside the pager before the attach block.
+        cmd_history = await asyncio.to_thread(
+            SessionLog.user_command_history, self.state_dir
+        )
         if client.sender:
             client.sender.cancel()
             client.sender = None
@@ -896,7 +909,7 @@ class WebServer:
         client.outbox = asyncio.Queue()
         session.viewers.add(client)
         snapshot = list(bridge.transcript)
-        await client.ws.send_json(self._hello(session, pager))
+        await client.ws.send_json(self._hello(session, pager, cmd_history))
         await client.ws.send_json(
             {"type": "replay", "events": snapshot, "truncated": bridge.truncated}
         )
