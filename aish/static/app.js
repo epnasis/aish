@@ -4284,8 +4284,10 @@ function openModelSheet(query) {
 
 const RECENT_MODELS_KEY = "aish-recent-models";
 function recentModels() {
-  try { return JSON.parse(localStorage.getItem(RECENT_MODELS_KEY)) || []; }
-  catch { return []; }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(RECENT_MODELS_KEY));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
 }
 function rememberModel(name) {
   const list = [name, ...recentModels().filter((n) => n !== name)].slice(0, 5);
@@ -4371,8 +4373,10 @@ function baseName(path) {
 
 const RECENT_DIRS_KEY = "aish-recent-dirs";
 function recentDirs() {
-  try { return JSON.parse(localStorage.getItem(RECENT_DIRS_KEY)) || []; }
-  catch { return []; }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(RECENT_DIRS_KEY));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
 }
 function rememberDir(path) {
   const list = [path, ...recentDirs().filter((p) => p !== path)].slice(0, 6);

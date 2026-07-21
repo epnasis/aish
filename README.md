@@ -399,7 +399,8 @@ just like a resumed session. The second row is a context bar: the **working
 directory** chip (folder name + path) taps into a folder picker to browse or
 fuzzy-search folders without typing (recents first; an absolute or `~` path
 in its search jumps straight there), and the **model chip** opens a
-searchable model picker (with a "make startup default" toggle). Your tool
+searchable model picker (recents first — up to 5, remembered on this device —
+with a "make startup default" toggle). Your tool
 activity — thinking time, recalled knowledge, each command and its output —
 is grouped into one collapsible **activity trace** per turn, live while it
 runs and summarised ("Worked for Xs · N steps") once done. Each executed
