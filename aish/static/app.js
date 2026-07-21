@@ -402,6 +402,23 @@ function renderAnswerNow() {
   answerEl.appendChild(renderMarkdown(answerText.slice(answerStableLen)));
 }
 
+// A fence opens on a run of 3+ backticks or tildes. Per CommonMark, the
+// closing line must reuse the SAME character, be at least as long, and carry
+// no trailing info string — so a shorter/different marker nested inside (e.g.
+// the model demonstrating markdown syntax with its own example fence) can't
+// masquerade as the outer close and desync everything parsed after it (#80).
+// Shared by stableBoundary and renderMarkdown so the two fence-trackers can't
+// drift apart and disagree on where a block actually ends.
+const FENCE_RE = /^(`{3,}|~{3,})(\w*)\s*$/;
+function fenceOpen(line) {
+  const m = line.match(FENCE_RE);
+  return m ? { ch: m[1][0], len: m[1].length, lang: m[2] } : null;
+}
+function fenceCloses(line, fence) {
+  const m = line.match(FENCE_RE);
+  return Boolean(m) && m[2] === "" && m[1][0] === fence.ch && m[1].length >= fence.len;
+}
+
 // Offset where the stable prefix ends: just past the last blank line that is
 // outside a code fence and already followed by another line (a trailing
 // blank may still grow into a paragraph continuation). Blocks never span a
@@ -411,15 +428,17 @@ function stableBoundary(text) {
   const lines = text.split("\n");
   let boundary = 0;
   let pos = 0;
-  let inFence = false;
+  let fence = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (inFence) {
-      if (/^```\s*$/.test(line)) inFence = false;
-    } else if (/^```(\w*)\s*$/.test(line)) {
-      inFence = true;
-    } else if (line.trim() === "" && i < lines.length - 1) {
-      boundary = pos + line.length + 1;
+    if (fence) {
+      if (fenceCloses(line, fence)) fence = null;
+    } else {
+      const open = fenceOpen(line);
+      if (open) fence = open;
+      else if (line.trim() === "" && i < lines.length - 1) {
+        boundary = pos + line.length + 1;
+      }
     }
     pos += line.length + 1;
   }
@@ -1672,7 +1691,11 @@ function highlightFences(container) {
 // ---- markdown rendering --------------------------------------------------
 function renderMarkdown(text) {
   const frag = document.createDocumentFragment();
-  const lines = text.split("\n");
+  // Normalize CRLF/lone-CR up front (#80): a trailing \r riding along on every
+  // split line is otherwise harmless noise almost everywhere, but it can land
+  // inside an inline match's captured text (e.g. a quick-reply payload) since
+  // most of the inline regexes below don't exclude it explicitly.
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
   let i = 0;
   let paragraph = [];
 
@@ -1686,16 +1709,16 @@ function renderMarkdown(text) {
 
   while (i < lines.length) {
     const line = lines[i];
-    const fence = line.match(/^```(\w*)\s*$/);
+    const fence = fenceOpen(line);
     if (fence) {
       flush();
       const body = [];
       i++;
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) body.push(lines[i++]);
+      while (i < lines.length && !fenceCloses(lines[i], fence)) body.push(lines[i++]);
       i++; // closing fence (or EOF while streaming)
       const pre = document.createElement("pre");
       const code = document.createElement("code");
-      if (fence[1]) code.dataset.lang = fence[1];
+      if (fence.lang) code.dataset.lang = fence.lang;
       code.textContent = body.join("\n");
       pre.appendChild(code);
       const holder = document.createElement("div");
@@ -1811,14 +1834,20 @@ function mdTable(lines, start) {
   return holder;
 }
 
+// Link/chip/image labels and the quick-reply payload exclude "\n" (#80): a
+// paragraph merges several source lines with no blank between them (e.g.
+// consecutive quick-reply lines with no separator), and without the
+// exclusion an unmatched "[" earlier in that blob could greedily consume
+// across a line break into a LATER line's real chip syntax instead of
+// leaving it to match on its own.
 const INLINE_RE = new RegExp(
   "(`[^`]+`)" +
   "|(\\*\\*[^*]+\\*\\*|__[^_]+__)" +
   "|(\\*[^*\\s][^*]*\\*)" +
   "|(~~[^~]+~~)" +
-  "|\\[([^\\]]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)" +
-  "|\\[([^\\]]+)\\]\\(aish-reply:\\/\\/([^)]*)\\)" +
-  "|!\\[([^\\]]*)\\]\\(([^)\\s]+)\\)"
+  "|\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)" +
+  "|\\[([^\\]\\n]+)\\]\\(aish-reply:\\/\\/([^)\\n]*)\\)" +
+  "|!\\[([^\\]\\n]*)\\]\\(([^)\\s]+)\\)"
 );
 
 // Images (#9): ![alt](https://…) embeds a web image; ![alt](/abs/path.png)
@@ -1866,6 +1895,10 @@ function quickReplyChip(label, payload) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "quick-reply";
+  // Trim stray whitespace/\r (#80): INLINE_RE's label group isn't whitespace-
+  // aware, so a chip built from a source line with trailing \r (or the model
+  // just leaving a space before "]") would otherwise carry it into the button.
+  label = (label || "").trim();
   btn.textContent = label;
   let reply = (payload || "").trim();
   try { reply = decodeURIComponent(reply) || reply; } catch { /* keep raw */ }
