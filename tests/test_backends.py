@@ -65,6 +65,23 @@ def test_convert_plain_messages_pass_through():
     assert convert_messages(messages) == messages
 
 
+def test_convert_collapses_extra_system_messages_to_user():
+    # Gemini's OpenAI-compat gateway drops ALL system instructions when more
+    # than one system message is present (issue #74). Only the first stays
+    # system; later ones (aish's recency reminder) become user turns in place.
+    messages = [
+        {"role": "system", "content": "main prompt"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "system", "content": "<system-reminder>reminder</system-reminder>"},
+        {"role": "user", "content": "go"},
+    ]
+    out = convert_messages(messages)
+    assert [m["role"] for m in out] == ["system", "user", "assistant", "user", "user"]
+    assert out[0]["content"] == "main prompt"
+    assert out[3] == {"role": "user", "content": "<system-reminder>reminder</system-reminder>"}
+
+
 def test_convert_pairs_tool_results_with_synthetic_ids():
     messages = [
         {"role": "user", "content": "list files"},

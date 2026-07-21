@@ -300,13 +300,27 @@ def convert_messages(messages: list[dict]) -> list[dict]:
     Ollama has no tool-call IDs, so synthetic IDs are minted per assistant
     message and handed out in order to the tool messages that follow — aish
     always appends tool results in call order, so positional pairing is exact.
+
+    aish injects a second ``system`` message (the per-task reminder) directly
+    before each user turn for recency. Gemini's OpenAI-compat gateway drops ALL
+    system instructions when more than one system message is present (issue
+    #74), so only the first system message is kept as ``system``; later ones
+    are relabelled ``user``. Their content is already ``<system-reminder>``
+    tagged, so recency and instruction-ness survive the relabel.
     """
     out: list[dict] = []
     pending_ids: list[str] = []
+    seen_system = False
     for i, message in enumerate(messages):
         role = message.get("role")
         content = message.get("content") or ""
-        if role == "assistant" and message.get("tool_calls"):
+        if role == "system":
+            if seen_system:
+                out.append({"role": "user", "content": content})
+            else:
+                seen_system = True
+                out.append({"role": "system", "content": content})
+        elif role == "assistant" and message.get("tool_calls"):
             calls = []
             pending_ids = []
             for j, call in enumerate(message["tool_calls"]):
