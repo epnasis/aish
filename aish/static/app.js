@@ -2804,7 +2804,13 @@ function buildCommandCard(card, event) {
   editBtn.title = "Edit the command before running";
   editBtn.appendChild(pencilIcon());
   editBtn.onclick = () => toggleEdit();
-  box.append(dollar, code, editBtn, copyChip(() => code.textContent, "copy command"));
+  // Group the edit + copy icons so they can stick to the top of the box: on a
+  // long multi-line command they stay top-right in view instead of scrolling
+  // away or sitting mid-height (#88).
+  const cmdTools = document.createElement("div");
+  cmdTools.className = "cmd-tools";
+  cmdTools.append(editBtn, copyChip(() => code.textContent, "copy command"));
+  box.append(dollar, code, cmdTools);
   card.appendChild(box);
 
   function toggleEdit() {
