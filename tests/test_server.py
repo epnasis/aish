@@ -1117,6 +1117,45 @@ class TestStopAndQueue:
                 m.get("content") == "second task" for m in server.active.agent.messages
             )
 
+    def test_bang_command_queued_while_busy_runs_as_shell_not_injected(
+        self, app_env, tmp_path
+    ):
+        # #105: a ! command queued while busy must run as the user's OWN shell
+        # command (via _finish_turn/_launch → _run_user_command), not be drained
+        # mid-task and injected as a plain model prompt.
+        bang_file = tmp_path / "bang"
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/a")]),
+                model_says("first answer"),
+            ],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "first task"})
+            request = recv_until(ws, "approval_request")
+
+            ws.send_json({"type": "task", "text": f"!touch {bang_file}"})
+            assert recv_until(ws, "queued")["position"] == 1
+
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            # First task finishes with NO mid-task injection of the ! item.
+            assert recv_until(ws, "done")["result"] == "first answer"
+            # _finish_turn relaunches it as a user-direct command: it echoes as a
+            # `user` event carrying the ! text (never an `injected` steering step).
+            assert recv_until(ws, "user")["text"] == f"!touch {bang_file}"
+            recv_until(ws, "done")  # the ! command's own (empty) done
+
+        # It actually ran as a shell command (the file exists) and was never
+        # injected verbatim as a model steering message.
+        assert bang_file.exists()
+        server = client.app.state.server
+        assert server.active.queue == []
+        assert not any(
+            m.get("content") == f"!touch {bang_file}"
+            for m in server.active.agent.messages
+        )
+
 
 class TestMultiConnection:
     """#102: N connections (phone, laptop, headless test) share one token and

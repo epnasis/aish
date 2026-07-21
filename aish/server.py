@@ -1980,7 +1980,11 @@ def create_app(
             drained: list[str] = []
             kept: list[tuple[str, list[str]]] = []
             for text, attachments in session.queue:
-                if attachments or not text:
+                # A queued ! command is the user's own shell action, not model
+                # steering — keep it for _finish_turn/_launch (which routes ! →
+                # _run_user_command) instead of injecting it as a mid-task user
+                # line, where it would run as a plain model prompt (issue #105).
+                if attachments or not text or text.startswith("!"):
                     kept.append((text, attachments))
                 else:
                     drained.append(text)
