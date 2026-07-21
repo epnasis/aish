@@ -22,6 +22,17 @@ from pathlib import Path
 DEFAULT_ALLOWLIST = Path.home() / ".config" / "aish" / "allow.txt"
 DEFAULT_DENYLIST = Path.home() / ".config" / "aish" / "deny.txt"
 
+# Admin-owned system bin directories. A binary invoked by absolute path from
+# one of these is trusted to be the tool its bare name denotes, so it may be
+# reduced to that basename for SAFE_COMMANDS / allowlist matching even when the
+# directory isn't on the current PATH (issues #16, #28). Writable/untrusted dirs
+# and relative paths (./gh) are deliberately excluded — they must still prompt.
+# Resolved once so a symlinked trusted dir still compares equal.
+_TRUSTED_BIN_DIRS = frozenset(
+    os.path.realpath(d)
+    for d in ("/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin", "/usr/sbin", "/sbin")
+)
+
 
 class Blocked:
     """Approver verdict for denylisted commands: not executable through the
@@ -140,24 +151,43 @@ def _has_unsafe_flag(name: str, tokens: list[str]) -> bool:
     )
 
 
+def _in_trusted_bindir(abs_path: str) -> bool:
+    """True when abs_path names a binary living directly in a trusted system bin
+    directory. The directory is symlink-resolved (also defusing '..'), but the
+    binary itself is not, so a trusted-dir → Cellar Homebrew symlink still
+    qualifies while '/opt/homebrew/bin/../../tmp/gh' does not."""
+    try:
+        return os.path.realpath(os.path.dirname(abs_path)) in _TRUSTED_BIN_DIRS
+    except OSError:
+        return False
+
+
+def _resolves_to_path_binary(abs_path: str, name: str) -> bool:
+    """True when abs_path is the very same file its bare `name` finds on PATH —
+    so a full-path invocation of an on-PATH tool counts as the bare name."""
+    on_path = shutil.which(name)
+    if not on_path:
+        return False
+    try:
+        return os.path.realpath(abs_path) == os.path.realpath(on_path)
+    except OSError:
+        return False
+
+
 def _canonical_tokens(tokens: list[str]) -> list[str]:
-    """If the command is invoked by absolute path but resolves to the very same
-    file its bare name finds on PATH, rewrite token 0 to the bare name so
-    SAFE_COMMANDS and saved allowlist prefixes match either spelling. A path
-    that shadows the PATH binary (or isn't on PATH at all) stays untouched, so
-    it still fails closed everywhere a bare name is required."""
+    """Rewrite an absolute-path command back to its bare name so SAFE_COMMANDS
+    and saved allowlist prefixes match either spelling — but only when the path
+    can be trusted to name the expected binary: it lives in a trusted system bin
+    directory, OR it resolves to the very same file its bare name finds on PATH.
+    A path in a writable/untrusted dir, one that shadows the PATH binary, or a
+    relative path (./gh) stays untouched, so it still fails closed everywhere a
+    bare name is required."""
     head = os.path.expanduser(tokens[0])
     if not os.path.isabs(head):
         return tokens
     name = head.rsplit("/", 1)[-1]
-    on_path = shutil.which(name)
-    if not on_path:
-        return tokens
-    try:
-        if os.path.realpath(head) == os.path.realpath(on_path):
-            return [name, *tokens[1:]]
-    except OSError:
-        pass
+    if _in_trusted_bindir(head) or _resolves_to_path_binary(head, name):
+        return [name, *tokens[1:]]
     return tokens
 
 

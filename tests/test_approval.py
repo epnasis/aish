@@ -205,6 +205,49 @@ class TestPathInvocation:
         assert not is_auto_approvable("/bin/bash -c 'rm x'", ["bash"])
 
 
+class TestTrustedBinDir:
+    """A binary invoked by absolute path from a trusted system bin dir counts as
+    its bare name even when that dir isn't on PATH — the issue #16/#28 case
+    where a skill hardcodes '/opt/homebrew/bin/gh'. shutil.which is forced to
+    None throughout to prove the match comes from the trusted-dir rule, not the
+    PATH-resolution fallback."""
+
+    @pytest.fixture(autouse=True)
+    def _off_path(self, monkeypatch):
+        monkeypatch.setattr("aish.approval.shutil.which", lambda name: None)
+
+    def test_matches_saved_prefix_off_path(self):
+        assert is_auto_approvable("/opt/homebrew/bin/gh issue list", ["gh issue"])
+
+    def test_multiword_prefix_still_scoped(self):
+        assert is_auto_approvable("/usr/bin/gh pr list", ["gh pr list"])
+        assert not is_auto_approvable("/usr/bin/gh repo delete x", ["gh pr list"])
+
+    def test_read_only_command_off_path(self):
+        assert is_read_only("/bin/ls -la")
+
+    def test_untrusted_absolute_dir_prompts(self):
+        assert not is_auto_approvable("/tmp/evil/gh issue list", ["gh issue"])
+        assert not is_read_only("/home/x/tools/ls -la")
+
+    def test_relative_path_prompts(self):
+        assert not is_auto_approvable("./gh issue list", ["gh issue"])
+        assert not is_read_only("./ls -la")
+
+    def test_dotdot_escape_from_trusted_dir_prompts(self):
+        assert not is_auto_approvable("/opt/homebrew/bin/../../tmp/gh issue list", ["gh issue"])
+
+    def test_interpreter_prefix_still_blocked(self):
+        assert not is_auto_approvable("/opt/homebrew/bin/bash -c 'rm x'", ["bash"])
+
+    def test_unsafe_flag_still_blocked(self):
+        assert not is_read_only("/usr/bin/find . -delete")
+
+    def test_bare_name_behavior_unchanged(self):
+        assert is_auto_approvable("gh issue list", ["gh issue"])
+        assert is_read_only("ls -la")
+
+
 DENIED = [
     "rm -rf /",
     "rm -fr ~/dev",
