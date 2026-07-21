@@ -409,14 +409,14 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.workspace-note {
   display: flex;
   align-items: center;
-  gap: 7px;
-  color: var(--dim);
-  font-size: 12.5px;
-  padding: 3px 0;
+  gap: 8px;
+  font-size: 13px;
+  padding: 5px 2px;
 }
-.msg.workspace-note .wsnote-ico { flex: 0 0 auto; line-height: 0; }
-.msg.workspace-note .wsnote-ico svg { width: 15px; height: 15px; opacity: 0.85; }
-.msg.workspace-note span:last-child { overflow-wrap: anywhere; }
+.msg.workspace-note .wsnote-ico { flex: 0 0 auto; line-height: 0; color: var(--blue); }
+.msg.workspace-note .wsnote-ico svg { width: 16px; height: 16px; }
+.msg.workspace-note .wsnote-label { font-weight: 600; color: var(--fg); }
+.msg.workspace-note .wsnote-path { color: var(--dim); overflow-wrap: anywhere; }
 
 /* ---- ANSI colors in command output ---- */
 .a-b { font-weight: 700; }

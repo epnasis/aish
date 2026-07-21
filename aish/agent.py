@@ -767,7 +767,8 @@ class Agent:
         for msg in self.check_pending_messages():
             if not msg:
                 continue
-            self.echo(f'[User injected feedback mid-task: "{msg}"]')
+            # No echo line — the `injected` step ("You added" note) is the sole,
+            # clean timeline marker for this (#95); a grey echo would duplicate it.
             self._emit_step(kind="injected", text=msg)
             self.messages.append({"role": "user", "content": msg})
 
@@ -1155,8 +1156,7 @@ class Agent:
         if result.startswith("ERROR"):
             return result
         self.roots[0] = Path(self.cwd).resolve()
-        self.echo(f"[session root re-anchored to {self.roots[0]}]")
-        self._emit_workspace("cwd", self.cwd)
+        self._emit_workspace("cwd", self.cwd)  # the timeline marker; no grey echo
         self._append(
             {"role": "user", "content": f"[I moved the session to {self.cwd} with /cd — "
              "this directory is the project now]"}
@@ -1704,6 +1704,7 @@ class Agent:
             self.echo(note)
             return note
         self.cwd = path
-        note = f"[working directory is now {path}]"
-        self.echo(note)
-        return note
+        # Return the note (callers surface it), but don't echo it — a cwd move is
+        # shown by the workspace timeline marker (web) / the CLI /cd print, not a
+        # grey echo line (#94/#95 cleanup).
+        return f"[working directory is now {path}]"

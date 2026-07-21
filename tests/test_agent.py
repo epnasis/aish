@@ -2603,12 +2603,13 @@ class TestMidTaskSteering:
             if m.get("role") == "user" and m.get("content") == "also check the logs"
         ]
         assert len(injected) == 1
-        # Echoed to the terminal and surfaced as a distinct trace step.
-        assert any("also check the logs" in line for line in echoed)
+        # Surfaced as a distinct `injected` trace step (the "You added" note) —
+        # the sole marker; no duplicate grey echo line.
         assert any(
             s.get("kind") == "injected" and s.get("text") == "also check the logs"
             for s in steps
         )
+        assert not any("also check the logs" in line for line in echoed)
 
     def test_injected_message_is_consumed_once(self, tmp_path):
         (tmp_path / "x").mkdir()

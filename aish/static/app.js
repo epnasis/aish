@@ -1468,17 +1468,21 @@ function retireRegen() {
 // folder glyph is static markup; the path is user data, so it goes in via
 // textContent.
 function addWorkspaceNote(change, path) {
+  // Styled like the "You added" steering note (blue icon + bold label + value)
+  // so a cwd/trust change reads as a first-class timeline event, not a grey
+  // system line (#94/#95).
   const el = document.createElement("div");
   el.className = "msg workspace-note";
   const ico = document.createElement("span");
   ico.className = "wsnote-ico";
   ico.innerHTML = FOLDER_SVG;
   const label = document.createElement("span");
-  label.textContent = change === "cwd"
-    ? `Working directory → ${abbreviatePath(path)}`
-    : `Trusted ${abbreviatePath(path)}`;
-  el.appendChild(ico);
-  el.appendChild(label);
+  label.className = "wsnote-label";
+  label.textContent = change === "cwd" ? "Working directory" : "Trusted directory";
+  const val = document.createElement("span");
+  val.className = "wsnote-path mono";
+  val.textContent = abbreviatePath(path);
+  el.append(ico, label, val);
   messagesEl.appendChild(el);
   scrollToEnd();
   return el;

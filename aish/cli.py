@@ -904,7 +904,9 @@ def handle_slash(
             roots = ", ".join(str(r) for r in agent.roots)
             print(f"{DIM}cwd: {agent.cwd} · roots: {roots} — /cd <dir> moves both{RESET}")
             return "handled"
-        agent.rebase(parts[1].strip())  # echoes its own result/error
+        result = agent.rebase(parts[1].strip())  # ERROR case still echoes itself
+        if not result.startswith("ERROR"):
+            print(f"{DIM}→ working directory: {agent.cwd}{RESET}")
         return "handled"
     if command in ("/add-dir", "/dir-add"):
         parts = task.split(maxsplit=1)
