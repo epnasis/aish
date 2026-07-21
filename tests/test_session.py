@@ -530,3 +530,100 @@ class TestSearchExcerpts:
         )
         assert len(out) < DETAIL_MAX_CHARS + 500
         assert "more messages omitted" in out
+
+
+# --- Terminal-mode command history (#104) ---------------------------------
+
+def _user_cmd(log, command, exit_code=0):
+    """Log a user-direct ! command exactly as server._run_user_command does:
+    the user-direct audit record, then its terminal-block cmd_start/cmd_end."""
+    log.command(command, "user-direct")
+    log.command_event({"kind": "cmd_start", "cwd": "/x", "command": command, "user": True})
+    log.command_event({"kind": "cmd_end", "status": "exit", "exit_code": exit_code})
+
+
+def _model_cmd(log, command, exit_code=0):
+    """Log a model tool-loop command: an approval decision, not user-direct."""
+    log.command(command, "approved")
+    log.command_event({"kind": "cmd_start", "cwd": "/x", "command": command})
+    log.command_event({"kind": "cmd_end", "status": "exit", "exit_code": exit_code})
+
+
+def test_user_command_history_excludes_model_and_failures(tmp_path):
+    log = SessionLog.new(tmp_path)
+    _user_cmd(log, "ls -la")           # user, ok → included
+    _user_cmd(log, "grep foo", 1)      # user, failed → excluded
+    _model_cmd(log, "rm -rf build")    # model command → never included
+    log.close()
+    assert SessionLog.user_command_history(tmp_path) == ["ls -la"]
+
+
+def test_user_command_history_ranks_by_frequency_then_recency(tmp_path):
+    log = SessionLog.new(tmp_path)
+    _user_cmd(log, "git status")   # run 3x → most frequent
+    _user_cmd(log, "ls")
+    _user_cmd(log, "git status")
+    _user_cmd(log, "pwd")
+    _user_cmd(log, "git status")
+    _user_cmd(log, "ls")           # ls at 2, pwd at 1
+    log.close()
+    # git status:3, ls:2, pwd:1 → frequency descending.
+    assert SessionLog.user_command_history(tmp_path) == ["git status", "ls", "pwd"]
+
+
+def test_user_command_history_recency_tiebreak(tmp_path):
+    log = SessionLog.new(tmp_path)
+    _user_cmd(log, "make test")   # each run once
+    _user_cmd(log, "make lint")   # more recent than make test
+    log.close()
+    # Equal frequency (1 each): most-recent first.
+    assert SessionLog.user_command_history(tmp_path) == ["make lint", "make test"]
+
+
+def test_user_command_history_keeps_alias_verbatim(tmp_path):
+    log = SessionLog.new(tmp_path)
+    _user_cmd(log, "ll")   # an alias the user typed — stored/suggested as-is
+    log.close()
+    assert SessionLog.user_command_history(tmp_path) == ["ll"]
+
+
+def test_user_command_history_case_preserved_for_dedup(tmp_path):
+    # Stored verbatim: differently-cased strings are distinct commands (the
+    # frontend prefix-matches case-insensitively, but we suggest what was typed).
+    log = SessionLog.new(tmp_path)
+    _user_cmd(log, "Git status")
+    _user_cmd(log, "git status")
+    log.close()
+    assert set(SessionLog.user_command_history(tmp_path)) == {"Git status", "git status"}
+
+
+def test_user_command_history_cd_excluded(tmp_path):
+    # !cd goes through rebase and emits NO cmd_end, so it never qualifies as a
+    # confirmed exit-0 command and drops out of the palette.
+    log = SessionLog.new(tmp_path)
+    log.command("cd /tmp", "user-direct")  # no cmd_start/cmd_end
+    _user_cmd(log, "ls")
+    log.close()
+    assert SessionLog.user_command_history(tmp_path) == ["ls"]
+
+
+def test_user_command_history_aggregates_across_sessions(tmp_path):
+    older = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+    _user_cmd(older, "ls")
+    _user_cmd(older, "git status")
+    older.close()
+    newer = SessionLog(tmp_path / "session-20260102-000000-000000.jsonl")
+    _user_cmd(newer, "git status")   # 2 total, and most recent
+    newer.close()
+    # Distinct mtimes so cross-session recency is deterministic.
+    os.utime(older.path, (1_700_000_000, 1_700_000_000))
+    os.utime(newer.path, (1_700_000_100, 1_700_000_100))
+    assert SessionLog.user_command_history(tmp_path) == ["git status", "ls"]
+
+
+def test_user_command_history_capped(tmp_path):
+    log = SessionLog.new(tmp_path)
+    for i in range(10):
+        _user_cmd(log, f"cmd{i}")
+    log.close()
+    assert len(SessionLog.user_command_history(tmp_path, limit=3)) == 3

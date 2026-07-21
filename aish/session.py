@@ -26,6 +26,12 @@ DETAIL_MAX_CHARS = 6000
 DETAIL_TAIL_MESSAGES = 20
 RECALL_SESSIONS_TOP = 3  # sessions shown in the recall tool's fallback section
 _SESSION_NAME_RE = re.compile(r"^session-[0-9-]+\.jsonl$")
+
+# Terminal-mode command autocomplete (#104): the personal command palette is
+# built from the user's own successful ! commands across sessions. Both caps
+# keep the disk scan mtime-cheap and the delivered list small.
+USER_HISTORY_MAX = 100  # commands offered to the web terminal-mode composer
+USER_HISTORY_SESSIONS = 200  # most-recent sessions scanned for that history
 # run_command appends this exit marker to its returned output; the live stream
 # never carries it (the code comes via command_end), so reconstruction strips
 # it before replaying the output into the terminal block.
@@ -559,6 +565,57 @@ class SessionLog:
                 )
             )
         return entries
+
+    @staticmethod
+    def user_command_history(state_dir: Path, limit: int = USER_HISTORY_MAX) -> list[str]:
+        """The user's OWN successfully-run commands, verbatim, aggregated across
+        sessions and ranked most-run first then most-recent — the source for the
+        web terminal-mode autocomplete (#104).
+
+        Only `decision:"user-direct"` command records count (the ! path), never
+        the model's tool-loop commands — those carry approval decisions, so the
+        AI's activity can't pollute the user's palette. A command qualifies only
+        when the terminal-block `cmd_end` that follows it reports a clean exit
+        (status "exit", exit_code 0); failures and `!cd` (which emits no cmd_end)
+        drop out. Strings are kept exactly as typed so aliases like `ll` are
+        suggested verbatim; case-insensitive prefix matching happens at the
+        callsite (the frontend), not here."""
+        counts: dict[str, int] = {}
+        last_seen: dict[str, int] = {}
+        order = 0  # monotonic across the whole scan; higher = more recent run
+        # Oldest→newest over recent sessions so a later run of the same command
+        # wins the recency tie-break; the scan is bounded to stay mtime-cheap.
+        recent = SessionLog._by_recency(state_dir)[:USER_HISTORY_SESSIONS]
+        for path in reversed(recent):
+            pending: str | None = None  # a user command awaiting its exit status
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                kind = record.get("kind")
+                if kind == "command":
+                    # Any command record resets the pending one, so a model
+                    # command can never inherit a preceding user command's exit.
+                    pending = (
+                        record.get("command")
+                        if record.get("decision") == "user-direct"
+                        else None
+                    )
+                elif kind == "cmd_end" and pending is not None:
+                    if record.get("status") == "exit" and record.get("exit_code") == 0:
+                        counts[pending] = counts.get(pending, 0) + 1
+                        last_seen[pending] = order
+                        order += 1
+                    pending = None
+        ranked = sorted(
+            counts, key=lambda cmd: (counts[cmd], last_seen[cmd]), reverse=True
+        )
+        return ranked[:limit]
 
     @staticmethod
     def rank(entries: list["SessionEntry"], query: str) -> list[SessionInfo]:

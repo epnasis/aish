@@ -333,6 +333,7 @@ function onHello(event) {
   $("model-name").textContent = event.model;
   setTitle(event.title);
   pagerSessions = event.pager || [];
+  cmdHistory = event.cmd_history || []; // personal command palette (#104)
   currentSession = event.session;
   localStorage.setItem("aish-session", event.session); // reconnects return here
   renderWorkspace(event);
@@ -3481,11 +3482,15 @@ function atFragment(text) {
 const requestFiles = debounce((query) => send({ type: "files", query }), 120);
 
 // Common shell commands offered as first-word completions in terminal mode.
+// Fallback first-word completions until this user has run enough ! commands to
+// build a personal history (#104). Once cmdHistory (from hello) is non-empty it
+// takes over — the palette is the user's own successful commands, aliases and all.
 const SHELL_COMMANDS = [
   "cat", "cd", "cp", "curl", "echo", "find", "git", "grep", "head", "less",
   "ls", "make", "mkdir", "mv", "node", "npm", "pwd", "python", "rm", "tail",
   "touch", "uv",
 ];
+let cmdHistory = []; // user's own successful commands, most-run first, from hello
 
 function updateSuggest() {
   if (cmdMode) { updateCmdSuggest(); return; }
@@ -3518,8 +3523,14 @@ function updateCmdSuggest() {
   const text = input.value;
   const before = text.slice(0, input.selectionStart ?? text.length);
   if (!before.includes(" ")) {
+    // History-first: prefix-match the user's own commands, keeping their stored
+    // (correctly-cased) form. Case-insensitive match so iOS autocapitalization
+    // (`Ls`, `Git`) still hits. Falls back to the static list only until any
+    // history exists — the palette is already frequency+recency ranked (#104).
+    const source = cmdHistory.length ? cmdHistory : SHELL_COMMANDS;
+    const lower = before.toLowerCase();
     const items = before
-      ? SHELL_COMMANDS.filter((c) => c.startsWith(before)).map((c) => [c, ""])
+      ? source.filter((c) => c.toLowerCase().startsWith(lower)).map((c) => [c, ""])
       : [];
     if (items.length) {
       suggest.items = items;
