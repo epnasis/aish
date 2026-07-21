@@ -307,6 +307,72 @@ def escaping_dirs(command: str, cwd: str, roots) -> list[str]:
     return dirs
 
 
+def _resolve_operand(token: str, cwd: str) -> Path | None:
+    """Fully resolve a path token (expand ~, anchor a relative token to cwd,
+    defuse '..' and symlinks). None when it can't be resolved — fail closed."""
+    expanded = os.path.expanduser(token)
+    try:
+        base = Path(expanded) if os.path.isabs(expanded) else Path(cwd) / expanded
+        return base.resolve()
+    except OSError:
+        return None
+
+
+def path_within(path: str, cwd: str, scratch_dir: Path) -> bool:
+    """True iff `path` resolves to a location STRICTLY inside scratch_dir
+    (symlinks and '..' defused). Backs auto-approval of writes into the
+    ephemeral scratch workspace; the scratch dir itself and anything that
+    escapes it (or can't be resolved) return False — fail closed."""
+    target = _resolve_operand(path, cwd)
+    if target is None:
+        return False
+    scratch = scratch_dir.resolve()
+    return target != scratch and target.is_relative_to(scratch)
+
+
+def is_scratch_delete(command: str, cwd: str, scratch_dir: Path) -> bool:
+    """True iff `command` is a single `rm` invocation whose every path operand
+    resolves STRICTLY inside scratch_dir — a delete confined to the ephemeral
+    scratch workspace, safe to auto-approve. Fail closed on ANY ambiguity, so
+    the command otherwise drops through to the normal denylist + prompt path:
+    chained/piped commands or shell metacharacters, a verb that isn't a bare
+    `rm` (no sudo/wrappers), recursive+force together (that stays denylisted
+    even here), no operands, or any operand resolving onto or outside the
+    scratch dir."""
+    segments = split_chain(command)
+    if segments is None or len(segments) != 1:
+        return False
+    try:
+        tokens = shlex.split(segments[0])
+    except ValueError:
+        return False
+    if not tokens or tokens[0].rsplit("/", 1)[-1] != "rm":
+        return False
+    scratch = scratch_dir.resolve()
+    operands: list[str] = []
+    flags: set[str] = set()
+    longs: set[str] = set()
+    after_ddash = False
+    for tok in tokens[1:]:
+        if not after_ddash and tok == "--":
+            after_ddash = True
+            continue
+        if not after_ddash and tok != "-" and tok.startswith("-"):
+            if tok.startswith("--"):
+                longs.add(tok)
+            else:
+                flags.update(tok[1:])
+            continue
+        operands.append(tok)
+    recursive = bool({"r", "R"} & flags) or "--recursive" in longs
+    force = "f" in flags or "--force" in longs
+    if recursive and force:  # rm -rf stays denylisted, even inside scratch
+        return False
+    if not operands:
+        return False
+    return all(path_within(operand, cwd, scratch) for operand in operands)
+
+
 def is_auto_approvable(
     command: str, prefixes: Collection[str], cwd: str | None = None, roots=None
 ) -> bool:

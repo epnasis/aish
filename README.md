@@ -92,8 +92,8 @@ in/out of it by restarting aish rather than `/model`.
 
 | Tool | What | Gate |
 |------|------|------|
-| `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve inside the session roots) |
-| `write_file` / `edit_file` | create or edit files | **colored diff + y/N** |
+| `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve inside the session roots; deletes confined to the scratch workspace auto-approve) |
+| `write_file` / `edit_file` | create or edit files | **colored diff + y/N** (auto inside the per-session scratch workspace) |
 | `read_file` | read a file | auto inside the session roots; **prompts outside them and on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
 | `web_search` / `read_url` | DuckDuckGo + fetch page as readable text | auto; every query/URL echoed; public hosts only |
 | `read_docs` | man page → `--help` fallback, full-text `topic` search | auto |
@@ -156,6 +156,13 @@ collapsed **Sources (n)** row that expands to clickable page titles.
    `~/.aws`, shell history, and the rest of your home tree would sit inside
    the auto-approval scope. Launch from any other directory (or `/cd`
    afterwards) and that choice is respected as-is.
+   Each session also gets a **private scratch workspace** — a temp directory
+   (`aish-scratch-…`) where the model may create, edit, *and* delete throwaway
+   files (staging a `gh` issue body, a commit message, an intermediate patch)
+   without prompting. The path is in the model's system prompt; the auto-approval
+   is confined strictly to that directory (paths escaping it via `..` or a
+   symlink still prompt, and `rm -rf` stays denylisted even there), and the
+   whole directory is deleted when the session ends.
 2. **Denylist** — unrecoverable classes (`rm -rf`, `shred`, `mkfs`, `dd` to raw
    devices, `diskutil erase*`, `git clean -f`, `git push --force`) are blocked
    outright, even if you'd approve them; edited commands are re-checked. Only

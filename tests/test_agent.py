@@ -2156,3 +2156,110 @@ class TestCommandFraming:
         )
         assert agent.on_command_start is None and agent.on_command_end is None
         assert agent.run_task("go") == "done"
+
+
+class TestScratchWorkspace:
+    """Issue #70: a per-session scratch dir where create AND delete are
+    auto-approved, scoped strictly to that dir; everything else still gated.
+    scratch_dir is created per-Agent, so these build the agent first, then
+    script responses that reference agent.scratch_dir."""
+
+    def _agent(self, tmp_path, **kwargs):
+        kwargs.setdefault("approve", lambda _cmd: True)
+        chat = FakeChat([])
+        agent = Agent(model="fake", client_chat=chat, cwd=str(tmp_path), **kwargs)
+        return agent, chat
+
+    def test_scratch_dir_created_and_in_system_prompt(self, tmp_path):
+        agent, _ = self._agent(tmp_path)
+        assert agent.scratch_dir.is_dir()
+        assert "aish-scratch-" in agent.scratch_dir.name
+        assert str(agent.scratch_dir) in agent.messages[0]["content"]
+        assert "SCRATCH WORKSPACE" in agent.messages[0]["content"]
+
+    def test_write_into_scratch_auto_approves(self, tmp_path):
+        agent, chat = self._agent(
+            tmp_path,
+            approve_write=lambda _plan: pytest.fail("scratch write must not prompt"),
+        )
+        target = agent.scratch_dir / "body.md"
+        chat.responses = [
+            model_says(tool_calls=[tool_call("write_file", path=str(target), content="hi")]),
+            model_says("done"),
+        ]
+        assert agent.run_task("stage a note") == "done"
+        assert target.read_text() == "hi\n"
+
+    def test_write_outside_scratch_still_prompts(self, tmp_path):
+        seen = []
+        target = tmp_path / "keep.txt"
+        agent, chat = self._agent(
+            tmp_path, approve_write=lambda plan: (seen.append(plan.target), False)[1]
+        )
+        chat.responses = [
+            model_says(tool_calls=[tool_call("write_file", path=str(target), content="hi")]),
+            model_says("done"),
+        ]
+        agent.run_task("write outside")
+        assert seen and seen[0] == target
+        assert not target.exists()  # denied → nothing written
+
+    def test_rm_inside_scratch_auto_approves(self, tmp_path):
+        agent, chat = self._agent(
+            tmp_path, approve=lambda _cmd: pytest.fail("scratch delete must not prompt")
+        )
+        victim = agent.scratch_dir / "tmp.txt"
+        victim.write_text("x")
+        chat.responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"rm {victim}")]),
+            model_says("done"),
+        ]
+        agent.run_task("clean up scratch")
+        assert not victim.exists()
+
+    def test_rm_outside_scratch_still_prompts(self, tmp_path):
+        marker = tmp_path / "important"
+        marker.write_text("x")
+        agent, chat = self._agent(tmp_path, approve=lambda _cmd: False)
+        chat.responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"rm {marker}")]),
+            model_says("ok"),
+        ]
+        agent.run_task("delete outside")
+        assert marker.exists()  # denied → nothing removed
+
+    def test_rm_escaping_scratch_via_dotdot_still_prompts(self, tmp_path):
+        seen = []
+        agent, chat = self._agent(tmp_path, approve=lambda cmd: (seen.append(cmd), False)[1])
+        outside = agent.scratch_dir.parent / "outside.txt"
+        outside.write_text("x")
+        escape = agent.scratch_dir / ".." / "outside.txt"
+        chat.responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"rm {escape}")]),
+            model_says("ok"),
+        ]
+        agent.run_task("escape")
+        assert seen  # the escaping rm reached the approver (prompted)
+        assert outside.exists()  # denied → nothing removed
+
+    def test_rm_rf_inside_scratch_still_gated(self, tmp_path):
+        # recursive+force stays denylisted even in scratch: it must reach the
+        # approver, not auto-approve.
+        seen = []
+        agent, chat = self._agent(tmp_path, approve=lambda cmd: (seen.append(cmd), False)[1])
+        sub = agent.scratch_dir / "sub"
+        sub.mkdir()
+        chat.responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"rm -rf {sub}")]),
+            model_says("ok"),
+        ]
+        agent.run_task("nuke scratch subdir")
+        assert seen  # rm -rf reached the approver
+        assert sub.exists()  # denied → still there
+
+    def test_close_removes_scratch_dir(self, tmp_path):
+        agent, _ = self._agent(tmp_path)
+        scratch = agent.scratch_dir
+        assert scratch.is_dir()
+        agent.close()
+        assert not scratch.exists()
