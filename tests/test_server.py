@@ -99,6 +99,15 @@ def tool_results(chat, call_index=1):
     return [m for m in chat.calls[call_index]["messages"] if m["role"] == "tool"]
 
 
+def find_tool_step(events, name):
+    """The finished `tool` trace step for a given tool, from a live transcript
+    or a cold reconstruction (both spread the step dict onto a `step` event)."""
+    return next(
+        e for e in events
+        if e.get("type") == "step" and e.get("kind") == "tool" and e.get("name") == name
+    )
+
+
 # Event types that are live-only chrome or control-flow, reconstructed
 # differently (or not at all) by design — excluded from the hot/cold guard.
 # Everything NOT listed is a DURABLE trace event the cold path must reproduce,
@@ -795,6 +804,60 @@ class TestWriteApproval:
             result = tool_results(chat)[-1]["content"]
             assert result.startswith(WRITE_DENIED)
             assert "wrong file — put it in docs/" in result
+
+    def test_approved_edit_step_carries_diff(self, app_env, tmp_path):
+        """#55: an applied edit's trace step carries the diff the approval card
+        computed, so the web timeline renders WHAT changed — live AND cold."""
+        target = tmp_path / "note.txt"
+        target.write_text("old line\n", encoding="utf-8")
+        responses = [
+            model_says(tool_calls=[tool_call(
+                "edit_file", path=str(target), old_str="old line", new_str="new line")]),
+            model_says("edited"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "edit it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+            server = client.app.state.server
+            hot = list(server.active.bridge.transcript)
+            path = server.active.logref.log.path
+        assert target.read_text(encoding="utf-8") == "new line\n"
+        for events in (hot, SessionLog.reconstruct_events(path)):
+            step = find_tool_step(events, "edit_file")
+            assert step["decision"] == "approved"
+            assert "+new line" in step["diff"]
+            assert "-old line" in step["diff"]
+
+    def test_denied_edit_step_carries_diff_and_reason(self, app_env, tmp_path):
+        """#55/#67: a denied edit stays in the timeline marked denied, with the
+        proposed (not-applied) diff and the user's feedback — live AND cold."""
+        target = tmp_path / "note.txt"
+        target.write_text("old line\n", encoding="utf-8")
+        responses = [
+            model_says(tool_calls=[tool_call(
+                "edit_file", path=str(target), old_str="old line", new_str="new line")]),
+            model_says("understood"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "edit it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "approval", "id": request["id"],
+                          "action": "deny", "comment": "leave it as is"})
+            recv_until(ws, "done")
+            server = client.app.state.server
+            hot = list(server.active.bridge.transcript)
+            path = server.active.logref.log.path
+        assert target.read_text(encoding="utf-8") == "old line\n"  # never touched disk
+        for events in (hot, SessionLog.reconstruct_events(path)):
+            step = find_tool_step(events, "edit_file")
+            assert step["decision"] == "denied"
+            assert step["ok"] is False
+            assert "+new line" in step["diff"]
+            assert step["comment"] == "leave it as is"
 
 
 class TestReconnect:

@@ -868,6 +868,17 @@ function toolFinish(t, step) {
       ref.main.appendChild(why);
     }
   }
+  // The diff of a file edit, shown inline in the timeline (#55): what was
+  // written for an applied edit, or (dimmed, under "Change not applied") what
+  // was proposed for a denied/held one. Reuses the approval card's renderer so
+  // the styling matches, and works identically live and on cold replay since
+  // the step carries the same diff the card computed.
+  if ((step.name === "write_file" || step.name === "edit_file") && step.diff) {
+    const d = renderDiff(step.diff);
+    d.classList.add("step-diff");
+    if (notRun) d.classList.add("not-applied");
+    ref.main.appendChild(d);
+  }
   // An executed run_command's output lives in the terminal block that
   // command_start/command_end drew and finalized — live AND on cold replay,
   // where reconstruct_events replays the same framing events. So there is
