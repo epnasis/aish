@@ -3381,6 +3381,7 @@ const SLASH_COMMANDS = [
   ["/new", "fresh conversation in a new session"],
   ["/fork", "branch this conversation into a new session (original untouched)"],
   ["/learn", "save this conversation's learnings as skills/memory"],
+  ["/feedback", "file a bug or idea as a GitHub issue"],
   ["/cd", "change working directory (re-anchors approval root)"],
   ["/add-dir", "allow auto-approved work in another tree"],
   ["/jobs", "list background jobs"],
@@ -3567,9 +3568,10 @@ function handleSlash(text) {
     case "/cd": arg ? send({ type: "cd", path: arg }) : openDirSheet(); break;
     case "/add-dir": case "/dir-add":
       arg ? send({ type: "add_dir", path: arg }) : openSheet("workspace-sheet"); break;
-    case "/learn":
-      // Runs as a task: the server swaps the text for the distillation
-      // prompt (cli.parse_learn) while the transcript shows what was typed.
+    case "/learn": case "/feedback":
+      // Run as a task: the server swaps the text for the expanded prompt
+      // (cli.parse_learn / parse_feedback) while the transcript shows what was
+      // typed. Both must reach the server, not be handled client-side here.
       if (send({ type: "task", text })) scrollToEndSettled();
       break;
     case "/jobs": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
