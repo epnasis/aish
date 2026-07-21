@@ -224,6 +224,39 @@ class SessionLog:
         return events if has_trace else None
 
     @staticmethod
+    def truncate_at_answer(text: str, after: int) -> str | None:
+        """Return the log truncated to include everything up to AND INCLUDING
+        the `after`-th (1-based) final answer — used to fork a conversation
+        "from here". A final answer is an assistant `message` record not
+        immediately followed by a `tool` message (same rule the exporter and
+        the UI use), so intermediate tool-calling turns don't count. All the
+        turn's non-message records (model/trace/cmd framing) precede its
+        assistant message, so cutting after that line preserves them and the
+        fork replays identically up to that point. Returns None if `after` is
+        out of range."""
+        lines = text.splitlines()
+        msgs: list[tuple[int, str]] = []  # (line index, role) for message records
+        for i, line in enumerate(lines):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("kind") == "message" and record.get("role") in (
+                "user", "assistant", "tool",
+            ):
+                msgs.append((i, record["role"]))
+        finals = [
+            line_idx
+            for j, (line_idx, role) in enumerate(msgs)
+            if role == "assistant"
+            and (j + 1 >= len(msgs) or msgs[j + 1][1] != "tool")
+        ]
+        if after < 1 or after > len(finals):
+            return None
+        cut = finals[after - 1]
+        return "\n".join(lines[: cut + 1]) + "\n"
+
+    @staticmethod
     def _derive_title(messages: list[dict]) -> str:
         """Untruncated title: the first user message — cheap, deterministic,
         and it almost always names the task."""

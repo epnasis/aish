@@ -1435,6 +1435,37 @@ class TestFork:
             recv_until(ws, "done")
             assert "zebra" in json.dumps(chat.calls[-1]["messages"])
 
+    def test_fork_from_here_truncates_to_that_answer(self, app_env):
+        # A per-answer Fork (after=N) branches up to and including that answer,
+        # dropping later turns — the "from here" case.
+        client, _ = make_client(
+            app_env,
+            [model_says("first answer alpha"), model_says("second answer beta")],
+        )
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "one"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "two"})
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "fork", "after": 1})
+            forked = recv_until(ws, "hello")
+            assert forked["session"] != hello["session"]
+            replay = recv_until(ws, "replay")
+            users = [e["text"] for e in replay["events"] if e["type"] == "user"]
+            dumped = json.dumps(replay["events"])
+            assert users == ["one"]  # only the first turn carried over
+            assert "alpha" in dumped and "beta" not in dumped
+
+    def test_fork_after_out_of_range_errors(self, app_env):
+        client, _ = make_client(app_env, [model_says("only answer")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "hi"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "fork", "after": 5})
+            error = recv_until(ws, "error")
+            assert "out of range" in error["text"]
+
     def test_fork_empty_conversation_refused(self, app_env):
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):

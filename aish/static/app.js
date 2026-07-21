@@ -295,6 +295,7 @@ function onReplay(event) {
   answerStableLen = 0;
   answerStableNodes = 0;
   sawAnswer = false;
+  renderedAnswers = 0; // fork ordinals restart with the rebuilt transcript
   if (event.truncated) addMsg("notice", "… earlier events trimmed …");
   replaying = true; // replayed history must not re-fire notifications
   try {
@@ -415,7 +416,7 @@ function closeAnswer() {
   // block) gets its copy/read-aloud row; mid-stream re-renders would clobber it.
   if (answerEl) {
     renderAnswerNow(); // flush any tokens still waiting on the next frame
-    if (answerText.trim()) attachAnswerTools(answerEl, answerText);
+    if (answerText.trim()) attachAnswerTools(answerEl, answerText, lastUserPrompt);
   }
   answerEl = null;
   answerText = "";
@@ -426,7 +427,7 @@ function onDone(event) {
   if (!sawAnswer && event.result) {
     const el = addMsg("answer md", "");
     el.replaceChildren(renderMarkdown(event.result));
-    attachAnswerTools(el, event.result);
+    attachAnswerTools(el, event.result, lastUserPrompt);
   }
   closeAnswer();
   finishTrace();
@@ -1101,7 +1102,10 @@ let userCmdBlock = null;
 function onCommandStart(event) {
   const block = buildTermBlock(event.cwd, event.command);
   if (event.user) {
-    // Direct user command: stand it in the main chat, no trace wrapper.
+    // Direct user command: stand it in the main chat, no trace wrapper, and
+    // expanded by default — the user ran it and wants to see the whole outcome
+    // to decide what's next, not a capped "Show all output" preview.
+    block.classList.add("expanded");
     messagesEl.appendChild(block);
     userCmdBlock = block;
     scrollToEnd();
@@ -1501,17 +1505,20 @@ $("scroll-top").onclick = () => {
 };
 
 function onHistory(history) {
+  renderedAnswers = 0; // fork ordinals restart with the rebuilt transcript
+  let prevPrompt = "";
   for (const message of history) {
     const content = (message.content || "").trim();
     if (!content) continue;
     if (message.role === "user") {
       retireQuickReplies();
+      prevPrompt = stripAttachmentNotes(content);
       addUserMsg(content);
     }
     else if (message.role === "assistant") {
       const el = addMsg("answer md", "");
       el.replaceChildren(renderMarkdown(content));
-      attachAnswerTools(el, content);
+      attachAnswerTools(el, content, prevPrompt);
     } else {
       const lines = content.split("\n");
       const shown = lines.slice(0, 4).join("\n");
@@ -2171,8 +2178,18 @@ function saveBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
-async function exportAnswerPdf(markdown, btn) {
-  const query = new URLSearchParams({ title: "aish answer" });
+// Pull the server-derived (ASCII-transliterated) download name out of the
+// Content-Disposition header, so the file is titled from the prompt.
+function dispositionName(response, fallback) {
+  const cd = response.headers.get("Content-Disposition") || "";
+  const m = cd.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)/i);
+  try { return (m && decodeURIComponent(m[1])) || fallback; } catch { return fallback; }
+}
+
+async function exportAnswerPdf(markdown, title, btn) {
+  // The prompt that led to the answer titles the document AND (via the server's
+  // safe_pdf_filename) the download name; fall back to a generic title.
+  const query = new URLSearchParams({ title: (title || "").trim() || "aish answer" });
   if (token) query.set("token", token);
   if (btn) btn.disabled = true;
   try {
@@ -2186,7 +2203,7 @@ async function exportAnswerPdf(markdown, btn) {
       showToast(`export failed: ${body.error || response.status}`);
       return;
     }
-    saveBlob(await response.blob(), "aish-answer.pdf");
+    saveBlob(await response.blob(), dispositionName(response, "aish-answer.pdf"));
   } catch {
     showToast("export failed — is the server reachable?");
   } finally {
@@ -2208,14 +2225,43 @@ function exportSessionPdf() {
   a.remove();
 }
 
-function exportChip(getText) {
+function exportChip(getText, getTitle) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "copy-chip";
   btn.title = "export answer to PDF";
   btn.setAttribute("aria-label", "export answer to PDF");
   btn.appendChild(pdfIcon());
-  btn.onclick = () => exportAnswerPdf(getText(), btn);
+  btn.onclick = () => exportAnswerPdf(getText(), getTitle ? getTitle() : "", btn);
+  return btn;
+}
+
+function forkIcon() {
+  return svgIcon("i-fork", (make, svg) => {
+    const g = make("g", { fill: "none", stroke: "currentColor", "stroke-width": "1.7",
+      "stroke-linecap": "round", "stroke-linejoin": "round" });
+    g.appendChild(make("circle", { cx: "7", cy: "5.5", r: "1.8" }));
+    g.appendChild(make("circle", { cx: "7", cy: "18.5", r: "1.8" }));
+    g.appendChild(make("circle", { cx: "17", cy: "9.5", r: "1.8" }));
+    g.appendChild(make("path", { d: "M7 7.3v9.4" }));
+    g.appendChild(make("path", { d: "M7 11.5h5a3 3 0 0 0 3-3v-.3" }));
+    svg.appendChild(g);
+  });
+}
+
+// Fork from a specific answer: branch the conversation up to and including this
+// answer into a new session (issue #47, from-here). `ordinal` is 1-based.
+function forkChip(ordinal) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "copy-chip";
+  btn.title = "fork the conversation from here into a new session";
+  btn.setAttribute("aria-label", "fork from here");
+  btn.appendChild(forkIcon());
+  btn.onclick = () => {
+    if (clientBusy) { showToast("can't fork while working"); return; }
+    send({ type: "fork", after: ordinal });
+  };
   return btn;
 }
 
@@ -2224,11 +2270,18 @@ function exportChip(getText) {
 let turnStart = 0;
 let answerTiming = 0;
 
-function attachAnswerTools(el, source) {
+// Each rendered final answer gets an ordinal so its Fork button can branch the
+// conversation up to and including that answer. Reset whenever the transcript
+// is rebuilt (replay/history), so it stays aligned with the log's answer order.
+let renderedAnswers = 0;
+
+function attachAnswerTools(el, source, prompt) {
+  const ordinal = ++renderedAnswers;
   const tools = document.createElement("div");
   tools.className = "msg-tools";
   tools.appendChild(copyChip(() => source, "copy answer"));
-  tools.appendChild(exportChip(() => source));
+  tools.appendChild(exportChip(() => source, () => prompt || ""));
+  tools.appendChild(forkChip(ordinal));
   if (TTS_OK) tools.appendChild(buildTtsBox(el));
   // Regenerate: only the newest answer keeps it, so retire the previous one.
   retireRegen();

@@ -814,7 +814,8 @@ class WebServer:
         elif kind == "new":
             await self._new_session(websocket)
         elif kind == "fork":
-            await self._fork_session(websocket)
+            after = message.get("after")
+            await self._fork_session(websocket, after if isinstance(after, int) else None)
         elif kind == "delete_session":
             await self._delete_session(websocket, str(message.get("name", "")))
         elif kind == "models":
@@ -1151,16 +1152,20 @@ class WebServer:
         self.add_session(session, activate=False)
         await self._show(websocket, session)
 
-    async def _fork_session(self, websocket: WebSocket) -> None:
+    async def _fork_session(self, websocket: WebSocket, after: int | None = None) -> None:
         """Branch the current conversation into a NEW session seeded with the
         history so far, leaving the original untouched — the "explore a tangent
         without polluting the main thread" move (issue #47).
 
         The fork is a SNAPSHOT: the source's append-only log (flushed on every
-        record) is copied verbatim to a fresh session file, then reopened along
-        the resume path (`_open_by_name` → `reconstruct_events`), so it replays
+        record) is copied to a fresh session file, then reopened along the
+        resume path (`_open_by_name` → `reconstruct_events`), so it replays
         identically to any resumed session — hot or later cold. The source's
         Agent and log are only read, never mutated.
+
+        `after` (1-based) forks "from here": the copy is truncated to include up
+        to and including that answer, so a per-answer Fork button branches from
+        an earlier point. `None` forks the whole conversation.
 
         Refused while the source is busy (a mid-task snapshot would capture a
         half-finished turn) and when there's nothing to fork yet."""
@@ -1188,16 +1193,29 @@ class WebServer:
             )
             return
 
-        def copy_log() -> Path:
+        def copy_log() -> Path | None:
+            # message + model + trace + terminal-framing records all carry over,
+            # so the fork reconstructs the same transcript (and --resume history)
+            # as the original up to the fork point. `after` truncates to that
+            # answer; None copies the whole log.
+            src_text = src_path.read_text(encoding="utf-8")
+            forked_text = (
+                src_text if after is None
+                else SessionLog.truncate_at_answer(src_text, after)
+            )
+            if forked_text is None:  # `after` out of range
+                return None
             new_path = SessionLog.new(self.state_dir).path
             new_path.parent.mkdir(parents=True, exist_ok=True)
-            # Verbatim copy: message + model + trace + terminal-framing records
-            # all carry over, so the fork reconstructs the exact same transcript
-            # (and --resume history) as the original up to this point.
-            new_path.write_text(src_path.read_text(encoding="utf-8"), encoding="utf-8")
+            new_path.write_text(forked_text, encoding="utf-8")
             return new_path
 
         new_path = await asyncio.to_thread(copy_log)
+        if new_path is None:
+            await websocket.send_json(
+                {"type": "error", "text": "can't fork from there — that answer is out of range"}
+            )
+            return
         session = await self._open_by_name(new_path.name)
         if session is None:  # pragma: no cover — we just wrote a valid session file
             await websocket.send_json({"type": "error", "text": "fork failed"})
