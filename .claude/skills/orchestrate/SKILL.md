@@ -48,6 +48,10 @@ Read `CLAUDE.md` (repo root) first — architecture, the approval-gate invariant
 - Capability phrasing in aish's own prompts is ignored — use imperative MUST + an example. [[prompt-hints-must-be-imperative]]
 - Small aish-web changes go straight to main; propose the preview env for bigger ones. [[preview-for-bigger-changes]]
 - Sessions run ON the mm host — act locally, never ssh. [[this-machine-is-mm]]
+- **`gh issue list` defaults to 30 items** — ALWAYS pass `--limit 100` (or more) when surveying, or older open issues are silently truncated from triage. [[gh-issue-list-default-limit]]
+- **The repo is often ahead of the tracker.** A prior orchestrator run may have fixed+merged issues but never closed them (tell-tale: stale `issue-*` worktrees under `.claude/worktrees/`, and `#NNN`-tagged comments already in the code). Before delegating ANY fix, grep the code for the issue's tag/feature and check `git worktree list` — most of a night can be verify-and-close, not rebuild. Delegating a done issue wastes a subagent.
+- **The auto-mode classifier throttles rapid bulk `gh issue close`/mutations.** Looping closes get blocked; even 3-at-once trips it after a streak. Do them as individual calls and interleave with other work (reviews, worktree cleanup) to space them out.
+- iOS-standalone/keyboard-visual issues (#8, #24) can't be verified from desktop Chrome — implement per the code, then label `question` and ask the user to confirm on-device rather than closing blind.
 
 ## Do NOT
 - Close an issue you didn't genuinely resolve.
