@@ -2148,6 +2148,16 @@ class TestActivityTraceSteps:
         assert result == "just a chat reply"
         assert [s["kind"] for s in steps] == ["thinking_start", "thinking_cancel"]
 
+    def test_plain_answer_thinking_cancel_carries_token_usage(self):
+        # #84: a text-only turn never emits a "thinking" step (that only fires
+        # alongside tool calls), so thinking_cancel is the only place its token
+        # usage can ride — without it the web trace's token header vanishes.
+        steps, _ = run_with_steps(
+            [model_says("just a chat reply", tokens=(120, 30))]
+        )
+        cancel = next(s for s in steps if s["kind"] == "thinking_cancel")
+        assert cancel["tokens"] == [120, 30]
+
     def test_output_is_bounded_in_step(self):
         from aish.agent import STEP_OUTPUT_CAP
 
