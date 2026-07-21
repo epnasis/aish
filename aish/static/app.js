@@ -1731,6 +1731,17 @@ function highlightFences(container) {
   }
 }
 
+// Syntax-highlight a proposed shell command (bash grammar) in an approval card
+// so operators (&&, |, ||), flags, strings, and binaries stand out (#90). Same
+// vendored hljs and the same innerHTML-safety as highlightFences: hljs escapes
+// the source it's given, and the source is text we set via textContent, so
+// code.textContent still returns the exact command for approve/copy.
+function highlightCommand(code) {
+  if (!window.hljs || !hljs.getLanguage("bash")) return; // vendor missing — stays plain
+  code.innerHTML = hljs.highlight(code.textContent, { language: "bash" }).value;
+  code.classList.add("hljs");
+}
+
 // ---- markdown rendering --------------------------------------------------
 function renderMarkdown(text) {
   const frag = document.createDocumentFragment();
@@ -2798,6 +2809,7 @@ function buildCommandCard(card, event) {
   const code = document.createElement("span");
   code.className = "cmd-text mono";
   code.textContent = event.command;
+  highlightCommand(code); // bash syntax colors (#90); reverted while editing below
   const editBtn = document.createElement("button");
   editBtn.type = "button";
   editBtn.className = "cmd-icon";
@@ -2818,8 +2830,13 @@ function buildCommandCard(card, event) {
       code.contentEditable = "false";
       code.classList.remove("editing");
       editBtn.classList.remove("active");
+      highlightCommand(code); // re-highlight the (possibly edited) command
       return;
     }
+    // Editing wants plain text: collapse the highlight spans back to one text
+    // node so the caret and contentEditable behave normally.
+    code.textContent = code.textContent;
+    code.classList.remove("hljs");
     code.contentEditable = "plaintext-only";
     code.classList.add("editing");
     editBtn.classList.add("active");

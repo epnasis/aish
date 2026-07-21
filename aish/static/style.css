@@ -440,20 +440,20 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md pre code { background: none; padding: 0; white-space: pre; }
 /* highlight.js token colors — mapped onto the app's own palette (no stock
    hljs theme shipped) so highlighted fences match the rest of the UI. */
-.msg.md .hljs-keyword, .msg.md .hljs-selector-tag, .msg.md .hljs-literal { color: var(--purple); }
-.msg.md .hljs-string, .msg.md .hljs-attr, .msg.md .hljs-regexp { color: var(--green); }
-.msg.md .hljs-number, .msg.md .hljs-symbol { color: var(--orange); }
-.msg.md .hljs-comment, .msg.md .hljs-quote { color: var(--dim); font-style: italic; }
-.msg.md .hljs-title, .msg.md .hljs-title.function_, .msg.md .hljs-section { color: var(--blue); }
-.msg.md .hljs-type, .msg.md .hljs-class .hljs-title { color: var(--cyan); }
-.msg.md .hljs-variable, .msg.md .hljs-template-variable, .msg.md .hljs-params { color: var(--fg); }
-.msg.md .hljs-built_in, .msg.md .hljs-name { color: var(--yellow); }
-.msg.md .hljs-tag { color: var(--dim); }
-.msg.md .hljs-attribute { color: var(--orange); }
-.msg.md .hljs-deletion { color: var(--red); }
-.msg.md .hljs-addition { color: var(--green); }
-.msg.md .hljs-emphasis { font-style: italic; }
-.msg.md .hljs-strong { font-weight: 700; }
+.hljs .hljs-keyword, .hljs .hljs-selector-tag, .hljs .hljs-literal { color: var(--purple); }
+.hljs .hljs-string, .hljs .hljs-attr, .hljs .hljs-regexp { color: var(--green); }
+.hljs .hljs-number, .hljs .hljs-symbol { color: var(--orange); }
+.hljs .hljs-comment, .hljs .hljs-quote { color: var(--dim); font-style: italic; }
+.hljs .hljs-title, .hljs .hljs-title.function_, .hljs .hljs-section { color: var(--blue); }
+.hljs .hljs-type, .hljs .hljs-class .hljs-title { color: var(--cyan); }
+.hljs .hljs-variable, .hljs .hljs-template-variable, .hljs .hljs-params { color: var(--fg); }
+.hljs .hljs-built_in, .hljs .hljs-name { color: var(--yellow); }
+.hljs .hljs-tag { color: var(--dim); }
+.hljs .hljs-attribute { color: var(--orange); }
+.hljs .hljs-deletion { color: var(--red); }
+.hljs .hljs-addition { color: var(--green); }
+.hljs .hljs-emphasis { font-style: italic; }
+.hljs .hljs-strong { font-weight: 700; }
 .msg.md blockquote {
   border-left: 3px solid var(--bg-elev3);
   color: var(--dim);
