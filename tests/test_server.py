@@ -17,6 +17,7 @@ from starlette.testclient import TestClient
 import aish.server as server_module
 from aish.agent import APPROVED_NOTE, DENIED_RESULT, WRITE_DENIED
 from aish.server import create_app
+from aish.session import SessionLog
 
 
 def tool_call(name: str, **arguments):
@@ -96,6 +97,41 @@ def recv_until(ws, wanted: str, limit: int = 200) -> dict:
 
 def tool_results(chat, call_index=1):
     return [m for m in chat.calls[call_index]["messages"] if m["role"] == "tool"]
+
+
+# Event types that are live-only chrome or control-flow, reconstructed
+# differently (or not at all) by design — excluded from the hot/cold guard.
+# Everything NOT listed is a DURABLE trace event the cold path must reproduce,
+# so a new event type added to the live stream but not persisted/reconstructed
+# (or vice versa) fails the guard until it is handled on both paths.
+_EPHEMERAL_EVENTS = {
+    "token", "echo", "status", "error", "hello", "replay", "history",
+    "queued", "approval_request", "approval_resolved", "cwd_changed",
+    "model_changed", "session_state", "file_list", "job_list",
+    "model_list", "session_list", "session_deleted",
+}
+
+
+def trace_shape(events):
+    """The durable-trace projection of an event stream: (type, discriminator)
+    per event, with consecutive stream chunks coalesced (the live path streams
+    N output lines; the cold path replays one) and ephemeral chrome dropped.
+    Hot (bridge.transcript) and cold (reconstruct_events) must project equal."""
+    shape = []
+    for event in events:
+        kind = event["type"]
+        if kind in _EPHEMERAL_EVENTS:
+            continue
+        if kind == "stream":
+            if not (shape and shape[-1] == ("stream",)):
+                shape.append(("stream",))
+        elif kind == "step":
+            shape.append(("step", event.get("kind"), event.get("name")))
+        elif kind == "command_end":
+            shape.append(("command_end", event.get("status")))
+        else:
+            shape.append((kind,))
+    return shape
 
 
 class TestConnect:
@@ -870,6 +906,31 @@ class TestSessions:
             ws.send_json({"type": "task", "text": "what animal?"})
             recv_until(ws, "done")
             assert "walrus" in json.dumps(chat2.calls[-1]["messages"])
+
+    def test_cold_reconstruction_matches_live_transcript(self, app_env):
+        # The guard for the hot/cold invariant. A live run's canonical event
+        # record (bridge.transcript) and the cold reconstruction from its log
+        # must project to the SAME durable trace shape. This is the single test
+        # that keeps the two paths from drifting: add a new trace event type to
+        # the live stream without persisting + reconstructing it (as command
+        # framing once was) and this fails immediately.
+        client, _ = make_client(app_env, [
+            model_says(tool_calls=[tool_call("run_command", command="ls")]),
+            model_says("listed the directory"),
+        ])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "list files"})
+            recv_until(ws, "done")
+            server = client.app.state.server
+            hot = list(server.active.bridge.transcript)
+            path = server.active.logref.log.path
+
+        cold = SessionLog.reconstruct_events(path)
+        assert cold is not None
+        # A run_command must survive the round-trip as its full terminal-block
+        # sequence, not a bare tool step — the whole point of the framing work.
+        assert ("command_start",) in trace_shape(cold)
+        assert trace_shape(hot) == trace_shape(cold)
 
     def test_connect_with_session_param_reattaches_after_restart(self, app_env):
         # The client names its session on (re)connect so a server restart
