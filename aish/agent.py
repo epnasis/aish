@@ -65,7 +65,11 @@ Rules:
    edit_file, never create a duplicate), or when a hard-won multi-step
    procedure worked, save it — recall first to find an existing entry, then
    write or update the skill file (the user approves the diff). One-line
-   facts, preferences, and corrected commands → remember().
+   facts, preferences, and corrected commands → remember(). When a memory is
+   stale, wrong, or superseded, you MUST prune it: call forget_memory(<slug>)
+   to delete it. To consolidate duplicates, remember() the one canonical fact,
+   then forget_memory() each redundant slug (e.g. remember 'canonical-fact',
+   then forget_memory('old-dupe')).
    Entries are FOUND by their name/description/keywords line, so you MUST
    phrase the description like the tasks it should catch ("Use when the
    user wants to find, buy, or compare a product …"), never as a bare rule
@@ -314,7 +318,9 @@ LEARN_PROMPT = (
     "Review this conversation for durable learnings{hint}. For each one: "
     "call recall first to check for an existing skill or memory entry — if "
     "one exists, UPDATE it (edit_file: append the gotcha or correct it) "
-    "instead of creating a duplicate. Save multi-step procedures as skills — "
+    "instead of creating a duplicate. If recall surfaces stale or duplicate "
+    "memory, consolidate it: remember() the one canonical fact, then "
+    "forget_memory() each redundant slug. Save multi-step procedures as skills — "
     "a markdown file in ~/.config/aish/skills/ (or ./.aish/skills/ when "
     "project-specific) with a trigger-phrased description ('Use when the "
     "user asks to …'); save one-line facts and preferences with remember(). "
@@ -1087,7 +1093,7 @@ class Agent:
             return str(a.get("query") or a.get("name") or "")
         if name in ("read_file", "write_file", "edit_file"):
             return str(a.get("path", ""))
-        if name == "remember":
+        if name in ("remember", "forget_memory"):
             return str(a.get("name") or "memory")
         # read_docs, run_command, and anything else: the command/topic string.
         return str(a.get("command", ""))
@@ -1305,6 +1311,15 @@ class Agent:
                 cwd=self.cwd,
                 lessons_path=self.lessons_path,
             )
+            self._note(f"→ {result}")
+            return result
+
+        if name == "forget_memory":
+            # Auto-approved like remember: strictly confined to the model's own
+            # memory files (slug-validated, one fact each) and recoverable from
+            # the knowledge git backup, so the create/update inverse stays
+            # frictionless rather than inventing a new approval channel.
+            result = skills.forget_memory(str(args.get("name", "") or ""), cwd=self.cwd)
             self._note(f"→ {result}")
             return result
 

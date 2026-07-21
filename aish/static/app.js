@@ -552,6 +552,7 @@ const TOOL_META = {
   write_file: ["write_file", "write", "--green"],
   edit_file: ["edit_file", "write", "--green"],
   remember: ["Saved to memory", "knowledge", "--yellow"],
+  forget_memory: ["Forgot a memory", "knowledge", "--yellow"],
 };
 
 function ensureTrace() {

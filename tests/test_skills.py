@@ -8,6 +8,7 @@ from aish.skills import (
     PREFLIGHT_TOP,
     RECALL_TOP,
     _parse,
+    forget_memory,
     knowledge_index,
     list_skills,
     load_entries,
@@ -282,6 +283,46 @@ class TestSaveMemory:
     def test_keywords_written(self, tmp_path):
         save_memory("fact", tmp_path / "memory", name="kw", keywords="a, b")
         assert "keywords: a, b" in (tmp_path / "memory" / "kw.md").read_text()
+
+
+class TestForgetMemory:
+    @staticmethod
+    def _mem_dir(tmp_path):
+        return tmp_path / ".aish" / "memory"
+
+    def test_deletes_named_slug_only(self, tmp_path):
+        d = self._mem_dir(tmp_path)
+        save_memory("keep this", d, name="keep")
+        save_memory("drop this", d, name="drop")
+        result = forget_memory("drop", cwd=str(tmp_path))
+        assert result.startswith("forgot")
+        assert (d / "keep.md").is_file()
+        assert not (d / "drop.md").exists()
+
+    def test_invalid_name_rejected(self, tmp_path):
+        assert forget_memory("../evil", cwd=str(tmp_path)).startswith("ERROR")
+        assert forget_memory("a/b", cwd=str(tmp_path)).startswith("ERROR")
+        assert forget_memory("", cwd=str(tmp_path)).startswith("ERROR")
+
+    def test_missing_slug_is_handled(self, tmp_path):
+        result = forget_memory("nope", cwd=str(tmp_path))
+        assert not result.startswith("ERROR")
+        assert "no memory named" in result
+
+    def test_cannot_delete_outside_memory_store(self, tmp_path):
+        outside = tmp_path / "secret.md"
+        outside.write_text("x")
+        # '..' is rejected outright; a plain slug only ever targets
+        # <memory_dir>/<slug>.md, never a sibling of the store.
+        forget_memory("..", cwd=str(tmp_path))
+        forget_memory("secret", cwd=str(tmp_path))
+        assert outside.is_file()
+
+    def test_reaches_global_memory(self, tmp_path):
+        save_memory("global fact", skills_module.GLOBAL_MEMORY_DIR, name="g")
+        assert (skills_module.GLOBAL_MEMORY_DIR / "g.md").is_file()
+        assert forget_memory("g", cwd=str(tmp_path)).startswith("forgot")
+        assert not (skills_module.GLOBAL_MEMORY_DIR / "g.md").exists()
 
 
 class TestMemoryIndexSection:

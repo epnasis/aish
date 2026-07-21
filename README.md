@@ -98,6 +98,7 @@ in/out of it by restarting aish rather than `/model`.
 | `web_search` / `read_url` | DuckDuckGo + fetch page as readable text | auto; every query/URL echoed; public hosts only |
 | `read_docs` | man page → `--help` fallback, full-text `topic` search | auto |
 | `remember` | save one fact/lesson as a structured memory entry in `~/.config/aish/memory/` (create-or-update by name, deduped) | auto (echoed) |
+| `forget_memory` | delete one stale/duplicate memory entry by slug (consolidate = remember the canonical fact, then forget the redundant slugs); confined to the memory store | auto (echoed) |
 | `read_skill` | load a playbook (see Memory & skills) | auto |
 | `recall` | ranked search over everything it knows — skills, memory, and past sessions (episodic fallback) — snippets first, full entry by name; deterministic ranking, hard output caps | auto (echoed); current session excluded |
 
