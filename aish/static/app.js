@@ -4698,7 +4698,6 @@ function renderDirList() {
   const list = $("dir-list");
   list.replaceChildren();
 
-  list.appendChild(sectionLabel("Folders"));
   if (dirPath !== "/") {
     list.appendChild(
       dirRow("..", null, () => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/"), "up")
@@ -4713,13 +4712,11 @@ function renderDirList() {
     );
   }
 
-  // Files are shown dimmed and non-navigable so the picker previews a folder's
-  // contents without becoming a file browser.
+  // Files are shown dimmed and non-navigable (distinguished by icon/dimming, no
+  // header — #93) so the picker previews a folder's contents without becoming a
+  // file browser.
   const visibleFiles = dirFiles.filter((n) => !n.startsWith("."));
-  if (visibleFiles.length) {
-    list.appendChild(sectionLabel("Files"));
-    for (const name of visibleFiles) list.appendChild(dirRow(name, null, null, "file"));
-  }
+  for (const name of visibleFiles) list.appendChild(dirRow(name, null, null, "file"));
   if (dirTruncated) {
     const note = document.createElement("div");
     note.className = "dir-empty";
