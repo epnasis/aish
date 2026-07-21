@@ -170,7 +170,12 @@ collapsed **Sources (n)** row that expands to clickable page titles.
    you can run them, via the `!` prefix. Extend in `~/.config/aish/deny.txt`.
 3. **Warnings** — recoverable-but-destructive commands get a red ⚠ at the prompt.
 4. **Audit trail** — every command and decision (approved/denied/edited/auto)
-   is logged with the session in `~/.local/state/aish/`.
+   is logged with the session in `~/.local/state/aish/`. Note these logs (and
+   `lessons.md`) are **plaintext** and capture command output verbatim, so any
+   secret a command prints — a token in an API response, a password echoed by a
+   tool — lands on disk unredacted. The files are yours alone (under your home
+   dir), but if that's a concern, avoid running secret-printing commands through
+   aish, or prune `~/.local/state/aish/` periodically.
 
 ## Reading the output
 
