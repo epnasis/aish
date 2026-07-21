@@ -1278,6 +1278,8 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .dir-row.up .folder { color: var(--blue); }
 .dir-row .meta { flex: none; color: var(--dim); font-size: 12px; margin-right: 4px; }
 .dir-row .dir-chev { width: 15px; height: 15px; flex: none; display: block; }
+.dir-row.file { opacity: 0.5; }
+.dir-row.file .folder { color: var(--dim); }
 .dir-action { flex: none; padding: 12px 4px 4px; border-top: 0.5px solid var(--sep); }
 .dir-action .primary.big {
   width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px;
