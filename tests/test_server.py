@@ -196,6 +196,20 @@ class TestConnect:
             assert done["sources"] == [{"url": "https://x.example/"}]
 
 
+class TestQuickReplyPromptGuidance:
+    """Issue #78: the system prompt must forbid terminating quick-reply chips
+    ("Thanks, that's all") — the user can end the chat anytime, so chips must
+    only offer useful next steps."""
+
+    def test_forbids_terminating_chips(self):
+        context = server_module.web_usage_context(
+            "model", "ollama", "/allow", "/deny", "/state"
+        )
+        assert "NEVER generate a chip whose only purpose is to end the conversation" in context
+        assert "Thanks, that's all" in context
+        assert "useful next step" in context
+
+
 class TestQuickReplyNet:
     """Issue #46: a web final answer that ends in a question with no chip gets
     a deterministic fallback set; [no-chips] opts out and is stripped."""
