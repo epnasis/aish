@@ -10,7 +10,19 @@ You are the orchestrator for autonomous development of **aish**. Goal: maximize 
 Read `CLAUDE.md` (repo root) first — architecture, the approval-gate invariant, and the testing pattern. It overrides defaults.
 
 ## The loop
-1. **Survey** open issues: `gh issue list --repo epnasis/aish --state open --json number,title,labels`. Keep the new-issue Monitor running; triage new arrivals as they come.
+0. **Arm the watcher first.** A Monitor is session-scoped and does NOT survive across sessions, so a fresh orchestrator run must start its own. Launch a persistent Monitor that polls for newly-opened issues so you're notified as they arrive:
+   ```
+   Monitor(persistent: true, description: "new GitHub issues on epnasis/aish", command: '''
+   last=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   while true; do
+     sleep 120
+     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+     gh issue list --repo epnasis/aish --state open --json number,title,createdAt \
+       --jq ".[] | select(.createdAt > \"$last\") | \"NEW ISSUE #\\(.number): \\(.title)\"" 2>/dev/null || true
+     last=$now
+   done''')
+   ```
+1. **Survey** open issues: `gh issue list --repo epnasis/aish --state open --json number,title,labels`. Triage new arrivals from the Monitor as they come.
 2. **Triage** each issue into one of:
    - **Actionable** — a bug or small/medium feature with a clear objective and no design decision needed → fix it.
    - **Needs human input** — a product/design/aesthetic call, an ambiguous objective, or a change to the primary UX the user should weigh in on → comment on the issue with *specific* questions, add the `question` label, leave it OPEN, and hold for the user.
