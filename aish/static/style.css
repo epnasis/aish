@@ -234,6 +234,29 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 #model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
 #model-chip .caret { width: 12px; height: 12px; }
 
+/* Multi-connection driver hint (#102): a small, non-intrusive pill shown only
+   when another tab/device is driving the session this tab views. Subtle amber,
+   consistent with the other top-bar chips; hidden (no space) when this tab
+   drives. It is an indicator only — the composer and approval buttons stay
+   live, since acting is how you take control. */
+#role-pill {
+  flex: none;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 12px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--orange-glow);
+  color: var(--orange);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+#role-pill[hidden] { display: none; }
+.role-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--orange); flex: none; }
+
 /* Narrow phones: the back button collapses to just "‹" (the badge still
    shows on the chevron); the label returns when there's room (#15). */
 @media (max-width: 430px) { .back-label { display: none; } }
