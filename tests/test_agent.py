@@ -206,10 +206,11 @@ class TestCommentGate:
     for — while a verdict comment is unanswered, every tool call is refused so
     the model cannot silently fold feedback into its next command."""
 
-    def test_tool_after_comment_is_refused_until_text(self, tmp_path):
+    def test_command_refused_until_text_only_reply(self, tmp_path):
         """Model denies-with-comment, then (eagerly) fires another command
-        before replying: the gate refuses it. Only once the model answers in
-        plain text (here, alongside its retry) does the command run."""
+        before replying: the gate refuses it. A same-turn text+tool does NOT
+        satisfy the gate — only a TEXT-ONLY reply lifts it (and ends the
+        task, so the user can review before continuing)."""
         from aish.agent import COMMENT_GATE_REFUSAL
         from aish.approval import Denied
 
@@ -218,51 +219,30 @@ class TestCommentGate:
 
         def approve(cmd):
             seen.append(cmd)
-            # Deny the first command with a comment; approve anything after.
-            return Denied("use -f on macOS") if len(seen) == 1 else True
+            return Denied("use -f on macOS")
 
         agent, _ = make_agent(
             [
                 model_says(tool_calls=[tool_call("run_command", command="rm x")]),
-                # Eager: no text, straight to another command — must be refused.
+                # Eager: no text, straight to another command — refused.
                 model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
-                # Now the model replies AND retries in one turn — the text lifts
-                # the gate so this command runs.
+                # Preamble alongside a command must NOT slip past the gate.
                 model_says(
-                    "You're right — switching to -f.",
+                    "on it",
                     tool_calls=[tool_call("run_command", command=f"touch {marker}")],
                 ),
-                model_says("done"),
+                # Only a TEXT-ONLY reply answers the comment.
+                model_says("You're right — I'll use -f. Not retrying the delete."),
             ],
             approve=approve,
         )
-        assert agent.run_task("clean up") == "done"
+        result = agent.run_task("clean up")
         results = [m["content"] for m in tool_messages(agent.messages)]
         assert results[1] == COMMENT_GATE_REFUSAL  # eager command blocked
-        assert marker.exists()  # ran only after the model replied
-        # The blocked command never reached the approver: two approver calls,
-        # not three — the refused turn short-circuited before approval.
-        assert seen == ["rm x", f"touch {marker}"]
-
-    def test_text_with_tool_same_turn_is_allowed(self, tmp_path):
-        """A turn that carries BOTH a text reply and a tool call satisfies the
-        gate — the comment is answered, so the tool runs."""
-        from aish.approval import Approved
-
-        marker = tmp_path / "same_turn"
-        agent, _ = make_agent(
-            [
-                model_says(tool_calls=[tool_call("run_command", command="echo one")]),
-                model_says(
-                    "Noted, doing it now.",
-                    tool_calls=[tool_call("run_command", command=f"touch {marker}")],
-                ),
-                model_says("done"),
-            ],
-            approve=lambda _cmd: Approved("prefer -D next time"),
-        )
-        assert agent.run_task("go") == "done"
-        assert marker.exists()  # the same-turn command ran, not refused
+        assert results[2] == COMMENT_GATE_REFUSAL  # text+tool also blocked
+        assert result.startswith("You're right")  # the text-only reply is the answer
+        assert not marker.exists()  # touch never ran
+        assert seen == ["rm x"]  # only the denied command reached approval
 
     def test_bare_denial_does_not_gate(self, tmp_path):
         """No comment → no gate: a plain deny must not block the next command."""

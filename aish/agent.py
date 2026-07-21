@@ -185,9 +185,9 @@ SKILL_GATE_REFUSAL = (
 # and the step budget bounds a model that never replies.
 COMMENT_GATE_REFUSAL = (
     "NOT EXECUTED — the user attached a COMMENT to their last decision and you "
-    "have not answered it yet. Reply to the user in plain text FIRST — address "
-    "their point and say what you will do about it — then issue your tool call "
-    "again. No further command runs until you have responded to their comment."
+    "have not answered it yet. Your NEXT turn must be TEXT ONLY, with NO tool "
+    "call: address the user's point in plain words and say what you will do "
+    "about it. Only after that plain-text reply will any command run again."
 )
 
 LOOP_WARNING = (
@@ -753,9 +753,14 @@ class Agent:
                 entry["raw_blocks"] = raw_blocks
             self._append(entry)
 
-            # A plain-text reply answers any pending user comment, so the gate
-            # lifts before this turn's tool calls (if any) are dispatched.
-            if content:
+            # Only a TEXT-ONLY turn answers a pending user comment. Clearing on
+            # any content would be defeated by chatty preamble (or thinking
+            # surfaced as content) that models routinely emit alongside a tool
+            # call — the command would run in the same turn, unexplained. So the
+            # gate holds until the model stops and replies with no tool call;
+            # that turn also ends the task (normal loop semantics), letting the
+            # user review the answer and decide whether to continue.
+            if content and not tool_calls:
                 self._pending_comment_response = False
 
             if not tool_calls:
@@ -1297,11 +1302,12 @@ class Agent:
         """Refusal while a user's verdict comment is unanswered, else None.
 
         A Denied/Approved comment arms this (see _dispatch/_dispatch_write); the
-        main loop clears the flag the instant a turn produces any plain text, so
-        a single reply lifts it. Until then every tool call is refused — the
-        model cannot silently fold feedback into its next command. No countdown:
-        the flag survives only across gated (text-free) turns, and the step
-        budget bounds a model that never replies."""
+        main loop clears the flag only when a turn is TEXT-ONLY (no tool call),
+        so a genuine reply — not chatty preamble riding alongside a command —
+        lifts it. Until then every tool call is refused, so the model cannot
+        silently fold feedback into its next command. No countdown: the flag
+        survives across gated turns, and the step budget bounds a model that
+        never replies."""
         if not self._pending_comment_response:
             return None
         if name == "run_command":  # so the trace shows why it was held, not a bare row
