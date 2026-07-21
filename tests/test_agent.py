@@ -207,6 +207,12 @@ class TestLoop:
         assert agent.run_task("hello") == "just an answer"
         assert len(chat.calls) == 1
 
+    def test_question_answer_returned_verbatim_on_cli_path(self):
+        # The web quick-reply safety net (#46) lives in server._run_task, not
+        # the agent core — the CLI path must return the model's text untouched.
+        agent, _ = make_agent([model_says("Shall I proceed?")])
+        assert agent.run_task("go") == "Shall I proceed?"
+
     def test_tool_result_fed_back_to_model(self):
         agent, chat = make_agent(
             [

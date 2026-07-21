@@ -323,7 +323,11 @@ links — the web UI renders them as tap chips. Tapping one puts the answer in
 the composer, ready to send as-is or edit first, so it goes out as a normal
 user message. It's plain markdown (one system prompt sentence, no JSON
 schema), so even small local models can use it; once any reply is sent —
-chip-fed or typed — the chips disappear.
+chip-fed or typed — the chips disappear. As a safety net, if a final answer
+ends in a question but the model forgot to add chips, a generic
+Yes / No / Tell-me-more set is appended automatically; the model suppresses
+this on a genuinely open-ended question by ending with a `[no-chips]` tag,
+which is hidden from you.
 
 **Inline images**: markdown image syntax in an answer renders right in the
 chat. `![caption](https://…)` embeds a web image; `![caption](/absolute/path.png)`

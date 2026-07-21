@@ -21,6 +21,7 @@ import contextlib
 import hashlib
 import os
 import queue
+import re
 import sys
 import time
 import uuid
@@ -115,6 +116,54 @@ MAX_OPEN_SESSIONS = 6
 
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 EXPORT_MAX_BYTES = 5 * 1024 * 1024  # a single answer's markdown; generous ceiling
+
+# Quick-reply safety net (issue #46). The model is told to end a question with
+# aish-reply:// chips, but small local models forget — so on the WEB surface a
+# final answer that ends in a question yet carries no chip gets a deterministic
+# fallback set appended. It is a guarantee, not a guess: no extra model call,
+# no latency. The model opts out by ending with the literal [no-chips] tag,
+# which is stripped from the shown answer (the frontend also strips it live).
+NO_CHIPS_TAG_RE = re.compile(r"\[no-chips\]", re.IGNORECASE)
+_REPLY_SCHEME = "aish-reply://"
+FALLBACK_CHIPS = (
+    "[Yes](aish-reply://yes)",
+    "[No](aish-reply://no)",
+    "[Tell me more](aish-reply://tell me more)",
+)
+
+
+def _ends_with_question(text: str) -> bool:
+    """The trailing non-whitespace character is a question mark — the signal
+    that the turn ended by asking something. Deliberately simple: a false
+    negative just skips the net, a false positive appends harmless chips."""
+    return text.rstrip().endswith("?")
+
+
+def quick_reply_suffix(text: str) -> str | None:
+    """Web-only post-processing verdict for a final answer. Returns the chip
+    block to APPEND when the answer ends in a question and has no chip and no
+    opt-out; an empty string when the [no-chips] opt-out fired (caller strips
+    the tag, appends nothing); or None to leave the answer untouched."""
+    if NO_CHIPS_TAG_RE.search(text):
+        return ""
+    if _REPLY_SCHEME in text:
+        return None
+    if not _ends_with_question(text):
+        return None
+    return "\n".join(FALLBACK_CHIPS)
+
+
+def apply_quick_reply_net(result: str) -> tuple[str, str | None]:
+    """Map a final answer to (shown_answer, streamed_suffix). shown_answer is
+    the canonical text for done.result / export / replay; streamed_suffix, when
+    not None, is the chip block to also emit as a live token so it lands in an
+    already-streamed answer. [no-chips] strips the tag and streams nothing."""
+    suffix = quick_reply_suffix(result)
+    if suffix is None:
+        return result, None
+    if suffix == "":  # opt-out: drop the tag from the stored answer
+        return NO_CHIPS_TAG_RE.sub("", result).rstrip(), None
+    return f"{result.rstrip()}\n\n{suffix}", f"\n\n{suffix}"
 
 # /file serves ONLY these — raster images the browser renders inertly in an
 # <img>. SVG is deliberately excluded: opened full-size it executes scripts
@@ -490,10 +539,13 @@ MUST append one markdown link per option, each on its own line, formatted \
 [Label](aish-reply://answer text) — the UI renders each as a tap button that \
 feeds "answer text" into the user's input box, so the reply arrives as an \
 ordinary user message (possibly edited). Asking in prose alone does NOT \
-create buttons; you must add the link lines too. Skip them only when the \
-answer is genuinely open-ended (no small set of options fits). Example: after \
+create buttons; you must add the link lines too. Example: after \
 "Proceed with the deploy?" end with [Yes, deploy](aish-reply://yes, deploy \
-now) and [No, hold off](aish-reply://no, hold off).
+now) and [No, hold off](aish-reply://no, hold off). If you end on a question \
+with NO chips, a safety net appends generic Yes/No/Tell-me-more buttons — so \
+add your own tailored chips to do better. When the question is genuinely \
+open-ended (no small set of options fits), you MUST end the message with the \
+literal tag [no-chips] to suppress the net; the tag is hidden from the user.
 - SHOWING IMAGES: you CAN display images — markdown image syntax renders \
 inline in the chat, and the user EXPECTS to see pictures this way. Whenever \
 your answer involves an image the user would want to look at — a chart or \
@@ -898,6 +950,12 @@ class WebServer:
                 )
             else:
                 result = await asyncio.to_thread(session.agent.run_task, text)
+            # Web-only quick-reply safety net (issue #46): a question with no
+            # chip gets fallback chips. The suffix also streams as a token so it
+            # lands in the already-streamed answer block, not just done.result.
+            result, suffix = apply_quick_reply_net(result)
+            if suffix is not None:
+                session.bridge.emit({"type": "token", "text": suffix})
             done: dict[str, Any] = {"type": "done", "result": result}
             # Riding on `done` (not a new event type) makes replay correctness
             # automatic and keeps the answer↔sources association explicit.

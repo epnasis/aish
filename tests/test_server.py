@@ -160,6 +160,70 @@ class TestConnect:
             assert done["sources"] == [{"url": "https://x.example/"}]
 
 
+class TestQuickReplyNet:
+    """Issue #46: a web final answer that ends in a question with no chip gets
+    a deterministic fallback set; [no-chips] opts out and is stripped."""
+
+    def test_suffix_appends_for_bare_question(self):
+        result, suffix = server_module.apply_quick_reply_net("Ready to deploy?")
+        assert suffix == "\n\n" + "\n".join(server_module.FALLBACK_CHIPS)
+        assert result.endswith("\n".join(server_module.FALLBACK_CHIPS))
+        assert "aish-reply://yes" in result
+
+    def test_existing_chip_left_untouched(self):
+        answer = "Deploy?\n[Go](aish-reply://go)"
+        assert server_module.apply_quick_reply_net(answer) == (answer, None)
+
+    def test_non_question_left_untouched(self):
+        answer = "All done — the build passed."
+        assert server_module.apply_quick_reply_net(answer) == (answer, None)
+
+    def test_no_chips_tag_strips_and_suppresses(self):
+        result, suffix = server_module.apply_quick_reply_net(
+            "What should we build next? [no-chips]"
+        )
+        assert suffix is None
+        assert "no-chips" not in result
+        assert "aish-reply://" not in result
+        assert result == "What should we build next?"
+
+    def test_task_appends_fallback_chips_over_socket(self, app_env):
+        client, _ = make_client(app_env, [model_says("Shall I proceed?")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "go"})
+            events = []
+            for _ in range(200):
+                event = ws.receive_json()
+                events.append(event)
+                if event["type"] == "done":
+                    break
+            done = next(e for e in events if e["type"] == "done")
+            assert "aish-reply://tell me more" in done["result"]
+            # the suffix also streams as a token so an already-streamed answer
+            # gains the chips live, not only in done.result.
+            token_text = "".join(e["text"] for e in events if e["type"] == "token")
+            assert "aish-reply://yes" in token_text
+
+    def test_task_strips_no_chips_tag_over_socket(self, app_env):
+        client, _ = make_client(
+            app_env, [model_says("How would you like to approach this? [no-chips]")]
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "advise"})
+            done = recv_until(ws, "done")
+            assert "no-chips" not in done["result"]
+            assert "aish-reply://" not in done["result"]
+
+    def test_task_keeps_model_supplied_chips(self, app_env):
+        answer = "Proceed?\n[Yes, go](aish-reply://yes)\n[Hold](aish-reply://hold)"
+        client, _ = make_client(app_env, [model_says(answer)])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "go"})
+            done = recv_until(ws, "done")
+            assert done["result"] == answer
+            assert "tell me more" not in done["result"].lower()
+
+
 class TestCommandApproval:
     def responses(self, command):
         return [
