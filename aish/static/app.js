@@ -2564,9 +2564,9 @@ function attachAnswerTools(el, source, prompt) {
   const ordinal = ++renderedAnswers;
   const tools = document.createElement("div");
   tools.className = "msg-tools";
-  // Order matters (#96): the two most-used actions sit at opposite ends so a
-  // reach for one can't misfire the other. TTS is pinned far left, Copy far
-  // right (both via CSS margin-left:auto spacers), Retry isolated between them.
+  // Order (#96): TTS first, then export/fork, Retry, and Copy last — same tight
+  // spacing as before, just reordered so the two most-used actions (TTS, Copy)
+  // bracket the row instead of sitting next to Retry.
   if (TTS_OK) tools.appendChild(buildTtsBox(el));
   tools.appendChild(exportChip(() => source, () => prompt || ""));
   tools.appendChild(forkChip(ordinal));
@@ -2586,9 +2586,7 @@ function attachAnswerTools(el, source, prompt) {
     tools.appendChild(regen);
     lastRegenBtn = regen;
   }
-  const answerCopy = copyChip(() => source, "copy answer");
-  answerCopy.classList.add("answer-copy"); // distinct from the copy-chip-classed export/fork chips
-  tools.appendChild(answerCopy);
+  tools.appendChild(copyChip(() => source, "copy answer"));
   if (answerTiming) {
     const timing = document.createElement("span");
     timing.className = "answer-timing";

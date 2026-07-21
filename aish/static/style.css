@@ -649,12 +649,6 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .msg-tools > .copy-chip { width: 40px; height: 40px; border-radius: 10px; }
 .msg-tools > .copy-chip svg { width: 19px; height: 19px; }
-/* spacers that pin TTS far left and the answer-copy button far right, leaving
-   Retry alone in the middle so neither end action misfires the other (#96).
-   Only the answer copy is anchored — the export/fork chips share .copy-chip but
-   stay clustered next to TTS on the left. */
-.msg-tools > .regen-chip { margin-left: auto; }
-.msg-tools > .answer-copy { margin-left: auto; }
 .regen-chip {
   display: flex;
   align-items: center;
@@ -669,7 +663,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .regen-chip svg { width: 19px; height: 19px; }
 .regen-chip:active { opacity: 0.5; }
-.answer-timing { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--dim); padding: 0 6px; }
+.answer-timing { margin-left: auto; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--dim); padding-right: 6px; }
 
 /* copy chip under your own prompt bubble, right-aligned with it */
 .user-tools {
