@@ -3703,7 +3703,9 @@ $("composer-actions").addEventListener("click", (e) => {
 let cmdMode = false;
 
 function cmdPromptLabel() {
-  return `${currentCwd ? baseName(currentCwd) : "~"} $ `;
+  // Just `$ ` — the directory name ate too much width on mobile, and the
+  // top-bar chip already shows the cwd.
+  return "$ ";
 }
 
 function refreshCmdPrompt() {
