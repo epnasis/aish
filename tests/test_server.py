@@ -2038,38 +2038,43 @@ class TestDirListing:
         (base / "file.txt").write_text("not a dir", encoding="utf-8")
         return base
 
-    def test_dirs_lists_folders_with_counts_and_files(self, app_env, tmp_path):
+    def test_dirs_lists_folders_and_files(self, app_env, tmp_path):
         base = self.make_tree(tmp_path)
         client, _ = make_client(app_env, [])
         with client:
             body = client.get(f"/dirs?path={base}").json()
             assert body["path"] == str(base)
-            # child-count per folder: alpha is empty, beta has 2 (incl. hidden),
-            # .git and projects each have 1.
+            # Folders list with items=None (no per-subfolder count — that extra
+            # scandir could block in-kernel and freeze the server; #86).
             assert body["dirs"] == [
-                {"name": ".git", "items": 1},
-                {"name": "alpha", "items": 0},
-                {"name": "beta", "items": 2},
-                {"name": "projects", "items": 1},
+                {"name": ".git", "items": None},
+                {"name": "alpha", "items": None},
+                {"name": "beta", "items": None},
+                {"name": "projects", "items": None},
             ]
             assert body["files"] == ["file.txt"]
+            assert body["truncated"] is False
 
-    def test_dirs_child_count_survives_unreadable_subfolder(self, app_env, tmp_path):
-        if os.name != "posix" or os.geteuid() == 0:
-            pytest.skip("permission bits aren't enforced for root or on non-POSIX")
+    def test_dirs_does_not_scandir_into_subfolders(self, app_env, tmp_path, monkeypatch):
+        """The listing must scandir ONLY the browsed dir — never a subfolder —
+        so a blocking subfolder can't freeze the endpoint (#86)."""
+        import aish.server as server_module
+
         base = self.make_tree(tmp_path)
-        locked = base / "beta" / "nested"
-        locked.mkdir(exist_ok=True)
-        os.chmod(locked, 0o000)
-        try:
-            client, _ = make_client(app_env, [])
-            with client:
-                body = client.get(f"/dirs?path={base}").json()
-                assert body["path"] == str(base)  # handler didn't crash
-                beta = next(d for d in body["dirs"] if d["name"] == "beta")
-                assert beta["items"] == 2  # unreadable child still counted, just uncounted itself
-        finally:
-            os.chmod(locked, 0o755)
+        real_scandir = os.scandir
+        scanned: list[str] = []
+
+        def tracking_scandir(p):
+            scanned.append(os.fspath(p))
+            return real_scandir(p)
+
+        monkeypatch.setattr(server_module.os, "scandir", tracking_scandir)
+        client, _ = make_client(app_env, [])
+        with client:
+            client.get(f"/dirs?path={base}").json()
+        assert str(base) in scanned  # the browsed dir is listed
+        subfolders = [p for p in scanned if p != str(base) and p.startswith(str(base))]
+        assert subfolders == []  # but never scandir'd into a subfolder
 
     def test_dirs_requires_token_when_set(self, app_env, tmp_path):
         base = self.make_tree(tmp_path)

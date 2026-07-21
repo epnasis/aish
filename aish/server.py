@@ -1491,11 +1491,18 @@ class WebServer:
     DIR_SEARCH_VISIT_CAP = 20_000
     DIR_SEARCH_SKIP = {".git", "node_modules", "venv", ".venv", "__pycache__", ".Trash"}
 
+    # Max folders / files returned. Beyond a client-render guard, this bounds
+    # how long the single scandir loop runs on a huge directory.
+    _DIRS_LISTING_CAP = 1000
+
     async def handle_dirs(self, request) -> JSONResponse:
-        """GET /dirs?path=<abs> — folders (name + item count) and files (names
-        only) of the browsed directory. One scandir for the folder itself,
-        plus one per immediate subfolder to count its children — never a
-        deeper walk, so cost stays bounded to what's on screen."""
+        """GET /dirs?path=<abs> — folders and files (names only) of the browsed
+        directory, both capped. A SINGLE scandir of the folder itself; we do NOT
+        scandir into each subfolder. (An earlier version counted every
+        subfolder's children, but that extra scandir-per-subfolder could block
+        in-kernel on a slow/networked path — e.g. iCloud Drive, a mount — and
+        because a blocking readdir holds the GIL it froze the whole server, not
+        just the request. No per-subfolder scandir = no such freeze; #86.)"""
         if self.token and request.query_params.get("token") != self.token:
             return JSONResponse({"error": "bad token"}, status_code=403)
         raw = request.query_params.get("path", "").strip() or str(Path.home())
@@ -1506,14 +1513,7 @@ class WebServer:
         if not path.is_dir():
             return JSONResponse({"error": "not a directory"}, status_code=404)
 
-        def count_children(sub: Path) -> int:
-            try:
-                with os.scandir(sub) as children:
-                    return sum(1 for _ in children)
-            except OSError:
-                return 0  # unreadable subfolder — show it with no count rather than fail
-
-        def list_entries() -> tuple[list[dict], list[str]]:
+        def list_entries() -> tuple[list[dict], list[str], bool]:
             dirs: list[dict] = []
             files: list[str] = []
             with os.scandir(path) as entries:
@@ -1523,17 +1523,19 @@ class WebServer:
                     except OSError:
                         continue  # broken symlink etc — skip rather than crash
                     if is_dir:
-                        items = count_children(path / entry.name)
-                        dirs.append({"name": entry.name, "items": items})
+                        dirs.append({"name": entry.name, "items": None})
                     else:
                         files.append(entry.name)
-            return dirs, files
+            truncated = len(dirs) > self._DIRS_LISTING_CAP or len(files) > self._DIRS_LISTING_CAP
+            return dirs[: self._DIRS_LISTING_CAP], files[: self._DIRS_LISTING_CAP], truncated
 
         try:
-            dirs, files = await asyncio.to_thread(list_entries)
+            dirs, files, truncated = await asyncio.to_thread(list_entries)
         except PermissionError:
             return JSONResponse({"error": "permission denied"}, status_code=403)
-        return JSONResponse({"path": str(path), "dirs": dirs, "files": files})
+        return JSONResponse(
+            {"path": str(path), "dirs": dirs, "files": files, "truncated": truncated}
+        )
 
     async def handle_dirs_search(self, request) -> JSONResponse:
         """GET /dirs/search?q=<term>&base=<abs> — bounded fuzzy walk under

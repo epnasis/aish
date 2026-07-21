@@ -4624,7 +4624,8 @@ function renderDirList(deepResults = null) {
     ({ name }) => !name.startsWith(".") && (!query || name.toLowerCase().includes(query))
   );
   for (const { name, items } of visible) {
-    const meta = items === 1 ? "1 item" : `${items} items`;
+    // items may be null (symlink, unreadable, or counting budget spent) — show no count then.
+    const meta = items == null ? null : items === 1 ? "1 item" : `${items} items`;
     list.appendChild(
       dirRow(name, meta, () => browseDir(dirPath === "/" ? `/${name}` : `${dirPath}/${name}`))
     );
