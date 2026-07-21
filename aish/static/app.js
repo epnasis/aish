@@ -204,7 +204,10 @@ function handle(event) {
       finishTrace(); // close any trace from a prior turn before the new one
       removeQueueChip(event.text); // a queued message that just started running
       retireQuickReplies();
-      retireRegen(); // a new turn supersedes the prior answer's regenerate
+      // The rerun button belongs to the last ANSWER: attachAnswerTools retires
+      // it when the next answer lands. Don't retire it here on the user turn —
+      // user-only turns (/cd, a bare !command) produce no answer and would
+      // otherwise strip the last answer's rerun for good (survives replay too).
 
       sawAnswer = false;
       answerFilling = false;
@@ -1429,6 +1432,7 @@ const RERUN_SVG =
 // comes back as a fresh `replay`, so the discarded answer disappears in place.
 function rerunPrompt(prompt) {
   if (!prompt) return;
+  if (clientBusy) { showToast("can't rerun while working"); return; }
   send({ type: "retry", text: prompt });
 }
 
