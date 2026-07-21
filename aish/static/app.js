@@ -3429,6 +3429,11 @@ input.addEventListener("keydown", (e) => {
 });
 
 input.addEventListener("input", () => {
+  // `!` as the sole character of an empty composer enters terminal mode (#100),
+  // consuming the `!` — the mode's prompt implies it from then on.
+  if (!cmdMode && input.value === "!") { enterCmdMode(); return; }
+  // Terminal mode owns the input: no chat draft, history-recall, or suggestions.
+  if (cmdMode) { resizeInput(); return; }
   historyIndex = null; // typing leaves history-recall mode
   saveDraft();
   resizeInput();
@@ -3445,6 +3450,7 @@ function atFragment(text) {
 const requestFiles = debounce((query) => send({ type: "files", query }), 120);
 
 function updateSuggest() {
+  if (cmdMode) { hideSuggest(); return; } // command autocomplete is step 2 (#100)
   const text = input.value;
   const before = text.slice(0, input.selectionStart ?? text.length);
   if (text.startsWith("/") && !text.includes("\n") && !before.includes(" ")) {
@@ -3524,6 +3530,7 @@ function acceptSuggestion([value]) {
 
 function submitInput() {
   hideSuggest();
+  if (cmdMode) { submitCommand(); return; }
   let text = input.value.trim();
   if (text.startsWith("/")) {
     rememberPrompt(text); // slash commands never echo back as user events
@@ -3545,6 +3552,21 @@ function submitInput() {
     renderAttachments();
     scrollToEndSettled();
   }
+}
+
+// Terminal mode submit: `exit` leaves the mode; anything else runs as a shell
+// command via the existing `!` path and keeps the mode active for the next one.
+function submitCommand() {
+  const text = input.value.trim();
+  if (text === "exit" || text === "quit") { exitCmdMode(); return; }
+  if (!text) { input.focus(); return; }
+  if (send({ type: "task", text: `!${text}`, attachments: [] })) {
+    rememberPrompt(text);
+    input.value = "";
+    resizeInput();
+    scrollToEndSettled();
+  }
+  input.focus(); // stay in the terminal, ready for the next command
 }
 
 const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit"]);
@@ -3588,6 +3610,7 @@ let attachments = []; // {name, path}
 // The + button opens the composer actions popover (attach / reference / slash
 // / photo); it sits above the button, iOS-style.
 $("attach").onclick = () => {
+  if (cmdMode) { exitCmdMode(); return; } // the + is an × while in terminal mode
   const menu = $("composer-actions");
   if (!menu.hidden) { closeSheets(); return; }
   menu.style.visibility = "hidden";
@@ -3611,8 +3634,50 @@ $("composer-actions").addEventListener("click", (e) => {
     // Prefill the trigger and let the user add detail (or just send) — the
     // server expands /feedback into the issue-filing flow (parse_feedback).
     case "feedback": composerInsert("/feedback "); break;
+    case "terminal": enterCmdMode(); break;
   }
 });
+
+// ---- terminal / command mode (#100) --------------------------------------
+// A composer mode that runs shell commands multi-turn. It reuses the existing
+// `!command` path (server _launch runs it as the user's own action, no model,
+// no approval gate) — this layer is purely the terminal-styled input, the
+// dynamic `dir $` prompt, and enter/exit affordances. Autocomplete is a
+// separate follow-up (issue #100, step 2).
+let cmdMode = false;
+
+function cmdPromptLabel() {
+  return `${currentCwd ? baseName(currentCwd) : "~"} $ `;
+}
+
+function refreshCmdPrompt() {
+  if (cmdMode) $("cmd-prompt").textContent = cmdPromptLabel();
+}
+
+function enterCmdMode() {
+  if (cmdMode) return;
+  cmdMode = true;
+  $("composer").classList.add("cmd-mode");
+  $("cmd-prompt").hidden = false;
+  refreshCmdPrompt();
+  $("attach").setAttribute("aria-label", "exit terminal mode");
+  input.placeholder = "";
+  input.value = "";
+  resizeInput();
+  input.focus();
+}
+
+function exitCmdMode() {
+  if (!cmdMode) return;
+  cmdMode = false;
+  $("composer").classList.remove("cmd-mode");
+  $("cmd-prompt").hidden = true;
+  $("attach").setAttribute("aria-label", "actions");
+  input.placeholder = "Ask aish";
+  input.value = "";
+  resizeInput();
+  input.focus();
+}
 
 // Insert a trigger char and fire the input flow (mention / slash suggestions).
 function composerInsert(ch) {
@@ -4613,6 +4678,7 @@ function renderWorkspace(event) {
     $("ws-cwd").textContent = event.cwd;
     $("cwd-name").textContent = baseName(event.cwd);
     $("cwd-text").textContent = abbreviatePath(event.cwd);
+    refreshCmdPrompt(); // keep the terminal prompt's `dir $` in sync after cd
   }
   if (event.roots) $("ws-roots").textContent = event.roots.join("\n");
 }

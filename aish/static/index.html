@@ -158,14 +158,20 @@
     <span class="action-ico" style="background:var(--yellow-glow)"><svg viewBox="0 0 24 24"><path d="M4.5 6.5h15a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H10l-4 3.5V16.5H4.5a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1z" fill="none" stroke="var(--yellow)" stroke-width="1.7" stroke-linejoin="round"/></svg></span>
     <span class="action-text"><span class="action-title">Send feedback</span><span class="action-sub">File a bug or idea on GitHub</span></span>
   </button>
+  <button class="action-item" data-act="terminal">
+    <span class="action-ico" style="background:var(--green-glow)"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="var(--green)" stroke-width="1.7"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5" fill="none" stroke="var(--green)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+    <span class="action-text"><span class="action-title">Terminal mode</span><span class="action-sub">Run shell commands — !</span></span>
+  </button>
 </div>
 
 <form id="composer">
   <button id="attach" type="button" aria-label="actions">
-    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+    <svg class="i-plus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+    <svg class="i-exit" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 9l6 6M15 9l-6 6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
   </button>
   <input id="file-input" type="file" multiple hidden>
   <input id="photo-input" type="file" accept="image/*" capture="environment" hidden>
+  <span id="cmd-prompt" aria-hidden="true" hidden></span>
   <textarea id="input" rows="1" placeholder="Ask aish"
             autocomplete="off" autocapitalize="sentences" spellcheck="true"></textarea>
   <button id="send" type="submit" aria-label="send">
