@@ -256,7 +256,8 @@ class TestSlashCompleter:
         return [c.text for c in completer.get_completions(Document(text), None)]
 
     def test_prefix_completes(self):
-        assert self.completions("/r") == ["/resume"]
+        assert self.completions("/re") == ["/rename", "/resume"]
+        assert self.completions("/res") == ["/resume"]
         assert self.completions("/q") == ["/quit"]
 
     def test_bare_slash_lists_all(self):

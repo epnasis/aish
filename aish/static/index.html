@@ -61,6 +61,10 @@
     <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
     New chat
   </button>
+  <button class="menu-item" data-act="rename">
+    <svg viewBox="0 0 24 24"><path d="M4 20h4l10.5-10.5a2 2 0 0 0 0-2.8l-1.2-1.2a2 2 0 0 0-2.8 0L4 16z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M13.5 6.5l4 4" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+    Rename chat…
+  </button>
   <button class="menu-item" data-act="model">
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v4.3l2.6 1.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
     Switch model…
@@ -85,6 +89,18 @@
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 7V5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2m-8 0l1 13h8l1-13M10 11v6m4-6v6"/></svg>
     <span class="grow menu-label">Delete chat</span>
   </button>
+</div>
+
+<!-- inline rename popover for the current chat -->
+<div id="rename-box" class="popover-menu rename-box" hidden>
+  <form id="rename-form">
+    <input id="rename-input" type="text" maxlength="200" placeholder="Chat title"
+           autocomplete="off" autocapitalize="sentences" enterkeyhint="done">
+    <div class="rename-actions">
+      <button type="button" id="rename-cancel" class="rename-btn">Cancel</button>
+      <button type="submit" id="rename-save" class="rename-btn primary">Save</button>
+    </div>
+  </form>
 </div>
 
 <main id="messages"></main>

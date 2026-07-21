@@ -23,6 +23,66 @@ def test_roundtrip_messages_and_commands(tmp_path):
     assert all("ts" in r for r in records)
 
 
+def test_custom_title_wins_hot_and_cold(tmp_path):
+    # A kind:"title" record overrides the first-user-message derivation on both
+    # the loaded path (info) and the cold peek (drawer/pager).
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "derived from this first message"})
+    log.message({"role": "assistant", "content": "ok"})
+    assert SessionLog.info(log.path).title == "derived from this first message"
+    assert SessionLog._peek_title(log.path) == "derived from this first message"
+
+    log.set_title("My Renamed Chat")
+    assert SessionLog.info(log.path).title == "My Renamed Chat"
+    assert SessionLog._peek_title(log.path) == "My Renamed Chat"
+    # pager_titles (cold path) reflects the custom title too.
+    assert SessionLog.pager_titles(tmp_path) == [(log.path.name, "My Renamed Chat")]
+
+
+def test_latest_title_record_wins(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "hello"})
+    log.set_title("first name")
+    log.set_title("second name")
+    log.set_title("final name")
+    assert SessionLog.info(log.path).title == "final name"
+    assert SessionLog._peek_title(log.path) == "final name"
+
+
+def test_title_record_excluded_from_conversation(tmp_path):
+    # A renamed session must --resume identically: the title record is metadata,
+    # never a message, so reconstruction ignores it.
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "hello"})
+    log.set_title("Renamed")
+    log.message({"role": "assistant", "content": "hi"})
+    assert SessionLog.load_messages(log.path) == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    messages, _, custom_title = SessionLog._parse(log.path)
+    assert custom_title == "Renamed"
+    assert all(m.get("role") in ("user", "assistant") for m in messages)
+
+
+def test_empty_title_ignored(tmp_path):
+    # A blank/whitespace title record does not shadow the derived title.
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "real title"})
+    log.set_title("   ")
+    assert SessionLog.info(log.path).title == "real title"
+    _, _, custom_title = SessionLog._parse(log.path)
+    assert custom_title is None
+
+
+def test_custom_title_is_searchable(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "unrelated first message"})
+    log.set_title("quarterly budget review")
+    results = SessionLog.search_sessions(tmp_path, "budget review")
+    assert [r.path.name for r in results] == [log.path.name]
+
+
 def test_trace_steps_excluded_from_conversation(tmp_path):
     # Trace records must not leak into the model-facing conversation.
     log = SessionLog.new(tmp_path)

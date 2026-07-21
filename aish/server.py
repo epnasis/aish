@@ -177,6 +177,7 @@ IMAGE_TYPES = {
 }
 MEDIA_MAX_BYTES = 20 * 1024 * 1024  # inline base64 limit; larger files fall back to a path
 MAX_QUEUE = 5  # messages waiting behind a busy session
+RENAME_MAX = 200  # custom chat-title length cap (a title, not a message)
 
 CLOSE_REPLACED = 4000  # another device connected; this socket is superseded
 CLOSE_BAD_TOKEN = 4403
@@ -520,9 +521,10 @@ leaving this one untouched — tell them to use it when they want to try an \
 alternative approach or a side question and keep the main chat clean. Header \
 controls: a "‹ Sessions" back button (top left, \
 with a badge when a background session needs attention) opens the sessions \
-drawer; the centered session title opens a menu (new chat, switch model, \
-change directory, line wrap, export the chat to PDF, delete this chat, \
-workspace & jobs); the compose pencil (top right) starts a new chat. Every \
+drawer; the centered session title opens a menu (new chat, rename this chat, \
+switch model, change directory, line wrap, export the chat to PDF, delete \
+this chat, workspace & jobs); the compose pencil (top right) starts a new \
+chat. Every \
 finished answer has a row of chips beneath it — copy, export that one answer \
 to PDF, and (where available) read-aloud. Both PDF exports render markdown to \
 a file entirely locally (no external service) and download it; the whole-chat \
@@ -572,7 +574,11 @@ Each drawer row has a trash icon: tap it, then its "Delete?" confirm, to \
 permanently delete that session (conversation and audit log; refused while \
 the session is running; deleting the current chat lands on a fresh one). \
 The session-title menu also has a "Delete chat" item (same two-tap \
-"Confirm delete") that deletes the chat you are currently in. \
+"Confirm delete") that deletes the chat you are currently in, and a \
+"Rename chat…" item that gives the current chat a custom title (an inline \
+field; the terminal equivalent is the /rename <title> command). A custom \
+title overrides the one auto-derived from the first message and shows in the \
+drawer, the /resume picker, and this header. \
 When the user refers to earlier work ("the fix from yesterday", "what went \
 wrong last time"), use the recall tool to find and read the \
 relevant past conversation instead of asking them to repeat it.
@@ -606,6 +612,7 @@ class Session:
         self.queue: list[tuple[str, list[str]]] = []  # (text, attachments) waiting
         self.pending_cwd: str | None = None  # a /cd requested while busy; applied after
         self.last_shown = time.monotonic()
+        self.custom_title: str | None = None  # a user-set name; overrides the derived title
 
     @property
     def name(self) -> str:
@@ -684,7 +691,10 @@ class WebServer:
     def _title(session: Session) -> str:
         """The conversation title, same derivation as the sessions drawer
         (SessionLog._derive_title) so a ! command reads as '! <cmd>' rather than
-        its internal '[I ran … myself]' annotation. '' while still empty."""
+        its internal '[I ran … myself]' annotation. A custom name (rename)
+        overrides the derivation. '' while still empty and never renamed."""
+        if session.custom_title:
+            return session.custom_title[:80]
         messages = session.agent.messages[1:]
         if not any(m.get("role") == "user" for m in messages):
             return ""
@@ -818,6 +828,10 @@ class WebServer:
             await self._fork_session(websocket, after if isinstance(after, int) else None)
         elif kind == "delete_session":
             await self._delete_session(websocket, str(message.get("name", "")))
+        elif kind == "rename_session":
+            await self._rename_session(
+                websocket, str(message.get("name", "")), str(message.get("title", ""))
+            )
         elif kind == "models":
             await self._send_models(websocket, str(message.get("query", "")))
         elif kind == "set_model":
@@ -1271,6 +1285,44 @@ class WebServer:
         await websocket.send_json({"type": "session_deleted", "name": name})
         await self._send_sessions(websocket, "")
 
+    async def _rename_session(self, websocket: WebSocket, name: str, title: str) -> None:
+        """Give a chat a custom title. Persisted as an append-only
+        `kind:"title"` record (no rewrite of the log). If the session is open
+        its in-memory title is updated too, so the drawer AND the header both
+        reflect the new name at once."""
+        title = title.strip()[:RENAME_MAX]
+        if not title:
+            await websocket.send_json(
+                {"type": "error", "text": "a chat title can't be empty"}
+            )
+            return
+        session = self.sessions.get(name)
+        safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
+        path = self.state_dir / name
+        if not safe or ".." in name or (session is None and not path.is_file()):
+            await websocket.send_json({"type": "error", "text": f"no such session: {name}"})
+            return
+        if session is not None:
+            # Append through the session's own open handle so a single writer
+            # touches the file; mirror the name into memory for the hot path.
+            await asyncio.to_thread(session.logref.log.set_title, title)
+            session.custom_title = title
+        else:
+            # A cold session: append with a transient log handle, then release
+            # it so the file isn't held open by a background writer.
+            def write_cold() -> None:
+                log = SessionLog(path)
+                try:
+                    log.set_title(title)
+                finally:
+                    log.close()
+
+            await asyncio.to_thread(write_cold)
+        await websocket.send_json(
+            {"type": "session_renamed", "name": name, "title": title}
+        )
+        await self._send_sessions(websocket, "")
+
     async def _send_models(self, websocket: WebSocket, query: str) -> None:
         agent, state_dir = self.active.agent, self.state_dir
 
@@ -1557,8 +1609,8 @@ class WebServer:
             return JSONResponse({"error": f"no such session: {name}"}, status_code=404)
 
         def build() -> tuple[bytes, str]:
-            messages = SessionLog.load_messages(path)
-            title = SessionLog._derive_title(messages) or "aish session"
+            messages, _, custom_title = SessionLog._parse(path)
+            title = custom_title or SessionLog._derive_title(messages) or "aish session"
             return export.render_session_pdf(messages, title), title
 
         try:
@@ -1628,10 +1680,11 @@ def create_app(
         keeps growing in place — same semantics as `aish --resume`)."""
         history: list[dict] = []
         recorded_spec = ""
+        custom_title: str | None = None
         if path is not None:
             # Parse BEFORE anything is appended: the last model record in
             # the file is the model this session must resume with.
-            history, recorded_spec = SessionLog._parse(path)
+            history, recorded_spec, custom_title = SessionLog._parse(path)
         log = SessionLog(path) if path is not None else SessionLog.new(state_dir)
         logref = LogRef(log)
         bridge = Bridge(get_loop)
@@ -1713,7 +1766,9 @@ def create_app(
                 except backends.BackendError:
                     pass
         logref.model(model_spec(agent))  # record what this session actually runs
-        return Session(agent, logref, bridge), history
+        session = Session(agent, logref, bridge)
+        session.custom_title = custom_title  # a renamed chat keeps its name hot
+        return session, history
 
     server = WebServer(open_session, state_dir, config_path, token)
     server_ref.append(server)

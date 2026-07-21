@@ -89,12 +89,16 @@ class SessionLog:
         return files[0] if files else None
 
     @staticmethod
-    def _parse(path: Path) -> tuple[list[dict], str]:
+    def _parse(path: Path) -> tuple[list[dict], str, str | None]:
         """One pass over the file: conversation messages (no audit records, no
-        stale system prompt — a fresh one is built on resume) plus the last
-        recorded model ("" for sessions that predate model records)."""
+        stale system prompt — a fresh one is built on resume), the last
+        recorded model ("" for sessions that predate model records), and the
+        latest custom title (None when the chat was never renamed). The
+        `kind:"title"` record is metadata — it never enters `messages`, so it
+        can't leak into a resumed conversation or the reconstructed transcript."""
         messages: list[dict] = []
         model = ""
+        custom_title: str | None = None
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 record = json.loads(line)
@@ -103,10 +107,14 @@ class SessionLog:
             kind = record.get("kind")
             if kind == "model":
                 model = record.get("model") or model
+            elif kind == "title":
+                title = (record.get("title") or "").strip()
+                if title:  # latest non-empty title wins
+                    custom_title = title
             elif kind == "message" and record.get("role") != "system":
                 keys = ("role", "content", "tool_name", "images", "documents")
                 messages.append({k: v for k, v in record.items() if k in keys})
-        return messages, model
+        return messages, model, custom_title
 
     @staticmethod
     def load_messages(path: Path) -> list[dict]:
@@ -325,9 +333,20 @@ class SessionLog:
         return ""
 
     @staticmethod
+    def _truncate_title(title: str) -> str:
+        if len(title) > TITLE_MAX:
+            return title[: TITLE_MAX - 1] + "…"
+        return title
+
+    @staticmethod
     def _peek_title(path: Path) -> str | None:
-        """First user message without parsing the whole log — the pager needs
-        only a label per session. None = no user input yet (empty chat)."""
+        """A label per session for the drawer/pager, without loading the whole
+        conversation. A custom title (latest `kind:"title"` record) wins; else
+        the first user message. None = no user input yet and never renamed (an
+        empty chat). The scan reads the whole file because a title record is
+        appended at the end, but the log is small and this stays one pass."""
+        first_user: str | None = None
+        custom: str | None = None
         try:
             with path.open(encoding="utf-8") as fh:
                 for line in fh:
@@ -335,14 +354,21 @@ class SessionLog:
                         record = json.loads(line)
                     except ValueError:
                         continue
-                    if record.get("kind") == "message" and record.get("role") == "user":
-                        title = SessionLog._derive_title([record])
-                        if len(title) > TITLE_MAX:
-                            title = title[: TITLE_MAX - 1] + "…"
-                        return title
+                    kind = record.get("kind")
+                    if kind == "title":
+                        title = (record.get("title") or "").strip()
+                        if title:
+                            custom = title
+                    elif (
+                        first_user is None
+                        and kind == "message"
+                        and record.get("role") == "user"
+                    ):
+                        first_user = SessionLog._derive_title([record])
         except OSError:
             return None
-        return None
+        title = custom if custom is not None else first_user
+        return SessionLog._truncate_title(title) if title is not None else None
 
     @staticmethod
     def _by_recency(state_dir: Path) -> list[Path]:
@@ -384,10 +410,11 @@ class SessionLog:
             return datetime.datetime.fromtimestamp(path.stat().st_mtime)
 
     @staticmethod
-    def _info_from(path: Path, messages: list[dict], model: str = "") -> SessionInfo:
-        title = SessionLog._derive_title(messages)
-        if len(title) > TITLE_MAX:
-            title = title[: TITLE_MAX - 1] + "…"
+    def _info_from(
+        path: Path, messages: list[dict], model: str = "", custom_title: str | None = None
+    ) -> SessionInfo:
+        title = custom_title if custom_title else SessionLog._derive_title(messages)
+        title = SessionLog._truncate_title(title)
         when = SessionLog._started_at(path).strftime("%Y-%m-%d %H:%M")
         try:
             mtime = path.stat().st_mtime
@@ -406,10 +433,10 @@ class SessionLog:
     @staticmethod
     def info(path: Path) -> SessionInfo | None:
         """Summary line for a session picker; None for empty sessions."""
-        messages, model = SessionLog._parse(path)
+        messages, model, custom_title = SessionLog._parse(path)
         if not messages:
             return None
-        return SessionLog._info_from(path, messages, model)
+        return SessionLog._info_from(path, messages, model, custom_title)
 
     @staticmethod
     def list_sessions(state_dir: Path, exclude: set | None = None) -> list[SessionInfo]:
@@ -435,7 +462,7 @@ class SessionLog:
         for path in SessionLog._by_recency(state_dir):
             if path in exclude:
                 continue
-            messages, model = SessionLog._parse(path)
+            messages, model, custom_title = SessionLog._parse(path)
             if not messages:
                 continue
             content_cf = " ".join(
@@ -445,10 +472,13 @@ class SessionLog:
             # Model tokens ("gemini", "2.5", "pro") join the fuzzy vocabulary
             # so a typo like "gemni" still filters by model.
             model_words = frozenset(re.split(r"[^a-z0-9.]+", model_cf)) - {""}
+            # A renamed chat is findable by its custom name, so the searchable
+            # title is the effective one (custom overrides the derived).
+            title_cf = (custom_title or SessionLog._derive_title(messages)).casefold()
             entries.append(
                 SessionEntry(
-                    info=SessionLog._info_from(path, messages, model),
-                    title_cf=SessionLog._derive_title(messages).casefold(),
+                    info=SessionLog._info_from(path, messages, model, custom_title),
+                    title_cf=title_cf,
                     content_cf=content_cf,
                     words=(
                         frozenset(w.strip(_PUNCT) for w in content_cf.split()) - {""}
@@ -649,6 +679,12 @@ class SessionLog:
 
     def command(self, command: str, decision: str) -> None:
         self._record("command", command=command, decision=decision)
+
+    def set_title(self, title: str) -> None:
+        """Rename the chat with an append-only `kind:"title"` record — no
+        rewrite of the log. The latest such record wins on parse/peek; the
+        derived first-user-message title is the fallback when none exists."""
+        self._record("title", title=title.strip())
 
     def step(self, step: dict) -> None:
         """Persist one structured activity-trace step so the trace is

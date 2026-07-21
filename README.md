@@ -206,7 +206,9 @@ LLM), ↑/↓ to select, Enter replays the session into the current conversation
 `/delete [n|text]` — delete an earlier session permanently (same picker and
 argument forms as `/resume`, then a y/N confirm; removes the conversation
 AND its command audit log; the current session is excluded — `/new` first
-to delete it) · `/new`
+to delete it) · `/rename <title>` — give this chat a custom title (overrides
+the one auto-derived from the first message; shown in `/resume` and the web
+drawer) · `/new`
 or `/clear`
 (plain `clear` works too) · `/model [name]` — switch model mid-session; no
 arg opens the same type-to-filter picker over local models and cloud
@@ -380,7 +382,9 @@ now"), each row a status icon, title, last-message preview and time, plus
 search; each row's trash icon deletes that session after an inline "Delete?"
 confirm (permanent: conversation and audit log; refused while running;
 deleting the current chat lands you on a fresh one). The **centered session
-title** (with its ˅ caret) opens a menu: new chat, switch model, change
+title** (with its ˅ caret) opens a menu: new chat, rename this chat (an
+inline field; a custom title overrides the one derived from the first
+message and shows in the drawer and `/resume`), switch model, change
 directory, line wrap, and workspace & jobs. The **compose pencil** (top
 right) starts a fresh chat. To **branch** a conversation, type `/fork` (or
 `/branch`): it copies everything so far into a new session and switches you
