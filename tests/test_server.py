@@ -2055,26 +2055,20 @@ class TestDirListing:
             assert body["files"] == ["file.txt"]
             assert body["truncated"] is False
 
-    def test_dirs_does_not_scandir_into_subfolders(self, app_env, tmp_path, monkeypatch):
-        """The listing must scandir ONLY the browsed dir — never a subfolder —
-        so a blocking subfolder can't freeze the endpoint (#86)."""
+    def test_dirs_listing_timeout_returns_504(self, app_env, tmp_path, monkeypatch):
+        """A hung listing (blocking scandir/stat on a TCC-gated or networked
+        path) is killed and returns 504 rather than freezing the server — the
+        reason the listing runs out of process (#86)."""
         import aish.server as server_module
 
+        monkeypatch.setattr(server_module.WebServer, "_DIRS_TIMEOUT_S", 0.3)
+        monkeypatch.setattr(
+            server_module.WebServer, "_DIRS_LIST_SCRIPT", "import time\ntime.sleep(30)\n"
+        )
         base = self.make_tree(tmp_path)
-        real_scandir = os.scandir
-        scanned: list[str] = []
-
-        def tracking_scandir(p):
-            scanned.append(os.fspath(p))
-            return real_scandir(p)
-
-        monkeypatch.setattr(server_module.os, "scandir", tracking_scandir)
         client, _ = make_client(app_env, [])
         with client:
-            client.get(f"/dirs?path={base}").json()
-        assert str(base) in scanned  # the browsed dir is listed
-        subfolders = [p for p in scanned if p != str(base) and p.startswith(str(base))]
-        assert subfolders == []  # but never scandir'd into a subfolder
+            assert client.get(f"/dirs?path={base}").status_code == 504
 
     def test_dirs_requires_token_when_set(self, app_env, tmp_path):
         base = self.make_tree(tmp_path)

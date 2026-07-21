@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
 import queue
 import re
@@ -1491,51 +1492,83 @@ class WebServer:
     DIR_SEARCH_VISIT_CAP = 20_000
     DIR_SEARCH_SKIP = {".git", "node_modules", "venv", ".venv", "__pycache__", ".Trash"}
 
-    # Max folders / files returned. Beyond a client-render guard, this bounds
-    # how long the single scandir loop runs on a huge directory.
-    _DIRS_LISTING_CAP = 1000
+    _DIRS_TIMEOUT_S = 5.0  # kill a stuck listing after this and return 504
+
+    # The listing runs in a SEPARATE process (see handle_dirs). Everything that
+    # touches the filesystem — resolve(), is_dir(), scandir() — lives here so a
+    # blocking call can never touch the server's own interpreter. Stdlib only.
+    _DIRS_LIST_SCRIPT = r"""
+import json, os, sys
+from pathlib import Path
+CAP = 1000
+raw = (sys.argv[1] if len(sys.argv) > 1 else "").strip() or str(Path.home())
+try:
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        print(json.dumps({"status": 400, "error": "path must be absolute"})); sys.exit(0)
+    p = p.resolve()
+    if not p.is_dir():
+        print(json.dumps({"status": 404, "error": "not a directory"})); sys.exit(0)
+    dirs, files = [], []
+    with os.scandir(p) as entries:
+        for e in sorted(entries, key=lambda x: x.name.lower()):
+            try:
+                is_dir = e.is_dir(follow_symlinks=True)
+            except OSError:
+                continue
+            (dirs if is_dir else files).append(e.name)
+    print(json.dumps({
+        "status": 200, "path": str(p),
+        "dirs": [{"name": n, "items": None} for n in dirs[:CAP]],
+        "files": files[:CAP],
+        "truncated": len(dirs) > CAP or len(files) > CAP,
+    }))
+except PermissionError:
+    print(json.dumps({"status": 403, "error": "permission denied"}))
+except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
+    print(json.dumps({"status": 500, "error": str(ex)}))
+"""
 
     async def handle_dirs(self, request) -> JSONResponse:
         """GET /dirs?path=<abs> — folders and files (names only) of the browsed
-        directory, both capped. A SINGLE scandir of the folder itself; we do NOT
-        scandir into each subfolder. (An earlier version counted every
-        subfolder's children, but that extra scandir-per-subfolder could block
-        in-kernel on a slow/networked path — e.g. iCloud Drive, a mount — and
-        because a blocking readdir holds the GIL it froze the whole server, not
-        just the request. No per-subfolder scandir = no such freeze; #86.)"""
+        directory, both capped.
+
+        All filesystem work runs in a SEPARATE, killable subprocess. A blocking
+        stat/scandir — a TCC-gated path (Desktop/Documents/iCloud) can *hang* a
+        headless launchd process rather than deny, and a blocking readdir holds
+        the GIL — would otherwise freeze the whole server, not just the request.
+        Isolating it means a stuck listing is killed and returns 504 while the
+        server stays fully responsive (#86)."""
         if self.token and request.query_params.get("token") != self.token:
             return JSONResponse({"error": "bad token"}, status_code=403)
-        raw = request.query_params.get("path", "").strip() or str(Path.home())
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
-            return JSONResponse({"error": "path must be absolute"}, status_code=400)
-        path = path.resolve()
-        if not path.is_dir():
-            return JSONResponse({"error": "not a directory"}, status_code=404)
-
-        def list_entries() -> tuple[list[dict], list[str], bool]:
-            dirs: list[dict] = []
-            files: list[str] = []
-            with os.scandir(path) as entries:
-                for entry in sorted(entries, key=lambda e: e.name.lower()):
-                    try:
-                        is_dir = entry.is_dir(follow_symlinks=True)
-                    except OSError:
-                        continue  # broken symlink etc — skip rather than crash
-                    if is_dir:
-                        dirs.append({"name": entry.name, "items": None})
-                    else:
-                        files.append(entry.name)
-            truncated = len(dirs) > self._DIRS_LISTING_CAP or len(files) > self._DIRS_LISTING_CAP
-            return dirs[: self._DIRS_LISTING_CAP], files[: self._DIRS_LISTING_CAP], truncated
-
+        raw = request.query_params.get("path", "").strip()
         try:
-            dirs, files, truncated = await asyncio.to_thread(list_entries)
-        except PermissionError:
-            return JSONResponse({"error": "permission denied"}, status_code=403)
-        return JSONResponse(
-            {"path": str(path), "dirs": dirs, "files": files, "truncated": truncated}
-        )
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                "-c",
+                self._DIRS_LIST_SCRIPT,
+                raw,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            return JSONResponse({"error": f"cannot list: {exc}"}, status_code=500)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=self._DIRS_TIMEOUT_S)
+        except TimeoutError:
+            proc.kill()
+            # Reap in the background: a child hard-stuck in uninterruptible I/O
+            # may not die until its syscall returns, but it's a separate process
+            # and no longer affects the server's responsiveness.
+            asyncio.create_task(proc.wait())
+            return JSONResponse({"error": "listing timed out"}, status_code=504)
+        try:
+            data = json.loads(out or b"{}")
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "listing failed"}, status_code=500)
+        status = data.pop("status", 200)
+        return JSONResponse(data, status_code=status)
 
     async def handle_dirs_search(self, request) -> JSONResponse:
         """GET /dirs/search?q=<term>&base=<abs> — bounded fuzzy walk under
