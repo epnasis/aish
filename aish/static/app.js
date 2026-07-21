@@ -4477,6 +4477,12 @@ function rememberDir(path) {
   const list = [path, ...recentDirs().filter((p) => p !== path)].slice(0, 6);
   localStorage.setItem(RECENT_DIRS_KEY, JSON.stringify(list));
 }
+// Drop a path from the recents list only — never touches the actual folder (#89).
+function forgetDir(path) {
+  localStorage.setItem(
+    RECENT_DIRS_KEY, JSON.stringify(recentDirs().filter((p) => p !== path))
+  );
+}
 
 let dirPath = "";       // directory the picker is browsing
 let dirEntries = [];    // its subdirectories, as {name, items}
@@ -4555,6 +4561,21 @@ function showDirRecents() {
       const row = dirRow(baseName(p), abbreviatePath(p), () => selectDir(p), "recent");
       row.querySelector(".dir-chev").remove(); // a selection, not a descent
       if (p === currentCwd) row.classList.add("selected");
+      // "Remove from Recents" ✕ — clears the history entry, NOT the folder (#89).
+      const remove = document.createElement("span");
+      remove.className = "dir-remove";
+      remove.setAttribute("role", "button");
+      remove.tabIndex = 0;
+      remove.title = "Remove from Recents";
+      remove.setAttribute("aria-label", `Remove ${baseName(p)} from Recents`);
+      remove.innerHTML =
+        '<svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+      const doRemove = (e) => { e.stopPropagation(); forgetDir(p); showDirRecents(); };
+      remove.addEventListener("click", doRemove);
+      remove.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") doRemove(e);
+      });
+      row.appendChild(remove);
       list.appendChild(row);
     }
   }

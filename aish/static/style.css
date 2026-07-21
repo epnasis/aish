@@ -1314,6 +1314,15 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .dir-row.up .folder { color: var(--blue); }
 .dir-row .meta { flex: none; color: var(--dim); font-size: 12px; margin-right: 4px; }
 .dir-row .dir-chev { width: 15px; height: 15px; flex: none; display: block; }
+/* "Remove from Recents" ✕ — clears the history entry only, not the folder (#89). */
+.dir-row .dir-remove {
+  flex: none; display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; margin: -6px -4px -6px 2px;
+  color: var(--sep2); border-radius: 8px; cursor: pointer;
+}
+.dir-row .dir-remove svg { width: 16px; height: 16px; display: block; }
+.dir-row .dir-remove:hover { color: var(--dim); }
+.dir-row .dir-remove:active { color: var(--red); background: var(--red-glow); }
 .dir-row.file { opacity: 0.5; }
 .dir-row.file .folder { color: var(--dim); }
 .dir-action { flex: none; padding: 12px 4px 4px; border-top: 0.5px solid var(--sep); }
