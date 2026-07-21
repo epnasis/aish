@@ -983,11 +983,18 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 #statusline .pulse { color: var(--green); animation: pulse 1.2s ease-in-out infinite; display: inline-block; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 #connbar {
+  display: block;
+  width: 100%;
+  border: none;
+  font-family: inherit;
+  text-align: left;
   padding: 4px 16px;
   font-size: 12px;
   color: var(--yellow);
   background: var(--bg-elev);
 }
+#connbar:active { opacity: 0.6; }
+#connbar[hidden] { display: none; }
 
 /* ---- suggestions popover ---- */
 #suggest {
