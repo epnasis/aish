@@ -159,6 +159,25 @@ class SessionLog:
             steps.append({"type": "step", **step})
             pending_start = pending_end = None
 
+        def emit_bang(command: str, content: str) -> None:
+            """Rebuild a user ! command as its live event sequence: the typed
+            `!command`, its terminal block (framing + streamed output), and an
+            empty `done`. A ! command runs no model turn, so it leaves no `tool`
+            step — its framing would otherwise orphan and corrupt the next
+            command's block, and its "[I ran … myself]" annotation would show as
+            a bare user bubble. Framing is present for logs written since ! gained
+            command_start/end; older logs synthesize a best-effort block."""
+            nonlocal pending_start, pending_end
+            start = pending_start or {"cwd": "", "command": command}
+            steps.append({"type": "command_start", **start})
+            _, _, output = content.partition("]\n")  # drop the annotation prefix
+            output = _EXIT_MARKER_RE.sub("", output)
+            if output:
+                steps.append({"type": "stream", "text": output})
+            end = pending_end or {"status": "exit", "exit_code": 0}
+            steps.append({"type": "command_end", **end})
+            pending_start = pending_end = None
+
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 record = json.loads(line)
@@ -178,8 +197,21 @@ class SessionLog:
                     steps.append({"type": "step", **step})
             elif kind == "message" and record.get("role") == "user":
                 flush()  # close the previous turn before the next one opens
-                events.append({"type": "user", "text": record.get("content", "")})
-                open_turn = True
+                content = record.get("content", "")
+                bang = _BANG_RE.match(content)
+                if bang:  # a ! command: replay it as its terminal block, not a bubble
+                    events.append({"type": "user", "text": "!" + bang.group(1)})
+                    # Framing present means a modern ! log (post command_start/end):
+                    # it reconstructs faithfully, so a session of only ! commands
+                    # must not fall back to a flat history blob.
+                    if pending_start is not None:
+                        has_trace = True
+                    open_turn = True
+                    emit_bang(bang.group(1), content)
+                    flush()  # a ! command is its own closed turn (no model answer)
+                else:
+                    events.append({"type": "user", "text": content})
+                    open_turn = True
             elif kind == "message" and record.get("role") == "assistant":
                 # The task's answer is its last non-empty assistant text;
                 # intermediate tool-calling turns carry no visible content.

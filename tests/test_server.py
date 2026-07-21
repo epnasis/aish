@@ -502,6 +502,106 @@ class TestTerminalFraming:
             assert not any(e["type"].startswith("command_") for e in events)
 
 
+class TestBangCommands:
+    """A user-typed ! command runs directly as the user's own action — no model,
+    no approval gate — mirroring the CLI's ! escape (cli.main). !cd is the /cd
+    alias. The empty responses list means the model is never consulted: a stray
+    model call would IndexError and surface as an error event, failing the test."""
+
+    def _drain(self, ws) -> list[dict]:
+        events = []
+        for _ in range(200):
+            event = ws.receive_json()
+            events.append(event)
+            if event["type"] == "done":
+                return events
+            if event["type"] == "error":
+                raise AssertionError(f"error: {event['text']}")
+        raise AssertionError("no done within 200 events")
+
+    def test_bang_command_runs_and_streams_without_model_or_approval(self, app_env):
+        client, chat = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "!echo direct-hit"})
+            assert recv_until(ws, "user")["text"] == "!echo direct-hit"
+            events = self._drain(ws)
+            # No approval card: a ! command is the user's own action (CLI parity).
+            assert not any(e["type"] == "approval_request" for e in events)
+            starts = [e for e in events if e["type"] == "command_start"]
+            assert starts and starts[0]["command"] == "echo direct-hit"
+            assert starts[0]["cwd"] == app_env["cwd"]
+            streamed = " ".join(e["text"] for e in events if e["type"] == "stream")
+            assert "direct-hit" in streamed
+            ends = [e for e in events if e["type"] == "command_end"]
+            assert ends and ends[0] == {"type": "command_end", "status": "exit", "exit_code": 0}
+            # The output rode the terminal block; done carries no answer bubble.
+            assert events[-1] == {"type": "done", "result": ""}
+            assert chat.calls == []  # the model was never asked
+
+    def test_bang_mutating_command_bypasses_approval_like_cli(self, app_env, tmp_path):
+        """A ! command that mutates state still runs without a card — exactly as
+        the CLI's ! runs `touch` directly. The gate guards the model, not the
+        user typing their own command."""
+        marker = tmp_path / "bang-made-me"
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": f"!touch {marker}"})
+            events = self._drain(ws)
+            assert not any(e["type"] == "approval_request" for e in events)
+            assert marker.exists()
+
+    def test_bang_cd_moves_cwd_and_reanchors_root(self, app_env, tmp_path):
+        """!cd is the /cd alias: it must not be shadowed by the general !command
+        path — it moves cwd, re-anchors roots[0], and refreshes the UI cwd."""
+        project = tmp_path / "bang-project"
+        project.mkdir()
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": f"!cd {project}"})
+            changed = recv_until(ws, "cwd_changed")
+            assert changed["cwd"] == str(project)
+            assert changed["roots"][0] == str(project)
+            recv_until(ws, "done")
+
+    def test_bang_session_title_shows_command_not_annotation(self, app_env):
+        """The reconnect hello title uses the same bang-aware derivation as the
+        drawer, so a ! session reads as '! <cmd>' — never the internal
+        '[I ran … myself]' conversation annotation."""
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "!echo titled"})
+            self._drain(ws)
+        with client, connected(client) as (_ws, hello, _):
+            assert hello["title"] == "! echo titled"
+
+    def test_bang_command_replays_as_terminal_block_when_cold(self, app_env):
+        """A ! command survives eviction/restart: reopened cold from its log it
+        reconstructs into the same user → terminal-block → done event stream a
+        live client saw, not the internal "[I ran … myself]" annotation."""
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            old_name = hello["session"]
+            ws.send_json({"type": "task", "text": "!echo cold-hit"})
+            self._drain(ws)
+        client2, _ = make_client(app_env, [])
+        with client2, connected(client2) as (ws, _, _):
+            ws.send_json({"type": "resume", "path": old_name})
+            recv_until(ws, "hello")
+            replay = recv_until(ws, "replay")
+            kinds = [e["type"] for e in replay["events"]]
+            assert "command_start" in kinds and "command_end" in kinds
+            user_ev = next(e for e in replay["events"] if e["type"] == "user")
+            assert user_ev["text"] == "!echo cold-hit"
+            start = next(e for e in replay["events"] if e["type"] == "command_start")
+            assert start["command"] == "echo cold-hit"
+            streamed = " ".join(
+                e["text"] for e in replay["events"] if e["type"] == "stream"
+            )
+            assert "cold-hit" in streamed
+            # No raw internal annotation leaks into the transcript.
+            assert not any("I ran `" in json.dumps(e) for e in replay["events"])
+
+
 class TestWriteApproval:
     def responses(self, path, content):
         return [

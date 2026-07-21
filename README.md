@@ -395,7 +395,10 @@ terminal: `/` pops up the command list (unambiguous prefixes work — `/res`
 runs `/resume`) and `@` pops up project-file completion (same walk and
 ranking as the TUI). The composer's **＋** button opens attach file, reference
 a path (@), slash command (/), and photo; attachments upload to
-`~/.local/state/aish/uploads/` (a session root). Messages sent while a task
+`~/.local/state/aish/uploads/` (a session root). The composer takes the same
+`!<command>` escape as the terminal — it runs directly, no model and no
+approval card (your own action), streaming into a terminal block; `!cd <dir>`
+is the `/cd` alias that moves the project directory. Messages sent while a task
 runs queue as chips above the composer (tap ✕ to cancel one).
 **Images go to the model natively** when the backend supports vision
 (Gemini, OpenAI, Claude, and Ollama vision models like llava/qwen-vl) — the

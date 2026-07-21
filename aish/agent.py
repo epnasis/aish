@@ -950,6 +950,10 @@ class Agent:
         cd_target = self._parse_cd(command)
         if cd_target is not None:
             return self.rebase(cd_target)
+        # Framing brackets the output as a terminal block for rich clients (the
+        # web UI) and records it for cold replay, exactly like a model command;
+        # on the CLI on_command_start/end are unset, so it stays log-only.
+        self._emit_command_start(command)
         result = tools.run_command(
             command,
             cwd=self.cwd,
@@ -957,6 +961,9 @@ class Agent:
             allow_detach=True,
             log_dir=self.job_log_dir,
         )
+        self._emit_command_end(status="exit", exit_code=_parse_exit_code(result))
+        if self.stream is None:
+            self.echo(result)
         self._append(
             {"role": "user", "content": f"[I ran `{command}` myself; output:]\n{result}"}
         )
