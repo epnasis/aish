@@ -204,7 +204,10 @@ function handle(event) {
       closeAnswer();
       finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
       addErrorMsg(event.text);
-      taskErrored = true; // couldn't complete — dot goes red until the next turn
+      // A live error means the current task failed → red dot. A REPLAYED error
+      // (a past interrupted turn on a freshly-loaded session) must not: the
+      // connection is fine, so keep the dot green and just show Retry.
+      if (!replaying) taskErrored = true;
       setBusy(false);
       setStatus(null);
       notify("aish — task failed", event.text);
@@ -1238,6 +1241,23 @@ function finishTrace(errored) {
   t.pending = null;
   t.activeStartedAt = null;
   currentTrace = null;
+  // Finalize any step still spinning — a tool cut off by a server restart
+  // mid-run (the "co to czarna dziura?" deploy bug) leaves a running row with
+  // no finish event; a closed trace must never keep a perpetual spinner.
+  t.body.querySelectorAll(".step.running").forEach((row) => {
+    row.classList.remove("running", "active-step");
+    const badge = row.querySelector(".step-badge");
+    if (badge) badge.innerHTML = traceSvg("denied", "var(--dim)");
+    const timer = row.querySelector(".step-timer");
+    if (timer) timer.remove();
+    const main = row.querySelector(".step-main");
+    if (main && !main.querySelector(".step-interrupted")) {
+      const note = document.createElement("span");
+      note.className = "step-sub step-interrupted";
+      note.textContent = "interrupted";
+      main.appendChild(note);
+    }
+  });
   // A pure-answer turn leaves no steps — drop the empty trace box entirely.
   if (!t.body.querySelector(".step")) { t.el.remove(); refreshStatusline(); return; }
   t.el.classList.remove("live", "stopping");
@@ -1275,6 +1295,16 @@ let lastUserPrompt = "";
 const RERUN_SVG =
   '<svg viewBox="0 0 24 24"><path d="M5 6.5v3.6h3.6M19 17.5v-3.6h-3.6M18.4 9.2A6.5 6.5 0 0 0 6.5 8M5.6 14.8A6.5 6.5 0 0 0 17.5 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
+// Re-run a prompt even if the previous turn didn't finish: first stop/reconcile
+// whatever is (or only looks) still running — `stop` is a graceful no-op when
+// nothing runs (#48) and cancels a live/stuck task otherwise — then send it.
+// Safe in every state: idle, busy, or wedged after a disruption.
+function rerunPrompt(prompt) {
+  if (!prompt) return;
+  send({ type: "stop" });
+  send({ type: "task", text: prompt });
+}
+
 // An error message with a Retry button (resends the last prompt, Gemini-style).
 function addErrorMsg(text) {
   const wrap = document.createElement("div");
@@ -1287,7 +1317,7 @@ function addErrorMsg(text) {
     retry.type = "button";
     retry.className = "retry-btn";
     retry.innerHTML = RERUN_SVG + "Retry";
-    retry.onclick = () => { if (!clientBusy) send({ type: "task", text: lastUserPrompt }); };
+    retry.onclick = () => rerunPrompt(lastUserPrompt);
     wrap.appendChild(retry);
   }
   messagesEl.appendChild(wrap);
@@ -2292,7 +2322,7 @@ function attachAnswerTools(el, source, prompt) {
     regen.title = "regenerate";
     regen.setAttribute("aria-label", "regenerate answer");
     regen.innerHTML = RERUN_SVG;
-    regen.onclick = () => { if (!clientBusy) send({ type: "task", text: lastUserPrompt }); };
+    regen.onclick = () => rerunPrompt(lastUserPrompt);
     tools.appendChild(regen);
     lastRegenBtn = regen;
   }

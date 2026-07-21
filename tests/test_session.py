@@ -64,6 +64,40 @@ def test_reconstruct_events_groups_by_task(tmp_path):
     assert dones == ["read it", "read again"]  # final text per task, not ""
 
 
+def test_reconstruct_events_interrupted_turn_becomes_error(tmp_path):
+    # A turn cut off mid-step (a deploy during a web search) — a tool_start with
+    # no matching finish — reconstructs as an ERROR (surfacing Retry), not a
+    # `done` that would leave the step spinning forever.
+    from aish.session import INTERRUPTED_TASK
+
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "co to czarna dziura?"})
+    log.step({"kind": "thinking_start"})
+    log.step({"kind": "thinking", "secs": 0.1})
+    log.step({"kind": "tool_start", "name": "web_search"})  # process died here
+
+    events = SessionLog.reconstruct_events(log.path)
+    types = [e["type"] for e in events]
+    assert types[0] == "user"
+    assert "done" not in types
+    errors = [e for e in events if e["type"] == "error"]
+    assert errors and errors[0]["text"] == INTERRUPTED_TASK
+
+
+def test_reconstruct_events_finished_tool_is_not_interrupted(tmp_path):
+    # The control: a tool_start WITH its matching finish closes normally (done).
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "hi"})
+    log.step({"kind": "thinking_start"})
+    log.step({"kind": "thinking", "secs": 0.1})
+    log.step({"kind": "tool_start", "name": "web_search"})
+    log.step({"kind": "tool", "name": "web_search", "ok": True})
+    log.message({"role": "assistant", "content": "done"})
+
+    types = [e["type"] for e in SessionLog.reconstruct_events(log.path)]
+    assert "error" not in types and types[-1] == "done"
+
+
 def test_reconstruct_events_run_command_framing(tmp_path):
     # A run_command reconstructs into the SAME command_start → stream →
     # command_end → tool sequence a live session emits, so the terminal block

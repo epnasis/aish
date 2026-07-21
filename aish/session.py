@@ -31,6 +31,14 @@ _SESSION_NAME_RE = re.compile(r"^session-[0-9-]+\.jsonl$")
 # it before replaying the output into the terminal block.
 _EXIT_MARKER_RE = re.compile(r"\n?\[exit code: -?\d+\]\s*$")
 
+# Shown when a cold-loaded session's last turn was cut off mid-step (server
+# restart / crash during a task) so it fails cleanly with a Retry instead of
+# spinning forever.
+INTERRUPTED_TASK = (
+    "This task was interrupted before it finished (the server restarted or the "
+    "task was cut off), so its result is unknown. Retry to run it again."
+)
+
 
 @dataclass
 class SessionInfo:
@@ -121,18 +129,28 @@ class SessionLog:
         answer = ""
         open_turn = False
         has_trace = False
+        running_steps = 0  # started (thinking/tool) but not finished — a cut-off turn
         pending_start: dict | None = None
         pending_end: dict | None = None
 
         def flush() -> None:
-            nonlocal steps, answer, open_turn
+            nonlocal steps, answer, open_turn, running_steps
             if not open_turn:
                 return
             events.extend(steps)
-            events.append({"type": "done", "result": answer})
+            if running_steps > 0 and not answer:
+                # A step was still running and no final answer was reached — the
+                # process was killed mid-turn (e.g. a deploy during a web search).
+                # Surface it as a failed turn with a Retry affordance instead of a
+                # `done` that leaves the step spinning forever. (A turn that DID
+                # answer is complete even if a trailing trace record was clipped.)
+                events.append({"type": "error", "text": INTERRUPTED_TASK})
+            else:
+                events.append({"type": "done", "result": answer})
             steps = []
             answer = ""
             open_turn = False
+            running_steps = 0
 
         def emit_command(step: dict) -> None:
             """Splice a run_command's terminal-block framing around its `tool`
@@ -193,7 +211,12 @@ class SessionLog:
             elif kind == "trace":
                 has_trace = True
                 step = record.get("step", {})
-                if step.get("kind") == "tool" and step.get("name") == "run_command":
+                sk = step.get("kind")
+                if sk in ("thinking_start", "tool_start"):
+                    running_steps += 1
+                elif sk in ("thinking", "thinking_cancel", "tool"):
+                    running_steps = max(0, running_steps - 1)
+                if sk == "tool" and step.get("name") == "run_command":
                     emit_command(step)
                 else:
                     steps.append({"type": "step", **step})
@@ -254,7 +277,20 @@ class SessionLog:
         if after < 1 or after > len(finals):
             return None
         cut = finals[after - 1]
-        return "\n".join(lines[: cut + 1]) + "\n"
+        # Include the rest of that turn's trailing records (thinking_cancel,
+        # model, framing …) up to the NEXT user message, so the fork replays the
+        # complete turn instead of orphaning a trace record logged after the
+        # answer (which would otherwise reconstruct as a dangling step).
+        end = len(lines)
+        for i in range(cut + 1, len(lines)):
+            try:
+                record = json.loads(lines[i])
+            except ValueError:
+                continue
+            if record.get("kind") == "message" and record.get("role") == "user":
+                end = i
+                break
+        return "\n".join(lines[:end]) + "\n"
 
     @staticmethod
     def _derive_title(messages: list[dict]) -> str:
