@@ -3348,7 +3348,11 @@ function rememberPrompt(text) {
 
 function resizeInput() {
   input.style.height = "auto";
-  input.style.height = `${Math.min(input.scrollHeight, innerHeight * 0.3)}px`;
+  input.style.height = `${Math.min(input.scrollHeight, innerHeight * 0.24)}px`;
+  // Once the text grows past a couple of lines, let it take the full composer
+  // width with the buttons tucked onto a row below (#97) — a narrow multi-line
+  // box beside the buttons wastes the screen. Not in terminal mode.
+  $("composer").classList.toggle("tall", !cmdMode && input.scrollHeight > 72);
 }
 
 function makeRecallable(bubble) {

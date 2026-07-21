@@ -1128,6 +1128,13 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 }
 #attach svg { width: 22px; height: 22px; }
 #attach:active { opacity: 0.5; }
+/* Tall composer (#97): the input jumps to a full-width row of its own and the
+   +/mic/send buttons wrap onto the row below — better use of width than a
+   narrow multi-line box beside the buttons. */
+#composer.tall { flex-wrap: wrap; }
+#composer.tall #input { order: -1; flex-basis: 100%; }
+#composer.tall #dictate { margin-left: auto; } /* push mic+send to the right on the button row */
+
 #input {
   flex: 1;
   min-width: 0;
