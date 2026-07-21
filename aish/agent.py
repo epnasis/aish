@@ -1001,18 +1001,26 @@ class Agent:
         cd_target = self._parse_cd(command)
         if cd_target is not None:
             return self.rebase(cd_target)
+        self._cancel.clear()  # a stale stop must not kill the new command
         # Framing brackets the output as a terminal block for rich clients (the
         # web UI) and records it for cold replay, exactly like a model command;
         # on the CLI on_command_start/end are unset, so it stays log-only.
         self._emit_command_start(command, user=True)
+        # should_stop wires the web UI Stop button to this user command: cancel()
+        # sets the same event the model path polls, so a long/hung ! command is
+        # interruptible (its whole process group is signaled — issue #76).
         result = tools.run_command(
             command,
             cwd=self.cwd,
             on_line=self.stream,
             allow_detach=True,
             log_dir=self.job_log_dir,
+            should_stop=self._cancel.is_set,
         )
-        self._emit_command_end(status="exit", exit_code=_parse_exit_code(result))
+        if self._cancel.is_set():
+            self._emit_command_end(status="interrupted")
+        else:
+            self._emit_command_end(status="exit", exit_code=_parse_exit_code(result))
         if self.stream is None:
             self.echo(result)
         self._append(

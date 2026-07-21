@@ -721,6 +721,38 @@ class TestBangCommands:
             # No raw internal annotation leaks into the transcript.
             assert not any("I ran `" in json.dumps(e) for e in replay["events"])
 
+    def test_bang_command_is_interruptible_by_stop(self, app_env):
+        """A long-running ! command is cancellable (issue #76): Stop signals its
+        whole process group — the `sh -c` shell AND its child `sleep` — the
+        terminal block renders an interrupted status, and the session returns to
+        idle promptly (not after the 30s sleep) with no hung worker."""
+        client, chat = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            # sh -c keeps a child `sleep` alive, so the stop must reach the whole
+            # group, not just the shell it launched.
+            ws.send_json({"type": "task", "text": "!sh -c 'sleep 30'"})
+            recv_until(ws, "command_start")
+            started = time.monotonic()
+            ws.send_json({"type": "stop"})
+            end = recv_until(ws, "command_end")
+            elapsed = time.monotonic() - started
+            assert end["status"] == "interrupted"
+            assert elapsed < 10  # terminated on the stop, not after the sleep
+            recv_until(ws, "done")
+            # The worker cleared: the session is idle again, never wedged busy.
+            assert client.app.state.server.active.busy is False
+            # And a stale cancel didn't leak — a follow-up ! command still runs.
+            ws.send_json({"type": "task", "text": "!echo recovered"})
+            events = []
+            for _ in range(200):
+                event = ws.receive_json()
+                events.append(event)
+                if event["type"] == "done":
+                    break
+            streamed = " ".join(e["text"] for e in events if e["type"] == "stream")
+            assert "recovered" in streamed
+            assert chat.calls == []  # a ! command never touches the model
+
 
 class TestWriteApproval:
     def responses(self, path, content):
