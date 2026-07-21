@@ -15,7 +15,7 @@ import pytest
 from starlette.testclient import TestClient
 
 import aish.server as server_module
-from aish.agent import APPROVED_NOTE, DENIED_RESULT, WRITE_DENIED
+from aish.agent import DENIED_RESULT, WRITE_DENIED
 from aish.server import create_app
 from aish.session import SessionLog
 
@@ -315,9 +315,9 @@ class TestCommandApproval:
             assert result.startswith(DENIED_RESULT)
             assert "wrong flag on macOS, use -f" in result
 
-    def test_approve_with_comment_runs_and_guides(self, app_env, tmp_path):
-        """#34: feedback is button-agnostic — on an approval the command runs
-        AND the comment reaches the model as forward guidance."""
+    def test_approve_with_comment_holds_original_for_adjustment(self, app_env, tmp_path):
+        """#81: APPROVE + comment = continue but ADJUST — the original command
+        is HELD (never run), and the model is told to adjust and re-propose."""
         marker = tmp_path / "ran43"
         client, chat = make_client(app_env, self.responses(f"touch {marker}"))
         with client, connected(client) as (ws, _, _):
@@ -328,18 +328,18 @@ class TestCommandApproval:
                     "type": "approval",
                     "id": request["id"],
                     "action": "approve",
-                    "comment": "prefer install -D next time",
+                    "comment": "run it verbosely instead",
                 }
             )
             resolved = recv_until(ws, "approval_resolved")
             assert resolved["decision"] == "approved"
-            assert resolved["comment"] == "prefer install -D next time"
+            assert resolved["comment"] == "run it verbosely instead"
             recv_until(ws, "done")
-            assert marker.exists()
+            assert not marker.exists()  # HELD — the original never ran
             result = tool_results(chat)[-1]["content"]
-            assert result.endswith(
-                APPROVED_NOTE.format(comment="prefer install -D next time")
-            )
+            assert result.startswith("NOT RUN")
+            assert "run it verbosely instead" in result
+            assert "ADJUSTED" in result
 
     def test_always_allow_persists_prefix_and_skips_future_prompts(
         self, app_env, tmp_path
@@ -378,7 +378,11 @@ class TestCommandApproval:
             assert auto is not None
             assert (tmp_path / "b").exists()
 
-    def test_edit_with_comment_carries_guidance(self, app_env, tmp_path):
+    def test_edit_with_comment_holds_for_adjustment(self, app_env, tmp_path):
+        """#81: an edit that ALSO carries a comment is still a commented
+        approval, so it holds — neither the original nor the edited form runs;
+        the model adjusts and re-proposes. (Edit WITHOUT a comment runs the
+        edit — see test_edit_runs_edited_command.)"""
         original, edited = tmp_path / "orig43", tmp_path / "edited43"
         client, chat = make_client(app_env, self.responses(f"touch {original}"))
         with client, connected(client) as (ws, _, _):
@@ -394,12 +398,10 @@ class TestCommandApproval:
                 }
             )
             recv_until(ws, "done")
-            assert edited.exists() and not original.exists()
+            assert not edited.exists() and not original.exists()  # HELD
             result = tool_results(chat)[-1]["content"]
-            assert "user edited the command" in result
-            assert result.endswith(
-                APPROVED_NOTE.format(comment="always use the edited name")
-            )
+            assert result.startswith("NOT RUN")
+            assert "always use the edited name" in result
 
     def test_edit_runs_edited_command(self, app_env, tmp_path):
         original, edited = tmp_path / "original", tmp_path / "edited42"
@@ -737,7 +739,9 @@ class TestWriteApproval:
             assert not target.exists()
             assert tool_results(chat)[-1]["content"] == WRITE_DENIED
 
-    def test_approve_write_with_comment_carries_guidance(self, app_env, tmp_path):
+    def test_approve_write_with_comment_holds_for_adjustment(self, app_env, tmp_path):
+        """#81: APPROVE + comment holds the write — nothing lands; the model
+        adjusts to the comment and re-proposes."""
         target = tmp_path / "note.txt"
         client, chat = make_client(app_env, self.responses(str(target), "hello\n"))
         with client, connected(client) as (ws, _, _):
@@ -752,11 +756,11 @@ class TestWriteApproval:
                 }
             )
             recv_until(ws, "done")
-            assert target.read_text(encoding="utf-8") == "hello\n"
+            assert not target.exists()  # HELD — nothing was written
             result = tool_results(chat)[-1]["content"]
-            assert result.endswith(
-                APPROVED_NOTE.format(comment="keep future notes under docs/")
-            )
+            assert result.startswith("NOT WRITTEN")
+            assert "keep future notes under docs/" in result
+            assert "ADJUSTED" in result
 
     def test_deny_write_with_comment_reaches_model(self, app_env, tmp_path):
         target = tmp_path / "note.txt"
@@ -1180,6 +1184,32 @@ class TestSessions:
         # A run_command must survive the round-trip as its full terminal-block
         # sequence, not a bare tool step — the whole point of the framing work.
         assert ("command_start",) in trace_shape(cold)
+        assert trace_shape(hot) == trace_shape(cold)
+
+    def test_cold_reconstruction_matches_live_for_held_command(self, app_env, tmp_path):
+        # #81: an approve+comment HOLD never runs, so it emits no terminal block
+        # (like a denial). Cold replay must match — the None-framing synthesize
+        # path must NOT fabricate a command_start for a command that never ran.
+        # A mutating command (not read-only) so it actually prompts.
+        client, _ = make_client(app_env, [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/z")]),
+            model_says("acknowledged"),
+        ])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "make a file"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({
+                "type": "approval", "id": request["id"],
+                "action": "approve", "comment": "put it under tmp/ instead",
+            })
+            recv_until(ws, "done")
+            server = client.app.state.server
+            hot = list(server.active.bridge.transcript)
+            path = server.active.logref.log.path
+
+        cold = SessionLog.reconstruct_events(path)
+        assert cold is not None
+        assert ("command_start",) not in trace_shape(cold)  # held → no terminal block
         assert trace_shape(hot) == trace_shape(cold)
 
     def test_connect_with_session_param_reattaches_after_restart(self, app_env):

@@ -167,6 +167,14 @@ class SessionLog:
             records); it is replayed as one `stream` chunk — the final panel is
             identical whether the live output arrived in one piece or many."""
             nonlocal pending_start, pending_end
+            if step.get("decision") in ("denied", "blocked", "held", "rejected"):
+                # Never executed → no terminal block, matching the live path
+                # (the frontend renders it struck-through from the tool step
+                # alone). Without this the None-framing branch below would wrongly
+                # synthesize a block, diverging from the live transcript.
+                steps.append({"type": "step", **step})
+                pending_start = pending_end = None
+                return
             start = pending_start
             if start is None:  # legacy log (framing not yet persisted): synthesize
                 start = {"cwd": "", "command": step.get("command", "")}

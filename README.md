@@ -282,11 +282,12 @@ ask aish about any of this — its own docs are in its system prompt.
 `aish-web` serves the same agent to a browser — built for phones: approvals
 become tap-able cards (Approve / Allow this session / Always allow / Deny,
 a pencil icon beside the command to edit it before running — plus an
-optional comment field whose text travels with *whichever* button you press:
-on Deny it tells the model why and what to do instead; on
-any approval it reaches the model as guidance for this and future actions.
-Either way, a comment forces the model to *answer it first* — before its next
-action — rather than silently absorbing the feedback into the next command),
+optional comment field whose text travels with *whichever* button you press,
+where approve and deny then mean opposite things. **Approve + comment =
+continue, but adjust:** the original command is *not* run — the model reworks
+it to what you asked and re-proposes the adjusted command, which you approve
+again before it runs. **Deny + comment = stop:** the model replies in plain
+text addressing your concern and then waits, running nothing else first),
 file writes show the colored diff before anything lands on disk, answers stream
 live and render as markdown (tables, code blocks, links), command output
 keeps its ANSI colors, and locking your phone mid-task loses nothing (on

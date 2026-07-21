@@ -79,12 +79,16 @@ Rules:
    preloaded, that is a defect: repair that entry's description/keywords
    (an improve-recall skill, if present, has the checklist).
 3. Every command is shown to the user for approval before it runs. The user
-   may edit a command before approving; the edited form is what ran. If the
-   user denies a command, do not retry it — change approach or ask. If the
-   user attaches a COMMENT to any decision (approve OR deny), you MUST answer
-   that comment in your next reply, as plain text, BEFORE any further tool
-   call — address their point and say what you are doing about it; never fold
-   the feedback silently into your next command.
+   may edit a command before approving; the edited form is what ran. A COMMENT
+   the user attaches to a decision changes what you do next, and approve vs
+   deny mean opposite things:
+   - APPROVE + comment = CONTINUE, but adjust. The original command is NOT run
+     as-is; adjust it to what the user asked and propose the ADJUSTED command
+     (it is approved again before it runs). Never re-run the original unchanged.
+   - DENY + comment = STOP. Your next reply MUST be plain text with NO tool
+     call: address the user's concern and wait for them. Do not retry a variant
+     or run anything else first.
+   A plain deny with no comment: do not retry it — change approach or ask.
 4. After running commands, analyze the output and answer concisely.
 5. Prefer read-only commands. Never bundle destructive operations
    (rm, mv, overwrite redirects) into a command unless the user explicitly
@@ -176,18 +180,18 @@ SKILL_GATE_REFUSAL = (
     "the call will then proceed."
 )
 
-# Comment gate (issue #81): the system prompt and the feedback notes ORDER the
-# model to answer a verdict comment in plain text before its next tool call,
-# but eager models (Gemini, small local ones) fire another tool first anyway.
-# This is the hard backstop — while a comment is unanswered every tool call is
-# refused, so the user's feedback is never silently folded into a command. One
-# line of plain text lifts it (the main loop clears the flag on any content),
-# and the step budget bounds a model that never replies.
-COMMENT_GATE_REFUSAL = (
-    "NOT EXECUTED — the user attached a COMMENT to their last decision and you "
-    "have not answered it yet. Your NEXT turn must be TEXT ONLY, with NO tool "
-    "call: address the user's point in plain words and say what you will do "
-    "about it. Only after that plain-text reply will any command run again."
+# Stop gate (issue #81): deny + comment means STOP — the system prompt and the
+# feedback note ORDER the model to address the concern in plain text and halt,
+# but eager models (Gemini, small local ones) run another tool first anyway.
+# This is the hard backstop — while a denial's concern is unaddressed every tool
+# call is refused, so feedback is never silently folded into another command. A
+# text-only reply lifts it (and ends the task); the step budget bounds a model
+# that never replies. Approvals never arm this: they mean continue.
+STOP_GATE_REFUSAL = (
+    "NOT EXECUTED — the user DENIED your last action with a concern you have "
+    "not addressed. Denial means STOP: your NEXT turn must be TEXT ONLY, with "
+    "NO tool call — address the user's concern and wait for them. Do not retry "
+    "a variant or run anything else."
 )
 
 LOOP_WARNING = (
@@ -225,37 +229,42 @@ WRITE_DENIED = (
     "Do not retry the same change; adjust it or ask the user what they want."
 )
 
-# Feedback verdicts (Denied/Approved with a typed comment) must never be
-# silently folded into the next tool call. Small local models ignore soft
-# phrasing (the "Prompt hints must be imperative" convention), so both notes
-# ORDER the model — MUST + a worked example — to answer the comment as plain
-# text on its NEXT turn, before issuing any further tool call.
+# Deny + comment = STOP. The denied action did not run; the model must address
+# the user's concern in plain text and then halt (the stop gate blocks tools
+# until a text-only turn, which ends the task). Small local models ignore soft
+# phrasing (the "Prompt hints must be imperative" convention), so the note
+# ORDERS it — MUST + a worked example.
 FEEDBACK_NOTE = (
-    '\n\n[The user left a COMMENT with this denial: "{comment}"\n'
-    "You MUST answer this comment in your NEXT reply, as plain text, BEFORE "
-    "issuing any further tool call. Address what the user said or asked and "
-    "explain what you will do differently. Do NOT silently fold it into your "
-    'next command. Example — comment "wrong flag on macOS, use -f" → reply '
-    '"You\'re right: on macOS that flag is -f. I\'ll switch to it." then '
-    "proceed.]"
+    '\n\n[The user DENIED this and left a COMMENT: "{comment}"\n'
+    "Denial means STOP. Your NEXT reply MUST be plain text with NO tool call: "
+    "address the user's concern, then wait for them. Do NOT retry a variant or "
+    'run anything else first. Example — comment "this could delete real data" → '
+    'reply "You\'re right, that would touch real files — I\'ve stopped. Here is '
+    'what I would do instead…" and stop.]'
 )
 
-APPROVED_NOTE = (
-    '\n\n[The user APPROVED this action and left a COMMENT: "{comment}"\n'
-    "The action has run. You MUST answer this comment in your NEXT reply, as "
-    "plain text, BEFORE issuing any further tool call: explain what is "
-    "happening and why, in direct response to the user's point. Do NOT "
-    "silently fold it into your next command. Apply the guidance now and to "
-    "future actions.]"
+# Approve + comment = CONTINUE, but adjust. The original action was HELD (not
+# run); the model must adjust it to what the user asked and re-propose, and the
+# adjusted action is approved again before it runs — the task keeps going.
+HELD_FOR_ADJUSTMENT = (
+    'NOT RUN — the user APPROVED this command but attached a COMMENT: "{comment}"\n'
+    "Approval means CONTINUE, so proceed — but the original command was NOT run. "
+    "Adjust it to what the user asked and propose the ADJUSTED command; it will "
+    "be shown for approval again before it runs. Do NOT re-run the original "
+    "unchanged."
+)
+
+WRITE_HELD_FOR_ADJUSTMENT = (
+    'NOT WRITTEN — the user APPROVED this change but attached a COMMENT: "{comment}"\n'
+    "Approval means CONTINUE, so proceed — but nothing was written. Adjust the "
+    "change to what the user asked and propose the ADJUSTED write; it will be "
+    "shown for approval again before it lands. Do NOT re-apply the original "
+    "unchanged."
 )
 
 
 def _with_feedback(base: str, comment: str) -> str:
     return base + FEEDBACK_NOTE.format(comment=comment) if comment else base
-
-
-def _with_approval_note(result: str, comment: str) -> str:
-    return result + APPROVED_NOTE.format(comment=comment) if comment else result
 
 
 _EXIT_CODE_RE = re.compile(r"\[exit code: (-?\d+)\]\s*$")
@@ -566,9 +575,9 @@ class Agent:
         # read_skill (or explicitly waive) before other tools run; values are
         # refusals left before the gate auto-lifts. Rebuilt every run_task.
         self._pending_skill_reads: dict[str, int] = {}
-        # Comment gate (issue #81): armed when a verdict carries a user comment,
-        # cleared by the main loop the moment a turn produces any plain text.
-        # While armed, _comment_gate refuses every tool call.
+        # Stop gate (issue #81): armed when a DENIAL carries a concern, cleared
+        # by the main loop only on a text-only turn (deny means stop). While
+        # armed, _stop_gate refuses every tool call.
         self._pending_comment_response = False
         self.base_context = context
         # Per-session scratch workspace (issue #70): a private temp dir where
@@ -753,13 +762,13 @@ class Agent:
                 entry["raw_blocks"] = raw_blocks
             self._append(entry)
 
-            # Only a TEXT-ONLY turn answers a pending user comment. Clearing on
-            # any content would be defeated by chatty preamble (or thinking
-            # surfaced as content) that models routinely emit alongside a tool
-            # call — the command would run in the same turn, unexplained. So the
-            # gate holds until the model stops and replies with no tool call;
-            # that turn also ends the task (normal loop semantics), letting the
-            # user review the answer and decide whether to continue.
+            # Deny means STOP: only a TEXT-ONLY turn clears the stop gate.
+            # Clearing on any content would be defeated by chatty preamble (or
+            # thinking surfaced as content) that models emit alongside a tool
+            # call — another command would run in the same turn. So the gate
+            # holds until the model stops and replies with no tool call; that
+            # turn also ends the task (normal loop semantics), so the user
+            # steers before anything else runs.
             if content and not tool_calls:
                 self._pending_comment_response = False
 
@@ -1291,33 +1300,34 @@ class Agent:
         label = f"→ read_file: {path}" + (f" (from line {offset})" if offset > 1 else "")
         return label, partial(files.read_file, path, self.cwd, offset=offset, limit=limit)
 
-    def _arm_comment_gate(self, comment: str) -> None:
-        """A verdict carried user feedback — hold every further tool call until
-        the model answers it in plain text (issue #81). No-op for a bare
-        approval/denial, matching the feedback notes that only fire on a comment."""
+    def _arm_stop_gate(self, comment: str) -> None:
+        """A DENY carried a concern — stop: hold every further tool call until
+        the model addresses it in plain text (issue #81). No-op for a bare
+        denial, matching the note that only fires on a comment. Approvals never
+        arm this — they mean continue (the command is held for adjustment,
+        re-proposed, and approved again)."""
         if comment:
             self._pending_comment_response = True
 
-    def _comment_gate(self, name: str, args: dict) -> str | None:
-        """Refusal while a user's verdict comment is unanswered, else None.
+    def _stop_gate(self, name: str, args: dict) -> str | None:
+        """Refusal while a denial's concern is unaddressed, else None.
 
-        A Denied/Approved comment arms this (see _dispatch/_dispatch_write); the
-        main loop clears the flag only when a turn is TEXT-ONLY (no tool call),
-        so a genuine reply — not chatty preamble riding alongside a command —
-        lifts it. Until then every tool call is refused, so the model cannot
-        silently fold feedback into its next command. No countdown: the flag
-        survives across gated turns, and the step budget bounds a model that
-        never replies."""
+        A Denied comment arms this (see _dispatch/_dispatch_write); the main
+        loop clears the flag only when a turn is TEXT-ONLY (no tool call), so a
+        genuine reply — not chatty preamble riding alongside a command — lifts
+        it, and that text-only turn ends the task (deny means stop). Until then
+        every tool call is refused. No countdown: the flag survives across gated
+        turns, and the step budget bounds a model that never replies."""
         if not self._pending_comment_response:
             return None
         if name == "run_command":  # so the trace shows why it was held, not a bare row
             self._run_meta = {
                 "command": str(args.get("command", "")),
                 "decision": "blocked",
-                "output": "Held until you reply to the user's comment.",
+                "output": "Held until you address the user's concern.",
             }
-        self._note("✋ gated until you answer the user's comment")
-        return COMMENT_GATE_REFUSAL
+        self._note("✋ stopped until you address the user's concern")
+        return STOP_GATE_REFUSAL
 
     def _skill_gate(self, name: str, args: dict) -> str | None:
         """Refusal text while a flagged oversized skill is unread, else None.
@@ -1343,10 +1353,10 @@ class Agent:
 
     def _dispatch(self, name: str, args: dict) -> str:
         # The gates run before everything — a refusal must never reach an
-        # approval prompt or a tool implementation. The comment gate goes first:
-        # the user's feedback outranks every other rule and must be answered
+        # approval prompt or a tool implementation. The stop gate goes first: a
+        # denial's concern outranks every other rule and must be addressed
         # before any tool runs.
-        refusal = self._comment_gate(name, args)
+        refusal = self._stop_gate(name, args)
         if refusal is not None:
             return refusal
 
@@ -1432,19 +1442,26 @@ class Agent:
                 }
                 return BLOCKED_RESULT.format(reason=decision.reason)
             if isinstance(decision, Denied):
+                # Deny + comment = STOP: address the concern, then halt. The stop
+                # gate holds every tool until a text-only reply, which ends the
+                # task so the user can steer before anything else runs.
                 self._run_meta = {
                     "command": command, "decision": "denied", "output": decision.comment or "",
                 }
-                self._arm_comment_gate(decision.comment)
+                self._arm_stop_gate(decision.comment)
                 return _with_feedback(DENIED_RESULT, decision.comment)
+            if isinstance(decision, Approved):
+                # Approve + comment = CONTINUE, but adjust: the original command
+                # is NOT run as-is. Hold it — the model adjusts to what the user
+                # asked and re-proposes, and that adjusted command is approved
+                # again before it runs (issue #81). Approval never stops the task.
+                self._run_meta = {
+                    "command": command, "decision": "held", "output": decision.comment,
+                }
+                return HELD_FOR_ADJUSTMENT.format(comment=decision.comment)
             if decision is None or decision is False:
                 self._run_meta = {"command": command, "decision": "denied", "output": ""}
                 return DENIED_RESULT
-            feedback = ""
-            if isinstance(decision, Approved):
-                feedback = decision.comment
-                self._arm_comment_gate(feedback)
-                decision = decision.command if decision.command else True
             final = command if decision is True else str(decision)
             # command_start opens the bounded terminal block in the web UI:
             # cwd + the (possibly edited) command that is about to run.
@@ -1452,12 +1469,10 @@ class Agent:
             if args.get("background"):
                 result = tools.start_background(final, cwd=self.cwd, log_dir=self.job_log_dir)
                 self._note(result)
-                self._run_meta = {
-                    "command": final, "decision": "approved", "output": result, "comment": feedback,
-                }
+                self._run_meta = {"command": final, "decision": "approved", "output": result}
                 # A detached job has no exit code — label the block instead.
                 self._emit_command_end(status="detached", job=_parse_job_id(result))
-                return _with_approval_note(result, feedback)
+                return result
             result = tools.run_command(
                 final,
                 cwd=self.cwd,
@@ -1466,9 +1481,7 @@ class Agent:
                 log_dir=self.job_log_dir,
                 should_stop=self._cancel.is_set,
             )
-            self._run_meta = {
-                "command": final, "decision": "approved", "output": result, "comment": feedback,
-            }
+            self._run_meta = {"command": final, "decision": "approved", "output": result}
             # command_end closes the block: a user cancel has no clean exit
             # code, a failed-to-start command none at all; otherwise the code.
             if self._cancel.is_set():
@@ -1480,7 +1493,7 @@ class Agent:
                 self.echo(result)
             if final != command:
                 result = f"[user edited the command to: {final}]\n{result}"
-            return _with_approval_note(result, feedback)
+            return result
 
         return f"ERROR: unknown tool '{name}'"
 
@@ -1507,24 +1520,27 @@ class Agent:
             return result
         decision = self.approve_write(plan)
         if isinstance(decision, Denied):
-            # A denied write never touches disk — the trace step must render
-            # denied (not a silent success) and carry the user's feedback,
-            # mirroring a denied run_command so the web timeline treats alike.
+            # Deny + comment = STOP: a denied write never touches disk — the
+            # trace step renders denied (not a silent success), carries the
+            # user's feedback, and arms the stop gate like a denied run_command.
             self._run_meta = {
                 "decision": "denied", "ok": False, "output": "", "comment": decision.comment,
             }
-            self._arm_comment_gate(decision.comment)
+            self._arm_stop_gate(decision.comment)
             return _with_feedback(WRITE_DENIED, decision.comment)
+        if isinstance(decision, Approved):
+            # Approve + comment = CONTINUE, but adjust: hold the write (nothing
+            # is committed), the model adjusts to what the user asked and
+            # re-proposes, and that change is approved again before it lands.
+            self._run_meta = {
+                "decision": "held", "ok": False, "output": "", "comment": decision.comment,
+            }
+            return WRITE_HELD_FOR_ADJUSTMENT.format(comment=decision.comment)
         if not decision:
             self._run_meta = {"decision": "denied", "ok": False, "output": ""}
             return WRITE_DENIED
         result = files.commit(plan)
         self.echo(result)
-        if isinstance(decision, Approved):
-            if decision.comment:  # surface the approval note on the trace step too
-                self._run_meta = {"decision": "approved", "comment": decision.comment}
-            self._arm_comment_gate(decision.comment)
-            result = _with_approval_note(result, decision.comment)
         return result
 
     def _parse_cd(self, command: str) -> str | None:

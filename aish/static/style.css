@@ -1457,6 +1457,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .step-tag { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 6px; }
 .step-tag.ok { color: var(--green); background: var(--green-glow); }
 .step-tag.bad { color: var(--red); background: var(--red-glow); }
+.step-tag.held { color: var(--orange); background: var(--orange-glow); }
 .step-tag.know { color: var(--green); background: var(--green-glow); font-size: 9px; letter-spacing: 0.4px; }
 .step-cmd { font-size: 12px; color: var(--dim); margin-top: 2px; overflow-x: auto; white-space: pre; }
 /* Global wrap toggle (title menu) also wraps run_command's long command line

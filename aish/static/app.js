@@ -800,6 +800,11 @@ function toolFinish(t, step) {
   t.secs += step.secs || 0;
   const meta = TOOL_META[step.name] || [step.name, "dot", "--dim"];
   const denied = step.decision === "denied" || step.decision === "blocked" || step.decision === "rejected";
+  // Approve + comment holds the action for adjustment (#81): it did not run,
+  // so it renders in the same "not executed" style as a denial, but amber and
+  // labelled "Held" — it is a pause, not a failure.
+  const held = step.decision === "held";
+  const notRun = denied || held;
   let ref = t.pending && t.pending.name === step.name ? t.pending : null;
   if (!ref) {
     // No matching start (e.g. replay ordering): synthesize a completed row.
@@ -817,24 +822,24 @@ function toolFinish(t, step) {
   t.pending = null;
   ref.row.classList.remove("running", "active-step");
   // finalize badge icon
-  const iconName = denied ? "denied" : step.name === "run_command" ? "command"
+  const iconName = held ? "command" : denied ? "denied" : step.name === "run_command" ? "command"
     : !step.ok ? "denied" : meta[1];
-  const color = denied || !step.ok ? "var(--red)" : `var(${meta[2]})`;
+  const color = held ? "var(--orange)" : denied || !step.ok ? "var(--red)" : `var(${meta[2]})`;
   ref.badge.innerHTML = traceSvg(iconName, color);
   // status tag on the title
   const tag = document.createElement("span");
-  tag.className = "step-tag " + (denied || !step.ok ? "bad" : "ok");
-  tag.textContent = denied
-    ? (step.decision === "blocked" ? "Blocked" : "Denied")
+  tag.className = "step-tag " + (held ? "held" : denied || !step.ok ? "bad" : "ok");
+  tag.textContent = held ? "Held — adjust"
+    : denied ? (step.decision === "blocked" ? "Blocked" : "Denied")
     : !step.ok ? "Error"
     : step.name === "run_command" ? `${ref.manual ? "Approved" : "Auto-approved"} · ${fmtSecs(step.secs)}`
     : fmtSecs(step.secs);
   ref.titleEl.appendChild(tag);
   // The user's approval note, shown back on the step (#3), clamped when long.
   if (step.comment) ref.main.appendChild(clampNote(step.comment));
-  if (denied) {
-    // A denied/blocked command never runs, so no terminal block is built —
-    // show the command struck-through here with the reason it was skipped.
+  if (notRun) {
+    // A denied/blocked/held command never runs, so no terminal block is built
+    // — show the command struck-through here with the reason it was skipped.
     if (step.name === "run_command" && step.command && !ref.row.querySelector(".step-cmd")) {
       const cmd = document.createElement("div");
       cmd.className = "step-cmd mono struck";

@@ -97,17 +97,18 @@ class TestApprovalGate:
 
 
 class TestApprovalComment:
-    """#59: a comment on any decision must be answered before the model
-    proceeds — the guidance in the tool result imperatively orders an
-    answer-first reply, never a silent fold into the next command."""
+    """#81: approve vs deny with a comment mean OPPOSITE things. Deny+comment =
+    STOP (address the concern in plain text, then halt). Approve+comment =
+    CONTINUE but ADJUST (the original never runs — the model adjusts and
+    re-proposes, approved again before it runs)."""
 
-    def _must_answer(self, text: str) -> bool:
-        return "MUST answer" in text and "BEFORE issuing any further tool call" in text
+    def _stop_note(self, text: str) -> bool:
+        return "STOP" in text and "NO tool call" in text
 
-    def test_deny_with_comment_forces_answer_first(self, tmp_path):
+    def test_deny_with_comment_holds_and_orders_stop(self, tmp_path):
         from aish.approval import Denied
 
-        marker = tmp_path / "denied59"
+        marker = tmp_path / "denied81"
         agent, _ = make_agent(
             [
                 model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
@@ -120,29 +121,29 @@ class TestApprovalComment:
         result = tool_messages(agent.messages)[0]["content"]
         assert result.startswith(DENIED_RESULT)
         assert "wrong flag on macOS, use -f" in result
-        assert self._must_answer(result)
+        assert self._stop_note(result)
 
-    def test_approve_with_comment_runs_and_forces_answer_first(self, tmp_path):
+    def test_approve_with_comment_holds_original_for_adjustment(self, tmp_path):
         from aish.approval import Approved
 
-        marker = tmp_path / "approved59"
+        marker = tmp_path / "approved81"
         agent, _ = make_agent(
             [
                 model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
                 model_says("acknowledged"),
             ],
-            approve=lambda _cmd: Approved("prefer install -D next time"),
+            approve=lambda _cmd: Approved("run it verbosely instead"),
         )
         agent.run_task("do it")
-        assert marker.exists()  # approved — the command ran
+        assert not marker.exists()  # HELD — the original command did NOT run
         result = tool_messages(agent.messages)[0]["content"]
-        assert "prefer install -D next time" in result
-        assert self._must_answer(result)
+        assert result.startswith("NOT RUN")
+        assert "run it verbosely instead" in result
+        assert "ADJUSTED" in result
 
     def test_no_comment_leaves_result_clean(self, tmp_path):
-        """A bare approval (no comment) must NOT carry the answer-first order —
-        the guidance appears only when the user actually typed something."""
-        marker = tmp_path / "plain59"
+        """A bare approval (no comment) runs the command as-is with no note."""
+        marker = tmp_path / "plain81"
         agent, _ = make_agent(
             [
                 model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
@@ -152,13 +153,15 @@ class TestApprovalComment:
         )
         agent.run_task("do it")
         assert marker.exists()
-        assert not self._must_answer(tool_messages(agent.messages)[0]["content"])
+        result = tool_messages(agent.messages)[0]["content"]
+        assert not self._stop_note(result)
+        assert "NOT RUN" not in result
 
-    def test_write_deny_with_comment_forces_answer_first(self, tmp_path):
+    def test_write_deny_with_comment_holds_and_orders_stop(self, tmp_path):
         from aish.agent import WRITE_DENIED
         from aish.approval import Denied
 
-        target = tmp_path / "note59.txt"
+        target = tmp_path / "note81.txt"
         agent, _ = make_agent(
             [
                 model_says(
@@ -176,12 +179,12 @@ class TestApprovalComment:
         result = tool_messages(agent.messages)[0]["content"]
         assert result.startswith(WRITE_DENIED)
         assert "put it under docs/ instead" in result
-        assert self._must_answer(result)
+        assert self._stop_note(result)
 
-    def test_write_approve_with_comment_writes_and_forces_answer_first(self, tmp_path):
+    def test_write_approve_with_comment_holds_for_adjustment(self, tmp_path):
         from aish.approval import Approved
 
-        target = tmp_path / "note59b.txt"
+        target = tmp_path / "note81b.txt"
         agent, _ = make_agent(
             [
                 model_says(
@@ -195,23 +198,24 @@ class TestApprovalComment:
             cwd=str(tmp_path),
         )
         agent.run_task("write it")
-        assert target.read_text().strip() == "hi"  # approved — the write landed
+        assert not target.exists()  # HELD — nothing was written
         result = tool_messages(agent.messages)[0]["content"]
+        assert result.startswith("NOT WRITTEN")
         assert "keep future notes under docs/" in result
-        assert self._must_answer(result)
+        assert "ADJUSTED" in result
 
 
-class TestCommentGate:
-    """#81: the answer-first rule is enforced programmatically, not just asked
-    for — while a verdict comment is unanswered, every tool call is refused so
-    the model cannot silently fold feedback into its next command."""
+class TestStopGate:
+    """#81: DENY + comment = STOP. The stop gate refuses every tool call until
+    the model addresses the concern in a TEXT-ONLY turn (which ends the task).
+    APPROVE + comment never arms it — approval means continue."""
 
-    def test_command_refused_until_text_only_reply(self, tmp_path):
+    def test_denied_command_stopped_until_text_only_reply(self, tmp_path):
         """Model denies-with-comment, then (eagerly) fires another command
         before replying: the gate refuses it. A same-turn text+tool does NOT
         satisfy the gate — only a TEXT-ONLY reply lifts it (and ends the
-        task, so the user can review before continuing)."""
-        from aish.agent import COMMENT_GATE_REFUSAL
+        task, so the user can steer before anything else runs)."""
+        from aish.agent import STOP_GATE_REFUSAL
         from aish.approval import Denied
 
         marker = tmp_path / "gated"
@@ -219,7 +223,7 @@ class TestCommentGate:
 
         def approve(cmd):
             seen.append(cmd)
-            return Denied("use -f on macOS")
+            return Denied("this could touch real data")
 
         agent, _ = make_agent(
             [
@@ -231,18 +235,44 @@ class TestCommentGate:
                     "on it",
                     tool_calls=[tool_call("run_command", command=f"touch {marker}")],
                 ),
-                # Only a TEXT-ONLY reply answers the comment.
-                model_says("You're right — I'll use -f. Not retrying the delete."),
+                # Only a TEXT-ONLY reply addresses the concern (and stops).
+                model_says("You're right — stopping. Here's what I'd do instead…"),
             ],
             approve=approve,
         )
         result = agent.run_task("clean up")
         results = [m["content"] for m in tool_messages(agent.messages)]
-        assert results[1] == COMMENT_GATE_REFUSAL  # eager command blocked
-        assert results[2] == COMMENT_GATE_REFUSAL  # text+tool also blocked
+        assert results[1] == STOP_GATE_REFUSAL  # eager command blocked
+        assert results[2] == STOP_GATE_REFUSAL  # text+tool also blocked
         assert result.startswith("You're right")  # the text-only reply is the answer
-        assert not marker.exists()  # touch never ran
+        assert not marker.exists()  # nothing else ran
         assert seen == ["rm x"]  # only the denied command reached approval
+
+    def test_approve_with_comment_does_not_stop(self, tmp_path):
+        """APPROVE + comment holds the original but does NOT arm the stop gate:
+        the model can re-propose an adjusted command in the very next turn and
+        the task continues (no forced text-only stop)."""
+        from aish.approval import Approved
+
+        original = tmp_path / "original"
+        adjusted = tmp_path / "adjusted"
+
+        def approve(cmd):
+            # Comment on the first command; approve the re-proposed one cleanly.
+            return Approved("use the adjusted path") if cmd == f"touch {original}" else True
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {original}")]),
+                # Re-proposes the adjusted command right away — allowed to run.
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {adjusted}")]),
+                model_says("done"),
+            ],
+            approve=approve,
+        )
+        assert agent.run_task("go") == "done"
+        assert not original.exists()  # HELD — original never ran
+        assert adjusted.exists()  # adjusted re-proposal ran without a stop
 
     def test_bare_denial_does_not_gate(self, tmp_path):
         """No comment → no gate: a plain deny must not block the next command."""
@@ -265,7 +295,7 @@ class TestCommentGate:
         assert marker.exists()  # second command ran without a text reply in between
 
     def test_gate_does_not_leak_across_tasks(self, tmp_path):
-        """A comment left armed at a task boundary (e.g. a prior task stopped
+        """A stop gate left armed at a task boundary (e.g. a prior task stopped
         before the model replied) must not gate the next task's first tool
         call — run_task resets the flag."""
         marker = tmp_path / "next_task"
