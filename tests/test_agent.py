@@ -1027,6 +1027,21 @@ class TestBangCommands:
         assert tmp_path.name in result
 
 
+def test_rebase_updates_cwd_in_system_prompt(tmp_path):
+    """After a /cd the system prompt's 'project directory' line must name the new
+    dir, so the model learns its cwd from the (rebuilt) prompt — not a user turn."""
+    from aish.agent import environment_context
+
+    start, moved = tmp_path / "start", tmp_path / "moved"
+    start.mkdir()
+    moved.mkdir()
+    agent, _ = make_agent([], cwd=str(start), context=environment_context(str(start)))
+    assert f"project directory (all commands run here): {start}" in agent.base_context
+    agent.rebase(str(moved))
+    assert f"project directory (all commands run here): {moved}" in agent.base_context
+    assert f"project directory (all commands run here): {start}" not in agent.base_context
+
+
 def test_failed_cd_is_echoed_not_silent(tmp_path):
     """Regression: !cd to a missing dir looked like a no-op because only
     successful cd echoed."""

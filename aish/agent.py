@@ -712,6 +712,21 @@ class Agent:
         if self.on_state is not None:
             self.on_state({"change": change, "path": path})
 
+    def _sync_cwd_in_context(self) -> None:
+        """Keep the system prompt's 'project directory' line current after a cwd
+        move, so the model reads its cwd from the (per-task / mid-task rebuilt)
+        system prompt — no disruptive conversation turn needed. Only that line
+        changes; the fixed session-start timestamp stays put, so an unchanged cwd
+        still yields a byte-identical prompt (prompt-cache friendly)."""
+        if not self.base_context:
+            return
+        self.base_context = re.sub(
+            r"(- project directory \(all commands run here\): ).*",
+            lambda m: m.group(1) + self.cwd,
+            self.base_context,
+            count=1,
+        )
+
     def restore_workspace(self, cwd: str | None, trusted: list[str]) -> None:
         """Reapply a session's persisted cwd + trusted dirs on resume/cold-open,
         setting state DIRECTLY (never through rebase/trust_root) so restoring
@@ -721,6 +736,7 @@ class Agent:
         if cwd and os.path.isdir(cwd):
             self.cwd = cwd
             self.roots[0] = Path(cwd).resolve()
+            self._sync_cwd_in_context()  # restored cwd shows in the system prompt too
         for path in trusted:
             resolved = Path(path).resolve()
             if resolved.is_dir() and not any(
@@ -1166,6 +1182,7 @@ class Agent:
         if result.startswith("ERROR"):
             return result
         self.roots[0] = Path(self.cwd).resolve()
+        self._sync_cwd_in_context()  # system prompt reflects the new cwd (no user turn)
         self._emit_workspace("cwd", self.cwd)  # the timeline marker; no grey echo
         if announce:
             self._append(
