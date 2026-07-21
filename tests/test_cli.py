@@ -1125,3 +1125,28 @@ class TestParseLearn:
         assert parse_learn("/lea") is not None
         assert parse_learn("/resume") is None
         assert parse_learn("/model gemini") is None
+        assert parse_learn("/feedback") is None  # feedback is not learn
+
+
+class TestParseFeedback:
+    def test_feedback_returns_flow_prompt(self):
+        from aish.cli import parse_feedback
+
+        prompt = parse_feedback("/feedback")
+        assert prompt is not None
+        assert "gh_issue" in prompt and "GitHub issue" in prompt
+        assert "aish-reply://Create the issue" in prompt  # approval chip
+
+    def test_initial_details_are_embedded(self):
+        from aish.cli import parse_feedback
+
+        prompt = parse_feedback("/feedback the dark mode toggle is broken")
+        assert "the dark mode toggle is broken" in prompt
+
+    def test_prefix_resolves_and_other_commands_pass_through(self):
+        from aish.cli import parse_feedback
+
+        assert parse_feedback("/feed") is not None
+        assert parse_feedback("/f") is not None  # unambiguous: only /feedback
+        assert parse_feedback("/learn") is None
+        assert parse_feedback("/model gemini") is None

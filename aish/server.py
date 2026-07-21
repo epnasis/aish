@@ -63,6 +63,7 @@ from .cli import (
     load_config,
     load_context_files,
     model_spec,
+    parse_feedback,
     parse_learn,
     rank_models,
     save_default_model,
@@ -1045,11 +1046,15 @@ class WebServer:
         session.busy = True
         session.bridge.emit({"type": "user", "text": text})
         if text.startswith("/"):
-            # /learn is the one slash command on web: the transcript shows
-            # what the user typed, the model gets the distillation prompt.
-            learn = parse_learn(text, getattr(session.agent, "lessons_path", None))
-            if learn is not None:
-                text = learn
+            # /learn and /feedback are the task-expanding slash commands on web:
+            # the transcript shows what the user typed, the model gets the
+            # expanded prompt (distillation, or the feedback issue-filing flow).
+            expanded = (
+                parse_learn(text, getattr(session.agent, "lessons_path", None))
+                or parse_feedback(text)
+            )
+            if expanded is not None:
+                text = expanded
         session.runner = asyncio.ensure_future(
             self._run_task(session, text, images, documents)
         )
