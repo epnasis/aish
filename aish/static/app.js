@@ -4505,7 +4505,6 @@ let dirPath = "";       // directory the picker is browsing
 let dirEntries = [];    // its subdirectories, as {name, items}
 let dirFiles = [];      // its files (display only, non-navigable)
 let dirTruncated = false; // listing hit the cap (huge folder)
-let dirSearchTimer = null;
 
 async function dirsFetch(url, params) {
   if (token) params.set("token", token);
@@ -4531,7 +4530,6 @@ async function browseDir(path) {
   dirEntries = body.dirs;
   dirFiles = body.files || [];
   dirTruncated = body.truncated || false;
-  $("dir-search").value = "";
   renderDirList();
 }
 
@@ -4675,31 +4673,20 @@ function renderDirCrumb() {
   });
 }
 
-function renderDirList(deepResults = null) {
+function renderDirList() {
   $("dir-current").textContent = abbreviatePath(dirPath);
   $("dir-use-label").textContent = `Set working directory to “${baseName(dirPath)}”`;
   renderDirCrumb();
   const list = $("dir-list");
   list.replaceChildren();
-  const raw = $("dir-search").value.trim();
-  const query = raw.toLowerCase();
 
-  // Escape hatch: a typed absolute (or ~) path jumps straight there —
-  // the rare case the browse/search flow doesn't cover.
-  if (raw.startsWith("/") || raw.startsWith("~")) {
-    const target = raw.startsWith("~") ? homeDir + raw.slice(1) : raw;
-    list.appendChild(dirRow(`Go to ${raw}`, null, () => browseDir(target), "up"));
-  }
-
-  if (!query) list.appendChild(sectionLabel("Folders"));
+  list.appendChild(sectionLabel("Folders"));
   if (dirPath !== "/") {
     list.appendChild(
       dirRow("..", null, () => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/"), "up")
     );
   }
-  const visible = dirEntries.filter(
-    ({ name }) => !name.startsWith(".") && (!query || name.toLowerCase().includes(query))
-  );
+  const visible = dirEntries.filter(({ name }) => !name.startsWith("."));
   for (const { name, items } of visible) {
     // items may be null (symlink, unreadable, or counting budget spent) — show no count then.
     const meta = items == null ? null : items === 1 ? "1 item" : `${items} items`;
@@ -4707,25 +4694,18 @@ function renderDirList(deepResults = null) {
       dirRow(name, meta, () => browseDir(dirPath === "/" ? `/${name}` : `${dirPath}/${name}`))
     );
   }
-  if (deepResults && deepResults.length) {
-    list.appendChild(sectionLabel("Everywhere"));
-    for (const p of deepResults) {
-      list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p), "recent"));
-    }
-  }
 
-  // Files aren't a search target and can't be navigated into — shown only on
-  // the unfiltered listing, dimmed, so the picker still previews folder
+  // Files are shown dimmed and non-navigable so the picker previews a folder's
   // contents without becoming a file browser.
   const visibleFiles = dirFiles.filter((n) => !n.startsWith("."));
-  if (!query && visibleFiles.length) {
+  if (visibleFiles.length) {
     list.appendChild(sectionLabel("Files"));
     for (const name of visibleFiles) list.appendChild(dirRow(name, null, null, "file"));
   }
-  if (dirTruncated && !query) {
+  if (dirTruncated) {
     const note = document.createElement("div");
     note.className = "dir-empty";
-    note.textContent = "Showing the first 1000 entries — narrow with search.";
+    note.textContent = "Showing the first 1000 entries.";
     list.appendChild(note);
   }
 }
@@ -4744,21 +4724,6 @@ $("dir-use").onclick = () => {
   send({ type: "cd", path: dirPath });
   closeSheets();
 };
-$("dir-search").addEventListener("input", () => {
-  renderDirList();
-  clearTimeout(dirSearchTimer);
-  const query = $("dir-search").value.trim();
-  if (query.length < 2) return;
-  dirSearchTimer = setTimeout(async () => {
-    try {
-      const body = await dirsFetch(
-        "/dirs/search", new URLSearchParams({ q: query, base: homeDir || dirPath })
-      );
-      if ($("dir-search").value.trim() === query) renderDirList(body.results);
-    } catch { /* deep search is best-effort */ }
-  }, 250);
-});
-
 // toast
 let toastTimer;
 function showToast(text) {

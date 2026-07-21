@@ -1487,11 +1487,6 @@ class WebServer:
     # to session roots: /cd already accepts any path the server user can
     # reach, so listing adds no capability — but it stays names-only and
     # token-gated.
-    DIR_SEARCH_MAX = 50
-    DIR_SEARCH_DEPTH = 5
-    DIR_SEARCH_VISIT_CAP = 20_000
-    DIR_SEARCH_SKIP = {".git", "node_modules", "venv", ".venv", "__pycache__", ".Trash"}
-
     _DIRS_TIMEOUT_S = 5.0  # kill a stuck listing after this and return 504
 
     # The listing runs in a SEPARATE process (see handle_dirs). Everything that
@@ -1589,80 +1584,6 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         if not isinstance(data, dict):
             return {"error": "listing failed"}, 500
         return data, data.pop("status", 200)
-
-    # Runs in the same killable subprocess as /dirs: the walk scandirs real dirs
-    # under `base` (e.g. an iCloud-backed ~/Documents), any of which can block.
-    _DIRS_SEARCH_SCRIPT = r"""
-import json, os, sys
-from pathlib import Path
-base_raw, query = sys.argv[1], sys.argv[2].strip().lower()
-visit_cap, depth_cap, max_out = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
-skip = set(filter(None, sys.argv[6].split(",")))
-
-def subsequence(needle, haystack):
-    it = iter(haystack)
-    return all(ch in it for ch in needle)
-
-try:
-    base = Path(base_raw).expanduser()
-    if not base.is_absolute():
-        print(json.dumps({"status": 400, "error": "base must be absolute"})); sys.exit(0)
-    base = base.resolve()
-    if not base.is_dir():
-        print(json.dumps({"status": 404, "error": "not a directory"})); sys.exit(0)
-    scored, queue, visited = [], [(base, 0)], 0
-    while queue and visited < visit_cap:
-        current, depth = queue.pop(0)
-        try:
-            with os.scandir(current) as entries:
-                children = [e.name for e in entries if e.is_dir(follow_symlinks=False)]
-        except OSError:
-            continue
-        visited += 1
-        for name in sorted(children, key=str.lower):
-            if name.startswith(".") or name in skip:
-                continue
-            lower = name.lower()
-            if lower.startswith(query):
-                tight = 0
-            elif query in lower:
-                tight = 1
-            elif subsequence(query, lower):
-                tight = 2
-            else:
-                tight = -1
-            child = current / name
-            if tight >= 0:
-                scored.append((tight, depth, len(name), str(child)))
-            if depth + 1 < depth_cap:
-                queue.append((child, depth + 1))
-    scored.sort()
-    print(json.dumps({"status": 200, "results": [p for _, _, _, p in scored[:max_out]]}))
-except Exception as ex:  # noqa: BLE001 - report any walk failure as 500
-    print(json.dumps({"status": 500, "error": str(ex)}))
-"""
-
-    async def handle_dirs_search(self, request) -> JSONResponse:
-        """GET /dirs/search?q=<term>&base=<abs> — bounded fuzzy walk under base
-        (depth- and visit-capped, hidden/noise dirs skipped), ranked
-        match-tightness first then shallowness. Runs in a killable subprocess so
-        a blocking scandir on an iCloud/networked dir can't freeze the server."""
-        if self.token and request.query_params.get("token") != self.token:
-            return JSONResponse({"error": "bad token"}, status_code=403)
-        query = request.query_params.get("q", "").strip()
-        if not query:
-            return JSONResponse({"results": []})
-        raw = request.query_params.get("base", "").strip() or str(Path.home())
-        data, status = await self._run_fs_child(
-            self._DIRS_SEARCH_SCRIPT,
-            raw,
-            query,
-            str(self.DIR_SEARCH_VISIT_CAP),
-            str(self.DIR_SEARCH_DEPTH),
-            str(self.DIR_SEARCH_MAX),
-            ",".join(sorted(self.DIR_SEARCH_SKIP)),
-        )
-        return JSONResponse(data, status_code=status)
 
     async def handle_upload(self, request) -> JSONResponse:
         """POST /upload?name=<filename>, raw body — no multipart, so no extra
@@ -1946,7 +1867,6 @@ def create_app(
             Route("/export/answer", server.handle_export_answer, methods=["POST"]),
             Route("/export/session", server.handle_export_session, methods=["GET"]),
             Route("/dirs", server.handle_dirs, methods=["GET"]),
-            Route("/dirs/search", server.handle_dirs_search, methods=["GET"]),
             Route("/", serve_index, methods=["GET"]),
             Route("/index.html", serve_index, methods=["GET"]),
             Mount("/", StaticFiles(directory=STATIC_DIR, html=True)),

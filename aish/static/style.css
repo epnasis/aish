@@ -1687,7 +1687,6 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ---- directory picker: step 1 (recents) vs step 2 (browse) ---- */
 #dir-sheet:not(.browsing) #dir-crumb,
-#dir-sheet:not(.browsing) .ws-row,
 #dir-sheet:not(.browsing) .dir-action { display: none; }
 
 /* Back-to-recents chevron: only while browsing (step 2), so the list no longer
