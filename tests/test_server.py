@@ -2045,15 +2045,27 @@ class TestDirListing:
             body = client.get(f"/dirs?path={base}").json()
             assert body["path"] == str(base)
             # Folders list with items=None (no per-subfolder count — that extra
-            # scandir could block in-kernel and freeze the server; #86).
+            # scandir could block in-kernel and freeze the server; #86). Noise
+            # dirs like .git are filtered server-side (#87).
             assert body["dirs"] == [
-                {"name": ".git", "items": None},
                 {"name": "alpha", "items": None},
                 {"name": "beta", "items": None},
                 {"name": "projects", "items": None},
             ]
             assert body["files"] == ["file.txt"]
             assert body["truncated"] is False
+
+    def test_dirs_filters_noise_dirs(self, app_env, tmp_path):
+        base = tmp_path / "proj"
+        for d in ("src", "node_modules", ".git", "venv", "__pycache__"):
+            (base / d).mkdir(parents=True)
+        (base / ".DS_Store").write_text("", encoding="utf-8")
+        (base / "main.py").write_text("", encoding="utf-8")
+        client, _ = make_client(app_env, [])
+        with client:
+            body = client.get(f"/dirs?path={base}").json()
+            assert [d["name"] for d in body["dirs"]] == ["src"]  # noise dirs gone
+            assert body["files"] == ["main.py"]  # .DS_Store filtered
 
     def test_dirs_listing_timeout_returns_504(self, app_env, tmp_path, monkeypatch):
         """A hung listing (blocking scandir/stat on a TCC-gated or networked

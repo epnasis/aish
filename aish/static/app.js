@@ -4475,6 +4475,7 @@ function rememberDir(path) {
 let dirPath = "";       // directory the picker is browsing
 let dirEntries = [];    // its subdirectories, as {name, items}
 let dirFiles = [];      // its files (display only, non-navigable)
+let dirTruncated = false; // listing hit the cap (huge folder)
 let dirSearchTimer = null;
 
 async function dirsFetch(url, params) {
@@ -4486,19 +4487,53 @@ async function dirsFetch(url, params) {
 }
 
 async function browseDir(path) {
+  $("dir-sheet").classList.add("browsing");
+  setDirLoading(true); // a browse can take up to the backend's timeout (iCloud/slow dirs)
   let body;
   try {
     body = await dirsFetch("/dirs", new URLSearchParams({ path }));
   } catch (err) {
-    showToast(`can't open: ${err.message}`);
+    setDirLoading(false);
+    renderDirUnlistable(path, err.message);
     return;
   }
+  setDirLoading(false);
   dirPath = body.path;
   dirEntries = body.dirs;
   dirFiles = body.files || [];
+  dirTruncated = body.truncated || false;
   $("dir-search").value = "";
-  $("dir-sheet").classList.add("browsing");
   renderDirList();
+}
+
+function setDirLoading(on) {
+  $("dir-list").classList.toggle("loading", on);
+}
+
+// A folder we couldn't list — the backend timed out reading it (an iCloud or
+// networked folder the headless server can't materialize). We can't show its
+// contents, but SELECTING it as the working dir doesn't need a listing (cd only
+// stats the path), so keep it reachable via ".." and the "Use this folder"
+// button, which still targets this path.
+function renderDirUnlistable(path, msg) {
+  dirPath = path;
+  $("dir-sheet").classList.add("browsing");
+  $("dir-current").textContent = abbreviatePath(path);
+  $("dir-use-label").textContent = `Set working directory to “${baseName(path)}”`;
+  renderDirCrumb();
+  const list = $("dir-list");
+  list.replaceChildren();
+  if (dirPath !== "/") {
+    list.appendChild(
+      dirRow("..", null, () => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/"), "up")
+    );
+  }
+  const note = document.createElement("div");
+  note.className = "dir-empty";
+  note.textContent =
+    `Couldn't open this folder (${msg}) — it may be an iCloud or network folder ` +
+    `the server can't read. You can still set it as the working directory below.`;
+  list.appendChild(note);
 }
 
 // Step 1 of the picker: recent folders + "Choose another folder…" → the
@@ -4605,8 +4640,6 @@ function renderDirList(deepResults = null) {
   const raw = $("dir-search").value.trim();
   const query = raw.toLowerCase();
 
-  if (!query) list.appendChild(dirRow("Recent folders", null, showDirRecents, "up"));
-
   // Escape hatch: a typed absolute (or ~) path jumps straight there —
   // the rare case the browse/search flow doesn't cover.
   if (raw.startsWith("/") || raw.startsWith("~")) {
@@ -4645,6 +4678,12 @@ function renderDirList(deepResults = null) {
     list.appendChild(sectionLabel("Files"));
     for (const name of visibleFiles) list.appendChild(dirRow(name, null, null, "file"));
   }
+  if (dirTruncated && !query) {
+    const note = document.createElement("div");
+    note.className = "dir-empty";
+    note.textContent = "Showing the first 1000 entries — narrow with search.";
+    list.appendChild(note);
+  }
 }
 
 function openDirSheet() {
@@ -4654,6 +4693,7 @@ function openDirSheet() {
 }
 
 $("cwd-chip").onclick = () => openDirSheet();
+$("dir-back").onclick = () => showDirRecents(); // back to step 1 (recents) from browsing
 $("dir-use").onclick = () => {
   if (!dirPath) return;
   rememberDir(dirPath);

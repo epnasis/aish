@@ -1669,6 +1669,25 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 #dir-sheet:not(.browsing) #dir-crumb,
 #dir-sheet:not(.browsing) .ws-row,
 #dir-sheet:not(.browsing) .dir-action { display: none; }
+
+/* Back-to-recents chevron: only while browsing (step 2), so the list no longer
+   needs a "Recent folders" row and its duplicate back-chevron (#87). */
+.dir-back {
+  display: none; background: none; border: 0; padding: 4px;
+  margin: -4px 4px -4px -4px; color: var(--blue); cursor: pointer;
+}
+.dir-back svg { width: 24px; height: 24px; display: block; }
+#dir-sheet.browsing .dir-back { display: inline-flex; }
+
+/* Loading feedback while a browse fetch is in flight (iCloud/slow dirs can take
+   up to the backend timeout, #87). */
+#dir-list.loading { position: relative; pointer-events: none; opacity: 0.5; min-height: 64px; }
+#dir-list.loading::after {
+  content: ""; position: absolute; top: 20px; left: 50%; width: 22px; height: 22px;
+  margin-left: -11px; border: 2px solid var(--sep2); border-top-color: var(--blue);
+  border-radius: 50%; animation: spin 0.7s linear infinite;
+}
+.dir-empty { padding: 14px 12px; color: var(--dim); font-size: 14px; line-height: 1.45; }
 .dir-choose {
   display: flex; align-items: center; justify-content: center; gap: 8px;
   width: calc(100% - 8px); margin: 12px 4px 4px; padding: 13px;

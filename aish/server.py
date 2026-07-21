@@ -1501,6 +1501,12 @@ class WebServer:
 import json, os, sys
 from pathlib import Path
 CAP = 1000
+# Build/dependency/system noise never worth showing in a directory picker (#87).
+IGNORE_DIRS = {
+    ".git", "node_modules", "venv", ".venv", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".tox", ".Trash", ".Spotlight-V100", ".fseventsd",
+}
+IGNORE_FILES = {".DS_Store", "Thumbs.db", ".localized"}
 raw = (sys.argv[1] if len(sys.argv) > 1 else "").strip() or str(Path.home())
 try:
     p = Path(raw).expanduser()
@@ -1516,7 +1522,11 @@ try:
                 is_dir = e.is_dir(follow_symlinks=True)
             except OSError:
                 continue
-            (dirs if is_dir else files).append(e.name)
+            if is_dir:
+                if e.name not in IGNORE_DIRS:
+                    dirs.append(e.name)
+            elif e.name not in IGNORE_FILES:
+                files.append(e.name)
     print(json.dumps({
         "status": 200, "path": str(p),
         "dirs": [{"name": n, "items": None} for n in dirs[:CAP]],
