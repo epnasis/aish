@@ -1641,6 +1641,10 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .queue-edit { color: var(--blue); }
 .queue-edit svg { width: 16px; height: 16px; }
 .queue-remove:active, .queue-edit:active { opacity: 0.5; }
+/* the pending-cwd card (#92): a solid blue-accented border + icon set it apart
+   from message chips and signal it applies first. */
+.queue-chip.cwd { border-style: solid; border-color: var(--blue); }
+.queue-chip.cwd .queue-ico { color: var(--blue); }
 
 /* ---- full-page Sessions screen (design Screen 1) ---- */
 .screen {
