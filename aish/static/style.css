@@ -1168,6 +1168,33 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   caret-color: var(--green);
 }
 
+/* ---- mic / speech-recognition diagnostic (/mic) ---- */
+.mic-body { padding: 4px 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+.mic-support { font-size: 13px; line-height: 1.5; color: var(--dim); }
+.mic-support .ok { color: var(--green); font-weight: 600; }
+.mic-support .bad { color: var(--red); font-weight: 600; }
+.mic-langs { display: flex; gap: 8px; }
+.mic-lang {
+  flex: 1; padding: 12px; border-radius: 12px; font-size: 16px; font-weight: 600;
+  background: var(--chip-bg); color: var(--fg); border: 1px solid transparent;
+}
+.mic-lang.active { border-color: var(--blue); color: var(--blue); background: var(--blue-glow); }
+.mic-toggle {
+  padding: 18px; border-radius: 14px; border: none; font-size: 19px; font-weight: 700;
+  background: var(--blue); color: #fff;
+}
+.mic-toggle.listening { background: var(--red); }
+.mic-toggle:active { opacity: 0.8; }
+.mic-field { display: flex; flex-direction: column; gap: 4px; }
+.mic-lbl { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--dim); }
+.mic-interim { min-height: 24px; font-size: 18px; color: var(--dim); }
+.mic-final { min-height: 24px; font-size: 18px; font-weight: 600; color: var(--fg); }
+.mic-log {
+  margin: 0; max-height: 180px; overflow-y: auto; padding: 10px 12px;
+  background: var(--bg-elev); border-radius: 10px; font-size: 12px; line-height: 1.5;
+  color: var(--dim); white-space: pre-wrap; word-break: break-word;
+}
+
 /* ---- sheets (iOS bottom sheets) ---- */
 #backdrop {
   position: fixed;

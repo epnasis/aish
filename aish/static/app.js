@@ -3385,6 +3385,7 @@ const SLASH_COMMANDS = [
   ["/cd", "change working directory (re-anchors approval root)"],
   ["/add-dir", "allow auto-approved work in another tree"],
   ["/jobs", "list background jobs"],
+  ["/mic", "test speech recognition (mic diagnostic)"],
   ["/help", "about aish web"],
 ];
 
@@ -3653,6 +3654,7 @@ function handleSlash(text) {
       return sent;
     }
     case "/jobs": openSheet("workspace-sheet"); return send({ type: "jobs" });
+    case "/mic": openMicSheet(); return true;
     case "/help": openSheet("workspace-sheet"); return true;
     case "/quit": case "/exit": showToast("just close the tab — sessions persist"); return true;
     case "/debug": reportViewport("manual"); showToast("viewport state sent to server log"); return true;
@@ -3887,12 +3889,118 @@ function openSheet(id) {
   $(id).hidden = false;
   $("backdrop").hidden = false;
 }
+
+// ---- mic / speech-recognition diagnostic (/mic) --------------------------
+// A throwaway probe for whether webkitSpeechRecognition actually works in THIS
+// runtime — crucially, when opened inside the installed PWA (standalone), where
+// iOS has historically broken it. Shows support, the run context, live interim
+// + final transcript, and every recognition event, with an en/pl language
+// switch so both languages can be checked. Gates the Car Mode feature (#97).
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let micRec = null;
+let micLang = "en-US";
+let micListening = false;
+
+function micLogLine(msg) {
+  const log = $("mic-log");
+  const t = new Date().toLocaleTimeString([], { hour12: false }) +
+    "." + String(Date.now() % 1000).padStart(3, "0");
+  log.textContent += `${t}  ${msg}\n`;
+  log.scrollTop = log.scrollHeight;
+}
+
+function micContext() {
+  const standalone = window.matchMedia("(display-mode: standalone)").matches ||
+    window.navigator.standalone === true;
+  const support = SpeechRec
+    ? '<span class="ok">SpeechRecognition: supported</span>'
+    : '<span class="bad">SpeechRecognition: NOT available</span>';
+  const ctx = standalone
+    ? '<span class="ok">running in: installed PWA (standalone)</span>'
+    : "running in: browser tab";
+  $("mic-support").innerHTML = `${support}<br>${ctx}`;
+}
+
+function openMicSheet() {
+  openSheet("mic-sheet");
+  micContext();
+  $("mic-interim").textContent = "—";
+  $("mic-final").textContent = "—";
+  $("mic-log").textContent = "";
+  micLogLine(`ready · lang ${micLang}`);
+}
+
+function startMic() {
+  if (!SpeechRec) { micLogLine("cannot start: no SpeechRecognition in this browser"); return; }
+  try {
+    micRec = new SpeechRec();
+    micRec.lang = micLang;
+    micRec.continuous = true;
+    micRec.interimResults = true;
+    micRec.onstart = () => micLogLine("onstart (mic live — say something)");
+    micRec.onaudiostart = () => micLogLine("onaudiostart");
+    micRec.onspeechstart = () => micLogLine("onspeechstart");
+    micRec.onspeechend = () => micLogLine("onspeechend");
+    micRec.onresult = (e) => {
+      let interim = "", final = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const chunk = e.results[i][0].transcript;
+        if (e.results[i].isFinal) final += chunk; else interim += chunk;
+      }
+      if (interim) $("mic-interim").textContent = interim;
+      if (final) {
+        $("mic-final").textContent = final;
+        micLogLine(`onresult FINAL: ${final.trim()}`);
+      }
+    };
+    micRec.onerror = (e) => micLogLine(`onerror: ${e.error}${e.message ? " — " + e.message : ""}`);
+    micRec.onend = () => {
+      micListening = false;
+      setMicToggle();
+      micLogLine("onend (recognition stopped — iOS often ends after a silence)");
+    };
+    micRec.start();
+    micListening = true;
+    setMicToggle();
+  } catch (err) {
+    micLogLine(`start() threw: ${err.name} — ${err.message}`);
+    micListening = false;
+    setMicToggle();
+  }
+}
+
+function stopMic() {
+  if (micRec) {
+    try { micRec.stop(); } catch { /* already stopped */ }
+    micRec = null;
+  }
+  micListening = false;
+  setMicToggle();
+}
+
+function setMicToggle() {
+  const btn = $("mic-toggle");
+  if (!btn) return;
+  btn.textContent = micListening ? "Stop" : "Start listening";
+  btn.classList.toggle("listening", micListening);
+}
+
+$("mic-toggle").onclick = () => (micListening ? stopMic() : startMic());
+for (const btn of document.querySelectorAll(".mic-lang")) {
+  btn.onclick = () => {
+    micLang = btn.dataset.lang;
+    for (const b of document.querySelectorAll(".mic-lang")) b.classList.toggle("active", b === btn);
+    micLogLine(`language → ${micLang}`);
+    if (micListening) { stopMic(); startMic(); } // restart so the new lang takes
+  };
+}
 function closeSheets() {
   // Blur a focused sheet input before hiding it: merely hiding leaves iOS to
   // dismiss the keyboard on its own schedule, and the layout-viewport pan it
   // caused can then settle without any visualViewport event (#8).
   const active = document.activeElement;
   if (active && active.closest(".sheet, .screen")) active.blur();
+  if (micListening) stopMic(); // don't leave the mic live after closing /mic
   for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
   for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
   $("sessions-sheet").hidden = true; // the full-page Sessions view

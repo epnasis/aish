@@ -239,6 +239,36 @@
   </div>
 </div>
 
+<!-- mic / speech-recognition diagnostic (/mic) — tests webkitSpeechRecognition
+     in this exact context (must run in the installed PWA to be a valid test) -->
+<div id="mic-sheet" class="sheet" hidden>
+  <div class="grabber"></div>
+  <div class="sheet-head">
+    <strong class="grow">Speech recognition test</strong>
+    <button class="close" aria-label="close" data-close="mic-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
+  </div>
+  <div class="mic-body">
+    <div id="mic-support" class="mic-support"></div>
+    <div class="mic-langs">
+      <button class="mic-lang active" data-lang="en-US">English</button>
+      <button class="mic-lang" data-lang="pl-PL">Polski</button>
+    </div>
+    <button id="mic-toggle" class="mic-toggle">Start listening</button>
+    <div class="mic-field">
+      <span class="mic-lbl">Interim</span>
+      <div id="mic-interim" class="mic-interim">—</div>
+    </div>
+    <div class="mic-field">
+      <span class="mic-lbl">Final</span>
+      <div id="mic-final" class="mic-final">—</div>
+    </div>
+    <div class="mic-field">
+      <span class="mic-lbl">Events</span>
+      <pre id="mic-log" class="mic-log"></pre>
+    </div>
+  </div>
+</div>
+
 <div id="dir-sheet" class="sheet" hidden>
   <div class="grabber"></div>
   <div class="sheet-head">
