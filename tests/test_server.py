@@ -1468,14 +1468,14 @@ class TestExportAssembly:
 
     def test_pdf_embeds_unicode_font_for_polish(self):
         # Regression: the PDF built-in fonts (Helvetica/Courier) have no Polish
-        # glyphs and render them as black boxes. The bundled DejaVu font must be
-        # embedded so ą/ć/ę/ł/… actually draw.
+        # glyphs and render them as black boxes. The bundled Source Sans 3 /
+        # Source Code Pro fonts must be embedded so ą/ć/ę/ł/… actually draw.
         from aish.export import render_answer_pdf
 
         data = render_answer_pdf("Zażółć gęślą jaźń — → `ąęść`", "t")
         assert data.startswith(b"%PDF")
-        assert b"DejaVuSans" in data  # embedded body font
-        assert b"DejaVuSansMono" in data  # embedded code font
+        assert b"SourceSans3" in data  # embedded body font
+        assert b"SourceCodePro" in data  # embedded code font
 
     def test_safe_pdf_filename_slugs_and_defaults(self):
         from aish.export import safe_pdf_filename
@@ -1483,6 +1483,20 @@ class TestExportAssembly:
         assert safe_pdf_filename("rename all/the photos!") == "rename-all-the-photos.pdf"
         assert safe_pdf_filename("") == "aish-export.pdf"
         assert safe_pdf_filename("   ", "fb") == "fb.pdf"
+
+    def test_safe_pdf_filename_transliterates_non_ascii(self):
+        # Non-ASCII letters must transliterate to ASCII, not be stripped to a
+        # run of dashes. ł/Ł is the load-bearing case (it doesn't decompose
+        # under NFKD), so it needs the explicit map.
+        from aish.export import safe_pdf_filename
+
+        name = safe_pdf_filename("Zażółć gęślą jaźń")
+        data = name.removesuffix(".pdf")
+        assert data.isascii()
+        assert "----" not in data  # letters weren't stripped into dash runs
+        assert "Zazolc" in data
+        assert "jazn" in data
+        assert name == "Zazolc-gesla-jazn.pdf"
 
 
 class TestExportEndpoints:

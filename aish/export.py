@@ -14,6 +14,7 @@ thinking/tool/working steps and keeps just the answers the user saw.
 
 import io
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -22,20 +23,37 @@ from pathlib import Path
 
 _UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 
-# Bundled DejaVu (Unicode) fonts — the PDF built-ins (Helvetica/Courier) have
-# no Polish/CE glyphs and render them as black boxes. DejaVu covers Latin
-# Extended-A, arrows, typographic punctuation, etc. Embedded via @font-face
-# with absolute paths so the glyphs actually draw (and the PDF is portable).
+# Letters that survive NFKD normalization intact (no combining-mark
+# decomposition), so an explicit ASCII fallback is the only way to keep them.
+# ł/Ł are the load-bearing case for Polish ("Zażółć" would otherwise lose it).
+_TRANSLIT_MAP = str.maketrans(
+    {
+        "ł": "l", "Ł": "L",
+        "đ": "d", "Đ": "D",
+        "ø": "o", "Ø": "O",
+        "ß": "ss",
+        "æ": "ae", "Æ": "AE",
+        "œ": "oe", "Œ": "OE",
+        "þ": "th", "Þ": "Th",
+        "ð": "d", "Ð": "D",
+    }
+)
+
+# Bundled Source Sans 3 / Source Code Pro (Adobe, SIL OFL 1.1) — the PDF
+# built-ins (Helvetica/Courier) have no Polish/CE glyphs and render them as
+# black boxes. These cover Latin Extended-A, arrows, typographic punctuation,
+# etc. Embedded via @font-face with the family names below so the glyphs
+# actually draw (and the PDF is portable). No italic face ships — italic body
+# text falls back to the regular Source Sans 3 face.
 _FONT_DIR = Path(__file__).parent / "fonts"
 
 
 def _font_face_css() -> str:
     faces = [
-        ("aishSans", "DejaVuSans.ttf", "normal", "normal"),
-        ("aishSans", "DejaVuSans-Bold.ttf", "bold", "normal"),
-        ("aishSans", "DejaVuSans-Oblique.ttf", "normal", "italic"),
-        ("aishMono", "DejaVuSansMono.ttf", "normal", "normal"),
-        ("aishMono", "DejaVuSansMono-Bold.ttf", "bold", "normal"),
+        ("aishSans", "SourceSans3-Regular.ttf", "normal", "normal"),
+        ("aishSans", "SourceSans3-Bold.ttf", "bold", "normal"),
+        ("aishMono", "SourceCodePro-Regular.ttf", "normal", "normal"),
+        ("aishMono", "SourceCodePro-Bold.ttf", "bold", "normal"),
     ]
     return "\n".join(
         f'@font-face {{ font-family: "{fam}"; '
@@ -87,8 +105,18 @@ _MD_EXTENSIONS = ["fenced_code", "tables", "sane_lists", "nl2br"]
 
 
 def safe_pdf_filename(title: str, fallback: str = "aish-export") -> str:
-    """A download-safe `<slug>.pdf` name derived from a title."""
-    slug = _UNSAFE_FILENAME.sub("-", (title or "").strip()).strip("-._")
+    """A download-safe `<slug>.pdf` name derived from a title.
+
+    Non-ASCII letters are transliterated to ASCII rather than stripped, so
+    "Zażółć gęślą jaźń" becomes "Zazolc-gesla-jazn" instead of "Za----".
+    Most accented letters decompose under NFKD to a base letter + combining
+    mark (dropped here); the few that don't (notably ł/Ł) go through an
+    explicit map first.
+    """
+    ascii_text = unicodedata.normalize("NFKD", (title or "").translate(_TRANSLIT_MAP))
+    ascii_text = "".join(ch for ch in ascii_text if not unicodedata.combining(ch))
+    ascii_text = ascii_text.encode("ascii", "ignore").decode("ascii")
+    slug = _UNSAFE_FILENAME.sub("-", ascii_text.strip()).strip("-._")
     slug = slug[:60] or fallback
     return f"{slug}.pdf"
 
