@@ -3685,18 +3685,59 @@ function handleSlash(text) {
 let attachments = []; // {name, path}
 
 // The + button opens the composer actions popover (attach / reference / slash
-// / photo); it sits above the button, iOS-style.
+// / photo / feedback / terminal); it sits above the button, iOS-style.
+//
+// The menu is position:fixed and placed with viewport coordinates read from the
+// + button's rect. On iPhone, tapping + blurs the input, so the keyboard
+// dismisses and the visual viewport slides back DOWN — a placement captured
+// before that settles leaves the menu stranded mid-screen (#103). So the
+// coordinates are recomputed from the CURRENT button rect: once on open, again
+// on the next frames, and live on every visualViewport resize/scroll while the
+// menu is open. offsetHeight is read after the menu is laid out (hidden-then-
+// measured) because the 6-item menu is taller than the compose bar.
+function positionComposerMenu() {
+  const menu = $("composer-actions");
+  if (menu.hidden) return; // settle timers can fire after the menu was closed
+  const anchor = $("attach").getBoundingClientRect();
+  menu.style.left = `${anchor.left}px`;
+  menu.style.top = `${anchor.top - menu.offsetHeight - 6}px`;
+}
+
+let composerMenuTracking = false;
+
+function stopComposerMenuTracking() {
+  if (!composerMenuTracking) return;
+  composerMenuTracking = false;
+  if (window.visualViewport) {
+    visualViewport.removeEventListener("resize", positionComposerMenu);
+    visualViewport.removeEventListener("scroll", positionComposerMenu);
+  }
+}
+
+function openComposerMenu() {
+  const menu = $("composer-actions");
+  menu.style.visibility = "hidden"; // measure offsetHeight before placing
+  menu.hidden = false;
+  positionComposerMenu();
+  menu.style.visibility = "";
+  $("backdrop").hidden = false;
+  if (window.visualViewport && !composerMenuTracking) {
+    composerMenuTracking = true;
+    visualViewport.addEventListener("resize", positionComposerMenu);
+    visualViewport.addEventListener("scroll", positionComposerMenu);
+  }
+  // The keyboard dismissal (a side effect of blurring the input) can settle
+  // WITHOUT any visualViewport event, so re-place across the animation window
+  // too — each call is a cheap no-op once the rect has stopped moving.
+  requestAnimationFrame(positionComposerMenu);
+  for (const ms of [50, 150, 350, 700]) setTimeout(positionComposerMenu, ms);
+}
+
 $("attach").onclick = () => {
   if (cmdMode) { exitCmdMode(); return; } // the + is an × while in terminal mode
   const menu = $("composer-actions");
   if (!menu.hidden) { closeSheets(); return; }
-  menu.style.visibility = "hidden";
-  menu.hidden = false;
-  const anchor = $("attach").getBoundingClientRect();
-  menu.style.left = `${anchor.left}px`;
-  menu.style.top = `${anchor.top - menu.offsetHeight - 6}px`;
-  menu.style.visibility = "";
-  $("backdrop").hidden = false;
+  openComposerMenu();
 };
 
 $("composer-actions").addEventListener("click", (e) => {
@@ -4020,6 +4061,7 @@ function closeSheets() {
   const active = document.activeElement;
   if (active && active.closest(".sheet, .screen")) active.blur();
   if (micListening) stopMic(); // don't leave the mic live after closing /mic
+  stopComposerMenuTracking(); // drop the #103 viewport listeners with the menu
   for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
   for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
   $("sessions-sheet").hidden = true; // the full-page Sessions view
