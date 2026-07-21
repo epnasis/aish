@@ -953,7 +953,9 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   z-index: 15;
 }
 #scroll-down { bottom: calc(76px + env(safe-area-inset-bottom)); }
-#scroll-top { top: calc(72px + env(safe-area-inset-top)); }
+/* 104px clears both header rows (nav-row + context-bar, ~94px tall) with a
+   10px gap so the button never sits over the directory/model chips (#82). */
+#scroll-top { top: calc(104px + env(safe-area-inset-top)); }
 #scroll-down[hidden], #scroll-top[hidden] { display: none; }
 #scroll-down svg, #scroll-top svg { width: 20px; height: 20px; }
 #scroll-down:active, #scroll-top:active { opacity: 0.6; }
