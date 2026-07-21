@@ -1884,6 +1884,43 @@ class TestExportAssembly:
         assert b"SourceSans3" in data  # embedded body font
         assert b"SourceCodePro" in data  # embedded code font
 
+    def test_export_strips_web_only_bits(self):
+        # Quick-reply chips, the [no-chips] tag, and emoji variation selectors
+        # are web-only / presentational — they must not reach the PDF markdown.
+        from aish.export import _strip_web_only
+
+        out = _strip_web_only(
+            "Answer text.\n\n[Yes](aish-reply://Yes) [No](aish-reply://No)\n[no-chips]\n"
+            "Heart ❤️ done."
+        )
+        assert "aish-reply" not in out
+        assert "no-chips" not in out.lower()
+        assert "️" not in out  # variation selector stripped
+        assert "Answer text." in out and "Heart ❤ done." in out
+
+    def test_export_wraps_emoji_and_embeds_emoji_font(self):
+        # reportlab can't render colour emoji; the bundled Noto Emoji outline
+        # font is embedded and emoji runs are wrapped to select it.
+        from aish.export import _wrap_emoji, render_answer_pdf
+
+        wrapped = _wrap_emoji("Ship it \U0001F680 now")
+        assert 'font-family: aishEmoji' in wrapped and "\U0001F680" in wrapped
+        # a symbol Source Sans already has is NOT rerouted to the emoji font
+        assert _wrap_emoji("arrow → here") == "arrow → here"
+
+        data = render_answer_pdf("Launch \U0001F680 and celebrate \U0001F389", "t")
+        assert data.startswith(b"%PDF")
+        assert b"NotoEmoji" in data
+
+    def test_export_wraps_long_code_to_page(self):
+        # A very long unbreakable line in a code block must not error and the
+        # page CSS carries the CJK wrap that fits it to the page width.
+        from aish.export import _PAGE_CSS, render_answer_pdf
+
+        assert "-pdf-word-wrap: CJK" in _PAGE_CSS
+        data = render_answer_pdf("```\n" + ("x" * 400) + "\n```\n", "t")
+        assert data.startswith(b"%PDF")
+
     def test_safe_pdf_filename_slugs_and_defaults(self):
         from aish.export import safe_pdf_filename
 

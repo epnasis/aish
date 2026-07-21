@@ -54,6 +54,10 @@ def _font_face_css() -> str:
         ("aishSans", "SourceSans3-Bold.ttf", "bold", "normal"),
         ("aishMono", "SourceCodePro-Regular.ttf", "normal", "normal"),
         ("aishMono", "SourceCodePro-Bold.ttf", "bold", "normal"),
+        # Monochrome emoji fallback (Noto Emoji, OFL): reportlab can't render
+        # colour emoji, so this covers pictographs as black outlines. Emoji runs
+        # are wrapped in a span with this family (reportlab does no auto-fallback).
+        ("aishEmoji", "NotoEmoji-Regular.ttf", "normal", "normal"),
     ]
     return "\n".join(
         f'@font-face {{ font-family: "{fam}"; '
@@ -87,12 +91,17 @@ ul, ol { margin: 0 0 8pt; }
 li { margin: 0 0 3pt; }
 code { font-family: "aishMono"; font-size: 9.5pt;
        background: #f2f2f7; color: #1c1c1e; }
+/* -pdf-word-wrap: CJK breaks long unbreakable strings at any character so code
+   output / command dumps / wide table cells wrap to the page instead of running
+   off the right edge (xhtml2pdf maps it to reportlab's wordWrap='CJK'). */
 pre { font-family: "aishMono"; font-size: 9pt; background: #f2f2f7;
-      color: #1c1c1e; padding: 8pt; margin: 0 0 8pt; }
+      color: #1c1c1e; padding: 8pt; margin: 0 0 8pt;
+      white-space: pre-wrap; -pdf-word-wrap: CJK; }
 blockquote { color: #6c6c70; margin: 0 0 8pt; padding: 0 0 0 10pt;
              border-left: 2pt solid #d1d1d6; }
 table { border-collapse: collapse; margin: 0 0 8pt; }
-th, td { border: 0.5pt solid #d1d1d6; padding: 4pt 7pt; font-size: 10pt; }
+th, td { border: 0.5pt solid #d1d1d6; padding: 4pt 7pt; font-size: 10pt;
+         -pdf-word-wrap: CJK; }
 th { background: #f2f2f7; }
 hr { border: none; border-top: 0.5pt solid #d1d1d6; margin: 14pt 0; }
 .aish-doc-header { color: #8e8e93; font-size: 9pt; margin: 0 0 14pt;
@@ -152,10 +161,93 @@ def assemble_session_markdown(messages: list[dict], title: str) -> str:
     return "\n\n---\n\n".join(answers)
 
 
+# Web-only interactive bits that make no sense in a printed PDF.
+_AISH_REPLY_RE = re.compile(r"\[[^\]]*\]\(\s*aish-reply://[^)]*\)")
+_NO_CHIPS_RE = re.compile(r"\[no-chips\]", re.IGNORECASE)
+
+
+_VARIATION_SELECTORS_RE = re.compile(r"[︀-️]")
+
+
+def _drop_variation_selectors(text: str) -> str:
+    """Emoji variation selectors (U+FE0E/FE0F) only pick colour-vs-text
+    presentation, which is moot in a monochrome PDF — and left in, they render
+    as a stray tofu box after their base glyph. Strip them everywhere."""
+    return _VARIATION_SELECTORS_RE.sub("", text or "")
+
+
+def _strip_web_only(markdown_text: str) -> str:
+    """Drop quick-reply chips ([label](aish-reply://…)) and the [no-chips] tag,
+    then tidy the whitespace they leave behind."""
+    text = _AISH_REPLY_RE.sub("", markdown_text or "")
+    text = _NO_CHIPS_RE.sub("", text)
+    text = _drop_variation_selectors(text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+_EMOJI_JOINERS = frozenset({0x200D, 0xFE0E, 0xFE0F})  # ZWJ + variation selectors
+_TAG_SPLIT_RE = re.compile(r"(<[^>]*>)")
+_emoji_cps: frozenset[int] | None = None
+
+
+def _emoji_codepoints() -> frozenset[int]:
+    """Codepoints to route to the emoji font: those the body font (Source Sans)
+    lacks but the emoji font has, plus skin-tone modifiers. Text symbols Source
+    Sans already draws (→ ± ✓ …) keep their normal look. Cached (font cmaps are
+    read once, lazily, so import stays cheap)."""
+    global _emoji_cps
+    if _emoji_cps is None:
+        from reportlab.pdfbase.ttfonts import TTFont  # reportlab is a hard dep
+
+        def cmap(name: str) -> set[int]:
+            return set(TTFont(name, str(_FONT_DIR / name)).face.charToGlyph)
+
+        sans = cmap("SourceSans3-Regular.ttf")
+        emoji = cmap("NotoEmoji-Regular.ttf")
+        modifiers = set(range(0x1F3FB, 0x1F400))
+        _emoji_cps = frozenset((emoji - sans) | modifiers)
+    return _emoji_cps
+
+
+def _wrap_emoji(html: str) -> str:
+    """Wrap emoji runs in a span naming the emoji font — reportlab does no
+    per-glyph fallback, so a run must explicitly select the font that has it.
+    Only text between tags is processed, so tags/attributes stay intact."""
+    emoji = _emoji_codepoints()
+
+    def emojiish(ch: str) -> bool:
+        cp = ord(ch)
+        return cp in emoji or cp in _EMOJI_JOINERS
+
+    def wrap_text(text: str) -> str:
+        out: list[str] = []
+        i, n = 0, len(text)
+        while i < n:
+            if emojiish(text[i]) and ord(text[i]) not in _EMOJI_JOINERS:
+                j = i + 1
+                while j < n and emojiish(text[j]):
+                    j += 1
+                out.append(f'<span style="font-family: aishEmoji">{text[i:j]}</span>')
+                i = j
+            else:
+                out.append(text[i])
+                i += 1
+        return "".join(out)
+
+    parts = _TAG_SPLIT_RE.split(html)
+    for k in range(0, len(parts), 2):  # even indices are text between tags
+        if parts[k]:
+            parts[k] = wrap_text(parts[k])
+    return "".join(parts)
+
+
 def _markdown_to_html_fragment(markdown_text: str) -> str:
     import markdown as md
 
-    return md.markdown(markdown_text or "", extensions=_MD_EXTENSIONS)
+    html = md.markdown(_strip_web_only(markdown_text), extensions=_MD_EXTENSIONS)
+    return _wrap_emoji(html)
 
 
 def render_answer_pdf(markdown_text: str, title: str) -> bytes:
@@ -178,7 +270,9 @@ def render_session_pdf(messages: list[dict], title: str) -> bytes:
 
 def _document(title: str, answer_html_blocks: list[str]) -> str:
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    safe_title = _escape(title or "aish")
+    # The title comes from the prompt, so it can carry emoji too — wrap them and
+    # drop variation selectors like the body, or the H1 shows tofu boxes.
+    safe_title = _wrap_emoji(_escape(_drop_variation_selectors(title or "aish")))
     body_parts = [
         f'<h1>{safe_title}</h1>',
         f'<div class="aish-doc-header">Exported from aish · {stamp}</div>',
