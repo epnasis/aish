@@ -2583,7 +2583,9 @@ function attachAnswerTools(el, source, prompt) {
     tools.appendChild(regen);
     lastRegenBtn = regen;
   }
-  tools.appendChild(copyChip(() => source, "copy answer"));
+  const answerCopy = copyChip(() => source, "copy answer");
+  answerCopy.classList.add("answer-copy"); // distinct from the copy-chip-classed export/fork chips
+  tools.appendChild(answerCopy);
   if (answerTiming) {
     const timing = document.createElement("span");
     timing.className = "answer-timing";
