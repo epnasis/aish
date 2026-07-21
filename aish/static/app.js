@@ -3581,11 +3581,14 @@ function submitInput() {
   if (cmdMode) { submitCommand(); return; }
   let text = input.value.trim();
   if (text.startsWith("/")) {
-    rememberPrompt(text); // slash commands never echo back as user events
-    input.value = "";
-    localStorage.removeItem("aish-draft");
-    input.style.height = "auto";
-    handleSlash(text);
+    // Only clear once the command is handled/sent — an unknown command, an
+    // ambiguous prefix, or a failed send keeps the text so it isn't lost (#101).
+    if (handleSlash(text)) {
+      rememberPrompt(text); // slash commands never echo back as user events
+      input.value = "";
+      localStorage.removeItem("aish-draft");
+      input.style.height = "auto";
+    }
     return;
   }
   if (!text && !attachments.length) return;
@@ -3627,28 +3630,33 @@ function handleSlash(text) {
     if (matches.length === 1) command = matches[0];
     else if (matches.length > 1) {
       showToast(`ambiguous — ${matches.join(" or ")}?`);
-      return;
+      return false; // keep the text so the user can disambiguate (#101)
     }
   }
+  // Return whether the input may be cleared: true once the command is handled
+  // or its message reaches the backend; false if it couldn't be sent or was
+  // unknown, so submitInput preserves the typed text instead of losing it.
   switch (command) {
-    case "/model": openModelSheet(arg); break;
-    case "/resume": case "/delete": openSessionsSheet(arg); break;
-    case "/new": case "/clear": send({ type: "new" }); break;
-    case "/fork": case "/branch": send({ type: "fork" }); break;
-    case "/cd": arg ? send({ type: "cd", path: arg }) : openDirSheet(); break;
+    case "/model": openModelSheet(arg); return true;
+    case "/resume": case "/delete": openSessionsSheet(arg); return true;
+    case "/new": case "/clear": return send({ type: "new" });
+    case "/fork": case "/branch": return send({ type: "fork" });
+    case "/cd": return arg ? send({ type: "cd", path: arg }) : (openDirSheet(), true);
     case "/add-dir": case "/dir-add":
-      arg ? send({ type: "add_dir", path: arg }) : openSheet("workspace-sheet"); break;
-    case "/learn": case "/feedback":
+      return arg ? send({ type: "add_dir", path: arg }) : (openSheet("workspace-sheet"), true);
+    case "/learn": case "/feedback": {
       // Run as a task: the server swaps the text for the expanded prompt
       // (cli.parse_learn / parse_feedback) while the transcript shows what was
       // typed. Both must reach the server, not be handled client-side here.
-      if (send({ type: "task", text })) scrollToEndSettled();
-      break;
-    case "/jobs": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
-    case "/help": openSheet("workspace-sheet"); break;
-    case "/quit": case "/exit": showToast("just close the tab — sessions persist"); break;
-    case "/debug": reportViewport("manual"); showToast("viewport state sent to server log"); break;
-    default: showToast(`unknown command ${command}`);
+      const sent = send({ type: "task", text });
+      if (sent) scrollToEndSettled();
+      return sent;
+    }
+    case "/jobs": openSheet("workspace-sheet"); return send({ type: "jobs" });
+    case "/help": openSheet("workspace-sheet"); return true;
+    case "/quit": case "/exit": showToast("just close the tab — sessions persist"); return true;
+    case "/debug": reportViewport("manual"); showToast("viewport state sent to server log"); return true;
+    default: showToast(`unknown command ${command}`); return false;
   }
 }
 
