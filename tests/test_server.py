@@ -1851,13 +1851,38 @@ class TestDirListing:
         (base / "file.txt").write_text("not a dir", encoding="utf-8")
         return base
 
-    def test_dirs_lists_subdirectories_only(self, app_env, tmp_path):
+    def test_dirs_lists_folders_with_counts_and_files(self, app_env, tmp_path):
         base = self.make_tree(tmp_path)
         client, _ = make_client(app_env, [])
         with client:
             body = client.get(f"/dirs?path={base}").json()
             assert body["path"] == str(base)
-            assert body["dirs"] == [".git", "alpha", "beta", "projects"]
+            # child-count per folder: alpha is empty, beta has 2 (incl. hidden),
+            # .git and projects each have 1.
+            assert body["dirs"] == [
+                {"name": ".git", "items": 1},
+                {"name": "alpha", "items": 0},
+                {"name": "beta", "items": 2},
+                {"name": "projects", "items": 1},
+            ]
+            assert body["files"] == ["file.txt"]
+
+    def test_dirs_child_count_survives_unreadable_subfolder(self, app_env, tmp_path):
+        if os.name != "posix" or os.geteuid() == 0:
+            pytest.skip("permission bits aren't enforced for root or on non-POSIX")
+        base = self.make_tree(tmp_path)
+        locked = base / "beta" / "nested"
+        locked.mkdir(exist_ok=True)
+        os.chmod(locked, 0o000)
+        try:
+            client, _ = make_client(app_env, [])
+            with client:
+                body = client.get(f"/dirs?path={base}").json()
+                assert body["path"] == str(base)  # handler didn't crash
+                beta = next(d for d in body["dirs"] if d["name"] == "beta")
+                assert beta["items"] == 2  # unreadable child still counted, just uncounted itself
+        finally:
+            os.chmod(locked, 0o755)
 
     def test_dirs_requires_token_when_set(self, app_env, tmp_path):
         base = self.make_tree(tmp_path)

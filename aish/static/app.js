@@ -4351,7 +4351,8 @@ function rememberDir(path) {
 }
 
 let dirPath = "";       // directory the picker is browsing
-let dirEntries = [];    // its subdirectory names
+let dirEntries = [];    // its subdirectories, as {name, items}
+let dirFiles = [];      // its files (display only, non-navigable)
 let dirSearchTimer = null;
 
 async function dirsFetch(url, params) {
@@ -4372,6 +4373,7 @@ async function browseDir(path) {
   }
   dirPath = body.path;
   dirEntries = body.dirs;
+  dirFiles = body.files || [];
   $("dir-search").value = "";
   $("dir-sheet").classList.add("browsing");
   renderDirList();
@@ -4410,13 +4412,14 @@ function selectDir(path) {
 
 const DIR_ICON_FOLDER = '<svg class="dir-ico" viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="var(--folder-fill)" stroke="var(--blue)" stroke-width="1.6"/></svg>';
 const DIR_ICON_UP = '<svg class="dir-ico" viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="var(--blue)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const DIR_ICON_FILE = '<svg class="dir-ico" viewBox="0 0 24 24"><path d="M6.5 3.8h7l4 4v11.4a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1V4.8a1 1 0 0 1 1-1z" fill="none" stroke="var(--dim)" stroke-width="1.6" stroke-linejoin="round"/><path d="M13.2 3.8v4h4" fill="none" stroke="var(--dim)" stroke-width="1.6" stroke-linejoin="round"/></svg>';
 const DIR_CHEVRON = '<svg class="dir-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" fill="none" stroke="var(--sep2)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 function dirRow(label, meta, onTap, kind = "folder") {
   const row = document.createElement("button");
   row.type = "button";
-  row.className = "row dir-row" + (kind === "up" ? " up" : "");
-  row.innerHTML = kind === "up" ? DIR_ICON_UP : DIR_ICON_FOLDER;
+  row.className = "row dir-row" + (kind === "up" ? " up" : "") + (kind === "file" ? " file" : "");
+  row.innerHTML = kind === "up" ? DIR_ICON_UP : kind === "file" ? DIR_ICON_FILE : DIR_ICON_FOLDER;
   const name = document.createElement("span");
   name.className = "folder";
   name.textContent = label;
@@ -4428,7 +4431,8 @@ function dirRow(label, meta, onTap, kind = "folder") {
     row.appendChild(metaEl);
   }
   if (kind === "folder" || kind === "recent") row.insertAdjacentHTML("beforeend", DIR_CHEVRON);
-  row.onclick = onTap;
+  if (kind === "file") row.disabled = true; // display only — not a destination
+  else row.onclick = onTap;
   return row;
 }
 
@@ -4495,11 +4499,12 @@ function renderDirList(deepResults = null) {
     );
   }
   const visible = dirEntries.filter(
-    (n) => !n.startsWith(".") && (!query || n.toLowerCase().includes(query))
+    ({ name }) => !name.startsWith(".") && (!query || name.toLowerCase().includes(query))
   );
-  for (const name of visible) {
+  for (const { name, items } of visible) {
+    const meta = items === 1 ? "1 item" : `${items} items`;
     list.appendChild(
-      dirRow(name, null, () => browseDir(dirPath === "/" ? `/${name}` : `${dirPath}/${name}`))
+      dirRow(name, meta, () => browseDir(dirPath === "/" ? `/${name}` : `${dirPath}/${name}`))
     );
   }
   if (deepResults && deepResults.length) {
@@ -4507,6 +4512,15 @@ function renderDirList(deepResults = null) {
     for (const p of deepResults) {
       list.appendChild(dirRow(abbreviatePath(p), null, () => browseDir(p), "recent"));
     }
+  }
+
+  // Files aren't a search target and can't be navigated into — shown only on
+  // the unfiltered listing, dimmed, so the picker still previews folder
+  // contents without becoming a file browser.
+  const visibleFiles = dirFiles.filter((n) => !n.startsWith("."));
+  if (!query && visibleFiles.length) {
+    list.appendChild(sectionLabel("Files"));
+    for (const name of visibleFiles) list.appendChild(dirRow(name, null, null, "file"));
   }
 }
 

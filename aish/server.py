@@ -1436,7 +1436,10 @@ class WebServer:
     DIR_SEARCH_SKIP = {".git", "node_modules", "venv", ".venv", "__pycache__", ".Trash"}
 
     async def handle_dirs(self, request) -> JSONResponse:
-        """GET /dirs?path=<abs> — subdirectory names only (browse mode)."""
+        """GET /dirs?path=<abs> — folders (name + item count) and files (names
+        only) of the browsed directory. One scandir for the folder itself,
+        plus one per immediate subfolder to count its children — never a
+        deeper walk, so cost stays bounded to what's on screen."""
         if self.token and request.query_params.get("token") != self.token:
             return JSONResponse({"error": "bad token"}, status_code=403)
         raw = request.query_params.get("path", "").strip() or str(Path.home())
@@ -1447,18 +1450,34 @@ class WebServer:
         if not path.is_dir():
             return JSONResponse({"error": "not a directory"}, status_code=404)
 
-        def list_dirs() -> list[str]:
+        def count_children(sub: Path) -> int:
+            try:
+                with os.scandir(sub) as children:
+                    return sum(1 for _ in children)
+            except OSError:
+                return 0  # unreadable subfolder — show it with no count rather than fail
+
+        def list_entries() -> tuple[list[dict], list[str]]:
+            dirs: list[dict] = []
+            files: list[str] = []
             with os.scandir(path) as entries:
-                return sorted(
-                    (e.name for e in entries if e.is_dir(follow_symlinks=True)),
-                    key=str.lower,
-                )
+                for entry in sorted(entries, key=lambda e: e.name.lower()):
+                    try:
+                        is_dir = entry.is_dir(follow_symlinks=True)
+                    except OSError:
+                        continue  # broken symlink etc — skip rather than crash
+                    if is_dir:
+                        items = count_children(path / entry.name)
+                        dirs.append({"name": entry.name, "items": items})
+                    else:
+                        files.append(entry.name)
+            return dirs, files
 
         try:
-            names = await asyncio.to_thread(list_dirs)
+            dirs, files = await asyncio.to_thread(list_entries)
         except PermissionError:
             return JSONResponse({"error": "permission denied"}, status_code=403)
-        return JSONResponse({"path": str(path), "dirs": names})
+        return JSONResponse({"path": str(path), "dirs": dirs, "files": files})
 
     async def handle_dirs_search(self, request) -> JSONResponse:
         """GET /dirs/search?q=<term>&base=<abs> — bounded fuzzy walk under
