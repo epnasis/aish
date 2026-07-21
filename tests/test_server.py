@@ -95,6 +95,18 @@ def recv_until(ws, wanted: str, limit: int = 200) -> dict:
     raise AssertionError(f"no {wanted!r} event within {limit} events")
 
 
+def recv_step(ws, kind: str, limit: int = 200) -> dict:
+    """Drain events until a trace `step` of the given kind arrives (#95: the
+    mid-task injected-message note is emitted as a step)."""
+    for _ in range(limit):
+        event = ws.receive_json()
+        if event["type"] == "step" and event.get("kind") == kind:
+            return event
+        if event["type"] == "error":
+            raise AssertionError(f"error while waiting for step {kind!r}: {event['text']}")
+    raise AssertionError(f"no step {kind!r} within {limit} events")
+
+
 def tool_results(chat, call_index=1):
     return [m for m in chat.calls[call_index]["messages"] if m["role"] == "tool"]
 
@@ -968,18 +980,19 @@ class TestReconnect:
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
             recv_until(ws, "done")
 
-    def test_pending_cwd_applies_before_queued_message(self, app_env, tmp_path):
-        # Ordering (#92): _finish_turn applies pending_cwd BEFORE draining the
-        # message queue, so the next queued message runs in the new directory.
-        # The card is retired (cwd_dequeued) once the change lands.
+    def test_cd_and_message_applied_mid_task_between_steps(self, app_env, tmp_path):
+        # #95: a /cd AND a message queued while the task runs are BOTH consumed
+        # between steps of the SAME task — the cd rebases (card retired via
+        # cwd_dequeued, top bar refreshed via cwd_changed) and the message is
+        # injected as a steering note — all before the task's own `done`, not
+        # deferred to _finish_turn as separate follow-ups.
         sub = tmp_path / "work"
         sub.mkdir()
-        client, chat = make_client(
+        client, _ = make_client(
             app_env,
             [
                 model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
                 model_says("first done"),
-                model_says("second done"),
             ],
         )
         with client, connected(client) as (ws, _, _):
@@ -990,14 +1003,20 @@ class TestReconnect:
             ws.send_json({"type": "task", "text": "second"})
             recv_until(ws, "queued")
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
-            recv_until(ws, "done")  # first task finishes
-            recv_until(ws, "cwd_dequeued")  # cwd applied → card retired
+            recv_until(ws, "cwd_dequeued")  # cd applied mid-task → card retired
+            changed = recv_until(ws, "cwd_changed")  # top bar updated immediately
+            assert changed["cwd"] == str(sub)
+            injected = recv_step(ws, "injected")  # message injected as steering
+            assert injected["text"] == "second"
+            recv_until(ws, "done")
             server = client.app.state.server
             assert server.active.pending_cwd is None
-            assert str(server.active.agent.cwd) == str(sub)  # applied first
-            user = recv_until(ws, "user")
-            assert user["text"] == "second"  # queued message runs after the cd
-            recv_until(ws, "done")
+            assert str(server.active.agent.cwd) == str(sub)  # rebased mid-task
+            assert server.active.queue == []  # message injected once, not relaunched
+            # the model saw the steering line in the SAME task
+            assert any(
+                m.get("content") == "second" for m in server.active.agent.messages
+            )
 
     def test_pending_cwd_card_replays_on_reconnect(self, app_env, tmp_path):
         # The card is backend-authoritative (#92): a reconnect while a cd is
@@ -1015,6 +1034,33 @@ class TestReconnect:
                 assert requeued["path"] == str(tmp_path)
                 ws2.send_json({"type": "approval", "id": request["id"], "action": "approve"})
                 recv_until(ws2, "done")
+
+    def test_cd_applied_mid_task_updates_bar_before_done(self, app_env, tmp_path):
+        # #95: a /cd queued while a multi-step task runs is applied at the next
+        # step boundary — the top bar (cwd_changed) and card (cwd_dequeued)
+        # update BEFORE the task's own `done`, so a long task stays responsive.
+        sub = tmp_path / "work"
+        sub.mkdir()
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+                model_says("done"),
+            ],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "go"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "cd", "path": str(sub)})
+            recv_until(ws, "cwd_queued")
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "cwd_dequeued")  # applied mid-task, card retired
+            changed = recv_until(ws, "cwd_changed")
+            assert changed["cwd"] == str(sub)
+            server = client.app.state.server
+            assert server.active.agent.cwd == str(sub)
+            assert server.active.pending_cwd is None
+            recv_until(ws, "done")
 
 
 class TestStopAndQueue:
@@ -1041,13 +1087,15 @@ class TestStopAndQueue:
             stopped = recv_until(ws, "stopped")
             assert stopped["type"] == "stopped"
 
-    def test_message_while_busy_queues_and_runs_next(self, app_env, tmp_path):
+    def test_message_while_busy_injected_into_running_task(self, app_env, tmp_path):
+        # #95: a message typed while a task runs still queues (chip appears), but
+        # is now DRAINED and INJECTED into the running task between steps —
+        # steering, not a deferred separate task. Consumed exactly once.
         client, _ = make_client(
             app_env,
             [
                 model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/a")]),
                 model_says("first answer"),
-                model_says("second answer"),
             ],
         )
         with client, connected(client) as (ws, _, _):
@@ -1055,17 +1103,19 @@ class TestStopAndQueue:
             request = recv_until(ws, "approval_request")
 
             ws.send_json({"type": "task", "text": "second task"})
-            queued = recv_until(ws, "queued")
+            queued = recv_until(ws, "queued")  # still queues as a chip
             assert queued["position"] == 1
 
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
-            first = recv_until(ws, "done")
-            assert first["result"] == "first answer"
-            # the queued message starts on its own
-            user = recv_until(ws, "user")
-            assert user["text"] == "second task"
-            second = recv_until(ws, "done")
-            assert second["result"] == "second answer"
+            injected = recv_step(ws, "injected")  # drained + injected mid-task
+            assert injected["text"] == "second task"
+            done = recv_until(ws, "done")
+            assert done["result"] == "first answer"  # same task, no second `done`
+            server = client.app.state.server
+            assert server.active.queue == []  # consumed once, not relaunched
+            assert any(
+                m.get("content") == "second task" for m in server.active.agent.messages
+            )
 
 
 class RaisingChat:

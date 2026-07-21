@@ -513,6 +513,8 @@ class Agent:
         command_log: Callable[[dict], None] | None = None,
         state_log: Callable[[dict], None] | None = None,
         on_state: Callable[[dict], None] | None = None,
+        check_pending_cwd: Callable[[], str | None] | None = None,
+        check_pending_messages: Callable[[], list[str]] | None = None,
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
@@ -578,6 +580,15 @@ class Agent:
         # reconstruct_events replays those records into the identical event.
         self.state_log = state_log
         self.on_state = on_state
+        # Between-steps steering hooks (issue #95), polled at the top of every
+        # run_task loop iteration so a long task stays responsive without being
+        # aborted: check_pending_cwd applies a /cd the UI queued while busy
+        # (moves cwd + rebuilds the system prompt for the new dir);
+        # check_pending_messages injects text the user typed mid-task so the
+        # next model turn pivots. Both are thread-safe get/drain callbacks (the
+        # server sets from the event loop, the worker thread consumes here).
+        self.check_pending_cwd = check_pending_cwd
+        self.check_pending_messages = check_pending_messages
         self._run_meta: dict | None = None
         self._cancel = threading.Event()
         # Skill-read gate state: oversized preloaded skills the model must
@@ -717,6 +728,49 @@ class Agent:
             ):
                 self.roots.append(resolved)
 
+    def _apply_pending_cwd(self) -> None:
+        """Apply a /cd the UI queued while this task runs (issue #95), between
+        steps instead of only after the whole task. rebase() moves cwd,
+        re-anchors roots[0], logs the #94 cwd record and fires on_state (the web
+        server turns that single signal into the top-bar chip + queue-card
+        update — one path for mid-task, immediate, and post-task moves alike).
+        Then the system prompt is rebuilt for the new directory — same helper
+        run_task uses at entry — so the new dir's environment context and
+        preloaded skills apply to every following step. Not a tool call, so it
+        never touches the #81 gates or the loop-detection counters."""
+        if self.check_pending_cwd is None:
+            return
+        target = self.check_pending_cwd()
+        if not target:
+            return
+        result = self.rebase(target)
+        if result.startswith("ERROR"):
+            return  # a vanished/invalid dir: rebase already reported it
+        self.messages[0]["content"] = compose_system_content(
+            self.base_context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir
+        )
+
+    def _inject_pending_messages(self) -> None:
+        """Fold in text the user typed while this task runs (issue #95): instead
+        of deferring it to a separate follow-up task, each queued message is
+        injected as a user turn mid-task so the very NEXT model call pivots —
+        steering, not a reset. Surfaced as a distinct `injected` trace step,
+        which renders live AND is replayed identically by reconstruct_events
+        (kept inside the open turn, so cold and hot timelines match). The text is
+        appended straight to self.messages — NOT via _append — so it logs no
+        conversation `message` record, which reconstruct would otherwise replay
+        as a turn-splitting second user bubble. Trade-off: the steering text is
+        therefore not carried into --resume history (it shaped the answer, which
+        is). Not a tool call — leaves the gates and loop counters untouched."""
+        if self.check_pending_messages is None:
+            return
+        for msg in self.check_pending_messages():
+            if not msg:
+                continue
+            self.echo(f'[User injected feedback mid-task: "{msg}"]')
+            self._emit_step(kind="injected", text=msg)
+            self.messages.append({"role": "user", "content": msg})
+
     def run_task(
         self,
         task: str,
@@ -793,6 +847,12 @@ class Agent:
         for _ in range(self.max_steps):
             if self._cancel.is_set():
                 return self._finish_cancelled()
+            # Absorb anything the user queued while this task runs (issue #95),
+            # BEFORE the model call so the next turn already reflects it. Neither
+            # is a tool call, so both are placed outside the dispatch path and
+            # leave the #81 gates and the loop-detection counters untouched.
+            self._apply_pending_cwd()
+            self._inject_pending_messages()
             self._enforce_budget(task_start)
             turn_start = time.perf_counter()
             # A live "Thinking…" row on the trace timeline; it finalizes to

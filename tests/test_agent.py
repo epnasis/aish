@@ -2486,3 +2486,165 @@ class TestScratchWorkspace:
         assert scratch.is_dir()
         agent.close()
         assert not scratch.exists()
+
+
+class TestMidTaskSteering:
+    """Issue #95: a /cd or a message queued while a task runs is applied /
+    injected BETWEEN steps, so a long multi-step task stays responsive."""
+
+    def test_pending_cwd_applied_between_steps(self, tmp_path):
+        start = tmp_path / "start"
+        moved = tmp_path / "moved"
+        start.mkdir()
+        moved.mkdir()
+        calls = {"n": 0}
+
+        def check_cwd():
+            calls["n"] += 1
+            return str(moved) if calls["n"] == 2 else None  # fire before step 2
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says(tool_calls=[tool_call("run_command", command="echo two")]),
+                model_says("done"),
+            ],
+            cwd=str(start),
+            check_pending_cwd=check_cwd,
+        )
+        assert agent.run_task("go") == "done"
+        assert agent.cwd == str(moved)  # rebased mid-task
+        assert agent.roots[0] == moved.resolve()  # root re-anchored too
+
+    def test_pending_cwd_rebuilds_system_prompt_for_new_dir(self, tmp_path):
+        start = tmp_path / "start"
+        moved = tmp_path / "moved"
+        start.mkdir()
+        (moved / ".aish" / "skills").mkdir(parents=True)
+        (moved / ".aish" / "skills" / "deployer.md").write_text(
+            "---\ndescription: Use when deploying the new project\n---\nbody\n"
+        )
+
+        def check_cwd():
+            return str(moved)  # applied on the first poll
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says("done"),
+            ],
+            cwd=str(start),
+            check_pending_cwd=check_cwd,
+        )
+        assert "deployer" not in agent.messages[0]["content"]  # not visible at start
+        agent.run_task("go")
+        # The moved dir's project skill is now advertised in messages[0] — proof
+        # the system prompt was recomposed for the new cwd.
+        assert "deployer" in agent.messages[0]["content"]
+
+    def test_pending_cwd_is_get_and_clear_applied_once(self, tmp_path):
+        start = tmp_path / "start"
+        moved = tmp_path / "moved"
+        start.mkdir()
+        moved.mkdir()
+        seen = []
+
+        def check_cwd():
+            # Get-and-clear: yields the path once, then None forever after.
+            if not seen:
+                seen.append(1)
+                return str(moved)
+            return None
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says(tool_calls=[tool_call("run_command", command="echo two")]),
+                model_says("done"),
+            ],
+            cwd=str(start),
+            check_pending_cwd=check_cwd,
+        )
+        agent.run_task("go")
+        assert agent.cwd == str(moved)
+        assert len(seen) == 1  # consumed exactly once
+
+    def test_pending_message_injected_between_steps(self, tmp_path):
+        (tmp_path / "x").mkdir()
+        echoed: list[str] = []
+        steps: list[dict] = []
+        calls = {"n": 0}
+
+        def check_msgs():
+            calls["n"] += 1
+            return ["also check the logs"] if calls["n"] == 2 else []
+
+        chat = FakeChat(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says(tool_calls=[tool_call("run_command", command="echo two")]),
+                model_says("done"),
+            ]
+        )
+        agent = Agent(
+            model="fake",
+            approve=lambda _c: True,
+            client_chat=chat,
+            cwd=str(tmp_path),
+            echo=echoed.append,
+            on_step=steps.append,
+            check_pending_messages=check_msgs,
+        )
+        assert agent.run_task("go") == "done"
+        # The model saw the injected instruction on its next turn: it is a user
+        # message in the history the model reads from.
+        injected = [
+            m for m in agent.messages
+            if m.get("role") == "user" and m.get("content") == "also check the logs"
+        ]
+        assert len(injected) == 1
+        # Echoed to the terminal and surfaced as a distinct trace step.
+        assert any("also check the logs" in line for line in echoed)
+        assert any(
+            s.get("kind") == "injected" and s.get("text") == "also check the logs"
+            for s in steps
+        )
+
+    def test_injected_message_is_consumed_once(self, tmp_path):
+        (tmp_path / "x").mkdir()
+
+        def check_msgs():
+            # A well-behaved drain returns the message once, then nothing.
+            if not getattr(check_msgs, "done", False):
+                check_msgs.done = True  # type: ignore[attr-defined]
+                return ["pivot now"]
+            return []
+
+        chat = FakeChat(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says(tool_calls=[tool_call("run_command", command="echo two")]),
+                model_says("done"),
+            ]
+        )
+        agent = Agent(
+            model="fake",
+            approve=lambda _c: True,
+            client_chat=chat,
+            cwd=str(tmp_path),
+            check_pending_messages=check_msgs,
+        )
+        agent.run_task("go")
+        injected = [m for m in agent.messages if m.get("content") == "pivot now"]
+        assert len(injected) == 1  # not re-appended on later steps
+
+    def test_no_steering_callbacks_is_harmless(self, tmp_path):
+        (tmp_path / "x").mkdir()
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        assert agent.run_task("go") == "done"  # callbacks default to None
