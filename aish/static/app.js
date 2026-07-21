@@ -2720,7 +2720,6 @@ function startPlayback(box, el) {
   if (!text) return;
   player.box = box;
   player.chunks = chunkParagraphs(text);
-  player.lang = speechLang(text);
   box.classList.add("active");
   box.querySelector(".t-rate").textContent = rateLabel();
   acquireWakeLock();
@@ -2735,7 +2734,10 @@ function speakChunk(index) {
   player.paused = false;
   player.box.classList.remove("paused");
   const utterance = new SpeechSynthesisUtterance(player.chunks[index]);
-  utterance.lang = player.lang;
+  // Detect language PER paragraph, not once for the whole reply: aish often
+  // mixes languages (a Polish answer citing an English-created issue), so each
+  // chunk is spoken in its own voice instead of forcing one over the lot (#97).
+  utterance.lang = speechLang(player.chunks[index]);
   utterance.rate = ttsRate;
   utterance.onend = () => {
     if (seq !== player.seq) return; // cancelled/skipped — a newer speak owns state
@@ -4107,6 +4109,9 @@ function dictJoin(a, b) {
 function renderDictation(interim) {
   input.value = dictJoin(dictateBase, dictJoin(dictateFinal, interim));
   resizeInput(); // note: never touch the "Ask aish" placeholder
+  // Once the textarea hits its max height it scrolls internally — keep the
+  // newest dictated words in view instead of stranding you at the top (#97).
+  input.scrollTop = input.scrollHeight;
 }
 
 // A trailing standalone "stop" ends dictation (deliberately NOT a silence timer,

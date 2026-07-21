@@ -1139,7 +1139,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   font: inherit;      /* proportional, same as sent bubbles */
   font-size: 16px;    /* prevents iOS focus zoom */
   resize: none;
-  max-height: 30dvh;
+  max-height: 24dvh;
 }
 #input:focus { outline: none; }
 #send {
@@ -1168,6 +1168,8 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   width: 34px; flex-shrink: 0; padding: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 1px; touch-action: none; /* let the hold gesture own the touch */
+  /* Holding to switch language must not text-select the EN/PL label. */
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
 #dictate svg { width: 22px; height: 22px; }
 #dictate:active { opacity: 0.5; }
