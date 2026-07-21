@@ -519,6 +519,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 /* ---- quick-reply chips (aish-reply:// links) ---- */
 .msg.md .quick-reply {
   display: inline-block;
+  max-width: 100%;
   margin: 4px 8px 2px 0;
   padding: 8px 16px;
   background: none;
@@ -528,6 +529,12 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   font-size: 15px;
   font-weight: 600;
   line-height: 1.2;
+  /* Buttons default to centered text; a label long enough to wrap would then
+     render as a full-width, centre-aligned block that looks broken next to the
+     compact chips (#98). Left-align so a wrapped chip reads as an intentional
+     pill, and break long words instead of overflowing. */
+  text-align: left;
+  overflow-wrap: break-word;
 }
 .msg.md .quick-reply:active { background: rgba(10, 132, 255, 0.18); }
 /* Answered (any user reply sent): chips and chip-only paragraphs vanish. */
