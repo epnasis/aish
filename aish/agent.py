@@ -616,6 +616,26 @@ class Agent:
         directly so they are not re-recorded)."""
         self.messages.extend(m for m in messages if m.get("role") != "system")
 
+    def rewind_last_task(self) -> str | None:
+        """Undo the most recent user turn: drop that user message and everything
+        the assistant produced after it (text, tool_calls, tool results), plus
+        the TASK_REMINDER that preceded it. Web retry (#60) calls this so a rerun
+        regenerates from a clean context — the model never sees its discarded
+        answer (run_task re-adds the prompt and reminder fresh). Returns the
+        removed user text, or None when there is no user turn to undo."""
+        for i in range(len(self.messages) - 1, 0, -1):
+            if self.messages[i].get("role") == "user":
+                text = self.messages[i].get("content")
+                cut = i
+                prev = self.messages[cut - 1]
+                if prev.get("role") == "system" and str(
+                    prev.get("content", "")
+                ).startswith(TASK_REMINDER_MARK):
+                    cut -= 1
+                del self.messages[cut:]
+                return text if isinstance(text, str) else None
+        return None
+
     def _append(self, message: dict) -> None:
         self.messages.append(message)
         if self.on_message:

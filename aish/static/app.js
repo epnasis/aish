@@ -1325,14 +1325,15 @@ let lastUserPrompt = "";
 const RERUN_SVG =
   '<svg viewBox="0 0 24 24"><path d="M5 6.5v3.6h3.6M19 17.5v-3.6h-3.6M18.4 9.2A6.5 6.5 0 0 0 6.5 8M5.6 14.8A6.5 6.5 0 0 0 17.5 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-// Re-run a prompt even if the previous turn didn't finish: first stop/reconcile
-// whatever is (or only looks) still running — `stop` is a graceful no-op when
-// nothing runs (#48) and cancels a live/stuck task otherwise — then send it.
-// Safe in every state: idle, busy, or wedged after a disruption.
+// Regenerate the last answer from scratch (#60): `retry` re-runs the prompt AND
+// discards the previous attempt from the model's context, the log, and the
+// transcript, so the rerun is not anchored to the old (likely wrong) answer. The
+// server cancels a still-running or wedged turn first, so this is safe in every
+// state: idle, busy, or stuck after a disruption. The rolled-back transcript
+// comes back as a fresh `replay`, so the discarded answer disappears in place.
 function rerunPrompt(prompt) {
   if (!prompt) return;
-  send({ type: "stop" });
-  send({ type: "task", text: prompt });
+  send({ type: "retry", text: prompt });
 }
 
 // An error message with a Retry button (resends the last prompt, Gemini-style).
