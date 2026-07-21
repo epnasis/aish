@@ -631,9 +631,12 @@ class TestStopAndQueue:
             assert done["result"] == CANCELLED_RESULT
             assert not marker.exists()
             assert len(chat.calls) == 1  # no model call after the stop
+            # Stop with nothing running must not dead-end (#48): it reconciles
+            # the foreground to idle with a benign `stopped` sync, never an
+            # `error` the UI would render as a task failure.
             ws.send_json({"type": "stop"})  # nothing running anymore
-            error = recv_until(ws, "error")
-            assert "nothing is running" in error["text"]
+            stopped = recv_until(ws, "stopped")
+            assert stopped["type"] == "stopped"
 
     def test_message_while_busy_queues_and_runs_next(self, app_env, tmp_path):
         client, _ = make_client(
@@ -660,6 +663,85 @@ class TestStopAndQueue:
             assert user["text"] == "second task"
             second = recv_until(ws, "done")
             assert second["result"] == "second answer"
+
+
+class RaisingChat:
+    """A backend that always raises, simulating a model/transport failure. The
+    agent retries once then surfaces ModelUnavailable, so run_task raises and
+    the server must emit a terminal error that clears the foreground."""
+
+    def __init__(self, message: str = "boom: model exploded"):
+        self.message = message
+        self.calls: list[dict] = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        raise RuntimeError(self.message)
+
+
+def recv_any(ws, wanted: str, limit: int = 200) -> dict:
+    """Like recv_until but does NOT treat an `error` event as fatal — used
+    when the error IS the event under test."""
+    for _ in range(limit):
+        event = ws.receive_json()
+        if event["type"] == wanted:
+            return event
+    raise AssertionError(f"no {wanted!r} event within {limit} events")
+
+
+class TestModelError:
+    """#48: a mid-task model error must leave the session and its foreground
+    consistent — a terminal event clears busy, the busy flag is false, Stop
+    afterward is a graceful no-op, and a cold re-attach shows it finished."""
+
+    def test_error_emits_terminal_and_clears_busy(self, app_env):
+        client = TestClient(create_app("fake", client_chat=RaisingChat(), **app_env))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "do it"})
+            error = recv_any(ws, "error")
+            assert "model unavailable" in error["text"]
+            # Server-side truth: the busy flag cleared with the error.
+            assert client.app.state.server.active.busy is False
+            assert client.app.state.server.active.state() == "idle"
+
+    def test_stop_after_error_is_graceful_noop(self, app_env):
+        client = TestClient(create_app("fake", client_chat=RaisingChat(), **app_env))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "do it"})
+            recv_any(ws, "error")
+            # The wedged-foreground reconciliation: Stop never dead-ends.
+            ws.send_json({"type": "stop"})
+            stopped = recv_any(ws, "stopped")
+            assert stopped["type"] == "stopped"
+
+    def test_reattached_errored_session_shows_finished(self, app_env):
+        # Re-attaching an errored session (switch away and back, or phone
+        # lock/unlock) must report idle (not running) and replay the recorded
+        # error — never a stuck "working" foreground.
+        client = TestClient(create_app("fake", client_chat=RaisingChat(), **app_env))
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "do it"})
+            recv_any(ws, "error")
+            # Re-show the same session: hello reports its authoritative state
+            # and the transcript replay carries the terminal error.
+            ws.send_json({"type": "resume", "path": name})
+            hello2 = recv_any(ws, "hello")
+            replay = recv_any(ws, "replay")
+            assert hello2["session"] == name
+            assert hello2["busy"] is False
+            assert any(e["type"] == "error" for e in replay["events"])
+
+    def test_errored_session_is_deletable(self, app_env):
+        # busy cleared → state() == "idle" → the delete guard allows removal.
+        client = TestClient(create_app("fake", client_chat=RaisingChat(), **app_env))
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "do it"})
+            recv_any(ws, "error")
+            ws.send_json({"type": "delete_session", "name": name})
+            deleted = recv_any(ws, "session_deleted")
+            assert deleted["name"] == name
 
 
 class TestSessions:

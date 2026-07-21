@@ -825,7 +825,14 @@ class WebServer:
     async def _stop_task(self, websocket: WebSocket) -> None:
         session = self.active
         if not session.busy:
-            await websocket.send_json({"type": "error", "text": "nothing is running"})
+            # Nothing is running server-side, but the foreground may be wedged
+            # showing "working" — e.g. a terminal event that never reached this
+            # client. Stop must never dead-end (#48): reconcile the view to the
+            # authoritative idle state instead of erroring. A plain `stopped`
+            # sync clears busy/working WITHOUT the red "task failed" treatment a
+            # real error carries.
+            session.bridge.emit({"type": "status", "state": "idle"}, record=False)
+            await websocket.send_json({"type": "stopped"})
             return
         if not hasattr(session.agent, "cancel"):
             await websocket.send_json(
