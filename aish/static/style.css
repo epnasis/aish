@@ -1464,6 +1464,10 @@ body.wrap .msg.echo, body.wrap .msg.stream {
    and its output (#6, and long-command wrap). */
 body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .step-cmd.struck { text-decoration: line-through; }
+/* The diff of an applied file edit, shown inline in the timeline (#55). Dimmed
+   when the edit was denied/held so it reads as proposed-but-not-written. */
+.step-diff { margin-top: 8px; }
+.step-diff.not-applied { opacity: 0.55; }
 .step-output { margin-top: 8px; }
 /* empty stdout/stderr: a compact one-liner (with the exit code) instead of an
    empty box carrying copy/wrap/expand controls for nothing. */

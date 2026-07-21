@@ -1518,13 +1518,19 @@ class Agent:
             result = files.commit(plan)
             self.echo(result)
             return result
+        # The diff the approval card showed, carried onto the trace step so the
+        # web timeline renders WHAT changed (or would have) — applied, denied, or
+        # held alike (#55). Computed from the plan (pre-commit), so it is stable
+        # regardless of the decision.
+        diff_meta = {"diff": plan.diff, "added": plan.added, "removed": plan.removed}
         decision = self.approve_write(plan)
         if isinstance(decision, Denied):
             # Deny + comment = STOP: a denied write never touches disk — the
             # trace step renders denied (not a silent success), carries the
             # user's feedback, and arms the stop gate like a denied run_command.
             self._run_meta = {
-                "decision": "denied", "ok": False, "output": "", "comment": decision.comment,
+                "decision": "denied", "ok": False, "output": "",
+                "comment": decision.comment, **diff_meta,
             }
             self._arm_stop_gate(decision.comment)
             return _with_feedback(WRITE_DENIED, decision.comment)
@@ -1533,14 +1539,16 @@ class Agent:
             # is committed), the model adjusts to what the user asked and
             # re-proposes, and that change is approved again before it lands.
             self._run_meta = {
-                "decision": "held", "ok": False, "output": "", "comment": decision.comment,
+                "decision": "held", "ok": False, "output": "",
+                "comment": decision.comment, **diff_meta,
             }
             return WRITE_HELD_FOR_ADJUSTMENT.format(comment=decision.comment)
         if not decision:
-            self._run_meta = {"decision": "denied", "ok": False, "output": ""}
+            self._run_meta = {"decision": "denied", "ok": False, "output": "", **diff_meta}
             return WRITE_DENIED
         result = files.commit(plan)
         self.echo(result)
+        self._run_meta = {"decision": "approved", **diff_meta}
         return result
 
     def _parse_cd(self, command: str) -> str | None:
