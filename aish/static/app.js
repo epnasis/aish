@@ -5,7 +5,10 @@
  * Approval cards are keyed by request id so a later approval_resolved (live
  * or replayed) collapses them. Assistant answers render as markdown; command
  * output renders ANSI SGR colors. All text lands via textContent /
- * createTextNode — model output never reaches innerHTML.
+ * createTextNode — model output never reaches innerHTML. The one exception
+ * is highlightFences(): hljs.highlight() escapes the source it's given
+ * before wrapping tokens in spans, so it is the model's raw string, escaped
+ * by hljs and never by us, that lands in innerHTML — see the comment there.
  */
 
 "use strict";
@@ -428,6 +431,7 @@ function closeAnswer() {
   // block) gets its copy/read-aloud row; mid-stream re-renders would clobber it.
   if (answerEl) {
     renderAnswerNow(); // flush any tokens still waiting on the next frame
+    highlightFences(answerEl); // the answer is settled now — safe to tokenize fences once
     if (answerText.trim()) attachAnswerTools(answerEl, answerText, lastUserPrompt);
   }
   answerEl = null;
@@ -439,6 +443,7 @@ function onDone(event) {
   if (!sawAnswer && event.result) {
     const el = addMsg("answer md", "");
     el.replaceChildren(renderMarkdown(event.result));
+    highlightFences(el);
     attachAnswerTools(el, event.result, lastUserPrompt);
   }
   closeAnswer();
@@ -1562,6 +1567,7 @@ function onHistory(history) {
     else if (message.role === "assistant") {
       const el = addMsg("answer md", "");
       el.replaceChildren(renderMarkdown(content));
+      highlightFences(el);
       attachAnswerTools(el, content, prevPrompt);
     } else {
       const lines = content.split("\n");
@@ -1626,6 +1632,29 @@ function applySgr(params, classes) {
       else if (codes[i + 1] === 2) i += 4;
       if (code === 38) dropColor("a-fg");
     }
+  }
+}
+
+// ---- syntax highlighting (fenced code blocks) -----------------------------
+// hljs is vendor/highlight.min.js (static/vendor, no CDN) — a plain global,
+// loaded before this script. renderMarkdown() only stamps a fence's language
+// onto data-lang; highlighting itself runs here, called just at the points
+// an answer is fully settled (closeAnswer, onDone's unstreamed branch,
+// onHistory's replay), never per streamed token — re-tokenizing a growing
+// fence on every frame would be wasted work and would flicker mid-stream.
+function highlightFences(container) {
+  if (!window.hljs) return; // vendor script missing/blocked — fences stay plain
+  for (const code of container.querySelectorAll("pre > code[data-lang]")) {
+    if (code.classList.contains("hljs")) continue; // idempotent if called twice
+    const lang = code.dataset.lang;
+    if (!hljs.getLanguage(lang)) continue; // unknown language name — no auto-detect fallback
+    // hljs.highlight() HTML-escapes the source before wrapping tokens in
+    // spans, so this is the one sink allowed to use innerHTML: the text it
+    // reads is what we already put in the DOM via textContent (never model
+    // markup), and hljs's own escaping is what reaches the DOM, not the
+    // model's raw string.
+    code.innerHTML = hljs.highlight(code.textContent, { language: lang }).value;
+    code.classList.add("hljs");
   }
 }
 
