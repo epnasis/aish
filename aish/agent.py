@@ -511,6 +511,8 @@ class Agent:
         on_command_end: Callable[[dict], None] | None = None,
         step_log: Callable[[dict], None] | None = None,
         command_log: Callable[[dict], None] | None = None,
+        state_log: Callable[[dict], None] | None = None,
+        on_state: Callable[[dict], None] | None = None,
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
@@ -569,6 +571,13 @@ class Agent:
         # The command's output is not duplicated here; it rides on the `tool`
         # trace step, and reconstruct_events splices it back in as one stream.
         self.command_log = command_log
+        # Workspace-change sinks (issue #94), parallel to step_log/on_step:
+        # state_log persists a cwd move / dir trust as a `kind:"cwd"` /
+        # `kind:"trust_dir"` record so resume/cold-open can restore the
+        # workspace; on_state surfaces the same change live in the web timeline.
+        # reconstruct_events replays those records into the identical event.
+        self.state_log = state_log
+        self.on_state = on_state
         self._run_meta: dict | None = None
         self._cancel = threading.Event()
         # Skill-read gate state: oversized preloaded skills the model must
@@ -679,6 +688,34 @@ class Agent:
 
     def _emit_step(self, **step: Any) -> None:
         self._sink_step(step)
+
+    def _emit_workspace(self, change: str, path: str) -> None:
+        """Persist a user-driven workspace change (cwd move / dir trust) and
+        surface it live in the timeline — parallel to _sink_step: durable log
+        vs live render. The persisted record and the live event carry the same
+        data reconstruct_events replays, so cold and hot timelines match."""
+        record_kind = "cwd" if change == "cwd" else "trust_dir"
+        field = "cwd" if change == "cwd" else "path"
+        if self.state_log is not None:
+            self.state_log({"kind": record_kind, field: path})
+        if self.on_state is not None:
+            self.on_state({"change": change, "path": path})
+
+    def restore_workspace(self, cwd: str | None, trusted: list[str]) -> None:
+        """Reapply a session's persisted cwd + trusted dirs on resume/cold-open,
+        setting state DIRECTLY (never through rebase/trust_root) so restoring
+        emits no fresh cwd/trust record — that would be a replay feedback loop.
+        Missing paths degrade gracefully: a vanished cwd keeps the default, a
+        vanished trusted dir is skipped."""
+        if cwd and os.path.isdir(cwd):
+            self.cwd = cwd
+            self.roots[0] = Path(cwd).resolve()
+        for path in trusted:
+            resolved = Path(path).resolve()
+            if resolved.is_dir() and not any(
+                resolved.is_relative_to(root) for root in self.roots
+            ):
+                self.roots.append(resolved)
 
     def run_task(
         self,
@@ -1059,6 +1096,7 @@ class Agent:
             return result
         self.roots[0] = Path(self.cwd).resolve()
         self.echo(f"[session root re-anchored to {self.roots[0]}]")
+        self._emit_workspace("cwd", self.cwd)
         self._append(
             {"role": "user", "content": f"[I moved the session to {self.cwd} with /cd — "
              "this directory is the project now]"}
@@ -1076,6 +1114,7 @@ class Agent:
         if path in self.roots:
             return f"[{path} is already a session root]"
         self.roots.append(path)
+        self._emit_workspace("trust", str(path))
         note = f"[I added {path} as a session root with /add-dir — you may work there too]"
         self._append({"role": "user", "content": note})
         return f"[added session root {path}]"
@@ -1094,6 +1133,7 @@ class Agent:
         if any(path.is_relative_to(root) for root in self.roots):
             return f"[{path} is already inside a session root]"
         self.roots.append(path)
+        self._emit_workspace("trust", str(path))
         return f"[trusted for this session: {path}]"
 
     def _execute_tool_calls(self, tool_calls: list[dict]) -> list[str]:

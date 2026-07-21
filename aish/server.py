@@ -1816,6 +1816,11 @@ def create_app(
             # and cold-loads back into the same timeline (reconstruct_events).
             step_log=logref.step,
             command_log=logref.command_event,
+            # Workspace changes (issue #94): persisted so resume/cold-open
+            # restores cwd + trusted dirs, and emitted live as a timeline marker
+            # identical to the one reconstruct_events replays.
+            state_log=logref.workspace,
+            on_state=lambda ev: bridge.emit({"type": "workspace", **ev}),
             # Terminal-block framing: command_start (cwd + command) and
             # command_end (exit code / detached / interrupted). Emitted live and
             # persisted (command_log) so a cold replay rebuilds the bounded
@@ -1845,6 +1850,12 @@ def create_app(
 
         if path is not None:
             agent.load_history(history)
+            # Restore the workspace the session left off in (issue #94), set
+            # directly (not via rebase/trust_root) so restoring logs no fresh
+            # record — a missing cwd falls back to the default, missing trusted
+            # dirs are skipped.
+            restored_cwd, trusted = SessionLog.restore_state(path)
+            agent.restore_workspace(restored_cwd, trusted)
             # Resume with the model this session last used (the drawer shows
             # it); fall back to the startup model when it can't be built.
             if (

@@ -1531,6 +1531,77 @@ class TestRootScoping:
         assert agent.roots == [tmp_path.resolve()]
 
 
+class TestWorkspacePersistence:
+    """Issue #94: user-driven cwd moves and dir trusts flow to the state_log
+    sink (persistence) and the on_state callback (live timeline), and restore
+    directly onto the agent on resume without re-logging."""
+
+    def test_rebase_logs_and_emits_cwd_change(self, tmp_path):
+        right = tmp_path / "right"
+        right.mkdir()
+        logged: list = []
+        emitted: list = []
+        agent, _ = make_agent(
+            [], cwd=str(tmp_path), state_log=logged.append, on_state=emitted.append
+        )
+        agent.rebase(str(right))
+        assert logged == [{"kind": "cwd", "cwd": str(right)}]
+        assert emitted == [{"change": "cwd", "path": str(right)}]
+
+    def test_trust_root_logs_and_emits_trust(self, tmp_path):
+        base, other = tmp_path / "base", tmp_path / "other"
+        base.mkdir()
+        other.mkdir()
+        logged: list = []
+        emitted: list = []
+        agent, _ = make_agent(
+            [], cwd=str(base), state_log=logged.append, on_state=emitted.append
+        )
+        agent.trust_root(str(other))
+        assert logged == [{"kind": "trust_dir", "path": str(other.resolve())}]
+        assert emitted == [{"change": "trust", "path": str(other.resolve())}]
+
+    def test_add_root_logs_trust(self, tmp_path):
+        base, other = tmp_path / "base", tmp_path / "other"
+        base.mkdir()
+        other.mkdir()
+        logged: list = []
+        agent, _ = make_agent([], cwd=str(base), state_log=logged.append)
+        agent.add_root(str(other))
+        assert logged == [{"kind": "trust_dir", "path": str(other.resolve())}]
+
+    def test_restore_workspace_sets_cwd_and_roots(self, tmp_path):
+        proj, shared = tmp_path / "proj", tmp_path / "shared"
+        proj.mkdir()
+        shared.mkdir()
+        agent, _ = make_agent([], cwd=str(tmp_path))
+        agent.restore_workspace(str(proj), [str(shared)])
+        assert agent.cwd == str(proj)
+        assert agent.roots[0] == proj.resolve()
+        assert shared.resolve() in agent.roots
+
+    def test_restore_workspace_does_not_relog(self, tmp_path):
+        # Restoring sets state directly (not via rebase/trust_root), so it emits
+        # no fresh record — the replay feedback-loop guard.
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        logged: list = []
+        emitted: list = []
+        agent, _ = make_agent(
+            [], cwd=str(tmp_path), state_log=logged.append, on_state=emitted.append
+        )
+        agent.restore_workspace(str(proj), [str(proj)])
+        assert logged == []
+        assert emitted == []
+
+    def test_restore_workspace_skips_missing_paths(self, tmp_path):
+        gone_cwd, gone_trust = tmp_path / "gone", tmp_path / "vanished"
+        agent, _ = make_agent([], cwd=str(tmp_path))
+        agent.restore_workspace(str(gone_cwd), [str(gone_trust)])
+        assert agent.cwd == str(tmp_path)  # vanished cwd → keep the default
+        assert gone_trust.resolve() not in agent.roots  # vanished trust → skipped
+
+
 class TestCancel:
     def test_cancel_stops_before_next_model_call(self, tmp_path):
         from aish.agent import CANCELLED_RESULT

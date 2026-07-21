@@ -139,6 +139,8 @@ def trace_shape(events):
             shape.append(("step", event.get("kind"), event.get("name")))
         elif kind == "command_end":
             shape.append(("command_end", event.get("status")))
+        elif kind == "workspace":
+            shape.append(("workspace", event.get("change"), event.get("path")))
         else:
             shape.append((kind,))
     return shape
@@ -1404,6 +1406,74 @@ class TestSessions:
         assert cold is not None
         assert ("command_start",) not in trace_shape(cold)  # held → no terminal block
         assert trace_shape(hot) == trace_shape(cold)
+
+    def test_cwd_and_trust_changes_log_and_reconstruct(self, app_env, tmp_path):
+        # #94: a /cd and a /add-dir emit live `workspace` timeline markers AND
+        # persist, so the cold reconstruction projects the identical shape —
+        # the same hot/cold invariant the trace and command framing obey.
+        elsewhere, shared = tmp_path / "elsewhere", tmp_path / "shared"
+        elsewhere.mkdir()
+        shared.mkdir()
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "cd", "path": str(elsewhere)})
+            live_cd = recv_until(ws, "workspace")
+            assert live_cd["change"] == "cwd" and live_cd["path"] == str(elsewhere)
+            ws.send_json({"type": "add_dir", "path": str(shared)})
+            live_trust = recv_until(ws, "workspace")
+            assert live_trust["change"] == "trust"
+            server = client.app.state.server
+            hot = list(server.active.bridge.transcript)
+            path = server.active.logref.log.path
+
+        cold = SessionLog.reconstruct_events(path)
+        assert cold is not None
+        shape = trace_shape(cold)
+        assert ("workspace", "cwd", str(elsewhere)) in shape
+        assert ("workspace", "trust", str(shared.resolve())) in shape
+        # The consistency invariant: the live `workspace` events and the ones
+        # reconstruct_events replays are byte-identical. (The full-transcript
+        # shape differs only by the /cd + /add-dir context notes the agent
+        # injects into the conversation, which predate #94.)
+        ws_hot = [e for e in hot if e["type"] == "workspace"]
+        ws_cold = [e for e in cold if e["type"] == "workspace"]
+        assert ws_hot == ws_cold
+
+    def test_cold_open_restores_cwd_and_trusted_roots(self, app_env, tmp_path):
+        # #94: reopening a session cold restores where it left off (cwd + the
+        # dirs it trusted), not the server's launch dir.
+        elsewhere, shared = tmp_path / "elsewhere", tmp_path / "shared"
+        elsewhere.mkdir()
+        shared.mkdir()
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "cd", "path": str(elsewhere)})
+            recv_until(ws, "workspace")
+            ws.send_json({"type": "add_dir", "path": str(shared)})
+            recv_until(ws, "workspace")
+
+        # Fresh server over the same state dir → the session is cold-loaded.
+        client2, _ = make_client(app_env, [])
+        with client2, connected(client2, f"/ws?session={name}") as (_, hello2, _):
+            assert hello2["cwd"] == str(elsewhere)
+            assert str(shared.resolve()) in hello2["roots"]
+
+    def test_cold_open_skips_vanished_cwd(self, app_env, tmp_path):
+        # #94: a restored cwd that no longer exists falls back to the default
+        # instead of crashing the cold open.
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "cd", "path": str(gone)})
+            recv_until(ws, "workspace")
+        gone.rmdir()  # the directory disappears before the session is reopened
+
+        client2, _ = make_client(app_env, [])
+        with client2, connected(client2, f"/ws?session={name}") as (_, hello2, _):
+            assert hello2["cwd"] == app_env["cwd"]  # gracefully back to default
 
     def test_connect_with_session_param_reattaches_after_restart(self, app_env):
         # The client names its session on (re)connect so a server restart
