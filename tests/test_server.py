@@ -115,7 +115,8 @@ def find_tool_step(events, name):
 # (or vice versa) fails the guard until it is handled on both paths.
 _EPHEMERAL_EVENTS = {
     "token", "echo", "status", "error", "hello", "replay", "history",
-    "queued", "approval_request", "approval_resolved", "cwd_changed",
+    "queued", "cwd_queued", "cwd_dequeued", "approval_request",
+    "approval_resolved", "cwd_changed",
     "model_changed", "session_state", "file_list", "job_list",
     "model_list", "session_list", "session_deleted", "session_renamed",
 }
@@ -919,16 +920,99 @@ class TestReconnect:
 
     def test_cd_queued_while_busy(self, app_env, tmp_path):
         # A /cd mid-task can't move state under the running agent, so it's
-        # queued and applied when the task finishes — not rejected.
+        # queued and applied when the task finishes — not rejected. It surfaces
+        # as a deduplicated queue card (#92), not an invisible echo.
         client, _ = make_client(app_env, self.pending_responses(tmp_path))
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "task", "text": "run it"})
             request = recv_until(ws, "approval_request")  # agent now blocked → busy
             ws.send_json({"type": "cd", "path": str(tmp_path)})
-            echo = recv_until(ws, "echo")
-            assert "will switch" in echo["text"]
+            queued = recv_until(ws, "cwd_queued")
+            assert queued["path"] == str(tmp_path)
+            assert client.app.state.server.active.pending_cwd == str(tmp_path)
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
             recv_until(ws, "done")
+
+    def test_second_cd_overwrites_pending_and_re_emits(self, app_env, tmp_path):
+        # Dedup (#92): a second cd while one is queued overwrites pending_cwd
+        # (single card) and re-emits so the frontend updates in place.
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        client, _ = make_client(app_env, self.pending_responses(tmp_path))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "cd", "path": str(tmp_path)})
+            recv_until(ws, "cwd_queued")
+            ws.send_json({"type": "cd", "path": str(sub)})
+            second = recv_until(ws, "cwd_queued")
+            assert second["path"] == str(sub)
+            assert client.app.state.server.active.pending_cwd == str(sub)
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+
+    def test_dequeue_cwd_clears_pending(self, app_env, tmp_path):
+        # Remove (#92): dequeue_cwd clears the pending change and tells the
+        # frontend to drop the card.
+        client, _ = make_client(app_env, self.pending_responses(tmp_path))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "cd", "path": str(tmp_path)})
+            recv_until(ws, "cwd_queued")
+            ws.send_json({"type": "dequeue_cwd"})
+            recv_until(ws, "cwd_dequeued")
+            assert client.app.state.server.active.pending_cwd is None
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+
+    def test_pending_cwd_applies_before_queued_message(self, app_env, tmp_path):
+        # Ordering (#92): _finish_turn applies pending_cwd BEFORE draining the
+        # message queue, so the next queued message runs in the new directory.
+        # The card is retired (cwd_dequeued) once the change lands.
+        sub = tmp_path / "work"
+        sub.mkdir()
+        client, chat = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+                model_says("first done"),
+                model_says("second done"),
+            ],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "first"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "cd", "path": str(sub)})
+            recv_until(ws, "cwd_queued")
+            ws.send_json({"type": "task", "text": "second"})
+            recv_until(ws, "queued")
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")  # first task finishes
+            recv_until(ws, "cwd_dequeued")  # cwd applied → card retired
+            server = client.app.state.server
+            assert server.active.pending_cwd is None
+            assert str(server.active.agent.cwd) == str(sub)  # applied first
+            user = recv_until(ws, "user")
+            assert user["text"] == "second"  # queued message runs after the cd
+            recv_until(ws, "done")
+
+    def test_pending_cwd_card_replays_on_reconnect(self, app_env, tmp_path):
+        # The card is backend-authoritative (#92): a reconnect while a cd is
+        # pending re-emits cwd_queued so the card reappears.
+        client, _ = make_client(app_env, self.pending_responses(tmp_path))
+        with client:
+            with connected(client) as (ws, _, _):
+                ws.send_json({"type": "task", "text": "run it"})
+                request = recv_until(ws, "approval_request")
+                ws.send_json({"type": "cd", "path": str(tmp_path)})
+                recv_until(ws, "cwd_queued")
+            with connected(client) as (ws2, hello, _):
+                assert hello["busy"] is True
+                requeued = recv_until(ws2, "cwd_queued")
+                assert requeued["path"] == str(tmp_path)
+                ws2.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+                recv_until(ws2, "done")
 
 
 class TestStopAndQueue:

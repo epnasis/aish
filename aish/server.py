@@ -806,6 +806,12 @@ class WebServer:
         await websocket.send_json(
             {"type": "replay", "events": snapshot, "truncated": bridge.truncated}
         )
+        # The queued-cwd card is backend-authoritative (single pending_cwd), so
+        # it's reconstructed on attach rather than replayed from the transcript
+        # (#92) — this survives reconnects and session switches. Sent after the
+        # replay so it lands on top of the freshly-rebuilt queue list.
+        if session.pending_cwd:
+            await websocket.send_json({"type": "cwd_queued", "path": session.pending_cwd})
         self.sender = asyncio.ensure_future(self._send_loop(websocket, bridge))
 
     async def _send_loop(self, websocket: WebSocket, bridge: Bridge) -> None:
@@ -863,6 +869,9 @@ class WebServer:
             await self._retry_task(websocket, str(message.get("text", "")).strip())
         elif kind == "dequeue":
             self._dequeue(str(message.get("text", "")))
+        elif kind == "dequeue_cwd":
+            self.active.pending_cwd = None
+            self.active.bridge.emit({"type": "cwd_dequeued"}, record=False)
         elif kind == "client_debug":
             # Device-side diagnostics (viewport state on iOS, etc.) — printed
             # to the server log because the phone has no reachable console.
@@ -1124,6 +1133,9 @@ class WebServer:
         if session.pending_cwd:  # a /cd requested mid-turn, applied now
             target, session.pending_cwd = session.pending_cwd, None
             result = session.agent.rebase(target)
+            # Retire the queued-cwd card (#92): the change has landed. The
+            # header cwd chip is refreshed separately via _cwd_event below.
+            session.bridge.emit({"type": "cwd_dequeued"}, record=False)
             ws = self.ws
             if ws is not None and session is self.active and not result.startswith("ERROR"):
                 with contextlib.suppress(Exception):
@@ -1457,10 +1469,13 @@ class WebServer:
         # Changing cwd mid-task would move the ground under the running agent —
         # queue it and apply the moment the task finishes, instead of failing.
         if self.active.busy:
+            # Surface the pending change as a single deduplicated queue card
+            # (#92): the backend keeps at most one pending_cwd, so overwriting
+            # and re-emitting updates the existing card in place. record=False —
+            # the card is reconstructed from pending_cwd on attach (see _show),
+            # not from transcript noise.
             self.active.pending_cwd = path
-            self.active.bridge.emit(
-                {"type": "echo", "text": f"↪ will switch to {path} when this task finishes"}
-            )
+            self.active.bridge.emit({"type": "cwd_queued", "path": path}, record=False)
             return
         result = await asyncio.to_thread(self.active.agent.rebase, path)
         if result.startswith("ERROR"):

@@ -222,6 +222,8 @@ function handle(event) {
     case "queued":
       addQueueChip(event.text);
       break;
+    case "cwd_queued": addCwdChip(event.path); break;
+    case "cwd_dequeued": removeCwdChip(); break;
     case "token": onToken(event.text); break;
     case "echo":
       // The activity trace already shows a run_command's approval + result and
@@ -353,6 +355,7 @@ function onReplay(event) {
     messagesEl.style.transform = "";
   }
   messagesEl.replaceChildren();
+  removeCwdChip(); // a session switch drops any stale cwd card; _show re-emits if pending (#92)
   cards.clear();
   pendingCards = 0;
   answerEl = null;
@@ -3568,6 +3571,42 @@ function addQueueChip(text) {
 function removeQueueChip(text) {
   const list = $("queue-list");
   const chip = [...list.children].find((c) => c.dataset.text === text);
+  if (chip) chip.remove();
+  if (!list.children.length) list.hidden = true;
+}
+
+// A pending working-directory change (#92) shows as a single card pinned to the
+// TOP of the queue — it applies first, before any queued messages. There is at
+// most one; a second cd updates the existing card in place. Edit reopens the
+// directory picker; Remove clears the pending change server-side.
+function addCwdChip(path) {
+  const list = $("queue-list");
+  let chip = list.querySelector(".queue-chip.cwd");
+  if (!chip) {
+    chip = document.createElement("div");
+    chip.className = "queue-chip cwd";
+    chip.innerHTML =
+      '<svg class="queue-ico" viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4l2 2.2h7.6a2 2 0 0 1 2 2v8.2a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>' +
+      '<span class="queue-body"><span class="queue-text"></span><span class="queue-sub">Queued · applies first</span></span>' +
+      '<button class="queue-edit" type="button" aria-label="change queued directory"><svg viewBox="0 0 24 24"><path d="M12 19.5h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.2a1.7 1.7 0 0 1 2.4 2.4l-8.3 8.3-3.2.8.8-3.2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg></button>' +
+      '<button class="queue-remove" type="button" aria-label="cancel directory change"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></button>';
+    // Edit reopens the directory picker (#92) — selecting there re-sends `cd`,
+    // which overwrites pending_cwd and re-emits, updating this same card.
+    chip.querySelector(".queue-edit").onclick = () => openDirSheet();
+    chip.querySelector(".queue-remove").onclick = () => {
+      send({ type: "dequeue_cwd" });
+      removeCwdChip();
+    };
+    list.insertBefore(chip, list.firstChild); // pinned above message chips
+  }
+  chip.querySelector(".queue-text").textContent = `Change directory to ${abbreviatePath(path)}`;
+  list.hidden = false;
+  scrollToEnd();
+}
+
+function removeCwdChip() {
+  const list = $("queue-list");
+  const chip = list.querySelector(".queue-chip.cwd");
   if (chip) chip.remove();
   if (!list.children.length) list.hidden = true;
 }
