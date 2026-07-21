@@ -128,6 +128,9 @@ class LogRef:
     def command_event(self, event: dict) -> None:
         self.log.command_event(event)
 
+    def rewind_last_turn(self) -> bool:
+        return self.log.rewind_last_turn()
+
 
 def load_config(path: Path) -> dict:
     try:

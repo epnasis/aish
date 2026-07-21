@@ -1708,6 +1708,98 @@ class TestFork:
             recv_until(ws, "done")
 
 
+class TestRetry:
+    def test_retry_discards_previous_answer_everywhere(self, app_env):
+        # #60: retry re-runs the prompt AND erases the previous attempt from the
+        # model's context, the transcript, and the on-disk log — so nothing about
+        # the regeneration is anchored to the discarded answer.
+        client, chat = make_client(
+            app_env,
+            [model_says("first wrong answer"), model_says("second clean answer")],
+        )
+        with client, connected(client) as (ws, hello, _):
+            session_name = hello["session"]
+            ws.send_json({"type": "task", "text": "what is 2+2?"})
+            done1 = recv_until(ws, "done")
+            assert done1["result"] == "first wrong answer"
+
+            ws.send_json({"type": "retry", "text": "what is 2+2?"})
+            # The transcript is re-sent rolled back: the discarded answer is gone
+            # but the user's prompt bubble stays.
+            replay = recv_until(ws, "replay")
+            dumped = json.dumps(replay["events"])
+            assert "first wrong answer" not in dumped
+            assert sum(1 for e in replay["events"] if e["type"] == "user") == 1
+            assert not any(e["type"] == "done" for e in replay["events"])
+            done2 = recv_until(ws, "done")
+            assert done2["result"] == "second clean answer"
+
+        # Model context on the rerun: the discarded answer must not be present,
+        # and the prompt must be (the rerun really happened, from scratch).
+        rerun_messages = json.dumps(chat.calls[1]["messages"])
+        assert "first wrong answer" not in rerun_messages
+        assert "what is 2+2?" in rerun_messages
+
+        # Persistence: a cold reload must not resurrect the discarded answer.
+        client2, _ = make_client(app_env, [])
+        with client2, connected(client2) as (ws2, _, _):
+            ws2.send_json({"type": "resume", "path": session_name})
+            recv_until(ws2, "hello")
+            replay = recv_until(ws2, "replay")
+            dumped = json.dumps(replay["events"])
+            assert "first wrong answer" not in dumped
+            assert "second clean answer" in dumped
+            assert sum(1 for e in replay["events"] if e["type"] == "user") == 1
+
+    def test_retry_keeps_earlier_turns(self, app_env):
+        # Only the LAST turn is rolled back; earlier answers stay in context.
+        client, chat = make_client(
+            app_env,
+            [model_says("alpha"), model_says("bravo"), model_says("charlie")],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "first"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "second"})
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "retry", "text": "second"})
+            recv_until(ws, "replay")
+            done = recv_until(ws, "done")
+            assert done["result"] == "charlie"
+
+        rerun_messages = json.dumps(chat.calls[2]["messages"])
+        assert "alpha" in rerun_messages  # the first turn's answer survives
+        assert "bravo" not in rerun_messages  # the retried turn's answer is gone
+        assert "second" in rerun_messages
+
+    def test_retry_while_busy_cancels_then_reruns_clean(self, app_env, tmp_path):
+        # Retry fired while a turn is wedged on an approval: cancel first, then
+        # roll back and rerun so the discarded (unexecuted) attempt leaves no
+        # trace in the model's context.
+        marker = tmp_path / "never"
+        client, chat = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+                model_says("clean answer"),
+            ],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run it"})
+            recv_until(ws, "approval_request")  # now busy, blocked on the card
+            ws.send_json({"type": "retry", "text": "run it"})
+            replay = recv_until(ws, "replay")
+            assert not marker.exists()  # the cancelled command never ran
+            assert sum(1 for e in replay["events"] if e["type"] == "user") == 1
+            done = recv_until(ws, "done")
+            assert done["result"] == "clean answer"
+
+        rerun_messages = json.dumps(chat.calls[1]["messages"])
+        assert "run it" in rerun_messages
+        assert str(marker) not in rerun_messages  # discarded tool call is not replayed
+
+
 class TestModels:
     def test_model_list_ranked(self, app_env, monkeypatch):
         monkeypatch.setattr(

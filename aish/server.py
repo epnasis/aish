@@ -622,6 +622,7 @@ class Session:
         self.runner: asyncio.Task | None = None
         self.queue: list[tuple[str, list[str]]] = []  # (text, attachments) waiting
         self.pending_cwd: str | None = None  # a /cd requested while busy; applied after
+        self.pending_retry: str | None = None  # a retry requested while busy; run after stop
         self.last_shown = time.monotonic()
         self.custom_title: str | None = None  # a user-set name; overrides the derived title
 
@@ -857,6 +858,8 @@ class WebServer:
             await self._send_files(websocket, str(message.get("query", "")))
         elif kind == "stop":
             await self._stop_task(websocket)
+        elif kind == "retry":
+            await self._retry_task(websocket, str(message.get("text", "")).strip())
         elif kind == "dequeue":
             self._dequeue(str(message.get("text", "")))
         elif kind == "client_debug":
@@ -933,6 +936,55 @@ class WebServer:
         for uid in list(session.bridge.pending):
             session.bridge.answer(uid, {"action": "deny"})
         session.bridge.emit({"type": "echo", "text": "✕ stop requested"})
+
+    async def _retry_task(self, websocket: WebSocket, text: str) -> None:
+        """Regenerate the last answer from scratch (#60): the previous attempt is
+        discarded from the model's context, the on-disk log, AND the transcript
+        so the rerun is not informed by it. While a turn is still running (or
+        wedged on an approval), the rollback can't touch agent.messages under the
+        worker thread — cancel first and defer the rerun to _finish_turn, exactly
+        how Retry already recovers a stuck turn."""
+        session = self.active
+        if session.busy:
+            session.pending_retry = text
+            await self._stop_task(websocket)
+            return
+        await self._launch_retry(session, text)
+
+    async def _launch_retry(self, session: Session, client_text: str) -> None:
+        # Roll the last user turn out of the model's context and the log; run_task
+        # re-adds and re-logs the prompt fresh, so neither the model nor a later
+        # cold replay sees the discarded answer. The transcript keeps the user
+        # bubble and drops only the answer/trace after it, then a fresh replay
+        # re-renders the shortened transcript so the browser matches.
+        prompt = session.agent.rewind_last_task() or client_text
+        if not prompt:
+            return
+        session.logref.rewind_last_turn()
+        self._rollback_transcript_to_last_user(session)
+        # Routed through the outbox (not a direct ws send) so it serializes behind
+        # any still-draining events from the cancelled turn — the replay wipes
+        # their transient render — and ahead of the rerun's fresh events.
+        session.bridge.emit(
+            {
+                "type": "replay",
+                "events": list(session.bridge.transcript),
+                "truncated": session.bridge.truncated,
+            },
+            record=False,
+        )
+        session.busy = True
+        session.runner = asyncio.ensure_future(self._run_task(session, prompt))
+
+    @staticmethod
+    def _rollback_transcript_to_last_user(session: Session) -> None:
+        """Drop everything after the last `user` event (the discarded answer and
+        its trace), keeping the user bubble — the visual half of a retry."""
+        transcript = session.bridge.transcript
+        for i in range(len(transcript) - 1, -1, -1):
+            if transcript[i].get("type") == "user":
+                del transcript[i + 1:]
+                return
 
     def _dequeue(self, text: str) -> None:
         """Drop the first still-waiting message matching `text` (the client's
@@ -1075,6 +1127,10 @@ class WebServer:
             if ws is not None and session is self.active and not result.startswith("ERROR"):
                 with contextlib.suppress(Exception):
                     await ws.send_json(self._cwd_event())
+        if session.pending_retry is not None:  # a Retry that had to cancel a stuck turn
+            text, session.pending_retry = session.pending_retry, None
+            await self._launch_retry(session, text)
+            return
         if session.queue:
             text, attachments = session.queue.pop(0)
             self._launch(session, text, attachments)

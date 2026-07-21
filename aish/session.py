@@ -308,6 +308,34 @@ class SessionLog:
                 break
         return "\n".join(lines[:end]) + "\n"
 
+    def rewind_last_turn(self) -> bool:
+        """Drop the most recent user turn from the log in place: the last
+        `message`/`user` record and every record after it (assistant/tool
+        messages, traces, command framing). Web retry (#60) re-runs the prompt,
+        which re-logs it and the fresh answer, so a cold replay shows one turn,
+        not the discarded attempt. Append-only otherwise, so this is the one
+        rewrite: the handle is closed and reopened lazily on the next record.
+        Returns False when there is no file yet or no user turn to drop."""
+        if not self.path.exists():
+            return False
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        cut: int | None = None
+        for i, line in enumerate(lines):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("kind") == "message" and record.get("role") == "user":
+                cut = i
+        if cut is None:
+            return False
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+        kept = lines[:cut]
+        self.path.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+        return True
+
     @staticmethod
     def _derive_title(messages: list[dict]) -> str:
         """Untruncated title: the first user message — cheap, deterministic,
