@@ -1918,7 +1918,10 @@ function mapsDirectionsEmbed(saddr, daddr, label) {
 
 function inlineMd(text) {
   const frag = document.createDocumentFragment();
-  let rest = text;
+  // [no-chips] (#46) is the model's opt-out from the quick-reply safety net —
+  // a directive, not content, so it never renders (code blocks skip inlineMd
+  // and keep it literal). Stripping here covers streaming, replay, and reload.
+  let rest = text.replace(/\[no-chips\]/gi, "");
   while (rest) {
     const match = rest.match(INLINE_RE);
     if (!match) {
