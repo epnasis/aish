@@ -377,7 +377,11 @@ confirm (permanent: conversation and audit log; refused while running;
 deleting the current chat lands you on a fresh one). The **centered session
 title** (with its ˅ caret) opens a menu: new chat, switch model, change
 directory, line wrap, and workspace & jobs. The **compose pencil** (top
-right) starts a fresh chat. The second row is a context bar: the **working
+right) starts a fresh chat. To **branch** a conversation, type `/fork` (or
+`/branch`): it copies everything so far into a new session and switches you
+there, leaving the original untouched — the "explore a tangent without
+polluting the main thread" move; the fork replays the full prior transcript
+just like a resumed session. The second row is a context bar: the **working
 directory** chip (folder name + path) taps into a folder picker to browse or
 fuzzy-search folders without typing (recents first; an absolute or `~` path
 in its search jumps straight there), and the **model chip** opens a

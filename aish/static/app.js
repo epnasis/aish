@@ -2984,6 +2984,7 @@ const SLASH_COMMANDS = [
   ["/resume", "search & resume an earlier session"],
   ["/delete", "delete an earlier session (trash icon in the drawer)"],
   ["/new", "fresh conversation in a new session"],
+  ["/fork", "branch this conversation into a new session (original untouched)"],
   ["/learn", "save this conversation's learnings as skills/memory"],
   ["/cd", "change working directory (re-anchors approval root)"],
   ["/add-dir", "allow auto-approved work in another tree"],
@@ -3150,7 +3151,7 @@ function submitInput() {
   }
 }
 
-const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/dir-add", "/quit", "/exit"]);
+const SLASH_ALL = SLASH_COMMANDS.map(([cmd]) => cmd).concat(["/clear", "/branch", "/dir-add", "/quit", "/exit"]);
 
 function handleSlash(text) {
   let [command, ...rest] = text.split(/\s+/);
@@ -3167,6 +3168,7 @@ function handleSlash(text) {
     case "/model": openModelSheet(arg); break;
     case "/resume": case "/delete": openSessionsSheet(arg); break;
     case "/new": case "/clear": send({ type: "new" }); break;
+    case "/fork": case "/branch": send({ type: "fork" }); break;
     case "/cd": arg ? send({ type: "cd", path: arg }) : openDirSheet(); break;
     case "/add-dir": case "/dir-add":
       arg ? send({ type: "add_dir", path: arg }) : openSheet("workspace-sheet"); break;

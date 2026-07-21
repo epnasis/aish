@@ -460,8 +460,13 @@ memory only.
 - There are NO ! direct commands here. A message starting with /learn \
 distills the conversation into saved skills/memory (an optional hint \
 follows, e.g. "/learn the gh flow"; "/learn lessons" migrates the legacy \
-lessons file); the composer also accepts /model /resume /delete /new /cd \
-/add-dir /jobs /help. Header controls: a "‹ Sessions" back button (top left, \
+lessons file); the composer also accepts /model /resume /delete /new /fork \
+/cd /add-dir /jobs /help. To branch the conversation and explore a tangent \
+without touching the current thread, the user types /fork (or /branch): it \
+copies the whole conversation so far into a NEW session and switches there, \
+leaving this one untouched — tell them to use it when they want to try an \
+alternative approach or a side question and keep the main chat clean. Header \
+controls: a "‹ Sessions" back button (top left, \
 with a badge when a background session needs attention) opens the sessions \
 drawer; the centered session title opens a menu (new chat, switch model, \
 change directory, line wrap, export the chat to PDF, delete this chat, \
@@ -752,6 +757,8 @@ class WebServer:
             await self._resume(websocket, str(message.get("path", "")))
         elif kind == "new":
             await self._new_session(websocket)
+        elif kind == "fork":
+            await self._fork_session(websocket)
         elif kind == "delete_session":
             await self._delete_session(websocket, str(message.get("name", "")))
         elif kind == "models":
@@ -1023,6 +1030,77 @@ class WebServer:
             session.agent.provider = getattr(source, "provider", "ollama")
             session.logref.model(model_spec(session.agent))
         self.add_session(session, activate=False)
+        await self._show(websocket, session)
+
+    async def _fork_session(self, websocket: WebSocket) -> None:
+        """Branch the current conversation into a NEW session seeded with the
+        history so far, leaving the original untouched — the "explore a tangent
+        without polluting the main thread" move (issue #47).
+
+        The fork is a SNAPSHOT: the source's append-only log (flushed on every
+        record) is copied verbatim to a fresh session file, then reopened along
+        the resume path (`_open_by_name` → `reconstruct_events`), so it replays
+        identically to any resumed session — hot or later cold. The source's
+        Agent and log are only read, never mutated.
+
+        Refused while the source is busy (a mid-task snapshot would capture a
+        half-finished turn) and when there's nothing to fork yet."""
+        source = self.active
+        if source.busy:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "text": "can't fork while this session is working — wait for "
+                    "the current task to finish, then fork",
+                }
+            )
+            return
+        src_path = source.logref.log.path
+        has_history = any(
+            m.get("role") in ("user", "assistant") for m in source.agent.messages[1:]
+        )
+        if not has_history or not src_path.is_file():
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "text": "nothing to fork yet — send a message first, then fork "
+                    "to branch the conversation into a new session",
+                }
+            )
+            return
+
+        def copy_log() -> Path:
+            new_path = SessionLog.new(self.state_dir).path
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            # Verbatim copy: message + model + trace + terminal-framing records
+            # all carry over, so the fork reconstructs the exact same transcript
+            # (and --resume history) as the original up to this point.
+            new_path.write_text(src_path.read_text(encoding="utf-8"), encoding="utf-8")
+            return new_path
+
+        new_path = await asyncio.to_thread(copy_log)
+        session = await self._open_by_name(new_path.name)
+        if session is None:  # pragma: no cover — we just wrote a valid session file
+            await websocket.send_json({"type": "error", "text": "fork failed"})
+            return
+        # Continue in the fork with the source's LIVE model/backend (it may have
+        # switched model since the last logged record); mirrors _new_session.
+        src_agent = source.agent
+        if (
+            getattr(src_agent, "provider", "ollama") != "claude-max"
+            and getattr(session.agent, "provider", "ollama") != "claude-max"
+        ):
+            session.agent.chat = src_agent.chat
+            session.agent.model = src_agent.model
+            session.agent.provider = getattr(src_agent, "provider", "ollama")
+            session.logref.model(model_spec(session.agent))
+        session.bridge.record(
+            {
+                "type": "echo",
+                "text": "✓ forked into a new session — the original chat is "
+                "untouched; continue the tangent here",
+            }
+        )
         await self._show(websocket, session)
 
     async def _delete_session(self, websocket: WebSocket, name: str) -> None:
