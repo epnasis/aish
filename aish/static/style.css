@@ -647,8 +647,11 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   gap: 2px;
   margin: 6px 0 0 -8px; /* optical: align icons with the answer's text edge */
 }
-.msg-tools > .copy-chip { width: 40px; height: 40px; border-radius: 10px; }
+.msg-tools > .copy-chip { width: 40px; height: 40px; border-radius: 10px; margin-left: auto; }
 .msg-tools > .copy-chip svg { width: 19px; height: 19px; }
+/* spacers that pin TTS far left and Copy far right, leaving Retry alone in the
+   middle so neither end action misfires the other (#96) */
+.msg-tools > .regen-chip { margin-left: auto; }
 .regen-chip {
   display: flex;
   align-items: center;
@@ -663,7 +666,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .regen-chip svg { width: 19px; height: 19px; }
 .regen-chip:active { opacity: 0.5; }
-.answer-timing { margin-left: auto; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--dim); padding-right: 6px; }
+.answer-timing { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--dim); padding: 0 6px; }
 
 /* copy chip under your own prompt bubble, right-aligned with it */
 .user-tools {

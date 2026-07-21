@@ -2271,6 +2271,34 @@ const player = {
   utterance: null, // held so WebKit can't GC it mid-speech (kills onend)
 };
 
+// Listening to an answer is passive, so the phone's idle timer sleeps the
+// screen mid-playback (#96). Hold a Screen Wake Lock while TTS is speaking.
+let wakeLock = null;
+
+async function acquireWakeLock() {
+  if (!("wakeLock" in navigator) || wakeLock) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", () => { wakeLock = null; });
+  } catch (err) {
+    console.warn(`wake lock request failed: ${err.name}`);
+  }
+}
+
+function releaseWakeLock() {
+  const held = wakeLock;
+  wakeLock = null; // clear first so a re-acquire can't race the async release
+  if (held) held.release().catch(() => {});
+}
+
+// iOS drops the wake lock whenever the page is hidden (screen off, app
+// switch). Re-take it on return if we're still mid-answer.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && player.box && !player.paused) {
+    acquireWakeLock();
+  }
+});
+
 function svgIcon(cls, build) {
   const NS = "http://www.w3.org/2000/svg";
   const make = (tag, attrs) => {
@@ -2536,10 +2564,12 @@ function attachAnswerTools(el, source, prompt) {
   const ordinal = ++renderedAnswers;
   const tools = document.createElement("div");
   tools.className = "msg-tools";
-  tools.appendChild(copyChip(() => source, "copy answer"));
+  // Order matters (#96): the two most-used actions sit at opposite ends so a
+  // reach for one can't misfire the other. TTS is pinned far left, Copy far
+  // right (both via CSS margin-left:auto spacers), Retry isolated between them.
+  if (TTS_OK) tools.appendChild(buildTtsBox(el));
   tools.appendChild(exportChip(() => source, () => prompt || ""));
   tools.appendChild(forkChip(ordinal));
-  if (TTS_OK) tools.appendChild(buildTtsBox(el));
   // Regenerate: only the newest answer keeps it, so retire the previous one.
   retireRegen();
   if (lastUserPrompt) {
@@ -2553,6 +2583,7 @@ function attachAnswerTools(el, source, prompt) {
     tools.appendChild(regen);
     lastRegenBtn = regen;
   }
+  tools.appendChild(copyChip(() => source, "copy answer"));
   if (answerTiming) {
     const timing = document.createElement("span");
     timing.className = "answer-timing";
@@ -2653,6 +2684,7 @@ function stopSpeaking() {
   player.box = null;
   player.utterance = null;
   player.paused = false;
+  releaseWakeLock();
 }
 
 function startPlayback(box, el) {
@@ -2664,6 +2696,7 @@ function startPlayback(box, el) {
   player.lang = speechLang(text);
   box.classList.add("active");
   box.querySelector(".t-rate").textContent = rateLabel();
+  acquireWakeLock();
   speakChunk(0);
 }
 
@@ -2694,9 +2727,11 @@ function togglePause() {
   if (player.paused) {
     speechSynthesis.resume();
     player.paused = false;
+    acquireWakeLock();
   } else {
     speechSynthesis.pause();
     player.paused = true;
+    releaseWakeLock();
   }
   player.box.classList.toggle("paused", player.paused);
 }
