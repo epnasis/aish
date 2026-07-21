@@ -486,6 +486,32 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "forget_memory",
+            "description": (
+                "Permanently delete ONE stale or wrong memory entry by its slug "
+                "name. Use this to prune memory that is outdated, incorrect, or "
+                "superseded, and to CONSOLIDATE duplicates: first remember() the "
+                "single canonical fact (reusing or picking one slug), then "
+                "forget_memory() each redundant slug so only the canonical entry "
+                "remains. Names come from the memory index in your context or "
+                "from recall. Only affects your own memory files — never other "
+                "files. Verify the name (recall first) before forgetting."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The exact slug of the memory entry to delete.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": (
                 "Read a text file with line numbers, optionally a specific line range. "

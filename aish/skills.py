@@ -626,3 +626,27 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
     except OSError as exc:
         return f"ERROR: could not save memory: {exc}"
     return f"remembered ({slug}): {text}"
+
+
+def forget_memory(name: str, cwd: str = "") -> str:
+    """Permanently delete one memory entry by slug. Strictly confined to the
+    memory dirs (project + global): slug-validated, and the resolved file must
+    sit directly inside a memory dir, so it can never remove an arbitrary path.
+    Legacy lessons.md lines are not files and cannot be forgotten this way."""
+    slug = name.strip()
+    if not NAME_RE.match(slug or ""):
+        return f"ERROR: invalid memory name {slug!r}"
+    for directory in memory_dirs(cwd):
+        path = directory / f"{slug}.md"
+        try:
+            if not path.is_file():
+                continue
+            # Defense in depth: NAME_RE already forbids separators, but confirm
+            # the file resolves to a direct child of the memory dir before unlink.
+            if path.resolve().parent != directory.resolve():
+                return f"ERROR: refusing to forget outside memory store: {slug!r}"
+            path.unlink()
+            return f"forgot ({slug})"
+        except OSError as exc:
+            return f"ERROR: could not forget memory: {exc}"
+    return f"(no memory named {slug!r} to forget)"

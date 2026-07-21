@@ -1275,6 +1275,33 @@ class TestRememberTool:
         assert list(skills_module.GLOBAL_MEMORY_DIR.glob("*.md")) == []
 
 
+class TestForgetMemoryTool:
+    def test_forget_auto_approved_and_deletes_entry(self, tmp_path):
+        from aish import skills as skills_module
+
+        skills_module.save_memory("stale", skills_module.GLOBAL_MEMORY_DIR, name="stale")
+        call = SimpleNamespace(function=SimpleNamespace(
+            name="forget_memory", arguments={"name": "stale"}))
+        agent, _ = make_agent(
+            [model_says(tool_calls=[call]), model_says("done")],
+            approve=lambda _c: pytest.fail("forget_memory must not hit approval"),
+            cwd=str(tmp_path),
+        )
+        agent.run_task("prune it")
+        assert not (skills_module.GLOBAL_MEMORY_DIR / "stale.md").exists()
+        assert "forgot" in tool_messages(agent.messages)[0]["content"]
+
+    def test_forget_unknown_slug_reports_gracefully(self, tmp_path):
+        call = SimpleNamespace(function=SimpleNamespace(
+            name="forget_memory", arguments={"name": "ghost"}))
+        agent, _ = make_agent(
+            [model_says(tool_calls=[call]), model_says("done")],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("prune")
+        assert "no memory named" in tool_messages(agent.messages)[0]["content"]
+
+
 class TestRootScoping:
     """read_file auto-approval is confined to session roots; only the
     user-side rebase/add_root (i.e. /cd and /add-dir) widen or move them."""
