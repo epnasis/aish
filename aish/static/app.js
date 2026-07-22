@@ -1088,6 +1088,13 @@ function renderErrorBox(container, text) {
 
 const TERM_OUTPUT_CAP_VH = 40;
 
+// Live DOM cap (issue #109): a command with tens of thousands of output lines
+// would append one node + reflow per line, freezing the tab. Keep only the last
+// N lines in the live terminal block; the full (truncated) result still arrives
+// on the tool step. Each line is wrapped in its own `.tol` span so lines are
+// cheap to count and trim regardless of the ANSI nodes inside them.
+const TERM_LIVE_LINE_CAP = 800;
+
 // The prompt-line directory, Starship [directory]-style: keep the last
 // DIR_SEGMENTS path segments, prefixed with "…/" when anything was truncated
 // (repo root is not special — truncate_to_repo=false). Home is shown as ~.
@@ -1323,15 +1330,67 @@ function traceStream(text) {
   // else the model's trace block; otherwise (no active block) it renders inline.
   const term = userCmdBlock || (currentTrace && currentTrace.pending && currentTrace.pending.term);
   if (term) {
-    const body = term.querySelector(".term-out");
-    if (body.childNodes.length) body.appendChild(document.createTextNode("\n"));
-    body.appendChild(ansiFragment(text));
+    appendTermLines(term.querySelector(".term-out"), text);
     term.classList.add("has-output");
-    scrollToEnd();
-    if (currentTrace) pinTrace(currentTrace);
+    // Coalesce scroll+pin to one per frame (issue #109): N stream events in a
+    // single tick otherwise trigger N layout reflows.
+    scheduleStreamRender(currentTrace);
     return;
   }
   addStreamLine(text);
+}
+
+// Append output to a terminal block, one `.tol` span per line, and enforce the
+// live DOM cap. The backend coalesces lines, so `text` may carry several joined
+// by '\n' (cold replay hands the whole truncated output as one chunk) — split
+// so trimming stays line-accurate either way.
+function appendTermLines(body, text) {
+  for (const line of text.split("\n")) {
+    if (body.childNodes.length) body.appendChild(document.createTextNode("\n"));
+    const tol = document.createElement("span");
+    tol.className = "tol";
+    tol.appendChild(ansiFragment(line));
+    body.appendChild(tol);
+  }
+  capTermLines(body);
+}
+
+function capTermLines(body) {
+  const lines = body.querySelectorAll(".tol");
+  const excess = lines.length - TERM_LIVE_LINE_CAP;
+  if (excess <= 0) return;
+  for (let i = 0; i < excess; i++) {
+    const tol = lines[i];
+    const nl = tol.nextSibling; // the "\n" text node that separated it
+    tol.remove();
+    if (nl && nl.nodeType === 3 && nl.textContent === "\n") nl.remove();
+  }
+  // One muted marker so the user knows output was dropped (the full truncated
+  // result is on the tool step below). Prepended once, then kept at the top.
+  if (!body.querySelector(".term-trim-note")) {
+    const note = document.createElement("span");
+    note.className = "term-trim-note a-dim";
+    note.textContent = "… earlier output trimmed (see full result below) …";
+    body.insertBefore(document.createTextNode("\n"), body.firstChild);
+    body.insertBefore(note, body.firstChild);
+  }
+}
+
+// One scroll + pin per animation frame no matter how many stream events land in
+// the frame; slow output still autoscrolls (a lone event schedules its own rAF).
+let streamRenderTrace = null;
+let streamRenderScheduled = false;
+function scheduleStreamRender(trace) {
+  if (trace) streamRenderTrace = trace;
+  if (streamRenderScheduled) return;
+  streamRenderScheduled = true;
+  requestAnimationFrame(() => {
+    streamRenderScheduled = false;
+    const trace = streamRenderTrace;
+    streamRenderTrace = null;
+    scrollToEnd();
+    if (trace) pinTrace(trace);
+  });
 }
 
 function mmss(sec) {
