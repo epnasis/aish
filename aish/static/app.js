@@ -5273,13 +5273,22 @@ function renderModels(event) {
   const list = $("model-list");
   list.replaceChildren();
   const modelRow = (model) => {
+    const isCurrent = model.name === event.current;
     const row = document.createElement("button");
-    row.className = "row" + (model.name === event.current ? " current" : "");
+    row.className = "row" + (isCurrent ? " current" : "");
     row.textContent = model.name;
     const meta = document.createElement("span");
     meta.className = "meta";
     meta.textContent = model.desc;
     row.appendChild(meta);
+    if (isCurrent) {
+      // A trailing checkmark on the active model (#121) — instant clarity on
+      // top of the subtle .current row tint; the iOS "selected row" convention.
+      const check = document.createElement("span");
+      check.className = "row-check";
+      check.innerHTML = '<svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      row.appendChild(check);
+    }
     row.onclick = () => {
       rememberModel(model.name);
       send({ type: "set_model", spec: model.name, save: $("model-save").checked });

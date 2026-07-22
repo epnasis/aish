@@ -1448,6 +1448,15 @@ body.wrap .msg.echo, body.wrap .msg.stream {
    while Enter actually takes the top match. Green text = you are here
    (same convention as the model picker). */
 .sheet-list .row.current { background: var(--row-sel-bg); }
+/* Active-model checkmark (#121), scoped to the model list so it can't reanchor
+   other sheet rows' absolutely-positioned children. */
+#model-list .row { position: relative; }
+#model-list .row.current { padding-right: 32px; } /* clear the checkmark */
+#model-list .row .row-check {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  display: flex; color: var(--blue);
+}
+#model-list .row .row-check svg { width: 20px; height: 20px; }
 .sheet-list .row .meta { color: var(--dim); font-size: 13.8px; display: block; margin-top: 2px; }
 .sheet-list .section-label {
   color: var(--dim);
