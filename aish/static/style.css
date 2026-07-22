@@ -351,6 +351,15 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .rename-btn:active { opacity: 0.8; }
 
 /* ---- messages ---- */
+/* Wraps the transcript so the empty-chat welcome (#123) can overlay exactly the
+   messages region — it shrinks with the keyboard and never covers the headers. */
+#messages-wrap {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
 #messages {
   flex: 1;
   overflow-y: auto;
@@ -363,17 +372,20 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg { margin-bottom: 12px; max-width: 100%; overflow-wrap: anywhere; font-size: calc(18.4px * var(--fs)); }
 
 /* ---- empty-chat welcome (brand hero, #123) ---- */
-/* Fixed, click-through overlay centred in the view; updateWelcome() shows it
-   only while the transcript is empty. Chips opt back into pointer events. */
+/* Click-through overlay filling the messages region only (its parent is the
+   relatively-positioned #messages-wrap), so it tracks that region as the
+   keyboard shrinks it and never overlaps the headers. `safe center` keeps the
+   top of the hero visible instead of clipping it when the region is short. */
 #welcome {
-  position: fixed;
+  position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: safe center;
   gap: 14px;
-  padding: 0 32px;
+  padding: 16px 32px;
+  overflow: hidden;
   text-align: center;
   pointer-events: none;
   z-index: 1;

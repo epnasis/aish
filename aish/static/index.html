@@ -121,19 +121,22 @@
   </form>
 </div>
 
-<main id="messages"></main>
-
-<!-- Empty-chat welcome (#123): brand mark + inviting greeting + a few starter
-     chips that fill-and-send. Shown by updateWelcome() only while the transcript
-     is empty; a fixed, mostly-click-through overlay centred in the view. -->
-<div id="welcome" hidden>
-  <div class="welcome-logo" aria-hidden="true"><span class="wl-a">a</span><span class="wl-gt">&gt;</span></div>
-  <h1 class="welcome-title">How can I help?</h1>
-  <p class="welcome-sub">Run commands, edit files, and browse the web — I always ask before anything changes.</p>
-  <div class="welcome-chips">
-    <button class="welcome-chip" type="button" data-fill="Give me a quick tour of this project.">Tour this project</button>
-    <button class="welcome-chip" type="button" data-fill="Run the test suite and show me the result.">Run the tests</button>
-    <button class="welcome-chip" type="button" data-fill="What changed in the last few commits?">Recent changes</button>
+<!-- The welcome overlays the transcript region only (not the whole screen), so
+     it can never ride up over the headers when the keyboard shrinks the view. -->
+<div id="messages-wrap">
+  <main id="messages"></main>
+  <!-- Empty-chat welcome (#123): brand mark + inviting greeting + a few starter
+       chips that fill-and-send. Shown by updateEmptyHint() only while the
+       transcript is empty; a click-through overlay centred in the messages area. -->
+  <div id="welcome" hidden>
+    <div class="welcome-logo" aria-hidden="true"><span class="wl-a">a</span><span class="wl-gt">&gt;</span></div>
+    <h1 class="welcome-title">How can I help?</h1>
+    <p class="welcome-sub">Run commands, edit files, and browse the web — I always ask before anything changes.</p>
+    <div class="welcome-chips">
+      <button class="welcome-chip" type="button" data-fill="Give me a quick tour of this project.">Tour this project</button>
+      <button class="welcome-chip" type="button" data-fill="Run the test suite and show me the result.">Run the tests</button>
+      <button class="welcome-chip" type="button" data-fill="What changed in the last few commits?">Recent changes</button>
+    </div>
   </div>
 </div>
 
