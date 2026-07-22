@@ -30,8 +30,10 @@ import os
 import queue
 import re
 import sys
+import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -265,6 +267,69 @@ class Bridge:
         except queue.Full:
             return False
         return True
+
+
+class StreamCoalescer:
+    """Batches a run_command's per-line output into fewer, larger `stream`
+    events for the browser (issue #109). A command with tens of thousands of
+    lines otherwise emits one WebSocket event — and one frontend DOM append +
+    reflow — per line, locking the tab up.
+
+    LIVE-ONLY: this changes only the granularity of live `stream` events. It
+    never touches what is logged (the `tool` step's truncated output) or what
+    `SessionLog.reconstruct_events` replays cold (that splices the tool output
+    as a single `stream`), so hot/cold trace parity is preserved — the frontend
+    re-splits joined text on '\\n', rendering identically either way.
+
+    Flushes on whichever comes first: MAX_LINES buffered, MAX_BYTES buffered,
+    MAX_DELAY since the first buffered line, or an explicit flush() at command
+    end. The time-based flush keeps slow output responsive (a lone line still
+    lands within MAX_DELAY instead of waiting for the next line)."""
+
+    MAX_LINES = 50
+    MAX_BYTES = 16 * 1024
+    MAX_DELAY = 0.1  # seconds
+
+    def __init__(self, emit_text: Callable[[str], None]) -> None:
+        self._emit_text = emit_text
+        self._buf: list[str] = []
+        self._bytes = 0
+        self._timer: threading.Timer | None = None
+        # on_line runs on the worker thread, the delay flush on a Timer thread —
+        # guard the buffer so they can't interleave.
+        self._lock = threading.Lock()
+
+    def line(self, text: str) -> None:
+        with self._lock:
+            self._buf.append(text)
+            self._bytes += len(text) + 1  # +1 for the joining newline
+            if len(self._buf) >= self.MAX_LINES or self._bytes >= self.MAX_BYTES:
+                self._flush_locked()
+            elif self._timer is None:
+                self._timer = threading.Timer(self.MAX_DELAY, self._flush)
+                self._timer.daemon = True
+                self._timer.start()
+
+    def flush(self) -> None:
+        """Emit any buffered remainder — called at command end so no trailing
+        output is lost."""
+        with self._lock:
+            self._flush_locked()
+
+    def _flush(self) -> None:  # Timer-thread entry point
+        with self._lock:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        if not self._buf:
+            return
+        text = "\n".join(self._buf)
+        self._buf = []
+        self._bytes = 0
+        self._emit_text(text)
 
 
 class WebStatus:
@@ -2019,13 +2084,25 @@ def create_app(
         approve, approve_write, approve_read = make_web_approvers(
             bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir
         )
+        # Coalesce a command's per-line output into fewer, larger `stream`
+        # events (issue #109) — huge output otherwise emits one WS event + one
+        # frontend reflow per line. Live-only: on_command_end flushes the
+        # remainder so nothing trails; logging/replay are untouched.
+        stream_coalescer = StreamCoalescer(
+            lambda text: bridge.emit({"type": "stream", "text": text})
+        )
+
+        def on_command_end(ev: dict) -> None:
+            stream_coalescer.flush()  # drain buffered lines before the exit line
+            bridge.emit({"type": "command_end", **ev})
+
         common = dict(
             model=model_name,
             approve=approve,
             approve_write=approve_write,
             approve_read=approve_read,
             echo=lambda text: bridge.emit({"type": "echo", "text": text}),
-            stream=lambda text: bridge.emit({"type": "stream", "text": text}),
+            stream=stream_coalescer.line,
             max_steps=max_steps,
             cwd=cwd,
             context=context,
@@ -2056,7 +2133,7 @@ def create_app(
             # persisted (command_log) so a cold replay rebuilds the bounded
             # block identically instead of falling back to a plain output box.
             on_command_start=lambda ev: bridge.emit({"type": "command_start", **ev}),
-            on_command_end=lambda ev: bridge.emit({"type": "command_end", **ev}),
+            on_command_end=on_command_end,
             job_log_dir=state_dir / "jobs",
             lessons_path=lessons_path,
             status=WebStatus(bridge),

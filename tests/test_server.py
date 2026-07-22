@@ -158,6 +158,50 @@ def trace_shape(events):
     return shape
 
 
+class TestStreamCoalescer:
+    """Issue #109: the live per-line output of a huge command is batched into
+    fewer, larger `stream` events before it reaches the browser. This is a
+    live-only transport optimization — the logged tool output and cold replay
+    are untouched (see test_large_bang_output_batches_stream_events for the
+    end-to-end batching, and the hot/cold parity guard elsewhere)."""
+
+    def _coalescer(self, sink):
+        from aish.server import StreamCoalescer
+
+        c = StreamCoalescer(sink)
+        c.MAX_DELAY = 3600  # keep the delay-flush thread from firing mid-test
+        return c
+
+    def test_batches_lines_and_flushes_remainder(self):
+        emitted = []
+        c = self._coalescer(emitted.append)
+        for i in range(120):
+            c.line(f"line-{i}")
+        # 120 lines, MAX_LINES=50 → two full 50-line batches emitted; the last
+        # 20 stay buffered until the explicit command-end flush.
+        assert len(emitted) == 2
+        assert emitted[0] == "\n".join(f"line-{i}" for i in range(50))
+        assert emitted[1] == "\n".join(f"line-{i}" for i in range(50, 100))
+        c.flush()
+        assert len(emitted) == 3
+        assert emitted[2] == "\n".join(f"line-{i}" for i in range(100, 120))
+        # No output is lost: the batches rejoin to the original line stream.
+        assert "\n".join(emitted).split("\n") == [f"line-{i}" for i in range(120)]
+
+    def test_flush_of_empty_buffer_emits_nothing(self):
+        emitted = []
+        c = self._coalescer(emitted.append)
+        c.flush()
+        assert emitted == []
+
+    def test_byte_cap_flushes_a_single_large_line(self):
+        emitted = []
+        c = self._coalescer(emitted.append)
+        big = "x" * (17 * 1024)  # over MAX_BYTES on its own
+        c.line(big)
+        assert emitted == [big]
+
+
 class TestConnect:
     def test_hello_carries_model_session_scope(self, app_env):
         client, _ = make_client(app_env, [])
@@ -680,6 +724,22 @@ class TestBangCommands:
             # The output rode the terminal block; done carries no answer bubble.
             assert events[-1] == {"type": "done", "result": ""}
             assert chat.calls == []  # the model was never asked
+
+    def test_large_bang_output_batches_stream_events(self, app_env):
+        """Issue #109: a command producing hundreds of output lines must not
+        emit one `stream` event per line (the frontend then reflows per line and
+        the tab freezes). The coalescer batches them — far fewer events — while
+        delivering every line intact."""
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            # awk is portable and streams one line per iteration through on_line.
+            ws.send_json({"type": "task", "text": "!awk 'BEGIN{for(i=1;i<=300;i++)print i}'"})
+            events = self._drain(ws)
+            streams = [e for e in events if e["type"] == "stream"]
+            # 300 lines batched at ~50/chunk → an order of magnitude fewer events.
+            assert 0 < len(streams) < 50
+            lines = [ln for ln in "\n".join(e["text"] for e in streams).split("\n") if ln]
+            assert lines == [str(n) for n in range(1, 301)]
 
     def test_bang_mutating_command_bypasses_approval_like_cli(self, app_env, tmp_path):
         """A ! command that mutates state still runs without a card — exactly as
