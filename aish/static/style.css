@@ -1135,6 +1135,53 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 #composer.tall #input { order: -1; flex-basis: 100%; }
 #composer.tall #dictate { margin-left: auto; } /* push mic+send to the right on the button row */
 
+/* Active read-aloud (#106): same wrap mechanics as tall — the input takes its
+   own row so the TTS transport sits in the button row beside + / mic / send.
+   margin-right:auto on the dock shoves mic+send to the right edge regardless of
+   whether the (conditionally shown) mic is present. */
+#composer.tts-on { flex-wrap: wrap; }
+#composer.tts-on #input { order: -1; flex-basis: 100%; }
+#composer.tts-on #tts-dock { margin-right: auto; }
+#tts-dock {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg-elev);
+  border-radius: 999px;
+  padding: 0 4px;
+}
+#tts-dock[hidden] { display: none; }
+#tts-dock button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 10px;
+  color: var(--fg);
+}
+#tts-dock button:active { opacity: 0.5; }
+#tts-dock button svg { width: 22px; height: 22px; }
+#tts-dock .td-prev svg, #tts-dock .td-next svg, #tts-dock .td-stop svg { width: 18px; height: 18px; }
+#tts-dock .td-main { color: var(--blue); }
+#tts-dock .td-stop { color: var(--dim); }
+#tts-dock .td-rate {
+  width: auto;
+  min-width: 40px;
+  padding: 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--blue);
+}
+/* pause/play swap, mirroring the per-answer pill */
+#tts-dock .i-pause, #tts-dock .i-play { display: none; }
+#tts-dock:not(.paused) .i-pause { display: block; }
+#tts-dock.paused .i-play { display: block; }
+
 #input {
   flex: 1;
   min-width: 0;

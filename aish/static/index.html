@@ -175,6 +175,9 @@
     <svg class="i-plus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
     <svg class="i-exit" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 9l6 6M15 9l-6 6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
   </button>
+  <!-- Active read-aloud transport (#106): populated + shown only while TTS
+       plays, docked in the button row so it rides above the keyboard. -->
+  <div id="tts-dock" role="group" aria-label="read-aloud controls" hidden></div>
   <input id="file-input" type="file" multiple hidden>
   <input id="photo-input" type="file" accept="image/*" capture="environment" hidden>
   <span id="cmd-prompt" aria-hidden="true" hidden></span>

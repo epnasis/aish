@@ -2713,6 +2713,7 @@ function stopSpeaking() {
   player.utterance = null;
   player.paused = false;
   releaseWakeLock();
+  syncTtsDock();
 }
 
 function startPlayback(box, el) {
@@ -2725,6 +2726,7 @@ function startPlayback(box, el) {
   box.querySelector(".t-rate").textContent = rateLabel();
   acquireWakeLock();
   speakChunk(0);
+  syncTtsDock();
 }
 
 function speakChunk(index) {
@@ -2751,6 +2753,7 @@ function speakChunk(index) {
   player.utterance = utterance;
   speechSynthesis.resume(); // cancel-while-paused leaves WebKit stuck paused
   speechSynthesis.speak(utterance);
+  syncTtsDock(); // a skip clears the paused state — keep the dock icon in sync
 }
 
 function togglePause() {
@@ -2764,6 +2767,7 @@ function togglePause() {
     releaseWakeLock();
   }
   player.box.classList.toggle("paused", player.paused);
+  syncTtsDock();
 }
 
 function skipChunk(delta) {
@@ -2779,7 +2783,55 @@ function cycleRate() {
     player.box.querySelector(".t-rate").textContent = rateLabel();
     speakChunk(player.index); // rate is fixed per utterance — restart the chunk
   }
+  syncTtsDock();
 }
+
+// A persistent transport for the ACTIVE read-aloud, docked in the composer
+// button row so playback stays reachable while you scroll away or type (#106).
+// It drives the same global `player` as the per-answer pill — the inline
+// speaker still STARTS playback; this bar just mirrors + controls whatever is
+// already playing, so there's one source of truth, not a second player.
+function buildTtsDock() {
+  const dock = $("tts-dock");
+  if (!dock || !TTS_OK) return;
+  const mkBtn = (cls, label, ...icons) => {
+    const b = document.createElement("button");
+    b.type = "button"; // inside the composer <form> — must not submit
+    b.className = cls;
+    b.title = label;
+    b.setAttribute("aria-label", label);
+    b.append(...icons);
+    return b;
+  };
+  const prev = mkBtn("td-prev", "previous paragraph", skipSvg(false));
+  const main = mkBtn("td-main", "pause / resume", pauseIcon(), playIcon());
+  const next = mkBtn("td-next", "next paragraph", skipSvg(true));
+  const rate = mkBtn("td-rate", "reading speed");
+  rate.textContent = rateLabel();
+  const stop = mkBtn("td-stop", "stop reading", xIcon());
+  prev.onclick = () => skipChunk(-1);
+  main.onclick = () => togglePause();
+  next.onclick = () => skipChunk(1);
+  rate.onclick = cycleRate;
+  stop.onclick = stopSpeaking;
+  dock.append(prev, main, next, rate, stop);
+}
+
+// Reflect the global player onto the composer dock: visible only while a
+// read-aloud is active, with the input pushed to its own row (#97 tall
+// mechanics) so the transport shares the button row with + / mic / send.
+function syncTtsDock() {
+  const dock = $("tts-dock");
+  if (!dock) return;
+  const active = !!player.box;
+  dock.hidden = !active;
+  $("composer").classList.toggle("tts-on", active);
+  dock.classList.toggle("paused", player.paused);
+  const rate = dock.querySelector(".td-rate");
+  if (rate) rate.textContent = rateLabel();
+}
+
+if (TTS_OK) buildTtsDock();
 
 // ---- approval cards ------------------------------------------------------
 function onApprovalRequest(event) {
