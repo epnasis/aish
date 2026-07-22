@@ -2524,6 +2524,35 @@ class TestDirListing:
             assert [d["name"] for d in body["dirs"]] == ["src"]  # noise dirs gone
             assert body["files"] == ["main.py"]  # .DS_Store filtered
 
+    def test_dirs_filters_glob_egg_info(self, app_env, tmp_path):
+        # fnmatch globbing in the default ignore list (#87).
+        base = tmp_path / "proj"
+        for d in ("keep", "aish.egg-info"):
+            (base / d).mkdir(parents=True)
+        client, _ = make_client(app_env, [])
+        with client:
+            body = client.get(f"/dirs?path={base}").json()
+            assert [d["name"] for d in body["dirs"]] == ["keep"]
+
+    def test_dirs_honors_config_ignore_list(self, app_env, tmp_path):
+        # A user-edited [directory_picker] ignore list is the source of truth:
+        # names it lists are hidden, and defaults it omits are NOT (#87).
+        app_env["config_path"].write_text(
+            '[directory_picker]\nignore = ["secret", "*.bak"]\n', encoding="utf-8"
+        )
+        base = tmp_path / "proj"
+        for d in ("src", "secret", "node_modules"):
+            (base / d).mkdir(parents=True)
+        (base / "old.bak").write_text("", encoding="utf-8")
+        (base / "keep.txt").write_text("", encoding="utf-8")
+        client, _ = make_client(app_env, [])
+        with client:
+            body = client.get(f"/dirs?path={base}").json()
+            # "secret" hidden by config; "node_modules" now shown (not in the
+            # user's list); "*.bak" file hidden by the glob.
+            assert [d["name"] for d in body["dirs"]] == ["node_modules", "src"]
+            assert body["files"] == ["keep.txt"]
+
     def test_dirs_listing_timeout_returns_504(self, app_env, tmp_path, monkeypatch):
         """A hung listing (blocking scandir/stat on a TCC-gated or networked
         path) is killed and returns 504 rather than freezing the server — the

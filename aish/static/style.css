@@ -1523,7 +1523,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .crumb-seg.current { color: var(--fg); font-weight: 600; }
 .crumb-sep { color: var(--dim); }
 .dir-note b { color: var(--fg); font-weight: 600; }
-.dir-row { display: flex; align-items: center; gap: 12px; }
+.dir-row { display: flex; align-items: center; gap: 12px; position: relative; }
 .dir-row .dir-ico { width: 21px; height: 21px; flex: none; display: block; }
 .dir-row .folder { flex: 1; min-width: 0; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dir-row.up .folder { color: var(--blue); }
@@ -1923,6 +1923,16 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 #dir-list.loading::after {
   content: ""; position: absolute; top: 20px; left: 50%; width: 22px; height: 22px;
   margin-left: -11px; border: 2px solid var(--sep2); border-top-color: var(--blue);
+  border-radius: 50%; animation: spin 0.7s linear infinite;
+}
+/* Per-row feedback while a tapped folder's /dirs fetch is in flight (#87): dim
+   the row and swap its chevron for a small spinner, so a slow drive shows which
+   folder is opening. Cleared implicitly when the list re-renders on arrival. */
+.dir-row.loading { opacity: 0.55; pointer-events: none; }
+.dir-row.loading .dir-chev { visibility: hidden; }
+.dir-row.loading::after {
+  content: ""; position: absolute; right: 8px; top: 50%; width: 15px; height: 15px;
+  margin-top: -7.5px; border: 2px solid var(--sep2); border-top-color: var(--blue);
   border-radius: 50%; animation: spin 0.7s linear infinite;
 }
 .dir-empty { padding: 14px 12px; color: var(--dim); font-size: 14px; line-height: 1.45; }
