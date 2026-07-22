@@ -353,9 +353,10 @@ downloads straight to your device.
 
 **Quick replies**: when the model asks a question with a few short likely
 answers, it can end the message with `[Label](aish-reply://answer text)`
-links — the web UI renders them as tap chips. Tapping one puts the answer in
-the composer, ready to send as-is or edit first, so it goes out as a normal
-user message. It's plain markdown (one system prompt sentence, no JSON
+links — the web UI renders them as tap chips. Tapping one sends that answer
+immediately as a normal user message (one tap, no extra send); a payload that
+ends with a colon or trailing space instead just pre-fills the composer for you
+to finish typing. It's plain markdown (one system prompt sentence, no JSON
 schema), so even small local models can use it; once any reply is sent —
 chip-fed or typed — the chips disappear. As a safety net, if a final answer
 ends in a question but the model forgot to add chips, a generic

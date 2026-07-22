@@ -660,8 +660,11 @@ Whenever you end a message with a question whose \
 likely answers are a few short options (yes/no, pick-one, a short menu), you \
 MUST append one markdown link per option, each on its own line, formatted \
 [Label](aish-reply://answer text) — the UI renders each as a tap button that \
-feeds "answer text" into the user's input box, so the reply arrives as an \
-ordinary user message (possibly edited). Asking in prose alone does NOT \
+sends "answer text" as the user's reply IMMEDIATELY on tap (one-tap, no extra \
+send press), so write each payload as a complete, ready-to-send message. If you \
+instead want a chip that only PRE-FILLS the box for the user to finish typing, \
+end its payload with a colon or trailing space (e.g. "add details: "). Asking \
+in prose alone does NOT \
 create buttons; you must add the link lines too. Example: after \
 "Proceed with the deploy?" end with [Yes, deploy](aish-reply://yes, deploy \
 now) and [No, hold off](aish-reply://no, hold off). If you end on a question \

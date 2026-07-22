@@ -1759,7 +1759,19 @@ let lastScrollTop = 0;
 let scrollingToTop = false; // the button's own smooth scroll must not re-show it
 
 function updateScrollButton() {
-  $("scroll-down").hidden = nearBottom();
+  // Hide both arrows while the composer is focused or expanded tall (#115):
+  // they sit right above the input and would overlap/obstruct it. They come
+  // back once the composer is blurred AND back to its small inline state.
+  if (document.activeElement === input || $("composer").classList.contains("tall")) {
+    $("scroll-down").hidden = true;
+    $("scroll-top").hidden = true;
+    return;
+  }
+  // Only offer "jump to latest" once you're a meaningful distance from the
+  // bottom — half a viewport, not the old ~120px that popped it on a nudge (#115).
+  const fromBottom =
+    messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+  $("scroll-down").hidden = fromBottom < messagesEl.clientHeight * 0.5;
   const top = messagesEl.scrollTop;
   if (top < 120 || top > lastScrollTop) scrollingToTop = false;
   if (top < lastScrollTop && top > messagesEl.clientHeight && !scrollingToTop) {
@@ -1771,6 +1783,10 @@ function updateScrollButton() {
 }
 
 messagesEl.addEventListener("scroll", updateScrollButton, { passive: true });
+// Re-evaluate on focus/blur so the arrows hide the instant the composer takes
+// focus (keyboard up) and reappear when it's dismissed (#115).
+input.addEventListener("focus", updateScrollButton);
+input.addEventListener("blur", updateScrollButton);
 
 $("scroll-down").onclick = () => {
   messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
@@ -2119,6 +2135,11 @@ function quickReplyChip(label, payload) {
   let reply = (payload || "").trim();
   try { reply = decodeURIComponent(reply) || reply; } catch { /* keep raw */ }
   if (!reply) reply = label;
+  // #116: a tapped chip submits immediately for a fast one-tap reply — UNLESS
+  // its payload is meant to be completed by the user first (it ends with ':' or
+  // trailing whitespace, e.g. the feedback "Edit" chip "…change the draft: "),
+  // in which case it just seeds the composer and waits for you to finish typing.
+  const seedOnly = /[\s:]$/.test(payload || "");
   btn.onclick = () => {
     if (input.value.trim() && input.value.trim() !== reply) {
       showToast("clear the input first to use a quick reply");
@@ -2127,7 +2148,11 @@ function quickReplyChip(label, payload) {
     input.value = reply;
     input.setSelectionRange(reply.length, reply.length);
     resizeInput();
-    input.focus();
+    if (seedOnly) {
+      input.focus(); // let the user complete the sentence before sending
+    } else {
+      submitInput(); // one-tap send
+    }
   };
   return btn;
 }
@@ -3802,7 +3827,7 @@ function submitInput() {
       rememberPrompt(text); // slash commands never echo back as user events
       input.value = "";
       localStorage.removeItem("aish-draft");
-      input.style.height = "auto";
+      resizeInput(); // #117: also drop the .tall class now the input is empty
     }
     return;
   }
@@ -3814,7 +3839,7 @@ function submitInput() {
     maybeRequestNotifyPermission();
     input.value = "";
     localStorage.removeItem("aish-draft");
-    input.style.height = "auto";
+    resizeInput(); // #117: recompute height AND drop the .tall class now it's empty
     attachments = [];
     renderAttachments();
     scrollToEndSettled();
