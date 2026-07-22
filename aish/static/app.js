@@ -1784,9 +1784,11 @@ function updateScrollButton() {
 
 messagesEl.addEventListener("scroll", updateScrollButton, { passive: true });
 // Re-evaluate on focus/blur so the arrows hide the instant the composer takes
-// focus (keyboard up) and reappear when it's dismissed (#115).
-input.addEventListener("focus", updateScrollButton);
-input.addEventListener("blur", updateScrollButton);
+// focus (keyboard up) and reappear when it's dismissed (#115). Use $("input")
+// here, not the `input` const — it's declared later in the file, so referencing
+// the variable at this top-level line would hit its temporal dead zone.
+$("input").addEventListener("focus", updateScrollButton);
+$("input").addEventListener("blur", updateScrollButton);
 
 $("scroll-down").onclick = () => {
   messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
