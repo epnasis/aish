@@ -167,6 +167,20 @@ NOT_EXECUTED = "(not executed — the user stopped the task)"
 LOOP_WARN_REPEATS = 3
 LOOP_STOP_REPEATS = 5
 
+# Progress-gated step budget (issue #108). A flat step cap has the wrong shape:
+# it kills a task that is still doing useful work while letting a stalled one
+# burn the whole budget. Instead the loop measures PROGRESS deterministically —
+# a step is progress when at least one of its tool calls yields a
+# (tool, args, result) tuple seen for the FIRST time (reusing the `repeats` dict
+# the loop detector already maintains; no extra model call, no wall-clock timer).
+# A steadily-progressing task may run PAST `max_steps` up to the hard ceiling; a
+# task that produces no new result for MAX_STALL_STEPS consecutive steps has
+# stalled and stops early. The ceiling is the unconditional cost cap that NOTHING
+# exceeds — it derives from `max_steps` (which stays the base budget), so raising
+# --max-steps raises the cap while the module floor keeps a sane minimum.
+MAX_STALL_STEPS = 8
+HARD_STEP_CEILING = 60  # effective cap = max(self.max_steps, HARD_STEP_CEILING)
+
 # Skill-read gate (issue #40): while a preloaded-but-truncated skill is
 # unread, other tool calls are refused. Must stay < LOOP_WARN_REPEATS — an
 # identical refused call repeats at most GATE_MAX_REFUSALS times before the
@@ -217,9 +231,20 @@ LOOP_STOP_NOTE = (
     "stuck, and what would be needed to make progress.]"
 )
 
+STALL_NOTE = (
+    "[aish: stopping this task — your recent tool calls stopped producing any "
+    "new results (no progress for several steps), so you appear stuck. Reply "
+    "with TEXT ONLY: summarize what you accomplished, what remains, and what is "
+    "blocking further progress — the user can redirect you or say 'continue'.]"
+)
+
 STOPPED_LIMIT = (
     "(stopped: hit the max-steps limit — say 'continue' to keep going, or "
     "raise --max-steps)"
+)
+STOPPED_STALL = (
+    "(stopped: no new progress for several steps — say 'continue' with a hint, "
+    "or raise --max-steps)"
 )
 STOPPED_LOOP = "(stopped: repeating the same tool call with no progress)"
 NOT_EXECUTED_LIMIT = "(not executed — the step limit was reached)"
@@ -938,7 +963,15 @@ class Agent:
         task_started = time.perf_counter()
         tokens_in = tokens_out = 0
         repeats: dict[tuple, int] = {}  # (tool, args, result) -> occurrences
-        for _ in range(self.max_steps):
+        # Progress-gated budget (#108): `max_steps` is the base, the ceiling is
+        # the hard cost cap nothing exceeds, and `stall` counts consecutive
+        # no-new-progress steps. A progressing task extends past max_steps; a
+        # stalled one stops at MAX_STALL_STEPS.
+        ceiling = max(self.max_steps, HARD_STEP_CEILING)
+        stall = 0
+        step = 0
+        while step < ceiling:
+            step += 1
             if self._cancel.is_set():
                 return self._finish_cancelled()
             # Absorb anything the user queued while this task runs (issue #95),
@@ -1021,7 +1054,7 @@ class Agent:
                 return self._finish_cancelled()
 
             results = self._execute_tool_calls(tool_calls)
-            warn = stuck = False
+            warn = stuck = progressed = False
             for call, result in zip(tool_calls, results, strict=True):
                 self._append(
                     {"role": "tool", "tool_name": call["function"]["name"], "content": result}
@@ -1029,6 +1062,8 @@ class Agent:
                 self._collect_source(call, result)
                 key = self._call_key(call, result)
                 repeats[key] = count = repeats.get(key, 0) + 1
+                if count == 1:
+                    progressed = True  # a never-seen (tool,args,result) is progress (#108)
                 if count >= LOOP_STOP_REPEATS:
                     stuck = True
                 elif count == LOOP_WARN_REPEATS:
@@ -1036,13 +1071,19 @@ class Agent:
             if stuck:
                 self.echo("✕ loop detected: identical call, identical output — stopping")
                 return self._finish_stopped(LOOP_STOP_NOTE, STOPPED_LOOP)
+            # Progress resets the stall clock; a step that produced only repeats
+            # (or, defensively, no results at all) advances toward the stall cap.
+            stall = 0 if progressed else stall + 1
+            if stall >= MAX_STALL_STEPS:
+                self.echo("⚠ no new progress for several steps — asking the model to wrap up")
+                return self._finish_stopped(STALL_NOTE, STOPPED_STALL)
             if warn:
                 self.echo("⚠ repeated identical tool call — nudging the model to change approach")
                 self._append(
                     {"role": "user", "content": LOOP_WARNING.format(count=LOOP_WARN_REPEATS)}
                 )
 
-        self.echo("⚠ step limit reached — asking the model to wrap up")
+        self.echo("⚠ step ceiling reached — asking the model to wrap up")
         return self._finish_stopped(STEP_LIMIT_NOTE, STOPPED_LIMIT)
 
     @staticmethod

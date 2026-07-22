@@ -268,11 +268,16 @@ without bloating the context.
   working (its lines surface as memory) — `/learn lessons` migrates it
   consciously and retires it.
 
-**Step limit & loop detection** — a task gets `max_steps` model turns
-(default 25). At the limit the model gets one final no-tools turn to judge
-the state and answer: the finished answer if the task is actually done,
-otherwise what was accomplished, what remains, and the next step — say
-"continue" to resume where it stopped. Independently, issuing the *exact
+**Step budget & loop detection** — the budget is *progress-gated*: `max_steps`
+(default 25) is the base, and a task that keeps making progress — each step
+producing a tool call it has not made before, with a result it has not seen —
+is allowed to run past it, up to a hard ceiling (the greater of `max_steps` and
+60) that nothing exceeds. A task that stops making progress — no new result for
+several steps in a row — is treated as stalled and stops early instead of
+grinding to the ceiling. However the budget ends, the model gets one final
+no-tools turn to judge the state and answer: the finished answer if the task is
+actually done, otherwise what was accomplished, what remains, and the next step
+— say "continue" to resume where it stopped. Independently, issuing the *exact
 same* tool call and getting the *exact same* output is treated as running
 in circles: three repeats inject a change-your-approach nudge, five stop
 the task with a diagnostic summary instead of burning the rest of the

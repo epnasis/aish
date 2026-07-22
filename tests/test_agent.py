@@ -334,12 +334,15 @@ class TestLoop:
         assert any("marker42" in m["content"] for m in tool_msgs)
 
     def test_max_steps_stops_runaway_loop(self):
+        # #108 made the step budget progress-gated, so a runaway no longer
+        # hard-stops at max_steps — but an identical call makes no progress, so
+        # it trips the 5-repeat loop detector well before the hard ceiling.
         endless = model_says(tool_calls=[tool_call("read_docs", command="ls")])
         agent, chat = make_agent([endless] * 10, max_steps=3)
         result = agent.run_task("loop forever")
-        assert "max-steps" in result
-        # 3 budgeted turns + 1 no-tools wrap-up turn; its tool calls never run
-        assert len(chat.calls) == 4
+        assert "no progress" in result
+        # 5 identical calls trip the detector, then 1 no-tools wrap-up turn
+        assert len(chat.calls) == 6
 
     def test_unknown_tool_reported_not_crashed(self):
         agent, _ = make_agent(
@@ -1112,14 +1115,17 @@ class TestStreaming:
         assert assistant[0]["tool_calls"][0]["function"]["name"] == "run_command"
 
     def test_synthesized_results_still_reach_user(self):
+        # An identical-call runaway trips loop detection (#108); the wrap-up turn
+        # here also proposes only a tool call (no text), so the synthesized stop
+        # headline must still reach the user via on_token.
         tokens = []
         endless = [chunk(tool_calls=[tool_call("read_docs", command="ls")])]
-        chat = FakeStreamChat([list(endless)] * 3)
+        chat = FakeStreamChat([list(endless)] * 6)
         agent = Agent(model="fake", approve=lambda _c: True, client_chat=chat,
-                      on_token=tokens.append, max_steps=3)
+                      on_token=tokens.append)
         result = agent.run_task("loop")
-        assert "max-steps" in result
-        assert any("max-steps" in t for t in tokens)
+        assert "no progress" in result
+        assert any("no progress" in t for t in tokens)
 
 
 class TestBlockedAndBackground:
@@ -1669,25 +1675,93 @@ class TestCancel:
 
 
 class TestStepLimitAndLoops:
-    """#25: the step limit ends with a self-assessment turn, and running in
-    circles (identical call, identical output) warns then stops early."""
+    """#25/#108: the step budget is progress-gated — a distinct-call task runs
+    past max_steps up to the hard ceiling, a stalled one stops early — and
+    every budget end runs a self-assessment wrap-up turn. Running in circles
+    (identical call, identical output) still warns then stops early."""
 
     def _docs(self, monkeypatch, fn):
         import aish.agent as agent_module
 
         monkeypatch.setattr(agent_module.tools, "read_docs", fn)
 
-    def test_step_limit_runs_wrapup_turn(self):
-        endless = model_says(tool_calls=[tool_call("read_docs", command="ls")])
-        agent, chat = make_agent(
-            [endless, endless, model_says("half done; X remains")], max_steps=2
-        )
+    def _distinct(self, n):
+        return [
+            model_says(tool_calls=[tool_call("read_docs", command=f"c{i}")])
+            for i in range(n)
+        ]
+
+    def test_progress_extends_past_max_steps(self, monkeypatch):
+        # #108: every call distinct with a new result is progress, so the task
+        # runs PAST the old flat max_steps and completes when the model answers.
+        self._docs(monkeypatch, lambda c, topic=None: f"docs for {c}")
+        calls = self._distinct(30) + [model_says("finished after 30 distinct steps")]
+        agent, chat = make_agent(calls, max_steps=25)  # old behavior stopped at 25
+        assert agent.run_task("go") == "finished after 30 distinct steps"
+        assert len(chat.calls) == 31  # 30 tool turns + the answer, past max_steps
+
+    def test_hard_ceiling_never_exceeded_by_distinct_calls(self, monkeypatch):
+        # #108: even an endlessly-progressing task (200 distinct calls queued) is
+        # capped at the hard ceiling — the unconditional anti-runaway guarantee.
+        from aish.agent import HARD_STEP_CEILING
+
+        self._docs(monkeypatch, lambda c, topic=None: f"docs for {c}")
+        agent, chat = make_agent(self._distinct(200), max_steps=25)
+        result = agent.run_task("never stop")
+        assert "max-steps" in result  # STOPPED_LIMIT — the ceiling is the cap
+        # exactly HARD_STEP_CEILING budgeted turns, then 1 wrap-up; never more
+        assert len(chat.calls) == HARD_STEP_CEILING + 1
+
+    def test_ceiling_derives_from_raised_max_steps(self, monkeypatch):
+        # #108: raising --max-steps above the floor raises the ceiling with it.
+        from aish.agent import HARD_STEP_CEILING
+
+        raised = HARD_STEP_CEILING + 10
+        self._docs(monkeypatch, lambda c, topic=None: f"docs for {c}")
+        agent, chat = make_agent(self._distinct(raised + 50), max_steps=raised)
+        agent.run_task("go far")
+        assert len(chat.calls) == raised + 1  # ceiling == max_steps when raised
+
+    def test_step_limit_runs_wrapup_turn(self, monkeypatch):
+        # The hard ceiling (#108) is the "step limit" now; hitting it still runs
+        # a final no-tools wrap-up turn whose prompt asks for a self-assessment.
+        from aish.agent import HARD_STEP_CEILING
+
+        self._docs(monkeypatch, lambda c, topic=None: f"docs for {c}")
+        calls = self._distinct(HARD_STEP_CEILING) + [model_says("half done; X remains")]
+        agent, chat = make_agent(calls, max_steps=25)
         result = agent.run_task("big task")
         assert "max-steps" in result and "half done; X remains" in result
-        assert len(chat.calls) == 3  # 2 budgeted turns + 1 wrap-up
+        assert len(chat.calls) == HARD_STEP_CEILING + 1  # ceiling turns + 1 wrap-up
         wrapup_prompt = [
-            m for m in chat.calls[2]["messages"]
+            m for m in chat.calls[-1]["messages"]
             if m["role"] == "user" and "step limit" in m["content"]
+        ]
+        assert wrapup_prompt
+
+    def test_stall_stops_task_and_runs_wrapup(self, monkeypatch):
+        # #108: rotating among a few calls whose output never changes means each
+        # step after the first cycle is a repeat (no NEW tuple), so the stall
+        # counter climbs to MAX_STALL_STEPS and stops the task — before any one
+        # call repeats enough to trip the 5-in-a-row loop detector, and far
+        # short of the ceiling. The wrap-up turn still runs.
+        from aish.agent import MAX_STALL_STEPS
+
+        # 3 distinct keys: progress for the first cycle (3 steps), then stall
+        # climbs by one each step, stopping at 3 + MAX_STALL_STEPS steps.
+        stall_stop = 3 + MAX_STALL_STEPS
+        self._docs(monkeypatch, lambda c, topic=None: f"stable {c}")
+        rotate = [
+            model_says(tool_calls=[tool_call("read_docs", command=f"c{i % 3}")])
+            for i in range(stall_stop)
+        ]
+        agent, chat = make_agent(rotate + [model_says("wrap-up text")], max_steps=100)
+        result = agent.run_task("spin")
+        assert "no new progress" in result and "wrap-up text" in result
+        assert len(chat.calls) == stall_stop + 1  # stall stop, then 1 wrap-up turn
+        wrapup_prompt = [
+            m for m in chat.calls[-1]["messages"]
+            if m["role"] == "user" and "no progress" in m["content"]
         ]
         assert wrapup_prompt
 
@@ -1695,12 +1769,12 @@ class TestStepLimitAndLoops:
         from aish.agent import NOT_EXECUTED_LIMIT
 
         executed = []
-        self._docs(monkeypatch, lambda c, topic=None: (executed.append(c), "docs")[1])
+        self._docs(monkeypatch, lambda c, topic=None: (executed.append(c), "same docs")[1])
         endless = model_says(tool_calls=[tool_call("read_docs", command="ls")])
-        agent, chat = make_agent([endless, endless], max_steps=1)
+        agent, chat = make_agent([endless] * 6, max_steps=25)
         result = agent.run_task("task")
         assert result.startswith("(stopped")
-        assert executed == ["ls"]  # only the in-budget call ran
+        assert executed == ["ls"] * 5  # the 5 in-budget calls ran; the wrap-up's did not
         assert tool_messages(agent.messages)[-1]["content"] == NOT_EXECUTED_LIMIT
 
     def test_loop_warning_injected_after_three_identical_results(self, monkeypatch):
@@ -1734,11 +1808,14 @@ class TestStepLimitAndLoops:
         agent, _ = make_agent([poll] * 6 + [model_says("done polling")], max_steps=25)
         assert agent.run_task("poll") == "done polling"
 
-    def test_model_failure_in_wrapup_falls_back_to_headline(self):
+    def test_model_failure_in_wrapup_falls_back_to_headline(self, monkeypatch):
+        self._docs(monkeypatch, lambda c, topic=None: "same docs")
         endless = model_says(tool_calls=[tool_call("read_docs", command="ls")])
-        agent, chat = make_agent([endless], max_steps=1)  # wrap-up pops empty list
+        # 5 identical calls trip the loop detector; the wrap-up then pops the
+        # empty list (model failure) and must fall back to the headline.
+        agent, chat = make_agent([endless] * 5, max_steps=25)
         result = agent.run_task("task")
-        assert result.startswith("(stopped: hit the max-steps limit")
+        assert result.startswith("(stopped: repeating the same tool call")
 
 
 class TestRecallTool:
