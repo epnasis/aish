@@ -123,6 +123,20 @@
 
 <main id="messages"></main>
 
+<!-- Empty-chat welcome (#123): brand mark + inviting greeting + a few starter
+     chips that fill-and-send. Shown by updateWelcome() only while the transcript
+     is empty; a fixed, mostly-click-through overlay centred in the view. -->
+<div id="welcome" hidden>
+  <div class="welcome-logo" aria-hidden="true"><span class="wl-a">a</span><span class="wl-gt">&gt;</span></div>
+  <h1 class="welcome-title">How can I help?</h1>
+  <p class="welcome-sub">Run commands, edit files, and browse the web — I always ask before anything changes.</p>
+  <div class="welcome-chips">
+    <button class="welcome-chip" type="button" data-fill="Give me a quick tour of this project.">Tour this project</button>
+    <button class="welcome-chip" type="button" data-fill="Run the test suite and show me the result.">Run the tests</button>
+    <button class="welcome-chip" type="button" data-fill="What changed in the last few commits?">Recent changes</button>
+  </div>
+</div>
+
 <button id="empty-hint" hidden>
   swipe sideways or tap
   <svg viewBox="0 0 24 24"><path d="M4.6 5.2v4.2h4.2M4.8 9.4a7.8 7.8 0 1 1-.6 3.4M12 8.2v4.1l2.9 1.7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>

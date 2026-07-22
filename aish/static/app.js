@@ -1640,8 +1640,10 @@ function scrollToEnd(force) {
 // Empty-state education (#33): a fresh chat with earlier sessions to go back
 // to points at the two resume affordances (swipe pager, history button).
 function updateEmptyHint() {
+  const empty = messagesEl.children.length === 0;
   const hasOthers = pagerSessions.some((s) => s.name !== currentSession);
-  $("empty-hint").hidden = !hasOthers || messagesEl.children.length > 0;
+  $("empty-hint").hidden = !hasOthers || !empty;
+  $("welcome").hidden = !empty; // brand hero on a fresh/empty chat (#123)
 }
 
 // iOS Safari settles keyboard-driven layout changes a beat after the gesture;
@@ -3667,6 +3669,17 @@ input.addEventListener("keydown", (e) => {
   }
 });
 
+// iOS soft keyboards don't fire a reliable Enter keydown on a <textarea> — the
+// return key arrives as a beforeinput/insertLineBreak. In terminal mode that
+// key must RUN the command like a real shell, not drop a newline. Desktop is
+// handled by the keydown above (which cancels this default), so no double-run.
+input.addEventListener("beforeinput", (e) => {
+  if (cmdMode && e.inputType === "insertLineBreak") {
+    e.preventDefault();
+    submitCommand();
+  }
+});
+
 input.addEventListener("input", () => {
   // `!` as the sole character of an empty composer enters terminal mode (#100),
   // consuming the `!` — the mode's prompt implies it from then on.
@@ -4022,6 +4035,7 @@ function enterCmdMode() {
   $("cmd-prompt").hidden = false;
   refreshCmdPrompt();
   $("attach").setAttribute("aria-label", "exit terminal mode");
+  input.setAttribute("enterkeyhint", "go"); // iOS return key reads "Go" — it runs the command
   input.placeholder = "";
   input.value = "";
   resizeInput();
@@ -4036,6 +4050,7 @@ function exitCmdMode() {
   $("cmd-prompt").hidden = true;
   hideSuggest();
   $("attach").setAttribute("aria-label", "actions");
+  input.removeAttribute("enterkeyhint"); // back to a normal multi-line composer
   input.placeholder = "Ask aish";
   input.value = "";
   resizeInput();
@@ -4866,6 +4881,15 @@ $("back-chip").onclick = () => openSessionsSheet("");
 $("session-chip").onclick = () => openSessionMenu();
 $("empty-hint").onclick = () => openSessionsSheet("");
 $("new-chip").onclick = () => requestNewChat();
+
+// Welcome starter chips (#123): fill the composer with the prompt and send it.
+$("welcome").addEventListener("click", (e) => {
+  const chip = e.target.closest(".welcome-chip");
+  if (!chip) return;
+  input.value = chip.dataset.fill;
+  resizeInput();
+  submitInput();
+});
 $("connbar").onclick = () => reconnect();
 
 // ---- session title menu -------------------------------------------------

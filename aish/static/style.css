@@ -362,11 +362,84 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
    bigger text reflows inside the bubble's fixed width. */
 .msg { margin-bottom: 12px; max-width: 100%; overflow-wrap: anywhere; font-size: calc(18.4px * var(--fs)); }
 
+/* ---- empty-chat welcome (brand hero, #123) ---- */
+/* Fixed, click-through overlay centred in the view; updateWelcome() shows it
+   only while the transcript is empty. Chips opt back into pointer events. */
+#welcome {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 0 32px;
+  text-align: center;
+  pointer-events: none;
+  z-index: 1;
+  animation: welcome-in 0.5s ease-out both;
+}
+#welcome[hidden] { display: none; }
+@keyframes welcome-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+/* Brand mark: the same dark rounded tile + monospace `a>` as icon.svg. */
+.welcome-logo {
+  width: 76px;
+  height: 76px;
+  border-radius: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 42px;
+  letter-spacing: -3px;
+  background: radial-gradient(circle at 50% 28%, #16223c, #05070c 72%, #040509);
+  box-shadow: 0 10px 34px rgba(10, 132, 255, 0.22), inset 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+}
+.wl-a { color: #fff; font-weight: 600; }
+.wl-gt { color: #0a84ff; font-weight: 700; }
+.welcome-title {
+  margin: 4px 0 0;
+  font-size: calc(30px * var(--fs));
+  font-weight: 700;
+  line-height: 1.15;
+  background: linear-gradient(105deg, #0a84ff, #6e5aed 55%, #c86dd7);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+.welcome-sub {
+  margin: 0;
+  max-width: 34ch;
+  font-size: calc(15px * var(--fs));
+  line-height: 1.45;
+  color: var(--dim);
+}
+.welcome-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
+  pointer-events: auto;
+}
+.welcome-chip {
+  background: var(--bg-elev);
+  border: 0.5px solid var(--sep);
+  border-radius: 999px;
+  color: var(--fg);
+  font-size: calc(14px * var(--fs));
+  padding: 8px 15px;
+  -webkit-tap-highlight-color: transparent;
+}
+.welcome-chip:active { opacity: 0.6; }
+
 /* ---- empty-chat hint (teaches the resume affordances, #33) ---- */
+/* Bottom-anchored so it clears the centred welcome hero above it. */
 #empty-hint {
   position: fixed;
   left: 50%;
-  top: 42%;
+  bottom: 92px;
   transform: translateX(-50%);
   display: inline-flex;
   align-items: center;
