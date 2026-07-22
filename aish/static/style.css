@@ -307,6 +307,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   flex: none; width: 36px; height: 30px; border-radius: 8px;
   background: var(--bg-elev2); color: var(--fg);
   border: none; font-size: 15px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center; /* center the glyph */
 }
 .fs-btn:active { opacity: 0.55; }
 #fs-state { min-width: 44px; text-align: center; }
@@ -420,13 +421,13 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   margin-left: auto;
   max-width: 82%;
   white-space: pre-wrap;
-  font-size: 16px;
+  font-size: calc(16px * var(--fs)); /* scale the conversation (#118) */
 }
 .msg.answer {
   color: var(--fg);
   white-space: pre-wrap;
   padding: 2px 0;
-  font-size: 16px;
+  font-size: calc(16px * var(--fs)); /* scale the conversation (#118) */
 }
 /* command output / agent status: monospace, no wrapping — scroll sideways
    like the diff view so structure survives */
