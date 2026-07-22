@@ -2911,6 +2911,23 @@ class TestIssueCreation:
         assert body.startswith("The toggle does nothing on tap.")
         assert "label: bug" in body
 
+    def test_create_issue_confirmation_carries_clickable_link(
+        self, app_env, monkeypatch
+    ):
+        # gh prints the new issue's URL to stdout; the confirmation surfaces it as
+        # a clickable markdown link, not plain terminal text (#110 follow-up).
+        captured: list[str] = []
+        monkeypatch.setattr(
+            "aish.tools.run_command", self._fake_run_command(captured)
+        )
+        client, _ = make_client(app_env, [model_says(ISSUE_BLOCK)])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/feedback dark mode is broken"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "create_issue"})
+            done = recv_until(ws, "done")  # the filing confirmation
+        assert "[#999](https://github.com/epnasis/aish/issues/999)" in done["result"]
+
     def test_create_issue_clears_pending_so_a_retap_cannot_double_file(
         self, app_env, monkeypatch
     ):

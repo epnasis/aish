@@ -183,6 +183,10 @@ def apply_quick_reply_net(result: str) -> tuple[str, str | None]:
 # The repo is hard-pinned; the model never runs `gh issue create` in this flow.
 ISSUE_REPO = "epnasis/aish"
 ISSUE_BLOCK_RE = re.compile(r"```aish-issue[^\n]*\n(.*?)```", re.DOTALL)
+# `gh issue create` prints the new issue's URL to stdout; pull it out so the
+# confirmation can show a clickable link instead of leaving it as plain terminal
+# text (#110 follow-up).
+ISSUE_URL_RE = re.compile(r"https://github\.com/\S+/issues/\d+")
 
 
 def parse_issue_block(text: str) -> tuple[dict[str, str] | None, str]:
@@ -1408,8 +1412,29 @@ class WebServer:
         session.pending_issue = None  # consumed; a re-tap can't double-file
         session.busy = True
         session.bridge.emit({"type": "user", "text": "Create the issue"})
-        # The created issue's URL streams out of gh into the terminal block.
-        session.runner = asyncio.ensure_future(self._run_user_command(session, command))
+        session.runner = asyncio.ensure_future(self._file_issue(session, command))
+
+    async def _file_issue(self, session: Session, command: str) -> None:
+        """Run the pinned `gh issue create` as a user-direct command (ungated,
+        streams into a terminal block like any ! command) and then surface the
+        new issue as a CLICKABLE link — gh prints the URL to stdout, which would
+        otherwise sit as plain, unclickable text in the terminal block (#110)."""
+        try:
+            session.logref.command(command, "user-direct")
+            output = await asyncio.to_thread(session.agent.run_user_command, command)
+            match = ISSUE_URL_RE.search(output)
+            # A rendered-markdown confirmation carrying a clickable link to the
+            # filed issue; empty (no answer bubble) if gh emitted no URL.
+            if match:
+                url = match.group(0)
+                result = f"✅ Issue [#{url.rsplit('/', 1)[-1]}]({url}) filed."
+            else:
+                result = ""
+            session.bridge.emit({"type": "done", "result": result})
+        except Exception as exc:  # noqa: BLE001 — a filing error must not kill the server
+            session.bridge.emit({"type": "error", "text": f"issue filing failed: {exc!r}"})
+        finally:
+            await self._finish_turn(session)
 
     async def _finish_turn(self, session: Session) -> None:
         """Shared end-of-turn drain for both the model task and ! command paths:
