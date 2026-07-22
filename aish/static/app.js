@@ -3119,14 +3119,15 @@ function scopeExplain(action, prefixText, escapeText) {
 }
 
 function buildCommandCard(card, event) {
-  // A command approval is an "attention needed" card: always the orange accent
-  // (border + icon + subtitle), per the design — gray reads as "safe/neutral",
-  // which an approval prompt never is. `destructive` only sharpens the icon and
-  // subtitle wording; write/diff cards use the blue accent instead.
-  card.classList.add("approval-card", "danger");
+  // #107: reserve the orange (danger) accent for DESTRUCTIVE commands so the
+  // warning color keeps its punch; a standard command uses the calmer blue
+  // (info) accent — the same as write/diff cards — with a shield icon. This
+  // fights the "everything's orange → approve reflex" warning fatigue. It's
+  // still an approval gate; the card is just not screaming when it needn't.
   const destructive = Boolean(event.destructive);
+  card.classList.add("approval-card", destructive ? "danger" : "info");
   const head = document.createElement("div");
-  head.className = "card-head danger";
+  head.className = destructive ? "card-head danger" : "card-head";
   head.innerHTML =
     `<span class="card-ico">${destructive ? CARD_TRIANGLE : CARD_SHIELD}</span>` +
     `<span class="card-htext"><span class="card-htitle">Approval needed</span>` +
