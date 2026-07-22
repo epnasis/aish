@@ -1157,21 +1157,29 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   padding-left: 4px;
 }
 
-/* ---- composer (iMessage-style pill) ---- */
+/* ---- composer (Gemini-style unified capsule, #122) ---- */
+/* The whole composer IS the capsule: + / mic / send live INSIDE it, beside the
+   input when short and pinned to a bottom row when the input grows tall (the
+   .tall reflow below). Full-width with small side gutters; the input itself is
+   transparent — the capsule carries the background, border, and rounding. */
 #composer {
   display: flex;
-  gap: 8px;
-  align-items: flex-end;
-  padding: 8px 12px;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 6px 5px 8px;
+  /* Full-width capsule with a small gutter on each side. */
+  margin-left: 10px;
+  margin-right: 10px;
   /* Home-indicator clearance as margin, not padding, and deliberately tighter
-     than the full safe-area inset: the pill sits ~12px above the bezel with
+     than the full safe-area inset: the capsule floats ~8px above the bezel with
      the swipe bar overlapping the gap below it, instead of a 34px dead strip.
-     Devices without an inset resolve to 0. */
-  margin-bottom: max(calc(env(safe-area-inset-bottom) - 22px), 0px);
+     Devices without an inset resolve to the 8px floor. */
+  margin-bottom: max(calc(env(safe-area-inset-bottom) - 22px), 8px);
   background: rgba(22, 22, 24, 0.85);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
-  border-top: 0.5px solid var(--sep);
+  border: 0.5px solid var(--sep);
+  border-radius: 24px;
 }
 #attach {
   background: none;
@@ -1240,20 +1248,23 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 #tts-dock:not(.paused) .i-pause { display: block; }
 #tts-dock.paused .i-play { display: block; }
 
+/* Transparent — the surrounding #composer capsule is the visible pill (#122). */
 #input {
   flex: 1;
   min-width: 0;
-  background: var(--bg-elev);
+  background: none;
   color: var(--fg);
-  border: 0.5px solid var(--sep);
-  border-radius: var(--r-bubble);
-  padding: 8px 14px;
+  border: none;
+  padding: 7px 6px;
   font: inherit;      /* proportional, same as sent bubbles */
   /* Scale with reading size (#118), but never below 16px or iOS zooms on focus. */
   font-size: max(18.4px, calc(18.4px * var(--fs)));
   resize: none;
   max-height: 24dvh;
 }
+/* Tall input gets the full capsule width; a touch of side padding keeps the
+   text off the rounded edge now that it spans the whole capsule (#122). */
+#composer.tall #input, #composer.tts-on #input { padding-left: 8px; padding-right: 8px; }
 #input:focus { outline: none; }
 #send {
   background: var(--blue);
@@ -1301,11 +1312,13 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 #composer.cmd-mode .i-plus { display: none; }
 #composer.cmd-mode .i-exit { display: block; }
 #composer.cmd-mode #attach { color: var(--green); }
-/* Flat, dark, edge-to-edge terminal bar in place of the rounded composer. */
+/* Terminal mode reuses the capsule shape but goes flat dark (#122): the green
+   prompt + dark fill signal the mode; no blur. */
 #composer.cmd-mode {
   align-items: center;
   gap: 4px;
   background: #0b0b0d;
+  border-color: #26261f;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
