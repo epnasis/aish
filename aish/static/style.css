@@ -98,6 +98,10 @@ body.kb-open .sheet { padding-bottom: 14px; }
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
 }
+/* Scale monospace CONTENT with the reading size (#118) — message code snippets
+   (inline + blocks) and terminal command display/output — while chrome mono
+   (cwd chip, trace timers/tokens/labels) keeps its fixed 13px above. */
+.msg.md code, .msg.md pre, .msg.md pre code { font-size: calc(13px * var(--fs)); }
 
 button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inherit; }
 
@@ -434,7 +438,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.echo, .msg.stream {
   color: var(--dim);
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   white-space: pre;
   overflow-x: auto;
   padding: 1px 0 1px 10px;
@@ -894,8 +898,8 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   position: sticky; top: 6px;
   background: var(--bg); border-radius: 8px;
 }
-.cmd-dollar { color: var(--green); font-family: ui-monospace, monospace; font-size: 13px; flex: none; }
-.cmd-text { flex: 1; min-width: 0; font-size: 13px; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.cmd-dollar { color: var(--green); font-family: ui-monospace, monospace; font-size: calc(13px * var(--fs)); flex: none; }
+.cmd-text { flex: 1; min-width: 0; font-size: calc(13px * var(--fs)); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
 .cmd-text.editing { outline: none; box-shadow: 0 0 0 2px var(--blue); border-radius: 5px; padding: 1px 5px; margin: -1px -5px; }
 .cmd-icon { flex: none; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: none; border: none; border-radius: 7px; color: var(--dim); }
 .cmd-icon svg { width: 15px; height: 15px; }
@@ -1768,7 +1772,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .out-actions .copy-chip svg { width: 15px; height: 15px; }
 .out-scroll { position: relative; max-height: 96px; overflow: auto; border-top: 0.5px solid var(--sep); transition: max-height 0.2s; }
 .out-box.expanded .out-scroll { max-height: 360px; }
-.out-body { padding: 8px 12px; font-size: 11.5px; line-height: 1.6; color: var(--dim); white-space: pre; }
+.out-body { padding: 8px 12px; font-size: calc(11.5px * var(--fs)); line-height: 1.6; color: var(--dim); white-space: pre; }
 .out-box.wrap-on .out-body, body.wrap .out-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 .out-fade { position: absolute; left: 0; right: 0; bottom: 0; height: 26px; pointer-events: none; background: linear-gradient(transparent, var(--bg)); display: none; }
 .out-box.collapsible:not(.expanded) .out-fade { display: block; }
@@ -1787,6 +1791,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-prompt {
   padding: 8px 72px 8px 12px; line-height: 1.5; color: var(--fg);
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+  font-size: calc(13px * var(--fs)); /* scale terminal command display (#118) */
 }
 .term-block.term-cnowrap .term-prompt {
   white-space: pre; overflow-wrap: normal; word-break: normal; overflow-x: auto;
@@ -1796,7 +1801,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-cmd { color: var(--fg); }
 .term-rule { height: 0; border-top: 0.5px solid var(--sep); }
 .term-out-wrap { position: relative; }
-.term-out { padding: 8px 12px; line-height: 1.6; color: var(--dim); white-space: pre; overflow-x: auto; }
+.term-out { padding: 8px 12px; line-height: 1.6; color: var(--dim); white-space: pre; overflow-x: auto; font-size: calc(13px * var(--fs)); }
 /* Wrapping is owned solely by the per-block toggle (seeded from body.wrap at
    build time) — do NOT also key it off body.wrap, or the global setting would
    override the local toggle and it could never unwrap. */
