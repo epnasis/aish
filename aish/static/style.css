@@ -93,6 +93,10 @@ body {
    safe-area bottom padding would just render as a dead strip above it. */
 body.kb-open #composer { margin-bottom: 0; }
 body.kb-open .sheet { padding-bottom: 14px; }
+/* With the keyboard up you're typing your first message, and the shrunk region
+   has no room for the hero — hide it so it can never crowd the header at any
+   screen size. It returns when the keyboard dismisses (#123). */
+body.kb-open #welcome { display: none; }
 
 .mono, pre, code {
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
@@ -1775,6 +1779,14 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   background-color: var(--bg);
   background-image: linear-gradient(var(--live-bg), var(--live-bg));
   box-shadow: 0 6px 16px -8px rgba(0, 0, 0, 0.7);
+}
+/* While an approval is pending the run is blocked — nothing streams — so the
+   live progress box drops its sticky pin and scrolls with the content, instead
+   of staying at top:0 where the approval card would slide underneath it. */
+body.awaiting-approval .trace.live {
+  position: relative;
+  z-index: auto;
+  box-shadow: none;
 }
 .trace-head {
   width: 100%; display: flex; align-items: center; gap: 10px;

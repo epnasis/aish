@@ -641,6 +641,10 @@ function refreshStatusline() {
   $("status-text").textContent =
     statusText || (pendingCards > 0 ? "waiting for approval" : "working…");
   $("stop-btn").hidden = !clientBusy;
+  // While an approval is pending the model is blocked — no progress is
+  // streaming — so let the sticky live-trace yield (CSS) rather than pinning at
+  // the top where the approval card would scroll underneath it.
+  document.body.classList.toggle("awaiting-approval", pendingCards > 0);
 }
 
 $("stop-btn").onclick = () => send({ type: "stop" });
