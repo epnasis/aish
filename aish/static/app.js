@@ -3520,7 +3520,15 @@ function resizeInput() {
   // Once the text grows past a couple of lines, let it take the full composer
   // width with the buttons tucked onto a row below (#97) — a narrow multi-line
   // box beside the buttons wastes the screen. Not in terminal mode.
-  $("composer").classList.toggle("tall", !cmdMode && input.scrollHeight > 72);
+  //
+  // Sticky (#114): going full-width makes the box wider, so the SAME text wraps
+  // to fewer lines and scrollHeight drops back under the threshold — a bare
+  // scrollHeight>72 test then flip-flops tall/short on every keystroke. Once
+  // tall, stay tall until the input is fully cleared (or terminal mode takes
+  // over), so it only collapses back when you've emptied it.
+  const composer = $("composer");
+  const stayTall = composer.classList.contains("tall") && input.value !== "";
+  composer.classList.toggle("tall", !cmdMode && (input.scrollHeight > 72 || stayTall));
 }
 
 function makeRecallable(bubble) {
