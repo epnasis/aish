@@ -1143,6 +1143,16 @@ class TestParseFeedback:
         prompt = parse_feedback("/feedback the dark mode toggle is broken")
         assert "the dark mode toggle is broken" in prompt
 
+    def test_block_flow_emits_aish_issue_block_not_gh_create(self):
+        # Web text-only feedback (#110): the model emits an aish-issue block and
+        # must NOT run gh issue create — the backend files it on confirm.
+        from aish.cli import parse_feedback
+
+        prompt = parse_feedback("/feedback broken", block_flow=True)
+        assert "```aish-issue" in prompt
+        assert "Do NOT run `gh issue create`" in prompt
+        assert "aish-reply://Create the issue" not in prompt  # no old chip
+
     def test_prefix_resolves_and_other_commands_pass_through(self):
         from aish.cli import parse_feedback
 

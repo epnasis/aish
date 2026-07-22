@@ -378,19 +378,48 @@ def learn_prompt(hint: str, lessons_path=None) -> str:
     return LEARN_PROMPT.format(hint=clause)
 
 
-# /feedback (CLI and web) expands to this so both entry points share one flow.
-# It leans on the `gh_issue` skill for the gh mechanics rather than a permanent
-# feedback skill, so nothing is added to the always-on skill index.
-FEEDBACK_PROMPT = (
+# /feedback (CLI and web) expands to one of these so both entry points share
+# the flow. It leans on the `gh_issue` skill for repo context rather than a
+# permanent feedback skill, so nothing is added to the always-on skill index.
+#
+# Two flavours (issue #110):
+#  - BLOCK flow (web, text-only feedback): the model emits the finished issue as
+#    ONE `aish-issue` fenced block and does NOT run `gh issue create`. The block
+#    is the single source of truth — the frontend renders it as a review card and
+#    the backend creates it verbatim on the user's confirm (a user-direct action,
+#    no approval gate, repo pinned). This drops the redundant second prompt.
+#  - CLASSIC flow (CLI, and web feedback that carries attachments): the model
+#    drafts the issue and runs `gh issue create` itself through the approval gate,
+#    because it also has to upload the attached assets — a step the text-only
+#    backend path does not handle. The approval gate is the safety boundary here.
+FEEDBACK_INTRO = (
     "The user wants to send feedback about aish — a bug report, a feature "
     "request, or an improvement idea — that will become a GitHub issue on the "
     "`epnasis/aish` repository (checked out at /Users/epnasis/dev/aish). "
     "You MUST follow this flow:\n"
-    "1. Read the `gh_issue` skill (read_skill) and follow it for the repo "
-    "context and the exact `gh issue create` mechanics.\n"
+    "1. Read the `gh_issue` skill (read_skill) for repo context and labels.\n"
     "2. If the request is unclear or thin, ask focused clarifying questions "
     "FIRST — one short round, not an interrogation. If they already described "
     "it{clause}, go straight to a draft.\n"
+)
+FEEDBACK_BLOCK_PROMPT = FEEDBACK_INTRO + (
+    "3. Emit the finished issue as EXACTLY ONE fenced block, and nothing that "
+    "duplicates it (no separate rendered copy, no `gh issue create`, no "
+    "quick-reply chips). The block is the ONLY thing the user reviews and the "
+    "EXACT text that gets filed:\n"
+    "```aish-issue\n"
+    "title: A concise one-line title\n"
+    "---\n"
+    "Body markdown here.\n"
+    "Multiple lines, sections, a suggested label, etc.\n"
+    "```\n"
+    "The FIRST line inside the block MUST be `title: <one-line title>`; the `---` "
+    "separator line is optional; everything after it is the issue body, verbatim.\n"
+    "4. Do NOT run `gh issue create` — the user files it with one tap and aish "
+    "creates it for them. Stop after the block; do not add chips or a trailing "
+    "question."
+)
+FEEDBACK_CLASSIC_PROMPT = FEEDBACK_INTRO + (
     "3. Present the draft issue as ordinary rendered markdown — a bold title "
     "line and a structured body. Do NOT wrap the draft in a code block; the "
     "user reads it rendered.\n"
@@ -400,15 +429,20 @@ FEEDBACK_PROMPT = (
     "[Edit — change something](aish-reply://I'd like to change the draft: )\n"
     "5. Run `gh issue create` ONLY after the user approves. Then show the new "
     "issue's URL.\n"
-    "If the user attached logs, screenshots, or files, incorporate them and "
-    "upload them to the issue per the `gh_issue` skill's asset workflow."
+    "The user attached logs, screenshots, or files — incorporate them and upload "
+    "them to the issue per the `gh_issue` skill's asset workflow."
 )
 
 
-def feedback_prompt(hint: str = "") -> str:
+def feedback_prompt(hint: str = "", block_flow: bool = False) -> str:
+    """The /feedback expansion. block_flow=True selects the web text-only path
+    (emit an `aish-issue` block, backend files it); the default classic path has
+    the model run `gh issue create` through the approval gate (CLI, or web
+    feedback with attachments that need the asset-upload workflow)."""
     hint = hint.strip()
     clause = f" (their words: {hint})" if hint else ""
-    return FEEDBACK_PROMPT.format(clause=clause)
+    template = FEEDBACK_BLOCK_PROMPT if block_flow else FEEDBACK_CLASSIC_PROMPT
+    return template.format(clause=clause)
 
 
 # No side effects and no approval prompt — safe to run concurrently.

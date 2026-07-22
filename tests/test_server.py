@@ -7,6 +7,7 @@ no network; the only real commands executed are harmless touch/ls in tmp dirs.
 import contextlib
 import json
 import os
+import shlex
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -2796,3 +2797,168 @@ class TestExportEndpoints:
                 == 200
             )
             assert client.get("/export/session?session=x").status_code == 403
+
+
+ISSUE_BLOCK = (
+    "Here is your draft:\n\n"
+    "```aish-issue\n"
+    "title: Dark mode toggle is broken\n"
+    "---\n"
+    "The toggle does nothing on tap.\n\n"
+    "### Steps\n"
+    "- open settings\n"
+    "- tap the toggle\n\n"
+    "label: bug\n"
+    "```\n"
+)
+
+
+class TestIssueBlockParsing:
+    """The aish-issue block is the single source of truth (#110): parsed once in
+    the backend, mirrored in app.js. Title/body must come out exactly."""
+
+    def test_parses_title_and_body_with_separator(self):
+        issue, cleaned = server_module.parse_issue_block(ISSUE_BLOCK)
+        assert issue == {
+            "title": "Dark mode toggle is broken",
+            "body": "The toggle does nothing on tap.\n\n"
+            "### Steps\n- open settings\n- tap the toggle\n\nlabel: bug",
+        }
+        # The raw fence is stripped from the stored answer (b): replay/export
+        # never show the fenced source, only the surrounding prose survives.
+        assert "```aish-issue" not in cleaned
+        assert cleaned == "Here is your draft:"
+
+    def test_optional_separator_absent_body_starts_line_two(self):
+        text = "```aish-issue\ntitle: A title\nBody line one.\nBody line two.\n```"
+        issue, _ = server_module.parse_issue_block(text)
+        assert issue == {"title": "A title", "body": "Body line one.\nBody line two."}
+
+    def test_body_may_itself_contain_a_separator_line(self):
+        # A --- deeper in the body is a real horizontal rule, not the optional
+        # leading separator, so it must be preserved verbatim.
+        text = (
+            "```aish-issue\n"
+            "title: Has a rule\n"
+            "---\n"
+            "Intro paragraph.\n"
+            "---\n"
+            "After the rule.\n"
+            "```"
+        )
+        issue, _ = server_module.parse_issue_block(text)
+        assert issue["title"] == "Has a rule"
+        assert issue["body"] == "Intro paragraph.\n---\nAfter the rule."
+
+    def test_no_block_returns_none_and_unchanged_text(self):
+        text = "Just a normal answer with no issue block."
+        assert server_module.parse_issue_block(text) == (None, text)
+
+
+class TestIssueCreation:
+    """Backend-owned creation (#110): confirm files the pre-reviewed draft as a
+    user-direct action — no model, no approval gate, repo pinned, safe argv."""
+
+    @staticmethod
+    def _fake_run_command(captured):
+        def fake(command, **kwargs):
+            captured.append(command)
+            on_line = kwargs.get("on_line")
+            if on_line:
+                on_line("https://github.com/epnasis/aish/issues/999")
+            return "https://github.com/epnasis/aish/issues/999\n[exit code: 0]"
+
+        return fake
+
+    def test_text_feedback_stashes_block_and_strips_from_answer(self, app_env):
+        # A text-only /feedback draft: the block is stashed and stripped from the
+        # streamed/stored answer (b); no gh call happens during the task.
+        client, chat = make_client(app_env, [model_says(ISSUE_BLOCK)])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/feedback dark mode is broken"})
+            done = recv_until(ws, "done")
+            assert "```aish-issue" not in done["result"]
+            # The model was told to EMIT a block, not to run gh issue create.
+            user_prompt = next(
+                m["content"] for m in reversed(chat.calls[0]["messages"])
+                if m["role"] == "user"
+            )
+            assert "aish-issue" in user_prompt
+            assert "Do NOT run `gh issue create`" in user_prompt
+
+    def test_create_issue_files_reviewed_draft_via_user_direct_path(
+        self, app_env, monkeypatch
+    ):
+        captured: list[str] = []
+        monkeypatch.setattr(
+            "aish.tools.run_command", self._fake_run_command(captured)
+        )
+        client, _ = make_client(app_env, [model_says(ISSUE_BLOCK)])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/feedback dark mode is broken"})
+            recv_until(ws, "done")  # draft stashed
+            ws.send_json({"type": "create_issue"})
+            # The user-direct path streams into a terminal block — no approval.
+            start = recv_until(ws, "command_start")
+            assert start.get("user") is True
+            recv_until(ws, "done")
+        assert len(captured) == 1
+        argv = shlex.split(captured[0])
+        # Repo hard-pinned; title/body are the EXACT reviewed text, safely quoted.
+        assert argv[:5] == ["gh", "issue", "create", "--repo", "epnasis/aish"]
+        assert argv[argv.index("--title") + 1] == "Dark mode toggle is broken"
+        body = argv[argv.index("--body") + 1]
+        assert body.startswith("The toggle does nothing on tap.")
+        assert "label: bug" in body
+
+    def test_create_issue_clears_pending_so_a_retap_cannot_double_file(
+        self, app_env, monkeypatch
+    ):
+        captured: list[str] = []
+        monkeypatch.setattr(
+            "aish.tools.run_command", self._fake_run_command(captured)
+        )
+        client, _ = make_client(app_env, [model_says(ISSUE_BLOCK)])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/feedback broken"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "create_issue"})
+            recv_until(ws, "done")
+            # Second tap: the draft was consumed, so it errors instead of re-filing.
+            ws.send_json({"type": "create_issue"})
+            err = recv_until(ws, "error")
+            assert "no issue draft" in err["text"]
+        assert len(captured) == 1  # filed exactly once
+
+    def test_create_issue_without_a_draft_errors_gracefully(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "create_issue"})
+            err = recv_until(ws, "error")
+            assert "no issue draft" in err["text"]
+
+    def test_feedback_with_attachments_keeps_gated_model_flow(self, app_env):
+        # Attachments → the classic model-driven flow: the model is told to run
+        # gh issue create itself (approval-gated) with the asset workflow. No
+        # backend block flow, so no pending_issue is stashed.
+        client, chat = make_client(app_env, [model_says("Here is the draft…")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json(
+                {
+                    "type": "task",
+                    "text": "/feedback see the log",
+                    "attachments": ["/tmp/does-not-exist.log"],
+                }
+            )
+            recv_until(ws, "done")
+            user_prompt = next(
+                m["content"] for m in reversed(chat.calls[0]["messages"])
+                if m["role"] == "user"
+            )
+            assert "gh issue create" in user_prompt
+            assert "asset workflow" in user_prompt
+            assert "aish-issue" not in user_prompt
+            # No draft was stashed, so a create_issue tap errors.
+            ws.send_json({"type": "create_issue"})
+            err = recv_until(ws, "error")
+            assert "no issue draft" in err["text"]

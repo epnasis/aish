@@ -94,6 +94,14 @@ check("tilde fences are recognized (not just backticks)", () => {
   assert.strictEqual(fenceCloses("~~~~", f), true);
 });
 
+check("a hyphenated info string is captured whole (aish-issue block, #110)", () => {
+  // \w* would stop at the hyphen and leave "-issue" trailing, so the fence
+  // wouldn't match at all and the feedback card would render as raw text.
+  const f = fenceOpen("```aish-issue");
+  assert(f, "```aish-issue should open a fence");
+  assert.strictEqual(f.lang, "aish-issue");
+});
+
 // --- cause #2/#3: quick-reply label/payload robustness -------------------
 
 check("a single-line quick reply matches with label and payload captured", () => {

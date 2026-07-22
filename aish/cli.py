@@ -732,16 +732,18 @@ def parse_learn(task: str, lessons_path=None) -> str | None:
     return learn_prompt(task.partition(" ")[2], lessons_path)
 
 
-def parse_feedback(task: str) -> str | None:
+def parse_feedback(task: str, block_flow: bool = False) -> str | None:
     """/feedback [details] → the feedback-flow prompt (run as a normal task so
     the gh_issue skill, chips, and approval gate all apply); None for any other
-    slash input. Unambiguous prefixes resolve, matching handle_slash."""
+    slash input. Unambiguous prefixes resolve, matching handle_slash. block_flow
+    (web, text-only) selects the backend-owned `aish-issue` block flow (#110);
+    the CLI leaves it False so the model files the issue through the gate."""
     verb = task.split()[0].lower()
     if verb != "/feedback":
         matches = [c for c in SLASH_COMMANDS if c.startswith(verb)]
         if matches != ["/feedback"]:
             return None
-    return feedback_prompt(task.partition(" ")[2])
+    return feedback_prompt(task.partition(" ")[2], block_flow=block_flow)
 
 
 def pick_session(state_dir: Path, arg: str, exclude: set, verb: str) -> SessionInfo | None:
