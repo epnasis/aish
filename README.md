@@ -222,7 +222,10 @@ providers; add `--save` to persist the choice as the startup default in
 `/learn [hint]` — save this conversation's learnings as skills/memory
 (`/learn lessons` migrates the legacy lessons file) ·
 `/feedback [text]` — file a bug or idea as a GitHub issue: aish gathers
-details, drafts the issue, and (on your approval) creates it via `gh` ·
+details and drafts the issue. On the web, a text-only draft becomes a review
+card you file with one tap (aish creates it for you — your own confirmed
+action, no second approval prompt); in the terminal, or when you attach
+logs/screenshots, aish runs `gh issue create` itself on your approval ·
 `/jobs` · `/help` · `/quit` (or `exit`).
 
 **Multiline input**: Enter submits; newline via Ctrl+J, trailing `\`, or

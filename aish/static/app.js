@@ -486,7 +486,9 @@ function renderAnswerNow() {
 // masquerade as the outer close and desync everything parsed after it (#80).
 // Shared by stableBoundary and renderMarkdown so the two fence-trackers can't
 // drift apart and disagree on where a block actually ends.
-const FENCE_RE = /^(`{3,}|~{3,})(\w*)\s*$/;
+// The info string allows hyphens (valid per CommonMark, and needed for the
+// aish-issue feedback block, #110) — not just \w, which stops at a hyphen.
+const FENCE_RE = /^(`{3,}|~{3,})([\w-]*)\s*$/;
 function fenceOpen(line) {
   const m = line.match(FENCE_RE);
   return m ? { ch: m[1][0], len: m[1].length, lang: m[2] } : null;
@@ -1924,6 +1926,12 @@ function renderMarkdown(text) {
       i++;
       while (i < lines.length && !fenceCloses(lines[i], fence)) body.push(lines[i++]);
       i++; // closing fence (or EOF while streaming)
+      // A ```aish-issue block (#110) is a feedback draft, not code: render it as
+      // a review card with Create/Edit controls instead of a raw code block.
+      if (fence.lang === "aish-issue") {
+        frag.appendChild(issueDraftCard(body.join("\n")));
+        continue;
+      }
       const pre = document.createElement("pre");
       const code = document.createElement("code");
       if (fence.lang) code.dataset.lang = fence.lang;
@@ -2137,6 +2145,54 @@ function retireQuickReplies() {
         : node.classList?.contains("spent"));
     if (emptied) p.classList.add("spent");
   }
+}
+
+// Issue-draft card (#110): a ```aish-issue block is the finished feedback issue
+// — the ONE thing the user reviews and the EXACT text the backend files. Parse
+// it (mirror of server.py parse_issue_block: line 1 `title:`, optional `---`
+// separator, the rest is the body verbatim) and render a review card: bold
+// title, the body as markdown, then Create / Edit controls. "Create the issue"
+// sends {type:create_issue} — the backend files the stashed draft as the user's
+// own action (no model, no approval gate, repo pinned). "Edit" is an ordinary
+// quick reply that seeds the composer so the user tells the model what to change.
+function issueDraftCard(inner) {
+  const lines = inner.replace(/\r\n?/g, "\n").split("\n");
+  const first = (lines[0] || "").trim();
+  const title = /^title:/i.test(first) ? first.slice(first.indexOf(":") + 1).trim() : first;
+  let rest = lines.slice(1);
+  if (rest.length && rest[0].trim() === "---") rest = rest.slice(1); // optional separator
+  const body = rest.join("\n").trim();
+
+  const card = document.createElement("div");
+  card.className = "issue-draft";
+  const head = document.createElement("div");
+  head.className = "issue-draft-title";
+  head.textContent = title;
+  card.appendChild(head);
+  const bodyEl = document.createElement("div");
+  bodyEl.className = "issue-draft-body md";
+  bodyEl.appendChild(renderMarkdown(body));
+  card.appendChild(bodyEl);
+
+  const controls = document.createElement("div");
+  controls.className = "issue-draft-controls";
+  const createBtn = document.createElement("button");
+  createBtn.type = "button";
+  createBtn.className = "issue-draft-create";
+  createBtn.textContent = "Create the issue";
+  createBtn.onclick = () => {
+    if (createBtn.disabled) return;
+    if (send({ type: "create_issue" })) {
+      controls.classList.add("spent"); // one-shot: a filed draft can't refire
+    }
+  };
+  controls.appendChild(createBtn);
+  // Edit reuses the quick-reply chip so it behaves exactly like today's edit
+  // chip — it seeds the composer, the user says what to change, the model
+  // re-drafts a fresh aish-issue block.
+  controls.appendChild(quickReplyChip("Edit", "I'd like to change the draft: "));
+  card.appendChild(controls);
+  return card;
 }
 
 // Rich embeds (#50): whitelisted YouTube / Google Maps links become inline

@@ -563,6 +563,35 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 /* Answered (any user reply sent): chips and chip-only paragraphs vanish. */
 .msg.md .quick-reply.spent, .msg.md p.spent { display: none; }
 
+/* ---- issue-draft card (feedback aish-issue block, #110) ---- */
+.msg.md .issue-draft {
+  background: var(--bg-elev);
+  border: 1px solid var(--blue-border);
+  border-radius: var(--r-card);
+  padding: 14px;
+  margin: 10px 0;
+}
+.msg.md .issue-draft-title { font-size: 16px; font-weight: 700; color: var(--fg); margin-bottom: 6px; }
+.msg.md .issue-draft-body { color: var(--fg); }
+.msg.md .issue-draft-body > :first-child { margin-top: 0; }
+.msg.md .issue-draft-body > :last-child { margin-bottom: 0; }
+.msg.md .issue-draft-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.msg.md .issue-draft-controls.spent { display: none; }
+.msg.md .issue-draft-create {
+  padding: 9px 18px;
+  border: none;
+  border-radius: 999px;
+  background: var(--blue);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.msg.md .issue-draft-create:active { opacity: 0.7; }
+/* The Edit control is a reused quick-reply chip; drop its default top/bottom
+   margin so it lines up with the primary button in the controls row. */
+.msg.md .issue-draft-controls .quick-reply { margin: 0; }
+
 /* ---- rich embeds (whitelisted YouTube / Google Maps, #50) ---- */
 .msg.md .embed {
   display: block;

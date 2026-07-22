@@ -29,6 +29,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import sys
 import threading
 import time
@@ -174,6 +175,36 @@ def apply_quick_reply_net(result: str) -> tuple[str, str | None]:
     if suffix == "":  # opt-out: drop the tag from the stored answer
         return NO_CHIPS_TAG_RE.sub("", result).rstrip(), None
     return f"{result.rstrip()}\n\n{suffix}", f"\n\n{suffix}"
+
+
+# Backend-owned issue creation (#110). A text-only /feedback draft comes back as
+# one ```aish-issue fenced block — the single source of truth: the frontend
+# renders it as a review card, and on confirm the backend files it VERBATIM.
+# The repo is hard-pinned; the model never runs `gh issue create` in this flow.
+ISSUE_REPO = "epnasis/aish"
+ISSUE_BLOCK_RE = re.compile(r"```aish-issue[^\n]*\n(.*?)```", re.DOTALL)
+
+
+def parse_issue_block(text: str) -> tuple[dict[str, str] | None, str]:
+    """Extract the first ```aish-issue block. Returns ({title, body}, cleaned)
+    where cleaned is `text` with the raw fence removed; ({}, text) is signalled
+    as (None, text) when no block is present. Parsing rule (defined once, used
+    everywhere — mirrored in app.js issueDraftCard): strip the fence; line 1 is
+    `title: <text>`; if the next line is exactly `---` it's an optional
+    separator and the body starts after it, else the body starts on line 2; the
+    remainder verbatim is the body (so a `---` deeper in the body is kept)."""
+    match = ISSUE_BLOCK_RE.search(text)
+    if match is None:
+        return None, text
+    lines = match.group(1).split("\n")
+    first = lines[0].strip()
+    title = first[len("title:"):].strip() if first.lower().startswith("title:") else first
+    rest = lines[1:]
+    if rest and rest[0].strip() == "---":  # optional separator
+        rest = rest[1:]
+    body = "\n".join(rest).strip()
+    cleaned = (text[: match.start()] + text[match.end():]).strip()
+    return {"title": title, "body": body}, cleaned
 
 # /file serves ONLY these — raster images the browser renders inertly in an
 # <img>. SVG is deliberately excluded: opened full-size it executes scripts
@@ -714,6 +745,10 @@ class Session:
         self.queue: list[tuple[str, list[str]]] = []  # (text, attachments) waiting
         self.pending_cwd: str | None = None  # a /cd requested while busy; applied after
         self.pending_retry: str | None = None  # a retry requested while busy; run after stop
+        # A pre-reviewed issue draft ({title, body}) from a text-only /feedback,
+        # stashed for a {type:create_issue} confirm (#110). Never model-derived
+        # at click time — this is the exact text the user reviewed in the card.
+        self.pending_issue: dict[str, str] | None = None
         self.last_shown = time.monotonic()
         self.custom_title: str | None = None  # a user-set name; overrides the derived title
         # last-actor-drives (#102): whoever last performed a session-affecting
@@ -1061,6 +1096,9 @@ class WebServer:
         elif kind == "retry":
             self._claim(client)
             await self._retry_task(client, str(message.get("text", "")).strip())
+        elif kind == "create_issue":
+            self._claim(client)
+            await self._create_issue(client)
         elif kind == "dequeue":
             self._dequeue(client, str(message.get("text", "")))
         elif kind == "dequeue_cwd":
@@ -1255,9 +1293,14 @@ class WebServer:
             # /learn and /feedback are the task-expanding slash commands on web:
             # the transcript shows what the user typed, the model gets the
             # expanded prompt (distillation, or the feedback issue-filing flow).
+            # Attachments gate the feedback flavour (#110): text-only feedback
+            # uses the backend-owned aish-issue block flow (block_flow=True);
+            # feedback WITH attachments keeps the classic model-driven flow so
+            # the model runs `gh issue create` (gated) with the asset-upload
+            # workflow the text path doesn't handle.
             expanded = (
                 parse_learn(text, getattr(session.agent, "lessons_path", None))
-                or parse_feedback(text)
+                or parse_feedback(text, block_flow=not attachments)
             )
             if expanded is not None:
                 text = expanded
@@ -1279,6 +1322,14 @@ class WebServer:
                 )
             else:
                 result = await asyncio.to_thread(session.agent.run_task, text)
+            # Backend-owned issue creation (#110): a text-only feedback draft
+            # returns as one aish-issue block. Stash it (the pre-reviewed source
+            # of truth for a later {type:create_issue}) and strip the raw fence
+            # from the stored/replayed answer — the frontend renders the review
+            # card from the live stream, so the fenced source never shows.
+            issue, result = parse_issue_block(result)
+            if issue is not None:
+                session.pending_issue = issue
             # Web-only quick-reply safety net (issue #46): a question with no
             # chip gets fallback chips. The suffix also streams as a token so it
             # lands in the already-streamed answer block, not just done.result.
@@ -1329,6 +1380,36 @@ class WebServer:
             session.bridge.emit({"type": "error", "text": f"command failed: {exc!r}"})
         finally:
             await self._finish_turn(session)
+
+    async def _create_issue(self, client: Client) -> None:
+        """File the stashed feedback draft on the pinned repo (#110). This is a
+        USER-DIRECT action: the title/body were reviewed in the card and are used
+        verbatim — never re-derived by the model at click time — the repo is
+        hard-pinned, and creation runs through the same ungated `!`-command path
+        as any user-typed command (`run_user_command`), so no approval gate is
+        needed or bypassed and NO model call happens on confirm. The argv is
+        built safely — every field is shlex.quote'd, so user/model text is never
+        shell-interpolated raw."""
+        session = client.viewing
+        if session is None:
+            return
+        issue = session.pending_issue
+        if issue is None:
+            await client.ws.send_json(
+                {"type": "error", "text": "no issue draft to file — start with /feedback"}
+            )
+            return
+        if await self._reject_busy(client, session):
+            return
+        command = (
+            f"gh issue create --repo {ISSUE_REPO} "
+            f"--title {shlex.quote(issue['title'])} --body {shlex.quote(issue['body'])}"
+        )
+        session.pending_issue = None  # consumed; a re-tap can't double-file
+        session.busy = True
+        session.bridge.emit({"type": "user", "text": "Create the issue"})
+        # The created issue's URL streams out of gh into the terminal block.
+        session.runner = asyncio.ensure_future(self._run_user_command(session, command))
 
     async def _finish_turn(self, session: Session) -> None:
         """Shared end-of-turn drain for both the model task and ! command paths:
