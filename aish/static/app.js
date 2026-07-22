@@ -5356,17 +5356,23 @@ async function dirsFetch(url, params) {
   return body;
 }
 
-async function browseDir(path) {
+async function browseDir(path, row = null) {
   $("dir-sheet").classList.add("browsing");
-  setDirLoading(true); // a browse can take up to the backend's timeout (iCloud/slow dirs)
+  // A browse can take up to the backend's timeout (iCloud/slow dirs). Show the
+  // spinner on the tapped row when there is one (#87), else the centered overlay
+  // (crumb/back/"choose another folder" have no row to mark).
+  if (row) row.classList.add("loading");
+  else setDirLoading(true);
   let body;
   try {
     body = await dirsFetch("/dirs", new URLSearchParams({ path }));
   } catch (err) {
-    setDirLoading(false);
+    if (row) row.classList.remove("loading");
+    else setDirLoading(false);
     renderDirUnlistable(path, err.message);
     return;
   }
+  // A successful browse re-renders the list (below), discarding the marked row.
   setDirLoading(false);
   dirPath = body.path;
   dirEntries = body.dirs;
@@ -5394,7 +5400,7 @@ function renderDirUnlistable(path, msg) {
   list.replaceChildren();
   if (dirPath !== "/") {
     list.appendChild(
-      dirRow("..", null, () => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/"), "up")
+      dirRow("..", null, (e) => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/", e.currentTarget), "up")
     );
   }
   const note = document.createElement("div");
@@ -5524,7 +5530,7 @@ function renderDirList() {
 
   if (dirPath !== "/") {
     list.appendChild(
-      dirRow("..", null, () => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/"), "up")
+      dirRow("..", null, (e) => browseDir(dirPath.replace(/\/[^/]+$/, "") || "/", e.currentTarget), "up")
     );
   }
   const visible = dirEntries.filter(({ name }) => !name.startsWith("."));
@@ -5532,7 +5538,8 @@ function renderDirList() {
     // items may be null (symlink, unreadable, or counting budget spent) — show no count then.
     const meta = items == null ? null : items === 1 ? "1 item" : `${items} items`;
     list.appendChild(
-      dirRow(name, meta, () => browseDir(dirPath === "/" ? `/${name}` : `${dirPath}/${name}`))
+      dirRow(name, meta, (e) =>
+        browseDir(dirPath === "/" ? `/${name}` : `${dirPath}/${name}`, e.currentTarget))
     );
   }
 

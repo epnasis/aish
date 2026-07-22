@@ -34,7 +34,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -45,7 +45,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from . import backends, export, tools
+from . import backends, dir_ignore, export, tools
 from .agent import Agent, ModelUnavailable, environment_context
 from .approval import (
     DEFAULT_ALLOWLIST,
@@ -78,7 +78,7 @@ from .cli import (
     save_default_model,
 )
 from .embeddings import SemanticIndex
-from .prompt import ATFILE_IGNORED_DIRS, ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
+from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .session import SessionLog
 
 if TYPE_CHECKING:
@@ -564,12 +564,15 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     return ask_approval, approve_write, approve_read
 
 
-def list_files(cwd: str, query: str) -> list[str]:
-    """Project paths for @-mention completion — the same walk, junk-dir
-    skiplist, cap, and scoring as the TUI's AtFileCompleter."""
+def list_files(cwd: str, query: str, ignore: Sequence[str] | None = None) -> list[str]:
+    """Project paths for @-mention completion — the same walk, cap, and scoring
+    as the TUI's AtFileCompleter. The junk-dir skiplist is the SAME configurable
+    directory-picker ignore list (#87), so there's one place to edit; defaults
+    apply when no list is passed."""
+    patterns = list(ignore) if ignore is not None else list(dir_ignore.DEFAULT_IGNORE)
     paths: list[str] = []
     for dirpath, dirnames, filenames in os.walk(cwd, onerror=lambda _e: None):
-        dirnames[:] = sorted(d for d in dirnames if d not in ATFILE_IGNORED_DIRS)
+        dirnames[:] = sorted(d for d in dirnames if not dir_ignore.matches(d, patterns, True))
         rel = os.path.relpath(dirpath, cwd)
         prefix = "" if rel == "." else rel + "/"
         paths.extend(prefix + d + "/" for d in dirnames)
@@ -792,12 +795,15 @@ class WebServer:
     shared across them. A default session is opened at startup and is where a
     bare (no ?session=) connection lands."""
 
-    def __init__(self, open_session, state_dir, config_path, token):
+    def __init__(self, open_session, state_dir, config_path, token, dir_ignore_patterns=None):
         self.open_session = open_session  # (path | None) -> Session
         self.state_dir = state_dir
         self.uploads_dir = state_dir / "uploads"
         self.config_path = config_path
         self.token = token
+        # gitignore-style names hidden in the folder browser + @-file index (#87);
+        # user-editable via config.toml [directory_picker], defaults otherwise.
+        self.dir_ignore = list(dir_ignore_patterns or dir_ignore.DEFAULT_IGNORE)
         self.loop: asyncio.AbstractEventLoop | None = None
         self.sessions: dict[str, Session] = {}
         self.clients: set[Client] = set()
@@ -1825,7 +1831,7 @@ class WebServer:
         if session is None:
             return
         cwd = session.agent.cwd
-        paths = await asyncio.to_thread(list_files, cwd, query)
+        paths = await asyncio.to_thread(list_files, cwd, query, self.dir_ignore)
         await client.ws.send_json({"type": "file_list", "query": query, "files": paths})
 
     # Directory picker backend (top-bar cwd control). Deliberately NOT scoped
@@ -1838,15 +1844,27 @@ class WebServer:
     # touches the filesystem — resolve(), is_dir(), scandir() — lives here so a
     # blocking call can never touch the server's own interpreter. Stdlib only.
     _DIRS_LIST_SCRIPT = r"""
-import json, os, sys
+import fnmatch, json, os, sys
 from pathlib import Path
 CAP = 1000
-# Build/dependency/system noise never worth showing in a directory picker (#87).
-IGNORE_DIRS = {
-    ".git", "node_modules", "venv", ".venv", "__pycache__", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", ".tox", ".Trash", ".Spotlight-V100", ".fseventsd",
-}
-IGNORE_FILES = {".DS_Store", "Thumbs.db", ".localized"}
+# gitignore-style ignore patterns are passed in as a JSON array (argv[2]) from
+# self.dir_ignore — the user-editable [directory_picker] list (#87). The matcher
+# is inlined (duplicating dir_ignore.matches) because this runs in an isolated
+# `python -I` child that can't import the aish package. A pure name filter over
+# the already-scanned entries — NO extra scandir/stat per entry (#86).
+try:
+    PATTERNS = json.loads(sys.argv[2]) if len(sys.argv) > 2 else []
+except (ValueError, IndexError):
+    PATTERNS = []
+def ignored(name, is_dir):
+    for pat in PATTERNS:
+        if pat.endswith("/"):
+            if not is_dir:
+                continue
+            pat = pat[:-1]
+        if pat and fnmatch.fnmatchcase(name, pat):
+            return True
+    return False
 raw = (sys.argv[1] if len(sys.argv) > 1 else "").strip() or str(Path.home())
 try:
     p = Path(raw).expanduser()
@@ -1862,10 +1880,11 @@ try:
                 is_dir = e.is_dir(follow_symlinks=True)
             except OSError:
                 continue
+            if ignored(e.name, is_dir):
+                continue
             if is_dir:
-                if e.name not in IGNORE_DIRS:
-                    dirs.append(e.name)
-            elif e.name not in IGNORE_FILES:
+                dirs.append(e.name)
+            else:
                 files.append(e.name)
     print(json.dumps({
         "status": 200, "path": str(p),
@@ -1892,7 +1911,9 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         if self.token and request.query_params.get("token") != self.token:
             return JSONResponse({"error": "bad token"}, status_code=403)
         raw = request.query_params.get("path", "").strip()
-        data, status = await self._run_fs_child(self._DIRS_LIST_SCRIPT, raw)
+        data, status = await self._run_fs_child(
+            self._DIRS_LIST_SCRIPT, raw, json.dumps(self.dir_ignore)
+        )
         return JSONResponse(data, status_code=status)
 
     async def _run_fs_child(self, script: str, *args: str) -> tuple[dict, int]:
@@ -2291,7 +2312,10 @@ def create_app(
         session_holder.append(session)  # #95: the mid-task get/drain callbacks read it
         return session, history
 
-    server = WebServer(open_session, state_dir, config_path, token)
+    # The folder-browser / @-file ignore list is read from the same config.toml
+    # the CLI uses (#87); a missing/malformed config degrades to defaults.
+    dir_ignore_patterns = dir_ignore.load_patterns(load_config(config_path) if config_path else {})
+    server = WebServer(open_session, state_dir, config_path, token, dir_ignore_patterns)
     server_ref.append(server)
     first, _ = open_session(None)
     server.add_session(first)
@@ -2325,6 +2349,9 @@ def main() -> int:
         os.environ.get("AISH_CONFIG", str(Path.home() / ".config" / "aish" / "config.toml"))
     )
     config = load_config(config_path)
+    # Seed config.toml with the default folder-browser ignore list on first use,
+    # so the user can see and edit it (#87). Best-effort; never blocks startup.
+    dir_ignore.seed_config(config_path)
 
     parser = argparse.ArgumentParser(
         prog="aish-web",
