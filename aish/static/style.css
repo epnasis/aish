@@ -3,6 +3,10 @@
    output, diffs, and code. */
 
 :root {
+  /* Reading-text scale (#118): a menu stepper multiplies the reading surfaces
+     so text gets bigger and REFLOWS within the same width (no horizontal scroll
+     like pinch-zoom). Chrome (bars, icons, labels) stays fixed. */
+  --fs: 1;
   --bg: #000000;
   --bg-elev: #1c1c1e;
   --bg-elev2: #2c2c2e;
@@ -295,6 +299,17 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .menu-item .grow { flex: 1; }
 .menu-item .menu-state { font-size: 13px; color: var(--dim); font-weight: 600; }
 .menu-item:active { background: var(--row-sel-bg); }
+/* Text-size stepper row (#118): a menu row (not a tap-to-act button) holding
+   the A−/A+ controls; the row itself doesn't highlight, only the buttons do. */
+.menu-stepper { cursor: default; }
+.menu-stepper:active { background: none; }
+.fs-btn {
+  flex: none; width: 36px; height: 30px; border-radius: 8px;
+  background: var(--bg-elev2); color: var(--fg);
+  border: none; font-size: 15px; font-weight: 600;
+}
+.fs-btn:active { opacity: 0.55; }
+#fs-state { min-width: 44px; text-align: center; }
 .menu-item.danger { color: var(--red); }
 .menu-item.danger svg { color: var(--red); }
 .menu-item.sep { margin-top: 5px; border-top: 0.5px solid var(--sep); padding-top: 13px; }
@@ -337,7 +352,10 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   padding: 14px 14px 6px;
   overscroll-behavior: contain;
 }
-.msg { margin-bottom: 12px; max-width: 100%; overflow-wrap: anywhere; }
+/* Message text scales with the reading-size stepper (#118); it inherits into
+   paragraphs, lists, inline code, and (via em) the markdown headings below, so
+   bigger text reflows inside the bubble's fixed width. */
+.msg { margin-bottom: 12px; max-width: 100%; overflow-wrap: anywhere; font-size: calc(16px * var(--fs)); }
 
 /* ---- empty-chat hint (teaches the resume affordances, #33) ---- */
 #empty-hint {
@@ -459,8 +477,9 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md { white-space: normal; }
 .msg.md p { margin: 7px 0; white-space: pre-wrap; }
 .msg.md .md-h { margin: 14px 0 4px; line-height: 1.25; font-weight: 700; }
-.msg.md h2 { font-size: 20px; } .msg.md h3 { font-size: 17px; }
-.msg.md h4, .msg.md h5, .msg.md h6 { font-size: 15px; }
+/* em, so they scale with the .msg reading-size base (#118): 20/17/15px @ 100%. */
+.msg.md h2 { font-size: 1.25em; } .msg.md h3 { font-size: 1.0625em; }
+.msg.md h4, .msg.md h5, .msg.md h6 { font-size: 0.9375em; }
 .msg.md ul, .msg.md ol { margin: 7px 0; padding-left: 22px; }
 .msg.md li { margin: 3px 0; }
 .msg.md code {
@@ -549,7 +568,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   border: 1px solid var(--blue);
   border-radius: 999px;
   color: var(--blue);
-  font-size: 15px;
+  font-size: calc(15px * var(--fs)); /* scale with reading size (#118) */
   font-weight: 600;
   line-height: 1.2;
   /* Buttons default to centered text; a label long enough to wrap would then
@@ -571,7 +590,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   padding: 14px;
   margin: 10px 0;
 }
-.msg.md .issue-draft-title { font-size: 16px; font-weight: 700; color: var(--fg); margin-bottom: 6px; }
+.msg.md .issue-draft-title { font-size: calc(16px * var(--fs)); font-weight: 700; color: var(--fg); margin-bottom: 6px; }
 .msg.md .issue-draft-body { color: var(--fg); }
 .msg.md .issue-draft-body > :first-child { margin-top: 0; }
 .msg.md .issue-draft-body > :last-child { margin-bottom: 0; }
@@ -1225,7 +1244,8 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   border-radius: var(--r-bubble);
   padding: 8px 14px;
   font: inherit;      /* proportional, same as sent bubbles */
-  font-size: 16px;    /* prevents iOS focus zoom */
+  /* Scale with reading size (#118), but never below 16px or iOS zooms on focus. */
+  font-size: max(16px, calc(16px * var(--fs)));
   resize: none;
   max-height: 24dvh;
 }

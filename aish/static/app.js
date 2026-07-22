@@ -4543,6 +4543,28 @@ function attachListNav(searchEl, listEl) {
 // Applied here, before any replay renders, so history draws in the chosen mode.
 const WRAP_KEY = "aish-wrap";
 if (localStorage.getItem(WRAP_KEY) === "1") document.body.classList.add("wrap");
+
+// Reading-text size (#118): a multiplier on the --fs CSS variable, stepped from
+// the ⋯ menu's A−/A+ and persisted. The transcript REFLOWS at the new size (the
+// scaled surfaces keep their width), unlike pinch-zoom which magnifies a region.
+const FONT_SCALE_KEY = "aish-font-scale";
+const FS_MIN = 0.8, FS_MAX = 2.0, FS_STEP = 0.1;
+let fontScale = parseFloat(localStorage.getItem(FONT_SCALE_KEY));
+if (!(fontScale >= FS_MIN && fontScale <= FS_MAX)) fontScale = 1;
+function applyFontScale() {
+  document.documentElement.style.setProperty("--fs", String(fontScale));
+  const el = $("fs-state");
+  if (el) el.textContent = `${Math.round(fontScale * 100)}%`;
+  localStorage.setItem(FONT_SCALE_KEY, String(fontScale));
+}
+function stepFontScale(delta) {
+  fontScale = Math.min(FS_MAX, Math.max(FS_MIN, Math.round((fontScale + delta) * 100) / 100));
+  applyFontScale();
+}
+applyFontScale();
+// stopPropagation so stepping doesn't bubble to the menu's close-on-click.
+$("fs-dec").onclick = (e) => { e.stopPropagation(); stepFontScale(-FS_STEP); };
+$("fs-inc").onclick = (e) => { e.stopPropagation(); stepFontScale(FS_STEP); };
 // Toggling wrap reflows every monospace block, so content heights above the
 // viewport change and the reader would land on different text (#21). Anchor
 // on the message at the top of the viewport and put it back at the same

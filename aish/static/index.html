@@ -83,6 +83,14 @@
     <svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h12a3.25 3.25 0 0 1 0 6.5h-2.5m0 0 2.2-2.2m-2.2 2.2 2.2 2.2M4 18.5h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
     <span class="grow">Line wrap</span><span id="wrap-state" class="menu-state"></span>
   </button>
+  <!-- Text size stepper (#118): scales the reading text, which reflows in place. -->
+  <div class="menu-item menu-stepper">
+    <svg viewBox="0 0 24 24"><path d="M3 17V8.5m0 0L6 17M3 8.5 0.2 17M2 14h2M13 17V9.5m0 0 2.6 7.5m-2.6-7.5L10.4 17M11 14.5h4M17 9h5m-2.5 0v8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span class="grow">Text size</span>
+    <button id="fs-dec" class="fs-btn" aria-label="smaller text">A−</button>
+    <span id="fs-state" class="menu-state">100%</span>
+    <button id="fs-inc" class="fs-btn" aria-label="larger text">A+</button>
+  </div>
   <button class="menu-item" data-act="export">
     <svg viewBox="0 0 24 24"><path d="M12 4v9.5M8.4 10.2 12 13.8l3.6-3.6M5.5 16.5v1.5a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-1.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
     Export to PDF
