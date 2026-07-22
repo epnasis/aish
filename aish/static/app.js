@@ -1767,12 +1767,18 @@ function updateScrollButton() {
     $("scroll-top").hidden = true;
     return;
   }
-  // Only offer "jump to latest" once you're a meaningful distance from the
-  // bottom — half a viewport, not the old ~120px that popped it on a nudge (#115).
-  const fromBottom =
-    messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
-  $("scroll-down").hidden = fromBottom < messagesEl.clientHeight * 0.5;
   const top = messagesEl.scrollTop;
+  const fromBottom = messagesEl.scrollHeight - top - messagesEl.clientHeight;
+  // Jump-to-latest is directional like the top arrow: it appears while you
+  // scroll DOWN and are still a meaningful distance (half a viewport) from the
+  // bottom, and hides the moment you scroll UP or reach the bottom — so it
+  // fades out when you scroll up to read instead of lingering (#119).
+  if (top > lastScrollTop && fromBottom > messagesEl.clientHeight * 0.5) {
+    $("scroll-down").hidden = false;
+  } else if (top < lastScrollTop || fromBottom < 120) {
+    $("scroll-down").hidden = true;
+  }
+  // Jump-to-top: appears while scrolling UP and far enough from the top.
   if (top < 120 || top > lastScrollTop) scrollingToTop = false;
   if (top < lastScrollTop && top > messagesEl.clientHeight && !scrollingToTop) {
     $("scroll-top").hidden = false;

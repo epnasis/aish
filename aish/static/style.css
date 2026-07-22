@@ -1036,12 +1036,17 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   justify-content: center;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
   z-index: 15;
+  opacity: 1;
+  transition: opacity 0.2s ease, visibility 0.2s ease; /* fade in/out (#119) */
 }
 #scroll-down { bottom: calc(76px + env(safe-area-inset-bottom)); }
 /* 104px clears both header rows (nav-row + context-bar, ~94px tall) with a
    10px gap so the button never sits over the directory/model chips (#82). */
 #scroll-top { top: calc(104px + env(safe-area-inset-top)); }
-#scroll-down[hidden], #scroll-top[hidden] { display: none; }
+/* Fade instead of display:none so the arrows ease out — e.g. jump-to-latest
+   fading away as you scroll up (#119). visibility+pointer-events keep the
+   invisible button non-interactive; position:fixed means no layout cost. */
+#scroll-down[hidden], #scroll-top[hidden] { opacity: 0; visibility: hidden; pointer-events: none; }
 #scroll-down svg, #scroll-top svg { width: 20px; height: 20px; }
 #scroll-down:active, #scroll-top:active { opacity: 0.6; }
 
