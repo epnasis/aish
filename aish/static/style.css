@@ -57,7 +57,7 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--fg);
-  font: 16px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  font: 18.4px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   /* Opt out of iOS text autosizing: rotating to landscape "boosts" font
      sizes to the wider layout width, and the boost sticks after rotating
@@ -96,12 +96,12 @@ body.kb-open .sheet { padding-bottom: 14px; }
 
 .mono, pre, code {
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
+  font-size: 15px;
 }
 /* Scale monospace CONTENT with the reading size (#118) — message code snippets
    (inline + blocks) and terminal command display/output — while chrome mono
    (cwd chip, trace timers/tokens/labels) keeps its fixed 13px above. */
-.msg.md code, .msg.md pre, .msg.md pre code { font-size: calc(13px * var(--fs)); }
+.msg.md code, .msg.md pre, .msg.md pre code { font-size: calc(15px * var(--fs)); }
 
 button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inherit; }
 
@@ -135,7 +135,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   background: none;
   border: none;
   color: var(--blue);
-  font-size: 16px;
+  font-size: 18.4px;
   padding: 6px 4px;
   flex: none;
 }
@@ -153,7 +153,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   border-radius: 8px;
   background: var(--orange);
   color: #fff;
-  font: 700 9.5px/1 -apple-system, system-ui, sans-serif;
+  font: 700 10.9px/1 -apple-system, system-ui, sans-serif;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -172,7 +172,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   background: none;
   border: none;
   color: var(--fg);
-  font-size: 16px;
+  font-size: 18.4px;
   font-weight: 600;
   padding: 2px 4px;
 }
@@ -207,8 +207,8 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 #cwd-chip .ctx-ico { width: 17px; height: 17px; flex: none; color: var(--blue); }
 .ctx-text { flex: 1 1 0; min-width: 0; overflow: hidden; display: flex; flex-direction: column; line-height: 1.2; }
-#cwd-name { font-size: 14px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#cwd-text { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#cwd-name { font-size: 16.1px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#cwd-text { font-size: 12.7px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #cwd-chip .caret { width: 12px; height: 12px; }
 #cwd-chip:active, #model-chip:active { opacity: 0.6; }
 .ctx-div { width: 0.5px; background: var(--sep); margin: 9px 0; flex: none; }
@@ -222,7 +222,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   padding: 8px 15px;
   min-height: 44px;
   color: var(--fg);
-  font-size: 14px;
+  font-size: 16.1px;
   font-weight: 600;
 }
 /* Status dot: dim + static at rest (carries no false "live" signal), green
@@ -258,7 +258,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   border-radius: 999px;
   background: var(--orange-glow);
   color: var(--orange);
-  font-size: 11px;
+  font-size: 12.7px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -296,12 +296,12 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   border-radius: 11px;
   padding: 10px 12px;
   color: var(--fg);
-  font-size: 15px;
+  font-size: 17.3px;
   text-align: left;
 }
 .menu-item svg { width: 19px; height: 19px; flex: none; color: var(--dim); }
 .menu-item .grow { flex: 1; }
-.menu-item .menu-state { font-size: 13px; color: var(--dim); font-weight: 600; }
+.menu-item .menu-state { font-size: 15px; color: var(--dim); font-weight: 600; }
 .menu-item:active { background: var(--row-sel-bg); }
 /* Text-size stepper row (#118): a menu row (not a tap-to-act button) holding
    the A−/A+ controls; the row itself doesn't highlight, only the buttons do. */
@@ -310,7 +310,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .fs-btn {
   flex: none; width: 36px; height: 30px; border-radius: 8px;
   background: var(--bg-elev2); color: var(--fg);
-  border: none; font-size: 15px; font-weight: 600;
+  border: none; font-size: 17.3px; font-weight: 600;
   display: flex; align-items: center; justify-content: center; /* center the glyph */
 }
 .fs-btn:active { opacity: 0.55; }
@@ -333,7 +333,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   border-radius: 11px;
   padding: 10px 12px;
   font: inherit;
-  font-size: 16px; /* prevents iOS focus zoom */
+  font-size: 18.4px; /* prevents iOS focus zoom */
 }
 #rename-input:focus { outline: none; border-color: var(--blue); }
 .rename-actions { display: flex; gap: 8px; justify-content: flex-end; }
@@ -342,7 +342,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   border-radius: 10px;
   padding: 9px 16px;
   font: inherit;
-  font-size: 15px;
+  font-size: 17.3px;
   font-weight: 600;
   color: var(--fg);
   background: var(--row-sel-bg);
@@ -360,7 +360,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 /* Message text scales with the reading-size stepper (#118); it inherits into
    paragraphs, lists, inline code, and (via em) the markdown headings below, so
    bigger text reflows inside the bubble's fixed width. */
-.msg { margin-bottom: 12px; max-width: 100%; overflow-wrap: anywhere; font-size: calc(16px * var(--fs)); }
+.msg { margin-bottom: 12px; max-width: 100%; overflow-wrap: anywhere; font-size: calc(18.4px * var(--fs)); }
 
 /* ---- empty-chat hint (teaches the resume affordances, #33) ---- */
 #empty-hint {
@@ -374,7 +374,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   background: none;
   border: none;
   color: var(--dim);
-  font-size: 13px;
+  font-size: 15px;
   white-space: nowrap;
   z-index: 1;
 }
@@ -396,7 +396,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   border-radius: 999px;
   background: var(--bg-elev2);
   color: var(--fg);
-  font-size: 14px;
+  font-size: 16.1px;
   font-weight: 500;
   pointer-events: none;
   transition: background 0.15s;
@@ -425,20 +425,20 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   margin-left: auto;
   max-width: 82%;
   white-space: pre-wrap;
-  font-size: calc(16px * var(--fs)); /* scale the conversation (#118) */
+  font-size: calc(18.4px * var(--fs)); /* scale the conversation (#118) */
 }
 .msg.answer {
   color: var(--fg);
   white-space: pre-wrap;
   padding: 2px 0;
-  font-size: calc(16px * var(--fs)); /* scale the conversation (#118) */
+  font-size: calc(18.4px * var(--fs)); /* scale the conversation (#118) */
 }
 /* command output / agent status: monospace, no wrapping — scroll sideways
    like the diff view so structure survives */
 .msg.echo, .msg.stream {
   color: var(--dim);
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: calc(12px * var(--fs));
+  font-size: calc(13.8px * var(--fs));
   white-space: pre;
   overflow-x: auto;
   padding: 1px 0 1px 10px;
@@ -447,16 +447,16 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .msg.error {
   color: var(--red);
-  font-size: 14px;
+  font-size: 16.1px;
   white-space: pre-wrap;
 }
-.msg.notice { color: var(--dim); font-size: 12px; text-align: center; }
+.msg.notice { color: var(--dim); font-size: 13.8px; text-align: center; }
 /* Workspace-change audit marker (issue #94): a quiet system-note row. */
 .msg.workspace-note {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 15px;
   padding: 5px 2px;
 }
 .msg.workspace-note .wsnote-ico { flex: 0 0 auto; line-height: 0; color: var(--blue); }
@@ -482,7 +482,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md { white-space: normal; }
 .msg.md p { margin: 7px 0; white-space: pre-wrap; }
 .msg.md .md-h { margin: 14px 0 4px; line-height: 1.25; font-weight: 700; }
-/* em, so they scale with the .msg reading-size base (#118): 20/17/15px @ 100%. */
+/* em, so they scale with the .msg reading-size base (#118): 23/20/17px @ 100%. */
 .msg.md h2 { font-size: 1.25em; } .msg.md h3 { font-size: 1.0625em; }
 .msg.md h4, .msg.md h5, .msg.md h6 { font-size: 0.9375em; }
 .msg.md ul, .msg.md ol { margin: 7px 0; padding-left: 22px; }
@@ -537,7 +537,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md table {
   border-collapse: separate;
   border-spacing: 0;
-  font-size: 14px;
+  font-size: 16.1px;
   background: var(--bg-elev);
   border-radius: var(--r-card);
   overflow: hidden;
@@ -561,7 +561,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   border-radius: var(--r-card);
   margin: 6px 0;
 }
-.msg.md .img-broken { color: var(--dim); font-size: 13px; }
+.msg.md .img-broken { color: var(--dim); font-size: 15px; }
 
 /* ---- quick-reply chips (aish-reply:// links) ---- */
 .msg.md .quick-reply {
@@ -573,7 +573,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   border: 1px solid var(--blue);
   border-radius: 999px;
   color: var(--blue);
-  font-size: calc(15px * var(--fs)); /* scale with reading size (#118) */
+  font-size: calc(17.3px * var(--fs)); /* scale with reading size (#118) */
   font-weight: 600;
   line-height: 1.2;
   /* Buttons default to centered text; a label long enough to wrap would then
@@ -595,7 +595,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   padding: 14px;
   margin: 10px 0;
 }
-.msg.md .issue-draft-title { font-size: calc(16px * var(--fs)); font-weight: 700; color: var(--fg); margin-bottom: 6px; }
+.msg.md .issue-draft-title { font-size: calc(18.4px * var(--fs)); font-weight: 700; color: var(--fg); margin-bottom: 6px; }
 .msg.md .issue-draft-body { color: var(--fg); }
 .msg.md .issue-draft-body > :first-child { margin-top: 0; }
 .msg.md .issue-draft-body > :last-child { margin-bottom: 0; }
@@ -607,7 +607,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   border-radius: 999px;
   background: var(--blue);
   color: #fff;
-  font-size: 15px;
+  font-size: 17.3px;
   font-weight: 600;
   line-height: 1.2;
 }
@@ -746,7 +746,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .regen-chip svg { width: 19px; height: 19px; }
 .regen-chip:active { opacity: 0.5; }
-.answer-timing { margin-left: auto; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--dim); padding-right: 6px; }
+.answer-timing { margin-left: auto; font-family: ui-monospace, Menlo, monospace; font-size: 12.1px; color: var(--dim); padding-right: 6px; }
 
 /* copy chip under your own prompt bubble, right-aligned with it */
 .user-tools {
@@ -794,7 +794,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   width: auto;
   min-width: 44px;
   padding: 0 6px;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--blue);
@@ -814,7 +814,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   margin: 12px 0;
 }
 /* legacy read/sensitive-file card chrome (buildReadCard) */
-.card .card-title { font-size: 13px; font-weight: 600; color: var(--orange); margin-bottom: 8px; }
+.card .card-title { font-size: 15px; font-weight: 600; color: var(--orange); margin-bottom: 8px; }
 .card .card-title .destructive { color: var(--red); }
 .card code, .card .cmd {
   display: block;
@@ -826,7 +826,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   margin-bottom: 10px;
 }
 .card .escape-note {
-  font-size: 13px;
+  font-size: 15px;
   color: var(--orange);
   margin-bottom: 10px;
   overflow-wrap: anywhere;
@@ -837,7 +837,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   border: none;
   border-radius: var(--r-control);
   padding: 11px 4px;
-  font-size: 15px;
+  font-size: 17.3px;
   font-weight: 600;
 }
 .card .buttons button:active { opacity: 0.7; }
@@ -854,7 +854,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   padding: 9px 12px;
   margin-bottom: 10px;
   font: inherit;
-  font-size: 16px; /* prevents iOS focus zoom */
+  font-size: 18.4px; /* prevents iOS focus zoom */
   line-height: 1.4;
   resize: vertical;
 }
@@ -881,11 +881,11 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .card-head.danger .card-ico { background: var(--orange-glow); color: var(--orange); }
 .card-ico svg { width: 17px; height: 17px; }
 .card-htext { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-.card-htitle { font-size: 14.5px; font-weight: 700; color: var(--fg); }
-.card-hsub { font-size: 11.5px; color: var(--dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-htitle { font-size: 16.7px; font-weight: 700; color: var(--fg); }
+.card-hsub { font-size: 13.2px; color: var(--dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-head.danger .card-hsub { color: var(--orange); }
 .card-hsub.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
-.card-count { font-size: 11px; font-weight: 700; font-family: ui-monospace, monospace; flex: none; }
+.card-count { font-size: 12.7px; font-weight: 700; font-family: ui-monospace, monospace; flex: none; }
 .card-count.add { color: var(--green); }
 .card-count.del { color: var(--red); }
 
@@ -898,8 +898,8 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   position: sticky; top: 6px;
   background: var(--bg); border-radius: 8px;
 }
-.cmd-dollar { color: var(--green); font-family: ui-monospace, monospace; font-size: calc(13px * var(--fs)); flex: none; }
-.cmd-text { flex: 1; min-width: 0; font-size: calc(13px * var(--fs)); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.cmd-dollar { color: var(--green); font-family: ui-monospace, monospace; font-size: calc(15px * var(--fs)); flex: none; }
+.cmd-text { flex: 1; min-width: 0; font-size: calc(15px * var(--fs)); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
 .cmd-text.editing { outline: none; box-shadow: 0 0 0 2px var(--blue); border-radius: 5px; padding: 1px 5px; margin: -1px -5px; }
 .cmd-icon { flex: none; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: none; border: none; border-radius: 7px; color: var(--dim); }
 .cmd-icon svg { width: 15px; height: 15px; }
@@ -907,7 +907,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .cmd-box .copy-chip { flex: none; width: 30px; height: 30px; }
 .cmd-box .copy-chip svg { width: 15px; height: 15px; }
 
-.card-where { display: flex; align-items: center; gap: 6px; padding: 9px 15px 2px; font-size: 12px; color: var(--dim); overflow: hidden; }
+.card-where { display: flex; align-items: center; gap: 6px; padding: 9px 15px 2px; font-size: 13.8px; color: var(--dim); overflow: hidden; }
 .card-where svg { width: 12px; height: 12px; flex: none; }
 .card-where .where-path { font-family: ui-monospace, "SF Mono", Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .approval-card .escape-note { margin: 6px 14px 0; }
@@ -918,17 +918,17 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 
 /* scope: a segmented control that modifies what Approve remembers */
 .scope { margin: 10px 14px 0; }
-.scope-label { font-size: 11px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 6px; }
+.scope-label { font-size: 12.7px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 6px; }
 .segmented { display: flex; background: var(--bg); border: 0.5px solid var(--sep); border-radius: 10px; padding: 3px; gap: 3px; }
-.seg { flex: 1; min-width: 0; text-align: center; padding: 7px 3px; border: none; border-radius: 8px; font-size: 12px; font-weight: 600; color: var(--dim); background: none; }
+.seg { flex: 1; min-width: 0; text-align: center; padding: 7px 3px; border: none; border-radius: 8px; font-size: 13.8px; font-weight: 600; color: var(--dim); background: none; }
 .seg.active { color: var(--fg); font-weight: 700; background: var(--bg-elev3); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18); }
 .seg:active { opacity: 0.7; }
-.scope-explain { margin-top: 7px; font-size: 11.5px; color: var(--dim); line-height: 1.4; }
+.scope-explain { margin-top: 7px; font-size: 13.2px; color: var(--dim); line-height: 1.4; }
 .scope-explain b { color: var(--fg); }
 .scope-explain .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 
 .card-actions { display: flex; gap: 8px; padding: 13px 14px 14px; }
-.card-actions button { border: none; border-radius: 12px; padding: 13px; font-size: 16px; font-weight: 700; }
+.card-actions button { border: none; border-radius: 12px; padding: 13px; font-size: 18.4px; font-weight: 700; }
 .card-actions button:active { opacity: 0.8; }
 .card-actions button:disabled { opacity: 0.5; }
 .card-actions .approve { flex: 2; background: var(--green); color: var(--approve-fg); }
@@ -953,12 +953,12 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   margin-top: 0;
 }
 .step-note-wrap.expanded .step-note { -webkit-line-clamp: unset; }
-.note-more { background: none; border: none; color: var(--blue); font-size: 11.5px; font-weight: 600; padding: 3px 0 0; }
+.note-more { background: none; border: none; color: var(--blue); font-size: 13.2px; font-weight: 600; padding: 3px 0 0; }
 
 /* ---- sources under an answer ---- */
 .sources {
   margin: 2px 0 10px;
-  font-size: 13px;
+  font-size: 15px;
 }
 .sources summary {
   color: var(--dim);
@@ -977,7 +977,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .source-row .source-url {
   display: block;
   color: var(--dim);
-  font-size: 11px;
+  font-size: 12.7px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1005,7 +1005,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .diff-inner { min-width: 100%; width: max-content; }
 .diff.diff-soft .diff-inner { width: auto; }
 /* one row = line-number gutter + text; add/del rows carry a full-width tint */
-.dl { display: flex; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.55; }
+.dl { display: flex; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13.8px; line-height: 1.55; }
 .dl-no { flex: none; width: 46px; padding: 0 10px 0 4px; text-align: right; color: var(--dim); opacity: 0.6; user-select: none; }
 /* `flex: 0 0 auto` (not shrinkable) is what lets each row's max-content include
    the full line, so the row — and its tinted background — grows past the
@@ -1080,7 +1080,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   align-items: center;
   gap: 8px;
   padding: 4px 16px;
-  font-size: 12px;
+  font-size: 13.8px;
   color: var(--dim);
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
@@ -1091,7 +1091,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   border: none;
   border-radius: 999px;
   color: var(--red);
-  font-size: 12px;
+  font-size: 13.8px;
   font-weight: 600;
   padding: 3px 12px;
 }
@@ -1105,7 +1105,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   font-family: inherit;
   text-align: left;
   padding: 4px 16px;
-  font-size: 12px;
+  font-size: 13.8px;
   color: var(--yellow);
   background: var(--bg-elev);
 }
@@ -1130,10 +1130,10 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   border-bottom: 0.5px solid var(--sep);
   color: var(--fg);
   padding: 10px 16px;
-  font-size: 14px;
+  font-size: 16.1px;
 }
 .suggest-row.active { background: var(--bg-elev2); }
-.suggest-row .meta { color: var(--dim); font-size: 12px; }
+.suggest-row .meta { color: var(--dim); font-size: 13.8px; }
 
 /* ---- attachment chips ---- */
 #attachments {
@@ -1147,13 +1147,13 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   background: var(--bg-elev2);
   border-radius: 999px;
   padding: 5px 12px;
-  font-size: 13px;
+  font-size: 15px;
 }
 .attach-chip button {
   background: none;
   border: none;
   color: var(--dim);
-  font-size: 13px;
+  font-size: 15px;
   padding-left: 4px;
 }
 
@@ -1230,7 +1230,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   width: auto;
   min-width: 40px;
   padding: 0 6px;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--blue);
@@ -1250,7 +1250,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   padding: 8px 14px;
   font: inherit;      /* proportional, same as sent bubbles */
   /* Scale with reading size (#118), but never below 16px or iOS zooms on focus. */
-  font-size: max(16px, calc(16px * var(--fs)));
+  font-size: max(18.4px, calc(18.4px * var(--fs)));
   resize: none;
   max-height: 24dvh;
 }
@@ -1290,7 +1290,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 #dictate.recording svg { animation: mic-pulse 1.1s ease-in-out infinite; }
 @keyframes mic-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 .dict-lang {
-  font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+  font-size: 10.4px; font-weight: 700; letter-spacing: 0.04em;
   line-height: 1; color: var(--dim);
 }
 #dictate.recording .dict-lang { color: var(--red); }
@@ -1312,7 +1312,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 #cmd-prompt {
   flex-shrink: 0;
   font-family: ui-monospace, Menlo, monospace;
-  font-size: 16px;
+  font-size: 18.4px;
   color: var(--green);
   white-space: nowrap;
   user-select: none;
@@ -1329,28 +1329,28 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 
 /* ---- mic / speech-recognition diagnostic (/mic) ---- */
 .mic-body { padding: 4px 16px 20px; display: flex; flex-direction: column; gap: 14px; }
-.mic-support { font-size: 13px; line-height: 1.5; color: var(--dim); }
+.mic-support { font-size: 15px; line-height: 1.5; color: var(--dim); }
 .mic-support .ok { color: var(--green); font-weight: 600; }
 .mic-support .bad { color: var(--red); font-weight: 600; }
 .mic-langs { display: flex; gap: 8px; }
 .mic-lang {
-  flex: 1; padding: 12px; border-radius: 12px; font-size: 16px; font-weight: 600;
+  flex: 1; padding: 12px; border-radius: 12px; font-size: 18.4px; font-weight: 600;
   background: var(--chip-bg); color: var(--fg); border: 1px solid transparent;
 }
 .mic-lang.active { border-color: var(--blue); color: var(--blue); background: var(--blue-glow); }
 .mic-toggle {
-  padding: 18px; border-radius: 14px; border: none; font-size: 19px; font-weight: 700;
+  padding: 18px; border-radius: 14px; border: none; font-size: 21.9px; font-weight: 700;
   background: var(--blue); color: #fff;
 }
 .mic-toggle.listening { background: var(--red); }
 .mic-toggle:active { opacity: 0.8; }
 .mic-field { display: flex; flex-direction: column; gap: 4px; }
-.mic-lbl { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--dim); }
-.mic-interim { min-height: 24px; font-size: 18px; color: var(--dim); }
-.mic-final { min-height: 24px; font-size: 18px; font-weight: 600; color: var(--fg); }
+.mic-lbl { font-size: 12.7px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--dim); }
+.mic-interim { min-height: 24px; font-size: 20.7px; color: var(--dim); }
+.mic-final { min-height: 24px; font-size: 20.7px; font-weight: 600; color: var(--fg); }
 .mic-log {
   margin: 0; max-height: 180px; overflow-y: auto; padding: 10px 12px;
-  background: var(--bg-elev); border-radius: 10px; font-size: 12px; line-height: 1.5;
+  background: var(--bg-elev); border-radius: 10px; font-size: 13.8px; line-height: 1.5;
   color: var(--dim); white-space: pre-wrap; word-break: break-word;
 }
 
@@ -1407,7 +1407,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .sheet.dragging { transition: none; }
 .sheet { transition: transform 0.18s ease-out; }
 .sheet-head { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
-.sheet-head strong { font-size: 17px; }
+.sheet-head strong { font-size: 19.6px; }
 .sheet-head .grow { flex: 1; }
 .sheet-head input[type="search"] {
   flex: 1;
@@ -1417,7 +1417,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   border: none;
   border-radius: var(--r-control);
   padding: 9px 12px;
-  font-size: 16px;
+  font-size: 18.4px;
 }
 .sheet-head input[type="search"]:focus { outline: none; }
 /* iOS-style sheet dismiss: gray circle with an ✕ (xmark.circle.fill) */
@@ -1439,7 +1439,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   border-bottom: 0.5px solid var(--sep);
   color: var(--fg);
   padding: 11px 6px;
-  font-size: 15px;
+  font-size: 17.3px;
 }
 .sheet-list .row:active { background: var(--bg-elev2); }
 .sheet-list .row.active { background: var(--bg-elev2); border-radius: 8px; }
@@ -1448,10 +1448,10 @@ body.wrap .msg.echo, body.wrap .msg.stream {
    while Enter actually takes the top match. Green text = you are here
    (same convention as the model picker). */
 .sheet-list .row.current { background: var(--row-sel-bg); }
-.sheet-list .row .meta { color: var(--dim); font-size: 12px; display: block; margin-top: 2px; }
+.sheet-list .row .meta { color: var(--dim); font-size: 13.8px; display: block; margin-top: 2px; }
 .sheet-list .section-label {
   color: var(--dim);
-  font-size: 11px;
+  font-size: 12.7px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.4px;
@@ -1476,7 +1476,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   white-space: nowrap;
 }
 .session-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; padding-top: 1px; }
-.session-right .stamp { color: var(--dim); font-size: 13px; }
+.session-right .stamp { color: var(--dim); font-size: 15px; }
 .session-row .row-delete {
   flex: none;
   color: var(--dim);
@@ -1487,7 +1487,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .session-row .row-delete svg { width: 15px; height: 15px; }
 .session-row .row-delete.armed {
   color: var(--red);
-  font-size: 12px;
+  font-size: 13.8px;
   font-weight: 600;
   line-height: 1;
 }
@@ -1495,14 +1495,14 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   display: block;
   margin-top: 3px;
   color: var(--dim);
-  font-size: 14px;
+  font-size: 16.1px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .sheet-list .badge {
   flex: none;
-  font-size: 10px;
+  font-size: 11.5px;
   font-weight: 700;
   padding: 1px 6px;
   border-radius: 6px;
@@ -1510,12 +1510,12 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 }
 .badge.st-running { color: var(--green); background: var(--green-glow); }
 .badge.st-waiting { color: #fff; background: var(--orange); }
-.save-toggle { font-size: 13px; color: var(--dim); margin: 0 4px 8px; display: block; }
+.save-toggle { font-size: 15px; color: var(--dim); margin: 0 4px 8px; display: block; }
 
 /* workspace */
 .ws-section { border-top: 0.5px solid var(--sep); padding: 12px 4px; }
-.ws-label { font-size: 14px; font-weight: 600; color: var(--fg); margin-bottom: 4px; }
-.ws-note { color: var(--dim); font-weight: 400; font-size: 11px; }
+.ws-label { font-size: 16.1px; font-weight: 600; color: var(--fg); margin-bottom: 4px; }
+.ws-note { color: var(--dim); font-weight: 400; font-size: 12.7px; }
 .ws-section .mono { color: var(--dim); overflow-x: auto; white-space: pre; }
 .ws-row { display: flex; gap: 8px; margin-top: 8px; }
 .ws-row input {
@@ -1526,7 +1526,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   border: none;
   border-radius: var(--r-control);
   padding: 9px 12px;
-  font-size: 16px;
+  font-size: 18.4px;
 }
 .ws-row input:focus { outline: none; }
 .ws-row button, #jobs-refresh {
@@ -1536,14 +1536,14 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   border-radius: var(--r-control);
   padding: 9px 14px;
   margin-top: 8px;
-  font-size: 15px;
+  font-size: 17.3px;
 }
 .ws-row button { margin-top: 0; }
-.ws-about { color: var(--dim); font-size: 12px; line-height: 1.5; }
+.ws-about { color: var(--dim); font-size: 13.8px; line-height: 1.5; }
 
 /* directory picker sheet */
-.dir-note { font-size: 13px; color: var(--dim); padding: 0 4px 8px; }
-.dir-crumb { display: flex; align-items: center; flex-wrap: wrap; gap: 1px; font-size: 12px; padding: 0 4px 10px; }
+.dir-note { font-size: 15px; color: var(--dim); padding: 0 4px 8px; }
+.dir-crumb { display: flex; align-items: center; flex-wrap: wrap; gap: 1px; font-size: 13.8px; padding: 0 4px 10px; }
 .crumb-seg { background: none; border: none; padding: 1px 2px; font: inherit; color: var(--blue); }
 .crumb-seg.current { color: var(--fg); font-weight: 600; }
 .crumb-sep { color: var(--dim); }
@@ -1552,7 +1552,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .dir-row .dir-ico { width: 21px; height: 21px; flex: none; display: block; }
 .dir-row .folder { flex: 1; min-width: 0; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dir-row.up .folder { color: var(--blue); }
-.dir-row .meta { flex: none; color: var(--dim); font-size: 12px; margin-right: 4px; }
+.dir-row .meta { flex: none; color: var(--dim); font-size: 13.8px; margin-right: 4px; }
 .dir-row .dir-chev { width: 15px; height: 15px; flex: none; display: block; }
 /* "Remove from Recents" ✕ — clears the history entry only, not the folder (#89). */
 .dir-row .dir-remove {
@@ -1569,14 +1569,14 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .dir-action .primary.big {
   width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px;
   padding: 13px; border: none; border-radius: 13px;
-  background: var(--blue); color: #fff; font-size: 16px; font-weight: 600;
+  background: var(--blue); color: #fff; font-size: 18.4px; font-weight: 600;
 }
 .dir-action .primary.big svg { width: 19px; height: 19px; }
 .dir-action .primary.big:active { opacity: 0.85; }
 #dir-current {
   text-align: center; margin-top: 7px;
   color: var(--dim);
-  font-size: 11px;
+  font-size: 12.7px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap; /* abbreviatePath() already keeps the leaf visible */
@@ -1601,8 +1601,8 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   max-width: 340px;
   width: 100%;
 }
-.gate-card h2 { font-size: 17px; margin-bottom: 6px; }
-.gate-card p { font-size: 13px; color: var(--dim); margin-bottom: 12px; }
+.gate-card h2 { font-size: 19.6px; margin-bottom: 6px; }
+.gate-card p { font-size: 15px; color: var(--dim); margin-bottom: 12px; }
 .gate-card form { display: flex; gap: 8px; }
 .gate-card input {
   flex: 1;
@@ -1612,7 +1612,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   border: none;
   border-radius: var(--r-control);
   padding: 10px 12px;
-  font-size: 16px;
+  font-size: 18.4px;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 .gate-card input:focus { outline: none; }
@@ -1622,7 +1622,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   color: #fff;
   border-radius: var(--r-control);
   padding: 10px 16px;
-  font-size: 15px;
+  font-size: 17.3px;
   font-weight: 600;
 }
 
@@ -1636,7 +1636,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   color: var(--fg);
   border-radius: 999px;
   padding: 9px 18px;
-  font-size: 13px;
+  font-size: 15px;
   max-width: 90vw;
   z-index: 30;
   overflow-wrap: anywhere;
@@ -1680,9 +1680,9 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 }
 .trace-status svg { display: block; }
 .trace-headtext { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.trace-title { font-size: 14px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.trace-sub { font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.trace-tokens { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--dim); flex: none; }
+.trace-title { font-size: 16.1px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-sub { font-size: 13.8px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-tokens { font-family: ui-monospace, Menlo, monospace; font-size: 12.7px; color: var(--dim); flex: none; }
 .trace-chev { width: 16px; height: 16px; flex: none; color: var(--dim); transition: transform 0.2s; }
 .trace.open .trace-chev { transform: rotate(180deg); }
 .trace-body { display: none; padding: 2px 13px 12px; border-top: 0.5px solid var(--sep); }
@@ -1717,7 +1717,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .trace-stop {
   flex: none; display: inline-flex; align-items: center; gap: 5px;
   height: 28px; padding: 0 11px 0 9px; border: none; border-radius: 999px;
-  font: 700 13px/1 -apple-system, system-ui, sans-serif;
+  font: 700 15px/1 -apple-system, system-ui, sans-serif;
   background: var(--red-glow); color: var(--red);
 }
 .trace-stop svg { width: 12px; height: 12px; }
@@ -1728,7 +1728,7 @@ body.wrap .msg.echo, body.wrap .msg.stream {
    where the box starts, instead of running through it. */
 .step.active-step { background: #10203a; margin: 2px -8px 0; padding: 8px; border-radius: 10px; }
 .step.active-step .step-title { color: var(--blue); }
-.step-timer { font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 600; color: var(--blue); margin-left: auto; padding-left: 8px; }
+.step-timer { font-family: ui-monospace, Menlo, monospace; font-size: 12.7px; font-weight: 600; color: var(--blue); margin-left: auto; padding-left: 8px; }
 .spin.spin-purple { width: 13px; height: 13px; border-color: var(--purple); border-top-color: transparent; }
 
 .step { position: relative; display: flex; gap: 11px; padding: 7px 0; }
@@ -1739,14 +1739,14 @@ body.wrap .msg.echo, body.wrap .msg.stream {
 .step-badge svg { display: block; }
 .step.running .step-badge { background: var(--blue-glow); }
 .step-main { flex: 1; min-width: 0; padding-top: 1px; display: flex; flex-direction: column; }
-.step-title { font-size: 13.5px; font-weight: 600; color: var(--fg); line-height: 1.3; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.step-sub { font-size: 12px; color: var(--dim); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.step-tag { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 6px; }
+.step-title { font-size: 15.5px; font-weight: 600; color: var(--fg); line-height: 1.3; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.step-sub { font-size: 13.8px; color: var(--dim); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-tag { font-size: 11.5px; font-weight: 700; padding: 1px 6px; border-radius: 6px; }
 .step-tag.ok { color: var(--green); background: var(--green-glow); }
 .step-tag.bad { color: var(--red); background: var(--red-glow); }
 .step-tag.held { color: var(--orange); background: var(--orange-glow); }
-.step-tag.know { color: var(--green); background: var(--green-glow); font-size: 9px; letter-spacing: 0.4px; }
-.step-cmd { font-size: 12px; color: var(--dim); margin-top: 2px; overflow-x: auto; white-space: pre; }
+.step-tag.know { color: var(--green); background: var(--green-glow); font-size: 10.4px; letter-spacing: 0.4px; }
+.step-cmd { font-size: 13.8px; color: var(--dim); margin-top: 2px; overflow-x: auto; white-space: pre; }
 /* Global wrap toggle (title menu) also wraps run_command's long command line
    and its output (#6, and long-command wrap). */
 body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -1758,11 +1758,11 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .step-output { margin-top: 8px; }
 /* empty stdout/stderr: a compact one-liner (with the exit code) instead of an
    empty box carrying copy/wrap/expand controls for nothing. */
-.out-empty { font-size: 11.5px; color: var(--dim); padding: 2px 0; }
+.out-empty { font-size: 13.2px; color: var(--dim); padding: 2px 0; }
 .out-box { border-radius: 10px; background: var(--bg); border: 0.5px solid var(--sep); overflow: hidden; }
 .out-box.error { border-color: var(--red-glow); }
 .out-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; }
-.out-label { flex: 1; font-family: ui-monospace, Menlo, monospace; font-size: 10px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--dim); }
+.out-label { flex: 1; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--dim); }
 .out-box.error .out-label { color: var(--red); }
 .out-actions { display: flex; gap: 2px; align-items: center; }
 .out-wrap { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; background: none; border: none; border-radius: 7px; color: var(--dim); }
@@ -1772,11 +1772,11 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .out-actions .copy-chip svg { width: 15px; height: 15px; }
 .out-scroll { position: relative; max-height: 96px; overflow: auto; border-top: 0.5px solid var(--sep); transition: max-height 0.2s; }
 .out-box.expanded .out-scroll { max-height: 360px; }
-.out-body { padding: 8px 12px; font-size: calc(11.5px * var(--fs)); line-height: 1.6; color: var(--dim); white-space: pre; }
+.out-body { padding: 8px 12px; font-size: calc(13.2px * var(--fs)); line-height: 1.6; color: var(--dim); white-space: pre; }
 .out-box.wrap-on .out-body, body.wrap .out-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 .out-fade { position: absolute; left: 0; right: 0; bottom: 0; height: 26px; pointer-events: none; background: linear-gradient(transparent, var(--bg)); display: none; }
 .out-box.collapsible:not(.expanded) .out-fade { display: block; }
-.out-expand { width: 100%; padding: 8px; border: none; border-top: 0.5px solid var(--sep); background: none; color: var(--blue); font-size: 12.5px; font-weight: 600; }
+.out-expand { width: 100%; padding: 8px; border: none; border-top: 0.5px solid var(--sep); background: none; color: var(--blue); font-size: 14.4px; font-weight: 600; }
 .out-expand[hidden] { display: none; }
 
 /* Terminal block (#52): an executed run_command as a real terminal panel —
@@ -1785,13 +1785,13 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
    The two rules signal that the copy chip covers the output only. */
 .term-block {
   margin-top: 8px; border-radius: 10px; background: #000;
-  border: 0.5px solid var(--sep); overflow: hidden; font-size: 11.5px;
+  border: 0.5px solid var(--sep); overflow: hidden; font-size: 13.2px;
 }
 .term-prompt-wrap { position: relative; }
 .term-prompt {
   padding: 8px 72px 8px 12px; line-height: 1.5; color: var(--fg);
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
-  font-size: calc(13px * var(--fs)); /* scale terminal command display (#118) */
+  font-size: calc(15px * var(--fs)); /* scale terminal command display (#118) */
 }
 .term-block.term-cnowrap .term-prompt {
   white-space: pre; overflow-wrap: normal; word-break: normal; overflow-x: auto;
@@ -1801,7 +1801,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-cmd { color: var(--fg); }
 .term-rule { height: 0; border-top: 0.5px solid var(--sep); }
 .term-out-wrap { position: relative; }
-.term-out { padding: 8px 12px; line-height: 1.6; color: var(--dim); white-space: pre; overflow-x: auto; font-size: calc(13px * var(--fs)); }
+.term-out { padding: 8px 12px; line-height: 1.6; color: var(--dim); white-space: pre; overflow-x: auto; font-size: calc(15px * var(--fs)); }
 /* Wrapping is owned solely by the per-block toggle (seeded from body.wrap at
    build time) — do NOT also key it off body.wrap, or the global setting would
    override the local toggle and it could never unwrap. */
@@ -1826,7 +1826,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-block.capped:not(.expanded) .term-fade { display: block; }
 .term-showall {
   width: 100%; padding: 8px; border: none; border-top: 0.5px solid var(--sep);
-  background: none; color: var(--blue); font-size: 12.5px; font-weight: 600; display: none;
+  background: none; color: var(--blue); font-size: 14.4px; font-weight: 600; display: none;
 }
 .term-block.capped .term-showall { display: block; }
 /* Empty output (very common): collapse the middle zone, keeping one divider
@@ -1835,7 +1835,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-block.no-output .term-showall,
 .term-block.no-output .term-rule-bot { display: none; }
 .term-exit { padding: 7px 12px; display: flex; align-items: center; }
-.term-exit-label { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.3px; }
+.term-exit-label { display: inline-flex; align-items: center; gap: 6px; font-size: 12.7px; font-weight: 700; letter-spacing: 0.3px; }
 .term-exit-cap { color: var(--dim); text-transform: uppercase; }
 .term-exit-val { font-variant-numeric: tabular-nums; }
 .term-exit-val.ok { color: var(--green); }
@@ -1844,8 +1844,8 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-block.running .term-exit-label { color: var(--dim); }
 .term-exit-label .spin { width: 12px; height: 12px; border-color: var(--dim); border-top-color: transparent; }
 .know-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
-.know-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px 3px 6px; border-radius: 8px; background: var(--chip-bg); font-size: 11.5px; color: var(--fg); line-height: 1.3; }
-.know-tag { font-weight: 700; font-size: 9px; letter-spacing: 0.4px; }
+.know-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px 3px 6px; border-radius: 8px; background: var(--chip-bg); font-size: 13.2px; color: var(--fg); line-height: 1.3; }
+.know-tag { font-weight: 700; font-size: 10.4px; letter-spacing: 0.4px; }
 .know-chip.skill .know-tag { color: var(--green); }
 .know-chip.mem .know-tag { color: var(--yellow); }
 
@@ -1859,8 +1859,8 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .action-ico { width: 30px; height: 30px; border-radius: 9px; flex: none; display: flex; align-items: center; justify-content: center; }
 .action-ico svg { width: 18px; height: 18px; display: block; }
 .action-text { display: flex; flex-direction: column; min-width: 0; }
-.action-title { font-size: 15px; font-weight: 600; color: var(--fg); line-height: 1.25; }
-.action-sub { font-size: 11.5px; color: var(--dim); }
+.action-title { font-size: 17.3px; font-weight: 600; color: var(--fg); line-height: 1.25; }
+.action-sub { font-size: 13.2px; color: var(--dim); }
 
 /* ---- queued message chips ---- */
 #queue-list { flex: none; padding: 6px 12px 0; display: flex; flex-direction: column; gap: 6px; }
@@ -1872,8 +1872,8 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
 .queue-ico { width: 16px; height: 16px; flex: none; color: var(--dim); }
 .queue-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.queue-text { font-size: 14px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.queue-sub { font-size: 11px; color: var(--dim); }
+.queue-text { font-size: 16.1px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-sub { font-size: 12.7px; color: var(--dim); }
 .queue-remove, .queue-edit { flex: none; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: none; border: none; color: var(--dim); }
 .queue-remove svg { width: 17px; height: 17px; }
 .queue-edit { color: var(--blue); }
@@ -1902,7 +1902,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   border-bottom: 0.5px solid var(--sep);
 }
 .screen-title-row { display: flex; align-items: flex-end; justify-content: space-between; }
-.screen-title { font-size: 32px; font-weight: 700; letter-spacing: -0.5px; color: var(--fg); }
+.screen-title { font-size: 36.8px; font-weight: 700; letter-spacing: -0.5px; color: var(--fg); }
 .screen-search {
   display: flex; align-items: center; gap: 7px; margin-top: 10px;
   background: var(--input-bg2); border-radius: 11px; padding: 6px 11px;
@@ -1910,20 +1910,20 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .screen-search svg { width: 16px; height: 16px; flex: none; color: var(--dim); }
 .screen-search input {
   flex: 1; min-width: 0; background: none; border: none; outline: none;
-  color: var(--fg); font-size: 16px;
+  color: var(--fg); font-size: 18.4px;
 }
 .screen-search input::placeholder { color: var(--dim); }
 .screen .sheet-list { flex: 1; padding: 0 6px; }
 
 /* per-session working directory line */
-.session-dir { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-dir { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 13.8px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-dir svg { width: 11px; height: 11px; flex: none; }
 
 /* ---- swipe-to-delete on session rows ---- */
 .swipe-wrap { position: relative; overflow: hidden; }
 .swipe-del {
   position: absolute; top: 0; right: 0; bottom: 0; width: 88px; border: none;
-  background: var(--red); color: #fff; font-size: 15px; font-weight: 600;
+  background: var(--red); color: #fff; font-size: 17.3px; font-weight: 600;
 }
 .swipe-del:active { opacity: 0.8; }
 .swipe-wrap .session-row { position: relative; background: var(--bg); transition: transform 0.18s ease-out; touch-action: pan-y; }
@@ -1961,12 +1961,12 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   margin-top: -7.5px; border: 2px solid var(--sep2); border-top-color: var(--blue);
   border-radius: 50%; animation: spin 0.7s linear infinite;
 }
-.dir-empty { padding: 14px 12px; color: var(--dim); font-size: 14px; line-height: 1.45; }
+.dir-empty { padding: 14px 12px; color: var(--dim); font-size: 16.1px; line-height: 1.45; }
 .dir-choose {
   display: flex; align-items: center; justify-content: center; gap: 8px;
   width: calc(100% - 8px); margin: 12px 4px 4px; padding: 13px;
   border: none; border-radius: 13px; background: var(--blue); color: #fff;
-  font-size: 16px; font-weight: 600;
+  font-size: 18.4px; font-weight: 600;
 }
 .dir-choose svg { width: 19px; height: 19px; }
 .dir-choose:active { opacity: 0.85; }
@@ -1998,7 +1998,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .retry-btn {
   display: inline-flex; align-items: center; gap: 6px; padding: 7px 15px;
   border: 1px solid var(--blue); border-radius: 999px; background: none;
-  color: var(--blue); font-size: 14px; font-weight: 600; line-height: 1.2;
+  color: var(--blue); font-size: 16.1px; font-weight: 600; line-height: 1.2;
 }
 .retry-btn svg { width: 16px; height: 16px; }
 .retry-btn:active { opacity: 0.6; }
