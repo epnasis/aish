@@ -1143,6 +1143,26 @@ class TestParseFeedback:
         prompt = parse_feedback("/feedback the dark mode toggle is broken")
         assert "the dark mode toggle is broken" in prompt
 
+    def test_attachments_add_public_upload_consent_rules(self):
+        # #130: with attachments the classic prompt orders the draft to list
+        # the assets with per-file exclude chips — confirm/deselect happens
+        # before anything is uploaded to the public release.
+        from aish.cli import parse_feedback
+
+        prompt = parse_feedback("/feedback broken", attachments=True)
+        assert "PUBLIC GitHub release" in prompt
+        assert "aish-reply://Exclude <name> from the issue" in prompt
+        assert "asset workflow" in prompt
+
+    def test_without_attachments_no_consent_section(self):
+        # The CLI's plain /feedback has nothing to upload: no Attachments
+        # section, no exclude chips, no upload instruction.
+        from aish.cli import parse_feedback
+
+        prompt = parse_feedback("/feedback broken")
+        assert "Exclude <name>" not in prompt
+        assert "asset workflow" not in prompt
+
     def test_block_flow_emits_aish_issue_block_not_gh_create(self):
         # Web text-only feedback (#110): the model emits an aish-issue block and
         # must NOT run gh issue create — the backend files it on confirm.

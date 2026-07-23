@@ -46,7 +46,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from . import backends, dir_ignore, export, tools
-from .agent import Agent, ModelUnavailable, environment_context
+from .agent import FEEDBACK_SWITCH_NOTE, Agent, ModelUnavailable, environment_context
 from .approval import (
     DEFAULT_ALLOWLIST,
     DEFAULT_DENYLIST,
@@ -762,6 +762,11 @@ class Session:
         # stashed for a {type:create_issue} confirm (#110). Never model-derived
         # at click time — this is the exact text the user reviewed in the card.
         self.pending_issue: dict[str, str] | None = None
+        # True while a text-only /feedback (block flow) is being drafted or
+        # adjusted: an attachment arriving in that window auto-switches the
+        # feedback to the classic upload-capable flow (#130). Cleared on the
+        # switch and when the drafted issue is filed.
+        self.feedback_block = False
         self.last_shown = time.monotonic()
         self.custom_title: str | None = None  # a user-set name; overrides the derived title
         # last-actor-drives (#102): whoever last performed a session-affecting
@@ -1313,13 +1318,29 @@ class WebServer:
             # uses the backend-owned aish-issue block flow (block_flow=True);
             # feedback WITH attachments keeps the classic model-driven flow so
             # the model runs `gh issue create` (gated) with the asset-upload
-            # workflow the text path doesn't handle.
-            expanded = (
-                parse_learn(text, getattr(session.agent, "lessons_path", None))
-                or parse_feedback(text, block_flow=not attachments)
-            )
+            # workflow the text path doesn't handle — its draft lists the
+            # assets for confirm/deselect before any public upload (#130).
+            expanded = parse_learn(text, getattr(session.agent, "lessons_path", None))
+            if expanded is None:
+                expanded = parse_feedback(
+                    text, block_flow=not attachments, attachments=bool(attachments)
+                )
+                if expanded is not None:
+                    # Remember the flavour: a block-flow draft still being
+                    # adjusted switches to classic if attachments arrive (#130).
+                    session.feedback_block = not attachments
             if expanded is not None:
                 text = expanded
+        elif attachments and session.feedback_block:
+            # Auto-switch (#130): text-only feedback gained attachments while
+            # the draft was being adjusted. The aish-issue block flow cannot
+            # upload assets, so withdraw the stashed draft and steer the model
+            # onto the classic flow (draft + chips + gated `gh issue create`),
+            # whose draft lists the assets for confirm/deselect before any
+            # public upload. Appended after the user echo, so it is model-only.
+            session.feedback_block = False
+            session.pending_issue = None
+            text += FEEDBACK_SWITCH_NOTE
         session.runner = asyncio.ensure_future(
             self._run_task(session, text, images, documents)
         )
@@ -1422,6 +1443,7 @@ class WebServer:
             f"--title {shlex.quote(issue['title'])} --body {shlex.quote(issue['body'])}"
         )
         session.pending_issue = None  # consumed; a re-tap can't double-file
+        session.feedback_block = False  # filed — the adjust window is over (#130)
         session.busy = True
         session.bridge.emit({"type": "user", "text": "Create the issue"})
         session.runner = asyncio.ensure_future(self._file_issue(session, command))

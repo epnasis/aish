@@ -225,7 +225,12 @@ providers; add `--save` to persist the choice as the startup default in
 details and drafts the issue. On the web, a text-only draft becomes a review
 card you file with one tap (aish creates it for you — your own confirmed
 action, no second approval prompt); in the terminal, or when you attach
-logs/screenshots, aish runs `gh issue create` itself on your approval ·
+logs/screenshots, aish runs `gh issue create` itself on your approval.
+Attachments — on the feedback message or added while you adjust the draft —
+are listed in the draft with per-file exclude chips, and only the files you
+leave listed are uploaded (to a public GitHub release) when you approve; a
+text-only draft that gains attachments mid-adjustment switches to the
+upload-capable flow automatically ·
 `/jobs` · `/help` · `/quit` (or `exit`).
 
 **Multiline input**: Enter submits; newline via Ctrl+J, trailing `\`, or
