@@ -29,7 +29,7 @@ from typing import Any
 import ollama
 
 from . import aliases as alias_map
-from . import files, skills, tool_plugins, tools, web
+from . import files, skill_import, skills, tool_plugins, tools, web
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
 from .session import SessionLog
 
@@ -91,7 +91,10 @@ Rules:
    it is invoked FREQUENTLY, its arguments are FREE-TEXT/shell-fragile, AND
    reliability matters (mutating or user-facing output); otherwise write a
    skill. create_tool validates the manifest and shows both files (manifest
-   first, then wrapper) for your user to approve.
+   first, then wrapper) for your user to approve. To install a skill from a
+   git repo or local path, use import_skill — it is untrusted content, so
+   aish shows the user every file for approval before anything lands; after
+   staging, summarize what the skill and its scripts do so they can review.
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. A COMMENT
    the user attaches to a decision changes what you do next, and approve vs
@@ -1792,6 +1795,9 @@ class Agent:
         if name == "create_tool":
             return self._create_tool(args)
 
+        if name == "import_skill":
+            return self._import_skill(args)
+
         if name == "run_command":
             # Expand any aish alias on the first word BEFORE the gate, so the
             # denylist/approval/cd-check all classify the real command.
@@ -2075,6 +2081,48 @@ class Agent:
             except OSError as exc:
                 return f"ERROR: wrote {target} but could not make it executable: {exc}"
         return None
+
+    def _import_skill(self, args: dict) -> str:
+        """Import a skill (#139). Untrusted content, so the safety is ENFORCED
+        here, not left to the model: every fetched file is installed through the
+        write-diff gate so the user reviews it before it lands. Only a shallow
+        read-only clone happens — the skill's code is never executed on import."""
+        repo = str(args.get("repo", "")).strip()
+        if not repo:
+            return "ERROR: repo (a git URL or local path) is required."
+        if self.approve_write is None:
+            return "ERROR: no write approver available; cannot import a skill."
+        try:
+            name, imported, skipped, tmp = skill_import.stage(
+                repo, str(args.get("path", "")).strip()
+            )
+        except skill_import.SkillImportError as exc:
+            return f"ERROR: {exc}"
+        try:
+            override = str(args.get("name", "")).strip()
+            if override:
+                if not skills.NAME_RE.match(override):
+                    return f"ERROR: invalid skill name {override!r}."
+                name = override
+            dest = skills.GLOBAL_SKILLS_DIR / name
+            note = f" ({len(skipped)} binary asset(s) skipped)" if skipped else ""
+            self._note(
+                f"→ importing skill '{name}': {len(imported)} file(s) into "
+                f"{_display_path(dest)} — review each before it is written{note}"
+            )
+            for rel, text, is_exec in imported:
+                result = self._commit_tool_file(dest / rel, text, executable=is_exec)
+                if result is not None:  # a denial/hold aborts the whole import
+                    return result
+        finally:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+        self._note(f"→ imported skill '{name}'")
+        skipped_note = f" Skipped binary assets: {', '.join(skipped)}." if skipped else ""
+        return (
+            f"Imported skill {name!r} into {dest} ({len(imported)} files)."
+            f"{skipped_note} It is available on the next task."
+        )
 
     def _dispatch_write(self, name: str, args: dict) -> str:
         if name == "write_file":

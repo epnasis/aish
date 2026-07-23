@@ -3079,3 +3079,64 @@ def test_display_path_abbreviates_home():
     p = Path.home() / ".config" / "aish" / "tools" / "x"
     assert _display_path(p) == "~/.config/aish/tools/x"
     assert _display_path(Path("/etc/hosts")) == "/etc/hosts"
+
+
+class TestSkillImport:
+    def _make_repo(self, root):
+        skill = root / "myskill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: myskill\ndescription: Use when demoing import\n---\nDo the thing.\n"
+        )
+        (skill / "scripts").mkdir()
+        (skill / "scripts" / "run.sh").write_text("#!/bin/sh\necho hi\n")
+        (skill / "scripts" / "run.sh").chmod(0o755)
+        return root
+
+    def test_import_installs_via_gate(self, tmp_path, monkeypatch):
+        import aish.skills as skills_mod
+
+        dest_root = tmp_path / "global-skills"
+        monkeypatch.setattr(skills_mod, "GLOBAL_SKILLS_DIR", dest_root)
+        repo = self._make_repo(tmp_path / "repo")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("import_skill", repo=str(repo), path="myskill")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_write=lambda plan: True,
+        )
+        agent.run_task("go")
+        assert (dest_root / "myskill" / "SKILL.md").exists()
+        assert (dest_root / "myskill" / "scripts" / "run.sh").exists()
+
+    def test_import_denied_installs_nothing(self, tmp_path, monkeypatch):
+        import aish.skills as skills_mod
+
+        dest_root = tmp_path / "global-skills"
+        monkeypatch.setattr(skills_mod, "GLOBAL_SKILLS_DIR", dest_root)
+        repo = self._make_repo(tmp_path / "repo")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("import_skill", repo=str(repo), path="myskill")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_write=lambda plan: False,
+        )
+        agent.run_task("go")
+        assert not (dest_root / "myskill").exists()
+
+    def test_import_missing_skill_md_errors(self, tmp_path, monkeypatch):
+        import aish.skills as skills_mod
+
+        monkeypatch.setattr(skills_mod, "GLOBAL_SKILLS_DIR", tmp_path / "g")
+        (tmp_path / "repo").mkdir()
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("import_skill", repo=str(tmp_path / "repo"))]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_write=lambda plan: True,
+        )
+        agent.run_task("go")
+        assert any("no SKILL.md" in m["content"] for m in tool_messages(agent.messages))

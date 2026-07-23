@@ -807,4 +807,41 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "import_skill",
+            "description": (
+                "Import a skill (a playbook) from a git repository or local path into "
+                "the user's skills. Use when the user asks to add/install a skill from a "
+                "public repo (e.g. anthropics/skills, VoltAgent/awesome-agent-skills). "
+                "SAFETY: an imported skill is untrusted content — its instructions and "
+                "scripts are what you'd later follow — so aish shows the user EVERY file "
+                "for approval before anything is installed (you cannot skip this). Only a "
+                "shallow read-only clone happens; the skill's code is never executed on "
+                "import. After staging you should summarize for the user what the skill "
+                "does and what its scripts do, so they can review before approving."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "A git URL (https/ssh) or a local directory path.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Subdirectory within the repo that holds the skill "
+                        "(the folder containing SKILL.md). Omit if it's at the repo root.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Optional: install under this name instead of the "
+                        "skill's declared name.",
+                    },
+                },
+                "required": ["repo"],
+            },
+        },
+    },
 ]
