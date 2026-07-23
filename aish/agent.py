@@ -8,11 +8,13 @@ the command to run (possibly edited by the user).
 
 import datetime
 import getpass
+import json
 import os
 import platform
 import re
 import shlex
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -1763,6 +1765,9 @@ class Agent:
         if name in ("write_file", "edit_file"):
             return self._dispatch_write(name, args)
 
+        if name == "create_tool":
+            return self._create_tool(args)
+
         if name == "run_command":
             # Expand any aish alias on the first word BEFORE the gate, so the
             # denylist/approval/cd-check all classify the real command.
@@ -1913,6 +1918,110 @@ class Agent:
             return tool_plugins.execute(tool, args, cwd=self.cwd)
         finally:
             self.status.stop()
+
+    _WRAPPER_META = {  # lang -> (filename, shebang)
+        "sh": ("run.sh", "#!/bin/sh"),
+        "python": ("run.py", "#!/usr/bin/env python3"),
+    }
+
+    def _create_tool(self, args: dict) -> str:
+        """Author a plugin tool (issue #141). Three guardrails the model cannot
+        bypass: the WHEN test lives in the tool description (imperative); the
+        manifest is LINTED and this refuses to write on any error (structured
+        feedback → correct-and-retry); and both files go through the normal
+        write-approval gate so the user sees the real code before it exists."""
+        name = str(args.get("name", "")).strip()
+        if not tool_plugins.NAME_RE.match(name):
+            return f"ERROR: invalid tool name {name!r} (need [A-Za-z0-9_-], 1-64)."
+        lang = str(args.get("wrapper_lang", "sh") or "sh").strip()
+        if lang not in self._WRAPPER_META:
+            return f"ERROR: wrapper_lang must be one of {sorted(self._WRAPPER_META)}."
+        raw_schema = str(args.get("schema", "") or "{}").strip() or "{}"
+        try:
+            schema_obj = json.loads(raw_schema)
+        except json.JSONDecodeError as exc:
+            return f"ERROR: schema is not valid JSON ({exc})."
+
+        wrapper_name, shebang = self._WRAPPER_META[lang]
+        wrapper_body = str(args.get("wrapper", ""))
+        if not wrapper_body.strip():
+            return "ERROR: wrapper (the executable script body) is required."
+        if not wrapper_body.startswith("#!"):
+            wrapper_body = f"{shebang}\n{wrapper_body}"
+        if not wrapper_body.endswith("\n"):
+            wrapper_body += "\n"
+
+        mutating = "yes" if args.get("mutating") else "no"
+        lines = [
+            "---",
+            f"name: {name}",
+            f"description: {str(args.get('description', '')).strip()}",
+            f"exec: ./{wrapper_name}",
+            f"mutating: {mutating}",
+        ]
+        if args.get("timeout"):
+            lines.append(f"timeout: {int(args['timeout'])}")
+        lines.append(f"schema: {json.dumps(schema_obj)}")
+        lines.append("---")
+        lines.append(str(args.get("notes", "")).strip() or f"{name} tool.")
+        manifest_text = "\n".join(lines) + "\n"
+
+        # Lint against a throwaway copy first — never prompt for an invalid tool.
+        with tempfile.TemporaryDirectory(prefix="aish-tool-lint-") as tmp:
+            tdir = Path(tmp)
+            (tdir / wrapper_name).write_text(wrapper_body, encoding="utf-8")
+            os.chmod(tdir / wrapper_name, 0o755)
+            (tdir / "TOOL.md").write_text(manifest_text, encoding="utf-8")
+            errors = tool_plugins.lint(tdir / "TOOL.md")
+        if errors:
+            joined = "; ".join(e.split(": ", 1)[-1] for e in errors)
+            return (
+                f"ERROR: tool {name!r} did not validate: {joined}. "
+                "Fix and call create_tool again."
+            )
+
+        if self.approve_write is None:
+            return "ERROR: no write approver available; cannot create a tool."
+
+        if str(args.get("scope", "global")).strip() == "project":
+            base = Path(self.cwd) / ".aish" / "tools" / name
+        else:
+            base = tool_plugins.GLOBAL_TOOLS_DIR / name
+
+        # Wrapper first (the executable — the critical thing to review), then the
+        # manifest. Each is diff-approved; a denial aborts without an orphan tool.
+        wrapper_res = self._commit_tool_file(base / wrapper_name, wrapper_body, executable=True)
+        if wrapper_res is not None:
+            return wrapper_res
+        manifest_res = self._commit_tool_file(base / "TOOL.md", manifest_text, executable=False)
+        if manifest_res is not None:
+            return manifest_res
+        self._plugin_sig = None  # force a rescan so the new tool is offered
+        self._note(f"→ created tool {name} at {base}")
+        return f"Created tool {name!r} at {base}. It is available on the next step."
+
+    def _commit_tool_file(self, target: Path, content: str, executable: bool) -> str | None:
+        """Write one tool file through the diff-approval gate. Returns None on
+        success, or a stop/deny result string the model should surface."""
+        plan = files.plan_write(str(target), content, self.cwd)
+        if plan.error:
+            return f"ERROR: {plan.error}"
+        decision = self.approve_write(plan)
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            return _with_feedback(WRITE_DENIED, decision.comment)
+        if isinstance(decision, Approved):
+            return WRITE_HELD_FOR_ADJUSTMENT.format(comment=decision.comment)
+        if not decision:
+            return WRITE_DENIED
+        files.commit(plan)
+        if executable:
+            try:
+                mode = os.stat(target).st_mode
+                os.chmod(target, mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+            except OSError as exc:
+                return f"ERROR: wrote {target} but could not make it executable: {exc}"
+        return None
 
     def _dispatch_write(self, name: str, args: dict) -> str:
         if name == "write_file":

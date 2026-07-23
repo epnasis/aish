@@ -180,6 +180,12 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
     )
 
 
+def lint(manifest: Path) -> list[str]:
+    """Public: the deterministic validation errors for a TOOL.md (empty =
+    valid). Used by create_tool to refuse writing an invalid manifest."""
+    return _parse_tool(manifest)[1]
+
+
 def _validate_schema(manifest: Path, schema: object) -> list[str]:
     if not isinstance(schema, dict):
         return [f"{manifest}: schema must be a JSON object of arg -> spec"]

@@ -2770,6 +2770,11 @@ class TestPluginTools:
 
     ECHO = "#!/bin/sh\ncat\n"
 
+    def _ct_call(self, **arguments):
+        return SimpleNamespace(
+            function=SimpleNamespace(name="create_tool", arguments=arguments)
+        )
+
     def _write_tool(self, cwd, name, *, mutating="no", script=None):
         import stat
 
@@ -2918,3 +2923,69 @@ class TestPluginTools:
         assert not marker.exists()  # held, not run
         held = TOOL_HELD_FOR_ADJUSTMENT.split("{")[0]
         assert any(held in m["content"] for m in tool_messages(agent.messages))
+
+    def test_create_tool_writes_files(self, tmp_path):
+        import os
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._ct_call(
+                    name="greeter", description="greet", mutating=False,
+                    schema='{"text": {"type": "string", "required": true}}',
+                    wrapper="cat\n", scope="project")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_write=lambda plan: True,
+        )
+        agent.run_task("make a tool")
+        tdir = tmp_path / ".aish" / "tools" / "greeter"
+        assert (tdir / "TOOL.md").exists()
+        assert (tdir / "run.sh").exists()
+        assert os.access(tdir / "run.sh", os.X_OK)
+
+    def test_create_tool_invalid_refuses_without_prompting(self, tmp_path):
+        prompted = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._ct_call(
+                    name="bad", description="d", mutating=False,
+                    schema='{"x": {"type": "blob"}}', wrapper="cat\n", scope="project")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+            approve_write=lambda plan: prompted.append(1) or True,
+        )
+        agent.run_task("go")
+        assert not (tmp_path / ".aish" / "tools" / "bad").exists()
+        assert not prompted  # an invalid tool is never shown for approval
+        assert any(
+            "did not validate" in m["content"] for m in tool_messages(agent.messages)
+        )
+
+    def test_create_tool_denied_writes_nothing(self, tmp_path):
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._ct_call(
+                    name="greeter", description="d", mutating=False,
+                    schema="{}", wrapper="cat\n", scope="project")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_write=lambda plan: False,
+        )
+        agent.run_task("go")
+        assert not (tmp_path / ".aish" / "tools" / "greeter").exists()
+
+    def test_created_tool_is_immediately_callable(self, tmp_path):
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._ct_call(
+                    name="greeter", description="echo text", mutating=False,
+                    schema='{"text": {"type": "string", "required": true}}',
+                    wrapper="cat\n", scope="project")]),
+                model_says(tool_calls=[tool_call("greeter", text="hi")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_write=lambda plan: True,
+        )
+        agent.run_task("go")
+        assert any('"text": "hi"' in m["content"] for m in tool_messages(agent.messages))

@@ -718,4 +718,76 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_tool",
+            "description": (
+                "Create a reusable plugin tool (a TOOL.md + wrapper) so a fragile, "
+                "repeated operation runs the SAME reliable way every time. Create a "
+                "tool ONLY when ALL THREE hold: (1) it is invoked FREQUENTLY, (2) its "
+                "arguments are FREE-TEXT or otherwise fragile through shell quoting "
+                "(e.g. an email body, an issue body), AND (3) reliability MATTERS "
+                "(it mutates state or produces user-facing output). If any is false, "
+                "write a skill instead — do NOT create a tool for read-only, simple-"
+                "argument, or one-off operations. The wrapper receives the validated "
+                "arguments as a JSON object on STDIN, prints results to stdout, and its "
+                "exit code signals success/failure (no shell quoting in the path — that "
+                "is the whole point). The manifest is validated and BOTH files are shown "
+                "to the user for approval before anything is written."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Tool name, [a-z0-9_-], e.g. 'gh_issue_create'. "
+                        "One tool = one operation (split, don't make an ops menu).",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "What the tool does and when to use it (this is "
+                        "what the model sees to pick it).",
+                    },
+                    "mutating": {
+                        "type": "boolean",
+                        "description": "true if it changes state / has side effects "
+                        "(then every call is approval-gated). Be conservative.",
+                    },
+                    "schema": {
+                        "type": "string",
+                        "description": "JSON object of arg -> {type, required, description}, "
+                        'e.g. {"title": {"type": "string", "required": true}}. '
+                        "Types: string, integer, number, boolean. Use {} for no args.",
+                    },
+                    "wrapper": {
+                        "type": "string",
+                        "description": "The wrapper script body. It reads the JSON args on "
+                        "stdin and prints output. Map the stable args to the real CLI here "
+                        "so the model never composes that command again.",
+                    },
+                    "wrapper_lang": {
+                        "type": "string",
+                        "description": "'sh' (default) or 'python' — sets the file "
+                        "extension and shebang.",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Optional per-call timeout in seconds (default 120).",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "'global' (default, ~/.config/aish/tools, backed up) "
+                        "or 'project' (./.aish/tools).",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Optional prose body for the TOOL.md: how the "
+                        "underlying CLI behaves, gotchas.",
+                    },
+                },
+                "required": ["name", "description", "mutating", "schema", "wrapper"],
+            },
+        },
+    },
 ]
