@@ -1,8 +1,8 @@
 """Local Markdown → PDF export for the web UI (issue #64).
 
-Conversion is fully local: `markdown` renders to HTML and `xhtml2pdf` (pure
-Python, reportlab-backed, no system libraries) renders HTML to PDF bytes.
-Nothing is sent to any external service.
+Conversion runs locally: `markdown` renders to HTML and `xhtml2pdf` (pure
+Python, reportlab-backed, no system libraries) renders HTML to PDF bytes. The
+markdown itself is never sent to any external service.
 
 Two shapes are exported: one answer (the markdown the user is looking at) and
 a whole session's FINAL answers only. "Final answer" is a structural property
@@ -10,11 +10,28 @@ of the persisted log — an assistant message is final iff it is NOT immediately
 followed by a tool result. Tool-calling turns are always followed by a `tool`
 message (the loop only returns after a text-only turn), so this cleanly drops
 thinking/tool/working steps and keeps just the answers the user saw.
+
+Media embedding (issue #133): images, map snapshots, and video thumbnails are
+inlined into the PDF as base64 data URIs. Local `![](path)` images are read
+only when the (symlink-resolved) path stays inside the caller-supplied
+`image_roots` — the same trust boundary as the approval model — anything
+outside renders as a captioned link card, never read. Remote `![](https://…)`
+images, Google static-map snapshots for the whitelisted map links, and YouTube
+thumbnails ARE fetched over the network at export time (owner-approved
+egress), each with a short timeout, a size cap, and graceful fallback to a
+captioned link card on failure/offline. Static maps need `GOOGLE_MAPS_API_KEY`
+in the environment; without it map links fall back to the link card.
 """
 
+import base64
+import html as html_lib
 import io
+import os
 import re
 import unicodedata
+import urllib.parse
+import urllib.request
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -69,8 +86,11 @@ def _font_face_css() -> str:
 
 def _link_callback(uri: str, rel: str) -> str:  # noqa: ARG001 — xhtml2pdf signature
     """Resolve the bundled-font URLs (fonts/<name>.ttf) to their real on-disk
-    path so reportlab can embed them. Everything the exporter references is
-    local and bundled; nothing hits the network."""
+    path so reportlab can embed them. Images arrive pre-inlined as data URIs
+    (passed through untouched); by the time pisa runs, nothing else needs
+    resolving and nothing hits the network from inside the renderer."""
+    if uri.startswith("data:"):
+        return uri
     name = uri.rsplit("/", 1)[-1]
     local = _FONT_DIR / name
     return str(local) if local.exists() else uri
@@ -108,6 +128,11 @@ hr { border: none; border-top: 0.5pt solid #d1d1d6; margin: 14pt 0; }
                    border-bottom: 0.5pt solid #e5e5ea; padding-bottom: 8pt; }
 .aish-answer + .aish-answer { border-top: 0.5pt solid #e5e5ea;
                              margin-top: 16pt; padding-top: 16pt; }
+.aish-link-card { border: 0.5pt solid #d1d1d6; background: #f9f9fb;
+                  padding: 6pt 9pt; margin: 4pt 0 8pt; }
+.aish-link-note { color: #8e8e93; font-size: 8.5pt; }
+.aish-embed { margin: 4pt 0 8pt; }
+.aish-embed-caption { color: #6c6c70; font-size: 9pt; }
 """
 
 _MD_EXTENSIONS = ["fenced_code", "tables", "sane_lists", "nl2br"]
@@ -243,25 +268,265 @@ def _wrap_emoji(html: str) -> str:
     return "".join(parts)
 
 
-def _markdown_to_html_fragment(markdown_text: str) -> str:
+# ---- media embedding (issue #133) -----------------------------------------
+# Every fetch is bounded (timeout + byte cap + per-document budget) and every
+# failure degrades to a captioned link card — an export can be slow, never hung.
+FETCH_TIMEOUT = 5.0
+FETCH_MAX_BYTES = 8 * 1024 * 1024
+MAX_REMOTE_FETCHES = 12  # per exported document, so N broken links can't stack N timeouts
+
+# Printable A4 width at our margins is ~493pt; images are scaled down to this
+# (xhtml2pdf needs explicit width/height — it does no max-width clamping).
+_IMG_MAX_WIDTH = 460
+
+# Ports of the app.js embed whitelist (embedForLink): only strictly-matched
+# YouTube ids / Google Maps queries ever become a fetch URL.
+_YOUTUBE_RE = re.compile(
+    r"^https?://(?:www\.)?(?:youtube\.com/watch\?(?:[^#]*&)?v=([a-zA-Z0-9_-]{11})"
+    r"|youtu\.be/([a-zA-Z0-9_-]{11}))(?:[#&?/]|$)"
+)
+_MAPS_RE = re.compile(
+    r"^https?://(?:maps\.google\.com/maps|(?:www\.)?google\.[a-z.]+/maps)"
+    r"(?:/[^?#\s]*)?\?([^#\s]+)"
+)
+
+# The markdown lib emits attributes in source order with double quotes, so
+# these stay simple; labels may carry nested inline markup (kept verbatim).
+_A_TAG_RE = re.compile(r'<a href="([^"]*)"[^>]*>(.*?)</a>', re.DOTALL)
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*/?>")
+_ATTR_RES = {
+    "src": re.compile(r'\bsrc="([^"]*)"'),
+    "alt": re.compile(r'\balt="([^"]*)"'),
+}
+
+
+def fetch_image(url: str) -> bytes | None:
+    """GET a remote image with a hard timeout and size cap. Any failure —
+    network error, non-2xx, oversize, offline — returns None and the caller
+    falls back to a captioned link card. http/https only.
+
+    Module-level (and looked up via the module at call time) so tests
+    monkeypatch it; nothing else in this module opens a socket."""
+    if not url.startswith(("http://", "https://")):
+        return None
+    request = urllib.request.Request(url, headers={"User-Agent": "aish-export"})
+    try:
+        with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT) as response:  # noqa: S310 — scheme-checked above
+            data = response.read(FETCH_MAX_BYTES + 1)
+    except Exception:
+        return None
+    if not data or len(data) > FETCH_MAX_BYTES:
+        return None
+    return data
+
+
+def _image_info(data: bytes) -> tuple[str, int, int] | None:
+    """(mime, width, height) when the bytes are an image the PDF renderer
+    handles, else None. Pillow is a hard dependency of xhtml2pdf (it is what
+    pisa itself decodes images with), so validating here mirrors exactly what
+    would succeed downstream — bad bytes become a link card instead of a
+    renderer error."""
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            fmt = (image.format or "").lower()
+            if fmt not in ("png", "jpeg", "gif", "webp"):
+                return None
+            return f"image/{fmt}", image.width, image.height
+    except Exception:
+        return None
+
+
+def _escape_attr(text: str) -> str:
+    return _escape(text).replace('"', "&quot;")
+
+
+def _img_tag(data: bytes, alt: str) -> str | None:
+    """A data-URI <img> scaled to fit the page, or None for non-image bytes."""
+    info = _image_info(data)
+    if info is None:
+        return None
+    mime, width, height = info
+    if width > _IMG_MAX_WIDTH:
+        height = max(1, round(height * _IMG_MAX_WIDTH / width))
+        width = _IMG_MAX_WIDTH
+    payload = base64.b64encode(data).decode("ascii")
+    return (
+        f'<img src="data:{mime};base64,{payload}" width="{width}" '
+        f'height="{height}" alt="{_escape_attr(alt)}"/>'
+    )
+
+
+def _link_card(label_html: str, url: str, note: str) -> str:
+    """The graceful-degradation shape: a bordered card with the link and a
+    small note saying what could not be embedded (and why it is a link)."""
+    href = _escape_attr(url)
+    label = label_html.strip() or _escape(url)
+    return (
+        f'<div class="aish-link-card"><a href="{href}">{label}</a><br/>'
+        f'<span class="aish-link-note">{_escape(note)} — {_escape(url)}</span></div>'
+    )
+
+
+def _embed_card(image_html: str, label_html: str, url: str, note: str) -> str:
+    href = _escape_attr(url)
+    label = label_html.strip() or _escape(url)
+    return (
+        f'<div class="aish-embed"><a href="{href}">{image_html}</a><br/>'
+        f'<span class="aish-embed-caption"><a href="{href}">{label}</a>'
+        f" ({_escape(note)})</span></div>"
+    )
+
+
+def _map_markers(map_query: str) -> list[tuple[str, str]] | None:
+    """The Static-Maps marker params for a whitelisted maps link's query
+    string, or None when the link carries no renderable query (only view
+    params like @lat,lng). Mirrors the web UI's embed parsing: only the
+    strictly parsed q/query or saddr+daddr values are used, re-encoded."""
+    params = urllib.parse.parse_qs(map_query)
+
+    def first(name: str) -> str:
+        values = params.get(name) or [""]
+        return values[0].strip()
+
+    saddr, daddr = first("saddr"), first("daddr")
+    if saddr and daddr:
+        return [("markers", f"label:A|{saddr}"), ("markers", f"label:B|{daddr}")]
+    query = first("q") or first("query")
+    if query:
+        return [("markers", query)]
+    return None
+
+
+def _static_map_url(markers: list[tuple[str, str]], key: str) -> str:
+    pairs = [("size", "640x400"), ("scale", "2"), *markers, ("key", key)]
+    return "https://maps.googleapis.com/maps/api/staticmap?" + urllib.parse.urlencode(
+        pairs, doseq=True
+    )
+
+
+class _MediaEmbedder:
+    """Rewrites one exported document's HTML: local images inlined when inside
+    the trusted roots, remote images / map snapshots / YouTube thumbnails
+    fetched and inlined, everything else (or any failure) a captioned link
+    card. One instance per document so the fetch budget spans all blocks."""
+
+    def __init__(self, image_roots: Sequence[os.PathLike | str]) -> None:
+        self.roots = [Path(root).resolve() for root in image_roots]
+        self.fetches_left = MAX_REMOTE_FETCHES
+
+    def _fetch(self, url: str) -> bytes | None:
+        if self.fetches_left <= 0:
+            return None
+        self.fetches_left -= 1
+        return fetch_image(url)  # module-global lookup, so tests monkeypatch export.fetch_image
+
+    def process(self, html: str) -> str:
+        # Links first, then images: cards emitted by the link pass contain
+        # data-URI <img> tags, which the image pass passes through untouched;
+        # the reverse order would rescan card-internal <a> tags.
+        html = _A_TAG_RE.sub(self._replace_link, html)
+        return _IMG_TAG_RE.sub(self._replace_img, html)
+
+    def _replace_link(self, match: re.Match[str]) -> str:
+        url = html_lib.unescape(match.group(1))
+        label_html = match.group(2)
+        youtube = _YOUTUBE_RE.match(url)
+        if youtube:
+            return self._youtube_card(youtube.group(1) or youtube.group(2), label_html, url)
+        maps = _MAPS_RE.match(url)
+        if maps:
+            return self._map_card(maps.group(1), label_html, url)
+        return match.group(0)
+
+    def _youtube_card(self, video_id: str, label_html: str, url: str) -> str:
+        thumb = self._fetch(f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg")
+        image = _img_tag(thumb, "video thumbnail") if thumb else None
+        if image is None:
+            return _link_card(label_html, url, "YouTube video")
+        return _embed_card(image, label_html, url, "YouTube video")
+
+    def _map_card(self, map_query: str, label_html: str, url: str) -> str:
+        markers = _map_markers(map_query)
+        if markers is None:
+            # View-only link (no q/query/directions): plain <a>, like the web UI.
+            return f'<a href="{_escape_attr(url)}">{label_html}</a>'
+        key = os.environ.get("GOOGLE_MAPS_API_KEY")
+        if not key:
+            return _link_card(label_html, url, "map")
+        snapshot = self._fetch(_static_map_url(markers, key))
+        image = _img_tag(snapshot, "map") if snapshot else None
+        if image is None:
+            return _link_card(label_html, url, "map")
+        return _embed_card(image, label_html, url, "map")
+
+    def _replace_img(self, match: re.Match[str]) -> str:
+        tag = match.group(0)
+        src_match = _ATTR_RES["src"].search(tag)
+        if not src_match:
+            return tag
+        src = html_lib.unescape(src_match.group(1))
+        alt_match = _ATTR_RES["alt"].search(tag)
+        alt = html_lib.unescape(alt_match.group(1)) if alt_match else ""
+        if src.startswith("data:"):
+            return tag  # already inline (e.g. a card this pass's sibling emitted)
+        if src.startswith(("http://", "https://")):
+            data = self._fetch(src)
+            image = _img_tag(data, alt) if data else None
+            return image or _link_card(_escape(alt), src, "image")
+        return self._local_image(src, alt)
+
+    def _local_image(self, src: str, alt: str) -> str:
+        """Inline a local file ONLY when its symlink-resolved path stays inside
+        the trusted roots — the same boundary the approval model and the /file
+        endpoint enforce. Everything else (relative paths, ~, .., symlink
+        escapes, missing/oversized/non-image files) becomes a link card and is
+        never read."""
+        card = _link_card(_escape(alt), src, "image not embedded")
+        if not src.startswith("/"):
+            return card  # relative / ~ / other schemes: no trusted anchor to resolve against
+        try:
+            path = Path(src).resolve(strict=True)  # resolves .. and symlinks
+            if not any(path.is_relative_to(root) for root in self.roots):
+                return card
+            if not path.is_file() or path.stat().st_size > FETCH_MAX_BYTES:
+                return card
+            data = path.read_bytes()
+        except OSError:
+            return card
+        return _img_tag(data, alt) or card
+
+
+def _markdown_to_html_fragment(
+    markdown_text: str, embedder: _MediaEmbedder | None = None
+) -> str:
     import markdown as md
 
     html = md.markdown(_strip_web_only(markdown_text), extensions=_MD_EXTENSIONS)
+    if embedder is not None:
+        html = embedder.process(html)
     return _wrap_emoji(html)
 
 
-def render_answer_pdf(markdown_text: str, title: str) -> bytes:
-    """PDF bytes for a single answer's markdown."""
-    body = _markdown_to_html_fragment(markdown_text)
+def render_answer_pdf(
+    markdown_text: str, title: str, image_roots: Sequence[os.PathLike | str] = ()
+) -> bytes:
+    """PDF bytes for a single answer's markdown. `image_roots` are the trusted
+    directories local images may be inlined from (see _MediaEmbedder)."""
+    body = _markdown_to_html_fragment(markdown_text, _MediaEmbedder(image_roots))
     return _html_to_pdf(_document(title, [body]))
 
 
-def render_session_pdf(messages: list[dict], title: str) -> bytes:
+def render_session_pdf(
+    messages: list[dict], title: str, image_roots: Sequence[os.PathLike | str] = ()
+) -> bytes:
     """PDF bytes for a whole session — final answers only, in order. Each
     answer is its own block so a page break never fuses two answers."""
     answers = session_answers(messages)
+    embedder = _MediaEmbedder(image_roots)  # one budget across the whole document
     blocks = (
-        [_markdown_to_html_fragment(answer) for answer in answers]
+        [_markdown_to_html_fragment(answer, embedder) for answer in answers]
         if answers
         else ["<p><em>This conversation has no answers to export yet.</em></p>"]
     )
