@@ -1168,7 +1168,13 @@ body.wrap .stream-wrap > .msg.stream { padding-right: 30px; }
 /* Fade instead of display:none so the arrows ease out — e.g. jump-to-latest
    fading away as you scroll up (#119). visibility+pointer-events keep the
    invisible button non-interactive; position:fixed means no layout cost. */
-#scroll-down[hidden], #scroll-top[hidden] { opacity: 0; visibility: hidden; pointer-events: none; }
+/* A slower transition on the hidden state (fading TOWARD hidden) makes the
+   timeout fade-out gentle, while the base rule keeps the appear-while-scrolling
+   fade-in prompt (#134). */
+#scroll-down[hidden], #scroll-top[hidden] {
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity 0.45s ease, visibility 0.45s ease;
+}
 #scroll-down svg, #scroll-top svg { width: 20px; height: 20px; }
 #scroll-down:active, #scroll-top:active { opacity: 0.6; }
 

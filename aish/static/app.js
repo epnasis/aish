@@ -1788,6 +1788,9 @@ document.addEventListener("visibilitychange", () => {
 let lastScrollTop = 0;
 let scrollingToTop = false; // the button's own smooth scroll must not re-show it
 let scrollFadeTimer = null; // hides the visible arrow a beat after scrolling stops
+// How long a jump arrow lingers after scrolling stops before it fades. Long
+// enough to comfortably reach up and tap it, not so long it overstays (#134).
+const SCROLL_FADE_MS = 2500;
 
 function fadeScrollArrows() {
   $("scroll-down").hidden = true;
@@ -1829,7 +1832,7 @@ function updateScrollButton() {
   // this and rearms the timer, so an arrow stays put while you keep scrolling.
   if (scrollFadeTimer) clearTimeout(scrollFadeTimer);
   if (!$("scroll-down").hidden || !$("scroll-top").hidden) {
-    scrollFadeTimer = setTimeout(fadeScrollArrows, 1000);
+    scrollFadeTimer = setTimeout(fadeScrollArrows, SCROLL_FADE_MS);
   }
 }
 
