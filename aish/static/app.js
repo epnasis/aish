@@ -1763,35 +1763,50 @@ document.addEventListener("visibilitychange", () => {
 // movement — including streaming content auto-scrolling to the tail — hides it.
 let lastScrollTop = 0;
 let scrollingToTop = false; // the button's own smooth scroll must not re-show it
+let scrollFadeTimer = null; // hides the visible arrow a beat after scrolling stops
+
+function fadeScrollArrows() {
+  $("scroll-down").hidden = true;
+  $("scroll-top").hidden = true;
+}
 
 function updateScrollButton() {
   // Hide both arrows while the composer is focused or expanded tall (#115):
   // they sit right above the input and would overlap/obstruct it. They come
   // back once the composer is blurred AND back to its small inline state.
   if (document.activeElement === input || $("composer").classList.contains("tall")) {
+    if (scrollFadeTimer) clearTimeout(scrollFadeTimer);
     $("scroll-down").hidden = true;
     $("scroll-top").hidden = true;
     return;
   }
   const top = messagesEl.scrollTop;
   const fromBottom = messagesEl.scrollHeight - top - messagesEl.clientHeight;
+  const vh = messagesEl.clientHeight;
   // Jump-to-latest is directional like the top arrow: it appears while you
-  // scroll DOWN and are still a meaningful distance (half a viewport) from the
-  // bottom, and hides the moment you scroll UP or reach the bottom — so it
-  // fades out when you scroll up to read instead of lingering (#119).
-  if (top > lastScrollTop && fromBottom > messagesEl.clientHeight * 0.5) {
+  // scroll DOWN and are still at least one viewport from the bottom, and hides
+  // the moment you scroll UP or come within a viewport of the bottom — so it
+  // fades out when you scroll up to read instead of lingering (#119, #127).
+  if (top > lastScrollTop && fromBottom > vh) {
     $("scroll-down").hidden = false;
-  } else if (top < lastScrollTop || fromBottom < 120) {
+  } else if (top < lastScrollTop || fromBottom < vh) {
     $("scroll-down").hidden = true;
   }
-  // Jump-to-top: appears while scrolling UP and far enough from the top.
-  if (top < 120 || top > lastScrollTop) scrollingToTop = false;
-  if (top < lastScrollTop && top > messagesEl.clientHeight && !scrollingToTop) {
+  // Jump-to-top: appears while scrolling UP and at least one viewport from top.
+  if (top < vh || top > lastScrollTop) scrollingToTop = false;
+  if (top < lastScrollTop && top > vh && !scrollingToTop) {
     $("scroll-top").hidden = false;
-  } else if (top > lastScrollTop || top < 120) {
+  } else if (top > lastScrollTop || top < vh) {
     $("scroll-top").hidden = true;
   }
   lastScrollTop = top;
+  // Auto-fade: once scrolling stops the arrow no longer reflects an active
+  // gesture, so hide it after a short beat (#127). Every scroll event re-runs
+  // this and rearms the timer, so an arrow stays put while you keep scrolling.
+  if (scrollFadeTimer) clearTimeout(scrollFadeTimer);
+  if (!$("scroll-down").hidden || !$("scroll-top").hidden) {
+    scrollFadeTimer = setTimeout(fadeScrollArrows, 1000);
+  }
 }
 
 messagesEl.addEventListener("scroll", updateScrollButton, { passive: true });
