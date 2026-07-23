@@ -2989,3 +2989,33 @@ class TestPluginTools:
         )
         agent.run_task("go")
         assert any('"text": "hi"' in m["content"] for m in tool_messages(agent.messages))
+
+    def test_create_tool_manifest_shown_before_wrapper(self, tmp_path):
+        order = []
+
+        def rec(plan):
+            order.append(str(plan.target).split("/")[-1])
+            return True
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._ct_call(
+                    name="greeter", description="echo", mutating=False,
+                    schema='{"text": {"type": "string"}}', wrapper="cat\n",
+                    scope="project")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_write=rec,
+        )
+        agent.run_task("go")
+        assert order == ["TOOL.md", "run.sh"]  # interface before implementation
+
+
+def test_display_path_abbreviates_home():
+    from pathlib import Path
+
+    from aish.agent import _display_path
+
+    p = Path.home() / ".config" / "aish" / "tools" / "x"
+    assert _display_path(p) == "~/.config/aish/tools/x"
+    assert _display_path(Path("/etc/hosts")) == "/etc/hosts"

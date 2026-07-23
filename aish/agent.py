@@ -302,6 +302,15 @@ def _with_feedback(base: str, comment: str) -> str:
     return base + FEEDBACK_NOTE.format(comment=comment) if comment else base
 
 
+def _display_path(path: Path) -> str:
+    """A path with $HOME abbreviated to ~ — so a global-config destination
+    reads clearly as ~/.config/aish/… rather than a bare absolute path."""
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
 _EXIT_CODE_RE = re.compile(r"\[exit code: (-?\d+)\]\s*$")
 _JOB_PID_RE = re.compile(r"pid (\d+)")
 
@@ -1988,14 +1997,18 @@ class Agent:
         else:
             base = tool_plugins.GLOBAL_TOOLS_DIR / name
 
-        # Wrapper first (the executable — the critical thing to review), then the
-        # manifest. Each is diff-approved; a denial aborts without an orphan tool.
-        wrapper_res = self._commit_tool_file(base / wrapper_name, wrapper_body, executable=True)
-        if wrapper_res is not None:
-            return wrapper_res
+        # Manifest FIRST: the user reasons about the tool's interface (what it
+        # does, what args it takes) before its implementation — review intent,
+        # then verify the code. Each file is diff-approved; a denial aborts,
+        # and an orphan (manifest without wrapper, or vice-versa) is simply
+        # skipped at discovery since the linter won't resolve it.
+        self._note(f"→ creating tool {name} in {_display_path(base)}")
         manifest_res = self._commit_tool_file(base / "TOOL.md", manifest_text, executable=False)
         if manifest_res is not None:
             return manifest_res
+        wrapper_res = self._commit_tool_file(base / wrapper_name, wrapper_body, executable=True)
+        if wrapper_res is not None:
+            return wrapper_res
         self._plugin_sig = None  # force a rescan so the new tool is offered
         self._note(f"→ created tool {name} at {base}")
         return f"Created tool {name!r} at {base}. It is available on the next step."

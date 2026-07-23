@@ -733,8 +733,12 @@ TOOL_SCHEMAS = [
                 "argument, or one-off operations. The wrapper receives the validated "
                 "arguments as a JSON object on STDIN, prints results to stdout, and its "
                 "exit code signals success/failure (no shell quoting in the path — that "
-                "is the whole point). The manifest is validated and BOTH files are shown "
-                "to the user for approval before anything is written."
+                "is the whole point). aish writes each tool as its OWN directory: "
+                "<scope>/tools/<name>/ containing TOOL.md (the manifest) and the wrapper "
+                "script — the manifest shown first, then the wrapper, each diff-approved. "
+                "Do NOT describe or invent any other layout (there is no flat '.json' "
+                "manifest), and do NOT ask the user to choose file paths — pass the "
+                "'scope' argument and just call create_tool; aish handles placement."
             ),
             "parameters": {
                 "type": "object",

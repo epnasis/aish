@@ -3431,14 +3431,16 @@ function wrenchIcon() {
   });
 }
 
-// The card header shows the file; a full absolute path is noise. Prefer the
-// path relative to the working directory (design shows `config/http.py`), else
-// the last couple of segments.
+// The card header shows the file. In-project: the path relative to the working
+// directory (design shows `config/http.py`). Outside the project: the FULL
+// location, home-abbreviated (~/…) — a write to global config must NOT read
+// like a file in the current project, or the user can't tell where it lands
+// (#141 create_tool writes to ~/.config/aish/tools).
 function relTarget(target) {
   const cwd = currentCwd || "";
   if (cwd && target.startsWith(cwd + "/")) return target.slice(cwd.length + 1);
-  const parts = target.split("/").filter(Boolean);
-  return parts.length > 2 ? parts.slice(-2).join("/") : target;
+  const home = target.match(/^\/(?:Users|home)\/[^/]+\//);
+  return home ? "~/" + target.slice(home[0].length) : target;
 }
 
 // A unified diff rendered the way the design shows it (Screen 2d): no
