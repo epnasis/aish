@@ -24,6 +24,7 @@ Read `CLAUDE.md` (repo root) first — architecture, the approval-gate invariant
    ```
 1. **Survey** open issues: `gh issue list --repo epnasis/aish --state open --json number,title,labels`. Triage new arrivals from the Monitor as they come.
 2. **Triage** each issue into one of:
+   - **Part of an epic → HANDS OFF.** The user manages epic work separately. An issue is epic-linked if it IS an epic/design-record ("Epic:" title, "child issues:" list) or belongs to one ("Part of the … epic", "Depends on #<epic-core>", listed as a child in an epic body). Do NOT build, do NOT delegate, do NOT ship — just note it in the ledger and leave it for the user. This overrides "Actionable" even when the issue is well-specified and buildable.
    - **Actionable** — a bug or small/medium feature with a clear objective and no design decision needed → fix it.
    - **Needs human input** — a product/design/aesthetic call, an ambiguous objective, or a change to the primary UX the user should weigh in on → comment on the issue with *specific* questions, add the `question` label, leave it OPEN, and hold for the user.
    - **Big refactor / deferred / device-only** (needs their iPhone etc.) → skip or leave a note; don't build speculatively.
