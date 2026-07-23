@@ -365,6 +365,7 @@ function onHello(event) {
   pagerSessions = event.pager || [];
   cmdHistory = event.cmd_history || []; // personal command palette (#104)
   currentSession = event.session;
+  currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
   localStorage.setItem("aish-session", event.session); // reconnects return here
   renderWorkspace(event);
   taskErrored = false; // fresh connected view — clear any stale red
@@ -2379,7 +2380,7 @@ function issueDraftCard(inner) {
 // model/page text is never interpolated into a frame URL. Frames are
 // sandboxed, given no referrer, and share no origin with aish.
 const YOUTUBE_RE =
-  /^https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?(?:[^#]*&)?v=([a-zA-Z0-9_-]{11})|youtu\.be\/([a-zA-Z0-9_-]{11}))(?:[#&?/]|$)/;
+  /^https?:\/\/(?:www\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|shorts\/)([a-zA-Z0-9_-]{11})|youtu\.be\/([a-zA-Z0-9_-]{11}))(?:[#&?/]|$)/;
 // The path segment after /maps varies by link type (bare, /search/, /dir/,
 // /place/…) — (?:\/[^?#\s]*)? absorbs any of it so the query string (the part
 // that actually gets parsed below) is still reached.
@@ -3207,14 +3208,21 @@ function answerCard(id, action, extra) {
 // future actions. Typing feedback implies no verdict: Enter just dismisses
 // the keyboard, the user still picks a button.
 function feedbackField() {
-  // A full-width multi-line box (design 2c): room to type an actual note, not a
-  // cramped single line. Enter inserts a newline; the verdict still comes from a
-  // button press, so nothing here submits.
+  // One line by default, auto-growing as you type up to a few lines then
+  // scrolling (#144): a permanent 2-row box ate vertical space (esp. on mobile)
+  // before a comment was even wanted. Enter still inserts a newline; the verdict
+  // comes from a button press (feedbackExtra reads .value), nothing here submits.
   const ta = document.createElement("textarea");
   ta.className = "feedback";
-  ta.rows = 2;
+  ta.rows = 1;
   ta.placeholder = "Optional comment";
   ta.autocomplete = "off";
+  // Mirror resizeInput's grow: reset then set to scrollHeight, capped (~5 lines).
+  const grow = () => {
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, 140)}px`;
+  };
+  ta.addEventListener("input", grow);
   return ta;
 }
 
@@ -3955,6 +3963,7 @@ const SLASH_COMMANDS = [
   ["/cd", "change working directory (re-anchors approval root)"],
   ["/add-dir", "allow auto-approved work in another tree"],
   ["/jobs", "list background jobs"],
+  ["/session", "show this session's log path (copyable)"],
   ["/mic", "test speech recognition (mic diagnostic)"],
   ["/help", "about aish web"],
 ];
@@ -3987,6 +3996,9 @@ input.addEventListener("keydown", (e) => {
       }
     }
     if (e.key === "Escape") {
+      // First Esc only closes the suggestion popup; a second one leaves the
+      // mode (#143) — so don't let this bubble to the global escapeExit.
+      e.stopPropagation();
       hideSuggest();
       return;
     }
@@ -4248,6 +4260,7 @@ function handleSlash(text) {
       return sent;
     }
     case "/jobs": openSheet("workspace-sheet"); return send({ type: "jobs" });
+    case "/session": copyLogPath(); return true; // path came in on hello (#146)
     case "/mic": openMicSheet(); return true;
     case "/help": openSheet("workspace-sheet"); return true;
     case "/quit": case "/exit": showToast("just close the tab — sessions persist"); return true;
@@ -4399,6 +4412,21 @@ function composerInsert(ch) {
   input.setRangeText(ch, start, end, "end");
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
+
+// Esc leaves whichever full-input mode is active (#143): it closes the
+// interactive PTY overlay (killing the process — no dangling shell) or exits
+// terminal mode, then returns to the normal composer. Order matters: the PTY
+// overlay sits on top of terminal mode. Returns true when it acted, so callers
+// swallow the key; when neither mode is active it does nothing and Esc is left
+// to its other handlers (suggest dismissal, sheet close). The on-screen "esc"
+// key still sends \x1b for programs that need it — only the hardware key means
+// "leave". [ESC-EXIT-START]
+function escapeExit() {
+  if (ptyOpen) { closePty(true); input.focus(); return true; }
+  if (cmdMode) { exitCmdMode(); return true; } // exitCmdMode already focuses input
+  return false;
+}
+// [ESC-EXIT-END]
 
 // ---- interactive PTY overlay controller (#148) ---------------------------
 // The full-screen terminal. Keystrokes captured off a hidden input are sent to
@@ -4558,11 +4586,13 @@ ptyCaptureEl.addEventListener("input", () => { ptyCaptureEl.value = ""; });
 ptyCaptureEl.addEventListener("keydown", (e) => {
   if (!ptyOpen) return;
   const k = e.key;
+  // Hardware Esc leaves the overlay (#143) rather than being sent to the PTY;
+  // the on-screen "esc" key remains the way to send \x1b to a program.
+  if (k === "Escape") { e.preventDefault(); escapeExit(); return; }
   let seq = null;
   if (k === "Enter") seq = "\r";
   else if (k === "Backspace") seq = "\x7f";
   else if (k === "Tab") seq = "\t";
-  else if (k === "Escape") seq = "\x1b";
   else if (k === "ArrowUp") seq = "\x1b[A";
   else if (k === "ArrowDown") seq = "\x1b[B";
   else if (k === "ArrowRight") seq = "\x1b[C";
@@ -4983,6 +5013,9 @@ $("backdrop").onclick = closeSheets;
 $("sessions-new").onclick = () => { send({ type: "new" }); closeSheets(); };
 
 document.addEventListener("keydown", (e) => {
+  // Esc leaves terminal mode / the PTY overlay first (#143); only if neither is
+  // active does it fall through to dismissing an open sheet.
+  if (e.key === "Escape" && escapeExit()) { e.preventDefault(); return; }
   if (e.key === "Escape" && (!$("backdrop").hidden || !$("sessions-sheet").hidden)) closeSheets();
   // Cmd/Ctrl+Shift+O = new chat, Cmd/Ctrl+Shift+P = search sessions
   // (ChatGPT / command-palette conventions).
@@ -5135,6 +5168,7 @@ function toggleWrap() {
 // horizontally scrollable output stay scrolls.
 let pagerSessions = []; // [{name, title}] oldest→newest, from hello
 let currentSession = null;
+let currentLogPath = ""; // absolute JSONL log path for this session, from hello (#146)
 let swipeInFrom = 0; // set on commit; onReplay animates the new page in
 
 const EDGE_GUARD = 28; // px — Safari's back/forward gesture zone
@@ -5474,6 +5508,7 @@ $("session-menu").addEventListener("click", (e) => {
     case "wrap": toggleWrap(); break;
     case "export": exportSessionPdf(); break;
     case "workspace": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
+    case "copylog": copyLogPath(); break;
     case "reconnect": reconnect(); break;
   }
 });
@@ -6143,6 +6178,35 @@ function showToast(text) {
   toast.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { toast.hidden = true; }, 3500);
+}
+
+// Copy to the clipboard with a toast, falling back to an execCommand copy off a
+// hidden textarea when the async Clipboard API is unavailable (older WKWebView /
+// non-secure context). Always shows the text so it's grabbable even if both fail.
+function copyToClipboard(text, label = "copied") {
+  const done = () => showToast(`${label}: ${text}`);
+  const fallback = () => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch { /* nothing more to try */ }
+    ta.remove();
+    done();
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done, fallback);
+  } else {
+    fallback();
+  }
+}
+
+// /session and the ⋯ menu's "Copy log path": copy the session's JSONL log path.
+function copyLogPath() {
+  if (!currentLogPath) { showToast("no session log yet"); return; }
+  copyToClipboard(currentLogPath, "log path");
 }
 
 $("token-form").addEventListener("submit", (e) => {

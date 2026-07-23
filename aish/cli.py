@@ -58,7 +58,7 @@ REPLAY_TOOL_LINES = 4
 SLASH_COMMANDS = (
     "/add-dir", "/aliases", "/cd", "/clear", "/delete", "/dir-add", "/exit",
     "/feedback", "/help", "/jobs", "/learn", "/model", "/new", "/quit",
-    "/rename", "/resume",
+    "/rename", "/resume", "/session",
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
@@ -95,6 +95,7 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  the first word before the approval gate — {CYAN}/aliases import{RESET}
                  pulls your zsh aliases in (existing entries are kept)
   {CYAN}/jobs{RESET}          list background jobs started this session
+  {CYAN}/session{RESET}       show this session's JSONL log path (+ message count)
   {CYAN}/help{RESET}          this help
   {CYAN}/quit, /exit{RESET}   quit (plain 'exit' works too)
 {BOLD}input:{RESET} Enter submits · newline: Ctrl+J, end line with \\, or Option+Enter
@@ -1068,6 +1069,14 @@ def handle_slash(
         return "handled"
     if command == "/jobs":
         print(f"{DIM}{tools.jobs_table()}{RESET}")
+        return "handled"
+    if command == "/session":
+        # Just the path (+ a message count), never the raw audit trail: the log
+        # can be huge, and it's a local file the user greps/tails themselves.
+        path = logref.log.path
+        count = len(SessionLog.load_messages(path)) if path.exists() else 0
+        print(f"{DIM}session log: {path}{RESET}")
+        print(f"{DIM}{count} message(s){RESET}")
         return "handled"
     if command == "/help":
         print(SLASH_HELP)

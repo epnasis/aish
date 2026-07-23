@@ -292,7 +292,7 @@ _IMG_MAX_WIDTH = 460
 # Ports of the app.js embed whitelist (embedForLink): only strictly-matched
 # YouTube ids / Google Maps queries ever become a fetch URL.
 _YOUTUBE_RE = re.compile(
-    r"^https?://(?:www\.)?(?:youtube\.com/watch\?(?:[^#]*&)?v=([a-zA-Z0-9_-]{11})"
+    r"^https?://(?:www\.)?(?:youtube\.com/(?:watch\?(?:[^#]*&)?v=|shorts/)([a-zA-Z0-9_-]{11})"
     r"|youtu\.be/([a-zA-Z0-9_-]{11}))(?:[#&?/]|$)"
 )
 _MAPS_RE = re.compile(

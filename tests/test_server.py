@@ -212,6 +212,7 @@ class TestConnect:
             assert hello["busy"] is False
             assert hello["cwd"] == app_env["cwd"]
             assert hello["rev"]  # static-files fingerprint for staleness checks
+            assert hello["log_path"].endswith(hello["session"])  # #146: /session + copy
             assert replay["events"] == []
 
     def test_index_stamps_asset_revision(self, app_env):

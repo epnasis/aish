@@ -950,7 +950,10 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   font: inherit;
   font-size: 18.4px; /* prevents iOS focus zoom */
   line-height: 1.4;
-  resize: vertical;
+  /* Single line by default, auto-grown by JS on input up to a cap then scrolls
+     (#144); the manual drag handle is off because JS owns the height. */
+  resize: none;
+  overflow-y: auto;
 }
 .card .feedback::placeholder { color: var(--dim); }
 .card .feedback:focus { outline: none; border-color: var(--blue); }
@@ -1025,7 +1028,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 
 /* width:auto on a textarea falls back to its intrinsic `cols` size, so set an
    explicit fill between the card's 14px side insets */
-.approval-card .feedback { margin: 10px 14px 0; width: calc(100% - 28px); box-sizing: border-box; min-height: 58px; }
+.approval-card .feedback { margin: 10px 14px 0; width: calc(100% - 28px); box-sizing: border-box; }
 
 /* scope: a segmented control that modifies what Approve remembers */
 .scope { margin: 10px 14px 0; }

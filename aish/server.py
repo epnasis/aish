@@ -999,6 +999,7 @@ class WebServer:
             "model": model_spec(session.agent),
             "session": session.name,
             "title": self._title(session),
+            "log_path": str(session.logref.log.path),  # /session + "Copy log path" (#146)
             "busy": session.busy,
             "cwd": session.agent.cwd,
             "roots": [str(root) for root in session.agent.roots],

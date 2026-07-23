@@ -45,3 +45,46 @@ def test_reflow_hard_wraps_over_long_line():
 
 def test_plain_answer_still_renders():
     assert _pdf_ok(export.render_answer_pdf("# Hello\n\nA normal answer.", "T", ()))
+
+
+def _tiny_png() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), "red").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_youtube_shorts_url_renders_embed_card(monkeypatch):
+    # #149: a /shorts/<id> link must produce the same YouTube embed card as a
+    # watch/youtu.be link, with the id captured for the thumbnail fetch.
+    requested = []
+
+    def fake_fetch(url: str) -> bytes:
+        requested.append(url)
+        return _tiny_png()
+
+    monkeypatch.setattr(export, "fetch_image", fake_fetch)
+    html = '<a href="https://www.youtube.com/shorts/dQw4w9WgXcQ">a short</a>'
+    out = export._MediaEmbedder(()).process(html)
+
+    assert "aish-embed" in out and "YouTube video" in out
+    assert "data:image/png;base64," in out  # the thumbnail was inlined
+    assert requested == ["https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg"]
+
+
+def test_youtube_shorts_shares_regex_with_watch_and_short_host():
+    # The three URL shapes must all match and yield the SAME 11-char id via the
+    # group(1) or group(2) read (kept in lockstep with app.js YOUTUBE_RE).
+    vid = "dQw4w9WgXcQ"
+    for url in (
+        f"https://www.youtube.com/shorts/{vid}",
+        f"https://www.youtube.com/watch?v={vid}",
+        f"https://youtu.be/{vid}",
+        f"https://www.youtube.com/shorts/{vid}?feature=share",
+    ):
+        m = export._YOUTUBE_RE.match(url)
+        assert m is not None, url
+        assert (m.group(1) or m.group(2)) == vid, url

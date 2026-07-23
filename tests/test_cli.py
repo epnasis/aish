@@ -121,6 +121,21 @@ def test_slash_prefix_resolves_when_unambiguous(tmp_path, capsys):
     assert "ambiguous" in capsys.readouterr().out
 
 
+def test_session_slash_shows_log_path(tmp_path, capsys):
+    from aish.cli import LogRef, handle_slash
+    from aish.session import SessionLog
+
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "hi"})  # one real message to count
+    logref = LogRef(log)
+    agent = type("A", (), {"reset": lambda self: None, "cwd": str(tmp_path),
+                           "roots": [tmp_path], "model": "m"})()
+    assert handle_slash("/session", agent, logref, tmp_path) == "handled"
+    out = capsys.readouterr().out
+    assert str(log.path) in out
+    assert "1 message" in out  # the path, not the raw audit trail
+
+
 def test_always_with_skip_leaves_segment_unvetted(tmp_path, monkeypatch):
     allow = tmp_path / "allow.txt"
     approve = make_approver(False, allow, None)
