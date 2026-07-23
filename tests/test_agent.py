@@ -3011,6 +3011,66 @@ class TestPluginTools:
         assert order == ["TOOL.md", "run.sh"]  # interface before implementation
 
 
+
+    def _write_tool_wraps(self, cwd, name, wraps, mutating="no"):
+        import stat
+
+        tdir = cwd / ".aish" / "tools" / name
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "TOOL.md").write_text(
+            f"---\nname: {name}\ndescription: echo the text\nexec: ./run.sh\n"
+            f"mutating: {mutating}\nwraps: {wraps}\n"
+            f'schema: {{"text": {{"type": "string"}}}}\n---\nbody\n'
+        )
+        p = tdir / "run.sh"
+        p.write_text(self.ECHO)
+        p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    def test_wraps_nudges_toward_tool(self, tmp_path):
+        self._write_tool_wraps(tmp_path, "greeter", "echo hi")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo hi there")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("go")
+        assert any(
+            "greeter" in m["content"] and "prefer" in m["content"]
+            for m in tool_messages(agent.messages)
+        )
+
+    def test_wraps_no_nudge_when_command_differs(self, tmp_path):
+        self._write_tool_wraps(tmp_path, "greeter", "echo hi")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="ls -la")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("go")
+        assert not any(
+            "covers this operation" in m["content"] for m in tool_messages(agent.messages)
+        )
+
+    def test_wraps_no_nudge_toward_unexposed_mutating_tool(self, tmp_path):
+        # a mutating tool with no approver isn't callable → don't nudge toward it
+        self._write_tool_wraps(tmp_path, "writer", "echo hi", mutating="yes")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo hi there")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("go")
+        assert not any(
+            "covers this operation" in m["content"] for m in tool_messages(agent.messages)
+        )
+
+
 def test_display_path_abbreviates_home():
     from pathlib import Path
 

@@ -779,6 +779,10 @@ class Agent:
         self._plugin_tools: dict[str, tool_plugins.Tool] = {}
         self._plugin_defs: list[dict] = []
         self._plugin_warned: set[str] = set()
+        # (wraps-prefix, tool-name) for exposed tools that declare `wraps:` —
+        # lets the agent nudge the model toward a tool when it runs the raw
+        # command the tool replaces (drift detection, issue #140).
+        self._tool_wraps: list[tuple[str, str]] = []
         # Skill-read gate state: oversized preloaded skills the model must
         # read_skill (or explicitly waive) before other tools run; values are
         # refusals left before the gate auto-lifts. Rebuilt every run_task.
@@ -1870,6 +1874,17 @@ class Agent:
                 self.echo(result)
             if final != command:
                 result = f"[user edited the command to: {final}]\n{result}"
+            # Drift nudge (#140): the model ran a raw command a reliable plugin
+            # tool already covers — point it at the tool for next time. Advisory
+            # only; the command still ran.
+            covered = self._tool_for_command(command)
+            if covered is not None:
+                self._note(f"↩ prefer tool '{covered}' over raw command")
+                result += (
+                    f"\n\n[aish: the '{covered}' tool covers this operation and passes "
+                    "arguments safely (no shell quoting) — prefer calling it over "
+                    "composing this command by hand next time.]"
+                )
             return result
 
         tool = self._plugin_tools.get(name)
@@ -1891,15 +1906,25 @@ class Agent:
         found, warnings = tool_plugins.discover(self.cwd)
         self._plugin_tools = {t.name: t for t in found}
         gated_ok = self.approve_tool is not None
-        self._plugin_defs = [
-            tool_plugins.to_tool_def(t)
-            for t in found
-            if not t.mutating or gated_ok
-        ]
+        exposed = [t for t in found if not t.mutating or gated_ok]
+        self._plugin_defs = [tool_plugins.to_tool_def(t) for t in exposed]
+        # Only nudge toward tools the model can actually call.
+        self._tool_wraps = [(t.wraps, t.name) for t in exposed if t.wraps]
         for warning in warnings:
             if warning not in self._plugin_warned:
                 self._plugin_warned.add(warning)
                 self._note(f"⚠ tool skipped: {warning}")
+
+    def _tool_for_command(self, command: str) -> str | None:
+        """The name of an available plugin tool whose `wraps:` prefix matches
+        this raw command, or None. Used to nudge the model off re-composing a
+        command a reliable tool already covers (issue #140)."""
+        cmd = " ".join(command.split())
+        for prefix, name in self._tool_wraps:
+            p = " ".join(prefix.split())
+            if p and (cmd == p or cmd.startswith(p + " ")):
+                return name
+        return None
 
     def _dispatch_plugin_tool(self, tool: "tool_plugins.Tool", args: dict) -> str:
         # Args are validated BEFORE the gate, so the user never approves a call
@@ -1981,6 +2006,8 @@ class Agent:
         ]
         if args.get("timeout"):
             lines.append(f"timeout: {int(args['timeout'])}")
+        if str(args.get("wraps", "") or "").strip():
+            lines.append(f"wraps: {str(args['wraps']).strip()}")
         lines.append(f"schema: {json.dumps(schema_obj)}")
         lines.append("---")
         lines.append(str(args.get("notes", "")).strip() or f"{name} tool.")

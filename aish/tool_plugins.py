@@ -59,6 +59,7 @@ class Tool:
     body: str
     dir: Path
     mtime: float = 0.0
+    wraps: str = ""  # optional shell-command prefix this tool replaces (drift nudge)
 
 
 def _truncate(text: str, head: int = _OUT_HEAD, tail: int = _OUT_TAIL) -> str:
@@ -175,6 +176,7 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
             body=body.strip(),
             dir=tool_dir,
             mtime=mtime,
+            wraps=fields.get("wraps", "").strip(),
         ),
         [],
     )

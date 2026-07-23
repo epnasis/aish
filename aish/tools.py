@@ -789,6 +789,12 @@ TOOL_SCHEMAS = [
                         "description": "Optional prose body for the TOOL.md: how the "
                         "underlying CLI behaves, gotchas.",
                     },
+                    "wraps": {
+                        "type": "string",
+                        "description": "Optional: the raw shell-command prefix this tool "
+                        "replaces (e.g. 'gh issue create'). If the model later runs that "
+                        "raw command, aish nudges it to use this tool instead.",
+                    },
                 },
                 "required": ["name", "description", "mutating", "schema", "wrapper"],
             },
