@@ -417,6 +417,13 @@ def learn_prompt(hint: str, lessons_path=None) -> str:
 #    drafts the issue and runs `gh issue create` itself through the approval gate,
 #    because it also has to upload the attached assets — a step the text-only
 #    backend path does not handle. The approval gate is the safety boundary here.
+#
+# Attachments (#130): assets are published to a PUBLIC GitHub release, so
+# consent is explicit — the draft lists every attached file with a per-file
+# exclude chip, and only the files still listed when the user approves are
+# uploaded (FEEDBACK_ASSETS_RULES). A block-flow feedback that gains
+# attachments while the draft is being adjusted auto-switches to the classic
+# flow via FEEDBACK_SWITCH_NOTE (appended server-side, model-only).
 FEEDBACK_INTRO = (
     "The user wants to send feedback about aish — a bug report, a feature "
     "request, or an improvement idea — that will become a GitHub issue on the "
@@ -453,21 +460,65 @@ FEEDBACK_CLASSIC_PROMPT = FEEDBACK_INTRO + (
     "[Create the issue](aish-reply://Create the issue)\n"
     "[Edit — change something](aish-reply://I'd like to change the draft: )\n"
     "5. Run `gh issue create` ONLY after the user approves. Then show the new "
-    "issue's URL.\n"
-    "The user attached logs, screenshots, or files — incorporate them and upload "
-    "them to the issue per the `gh_issue` skill's asset workflow."
+    "issue's URL."
+)
+
+# Consent for feedback attachments (#130): issue assets land on a PUBLIC GitHub
+# release, so nothing is uploaded silently — the draft itself lists every
+# detected file with a per-file exclude chip, and only what survives review is
+# uploaded. Appended to the classic prompt when the feedback carries
+# attachments, and embedded in the block→classic switch note.
+FEEDBACK_ASSETS_RULES = (
+    "Attachment rules — issue assets are uploaded to a PUBLIC GitHub release, "
+    "so the user must see and confirm exactly what gets published:\n"
+    "- The draft MUST end with an **Attachments** section listing every "
+    "attached file (including any the user attaches in later turns while "
+    "adjusting the draft), one per line, each with its own exclude chip:\n"
+    "[Exclude <name>](aish-reply://Exclude <name> from the issue)\n"
+    "- If the user excludes a file, re-present the draft without it; an "
+    "excluded file is NEVER uploaded.\n"
+    "- Upload ONLY the files still listed when the user approves the draft, "
+    "per the `gh_issue` skill's asset workflow, and link them in the issue "
+    "body."
+)
+
+# Auto-switch (#130): a text-only feedback (block flow) that gains attachments
+# while the draft is being adjusted moves to the upload-capable classic flow —
+# the aish-issue block cannot carry assets. The server appends this to the
+# follow-up turn's text (model-only; the user's echo stays clean) and withdraws
+# the stashed block draft at the same time.
+FEEDBACK_SWITCH_NOTE = (
+    "\n\n[The user attached files to this feedback. The aish-issue block flow "
+    "cannot upload them, so the block draft is WITHDRAWN — SWITCH to the "
+    "classic flow NOW and do not emit an aish-issue block again:\n"
+    "- Re-present the updated draft as ordinary rendered markdown — a bold "
+    "title line and a structured body, NOT in a code block.\n"
+    "- End that same message with exactly these two quick-reply chips, each on "
+    "its own line:\n"
+    "[Create the issue](aish-reply://Create the issue)\n"
+    "[Edit — change something](aish-reply://I'd like to change the draft: )\n"
+    "- Run `gh issue create` ONLY after the user approves, then show the new "
+    "issue's URL.\n" + FEEDBACK_ASSETS_RULES + "]"
 )
 
 
-def feedback_prompt(hint: str = "", block_flow: bool = False) -> str:
+def feedback_prompt(hint: str = "", block_flow: bool = False, attachments: bool = False) -> str:
     """The /feedback expansion. block_flow=True selects the web text-only path
     (emit an `aish-issue` block, backend files it); the default classic path has
     the model run `gh issue create` through the approval gate (CLI, or web
-    feedback with attachments that need the asset-upload workflow)."""
+    feedback with attachments that need the asset-upload workflow). attachments
+    appends the public-upload consent rules (#130): list the assets in the
+    draft with per-file exclude chips, upload only what survives review."""
     hint = hint.strip()
     clause = f" (their words: {hint})" if hint else ""
     template = FEEDBACK_BLOCK_PROMPT if block_flow else FEEDBACK_CLASSIC_PROMPT
-    return template.format(clause=clause)
+    prompt = template.format(clause=clause)
+    if attachments and not block_flow:
+        prompt += (
+            "\nThe user attached logs, screenshots, or files — incorporate "
+            "them into the issue.\n" + FEEDBACK_ASSETS_RULES
+        )
+    return prompt
 
 
 # No side effects and no approval prompt — safe to run concurrently.

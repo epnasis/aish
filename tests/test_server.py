@@ -3004,7 +3004,128 @@ class TestIssueCreation:
             assert "gh issue create" in user_prompt
             assert "asset workflow" in user_prompt
             assert "aish-issue" not in user_prompt
+            # #130: consent — the draft lists the assets with per-file exclude
+            # chips before anything is uploaded to the public release.
+            assert "aish-reply://Exclude <name> from the issue" in user_prompt
+            assert "PUBLIC GitHub release" in user_prompt
             # No draft was stashed, so a create_issue tap errors.
             ws.send_json({"type": "create_issue"})
             err = recv_until(ws, "error")
             assert "no issue draft" in err["text"]
+
+
+class TestFeedbackAttachmentSwitch:
+    """#130: attachments in the /feedback adjust loop. A text-only draft being
+    adjusted auto-switches to the classic upload flow when attachments arrive,
+    and uploads are consented — the draft lists the assets with per-file
+    exclude chips before anything lands on the public release."""
+
+    @staticmethod
+    def _last_user_prompt(chat, call: int) -> str:
+        return next(
+            m["content"] for m in reversed(chat.calls[call]["messages"])
+            if m["role"] == "user"
+        )
+
+    def test_adjust_turn_attachment_switches_block_to_classic(self, app_env):
+        client, chat = make_client(
+            app_env, [model_says(ISSUE_BLOCK), model_says("Updated draft…")]
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/feedback dark mode is broken"})
+            recv_until(ws, "done")  # block draft stashed
+            ws.send_json(
+                {
+                    "type": "task",
+                    "text": "here is a screenshot",
+                    "attachments": ["/tmp/shot.png"],
+                }
+            )
+            # The switch note is model-only: the user echo stays clean.
+            echo = recv_until(ws, "user")
+            assert "SWITCH" not in echo["text"]
+            assert "[attached file: /tmp/shot.png]" in echo["text"]
+            recv_until(ws, "done")
+            prompt = self._last_user_prompt(chat, 1)
+            # The attachment was detected and the model re-anchored on the
+            # classic flow, with the consent listing (confirm/deselect).
+            assert "[attached file: /tmp/shot.png]" in prompt
+            assert "SWITCH to the classic flow" in prompt
+            assert "aish-reply://Create the issue" in prompt
+            assert "aish-reply://Exclude <name> from the issue" in prompt
+            assert "PUBLIC GitHub release" in prompt
+            # The stale block draft was withdrawn: a Create tap can't file it.
+            ws.send_json({"type": "create_issue"})
+            err = recv_until(ws, "error")
+            assert "no issue draft" in err["text"]
+
+    def test_exclude_reply_passes_through_without_a_second_switch(self, app_env):
+        # The deselect chip's reply is an ordinary adjust turn: no attachments
+        # and the flow already switched, so the model receives it verbatim (no
+        # duplicate switch note) and re-drafts without the excluded file.
+        client, chat = make_client(
+            app_env,
+            [
+                model_says(ISSUE_BLOCK),
+                model_says("Draft listing shot.png"),
+                model_says("Draft without shot.png"),
+            ],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/feedback broken"})
+            recv_until(ws, "done")
+            ws.send_json(
+                {"type": "task", "text": "screenshot", "attachments": ["/tmp/shot.png"]}
+            )
+            recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "Exclude shot.png from the issue"})
+            recv_until(ws, "done")
+            assert self._last_user_prompt(chat, 2) == "Exclude shot.png from the issue"
+
+    def test_textonly_adjust_turn_stays_on_block_flow(self, app_env):
+        # No attachments → no switch: the refinement loop keeps the fast
+        # backend-owned block flow and the re-emitted draft stays filable.
+        client, chat = make_client(
+            app_env, [model_says(ISSUE_BLOCK), model_says(ISSUE_BLOCK)]
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/feedback broken"})
+            recv_until(ws, "done")
+            ws.send_json(
+                {"type": "task", "text": "I'd like to change the draft: mention iOS"}
+            )
+            recv_until(ws, "done")
+            prompt = self._last_user_prompt(chat, 1)
+            assert "SWITCH" not in prompt
+            assert prompt == "I'd like to change the draft: mention iOS"
+
+    def test_attachment_outside_feedback_does_not_switch(self, app_env):
+        # An attachment in a session with no feedback in progress is a plain
+        # attachment — never a flow switch.
+        client, chat = make_client(app_env, [model_says("looked at it")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json(
+                {"type": "task", "text": "what is this?", "attachments": ["/tmp/x.log"]}
+            )
+            recv_until(ws, "done")
+            assert "SWITCH" not in self._last_user_prompt(chat, 0)
+
+    def test_filing_the_issue_closes_the_switch_window(self, app_env, monkeypatch):
+        # Once the draft is filed the adjust loop is over: a later attachment
+        # in the same session must not drag the model back into feedback.
+        monkeypatch.setattr(
+            "aish.tools.run_command", TestIssueCreation._fake_run_command([])
+        )
+        client, chat = make_client(
+            app_env, [model_says(ISSUE_BLOCK), model_says("looked at it")]
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "/feedback broken"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "create_issue"})
+            recv_until(ws, "done")
+            ws.send_json(
+                {"type": "task", "text": "unrelated", "attachments": ["/tmp/x.log"]}
+            )
+            recv_until(ws, "done")
+            assert "SWITCH" not in self._last_user_prompt(chat, 1)
