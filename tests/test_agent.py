@@ -2823,7 +2823,9 @@ class TestPluginTools:
         )
         agent.run_task("go")
         assert not marker.exists()  # never executed
-        assert any("cannot run yet" in m["content"] for m in tool_messages(agent.messages))
+        assert any(
+            "no tool approver" in m["content"] for m in tool_messages(agent.messages)
+        )
 
     def test_invalid_arg_returns_structured_error(self, tmp_path):
         self._write_tool(tmp_path, "echoer")
@@ -2846,3 +2848,73 @@ class TestPluginTools:
         self._write_tool(tmp_path, "echoer")
         agent.run_task("two")
         assert "echoer" in self._offered_tool_names(chat)
+
+    def _mutating_tool(self, cwd, marker):
+        self._write_tool(cwd, "writer", mutating="yes",
+                         script=f"#!/bin/sh\ntouch {marker}\ncat\n")
+
+    def test_mutating_tool_offered_when_approver_wired(self, tmp_path):
+        self._write_tool(tmp_path, "writer", mutating="yes")
+        agent, chat = make_agent(
+            [model_says("done")], cwd=str(tmp_path), approve_tool=lambda n, a: True
+        )
+        agent.run_task("go")
+        assert "writer" in self._offered_tool_names(chat)
+
+    def test_mutating_tool_approved_runs(self, tmp_path):
+        marker = tmp_path / "touched"
+        self._mutating_tool(tmp_path, marker)
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("writer", text="x")]), model_says("done")],
+            cwd=str(tmp_path), approve_tool=lambda n, a: True,
+        )
+        agent.run_task("go")
+        assert marker.exists()
+
+    def test_mutating_tool_denied_not_run(self, tmp_path):
+        from aish.agent import DENIED_RESULT
+
+        marker = tmp_path / "touched"
+        self._mutating_tool(tmp_path, marker)
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("writer", text="x")]), model_says("done")],
+            cwd=str(tmp_path), approve_tool=lambda n, a: None,
+        )
+        agent.run_task("go")
+        assert not marker.exists()
+        assert any(DENIED_RESULT in m["content"] for m in tool_messages(agent.messages))
+
+    def test_mutating_tool_denied_with_comment_stops(self, tmp_path):
+        from aish.approval import Denied
+
+        marker = tmp_path / "touched"
+        self._mutating_tool(tmp_path, marker)
+        # After a denial with a comment the stop gate is armed: a second tool
+        # call in the same turn must be refused until a text-only reply.
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("writer", text="x")]),
+                model_says(tool_calls=[tool_call("run_command", command="echo hi")]),
+                model_says("acknowledged"),
+            ],
+            cwd=str(tmp_path), approve_tool=lambda n, a: Denied("no thanks"),
+        )
+        result = agent.run_task("go")
+        assert not marker.exists()
+        assert result == "acknowledged"
+        assert any("no thanks" in m["content"] for m in tool_messages(agent.messages))
+
+    def test_mutating_tool_approved_with_comment_holds(self, tmp_path):
+        from aish.agent import TOOL_HELD_FOR_ADJUSTMENT
+        from aish.approval import Approved
+
+        marker = tmp_path / "touched"
+        self._mutating_tool(tmp_path, marker)
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("writer", text="x")]), model_says("reworked")],
+            cwd=str(tmp_path), approve_tool=lambda n, a: Approved("shorter please"),
+        )
+        agent.run_task("go")
+        assert not marker.exists()  # held, not run
+        held = TOOL_HELD_FOR_ADJUSTMENT.split("{")[0]
+        assert any(held in m["content"] for m in tool_messages(agent.messages))

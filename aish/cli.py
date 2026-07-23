@@ -333,6 +333,27 @@ def make_write_approver(log):
     return approve_write
 
 
+def make_tool_approver(log):
+    """Gate a mutating plugin tool call (issue #141). Reuses the command
+    prompt's shape — the tool name + its structured args stand in for a shell
+    string — but there is no denylist or auto-approval: a mutating tool always
+    prompts. CLI stays y/N (the comment/adjust verdicts are web-card-only)."""
+
+    def approve_tool(name: str, args: dict) -> bool:
+        shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        print(f"\n{YELLOW}{BOLD}▶ run tool?{RESET} {BOLD}{name}{RESET}({shown})")
+        try:
+            answer = input(f"{YELLOW}[y/N]{RESET} ").strip().lower()
+        except EOFError:
+            answer = ""
+        approved = answer in ("y", "yes")
+        if log:
+            log.command(f"tool {name}({shown})", "approved" if approved else "denied")
+        return approved
+
+    return approve_tool
+
+
 def make_read_approver(log, trust_dir=None):
     """Prompt before an auto-approved read_file touches a secret-bearing path
     or one outside the session roots, so an injected read_file can't silently
@@ -1402,6 +1423,7 @@ def main() -> int:
             ),
             approve_write=make_write_approver(logref),
             approve_read=make_read_approver(logref, trust_dir=trust_dir),
+            approve_tool=make_tool_approver(logref),
             echo=echo,
             stream=stream_line,
             max_steps=args.max_steps,
@@ -1432,6 +1454,7 @@ def main() -> int:
             ),
             approve_write=make_write_approver(logref),
             approve_read=make_read_approver(logref, trust_dir=trust_dir),
+            approve_tool=make_tool_approver(logref),
             echo=echo,
             stream=stream_line,
             num_ctx=args.num_ctx,

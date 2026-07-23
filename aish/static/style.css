@@ -979,6 +979,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .card-hsub { font-size: 13.2px; color: var(--dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-head.danger .card-hsub { color: var(--orange); }
 .card-hsub.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.tool-args { margin: 10px 0 0; padding: 10px 12px; background: var(--code-bg, rgba(127,127,127,0.08)); border-radius: 8px; font-size: 12.7px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; overflow-x: auto; }
 .card-count { font-size: 12.7px; font-weight: 700; font-family: ui-monospace, monospace; flex: none; }
 .card-count.add { color: var(--green); }
 .card-count.del { color: var(--red); }

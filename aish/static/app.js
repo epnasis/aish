@@ -3060,6 +3060,9 @@ function onApprovalRequest(event) {
   } else if (event.kind === "write") {
     card.dataset.summary = `${event.verb} ${event.target}`;
     buildWriteCard(card, event);
+  } else if (event.kind === "tool") {
+    card.dataset.summary = `run ${event.tool}`;
+    buildToolCard(card, event);
   } else {
     card.dataset.summary = `read ${event.path}`;
     buildReadCard(card, event);
@@ -3366,6 +3369,66 @@ function buildWriteCard(card, event) {
   denyBtn.onclick = () => answerCard(event.id, "deny", feedbackExtra(feedback));
   actionsRow.append(approveBtn, denyBtn);
   card.appendChild(actionsRow);
+}
+
+// A mutating plugin tool (#141) reuses the write card's shape: header names
+// the tool, the body shows the structured args, feedback rides along (deny =
+// stop, approve+comment = adjust), and Approve/Deny answer the same way.
+function buildToolCard(card, event) {
+  card.classList.add("approval-card", "info");
+  const head = document.createElement("div");
+  head.className = "card-head sep";
+  const ico = document.createElement("span");
+  ico.className = "card-ico";
+  ico.appendChild(wrenchIcon());
+  const htext = document.createElement("span");
+  htext.className = "card-htext";
+  const htitle = document.createElement("span");
+  htitle.className = "card-htitle";
+  htitle.textContent = "Run tool";
+  const hsub = document.createElement("span");
+  hsub.className = "card-hsub mono";
+  hsub.textContent = event.tool;
+  htext.append(htitle, hsub);
+  head.append(ico, htext);
+  card.appendChild(head);
+
+  const argsBox = document.createElement("pre");
+  argsBox.className = "tool-args mono";
+  const entries = Object.entries(event.args || {});
+  argsBox.textContent = entries.length
+    ? entries.map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join("\n")
+    : "(no arguments)";
+  card.appendChild(argsBox);
+
+  const feedback = feedbackField();
+  card.appendChild(feedback);
+
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "card-actions even";
+  const approveBtn = document.createElement("button");
+  approveBtn.type = "button";
+  approveBtn.className = "approve";
+  approveBtn.textContent = "Approve";
+  approveBtn.onclick = () => answerCard(event.id, "approve", feedbackExtra(feedback));
+  const denyBtn = document.createElement("button");
+  denyBtn.type = "button";
+  denyBtn.className = "deny";
+  denyBtn.textContent = "Deny";
+  denyBtn.onclick = () => answerCard(event.id, "deny", feedbackExtra(feedback));
+  actionsRow.append(approveBtn, denyBtn);
+  card.appendChild(actionsRow);
+}
+
+function wrenchIcon() {
+  return svgIcon("i-wrench", (make, svg) => {
+    const g = make("g", { fill: "none", stroke: "currentColor", "stroke-width": "1.7",
+      "stroke-linecap": "round", "stroke-linejoin": "round" });
+    g.appendChild(make("path", {
+      d: "M14.5 6a3.5 3.5 0 0 0-4.6 4.3l-4.8 4.8a1.5 1.5 0 0 0 2.1 2.1l4.8-4.8A3.5 3.5 0 0 0 18 8.5l-2 2-2-2 2-2A3.5 3.5 0 0 0 14.5 6Z",
+    }));
+    svg.appendChild(g);
+  });
 }
 
 // The card header shows the file; a full absolute path is noise. Prefer the

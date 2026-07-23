@@ -561,7 +561,32 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         resolve(request["id"], "approved" if approved else "denied")
         return approved
 
-    return ask_approval, approve_write, approve_read
+    def approve_tool(name: str, args: dict) -> "bool | Approved | Denied":
+        # Reuses the command card verbatim (issue #141): same approve/deny +
+        # comment verdicts, no denylist/auto-approval — a mutating tool always
+        # prompts. Comment semantics match commands: deny+comment = STOP,
+        # approve+comment = HOLD-and-adjust.
+        request: dict[str, Any] = {
+            "type": "approval_request",
+            "kind": "tool",
+            "tool": name,
+            "args": args,
+        }
+        answer = bridge.ask(request)
+        approved = answer.get("action") == "approve"
+        comment = str(answer.get("comment") or "").strip()
+        decision = "approved" if approved else "denied"
+        shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        record(
+            f"tool {name}({shown})",
+            f"{decision} (feedback: {comment})" if comment else decision,
+        )
+        resolve(request["id"], decision, comment)
+        if approved:
+            return Approved(comment) if comment else True
+        return Denied(comment) if comment else False
+
+    return ask_approval, approve_write, approve_read, approve_tool
 
 
 def list_files(cwd: str, query: str, ignore: Sequence[str] | None = None) -> list[str]:
@@ -2252,7 +2277,7 @@ def create_app(
                 return agent_holder[0].trust_root(path)
             return "ERROR: agent not ready"
 
-        approve, approve_write, approve_read = make_web_approvers(
+        approve, approve_write, approve_read, approve_tool = make_web_approvers(
             bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir
         )
         # Coalesce a command's per-line output into fewer, larger `stream`
@@ -2272,6 +2297,7 @@ def create_app(
             approve=approve,
             approve_write=approve_write,
             approve_read=approve_read,
+            approve_tool=approve_tool,
             echo=lambda text: bridge.emit({"type": "echo", "text": text}),
             stream=stream_coalescer.line,
             max_steps=max_steps,

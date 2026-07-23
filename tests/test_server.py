@@ -3360,3 +3360,54 @@ class TestFeedbackAttachmentSwitch:
             )
             recv_until(ws, "done")
             assert "SWITCH" not in self._last_user_prompt(chat, 1)
+
+
+class TestToolApproval:
+    """Mutating plugin tools reuse the command card verbatim over the WS."""
+
+    def _write_tool(self, cwd, name, marker, mutating="yes"):
+        import stat
+        from pathlib import Path
+
+        tdir = Path(cwd) / ".aish" / "tools" / name
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "TOOL.md").write_text(
+            f"---\nname: {name}\ndescription: writer tool\nexec: ./run.sh\n"
+            f'mutating: {mutating}\nschema: {{"text": {{"type": "string"}}}}\n---\nb\n'
+        )
+        p = tdir / "run.sh"
+        p.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n")
+        p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    def responses(self):
+        return [
+            model_says(tool_calls=[tool_call("writer", text="hi")]),
+            model_says("finished"),
+        ]
+
+    def test_tool_approve_runs(self, app_env, tmp_path):
+        marker = tmp_path / "toolran"
+        self._write_tool(app_env["cwd"], "writer", marker)
+        client, _ = make_client(app_env, self.responses())
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run tool"})
+            request = recv_until(ws, "approval_request")
+            assert request["kind"] == "tool"
+            assert request["tool"] == "writer"
+            assert request["args"] == {"text": "hi"}
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            assert recv_until(ws, "approval_resolved")["decision"] == "approved"
+            recv_until(ws, "done")
+            assert marker.exists()
+
+    def test_tool_deny_never_runs(self, app_env, tmp_path):
+        marker = tmp_path / "toolpwned"
+        self._write_tool(app_env["cwd"], "writer", marker)
+        client, chat = make_client(app_env, self.responses())
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run tool"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "approval", "id": request["id"], "action": "deny"})
+            recv_until(ws, "done")
+            assert not marker.exists()
+            assert tool_results(chat)[-1]["content"] == DENIED_RESULT

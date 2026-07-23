@@ -288,6 +288,13 @@ WRITE_HELD_FOR_ADJUSTMENT = (
     "unchanged."
 )
 
+TOOL_HELD_FOR_ADJUSTMENT = (
+    'NOT RUN — the user APPROVED calling {name} but attached a COMMENT: "{comment}"\n'
+    "Approval means CONTINUE, so proceed — but the tool was NOT run. Rework the "
+    "arguments to what the user asked and call {name} again; it will be shown "
+    "for approval again before it runs. Do NOT re-run the original args unchanged."
+)
+
 
 def _with_feedback(base: str, comment: str) -> str:
     return base + FEEDBACK_NOTE.format(comment=comment) if comment else base
@@ -660,6 +667,7 @@ class Agent:
         check_pending_cwd: Callable[[], str | None] | None = None,
         check_pending_messages: Callable[[], list[str]] | None = None,
         aliases: Mapping[str, str] | None = None,
+        approve_tool: Callable[[str, dict], Any] | None = None,
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
@@ -667,6 +675,7 @@ class Agent:
         self.approve = approve
         self.approve_write = approve_write
         self.approve_read = approve_read
+        self.approve_tool = approve_tool
         self.echo = echo
         self.stream = stream
         self.chat = client_chat
@@ -741,9 +750,9 @@ class Agent:
         self._run_meta: dict | None = None
         self._cancel = threading.Event()
         # Plugin tools (TOOL.md), rebuilt only when the tool dirs' signature
-        # moves — a mid-task manifest edit is picked up on the next step. Only
-        # read-only tools are exposed to the model in this build; mutating ones
-        # are discovered+validated but gated off until the approval channel lands.
+        # moves — a mid-task manifest edit is picked up on the next step.
+        # Read-only tools are always exposed; mutating ones only when a tool
+        # approver is wired (fail-closed otherwise — never run ungated).
         self._plugin_sig: tuple | None = None
         self._plugin_tools: dict[str, tool_plugins.Tool] = {}
         self._plugin_defs: list[dict] = []
@@ -1846,34 +1855,57 @@ class Agent:
 
     def _refresh_plugin_tools(self) -> None:
         """Rescan TOOL.md manifests when the tool dirs' signature changed
-        (mtime-cached, near-free). Only read-only tools are exposed to the
-        model; mutating ones are kept for fail-closed dispatch but not offered
-        until the approval channel exists. Invalid manifests are skipped and
-        warned about once each."""
+        (mtime-cached, near-free). Read-only tools are always exposed; mutating
+        ones are exposed only when a tool approver is wired (else kept for
+        fail-closed dispatch but not offered). Invalid manifests are skipped
+        and warned about once each."""
         sig = tool_plugins.signature(self.cwd)
         if sig == self._plugin_sig:
             return
         self._plugin_sig = sig
         found, warnings = tool_plugins.discover(self.cwd)
         self._plugin_tools = {t.name: t for t in found}
-        self._plugin_defs = [tool_plugins.to_tool_def(t) for t in found if not t.mutating]
+        gated_ok = self.approve_tool is not None
+        self._plugin_defs = [
+            tool_plugins.to_tool_def(t)
+            for t in found
+            if not t.mutating or gated_ok
+        ]
         for warning in warnings:
             if warning not in self._plugin_warned:
                 self._plugin_warned.add(warning)
                 self._note(f"⚠ tool skipped: {warning}")
 
     def _dispatch_plugin_tool(self, tool: "tool_plugins.Tool", args: dict) -> str:
-        # Mutating tools are not exposed yet, so this only fires if a stale
-        # tool_call names one — fail closed rather than run it ungated.
-        if tool.mutating:
-            return (
-                f"ERROR: tool {tool.name!r} is mutating and cannot run yet "
-                "(approval channel not implemented)."
-            )
+        # Args are validated BEFORE the gate, so the user never approves a call
+        # that would fail validation anyway, and the error feeds the retry loop.
         problem = tool_plugins.validate_args(tool, args)
         if problem is not None:
             self._note(f"→ {tool.name}: {problem}")
             return problem
+
+        if tool.mutating:
+            if self.approve_tool is None:
+                # Not exposed without an approver, so this only fires on a stale
+                # tool_call — fail closed rather than run a mutation ungated.
+                return (
+                    f"ERROR: tool {tool.name!r} is mutating and no tool approver "
+                    "is available; it cannot run."
+                )
+            decision = self.approve_tool(tool.name, args)
+            if isinstance(decision, Denied):
+                # Deny + comment = STOP (issue #81): address the concern, then halt.
+                self._arm_stop_gate(decision.comment)
+                return _with_feedback(DENIED_RESULT, decision.comment)
+            if isinstance(decision, Approved):
+                # Approve + comment = CONTINUE but adjust: the original args are
+                # HELD, the model reworks them and re-proposes (re-approved).
+                return TOOL_HELD_FOR_ADJUSTMENT.format(
+                    name=tool.name, comment=decision.comment
+                )
+            if decision is None or decision is False:
+                return DENIED_RESULT
+
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
         self._note(f"→ {tool.name}({shown})")
         self.status.start(tool.name)
