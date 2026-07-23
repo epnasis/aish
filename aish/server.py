@@ -79,6 +79,7 @@ from .cli import (
 )
 from .embeddings import SemanticIndex
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
+from .pty_session import PtySession
 from .session import SessionLog
 
 if TYPE_CHECKING:
@@ -124,6 +125,11 @@ TRANSCRIPT_KEEP = 500
 # Open sessions kept in memory at once; beyond this the longest-idle one is
 # closed (its file persists — reopening it later just reloads the history).
 MAX_OPEN_SESSIONS = 6
+
+# Concurrent interactive PTYs across all sessions (issue #148). Each holds a
+# child process + fds + a reader thread, so it's capped; one per session is the
+# design (Session.pty is a single slot), this bounds the cross-session total.
+MAX_OPEN_PTYS = 8
 
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 EXPORT_MAX_BYTES = 5 * 1024 * 1024  # a single answer's markdown; generous ceiling
@@ -674,7 +680,12 @@ session roots, so allowlisted work there auto-approves afterwards — also in \
 memory only.
 - A message the user prefixes with ! runs directly as a shell command — their \
 own action, without you and without an approval card (just as in the terminal); \
-!cd <dir> is the /cd alias that moves the project directory. A message starting \
+!cd <dir> is the /cd alias that moves the project directory. For commands that \
+need to READ input (gcloud auth, ssh host-key prompts, sudo passwords), the ＋ \
+menu's "Interactive shell" opens a real pseudo-terminal the user types into \
+directly — you have NO access to it: its input and output stay private to that \
+terminal unless the user explicitly taps "Share" to inject a selection into \
+your context. A message starting \
 with /learn \
 distills the conversation into saved skills/memory (an optional hint \
 follows, e.g. "/learn the gh flow"; "/learn lessons" migrates the legacy \
@@ -700,7 +711,9 @@ anything unavailable becomes a captioned link card. A \
 context bar under the title shows the working directory \
 (tap to open a folder picker) and the model (tap to switch). In the composer, \
 the ＋ button opens attach file / reference a path (@) / slash command (/) / \
-photo. Your tool activity (thinking, recalled knowledge, commands and their \
+photo / send feedback / terminal mode (multi-command shell, prefix !) / \
+interactive shell (a real TTY for programs that prompt for input). \
+Your tool activity (thinking, recalled knowledge, commands and their \
 output) is grouped into one collapsible activity trace per turn. Swiping the \
 transcript sideways pages through recent chats.
 - Several sessions can be open at once; a task keeps running when the user \
@@ -822,6 +835,11 @@ class Session:
         # action. Observers viewing this session see a "another tab is active"
         # hint; acting claims control. Never persisted — replay re-derives it.
         self.controller: Client | None = None
+        # The live interactive PTY (issue #148), if the user opened one. One per
+        # session; a new one replaces (and kills) the old. Held on the Session,
+        # NOT the agent — the model has no reference to it and no way to write
+        # to its input (the load-bearing security invariant).
+        self.pty: PtySession | None = None
 
     @property
     def viewers(self) -> set:
@@ -839,8 +857,16 @@ class Session:
         return "idle"
 
     def close(self) -> None:
+        self.kill_pty()  # no leaked interactive child/fds when a session goes away
         self.logref.log.close()
         self.agent.close()  # best-effort scratch-workspace cleanup (issue #70)
+
+    def kill_pty(self) -> None:
+        """Terminate and forget this session's interactive PTY, if any. Called on
+        close/evict/disconnect and before starting a new one — idempotent."""
+        if self.pty is not None:
+            self.pty.kill()
+            self.pty = None
 
 
 class WebServer:
@@ -887,6 +913,7 @@ class WebServer:
         for session in self.sessions.values():
             for uid in list(session.bridge.pending):
                 session.bridge.answer(uid, {"action": "deny"})
+            session.kill_pty()  # no leaked interactive children on shutdown (#148)
         for client in list(self.clients):
             with contextlib.suppress(Exception):
                 await client.ws.close()
@@ -1035,6 +1062,12 @@ class WebServer:
             return
         session.viewers.discard(client)
         client.viewing = None
+        # An interactive PTY is tied to being watched: once no one is viewing the
+        # session, kill it so a program blocked on input (e.g. a hung `gcloud
+        # auth`) can't linger unattended (issue #148 cleanup). Background MODEL
+        # tasks are unaffected — they keep running with no viewer by design.
+        if not session.viewers:
+            session.kill_pty()
         if session.controller is client:
             session.controller = None
             self._broadcast_role(session)
@@ -1169,6 +1202,28 @@ class WebServer:
         elif kind == "create_issue":
             self._claim(client)
             await self._create_issue(client)
+        elif kind == "pty_start":
+            self._claim(client)
+            await self._pty_start(client, str(message.get("command", "")))
+        elif kind == "pty_in":
+            # Keystrokes from the USER's own socket → the PTY master. This is the
+            # ONLY path to PTY input (issue #148): no model/agent code reaches
+            # it. Claims control like any other action.
+            self._claim(client)
+            self._pty_in(client, message.get("data", ""))
+        elif kind == "pty_resize":
+            self._pty_resize(
+                client, message.get("cols", 80), message.get("rows", 24)
+            )
+        elif kind == "pty_kill":
+            self._claim(client)
+            self._pty_kill(client)
+        elif kind == "pty_share":
+            # Explicit "share this selection to the model" (issue #148): PTY I/O
+            # is private by default; only this user action injects a slice of it
+            # into the model's context, via the same user-message path as `!`.
+            self._claim(client)
+            await self._pty_share(client, str(message.get("text", "")))
         elif kind == "dequeue":
             self._dequeue(client, str(message.get("text", "")))
         elif kind == "dequeue_cwd":
@@ -1466,6 +1521,107 @@ class WebServer:
             session.bridge.emit({"type": "error", "text": f"command failed: {exc!r}"})
         finally:
             await self._finish_turn(session)
+
+    # -- interactive PTY (issue #148) --------------------------------------
+    # A real pseudo-terminal so TTY-reading programs (gcloud auth, ssh, sudo)
+    # work interactively. This is the USER's own terminal: ungated like the `!`
+    # path, and — crucially — the model has NO write path to it. Bytes reach the
+    # PTY only through _pty_in, driven solely by the user's socket. I/O stays
+    # private to the terminal (never recorded, never in model context) unless the
+    # user explicitly shares a selection via _pty_share.
+
+    def _count_ptys(self) -> int:
+        return sum(1 for s in self.sessions.values() if s.pty is not None)
+
+    async def _pty_start(self, client: Client, command: str) -> None:
+        session = client.viewing
+        if session is None:
+            return
+        # Default to the user's login shell — the general interactive workspace
+        # from which they run gcloud/ssh/sudo/etc.; a specific command is honored.
+        command = command.strip() or os.environ.get("SHELL") or "/bin/bash"
+        # A new PTY in THIS session replaces its own (killed below), so only
+        # count OTHER sessions' PTYs toward the cross-session cap.
+        if session.pty is None and self._count_ptys() >= MAX_OPEN_PTYS:
+            await client.ws.send_json(
+                {
+                    "type": "pty_error",
+                    "text": "too many interactive terminals open — close one first",
+                }
+            )
+            return
+        session.kill_pty()  # one PTY per session; replace any prior
+        # Audit trail: the user's own action, same decision tag as `!` commands.
+        session.logref.command(f"[interactive] {command}", "user-direct")
+        loop = self.loop
+        assert loop is not None, "no event loop yet"
+        bridge = session.bridge
+        name = session.name
+
+        def on_output(text: str) -> None:
+            # Live-only, NOT recorded: interactive I/O is private to the terminal
+            # and must never enter the transcript or the model's context
+            # (issue #148). Fans out to every viewer, like all bridge events.
+            bridge.emit({"type": "pty_out", "data": text}, record=False)
+
+        def on_exit(code: int) -> None:
+            sess = self.sessions.get(name)
+            if sess is not None and sess.pty is pty:
+                sess.pty = None
+            bridge.emit({"type": "pty_exit", "code": code}, record=False)
+
+        # Announce BEFORE spawning so the frontend resets its screen before any
+        # pty_out can arrive (both events reach the loop via call_soon_threadsafe;
+        # emitting first keeps ordering deterministic).
+        bridge.emit(
+            {"type": "pty_started", "command": command, "cwd": session.agent.cwd},
+            record=False,
+        )
+        pty = PtySession(command, session.agent.cwd, on_output, on_exit, loop)
+        session.pty = pty
+
+    def _pty_in(self, client: Client, data: object) -> None:
+        session = client.viewing
+        if session is None or session.pty is None or not isinstance(data, str):
+            return
+        session.pty.write(data)
+
+    def _pty_resize(self, client: Client, cols: object, rows: object) -> None:
+        session = client.viewing
+        if session is None or session.pty is None:
+            return
+        try:
+            session.pty.resize(int(cols), int(rows))  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            pass
+
+    def _pty_kill(self, client: Client) -> None:
+        session = client.viewing
+        if session is not None:
+            session.kill_pty()
+
+    async def _pty_share(self, client: Client, text: str) -> None:
+        session = client.viewing
+        if session is None:
+            return
+        text = text.strip()
+        if not text:
+            return
+        if session.busy:
+            # Appending to the model's messages while the worker thread iterates
+            # them would race; sharing is a between-tasks action anyway.
+            await client.ws.send_json(
+                {
+                    "type": "pty_error",
+                    "text": "finish the current task first, then share to context",
+                }
+            )
+            return
+        # Reuse the user-message path: append a user turn the model sees on its
+        # NEXT task (no answer forced now), logged so it survives --resume. Echo
+        # a transcript marker so every viewer sees what was shared.
+        session.agent.add_user_context(f"[Shared from my interactive terminal:]\n{text}")
+        session.bridge.emit({"type": "pty_shared", "text": text})
 
     async def _create_issue(self, client: Client) -> None:
         """File the stashed feedback draft on the pinned repo (#110). This is a

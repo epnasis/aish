@@ -1391,6 +1391,14 @@ class Agent:
         )
         return result
 
+    def add_user_context(self, text: str) -> None:
+        """Append a user-authored context turn WITHOUT running the model: the note
+        becomes visible to the model on its next task and is logged so it survives
+        `--resume`, but no answer is generated now. Backs the web "share selection
+        to context" action for interactive PTY sessions (issue #148), where the
+        terminal I/O is otherwise private to the terminal."""
+        self._append({"role": "user", "content": text})
+
     def rebase(self, target: str, announce: bool = True) -> str:
         """User-typed /cd (and its alias !cd): move cwd AND re-anchor the
         primary session root. Never reachable by the model — that's what

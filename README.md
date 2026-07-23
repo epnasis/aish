@@ -415,6 +415,24 @@ roots (symlinks are resolved before that check). In the terminal, the same
 markdown displays the image inline on iTerm2, kitty, WezTerm, and ghostty;
 other terminals simply keep the path visible as text.
 
+**Terminal & interactive shell**: prefixing a message with `!` runs it directly
+as a shell command — your own action, no model and no approval card — and the
+＋ menu's *Terminal mode* keeps that running multiple commands in a row. Those
+run *non-interactively*, though, so anything that reads from a TTY (`gcloud auth
+login`, an `ssh` host-key prompt, a `sudo` password) would just hang. For those,
+the ＋ menu's **Interactive shell** opens a real pseudo-terminal in a full-screen
+overlay: a login shell you type into directly, with the program seeing a genuine
+TTY so it can prompt for input. Keystrokes go to the terminal and are *not*
+echoed locally — the terminal echoes what it wants, so a password prompt masks
+for free. Control-key chips (`^C`, `^D`, tab, esc, arrows) sit above the keyboard
+for the keys a soft keyboard can't send. It renders line-oriented output with
+ANSI colors — enough for prompts, progress bars, and auth flows, but not a
+full-screen terminal (vim/htop are out of scope). The model has **no access** to
+this terminal: its input and output stay private to the overlay unless you
+select some output and tap **Share**, which drops that selection into the chat
+as context for the model's next turn. The interactive session is the user's
+alone — it never touches the approval gate and its I/O is never recorded.
+
 **Parallel sessions**: several sessions can be open at once, each with its
 own agent, model, working directory, and running task. Start a task, hit the
 compose button, work on something else — the first task keeps running and

@@ -289,6 +289,11 @@ function handle(event) {
     case "session_deleted": showToast("session deleted"); break;
     case "session_renamed": onSessionRenamed(event); break;
     case "role": onRole(event); break;
+    case "pty_started": onPtyStarted(event); break;
+    case "pty_out": onPtyOut(event.data); break;
+    case "pty_exit": onPtyExit(event.code); break;
+    case "pty_shared": showToast("shared to context"); break;
+    case "pty_error": showToast(event.text); break;
   }
 }
 
@@ -350,6 +355,11 @@ function onHello(event) {
   // Server code changed since this page was built (or the page predates rev
   // stamping entirely) — reload; the replay mechanism restores the view.
   if (event.rev && event.rev !== PAGE_REV) { location.reload(); return; }
+  // A hello means a (re)attach — possibly to a different session. Any open
+  // interactive terminal belonged to the session we just left (the server
+  // killed its PTY when the last viewer left), so close the overlay without
+  // sending a stray kill (#148).
+  closePty(false);
   $("model-name").textContent = event.model;
   setTitle(event.title);
   pagerSessions = event.pager || [];
@@ -1940,6 +1950,87 @@ function applySgr(params, classes) {
     }
   }
 }
+
+// ---- interactive PTY: line model (#148) ----------------------------------
+// A SMALL line-oriented terminal — enough for prompts, progress bars, and
+// colored output from TTY programs (gcloud/ssh/sudo). NOT a full-screen
+// emulator: cursor-addressing CSI (vim/htop) is dropped by design. State is
+// { lines[], row, col }; \r returns to column 0, \n opens a line, \b steps
+// back, \t goes to the next 8-col stop, CSI-K erases within the line. SGR
+// color escapes are kept INLINE in the line text and colored at render time by
+// ansiFragment, so the model stays plain-string and testable without a DOM.
+const PTY_MAX_LINES = 5000; // scrollback cap so a long session can't grow forever
+
+function ptyNewState() { return { lines: [""], row: 0, col: 0 }; }
+
+function ptyWriteText(st, text) {
+  let line = st.lines[st.row] || "";
+  if (line.length < st.col) line += " ".repeat(st.col - line.length); // pad a gap
+  st.lines[st.row] = line.slice(0, st.col) + text + line.slice(st.col + text.length);
+  st.col += text.length;
+}
+
+function ptyEraseInLine(st, mode) {
+  const line = st.lines[st.row] || "";
+  if (mode === "1") st.lines[st.row] = " ".repeat(Math.min(st.col, line.length)) + line.slice(st.col);
+  else if (mode === "2") st.lines[st.row] = "";
+  else st.lines[st.row] = line.slice(0, st.col); // "" / "0": clear to end of line
+}
+
+function ptyApply(st, chunk) {
+  let i = 0;
+  while (i < chunk.length) {
+    const ch = chunk[i];
+    if (ch === "\x1b") {
+      if (chunk[i + 1] === "[") { // CSI: consume through a final byte @..~
+        let j = i + 2;
+        while (j < chunk.length && !(chunk[j] >= "@" && chunk[j] <= "~")) j++;
+        if (j >= chunk.length) break; // incomplete (split across chunks) — drop tail
+        const final = chunk[j];
+        if (final === "K") ptyEraseInLine(st, chunk.slice(i + 2, j));
+        else if (final === "m") ptyWriteText(st, chunk.slice(i, j + 1)); // keep SGR inline
+        // any other CSI (cursor moves, screen ops) is dropped — line-oriented only
+        i = j + 1;
+        continue;
+      }
+      if (chunk[i + 1] === "]") { // OSC (titles/hyperlinks): skip to BEL or ST
+        let j = i + 2;
+        while (j < chunk.length && chunk[j] !== "\x07" && !(chunk[j] === "\x1b" && chunk[j + 1] === "\\")) j++;
+        i = chunk[j] === "\x07" ? j + 1 : j + 2;
+        continue;
+      }
+      i++; continue; // lone ESC: drop it
+    }
+    if (ch === "\n") { st.row += 1; st.col = 0; if (st.lines[st.row] === undefined) st.lines[st.row] = ""; i++; continue; }
+    if (ch === "\r") { st.col = 0; i++; continue; }
+    if (ch === "\b") { if (st.col > 0) st.col -= 1; i++; continue; }
+    if (ch === "\t") { ptyWriteText(st, " ".repeat(8 - (st.col % 8))); i++; continue; }
+    if (ch < " ") { i++; continue; } // bell and other C0 controls: ignore
+    ptyWriteText(st, ch); i++;
+  }
+  if (st.lines.length > PTY_MAX_LINES) { // bound scrollback
+    const drop = st.lines.length - PTY_MAX_LINES;
+    st.lines.splice(0, drop);
+    st.row = Math.max(0, st.row - drop);
+  }
+  return st;
+}
+
+// Rebuild the screen from the line model: one `.ptol` span per line, SGR
+// colored via the same ansiFragment the run_command terminal block uses. Lines
+// are capped and output is coalesced, so a full rebuild per frame stays cheap.
+function ptyRenderScreen(el, st) {
+  const frag = document.createDocumentFragment();
+  for (const line of st.lines) {
+    const span = document.createElement("span");
+    span.className = "ptol";
+    span.appendChild(ansiFragment(line));
+    frag.appendChild(span);
+  }
+  el.textContent = "";
+  el.appendChild(frag);
+}
+// ---- end interactive PTY line model --------------------------------------
 
 // ---- syntax highlighting (fenced code blocks) -----------------------------
 // hljs is vendor/highlight.min.js (static/vendor, no CDN) — a plain global,
@@ -4237,6 +4328,7 @@ $("composer-actions").addEventListener("click", (e) => {
     // server expands /feedback into the issue-filing flow (parse_feedback).
     case "feedback": composerInsert("/feedback "); break;
     case "terminal": enterCmdMode(); break;
+    case "interactive": openPty(); break;
   }
 });
 
@@ -4307,6 +4399,183 @@ function composerInsert(ch) {
   input.setRangeText(ch, start, end, "end");
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
+
+// ---- interactive PTY overlay controller (#148) ---------------------------
+// The full-screen terminal. Keystrokes captured off a hidden input are sent to
+// the PTY as `pty_in` and NEVER echoed locally — the PTY echoes what it wants,
+// so a password prompt (echo off) masks for free. `pty_out` bytes render via
+// the line model above. Everything here is user-driven; the model has no path
+// to pty_in (the server enforces that too).
+let ptyState = null; // the line model, or null when the overlay is closed
+let ptyOpen = false;
+let ptyRenderQueued = false;
+
+function ptyScreenEl() { return $("pty-screen"); }
+
+function setPtyStatus(text, exited) {
+  const el = $("pty-status");
+  el.textContent = text || "";
+  el.classList.toggle("exited", Boolean(exited));
+}
+
+function openPty() {
+  closeSheets();
+  if (!send({ type: "pty_start", command: "" })) { // server runs the login shell
+    showToast("not connected — reconnecting…");
+    return;
+  }
+  ptyState = ptyNewState();
+  ptyOpen = true;
+  $("pty-overlay").hidden = false;
+  $("pty-share").hidden = true;
+  ptyScreenEl().textContent = "";
+  setPtyStatus("starting…");
+  ptySendResize();
+  focusPtyCapture();
+}
+
+// kill=false when the PTY is already gone server-side (session switch/reconnect)
+// so we don't send a stray kill for a session we no longer view.
+function closePty(kill = true) {
+  if (!ptyOpen) return;
+  ptyOpen = false;
+  if (kill) send({ type: "pty_kill" });
+  $("pty-overlay").hidden = true;
+  ptyState = null;
+  $("pty-capture").blur();
+}
+
+function ptySend(data) {
+  if (ptyOpen) send({ type: "pty_in", data });
+}
+
+function focusPtyCapture() {
+  const cap = $("pty-capture");
+  cap.value = "";
+  cap.focus();
+}
+
+// Estimate cols/rows from the screen box and a measured monospace char cell, so
+// the PTY wraps where the program expects (TIOCSWINSZ on the server).
+function ptyMetrics() {
+  const el = ptyScreenEl();
+  const probe = document.createElement("span");
+  probe.className = "ptol";
+  probe.style.position = "absolute";
+  probe.style.visibility = "hidden";
+  probe.style.whiteSpace = "pre";
+  probe.textContent = "0".repeat(20);
+  el.appendChild(probe);
+  const rect = probe.getBoundingClientRect();
+  const cw = rect.width / 20 || 8;
+  const lh = rect.height || 18;
+  probe.remove();
+  return {
+    cols: Math.max(20, Math.floor((el.clientWidth - 24) / cw)),
+    rows: Math.max(6, Math.floor(el.clientHeight / lh)),
+  };
+}
+
+function ptySendResize() {
+  if (!ptyOpen) return;
+  const { cols, rows } = ptyMetrics();
+  send({ type: "pty_resize", cols, rows });
+}
+
+function ptyRenderSoon() {
+  if (ptyRenderQueued) return;
+  ptyRenderQueued = true;
+  requestAnimationFrame(() => { ptyRenderQueued = false; ptyRenderNow(); });
+}
+
+function ptyRenderNow() {
+  if (!ptyState) return;
+  const el = ptyScreenEl();
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  ptyRenderScreen(el, ptyState);
+  if (atBottom) el.scrollTop = el.scrollHeight; // follow output unless scrolled up
+}
+
+function onPtyStarted(event) {
+  if (!ptyOpen) return;
+  ptyState = ptyNewState();
+  setPtyStatus(`${promptDir(event.cwd)} · ${event.command}`);
+  ptyRenderNow();
+}
+
+function onPtyOut(data) {
+  if (!ptyState) return;
+  ptyApply(ptyState, String(data));
+  ptyRenderSoon();
+}
+
+function onPtyExit(code) {
+  setPtyStatus(`exited (${code}) — tap Close`, true);
+  // Keep the overlay + scrollback up so the final output stays readable; the
+  // user closes explicitly.
+}
+
+// Wire the overlay's controls once at load.
+$("pty-close").onclick = () => closePty(true);
+$("pty-share").onclick = () => {
+  const sel = (window.getSelection ? String(window.getSelection()) : "").trim();
+  if (!sel) { showToast("select some output first, then Share"); return; }
+  send({ type: "pty_share", text: sel });
+};
+
+// Reveal Share only when there is a selection inside the terminal screen.
+document.addEventListener("selectionchange", () => {
+  if (!ptyOpen) return;
+  const sel = (window.getSelection ? String(window.getSelection()) : "").trim();
+  $("pty-share").hidden = !sel;
+});
+
+document.querySelector(".pty-keys").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-key]");
+  if (!btn) return;
+  if (btn.dataset.key === "kb") { focusPtyCapture(); return; } // re-summon keyboard
+  const CTRL = { tab: "\t", esc: "\x1b", "ctrl-c": "\x03", "ctrl-d": "\x04", up: "\x1b[A", down: "\x1b[B" };
+  const seq = CTRL[btn.dataset.key];
+  if (seq != null) ptySend(seq);
+  focusPtyCapture();
+});
+
+// Text entry: beforeinput carries the inserted text (incl. mobile autocorrect)
+// and the soft-keyboard delete/return; we forward it and swallow it so nothing
+// is echoed locally (the PTY echoes). Special/navigation keys come via keydown.
+const ptyCaptureEl = $("pty-capture");
+ptyCaptureEl.addEventListener("beforeinput", (e) => {
+  if (!ptyOpen) return;
+  e.preventDefault();
+  const t = e.inputType;
+  if (t === "insertLineBreak" || t === "insertParagraph") ptySend("\r");
+  else if (t === "deleteContentBackward") ptySend("\x7f");
+  else if (t === "deleteWordBackward") ptySend("\x17"); // ^W
+  else if (e.data != null) ptySend(e.data);
+  ptyCaptureEl.value = "";
+});
+ptyCaptureEl.addEventListener("input", () => { ptyCaptureEl.value = ""; });
+ptyCaptureEl.addEventListener("keydown", (e) => {
+  if (!ptyOpen) return;
+  const k = e.key;
+  let seq = null;
+  if (k === "Enter") seq = "\r";
+  else if (k === "Backspace") seq = "\x7f";
+  else if (k === "Tab") seq = "\t";
+  else if (k === "Escape") seq = "\x1b";
+  else if (k === "ArrowUp") seq = "\x1b[A";
+  else if (k === "ArrowDown") seq = "\x1b[B";
+  else if (k === "ArrowRight") seq = "\x1b[C";
+  else if (k === "ArrowLeft") seq = "\x1b[D";
+  else if (e.ctrlKey && !e.metaKey && !e.altKey && k.length === 1) {
+    const c = k.toLowerCase().charCodeAt(0);
+    if (c >= 97 && c <= 122) seq = String.fromCharCode(c - 96); // ^A..^Z
+  }
+  // Printable keys fall through (seq stays null) so beforeinput handles them —
+  // sending here too would double them.
+  if (seq !== null) { e.preventDefault(); ptySend(seq); ptyCaptureEl.value = ""; }
+});
+window.addEventListener("resize", () => { if (ptyOpen) ptySendResize(); });
 
 $("file-input").addEventListener("change", async () => {
   for (const file of $("file-input").files) await uploadFile(file);

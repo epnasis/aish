@@ -2157,3 +2157,63 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
 .retry-btn svg { width: 16px; height: 16px; }
 .retry-btn:active { opacity: 0.6; }
+
+/* ---- interactive PTY overlay (#148) ------------------------------------- */
+/* A full-screen terminal for TTY-reading programs. Always dark (a terminal
+   reads as dark in either app theme), scrollback fills the middle, control
+   keys dock at the bottom above the on-screen keyboard. */
+#pty-overlay {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; flex-direction: column;
+  background: #0b0b0d;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+#pty-overlay[hidden] { display: none; }
+.pty-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px 14px; border-bottom: 1px solid #26262b;
+  background: rgba(20, 20, 24, 0.9);
+}
+.pty-title-wrap { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.pty-title { color: #f2f2f7; font-weight: 700; font-size: 17px; }
+.pty-status {
+  color: #98989e; font-size: 12.5px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.pty-status.exited { color: var(--orange); }
+.pty-head-tools { display: flex; gap: 8px; flex: none; }
+.pty-headbtn {
+  border: 1px solid #3a3a3c; border-radius: 999px; background: none;
+  color: #d8d8dc; font-size: 13.5px; font-weight: 600; padding: 6px 13px;
+}
+.pty-headbtn:active { opacity: 0.6; }
+#pty-share { color: var(--blue); border-color: var(--blue-border); }
+#pty-share[hidden] { display: none; }
+.pty-screen {
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: auto;
+  padding: 10px 12px 14px; color: #e6e6ea;
+  font-size: calc(14px * var(--fs)); line-height: 1.5;
+  white-space: pre; -webkit-user-select: text; user-select: text;
+  background: #0b0b0d;
+}
+/* Each PTY line is its own span so the model rebuilds only what changed. */
+.pty-screen .ptol { display: block; min-height: 1.5em; }
+.pty-capture {
+  /* Off-screen but focusable: it summons the mobile keyboard and captures
+     keystrokes; typed text is forwarded to the PTY, never shown here (the PTY
+     echoes what it wants — so password prompts mask for free). */
+  position: absolute; left: -9999px; width: 1px; height: 1px;
+  opacity: 0; border: 0; padding: 0;
+}
+.pty-keys {
+  display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto;
+  border-top: 1px solid #26262b; background: rgba(20, 20, 24, 0.95);
+}
+.pty-keys button {
+  flex: none; border: 1px solid #3a3a3c; border-radius: 8px;
+  background: #1c1c20; color: #d8d8dc; font-size: 14px; font-weight: 600;
+  padding: 8px 13px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.pty-keys button:active { background: #2c2c30; }
+.pty-key-kb { margin-left: auto; }

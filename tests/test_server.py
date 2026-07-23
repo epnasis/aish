@@ -3411,3 +3411,131 @@ class TestToolApproval:
             recv_until(ws, "done")
             assert not marker.exists()
             assert tool_results(chat)[-1]["content"] == DENIED_RESULT
+
+
+class TestInteractivePty:
+    """Issue #148: an interactive pseudo-terminal over the WebSocket. The USER
+    drives it (ungated, like `!`); the model has no path to its input. I/O is
+    private to the terminal unless explicitly shared to context."""
+
+    _CHILD = (
+        "import sys\n"
+        "for line in sys.stdin:\n"
+        "    sys.stdout.write('GOT:' + line)\n"
+        "    sys.stdout.flush()\n"
+    )
+
+    def _cmd(self):
+        import sys as _sys
+
+        return f"{shlex.quote(_sys.executable)} -c {shlex.quote(self._CHILD)}"
+
+    def test_pty_start_in_and_out_over_the_socket(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "pty_start", "command": self._cmd()})
+            started = recv_until(ws, "pty_started")
+            assert started["command"] == self._cmd()
+            # Bytes IN over the socket → the child → bytes OUT over the socket.
+            ws.send_json({"type": "pty_in", "data": "hello\n"})
+            seen = ""
+            for _ in range(200):
+                event = ws.receive_json()
+                if event["type"] == "pty_out":
+                    seen += event["data"]
+                    if "GOT:hello" in seen:
+                        break
+            assert "GOT:hello" in seen
+            # EOF ends the child; the exit is reported over the socket.
+            ws.send_json({"type": "pty_in", "data": "\x04"})
+            assert recv_until(ws, "pty_exit")["code"] == 0
+        # The session forgot the PTY once it exited (no dangling handle).
+        assert client.app.state.server.active.pty is None
+
+    def test_pty_kill_terminates_and_reports_exit(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "pty_start", "command": "cat"})  # blocks on stdin
+            recv_until(ws, "pty_started")
+            server = client.app.state.server
+            assert server.active.pty is not None
+            pid = server.active.pty.pid
+            ws.send_json({"type": "pty_kill"})
+            recv_until(ws, "pty_exit")
+            assert server.active.pty is None
+            # The child is really gone — reaped, not a zombie.
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    def test_pty_killed_on_disconnect(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "pty_start", "command": "cat"})
+            recv_until(ws, "pty_started")
+            server = client.app.state.server
+            pid = server.active.pty.pid
+        # Socket closed (context exit) → last viewer left → PTY killed + reaped.
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert server.active.pty is None
+
+    def test_pty_output_is_never_recorded_in_the_transcript(self, app_env):
+        # Interactive I/O is private: it must not enter the transcript (and thus
+        # never a cold replay or the model's context) unless explicitly shared.
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "pty_start", "command": self._cmd()})
+            recv_until(ws, "pty_started")
+            ws.send_json({"type": "pty_in", "data": "secret\n"})
+            for _ in range(100):
+                if ws.receive_json().get("type") == "pty_out":
+                    break
+            server = client.app.state.server
+            transcript = server.active.bridge.transcript
+            assert not any(e["type"].startswith("pty_") for e in transcript)
+            assert not any("secret" in json.dumps(e) for e in transcript)
+            ws.send_json({"type": "pty_kill"})
+
+    def test_share_injects_selection_into_model_context(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "pty_start", "command": "cat"})
+            recv_until(ws, "pty_started")
+            ws.send_json({"type": "pty_share", "text": "device code ABC-123"})
+            recv_until(ws, "pty_shared")
+            ws.send_json({"type": "pty_kill"})
+        # The shared text is now a user turn the model will see — via the same
+        # user-message path as `!`, not the PTY stream.
+        messages = client.app.state.server.active.agent.messages
+        assert any("device code ABC-123" in str(m.get("content", "")) for m in messages)
+
+    def test_model_run_command_never_touches_the_pty(self, app_env, tmp_path):
+        # A normal model task that runs a command must not create or feed a PTY:
+        # the model has no pty path. session.pty stays None throughout.
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+                model_says("done"),
+            ],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "make a file"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+            assert client.app.state.server.active.pty is None

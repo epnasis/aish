@@ -193,6 +193,10 @@
     <span class="action-ico" style="background:var(--green-glow)"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="var(--green)" stroke-width="1.7"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5" fill="none" stroke="var(--green)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
     <span class="action-text"><span class="action-title">Terminal mode</span><span class="action-sub">Run shell commands — !</span></span>
   </button>
+  <button class="action-item" data-act="interactive">
+    <span class="action-ico" style="background:var(--blue-glow)"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="var(--blue)" stroke-width="1.7"/><path d="M7 9l3 3-3 3" fill="none" stroke="var(--blue)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><circle cx="15.5" cy="15" r="1.1" fill="var(--blue)"/></svg></span>
+    <span class="action-text"><span class="action-title">Interactive shell</span><span class="action-sub">A real TTY — gcloud, ssh, sudo prompts</span></span>
+  </button>
 </div>
 
 <form id="composer">
@@ -218,6 +222,38 @@
 </form>
 
 <div id="backdrop" hidden></div>
+
+<!-- interactive PTY overlay (#148): a real pseudo-terminal for programs that
+     read stdin. Keystrokes go to the PTY and are NOT echoed locally — the PTY
+     echoes, so password prompts (echo off) mask for free. Output renders via a
+     small line/SGR parser; no xterm.js, no full-screen TUI emulation. -->
+<div id="pty-overlay" hidden>
+  <div class="pty-head">
+    <div class="pty-title-wrap">
+      <span class="pty-title">Interactive</span>
+      <span id="pty-status" class="pty-status"></span>
+    </div>
+    <div class="pty-head-tools">
+      <button id="pty-share" class="pty-headbtn" type="button" title="Share the selected output to the chat">Share ›</button>
+      <button id="pty-close" class="pty-headbtn" type="button" aria-label="close terminal">Close ✕</button>
+    </div>
+  </div>
+  <!-- tabindex so the screen can hold selection for "share"; the real key
+       capture happens on the hidden input below, which summons the keyboard. -->
+  <div id="pty-screen" class="pty-screen mono" tabindex="0" aria-live="polite"></div>
+  <input id="pty-capture" class="pty-capture" autocomplete="off"
+         autocapitalize="none" autocorrect="off" spellcheck="false"
+         inputmode="text" aria-label="terminal input">
+  <div class="pty-keys" role="group" aria-label="control keys">
+    <button type="button" data-key="tab">tab</button>
+    <button type="button" data-key="esc">esc</button>
+    <button type="button" data-key="ctrl-c">^C</button>
+    <button type="button" data-key="ctrl-d">^D</button>
+    <button type="button" data-key="up">↑</button>
+    <button type="button" data-key="down">↓</button>
+    <button type="button" data-key="kb" class="pty-key-kb">keyboard</button>
+  </div>
+</div>
 
 <!-- sessions drawer -->
 <div id="sessions-sheet" class="screen" hidden>
