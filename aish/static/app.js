@@ -3393,13 +3393,18 @@ function buildToolCard(card, event) {
   head.append(ico, htext);
   card.appendChild(head);
 
-  const argsBox = document.createElement("pre");
-  argsBox.className = "tool-args mono";
+  const argsWrap = document.createElement("div");
+  argsWrap.className = "tool-args";
   const entries = Object.entries(event.args || {});
-  argsBox.textContent = entries.length
-    ? entries.map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join("\n")
-    : "(no arguments)";
-  card.appendChild(argsBox);
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "tool-arg-empty";
+    empty.textContent = "(no arguments)";
+    argsWrap.appendChild(empty);
+  } else {
+    for (const [k, v] of entries) argsWrap.appendChild(toolArgRow(k, v));
+  }
+  card.appendChild(argsWrap);
 
   const feedback = feedbackField();
   card.appendChild(feedback);
@@ -3418,6 +3423,31 @@ function buildToolCard(card, event) {
   denyBtn.onclick = () => answerCard(event.id, "deny", feedbackExtra(feedback));
   actionsRow.append(approveBtn, denyBtn);
   card.appendChild(actionsRow);
+}
+
+// One tool argument as a labeled field. A string is shown RAW (real line breaks,
+// no JSON escaping) so an email/issue body reads like text, not one \n-littered
+// line; a multi-line value drops to a block layout (label above, value below).
+// Non-strings render as pretty JSON.
+function toolArgRow(key, value) {
+  const row = document.createElement("div");
+  row.className = "tool-arg";
+  const keyEl = document.createElement("span");
+  keyEl.className = "tool-arg-key";
+  keyEl.textContent = key;
+  const valEl = document.createElement("span");
+  valEl.className = "tool-arg-val mono";
+  valEl.textContent = prettyArgValue(value);
+  if (typeof value === "string" && value.includes("\n")) row.classList.add("block");
+  row.append(keyEl, valEl);
+  return row;
+}
+
+function prettyArgValue(v) {
+  if (typeof v === "string") return v;
+  if (v === null) return "null";
+  if (typeof v === "object") return JSON.stringify(v, null, 2);
+  return String(v);
 }
 
 function wrenchIcon() {
