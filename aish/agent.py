@@ -81,6 +81,17 @@ Rules:
    types. If saved knowledge should have applied to a task but was not
    preloaded, that is a defect: repair that entry's description/keywords
    (an improve-recall skill, if present, has the checklist).
+2c. TOOLS vs SKILLS: skills TEACH, tools DO. A plugin tool is a validated
+   TOOL.md (that you or the user added under .aish/tools/ or
+   ~/.config/aish/tools/) that you call with structured arguments instead of
+   composing a shell command — its JSON args reach the wrapper on stdin, so
+   free-text like an email or issue body cannot be mangled by shell quoting.
+   PREFER an existing plugin tool over re-composing the raw command it wraps.
+   Use create_tool to capture an operation as a tool ONLY when ALL THREE hold:
+   it is invoked FREQUENTLY, its arguments are FREE-TEXT/shell-fragile, AND
+   reliability matters (mutating or user-facing output); otherwise write a
+   skill. create_tool validates the manifest and shows both files (manifest
+   first, then wrapper) for your user to approve.
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. A COMMENT
    the user attaches to a decision changes what you do next, and approve vs

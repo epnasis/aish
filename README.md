@@ -101,6 +101,8 @@ in/out of it by restarting aish rather than `/model`.
 | `forget_memory` | delete one stale/duplicate memory entry by slug (consolidate = remember the canonical fact, then forget the redundant slugs); confined to the memory store | auto (echoed) |
 | `read_skill` | load a playbook (see Memory & skills) | auto |
 | `recall` | ranked search over everything it knows — skills, memory, and past sessions (episodic fallback) — snippets first, full entry by name; deterministic ranking, hard output caps | auto (echoed); current session excluded |
+| `create_tool` | author a reusable **plugin tool** (see Plugin tools) — a validated `TOOL.md` + wrapper for a repeated, shell-fragile operation | **colored diff + y/N** on each file; refuses to write an invalid manifest |
+| _plugin tools_ | any `TOOL.md` you or `create_tool` add under `~/.config/aish/tools/` or `./.aish/tools/` — called exactly like a built-in tool | read-only auto; **mutating ones prompt** with the command card (name + args) |
 
 Independent lookups batched in one model turn (several searches, a few page
 reads) run **in parallel**. Fetched web pages are wrapped in an
@@ -243,7 +245,10 @@ prompt each task (rescanned live, so new entries appear immediately — no
 restart), full bodies load on demand, and the long tail is reachable through
 the ranked `recall` search — so the library can grow to thousands of entries
 without bloating the context.
-- **skills** — playbooks for anything worth repeating: markdown files in
+- **skills** — playbooks for anything worth repeating: a markdown file
+  `<name>.md`, or a folder `<name>/SKILL.md` bundling `scripts/`,
+  `references/`, `assets/` ([agentskills.io](https://agentskills.io)-compatible,
+  so you can drop in skills built for other agents), in
   `~/.config/aish/skills/` (global) or `./.aish/skills/` (project, wins on
   name clash) with `name:`/`description:`/`keywords:` frontmatter. The
   description states the trigger ("Use when the user asks to …") — that is
@@ -262,6 +267,20 @@ without bloating the context.
   should have matched, telling aish so makes it repair that entry's
   description/keywords so retrieval finds it next time. Ask aish to write
   a skill — it knows the format.
+- **plugin tools** — where a skill *teaches*, a tool *does*: a droppable
+  `<name>/TOOL.md` under `~/.config/aish/tools/` (global) or `./.aish/tools/`
+  (project) that the model calls exactly like a built-in tool, chosen from a
+  schema instead of improvising a shell command. Reserve one for an operation
+  that is **frequent**, has **free-text/shell-fragile arguments** (an email or
+  issue body full of quotes, backticks, newlines), and where **reliability
+  matters** — everything else stays a skill. The manifest declares the input
+  schema + `mutating:` flag + an `exec` wrapper; the model's validated JSON
+  arguments reach the wrapper on **stdin (no shell)**, so nothing gets mangled
+  by quoting, and raw output + exit code come back. Read-only tools auto-run;
+  mutating ones prompt with the same approval card as a command. aish can also
+  build one for you on the fly with **`create_tool`** — it drafts the manifest
+  + wrapper, validates them (refusing to write anything that fails the linter),
+  and shows both files for approval, manifest first.
 - **memory** — one fact per file in `~/.config/aish/memory/` (or
   `./.aish/memory/`), same format; the description line IS the fact. The 15
   newest show in context, the rest are searchable. Saved via `remember`.
