@@ -811,6 +811,11 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 /* beat `.msg.md pre code { white-space: pre }` (equal specificity) by ordering */
 .copywrap.wrap-on pre,
 .copywrap.wrap-on pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* When wrapped, lines reflow to the container's right edge and would slide under
+   the copy (right:6, 28w) + wrap (right:40, 28w) chips; reserve a gutter clearing
+   both so wrapped code stays legible (#128). Scroll mode is untouched — there the
+   overlay floats over horizontally-scrolling content by design. */
+.copywrap.wrap-on pre { padding-right: 72px; }
 
 /* ---- footer row under answers: copy + read-aloud ---- */
 .msg-tools {
@@ -1125,6 +1130,10 @@ body.wrap .msg.echo, body.wrap .msg.stream {
   padding-left: 22px; /* 10px base + 12px hang */
   text-indent: -12px;
 }
+/* A wrapped stream reflows to the right edge under its copy chip (right:0, 24w);
+   reserve a gutter so wrapped console output clears it (#128). Only inside
+   .stream-wrap, where the chip exists — bare .msg.stream has no overlay. */
+body.wrap .stream-wrap > .msg.stream { padding-right: 30px; }
 .dl.del .dl-tx { color: var(--red); }
 .dl.ctx .dl-tx { color: var(--dim); }
 
