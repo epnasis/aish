@@ -14,6 +14,12 @@ Skills live in ./.aish/skills/ (project, wins on name clash) or
 .aish/memory/ and ~/.config/aish/memory/. Legacy one-line lessons in
 lessons.md are exposed as synthetic memory entries until migrated.
 
+A skill is either a flat `<name>.md` or an agentskills.io folder
+`<name>/SKILL.md` that may bundle `scripts/`, `references/`, `assets/`
+beside the instructions (name defaults to the directory; frontmatter still
+wins). read_skill names the bundled files so the model can read or run them.
+Memory stays one flat file per fact — only skills take the folder form.
+
 Progressive disclosure keeps the prompt small at any library size: a capped
 index of name+description lines goes into the system prompt every task, full
 bodies load on demand (read_skill), and the long tail is reachable through
@@ -125,10 +131,12 @@ def _build_words(*texts: str) -> frozenset:
 
 
 def _parse(path: Path, kind: str = "skill") -> Entry:
-    """Entry from a markdown file — name defaults to the filename,
-    description to the first non-empty body line."""
+    """Entry from a markdown file — name defaults to the filename (or, for a
+    folder skill's SKILL.md, its directory name), description to the first
+    non-empty body line."""
     text = path.read_text(encoding="utf-8")
-    name, description, keywords, body = path.stem, "", [], text
+    default_name = path.parent.name if path.name == "SKILL.md" else path.stem
+    name, description, keywords, body = default_name, "", [], text
     if text.startswith("---"):
         parts = text.split("---", 2)
         if len(parts) == 3:
@@ -175,6 +183,15 @@ def _dir_entries(directory: Path, kind: str) -> list[Entry]:
         files = sorted(directory.glob("*.md"))
     except OSError:
         return entries
+    # Folder skills (agentskills.io layout): <directory>/<name>/SKILL.md,
+    # bundling scripts/ references/ assets/ beside the instructions. Only
+    # skills use the folder form; memory stays one fact per flat file.
+    if kind == "skill":
+        try:
+            subdirs = sorted(p for p in directory.iterdir() if p.is_dir())
+        except OSError:
+            subdirs = []
+        files += [sub / "SKILL.md" for sub in subdirs if (sub / "SKILL.md").is_file()]
     for path in files:
         try:
             mtime = path.stat().st_mtime
@@ -320,9 +337,33 @@ def load_skill(name: str, dirs: list[Path]) -> str:
         return f"ERROR: invalid skill name {name!r}"
     for entry in _merged(dirs, "skill"):
         if entry.name == name:
-            return f"{_block_header(entry)}\n{entry.body}"
+            return f"{_block_header(entry)}\n{entry.body}{_bundled_note(entry)}"
     available = ", ".join(n for n, _ in list_skills(dirs)) or "none"
     return f"ERROR: no skill named {name!r}. Available skills: {available}"
+
+
+def _bundled_note(entry: Entry) -> str:
+    """For a folder skill, name its bundled files so the model can reach them
+    (read_file for docs, run_command for scripts). Flat skills have none."""
+    if not (entry.path and entry.path.name == "SKILL.md"):
+        return ""
+    base = entry.path.parent
+    try:
+        bundled = sorted(
+            str(p.relative_to(base))
+            for p in base.rglob("*")
+            if p.is_file() and p.name != "SKILL.md"
+        )
+    except OSError:
+        return ""
+    if not bundled:
+        return ""
+    listing = ", ".join(bundled[:20])
+    more = f" (+{len(bundled) - 20} more)" if len(bundled) > 20 else ""
+    return (
+        f"\n\nBundled files under {base}/: {listing}{more}\n"
+        "Read one with read_file <path>; run a bundled script via run_command."
+    )
 
 
 def score_entries(entries: list[Entry], query: str) -> list[tuple[int, Entry]]:

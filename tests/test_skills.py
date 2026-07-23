@@ -96,6 +96,62 @@ class TestListAndLoad:
         assert "Available skills: none" in load_skill("x", [tmp_path / "nope"])
 
 
+class TestFolderSkills:
+    """agentskills.io folder layout: <skills_dir>/<name>/SKILL.md + bundles."""
+
+    def test_parse_skill_md_name_from_parent_dir(self, tmp_path):
+        path = write_skill(tmp_path / "my-tool", "SKILL.md", "# my-tool\ndesc")
+        assert _parse(path).name == "my-tool"
+
+    def test_folder_skill_discovered(self, tmp_path):
+        write_skill(tmp_path / "pdf-processing", "SKILL.md",
+                    "---\nname: pdf-processing\ndescription: extract PDFs\n---\nbody")
+        skills = dict(list_skills([tmp_path]))
+        assert skills.get("pdf-processing") == "extract PDFs"
+
+    def test_folder_frontmatter_name_overrides_dir(self, tmp_path):
+        write_skill(tmp_path / "any-dir", "SKILL.md",
+                    "---\nname: renamed\ndescription: d\n---\nbody")
+        assert "renamed" in dict(list_skills([tmp_path]))
+
+    def test_folder_and_flat_coexist(self, tmp_path):
+        write_skill(tmp_path, "flat.md", "# flat\nx")
+        write_skill(tmp_path / "foldery", "SKILL.md", "# foldery\ny")
+        names = dict(list_skills([tmp_path]))
+        assert "flat" in names and "foldery" in names
+
+    def test_load_folder_skill_lists_bundled_files(self, tmp_path):
+        write_skill(tmp_path / "extractor", "SKILL.md",
+                    "---\nname: extractor\ndescription: d\n---\nRun scripts/go.py")
+        write_skill(tmp_path / "extractor" / "scripts", "go.py", "print('hi')")
+        write_skill(tmp_path / "extractor" / "references", "REFERENCE.md", "docs")
+        out = load_skill("extractor", [tmp_path])
+        assert "Bundled files" in out
+        assert "scripts/go.py" in out
+        assert "references/REFERENCE.md" in out
+
+    def test_flat_skill_has_no_bundled_note(self, tmp_path):
+        write_skill(tmp_path, "solo.md", "---\nname: solo\ndescription: d\n---\nbody")
+        assert "Bundled files" not in load_skill("solo", [tmp_path])
+
+    def test_folder_skill_in_knowledge_index(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "global")
+        write_skill(tmp_path / ".aish" / "skills" / "deployer", "SKILL.md",
+                    "---\nname: deployer\ndescription: deploy the app\n---\nx")
+        assert "- deployer: deploy the app" in knowledge_index(str(tmp_path))
+
+    def test_folder_without_skill_md_ignored(self, tmp_path):
+        (tmp_path / "notaskill").mkdir(parents=True)
+        (tmp_path / "notaskill" / "readme.txt").write_text("x")
+        assert list_skills([tmp_path]) == []
+
+    def test_memory_dir_does_not_scan_subfolders(self, tmp_path):
+        # memory stays flat — a subdir with SKILL.md must not become a memory
+        write_skill(tmp_path / "memory" / "sub", "SKILL.md", "# sub\nx")
+        from aish.skills import _dir_entries
+        assert _dir_entries(tmp_path / "memory", "memory") == []
+
+
 class TestKnowledgeIndex:
     def test_empty_when_no_skills(self, tmp_path, monkeypatch):
         monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "none")
