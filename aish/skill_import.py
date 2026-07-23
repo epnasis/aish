@@ -146,3 +146,60 @@ def stage(
             continue
         files.append((rel, text, os.access(p, os.X_OK)))
     return name, entry.description, files, skipped, tmp
+
+
+QUARANTINE_ROOT = Path.home() / ".local" / "state" / "aish" / "skill-imports"
+
+
+def stage_to_disk(
+    repo: str, path: str = "", root: Path | None = None
+) -> tuple[str, Path, list[str]]:
+    """Stage an import to a quarantine dir for later, external review (the CLI
+    'B' path): the validated files are written under root/<name>/ so the user
+    can inspect them with their own editor, then `aish skill approve <name>`
+    installs. Returns (name, quarantine_dir, risk_flags)."""
+    root = root or QUARANTINE_ROOT
+    name, _description, files, _skipped, tmp = stage(repo, path)
+    try:
+        dest = root / name
+        shutil.rmtree(dest, ignore_errors=True)
+        for rel, text, is_exec in files:
+            target = dest / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+            if is_exec:
+                target.chmod(0o755)
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return name, dest, safety_scan(files)
+
+
+def pending(root: Path | None = None) -> list[str]:
+    root = root or QUARANTINE_ROOT
+    try:
+        return sorted(p.name for p in root.iterdir() if (p / "SKILL.md").is_file())
+    except OSError:
+        return []
+
+
+def install(name: str, dest_skills_dir: Path, root: Path | None = None) -> Path:
+    """Move a quarantined skill into the skills dir. Returns the install path."""
+    root = root or QUARANTINE_ROOT
+    src = root / name
+    if not (src / "SKILL.md").is_file():
+        raise SkillImportError(f"no staged skill named {name!r} (see `aish skill list`)")
+    dest = dest_skills_dir / name
+    shutil.rmtree(dest, ignore_errors=True)
+    shutil.copytree(src, dest)
+    shutil.rmtree(src, ignore_errors=True)
+    return dest
+
+
+def discard(name: str, root: Path | None = None) -> bool:
+    root = root or QUARANTINE_ROOT
+    src = root / name
+    if not src.is_dir():
+        return False
+    shutil.rmtree(src, ignore_errors=True)
+    return True

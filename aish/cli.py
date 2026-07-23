@@ -1341,9 +1341,58 @@ def _secret_cli(args: list[str]) -> int:
     return 2
 
 
+def _skill_cli(args: list[str]) -> int:
+    """`aish skill <import|approve|list|discard>` — the review-in-your-editor
+    path for skill imports (#139). `import` STAGES to a quarantine dir (nothing
+    installed); you review the files with your own tools, then `approve` installs.
+    For in-session import with an inline review card, just ask aish to import."""
+    from . import skill_import, skills
+
+    usage = "usage: aish skill <import REPO [PATH] | approve NAME | list | discard NAME>"
+    if not args:
+        print(usage)
+        return 2
+    cmd, rest = args[0], args[1:]
+    if cmd == "list":
+        staged = skill_import.pending()
+        print("\n".join(staged) if staged else "(no skills staged for review)")
+        return 0
+    if cmd == "import" and rest:
+        try:
+            sub = rest[1] if len(rest) > 1 else ""
+            name, dest, flags = skill_import.stage_to_disk(rest[0], sub)
+        except skill_import.SkillImportError as exc:
+            print(f"error: {exc}")
+            return 1
+        print(f"staged {BOLD}{name}{RESET} for review at:\n  {dest}")
+        if flags:
+            print(f"{RED}  ⚠ review closely:{RESET}")
+            for flag in flags:
+                print(f"{RED}    • {flag}{RESET}")
+        print(f"\nreview the files, then install with:  {BOLD}aish skill approve {name}{RESET}")
+        print(f"or drop it with:                      aish skill discard {name}")
+        return 0
+    if cmd == "approve" and rest:
+        try:
+            dest = skill_import.install(rest[0], skills.GLOBAL_SKILLS_DIR)
+        except skill_import.SkillImportError as exc:
+            print(f"error: {exc}")
+            return 1
+        print(f"installed {rest[0]} → {dest}")
+        return 0
+    if cmd == "discard" and rest:
+        ok = skill_import.discard(rest[0])
+        print(f"discarded {rest[0]}" if ok else f"{rest[0]}: not staged")
+        return 0 if ok else 1
+    print(usage)
+    return 2
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "secret":
         return _secret_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "skill":
+        return _skill_cli(sys.argv[2:])
 
     config_path = Path(
         os.environ.get("AISH_CONFIG", str(Path.home() / ".config" / "aish" / "config.toml"))
