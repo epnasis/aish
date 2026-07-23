@@ -111,12 +111,12 @@ ul, ol { margin: 0 0 8pt; }
 li { margin: 0 0 3pt; }
 code { font-family: "aishMono"; font-size: 9.5pt;
        background: #f2f2f7; color: #1c1c1e; }
-/* -pdf-word-wrap: CJK breaks long unbreakable strings at any character so code
-   output / command dumps / wide table cells wrap to the page instead of running
-   off the right edge (xhtml2pdf maps it to reportlab's wordWrap='CJK'). */
-pre { font-family: "aishMono"; font-size: 9pt; background: #f2f2f7;
-      color: #1c1c1e; padding: 8pt; margin: 0 0 8pt;
-      white-space: pre-wrap; -pdf-word-wrap: CJK; }
+/* -pdf-word-wrap: CJK breaks long unbreakable strings at any character so
+   wide table cells wrap to the page instead of running off the right edge
+   (xhtml2pdf maps it to reportlab's wordWrap='CJK'). Code blocks deliberately
+   do NOT use it — see .codeblock and _reflow_code_blocks. */
+.codeblock { font-family: "aishMono"; font-size: 9pt; background: #f2f2f7;
+             color: #1c1c1e; padding: 8pt; margin: 0 0 8pt; }
 blockquote { color: #6c6c70; margin: 0 0 8pt; padding: 0 0 0 10pt;
              border-left: 2pt solid #d1d1d6; }
 table { border-collapse: collapse; margin: 0 0 8pt; }
@@ -136,6 +136,16 @@ hr { border: none; border-top: 0.5pt solid #d1d1d6; margin: 14pt 0; }
 """
 
 _MD_EXTENSIONS = ["fenced_code", "tables", "sane_lists", "nl2br"]
+
+# Widest run kept on one code line before a hard break is inserted; ~the printable
+# A4 width at the 9pt mono size, so a long token wraps instead of overflowing the
+# margin (it replaces the CJK word-wrap that _reflow_code_blocks must avoid).
+_CODE_MAX_COLS = 90
+
+# A fenced code block: <pre> wrapping an optional <code>, however markdown emits it.
+_PRE_BLOCK_RE = re.compile(
+    r"<pre\b[^>]*>(?:\s*<code\b[^>]*>)?(.*?)(?:</code>\s*)?</pre>", re.S
+)
 
 
 def safe_pdf_filename(title: str, fallback: str = "aish-export") -> str:
@@ -498,12 +508,38 @@ class _MediaEmbedder:
         return _img_tag(data, alt) or card
 
 
+def _reflow_code_blocks(html: str) -> str:
+    """Render fenced code blocks as a <div> of <br>-separated lines instead of a
+    <pre>. xhtml2pdf turns a <pre> (like any -pdf-word-wrap:CJK block) into a
+    single UNSPLITTABLE flowable, so a code block taller than the page can't be
+    paginated: reportlab fails to place it and aborts the whole PDF (issue #147).
+    Hard <br> breaks let the block split across pages; indentation is preserved
+    with &nbsp; and an over-long line is wrapped in place of the CJK word-wrap we
+    can no longer use. The code text is unescaped before wrapping and re-escaped
+    per chunk, so a break never lands inside an HTML entity."""
+
+    def replace(match: re.Match[str]) -> str:
+        code = html_lib.unescape(match.group(1)).strip("\n")
+        rows = []
+        for line in code.split("\n"):
+            body = line.lstrip(" ")
+            indent = "&nbsp;" * (len(line) - len(body))
+            chunks = [
+                body[i : i + _CODE_MAX_COLS] for i in range(0, len(body), _CODE_MAX_COLS)
+            ] or [""]
+            rows.append(indent + "<br/>".join(_escape(chunk) for chunk in chunks))
+        return '<div class="codeblock">' + "<br/>".join(rows) + "</div>"
+
+    return _PRE_BLOCK_RE.sub(replace, html)
+
+
 def _markdown_to_html_fragment(
     markdown_text: str, embedder: _MediaEmbedder | None = None
 ) -> str:
     import markdown as md
 
     html = md.markdown(_strip_web_only(markdown_text), extensions=_MD_EXTENSIONS)
+    html = _reflow_code_blocks(html)  # splittable code blocks (#147)
     if embedder is not None:
         html = embedder.process(html)
     return _wrap_emoji(html)
