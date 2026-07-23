@@ -352,9 +352,16 @@ browser clipboard API is unavailable.
 **Export to PDF**: beside each answer's copy button is an export chip that
 saves that one answer as a PDF, and the session-title menu has an "Export to
 PDF" item that saves the whole chat — final answers only, without the thinking
-or intermediate working steps. Conversion is done entirely on the server
-(markdown rendered locally, never sent to any online service) and the file
-downloads straight to your device.
+or intermediate working steps. Conversion happens on the server (markdown
+rendered locally, the text never sent to any online service) and the file
+downloads straight to your device. Pictures come along: local images are
+embedded when their path lies inside the session's trusted directories
+(anything outside is shown as a link, never read), web images are fetched and
+inlined, whitelisted Google Maps links become static-map snapshots (set
+`GOOGLE_MAPS_API_KEY`; without a key they stay links), and YouTube links
+render as a thumbnail card linking to the video. Every fetch has a short
+timeout and a size cap — offline or on failure the PDF still exports, with a
+captioned link card in place of the media.
 
 **Quick replies**: when the model asks a question with a few short likely
 answers, it can end the message with `[Label](aish-reply://answer text)`

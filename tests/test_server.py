@@ -2762,6 +2762,237 @@ class TestExportAssembly:
         assert name == "Zazolc-gesla-jazn.pdf"
 
 
+def _png_bytes(width: int = 8, height: int = 8) -> bytes:
+    """A tiny real PNG (Pillow is a hard dep of xhtml2pdf, so it is always
+    present in the test environment)."""
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (30, 90, 200)).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+class TestExportMedia:
+    """Issue #133: pictures, maps, and video thumbnails embedded into the PDF.
+    All network is faked by monkeypatching export.fetch_image — the tests
+    assert on the HTML-rewrite boundary (_MediaEmbedder) plus one end-to-end
+    PDF render per shape."""
+
+    def _process(self, markdown_text, roots=()):
+        import aish.export as export
+
+        return export._markdown_to_html_fragment(
+            markdown_text, export._MediaEmbedder(list(roots))
+        )
+
+    # ---- local images -----------------------------------------------------
+
+    def test_local_image_inside_root_is_inlined(self, tmp_path):
+        (tmp_path / "shot.png").write_bytes(_png_bytes())
+        html = self._process(f"![my shot]({tmp_path}/shot.png)", [tmp_path])
+        assert "data:image/png;base64," in html
+        assert 'alt="my shot"' in html
+
+    def test_local_image_outside_roots_is_never_read(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        secret = tmp_path / "secret.png"
+        secret.write_bytes(_png_bytes())
+        html = self._process(f"![leak]({secret})", [root])
+        assert "data:image" not in html
+        assert "aish-link-card" in html  # captioned link card instead
+        assert str(secret) in html
+
+    def test_dotdot_traversal_is_rejected(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        secret = tmp_path / "secret.png"
+        secret.write_bytes(_png_bytes())
+        html = self._process(f"![leak]({root}/../secret.png)", [root])
+        assert "data:image" not in html
+        assert "aish-link-card" in html
+
+    def test_symlink_escape_is_rejected(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        secret = tmp_path / "secret.png"
+        secret.write_bytes(_png_bytes())
+        link = root / "inside.png"
+        link.symlink_to(secret)  # inside the root, but resolves outside
+        html = self._process(f"![leak]({link})", [root])
+        assert "data:image" not in html
+        assert "aish-link-card" in html
+
+    def test_relative_path_is_not_resolved(self, tmp_path):
+        (tmp_path / "rel.png").write_bytes(_png_bytes())
+        html = self._process("![r](rel.png)", [tmp_path])
+        assert "data:image" not in html
+        assert "aish-link-card" in html
+
+    def test_non_image_local_file_becomes_card(self, tmp_path):
+        (tmp_path / "notes.png").write_text("not an image at all")
+        html = self._process(f"![n]({tmp_path}/notes.png)", [tmp_path])
+        assert "data:image" not in html
+        assert "aish-link-card" in html
+
+    # ---- remote images ----------------------------------------------------
+
+    def test_remote_image_is_fetched_and_inlined(self, monkeypatch):
+        import aish.export as export
+
+        fetched = []
+
+        def fake_fetch(url):
+            fetched.append(url)
+            return _png_bytes()
+
+        monkeypatch.setattr(export, "fetch_image", fake_fetch)
+        html = self._process("![pic](https://example.com/pic.png)")
+        assert fetched == ["https://example.com/pic.png"]
+        assert "data:image/png;base64," in html
+
+    def test_remote_image_fetch_failure_falls_back_to_card(self, monkeypatch):
+        import aish.export as export
+
+        monkeypatch.setattr(export, "fetch_image", lambda url: None)
+        html = self._process("![pic](https://example.com/gone.png)")
+        assert "data:image" not in html
+        assert "aish-link-card" in html
+        assert "https://example.com/gone.png" in html
+
+    def test_remote_fetch_budget_is_bounded(self, monkeypatch):
+        import aish.export as export
+
+        fetched = []
+
+        def fake_fetch(url):
+            fetched.append(url)
+            return _png_bytes()
+
+        monkeypatch.setattr(export, "fetch_image", fake_fetch)
+        links = "\n\n".join(
+            f"![i{n}](https://example.com/{n}.png)"
+            for n in range(export.MAX_REMOTE_FETCHES + 5)
+        )
+        self._process(links)
+        assert len(fetched) == export.MAX_REMOTE_FETCHES
+
+    # ---- YouTube thumbnails -----------------------------------------------
+
+    def test_youtube_link_becomes_thumbnail_card(self, monkeypatch):
+        import aish.export as export
+
+        fetched = []
+
+        def fake_fetch(url):
+            fetched.append(url)
+            return _png_bytes()
+
+        monkeypatch.setattr(export, "fetch_image", fake_fetch)
+        html = self._process("Watch [Demo](https://youtu.be/dQw4w9WgXcQ) now")
+        assert fetched == ["https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg"]
+        assert "data:image/png;base64," in html
+        assert "YouTube video" in html
+        assert 'href="https://youtu.be/dQw4w9WgXcQ"' in html  # card links to the video
+
+    def test_youtube_thumbnail_failure_falls_back_to_card(self, monkeypatch):
+        import aish.export as export
+
+        monkeypatch.setattr(export, "fetch_image", lambda url: None)
+        html = self._process(
+            "[Demo](https://www.youtube.com/watch?v=dQw4w9WgXcQ)"
+        )
+        assert "data:image" not in html
+        assert "aish-link-card" in html
+        assert "YouTube video" in html
+
+    def test_plain_link_is_untouched(self, monkeypatch):
+        import aish.export as export
+
+        monkeypatch.setattr(
+            export, "fetch_image", lambda url: pytest.fail("must not fetch")
+        )
+        html = self._process("[docs](https://example.com/docs)")
+        assert '<a href="https://example.com/docs">docs</a>' in html
+
+    # ---- Google Maps snapshots --------------------------------------------
+
+    def test_map_link_without_api_key_is_a_link_card(self, monkeypatch):
+        import aish.export as export
+
+        monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
+        monkeypatch.setattr(
+            export, "fetch_image", lambda url: pytest.fail("must not fetch without a key")
+        )
+        html = self._process(
+            "[Office](https://www.google.com/maps/search/?api=1&query=Central+Park)"
+        )
+        assert "aish-link-card" in html
+        assert "map" in html
+
+    def test_map_link_with_api_key_fetches_static_map(self, monkeypatch):
+        import aish.export as export
+
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "K123")
+        fetched = []
+
+        def fake_fetch(url):
+            fetched.append(url)
+            return _png_bytes()
+
+        monkeypatch.setattr(export, "fetch_image", fake_fetch)
+        html = self._process(
+            "[Office](https://www.google.com/maps/search/?api=1&query=Central+Park)"
+        )
+        assert len(fetched) == 1
+        assert fetched[0].startswith("https://maps.googleapis.com/maps/api/staticmap?")
+        assert "markers=Central+Park" in fetched[0]
+        assert "key=K123" in fetched[0]
+        assert "data:image/png;base64," in html
+
+    def test_directions_link_maps_both_endpoints(self, monkeypatch):
+        import aish.export as export
+
+        monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "K123")
+        fetched = []
+
+        def fake_fetch(url):
+            fetched.append(url)
+            return _png_bytes()
+
+        monkeypatch.setattr(export, "fetch_image", fake_fetch)
+        self._process("[Route](https://maps.google.com/maps?saddr=Kraków&daddr=Warszawa)")
+        assert len(fetched) == 1
+        assert "label%3AA%7CKrak" in fetched[0] or "label:A" in fetched[0]
+
+    # ---- end to end -------------------------------------------------------
+
+    def test_render_answer_pdf_with_local_image(self, tmp_path):
+        from aish.export import render_answer_pdf
+
+        (tmp_path / "shot.png").write_bytes(_png_bytes(600, 200))
+        markdown = f"# Report\n\n![shot]({tmp_path}/shot.png)\n"
+        with_image = render_answer_pdf(markdown, "t", [tmp_path])
+        without_scope = render_answer_pdf(markdown, "t", [])
+        assert with_image.startswith(b"%PDF")
+        assert without_scope.startswith(b"%PDF")
+        assert len(with_image) > len(without_scope)  # the image bytes made it in
+
+    def test_export_answer_endpoint_inlines_session_root_image(self, app_env):
+        cwd = Path(app_env["cwd"])
+        (cwd / "shot.png").write_bytes(_png_bytes())
+        client, _ = make_client(app_env, [])
+        with client:
+            response = client.post(
+                "/export/answer?title=pic",
+                content=f"![shot]({cwd}/shot.png)".encode(),
+            )
+            assert response.status_code == 200
+            assert response.content.startswith(b"%PDF")
+
+
 class TestExportEndpoints:
     def test_export_answer_returns_pdf_attachment(self, app_env):
         client, _ = make_client(app_env, [])

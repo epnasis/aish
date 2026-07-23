@@ -642,9 +642,12 @@ switch model, change directory, line wrap, export the chat to PDF, delete \
 this chat, workspace & jobs); the compose pencil (top right) starts a new \
 chat. Every \
 finished answer has a row of chips beneath it — copy, export that one answer \
-to PDF, and (where available) read-aloud. Both PDF exports render markdown to \
-a file entirely locally (no external service) and download it; the whole-chat \
-export includes only your final answers, not thinking or intermediate steps. A \
+to PDF, and (where available) read-aloud. Both PDF exports render markdown \
+locally and download the file; the whole-chat export includes only your final \
+answers, not thinking or intermediate steps. Exported PDFs embed pictures: \
+local image paths inside the session's directories, web images, Google Maps \
+snapshots (needs GOOGLE_MAPS_API_KEY set), and YouTube thumbnails are inlined; \
+anything unavailable becomes a captioned link card. A \
 context bar under the title shows the working directory \
 (tap to open a folder picker) and the model (tap to switch). In the composer, \
 the ＋ button opens attach file / reference a path (@) / slash command (/) / \
@@ -2023,11 +2026,24 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             },
         )
 
+    def _image_roots(self) -> list[Path]:
+        """The trusted directories the exporter may inline local images from:
+        every open session's roots (which already include the uploads dir) plus
+        their scratch workspaces — the same union-of-roots boundary /file
+        serves under. Local `![](path)` images outside this set render as link
+        cards, never read (issue #133)."""
+        roots = [self.uploads_dir.resolve()]
+        for session in self.sessions.values():
+            roots.extend(Path(r).resolve() for r in session.agent.roots)
+            roots.append(Path(session.agent.scratch_dir).resolve())
+        return roots
+
     async def handle_export_answer(self, request) -> Response | JSONResponse:
         """POST /export/answer?title=<title>, raw markdown body — renders one
-        answer to a PDF the browser downloads. Conversion is fully local (see
-        export.py); the markdown is what the user is already looking at, so it
-        never leaves the machine."""
+        answer to a PDF the browser downloads. Conversion is local (see
+        export.py); embedded media (remote images, map snapshots, video
+        thumbnails) may be fetched at export time, each bounded by a timeout
+        with link-card fallback."""
         if self.token and request.query_params.get("token") != self.token:
             return JSONResponse({"error": "bad token"}, status_code=403)
         raw = await request.body()
@@ -2037,9 +2053,10 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return JSONResponse({"error": "answer too large to export"}, status_code=413)
         markdown_text = raw.decode("utf-8", errors="replace")
         title = request.query_params.get("title", "").strip() or "aish answer"
+        image_roots = self._image_roots()
 
         def build() -> bytes:
-            return export.render_answer_pdf(markdown_text, title)
+            return export.render_answer_pdf(markdown_text, title, image_roots)
 
         try:
             data = await asyncio.to_thread(build)
@@ -2050,7 +2067,8 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
     async def handle_export_session(self, request) -> Response | JSONResponse:
         """GET /export/session?session=<name> — renders a session's FINAL
         answers (thinking/tool steps excluded) to a downloadable PDF, sourced
-        from the persisted JSONL log. Conversion is fully local."""
+        from the persisted JSONL log. Embedded media follows the same rules as
+        the answer export (see handle_export_answer)."""
         if self.token and request.query_params.get("token") != self.token:
             return JSONResponse({"error": "bad token"}, status_code=403)
         name = request.query_params.get("session", "").strip()
@@ -2058,11 +2076,12 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         path = self.state_dir / name
         if not safe or ".." in name or not path.is_file():
             return JSONResponse({"error": f"no such session: {name}"}, status_code=404)
+        image_roots = self._image_roots()
 
         def build() -> tuple[bytes, str]:
             messages, _, custom_title = SessionLog._parse(path)
             title = custom_title or SessionLog._derive_title(messages) or "aish session"
-            return export.render_session_pdf(messages, title), title
+            return export.render_session_pdf(messages, title, image_roots), title
 
         try:
             data, title = await asyncio.to_thread(build)
