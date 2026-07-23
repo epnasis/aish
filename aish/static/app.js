@@ -73,6 +73,12 @@ const token = localStorage.getItem("aish-token");
 let ws = null;
 let backoff = 1000;
 let reconnectTimer = null;
+// A transient drop usually reconnects in well under a second, so we don't flash
+// the red dot + "reconnecting" bar the instant the socket closes — we arm a
+// short grace timer and only surface the warning if the outage outlives it. A
+// successful onopen clears it, so a quick blip is never shown to the user (#129).
+let connWarnTimer = null;
+const CONN_WARN_DELAY = 2000;
 
 function connect() {
   clearTimeout(reconnectTimer);
@@ -88,6 +94,8 @@ function connect() {
   ws = new WebSocket(`${proto}//${location.host}${BASE}ws${query}`);
   ws.onopen = () => {
     backoff = 1000;
+    clearTimeout(connWarnTimer); // reconnected within the grace window — no warning
+    connWarnTimer = null;
     $("connbar").hidden = true;
     connOk = true;
     updateDot();
@@ -95,21 +103,33 @@ function connect() {
   };
   ws.onmessage = (raw) => handle(JSON.parse(raw.data));
   ws.onclose = (event) => {
-    connOk = false; // socket down — dot goes red until we reconnect
-    updateDot();
     if (event.code === 4000) {
+      connOk = false;
+      updateDot();
       showToast("another device connected — this tab is detached");
       return; // deliberate replacement: do not fight over the session
     }
     if (event.code === 4403) {
       // In-app entry: iOS home-screen apps launch without query params and
       // have storage isolated from Safari, so the URL trick can't help there.
+      connOk = false;
+      updateDot();
       if (token) showToast("that token was rejected — check for typos");
       $("token-gate").hidden = false;
       $("token-input").focus();
       return;
     }
-    $("connbar").hidden = false;
+    // Transient drop: defer the red dot + "reconnecting" bar past a grace window
+    // so a sub-second blip stays invisible (#129). Arm once — don't reset it on
+    // each failed retry, or a sustained outage would never surface.
+    if (connWarnTimer === null && $("connbar").hidden) {
+      connWarnTimer = setTimeout(() => {
+        connWarnTimer = null;
+        connOk = false;
+        updateDot();
+        $("connbar").hidden = false;
+      }, CONN_WARN_DELAY);
+    }
     reconnectTimer = setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 10000);
   };
