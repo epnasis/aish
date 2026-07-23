@@ -693,6 +693,7 @@ class Agent:
         check_pending_messages: Callable[[], list[str]] | None = None,
         aliases: Mapping[str, str] | None = None,
         approve_tool: Callable[[str, dict], Any] | None = None,
+        approve_import: Callable[..., Any] | None = None,
     ):
         self.model = model
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
@@ -701,6 +702,7 @@ class Agent:
         self.approve_write = approve_write
         self.approve_read = approve_read
         self.approve_tool = approve_tool
+        self.approve_import = approve_import
         self.echo = echo
         self.stream = stream
         self.chat = client_chat
@@ -2083,17 +2085,17 @@ class Agent:
         return None
 
     def _import_skill(self, args: dict) -> str:
-        """Import a skill (#139). Untrusted content, so the safety is ENFORCED
-        here, not left to the model: every fetched file is installed through the
-        write-diff gate so the user reviews it before it lands. Only a shallow
-        read-only clone happens — the skill's code is never executed on import."""
+        """Import a skill (#139). Untrusted content — the whole skill is shown in
+        ONE consolidated review (every file's contents, syntax-highlighted, plus
+        deterministic risk flags), and installs only on a single approval. Only a
+        shallow read-only clone happens; the code is never executed on import."""
         repo = str(args.get("repo", "")).strip()
         if not repo:
             return "ERROR: repo (a git URL or local path) is required."
-        if self.approve_write is None:
-            return "ERROR: no write approver available; cannot import a skill."
+        if self.approve_import is None:
+            return "ERROR: no import reviewer available; cannot import a skill."
         try:
-            name, imported, skipped, tmp = skill_import.stage(
+            name, description, imported, skipped, tmp = skill_import.stage(
                 repo, str(args.get("path", "")).strip()
             )
         except skill_import.SkillImportError as exc:
@@ -2105,15 +2107,39 @@ class Agent:
                     return f"ERROR: invalid skill name {override!r}."
                 name = override
             dest = skills.GLOBAL_SKILLS_DIR / name
-            note = f" ({len(skipped)} binary asset(s) skipped)" if skipped else ""
-            self._note(
-                f"→ importing skill '{name}': {len(imported)} file(s) into "
-                f"{_display_path(dest)} — review each before it is written{note}"
+            flags = skill_import.safety_scan(imported)
+            files_payload = [
+                {"path": rel, "content": text, "lang": skill_import.lang_for(rel),
+                 "executable": is_exec}
+                for rel, text, is_exec in imported
+            ]
+            self._note(f"→ reviewing skill '{name}' ({len(imported)} files)")
+            decision = self.approve_import(
+                name=name, description=description, files=files_payload,
+                skipped=skipped, flags=flags, dest=str(dest),
             )
+            if isinstance(decision, Denied):
+                self._arm_stop_gate(decision.comment)
+                return _with_feedback(
+                    f"Import of {name!r} was DENIED — nothing was installed.",
+                    decision.comment,
+                )
+            if not decision:
+                return f"Import of {name!r} was denied — nothing was installed."
+            # Approved: install all reviewed files at once (the review already
+            # happened; no per-file prompts).
             for rel, text, is_exec in imported:
-                result = self._commit_tool_file(dest / rel, text, executable=is_exec)
-                if result is not None:  # a denial/hold aborts the whole import
-                    return result
+                plan = files.plan_write(str(dest / rel), text, self.cwd)
+                if plan.error:
+                    return f"ERROR importing {rel}: {plan.error}"
+                files.commit(plan)
+                if is_exec:
+                    target = dest / rel
+                    try:
+                        mode = os.stat(target).st_mode
+                        os.chmod(target, mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+                    except OSError:
+                        pass
         finally:
             if tmp:
                 shutil.rmtree(tmp, ignore_errors=True)

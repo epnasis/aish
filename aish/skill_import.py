@@ -25,6 +25,51 @@ from pathlib import Path
 _URLISH = re.compile(r"^(https?://|git@|ssh://|git://)")
 CLONE_TIMEOUT = 120
 
+# Extension → highlight.js language name (for the review card's code blocks).
+_LANG = {
+    ".sh": "bash", ".bash": "bash", ".zsh": "bash", ".py": "python",
+    ".js": "javascript", ".mjs": "javascript", ".ts": "typescript",
+    ".md": "markdown", ".json": "json", ".yaml": "yaml", ".yml": "yaml",
+    ".toml": "toml", ".rb": "ruby", ".go": "go", ".rs": "rust", ".sql": "sql",
+    ".html": "xml", ".css": "css", ".pl": "perl", ".php": "php",
+}
+
+# Deterministic heuristics that FOCUS the human review — not a verdict. Each is
+# a pattern whose presence in a fetched file is worth a second look.
+_RISK_PATTERNS = [
+    (re.compile(r"\b(curl|wget|nc|ncat|scp|ssh|telnet)\b"), "network access"),
+    (re.compile(r"(curl|wget)[^|\n]*\|\s*(sh|bash|zsh|python)"), "pipe-to-shell"),
+    (re.compile(r"\beval\b|\bexec\s*\("), "dynamic eval/exec"),
+    (re.compile(r"\brm\s+-[rf]{1,2}\b"), "recursive delete"),
+    (re.compile(r"\bsudo\b"), "sudo / privilege escalation"),
+    (re.compile(r"base64\s+(-d|--decode)"), "base64-decoded payload"),
+    (re.compile(r">\s*/etc/|>>?\s*~|>\s*\$HOME"), "writes outside its own dir"),
+    (re.compile(r"\bchmod\b|\bchown\b"), "changes file permissions/ownership"),
+    (re.compile(r"/etc/passwd|id_rsa|\.ssh/|\.aws/|\.config/aish"), "touches sensitive paths"),
+]
+
+
+def lang_for(path: str) -> str:
+    import os.path
+
+    return _LANG.get(os.path.splitext(path)[1].lower(), "")
+
+
+def safety_scan(files: list[tuple[str, str, bool]]) -> list[str]:
+    """Human-readable flags for patterns worth reviewing, e.g.
+    'scripts/run.sh: network access, pipe-to-shell'. Deterministic; advisory."""
+    flags: list[str] = []
+    for rel, text, _is_exec in files:
+        hits = [label for pat, label in _RISK_PATTERNS if pat.search(text)]
+        if hits:
+            # de-dupe while preserving order
+            seen: list[str] = []
+            for h in hits:
+                if h not in seen:
+                    seen.append(h)
+            flags.append(f"{rel}: {', '.join(seen)}")
+    return flags
+
 
 class SkillImportError(RuntimeError):
     pass
@@ -41,11 +86,13 @@ def _decodes(data: bytes) -> str | None:
         return None
 
 
-def stage(repo: str, path: str = "") -> tuple[str, list[tuple[str, str, bool]], list[str], str]:
+def stage(
+    repo: str, path: str = ""
+) -> tuple[str, str, list[tuple[str, str, bool]], list[str], str]:
     """Fetch + validate + collect. Returns
-    (skill_name, files, skipped_binaries, tmp_to_cleanup) where files is a list
-    of (relpath, text, is_executable). Raises SkillImportError on failure. The
-    caller MUST rmtree tmp_to_cleanup (empty string when the source was local)."""
+    (skill_name, description, files, skipped_binaries, tmp_to_cleanup) where
+    files is a list of (relpath, text, is_executable). Raises SkillImportError
+    on failure. The caller MUST rmtree tmp_to_cleanup (empty when local)."""
     tmp = ""
     if looks_like_url(repo):
         tmp = tempfile.mkdtemp(prefix="aish-skill-import-")
@@ -98,4 +145,4 @@ def stage(repo: str, path: str = "") -> tuple[str, list[tuple[str, str, bool]], 
             skipped.append(rel)  # binary asset — not part of the trust surface
             continue
         files.append((rel, text, os.access(p, os.X_OK)))
-    return name, files, skipped, tmp
+    return name, entry.description, files, skipped, tmp

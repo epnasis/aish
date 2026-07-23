@@ -3063,6 +3063,9 @@ function onApprovalRequest(event) {
   } else if (event.kind === "tool") {
     card.dataset.summary = `run ${event.tool}`;
     buildToolCard(card, event);
+  } else if (event.kind === "import") {
+    card.dataset.summary = `import ${event.skill}`;
+    buildImportCard(card, event);
   } else {
     card.dataset.summary = `read ${event.path}`;
     buildReadCard(card, event);
@@ -3448,6 +3451,97 @@ function prettyArgValue(v) {
   if (v === null) return "null";
   if (typeof v === "object") return JSON.stringify(v, null, 2);
   return String(v);
+}
+
+// Consolidated review of a whole imported skill (#139): every file's full
+// contents (syntax-highlighted, not a diff), risk flags up top, one decision —
+// so untrusted code is actually reviewable, not rubber-stamped file-by-file.
+function buildImportCard(card, event) {
+  card.classList.add("approval-card", "info");
+  const head = document.createElement("div");
+  head.className = "card-head sep";
+  const ico = document.createElement("span");
+  ico.className = "card-ico";
+  ico.appendChild(wrenchIcon());
+  const htext = document.createElement("span");
+  htext.className = "card-htext";
+  const htitle = document.createElement("span");
+  htitle.className = "card-htitle";
+  htitle.textContent = "Import skill";
+  const hsub = document.createElement("span");
+  hsub.className = "card-hsub mono";
+  hsub.textContent = event.skill;
+  htext.append(htitle, hsub);
+  head.append(ico, htext);
+  card.appendChild(head);
+
+  if (event.description) {
+    const desc = document.createElement("div");
+    desc.className = "import-desc";
+    desc.textContent = event.description;
+    card.appendChild(desc);
+  }
+
+  const files = event.files || [];
+  const meta = document.createElement("div");
+  meta.className = "import-meta";
+  meta.textContent = `${files.length} file${files.length === 1 ? "" : "s"} → ${event.dest || ""}`;
+  card.appendChild(meta);
+
+  if ((event.flags || []).length) {
+    const warn = document.createElement("div");
+    warn.className = "import-flags";
+    const t = document.createElement("div");
+    t.className = "import-flags-title";
+    t.textContent = "⚠ Review closely";
+    warn.appendChild(t);
+    for (const flag of event.flags) {
+      const row = document.createElement("div");
+      row.className = "import-flag";
+      row.textContent = flag;
+      warn.appendChild(row);
+    }
+    card.appendChild(warn);
+  }
+  if ((event.skipped || []).length) {
+    const sk = document.createElement("div");
+    sk.className = "import-skipped";
+    sk.textContent = `Binary assets skipped (not installed): ${event.skipped.join(", ")}`;
+    card.appendChild(sk);
+  }
+
+  for (const f of files) {
+    const fileHead = document.createElement("div");
+    fileHead.className = "import-file-head mono";
+    fileHead.textContent = f.path + (f.executable ? "  •exec" : "");
+    card.appendChild(fileHead);
+    const pre = document.createElement("pre");
+    pre.className = "import-file";
+    const code = document.createElement("code");
+    if (f.lang) code.dataset.lang = f.lang;
+    code.textContent = f.content;
+    pre.appendChild(code);
+    card.appendChild(pre);
+  }
+  highlightFences(card); // reuse the vendored hljs — real syntax highlighting
+
+  const feedback = feedbackField();
+  card.appendChild(feedback);
+
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "card-actions even";
+  const approveBtn = document.createElement("button");
+  approveBtn.type = "button";
+  approveBtn.className = "approve";
+  approveBtn.textContent = "Install";
+  approveBtn.onclick = () => answerCard(event.id, "approve", feedbackExtra(feedback));
+  const denyBtn = document.createElement("button");
+  denyBtn.type = "button";
+  denyBtn.className = "deny";
+  denyBtn.textContent = "Deny";
+  denyBtn.onclick = () => answerCard(event.id, "deny", feedbackExtra(feedback));
+  actionsRow.append(approveBtn, denyBtn);
+  card.appendChild(actionsRow);
 }
 
 function wrenchIcon() {

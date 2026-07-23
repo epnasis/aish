@@ -333,6 +333,37 @@ def make_write_approver(log):
     return approve_write
 
 
+def make_import_approver(log):
+    """Consolidated review for a skill import (#139): the WHOLE skill in one
+    decision — name, description, risk flags, and every file's contents — so
+    untrusted code is reviewed properly, not rubber-stamped file-by-file."""
+
+    def approve_import(name, description, files, skipped, flags, dest) -> bool:
+        print(f"\n{YELLOW}{BOLD}▶ import skill?{RESET} {BOLD}{name}{RESET}")
+        print(f"{DIM}  {description}{RESET}")
+        print(f"{DIM}  → {dest}  ({len(files)} files){RESET}")
+        if flags:
+            print(f"{RED}  ⚠ review closely:{RESET}")
+            for flag in flags:
+                print(f"{RED}    • {flag}{RESET}")
+        if skipped:
+            print(f"{DIM}  (binary assets skipped: {', '.join(skipped)}){RESET}")
+        for f in files:
+            print(f"\n{CYAN}{BOLD}── {f['path']}{RESET}"
+                  f"{DIM}{'  (executable)' if f.get('executable') else ''}{RESET}")
+            print(f["content"].rstrip("\n"))
+        try:
+            answer = input(f"\n{YELLOW}install this skill? [y/N]{RESET} ").strip().lower()
+        except EOFError:
+            answer = ""
+        approved = answer in ("y", "yes")
+        if log:
+            log.command(f"import skill {name}", "approved" if approved else "denied")
+        return approved
+
+    return approve_import
+
+
 def make_tool_approver(log):
     """Gate a mutating plugin tool call (issue #141). Reuses the command
     prompt's shape — the tool name + its structured args stand in for a shell
@@ -1477,6 +1508,7 @@ def main() -> int:
             approve_write=make_write_approver(logref),
             approve_read=make_read_approver(logref, trust_dir=trust_dir),
             approve_tool=make_tool_approver(logref),
+            approve_import=make_import_approver(logref),
             echo=echo,
             stream=stream_line,
             max_steps=args.max_steps,
@@ -1508,6 +1540,7 @@ def main() -> int:
             approve_write=make_write_approver(logref),
             approve_read=make_read_approver(logref, trust_dir=trust_dir),
             approve_tool=make_tool_approver(logref),
+            approve_import=make_import_approver(logref),
             echo=echo,
             stream=stream_line,
             num_ctx=args.num_ctx,

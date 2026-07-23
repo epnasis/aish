@@ -103,7 +103,7 @@ in/out of it by restarting aish rather than `/model`.
 | `recall` | ranked search over everything it knows — skills, memory, and past sessions (episodic fallback) — snippets first, full entry by name; deterministic ranking, hard output caps | auto (echoed); current session excluded |
 | `create_tool` | author a reusable **plugin tool** (see Plugin tools) — a validated `TOOL.md` + wrapper for a repeated, shell-fragile operation | **colored diff + y/N** on each file; refuses to write an invalid manifest |
 | _plugin tools_ | any `TOOL.md` you or `create_tool` add under `~/.config/aish/tools/` or `./.aish/tools/` — called exactly like a built-in tool | read-only auto; **mutating ones prompt** with the command card (name + args) |
-| `import_skill` | install a skill from a git repo or local path (e.g. `anthropics/skills`) | **every fetched file diff-approved** before it lands (imported skills are untrusted; a read-only clone, code never executed on import) |
+| `import_skill` | install a skill from a git repo or local path (e.g. `anthropics/skills`) | **one consolidated review** — the whole skill (every file's contents, syntax-highlighted, + risk flags) in a single Install/Deny (imported skills are untrusted; a read-only clone, code never executed on import) |
 
 Independent lookups batched in one model turn (several searches, a few page
 reads) run **in parallel**. Fetched web pages are wrapped in an

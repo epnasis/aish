@@ -586,7 +586,31 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             return Approved(comment) if comment else True
         return Denied(comment) if comment else False
 
-    return ask_approval, approve_write, approve_read, approve_tool
+    def approve_import(name, description, files, skipped, flags, dest):
+        # One consolidated review of the WHOLE skill (#139): every file's
+        # contents (rendered syntax-highlighted by app.js) + risk flags, one
+        # decision. Untrusted code is reviewed as whole files, not diffs.
+        request: dict[str, Any] = {
+            "type": "approval_request",
+            "kind": "import",
+            "skill": name,
+            "description": description,
+            "files": files,
+            "skipped": skipped,
+            "flags": flags,
+            "dest": dest,
+        }
+        answer = bridge.ask(request)
+        approved = answer.get("action") == "approve"
+        comment = str(answer.get("comment") or "").strip()
+        decision = "approved" if approved else "denied"
+        record(f"import skill {name}", f"{decision} (feedback: {comment})" if comment else decision)
+        resolve(request["id"], decision, comment)
+        if approved:
+            return Approved(comment) if comment else True
+        return Denied(comment) if comment else False
+
+    return ask_approval, approve_write, approve_read, approve_tool, approve_import
 
 
 def list_files(cwd: str, query: str, ignore: Sequence[str] | None = None) -> list[str]:
@@ -2277,7 +2301,7 @@ def create_app(
                 return agent_holder[0].trust_root(path)
             return "ERROR: agent not ready"
 
-        approve, approve_write, approve_read, approve_tool = make_web_approvers(
+        approve, approve_write, approve_read, approve_tool, approve_import = make_web_approvers(
             bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir
         )
         # Coalesce a command's per-line output into fewer, larger `stream`
@@ -2298,6 +2322,7 @@ def create_app(
             approve_write=approve_write,
             approve_read=approve_read,
             approve_tool=approve_tool,
+            approve_import=approve_import,
             echo=lambda text: bridge.emit({"type": "echo", "text": text}),
             stream=stream_coalescer.line,
             max_steps=max_steps,
