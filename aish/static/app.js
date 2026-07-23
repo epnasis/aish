@@ -1666,7 +1666,11 @@ function scrollToEnd(force) {
 function updateEmptyHint() {
   const empty = messagesEl.children.length === 0;
   const hasOthers = pagerSessions.some((s) => s.name !== currentSession);
-  $("empty-hint").hidden = !hasOthers || !empty;
+  // The hint is fixed just above the composer, so a composer that grows tall
+  // paints its text right over it — hide it the moment there's a draft (#132).
+  // ($("input") not the `input` const: this can run before that TDZ binding.)
+  const composing = $("input").value.trim() !== "";
+  $("empty-hint").hidden = !hasOthers || !empty || composing;
   $("welcome").hidden = !empty; // brand hero on a fresh/empty chat (#123)
 }
 
@@ -3604,6 +3608,7 @@ function resizeInput() {
   const composer = $("composer");
   const stayTall = composer.classList.contains("tall") && input.value !== "";
   composer.classList.toggle("tall", !cmdMode && (input.scrollHeight > 72 || stayTall));
+  updateEmptyHint(); // draft state gates the empty-chat hint (#132)
 }
 
 function makeRecallable(bubble) {
