@@ -1664,7 +1664,12 @@ function scrollToEnd(force) {
 // Empty-state education (#33): a fresh chat with earlier sessions to go back
 // to points at the two resume affordances (swipe pager, history button).
 function updateEmptyHint() {
-  const empty = messagesEl.children.length === 0;
+  // A workspace-note (a UI /cd or dir-trust marker) is system metadata, not a
+  // real turn — a fresh chat is still "empty" for onboarding after one, so the
+  // welcome hero stays until the user actually sends a message (#135).
+  const empty = [...messagesEl.children].every((c) =>
+    c.classList.contains("workspace-note")
+  );
   const hasOthers = pagerSessions.some((s) => s.name !== currentSession);
   // The hint is fixed just above the composer, so a composer that grows tall
   // paints its text right over it — hide it the moment there's a draft (#132).
