@@ -795,6 +795,13 @@ TOOL_SCHEMAS = [
                         "replaces (e.g. 'gh issue create'). If the model later runs that "
                         "raw command, aish nudges it to use this tool instead.",
                     },
+                    "secrets": {
+                        "type": "string",
+                        "description": "Optional: comma/space-separated env-var names the "
+                        "wrapper needs (e.g. 'FASTMAIL_TOKEN'). aish injects them from the "
+                        "Keychain into the wrapper's env at run time — you never put secret "
+                        "VALUES in the tool. The user sets them with `aish secret set NAME`.",
+                    },
                 },
                 "required": ["name", "description", "mutating", "schema", "wrapper"],
             },

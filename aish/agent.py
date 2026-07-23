@@ -2008,6 +2008,8 @@ class Agent:
             lines.append(f"timeout: {int(args['timeout'])}")
         if str(args.get("wraps", "") or "").strip():
             lines.append(f"wraps: {str(args['wraps']).strip()}")
+        if str(args.get("secrets", "") or "").strip():
+            lines.append(f"secrets: {str(args['secrets']).strip()}")
         lines.append(f"schema: {json.dumps(schema_obj)}")
         lines.append("---")
         lines.append(str(args.get("notes", "")).strip() or f"{name} tool.")

@@ -1260,7 +1260,60 @@ def _backend_hint(agent) -> str:
     return " — check your API key, network, and the provider's rate limits"
 
 
+def _secret_cli(args: list[str]) -> int:
+    """`aish secret <set|get|list|rm> [NAME]` — manage Keychain-backed secrets
+    (issue #142). `set` reads the value via getpass (never echoed, never in
+    shell history). Tools reference these by name via a `secrets:` manifest
+    field; the value is injected into the wrapper's env, never the model."""
+    import getpass
+
+    from . import secrets
+
+    usage = "usage: aish secret <set|get|list|rm> [NAME]"
+    if not args:
+        print(usage)
+        return 2
+    cmd, rest = args[0], args[1:]
+    if cmd == "list":
+        found = secrets.names()
+        print("\n".join(found) if found else "(no secrets set)")
+        return 0
+    if cmd in ("set", "get", "rm") and rest:
+        name = rest[0]
+        if not secrets.valid_name(name):
+            print(f"error: invalid secret name {name!r}")
+            return 1
+        if cmd == "set":
+            value = getpass.getpass(f"value for {name} (hidden): ")
+            if not value:
+                print("aborted (empty value)")
+                return 1
+            try:
+                secrets.put(name, value)
+            except secrets.SecretError as exc:
+                print(f"error: {exc}")
+                return 1
+            print(f"stored secret {name}")
+            return 0
+        if cmd == "get":
+            current = secrets.get(name)
+            if current is None:
+                print(f"{name}: not set")
+                return 1
+            print(current)
+            return 0
+        # rm
+        removed = secrets.delete(name)
+        print(f"removed {name}" if removed else f"{name}: not set")
+        return 0 if removed else 1
+    print(usage)
+    return 2
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "secret":
+        return _secret_cli(sys.argv[2:])
+
     config_path = Path(
         os.environ.get("AISH_CONFIG", str(Path.home() / ".config" / "aish" / "config.toml"))
     )

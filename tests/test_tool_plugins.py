@@ -225,3 +225,53 @@ def test_wraps_defaults_empty(tmp_path):
     manifest = write_tool(tmp_path / "t", VALID)
     tool, _ = _parse_tool(manifest)
     assert tool.wraps == ""
+
+
+SECRET_TOOL = """---
+name: secret_echo
+description: echo a secret from env
+exec: ./run.sh
+mutating: no
+secrets: MY_TOKEN
+schema: {}
+---
+Prints the injected MY_TOKEN env var.
+"""
+
+SECRET_SCRIPT = '#!/bin/sh\nprintf %s "$MY_TOKEN"\n'
+
+
+class TestSecretInjection:
+    def test_secrets_parsed(self, tmp_path):
+        manifest = write_tool(tmp_path / "s", SECRET_TOOL, script=SECRET_SCRIPT)
+        tool, errors = _parse_tool(manifest)
+        assert errors == []
+        assert tool.secrets == ("MY_TOKEN",)
+
+    def test_invalid_secret_name_skipped(self, tmp_path):
+        manifest = write_tool(
+            tmp_path / "s",
+            SECRET_TOOL.replace("secrets: MY_TOKEN", "secrets: bad-name"),
+            script=SECRET_SCRIPT,
+        )
+        tool, errors = _parse_tool(manifest)
+        assert tool is None
+        assert any("secret name" in e for e in errors)
+
+    def test_secret_injected_into_env(self, tmp_path):
+        tool, _ = _parse_tool(write_tool(tmp_path / "s", SECRET_TOOL, script=SECRET_SCRIPT))
+        out = execute(tool, {}, cwd=str(tmp_path), get_secret=lambda n: "sk-live-xyz")
+        assert "sk-live-xyz" in out
+        assert "[exit code: 0]" in out
+
+    def test_missing_secret_errors_without_running(self, tmp_path):
+        tool, _ = _parse_tool(write_tool(tmp_path / "s", SECRET_TOOL, script=SECRET_SCRIPT))
+        out = execute(tool, {}, cwd=str(tmp_path), get_secret=lambda n: None)
+        assert "needs secret 'MY_TOKEN'" in out
+        assert "aish secret set MY_TOKEN" in out
+
+    def test_no_secrets_means_default_env(self, tmp_path):
+        # a tool with no secrets runs with inherited env (env=None), unchanged
+        tool, _ = _parse_tool(write_tool(tmp_path / "e", VALID))
+        out = execute(tool, {"text": "hi"}, cwd=str(tmp_path))
+        assert "[exit code: 0]" in out

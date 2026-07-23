@@ -34,6 +34,7 @@ from pathlib import Path
 
 GLOBAL_TOOLS_DIR = Path.home() / ".config" / "aish" / "tools"
 NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ARG_TYPES = {"string", "integer", "number", "boolean"}
 DEFAULT_TIMEOUT = 120
 MAX_TIMEOUT = 900
@@ -60,6 +61,7 @@ class Tool:
     dir: Path
     mtime: float = 0.0
     wraps: str = ""  # optional shell-command prefix this tool replaces (drift nudge)
+    secrets: tuple[str, ...] = ()  # env-var names injected from the Keychain at exec
 
 
 def _truncate(text: str, head: int = _OUT_HEAD, tail: int = _OUT_TAIL) -> str:
@@ -163,6 +165,14 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
         else:
             errors.extend(_validate_schema(manifest, schema))
 
+    secrets = tuple(re.split(r"[,\s]+", fields.get("secrets", "").strip())) if fields.get(
+        "secrets", ""
+    ).strip() else ()
+    secrets = tuple(s for s in secrets if s)
+    for s in secrets:
+        if not _ENV_NAME_RE.match(s):
+            errors.append(f"{manifest}: secret name {s!r} must be [A-Za-z_][A-Za-z0-9_]*")
+
     if errors:
         return None, errors
     return (
@@ -177,6 +187,7 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
             dir=tool_dir,
             mtime=mtime,
             wraps=fields.get("wraps", "").strip(),
+            secrets=secrets,
         ),
         [],
     )
@@ -265,15 +276,35 @@ def _type_ok(atype: object, value: object) -> bool:
     return True
 
 
-def execute(tool: Tool, args: dict, cwd: str) -> str:
+def execute(tool: Tool, args: dict, cwd: str, get_secret=None) -> str:
     """Run the tool: validated args as JSON on stdin, raw output + exit code
-    back. No shell — the args never pass through shell word-splitting."""
+    back. No shell — the args never pass through shell word-splitting.
+
+    Any secrets the manifest declares are resolved (default: the macOS Keychain
+    via ``secrets.get``) and injected into ONLY this subprocess's environment —
+    never into args, so a value can't leak into logs or the model's context. A
+    declared-but-unset secret is a hard error rather than a silent empty env."""
     exe = resolve_executable(tool.dir, tool.executable)
     if exe is None:
         return (
             f"ERROR: tool {tool.name!r} executable {tool.executable!r} could not be "
             "resolved (not on PATH, or not an executable wrapper inside the tool dir)."
         )
+    env = None
+    if tool.secrets:
+        if get_secret is None:
+            from . import secrets as secrets_store
+
+            get_secret = secrets_store.get
+        env = dict(os.environ)
+        for sec in tool.secrets:
+            value = get_secret(sec)
+            if value is None:
+                return (
+                    f"ERROR: tool {tool.name!r} needs secret {sec!r} but it is not set. "
+                    f"Add it with: aish secret set {sec}"
+                )
+            env[sec] = value
     try:
         proc = subprocess.run(
             [exe],
@@ -282,6 +313,7 @@ def execute(tool: Tool, args: dict, cwd: str) -> str:
             text=True,
             timeout=tool.timeout,
             cwd=cwd,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return f"ERROR: tool {tool.name!r} timed out after {tool.timeout}s"
