@@ -275,3 +275,21 @@ class TestSecretInjection:
         tool, _ = _parse_tool(write_tool(tmp_path / "e", VALID))
         out = execute(tool, {"text": "hi"}, cwd=str(tmp_path))
         assert "[exit code: 0]" in out
+
+
+class TestCollision:
+    def test_project_shadows_global_warns(self, tmp_path):
+        proj = tmp_path / ".aish" / "tools"
+        glob = tmp_path / "global"
+        import aish.tool_plugins as tp
+        write_tool(proj / "dup", VALID.replace("echoer", "dup"))
+        gtext = VALID.replace("echoer", "dup").replace("mutating: no", "mutating: yes")
+        write_tool(glob / "dup", gtext)
+        # point global at our temp global dir
+        import unittest.mock as m
+        with m.patch.object(tp, "GLOBAL_TOOLS_DIR", glob):
+            found, warnings = tp.discover(str(tmp_path))
+        names = [t.name for t in found]
+        assert names.count("dup") == 1  # only one wins
+        assert any("shadowed" in w for w in warnings)
+        assert any("mutating` flags DIFFER" in w for w in warnings)

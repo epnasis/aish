@@ -3167,3 +3167,38 @@ class TestSkillImport:
         )
         agent.run_task("go")
         assert any("no SKILL.md" in m["content"] for m in tool_messages(agent.messages))
+
+
+class TestReadonlyPluginParallel:
+    ECHO = "#!/bin/sh\ncat\n"
+
+    def _tool(self, cwd, name):
+        import stat
+
+        tdir = cwd / ".aish" / "tools" / name
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "TOOL.md").write_text(
+            f"---\nname: {name}\ndescription: echo\nexec: ./run.sh\nmutating: no\n"
+            f'schema: {{"text": {{"type": "string"}}}}\n---\nb\n'
+        )
+        p = tdir / "run.sh"
+        p.write_text(self.ECHO)
+        p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    def test_two_readonly_plugins_run_in_parallel(self, tmp_path):
+        self._tool(tmp_path, "echo_a")
+        self._tool(tmp_path, "echo_b")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("echo_a", text="one"),
+                    tool_call("echo_b", text="two"),
+                ]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("go")
+        results = [m["content"] for m in tool_messages(agent.messages)]
+        assert any('"text": "one"' in r for r in results)
+        assert any('"text": "two"' in r for r in results)

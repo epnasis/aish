@@ -341,7 +341,23 @@ def discover(cwd: str) -> tuple[list[Tool], list[str]]:
             if errors:
                 warnings.extend(errors)
             elif tool is not None:
-                tools.setdefault(tool.name, tool)
+                existing = tools.get(tool.name)
+                if existing is not None:
+                    # project dirs come first, so `existing` wins and this one is
+                    # shadowed. A silent shadow is a sharp edge for EXECUTABLES —
+                    # doubly so when the mutability differs — so warn.
+                    mut = (
+                        ""
+                        if existing.mutating == tool.mutating
+                        else f" — and their `mutating` flags DIFFER "
+                        f"({existing.mutating} vs {tool.mutating})"
+                    )
+                    warnings.append(
+                        f"{manifest}: tool {tool.name!r} is shadowed by "
+                        f"{existing.dir / 'TOOL.md'}{mut}"
+                    )
+                else:
+                    tools[tool.name] = tool
     return list(tools.values()), warnings
 
 

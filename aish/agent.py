@@ -1459,7 +1459,8 @@ class Agent:
         concurrent = [
             i
             for i, (name, args) in enumerate(calls)
-            if name in READ_ONLY_TOOLS and not self._read_needs_prompt(name, args)
+            if (name in READ_ONLY_TOOLS or self._is_readonly_plugin(name))
+            and not self._read_needs_prompt(name, args)
         ]
         # While either gate is armed, everything goes through _dispatch
         # sequentially — the parallel thunks below would bypass the gate (and
@@ -1621,7 +1622,21 @@ class Agent:
                 f" (name: {entry})" if entry else ""
             )
             return label, partial(self._recall, query, entry)
+        tool = self._plugin_tools.get(name)
+        if tool is not None:  # read-only plugin tool (mutating ones never reach here)
+            shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
+            return f"→ {name}({shown})", partial(self._run_readonly_plugin, tool, args)
         return self._read_file_call(args)  # read_file
+
+    def _is_readonly_plugin(self, name: str) -> bool:
+        tool = self._plugin_tools.get(name)
+        return tool is not None and not tool.mutating
+
+    def _run_readonly_plugin(self, tool: "tool_plugins.Tool", args: dict) -> str:
+        problem = tool_plugins.validate_args(tool, args)
+        if problem is not None:
+            return problem
+        return tool_plugins.execute(tool, args, cwd=self.cwd)
 
     def _recall(self, query: str, name: str | None) -> str:
         if self.state_dir is None:
