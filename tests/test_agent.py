@@ -2762,3 +2762,87 @@ class TestMidTaskSteering:
             cwd=str(tmp_path),
         )
         assert agent.run_task("go") == "done"  # callbacks default to None
+
+
+class TestPluginTools:
+    """Read-only TOOL.md tools are exposed and dispatched like native tools;
+    mutating ones are held back until the approval channel exists."""
+
+    ECHO = "#!/bin/sh\ncat\n"
+
+    def _write_tool(self, cwd, name, *, mutating="no", script=None):
+        import stat
+
+        tdir = cwd / ".aish" / "tools" / name
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "TOOL.md").write_text(
+            f"---\nname: {name}\ndescription: echo the text\nexec: ./run.sh\n"
+            f'mutating: {mutating}\nschema: {{"text": {{"type": "string", "required": true}}}}\n'
+            f"---\nbody\n"
+        )
+        p = tdir / "run.sh"
+        p.write_text(script or self.ECHO)
+        p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    def _offered_tool_names(self, chat):
+        return {t["function"]["name"] for t in chat.calls[-1]["tools"]}
+
+    def test_readonly_tool_exposed_and_dispatched(self, tmp_path):
+        self._write_tool(tmp_path, "echoer")
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("echoer", text="hello")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        assert agent.run_task("go") == "done"
+        assert "echoer" in self._offered_tool_names(chat)
+        results = tool_messages(agent.messages)
+        assert any('"text": "hello"' in m["content"] for m in results)
+        assert any("[exit code: 0]" in m["content"] for m in results)
+
+    def test_mutating_tool_not_offered(self, tmp_path):
+        self._write_tool(tmp_path, "writer", mutating="yes")
+        agent, chat = make_agent([model_says("done")], cwd=str(tmp_path))
+        agent.run_task("go")
+        assert "writer" not in self._offered_tool_names(chat)
+
+    def test_mutating_tool_failclosed_if_called(self, tmp_path):
+        marker = tmp_path / "touched"
+        self._write_tool(
+            tmp_path, "writer", mutating="yes",
+            script=f"#!/bin/sh\ntouch {marker}\n",
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("writer", text="x")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("go")
+        assert not marker.exists()  # never executed
+        assert any("cannot run yet" in m["content"] for m in tool_messages(agent.messages))
+
+    def test_invalid_arg_returns_structured_error(self, tmp_path):
+        self._write_tool(tmp_path, "echoer")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("echoer", wrong="x")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("go")
+        assert any("invalid args for echoer" in m["content"] for m in tool_messages(agent.messages))
+
+    def test_new_tool_appears_on_next_task_via_rescan(self, tmp_path):
+        agent, chat = make_agent(
+            [model_says("first"), model_says("second")], cwd=str(tmp_path)
+        )
+        agent.run_task("one")
+        assert "echoer" not in self._offered_tool_names(chat)
+        self._write_tool(tmp_path, "echoer")
+        agent.run_task("two")
+        assert "echoer" in self._offered_tool_names(chat)

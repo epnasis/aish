@@ -27,7 +27,7 @@ from typing import Any
 import ollama
 
 from . import aliases as alias_map
-from . import files, skills, tools, web
+from . import files, skills, tool_plugins, tools, web
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
 from .session import SessionLog
 
@@ -740,6 +740,14 @@ class Agent:
         self.check_pending_messages = check_pending_messages
         self._run_meta: dict | None = None
         self._cancel = threading.Event()
+        # Plugin tools (TOOL.md), rebuilt only when the tool dirs' signature
+        # moves — a mid-task manifest edit is picked up on the next step. Only
+        # read-only tools are exposed to the model in this build; mutating ones
+        # are discovered+validated but gated off until the approval channel lands.
+        self._plugin_sig: tuple | None = None
+        self._plugin_tools: dict[str, tool_plugins.Tool] = {}
+        self._plugin_defs: list[dict] = []
+        self._plugin_warned: set[str] = set()
         # Skill-read gate state: oversized preloaded skills the model must
         # read_skill (or explicitly waive) before other tools run; values are
         # refusals left before the gate auto-lifts. Rebuilt every run_task.
@@ -1193,10 +1201,11 @@ class Agent:
         provider-native raw blocks or None). Streams content through on_token
         when set. Retries once on a transport error (a busy/overloaded local
         Ollama commonly drops or refuses a request)."""
+        self._refresh_plugin_tools()
         kwargs = dict(
             model=self.model,
             messages=self.messages,
-            tools=tools.TOOL_SCHEMAS,
+            tools=tools.TOOL_SCHEMAS + self._plugin_defs,
             options={"num_ctx": self.num_ctx},
             think=self.think,
         )
@@ -1829,7 +1838,49 @@ class Agent:
                 result = f"[user edited the command to: {final}]\n{result}"
             return result
 
+        tool = self._plugin_tools.get(name)
+        if tool is not None:
+            return self._dispatch_plugin_tool(tool, args)
+
         return f"ERROR: unknown tool '{name}'"
+
+    def _refresh_plugin_tools(self) -> None:
+        """Rescan TOOL.md manifests when the tool dirs' signature changed
+        (mtime-cached, near-free). Only read-only tools are exposed to the
+        model; mutating ones are kept for fail-closed dispatch but not offered
+        until the approval channel exists. Invalid manifests are skipped and
+        warned about once each."""
+        sig = tool_plugins.signature(self.cwd)
+        if sig == self._plugin_sig:
+            return
+        self._plugin_sig = sig
+        found, warnings = tool_plugins.discover(self.cwd)
+        self._plugin_tools = {t.name: t for t in found}
+        self._plugin_defs = [tool_plugins.to_tool_def(t) for t in found if not t.mutating]
+        for warning in warnings:
+            if warning not in self._plugin_warned:
+                self._plugin_warned.add(warning)
+                self._note(f"⚠ tool skipped: {warning}")
+
+    def _dispatch_plugin_tool(self, tool: "tool_plugins.Tool", args: dict) -> str:
+        # Mutating tools are not exposed yet, so this only fires if a stale
+        # tool_call names one — fail closed rather than run it ungated.
+        if tool.mutating:
+            return (
+                f"ERROR: tool {tool.name!r} is mutating and cannot run yet "
+                "(approval channel not implemented)."
+            )
+        problem = tool_plugins.validate_args(tool, args)
+        if problem is not None:
+            self._note(f"→ {tool.name}: {problem}")
+            return problem
+        shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        self._note(f"→ {tool.name}({shown})")
+        self.status.start(tool.name)
+        try:
+            return tool_plugins.execute(tool, args, cwd=self.cwd)
+        finally:
+            self.status.stop()
 
     def _dispatch_write(self, name: str, args: dict) -> str:
         if name == "write_file":
