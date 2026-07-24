@@ -4547,16 +4547,16 @@ function setConsoleCtrlMode(mode) {
   }
 }
 
-function setConsoleSelectMode(on) {
+function setConsoleSelectMode(on, quiet) {
   consoleSelectMode = on;
   const chip = document.querySelector('.pty-keys button[data-key="select"]');
   if (chip) chip.classList.toggle("on", on);
   const scr = $("pty-screen");
   if (scr) scr.classList.toggle("selecting", on);
-  if (on) showToast("select mode — drag to paint a selection, then Copy");
+  if (on && !quiet) showToast("select mode — drag to paint a selection, then Copy");
   // Clear any lingering selection on exit so the scroll handler resumes cleanly
   // (it stands down whenever text is selected).
-  else if (window.getSelection) window.getSelection().removeAllRanges();
+  else if (!on && window.getSelection) window.getSelection().removeAllRanges();
 }
 
 let consoleLockY = 0; // page scroll offset captured while the console freezes it
@@ -4989,6 +4989,8 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
   const SLOP = 10; // px of travel before a touch is judged a deliberate scroll drag
   let touchY = 0, startX = 0, startY = 0, scrolling = false;
   let selAnchor = null; // collapsed caret Range where a select-mode drag began
+  let holdTimer = 0;    // long-press → enter Select mode without tapping the chip
+  const HOLD_MS = 500;  // stationary hold before a long-press selection arms
 
   // The text caret under a screen point (WebKit vs standard spelling).
   const caretAt = (x, y) => {
@@ -4999,6 +5001,16 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
       const r = document.createRange(); r.setStart(p.offsetNode, p.offset); r.collapse(true); return r;
     }
     return null;
+  };
+  // Select the whole word under a point — the immediate feedback a long-press
+  // gives on iOS (hold → a word is selected, then drag to extend).
+  const selectWordAt = (x, y) => {
+    const r = caretAt(x, y);
+    if (!r) return;
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.collapse(r.startContainer, r.startOffset);
+    if (s.modify) { s.modify("move", "backward", "word"); s.modify("extend", "forward", "word"); }
   };
   // Paint the selection from the drag's anchor caret to the caret under the
   // finger, ordering the two so the range is valid whichever way you drag.
@@ -5027,11 +5039,22 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
       return;
     }
     touchY = t.clientY; startX = t.clientX; startY = t.clientY; scrolling = false;
+    // Hold still ~0.5s (no scroll drag) → enter Select mode and grab the word
+    // under the finger, iOS-style. A drag past SLOP before then cancels it.
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(() => {
+      if (consoleSelectMode || !consoleOpen) return;
+      setConsoleSelectMode(true, true); // quiet — no toast on the hold path
+      selAnchor = caretAt(startX, startY);
+      selectWordAt(startX, startY);
+      if (navigator.vibrate) { try { navigator.vibrate(10); } catch (err) { /* ignore */ } }
+    }, HOLD_MS);
   }, { passive: false });
   screen.addEventListener("touchmove", (e) => {
     if (!consoleOpen || e.touches.length !== 1) return;
     const t = e.touches[0];
     if (consoleSelectMode) {
+      clearTimeout(holdTimer);
       // Paint an arbitrary region from finger position — independent of tmux,
       // which touch can't drive as a drag.
       e.preventDefault();
@@ -5047,6 +5070,7 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
       // stays below SLOP and passes through to iOS's native selection.
       if (Math.abs(t.clientX - startX) < SLOP && Math.abs(t.clientY - startY) < SLOP) return;
       scrolling = true;
+      clearTimeout(holdTimer); // moved before the hold armed → it's a scroll, not a select
       touchY = t.clientY; // anchor here so the SLOP travel isn't scrolled in one jump
     }
     e.preventDefault(); // the swipe drives the terminal, not the page
@@ -5060,7 +5084,7 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
       new WheelEvent("wheel", { deltaY, deltaMode: 0, bubbles: true, cancelable: true })
     );
   }, { passive: false });
-  const end = () => { scrolling = false; selAnchor = null; };
+  const end = () => { scrolling = false; selAnchor = null; clearTimeout(holdTimer); };
   screen.addEventListener("touchend", end);
   screen.addEventListener("touchcancel", end);
 })();
