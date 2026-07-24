@@ -1329,10 +1329,12 @@ class WebServer:
             suffix = path.suffix.lower()
             if in_uploads and size_ok and suffix in backends.IMAGE_SUFFIXES and "image" in support:
                 images.append(str(path))
-                notes.append(f"[image attached: {path.name} — you can see it]")
+                # Full path (not just the name) so /feedback's classic flow can
+                # upload the file, not only see it (#152).
+                notes.append(f"[image attached: {path.name} — you can see it; file at {path}]")
             elif in_uploads and size_ok and suffix == ".pdf" and "pdf" in support:
                 documents.append(str(path))
-                notes.append(f"[document attached: {path.name} — you can read it]")
+                notes.append(f"[document attached: {path.name} — you can read it; file at {path}]")
             else:
                 notes.append(f"[attached file: {path}]")
         return images, documents, notes

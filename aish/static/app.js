@@ -4210,9 +4210,10 @@ function handleSlash(text) {
     case "/learn": case "/feedback": {
       // Run as a task: the server swaps the text for the expanded prompt
       // (cli.parse_learn / parse_feedback) while the transcript shows what was
-      // typed. Both must reach the server, not be handled client-side here.
-      const sent = send({ type: "task", text });
-      if (sent) scrollToEndSettled();
+      // typed. Include attachments — /feedback WITH files uses the classic
+      // upload flow, and without this they were silently dropped (#152).
+      const sent = send({ type: "task", text, attachments: attachments.map((a) => a.path) });
+      if (sent) { attachments = []; renderAttachments(); scrollToEndSettled(); }
       return sent;
     }
     case "/jobs": openSheet("workspace-sheet"); return send({ type: "jobs" });
