@@ -385,6 +385,52 @@ class TestContextCompaction:
         assert "[trimmed" in old
         assert len(old) < 300
 
+    def test_keep_history_preserves_interrupted_task_output(self, monkeypatch):
+        # Resume (#164): the restored work IS this task's own unfinished work,
+        # so it must arrive verbatim — trimming it to a stub would discard the
+        # very results the resumed run exists to avoid recomputing.
+        agent, _ = self.big_output_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="big")]),
+                model_says("task 1 done"),
+                model_says("resumed and finished"),
+            ],
+            monkeypatch,
+        )
+        agent.run_task("first")
+        agent.run_task("[automatic resume] continue", keep_history=True)
+        assert len(tool_messages(agent.messages)[0]["content"]) == 5000
+
+    def test_keep_history_still_trims_when_over_budget(self, monkeypatch):
+        # The bound holds: keeping history whole is a preference, not a licence
+        # to blow the context window.
+        agent, _ = self.big_output_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="big")]),
+                model_says("task 1 done"),
+                model_says("resumed"),
+            ],
+            monkeypatch,
+            num_ctx=100,  # tiny budget: the restored history cannot fit whole
+        )
+        agent.run_task("first")
+        agent.run_task("[automatic resume] continue", keep_history=True)
+        assert "[trimmed" in tool_messages(agent.messages)[0]["content"]
+
+    def test_trim_history_stops_as_soon_as_it_fits(self, monkeypatch):
+        # Oldest-first, and no further than needed: on a resume the newest
+        # results are the ones the model continues FROM, so they survive.
+        agent, _ = make_agent([])
+        agent.num_ctx = 2000  # budget = 6000 chars
+        agent.messages = [
+            {"role": "system", "content": "S"},
+            {"role": "tool", "content": "A" * 5000},
+            {"role": "tool", "content": "B" * 5000},
+        ]
+        agent._trim_history_to_budget()
+        assert "[trimmed" in agent.messages[1]["content"]
+        assert agent.messages[2]["content"] == "B" * 5000
+
     def test_system_prompt_never_trimmed(self, monkeypatch):
         agent, _ = self.big_output_agent(
             [

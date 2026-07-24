@@ -168,9 +168,16 @@ class SessionLog:
 
         `attempts` counts the task_start records since the last task_end, so a
         task that keeps killing the server is resumed a bounded number of times
-        instead of crash-looping it forever."""
+        instead of crash-looping it forever.
+
+        `in_flight` names the steps that had STARTED but never reported back —
+        a `tool_start` trace record with no matching `tool`. That is the one
+        genuinely dangerous gap in a resume: a completed step logged its result,
+        but an in-flight one may or may not have taken effect (a send, a write),
+        and only the model re-checking reality can tell."""
         pending: dict | None = None
         attempts = 0
+        started: list[dict] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 record = json.loads(line)
@@ -179,14 +186,36 @@ class SessionLog:
             kind = record.get("kind")
             if kind == "task_start":
                 attempts += 1
+                started = []
                 pending = {
                     "prompt": record.get("prompt") or "",
                     "ts": record.get("ts") or "",
                     "attempts": attempts,
                 }
             elif kind == "task_end":
-                pending, attempts = None, 0
+                pending, attempts, started = None, 0, []
+            elif kind == "trace" and pending is not None:
+                step = record.get("step") or {}
+                if step.get("kind") == "tool_start":
+                    started.append(step)
+                elif step.get("kind") == "tool":
+                    # Read-only calls run in parallel, so match by name rather
+                    # than assuming the last start is the one finishing.
+                    for i, pending_step in enumerate(started):
+                        if pending_step.get("name") == step.get("name"):
+                            del started[i]
+                            break
+        if pending is not None:
+            pending["in_flight"] = [SessionLog._describe_step(s) for s in started]
         return pending
+
+    @staticmethod
+    def _describe_step(step: dict) -> str:
+        """One short line naming a tool call: the tool plus whatever identifies
+        THIS call (a command, a URL, a summary), as the trace already records it."""
+        name = step.get("name") or "step"
+        detail = (step.get("command") or step.get("summary") or "").strip()
+        return f"{name}: {detail[:160]}" if detail else name
 
     @staticmethod
     def interrupted_sessions(

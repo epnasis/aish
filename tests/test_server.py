@@ -3941,6 +3941,47 @@ class TestRestartResume:
         # The completed run closed its bracket: a second restart won't redo it.
         assert SessionLog.pending_task(path) is None
 
+    def test_resume_names_the_step_that_was_in_flight(self, app_env):
+        # The one genuinely unknown part of an interrupted run: a step that
+        # started and never reported back. The model is told to verify THOSE
+        # rather than re-run the task.
+        state_dir = Path(app_env["state_dir"])
+        log = SessionLog(state_dir / "session-20260101-120000-000000.jsonl")
+        log.model("fake")
+        log.task_start("answer the mail")
+        log.message({"role": "user", "content": "answer the mail"})
+        log.step({"kind": "tool_start", "name": "gmail_search", "summary": "id:abc"})
+        log.step({"kind": "tool", "name": "gmail_search", "ok": True})
+        log.message({"role": "tool", "tool_name": "gmail_search", "content": "the mail"})
+        log.step({"kind": "tool_start", "name": "gmail_send", "summary": "to pawel"})
+        log.close()  # killed with the send in flight
+        client, chat = make_client(app_env, [model_says("verified, already sent")])
+        with client:
+            server = client.app.state.server
+            assert self._wait(lambda: log.path.name in server.sessions)
+            assert self._wait(lambda: not server.sessions[log.path.name].busy)
+        prompt = self._resumed_prompt(chat)
+        assert "gmail_send: to pawel" in prompt
+        assert "gmail_search" not in prompt  # it reported back; nothing to verify
+
+    def test_resume_keeps_the_interrupted_output_verbatim(self, app_env):
+        # The point of resuming: prior results arrive whole, so the model
+        # continues instead of recomputing them.
+        state_dir = Path(app_env["state_dir"])
+        log = SessionLog(state_dir / "session-20260101-120000-000000.jsonl")
+        log.model("fake")
+        log.task_start("summarize the page")
+        log.message({"role": "user", "content": "summarize the page"})
+        log.message({"role": "tool", "tool_name": "read_url", "content": "PAGE" * 2000})
+        log.close()
+        client, chat = make_client(app_env, [model_says("summarized")])
+        with client:
+            server = client.app.state.server
+            assert self._wait(lambda: log.path.name in server.sessions)
+            assert self._wait(lambda: not server.sessions[log.path.name].busy)
+        sent = [m for m in chat.calls[0]["messages"] if m.get("role") == "tool"]
+        assert sent and len(sent[0]["content"]) == 4 * 2000  # untrimmed
+
     def test_resume_reissues_prompt_when_nothing_was_logged(self, app_env):
         # Killed before the user message itself was logged: the history holds
         # nothing to continue from, so the recorded prompt is re-issued.

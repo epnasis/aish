@@ -723,3 +723,44 @@ def test_interrupted_sessions_newest_first_within_window(tmp_path):
 
 def test_interrupted_sessions_empty_state_dir(tmp_path):
     assert SessionLog.interrupted_sessions(tmp_path, max_age_secs=3600) == []
+
+
+def test_pending_task_names_in_flight_steps(tmp_path):
+    # A tool_start with no matching tool is a step whose effect is unknown —
+    # exactly what the resumed run must verify rather than blindly repeat.
+    log = SessionLog.new(tmp_path)
+    log.task_start("answer the mail")
+    log.step({"kind": "tool_start", "name": "gmail_search", "summary": "id:abc"})
+    log.step({"kind": "tool", "name": "gmail_search", "ok": True})
+    log.step({"kind": "tool_start", "name": "gmail_send", "summary": "to pawel@wenda.eu"})
+    log.close()  # killed here: the send never reported back
+    pending = SessionLog.pending_task(log.path)
+    assert pending["in_flight"] == ["gmail_send: to pawel@wenda.eu"]
+
+
+def test_pending_task_in_flight_empty_when_every_step_finished(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.task_start("go")
+    log.step({"kind": "tool_start", "name": "read_url", "summary": "https://x"})
+    log.step({"kind": "tool", "name": "read_url", "ok": True})
+    log.close()
+    assert SessionLog.pending_task(log.path)["in_flight"] == []
+
+
+def test_pending_task_in_flight_resets_per_attempt(tmp_path):
+    # Steps from an earlier interrupted attempt are not reported again.
+    log = SessionLog.new(tmp_path)
+    log.task_start("go")
+    log.step({"kind": "tool_start", "name": "web_search", "summary": "old"})
+    log.task_start("go")  # attempt 2, nothing started yet
+    log.close()
+    pending = SessionLog.pending_task(log.path)
+    assert pending["attempts"] == 2 and pending["in_flight"] == []
+
+
+def test_pending_task_in_flight_uses_command_for_shell_steps(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.task_start("build")
+    log.step({"kind": "tool_start", "name": "run_command", "command": "make release"})
+    log.close()
+    assert SessionLog.pending_task(log.path)["in_flight"] == ["run_command: make release"]

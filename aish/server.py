@@ -1145,9 +1145,19 @@ class WebServer:
             text = RESUME_NOTE if any(m.get("role") == "user" for m in history) else info["prompt"]
             if not text:
                 continue
+            if text is RESUME_NOTE and info.get("in_flight"):
+                # The steps that never reported back are the only ones whose
+                # effect is genuinely unknown — name them so the model verifies
+                # those specifically instead of re-running the whole task.
+                text += "\n\nCut off mid-step. These had STARTED and never " \
+                        "reported a result, so whether they took effect is " \
+                        "UNKNOWN — check each before repeating it:\n- " \
+                        + "\n- ".join(info["in_flight"])
             session.busy = True
             session.bridge.emit({"type": "user", "text": text})
-            session.runner = asyncio.ensure_future(self._run_task(session, text))
+            session.runner = asyncio.ensure_future(
+                self._run_task(session, text, resume=True)
+            )
             resumed += 1
             print(f"[resume] {path.name}: retrying an interrupted task "
                   f"(attempt {info['attempts'] + 1})", file=sys.stderr)
@@ -1731,6 +1741,7 @@ class WebServer:
         text: str,
         images: list[str] | None = None,
         documents: list[str] | None = None,
+        resume: bool = False,
     ) -> None:
         # Bracket the run on disk (#164). Only a killed process leaves the
         # task_start unmatched, which is exactly what makes it the restart
@@ -1739,7 +1750,15 @@ class WebServer:
         # the user's own shell command unattended is not a recovery, it's a risk.
         session.logref.task_start(text)
         try:
-            if images or documents:
+            if resume and isinstance(session.agent, Agent):
+                # Keep the interrupted task's own tool output verbatim (#164):
+                # the normal "old task" trim would stub out exactly the results
+                # the resumed run must not recompute. claude-max keeps its own
+                # session state and takes no such flag.
+                result = await asyncio.to_thread(
+                    session.agent.run_task, text, images, documents, keep_history=True
+                )
+            elif images or documents:
                 result = await asyncio.to_thread(
                     session.agent.run_task, text, images, documents
                 )

@@ -994,6 +994,8 @@ class Agent:
         task: str,
         images: list[str] | None = None,
         documents: list[str] | None = None,
+        *,
+        keep_history: bool = False,
     ) -> str:
         # Fresh scan every task: skills/memory created mid-session (or after
         # /cd) show up immediately, in every open session — no restart needed.
@@ -1013,8 +1015,16 @@ class Agent:
         # Old tasks' raw tool outputs are rarely needed verbatim again;
         # shrinking them keeps long REPL sessions inside the context window.
         task_start = len(self.messages)
-        for message in self.messages[1:task_start]:
-            self._trim_tool_message(message)
+        if keep_history:
+            # Resuming an interrupted task (#164): what looks like "an old task"
+            # here IS this task's own unfinished work, so trimming it to a
+            # 200-char stub would throw away exactly the results the resumed run
+            # must not recompute. Keep them whole and fall back to the same
+            # oldest-first trim only if the context genuinely doesn't fit.
+            self._trim_history_to_budget()
+        else:
+            for message in self.messages[1:task_start]:
+                self._trim_tool_message(message)
 
         # Media rides on the user message as file paths; each backend encodes
         # them for its API (ollama `images`, data URLs, Anthropic blocks).
@@ -1327,6 +1337,17 @@ class Agent:
             return False
         message["content"] = content[:TRIM_KEEP_CHARS] + TRIMMED_NOTE
         return True
+
+    def _trim_history_to_budget(self) -> None:
+        """Shrink restored tool outputs oldest-first, but only as far as the
+        character budget actually demands (#164). The counterpart to the eager
+        per-task trim: on a resume the newest results are the ones the model
+        needs verbatim to continue, so they are the last to go."""
+        budget = self.num_ctx * CHARS_PER_TOKEN_BUDGET
+        for message in self.messages[1:]:
+            if self._total_chars() <= budget:
+                return
+            self._trim_tool_message(message)
 
     def _total_chars(self) -> int:
         return sum(len(message.get("content") or "") for message in self.messages)
