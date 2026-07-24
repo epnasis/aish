@@ -4345,10 +4345,16 @@ function enterCmdMode() {
   refreshCmdPrompt();
   $("attach").setAttribute("aria-label", "exit terminal mode");
   input.setAttribute("enterkeyhint", "go"); // iOS return key reads "Go" — it runs the command
+  // Terminal mode is a CLI, not prose: iOS otherwise capitalizes the first
+  // letter and autocorrects shell syntax into broken commands (#156). iOS only
+  // re-reads these on focus, so refocusInput() below forces them to apply now.
+  input.setAttribute("autocorrect", "off");
+  input.setAttribute("autocapitalize", "off");
+  input.setAttribute("spellcheck", "false");
   input.placeholder = "";
   input.value = "";
   resizeInput();
-  input.focus();
+  refocusInput();
   setInputTyping(true);
 }
 
@@ -4360,11 +4366,27 @@ function exitCmdMode() {
   hideSuggest();
   $("attach").setAttribute("aria-label", "actions");
   input.removeAttribute("enterkeyhint"); // back to a normal multi-line composer
+  // Restore the prose defaults (matches index.html): chat wants sentence-case
+  // and spellcheck back (#156).
+  input.setAttribute("autocorrect", "on");
+  input.setAttribute("autocapitalize", "sentences");
+  input.setAttribute("spellcheck", "true");
   input.placeholder = "Ask aish";
   input.value = "";
   resizeInput();
-  input.focus();
+  refocusInput();
   setInputTyping(false);
+}
+
+// iOS applies autocorrect/autocapitalize/enterkeyhint changes only when an
+// element takes focus — an already-focused composer keeps the OLD keyboard. A
+// synchronous blur+focus in the same tick forces the soft keyboard to re-read
+// the attributes without visibly dismissing (the refocus lands before iOS
+// tears the keyboard down); on desktop it's a harmless no-op.
+function refocusInput() {
+  const active = document.activeElement === input;
+  if (active) input.blur();
+  input.focus();
 }
 
 // Insert a trigger char and fire the input flow (mention / slash suggestions).
