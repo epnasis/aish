@@ -4391,6 +4391,21 @@ function setPtyCtrl(on) {
   if (chip) chip.classList.toggle("armed", on);
 }
 
+function ptyCopy() {
+  const sel = ptyTerm ? ptyTerm.getSelection() : "";
+  if (!sel) { showToast("select some text first"); return; }
+  if (navigator.clipboard) navigator.clipboard.writeText(sel).then(
+    () => showToast("copied"), () => showToast("copy blocked"));
+}
+
+function ptyPaste() {
+  if (!navigator.clipboard || !navigator.clipboard.readText) { showToast("clipboard unavailable"); return; }
+  navigator.clipboard.readText().then((t) => {
+    if (t) ptySend(t); // straight to the PTY (the shell echoes it), like a real paste
+    if (ptyTerm) ptyTerm.focus();
+  }, () => showToast("clipboard blocked"));
+}
+
 function ptySend(data) {
   if (ptyOpen) send({ type: "pty_in", data });
 }
@@ -4427,6 +4442,14 @@ function openPty() {
   });
   ptyFit = new FitAddon.FitAddon();
   ptyTerm.loadAddon(ptyFit);
+  // Clickable URLs (#148): auth CLIs print a login URL — often wrapped across
+  // lines — that the user taps to open in the browser. The web-links addon
+  // underlines links on hover and follows wrapped rows.
+  if (window.WebLinksAddon) {
+    ptyTerm.loadAddon(new WebLinksAddon.WebLinksAddon(
+      (event, uri) => window.open(uri, "_blank", "noopener")
+    ));
+  }
   ptyTerm.open(screen);
   // THE input path; the model never reaches it. A sticky Ctrl chip (#148) arms
   // one keystroke: while armed, the next single char is sent as its control
@@ -4443,7 +4466,13 @@ function openPty() {
   // on-screen "esc" chip still sends \x1b. Returning false stops xterm from
   // handling the key (and lets it bubble to the global Esc handler too).
   ptyTerm.attachCustomKeyEventHandler((e) => {
-    if (e.type === "keydown" && e.key === "Escape") { escapeExit(); return false; }
+    if (e.type !== "keydown") return true;
+    if (e.key === "Escape") { escapeExit(); return false; }
+    // Cmd/Ctrl+Shift+C/V for copy/paste — never plain Ctrl+C (that's SIGINT to
+    // the program). Cmd (meta) alone works too on macOS where it can't collide.
+    const copyCombo = (e.metaKey && !e.ctrlKey) || (e.ctrlKey && e.shiftKey);
+    if (copyCombo && (e.key === "c" || e.key === "C")) { ptyCopy(); return false; }
+    if (copyCombo && (e.key === "v" || e.key === "V")) { ptyPaste(); return false; }
     return true;
   });
   ptyTerm.onSelectionChange(() => {
@@ -4501,6 +4530,8 @@ document.querySelector(".pty-keys").addEventListener("click", (e) => {
   if (!btn) return;
   if (btn.dataset.key === "kb") { if (ptyTerm) ptyTerm.focus(); return; } // re-summon keyboard
   if (btn.dataset.key === "ctrl") { setPtyCtrl(!ptyCtrlArmed); if (ptyTerm) ptyTerm.focus(); return; }
+  if (btn.dataset.key === "copy") { ptyCopy(); return; }
+  if (btn.dataset.key === "paste") { ptyPaste(); return; }
   const CTRL = { tab: "\t", esc: "\x1b", "ctrl-c": "\x03", "ctrl-d": "\x04", up: "\x1b[A", down: "\x1b[B" };
   const seq = CTRL[btn.dataset.key];
   if (seq != null) ptySend(seq);
