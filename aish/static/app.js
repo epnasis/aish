@@ -6199,6 +6199,15 @@ function sessionRow(info, current) {
     badge.textContent = badgeSpec[0];
     head.appendChild(badge);
   }
+  // Provenance tag for triggered sessions (#160) so an automated chat is
+  // legible even in the flat "Active now" / search views, not only under its
+  // "Automated" section.
+  if (info.origin && info.origin !== "user") {
+    const tag = document.createElement("span");
+    tag.className = "badge origin";
+    tag.textContent = info.origin;
+    head.appendChild(tag);
+  }
   body.appendChild(head);
   if (info.cwd) {
     const dir = document.createElement("span");
@@ -6281,11 +6290,22 @@ function renderSessions(event) {
     for (const info of event.sessions) list.appendChild(sessionRow(info, event.current));
     return;
   }
-  const active = event.sessions.filter((s) => s.state === "running" || s.state === "waiting");
-  const rest = event.sessions.filter((s) => !(s.state === "running" || s.state === "waiting"));
+  const isActive = (s) => s.state === "running" || s.state === "waiting";
+  const isAuto = (s) => s.origin && s.origin !== "user";
+  const active = event.sessions.filter(isActive);
+  // Triggered sessions (#160) get their own "Automated" section so scheduled /
+  // email / webhook workflows are observable at a glance, separate from chats
+  // you started. Active ones still surface under "Active now" (they carry an
+  // origin tag there too), so exclude those to avoid double-listing.
+  const automated = event.sessions.filter((s) => isAuto(s) && !isActive(s));
+  const rest = event.sessions.filter((s) => !isActive(s) && !isAuto(s));
   if (active.length) {
     list.appendChild(sectionLabel("Active now"));
     for (const info of active) list.appendChild(sessionRow(info, event.current));
+  }
+  if (automated.length) {
+    list.appendChild(sectionLabel("Automated"));
+    for (const info of automated) list.appendChild(sessionRow(info, event.current));
   }
   let lastGroup = null;
   for (const info of rest) {

@@ -1670,6 +1670,7 @@ body.wrap .stream-wrap > .msg.stream { padding-right: 30px; }
 }
 .badge.st-running { color: var(--green); background: var(--green-glow); }
 .badge.st-waiting { color: #fff; background: var(--orange); }
+.badge.origin { color: var(--blue); background: var(--blue-glow); text-transform: uppercase; }
 .save-toggle { font-size: 15px; color: var(--dim); margin: 0 4px 8px; display: block; }
 
 /* workspace */

@@ -2044,7 +2044,7 @@ class TestRename:
             row = next(s for s in listing["sessions"] if s["name"] == old.name)
             assert row["title"] == "Archived"
         # The renamed cold session still reconstructs its conversation cleanly.
-        messages, _, custom_title = SessionLog._parse(old)
+        messages, _, custom_title, _ = SessionLog._parse(old)
         assert custom_title == "Archived"
         assert messages == [{"role": "user", "content": "old topic"}]
 
@@ -3627,3 +3627,139 @@ class TestGlobalConsole:
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
             recv_until(ws, "done")
             assert client.app.state.server.console is None
+
+
+class _FakeBridge:
+    """Minimal Bridge stand-in for unit-testing the approvers: records emitted
+    events and canned-answers asks. `ask` should never be reached for an
+    auto-approved (safe) triggered mutation — the test asserts that."""
+
+    def __init__(self, answer=None):
+        self.events: list = []
+        self.asked: list = []
+        self._answer = answer or {"action": "approve"}
+
+    def emit(self, event, record=True):
+        self.events.append(event)
+
+    def ask(self, request):
+        request.setdefault("id", "uid-1")
+        self.asked.append(request)
+        return self._answer
+
+
+class _FakeLog:
+    def __init__(self):
+        self.records: list = []
+
+    def command(self, command, decision):
+        self.records.append((command, decision))
+
+
+class TestTriggeredCapabilityPolicy:
+    """The #160 draft-and-hold policy, unit-tested on approve_tool directly."""
+
+    def _approver(self, origin, answer=None):
+        bridge, log = _FakeBridge(answer), _FakeLog()
+        approvers = server_module.make_web_approvers(
+            bridge, log, Path("/x/allow"), Path("/x/deny"),
+            ask_all=False, get_scope=lambda: (".", []),
+            trust_dir=lambda p: "", get_origin=lambda: origin,
+        )
+        return approvers[3], bridge, log  # approve_tool
+
+    def test_safe_tool_auto_runs_in_triggered_session(self):
+        approve_tool, bridge, log = self._approver("email")
+        result = approve_tool("gmail_label", {"message_id": "m1", "add": "Receipts"})
+        assert result is True
+        assert bridge.asked == []  # no card — auto-run, no human needed
+        assert log.records and log.records[0][1] == "auto (email)"
+
+    def test_draft_send_is_safe_but_live_send_holds(self):
+        approve_tool, bridge, _ = self._approver("email")
+        assert approve_tool("gmail_send", {"to": "x@y.z", "body": "hi", "draft": True}) is True
+        assert bridge.asked == []
+        # A live (non-draft) send falls through to the card = held for approval.
+        approve_tool2, bridge2, _ = self._approver("email")
+        approve_tool2("gmail_send", {"to": "x@y.z", "body": "hi"})
+        assert len(bridge2.asked) == 1 and bridge2.asked[0]["tool"] == "gmail_send"
+
+    def test_unsafe_tool_holds_in_triggered_session(self):
+        approve_tool, bridge, _ = self._approver("email")
+        approve_tool("gmail_trash", {"message_id": "m1"})
+        assert len(bridge.asked) == 1  # trash always prompts, even when triggered
+
+    def test_user_session_always_prompts_even_for_safe_tools(self):
+        # The policy is scoped to NON-user origins; a human-driven session gates
+        # every mutation as before (no silent auto-run).
+        approve_tool, bridge, _ = self._approver("user")
+        approve_tool("gmail_label", {"message_id": "m1", "add": "Receipts"})
+        assert len(bridge.asked) == 1
+
+    def test_triggered_safe_helper(self):
+        assert server_module._triggered_safe("gmail_label", {})
+        assert server_module._triggered_safe("gmail_send", {"draft": True})
+        assert not server_module._triggered_safe("gmail_send", {})
+        assert not server_module._triggered_safe("gmail_trash", {"message_id": "m"})
+
+
+class TestTriggerEndpoint:
+    """The loopback/token-gated /trigger ingress and origin plumbing (#160)."""
+
+    def test_trigger_spawns_origin_tagged_session_and_runs(self, app_env):
+        client, _ = make_client(app_env, [model_says("triaged")], token="secret")
+        with client:
+            r = client.post("/trigger?token=secret",
+                            json={"prompt": "new mail arrived", "origin": "email",
+                                  "meta": {"msg": "abc"}, "title": "Email: booking"})
+            assert r.status_code == 200
+            name = r.json()["session"]
+            assert r.json()["origin"] == "email"
+            # Drive the spawned session to completion, then confirm provenance.
+            with connected(client, f"/ws?token=secret&session={name}") as (ws, _, _):
+                recv_until(ws, "done")
+                ws.send_json({"type": "sessions"})
+                lst = recv_until(ws, "session_list")
+            row = next(s for s in lst["sessions"] if s["name"] == name)
+            assert row["origin"] == "email"
+            session = client.app.state.server.sessions[name]
+            assert session.origin == "email"
+            assert session.trigger_meta == {"msg": "abc"}
+
+    def test_trigger_rejects_bad_token(self, app_env):
+        client, _ = make_client(app_env, [model_says("x")], token="secret")
+        with client:
+            r = client.post("/trigger?token=nope", json={"prompt": "hi"})
+            assert r.status_code == 403
+
+    def test_trigger_rejects_user_origin(self, app_env):
+        client, _ = make_client(app_env, [model_says("x")], token="secret")
+        with client:
+            r = client.post("/trigger?token=secret",
+                            json={"prompt": "hi", "origin": "user"})
+            assert r.status_code == 400
+
+    def test_trigger_requires_prompt(self, app_env):
+        client, _ = make_client(app_env, [model_says("x")], token="secret")
+        with client:
+            r = client.post("/trigger?token=secret", json={"origin": "email"})
+            assert r.status_code == 400
+
+
+class TestOriginPersistence:
+    """origin survives a cold reopen from the log (#160)."""
+
+    def test_origin_recorded_and_reparsed(self, app_env, tmp_path):
+        client, _ = make_client(app_env, [model_says("done")], token="secret")
+        with client:
+            r = client.post("/trigger?token=secret",
+                            json={"prompt": "go", "origin": "schedule"})
+            name = r.json()["session"]
+            with connected(client, f"/ws?token=secret&session={name}") as (ws, _, _):
+                recv_until(ws, "done")
+        # Re-parse straight off disk: the origin record round-trips.
+        path = Path(app_env["state_dir"]) / name
+        _, _, _, origin = SessionLog._parse(path)
+        assert origin == "schedule"
+        # And a fresh, untagged session parses as the default "user".
+        assert SessionLog._info_from(path, [{"role": "user", "content": "x"}]).origin == "user"

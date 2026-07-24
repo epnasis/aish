@@ -447,7 +447,28 @@ class WebStatus:
         self.bridge.emit({"type": "status", "state": "idle"}, record=False)
 
 
-def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir):
+# Triggered-session capability policy (#160): a session NOT started by the user
+# (origin email/schedule/webhook) runs with no human at the keyboard. These
+# mutating tools are SAFE to auto-run there — reversible and non-exfiltrating:
+# relabeling mail, and saving (never sending) a draft. Everything else (sending
+# live mail, trashing, creating filters, sharing to Drive) falls through to the
+# normal approval card, which simply HOLDS pending until the owner opens the
+# automated session and answers — the draft-and-hold model, built out of the
+# existing gate rather than a bespoke hold flow.
+TRIGGERED_SAFE_TOOLS = frozenset({"gmail_label"})
+
+
+def _triggered_safe(name: str, args: dict) -> bool:
+    """Whether tool `name` with `args` may auto-run in a triggered session."""
+    if name in TRIGGERED_SAFE_TOOLS:
+        return True
+    # Saving a draft never leaves the mailbox; sending it does — so a triggered
+    # send is safe ONLY as a draft, and a live send still holds for approval.
+    return name == "gmail_send" and bool(args.get("draft"))
+
+
+def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir,
+                       get_origin=None):
     """The three approval callbacks, backed by browser round trips. Mirrors
     cli.make_approver semantics exactly: denylist first (also on edited
     commands), then auto-approval scoped to the live session roots, then a
@@ -613,6 +634,15 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         # approve+comment = HOLD-and-adjust. A ground-truth preview (#157), when
         # the tool provides one, gives the human a legible description of an
         # otherwise-opaque (e.g. id-addressed) action.
+        origin = get_origin() if get_origin else "user"
+        if origin != "user" and _triggered_safe(name, args):
+            # Triggered-session capability policy (#160): a safe mutation runs
+            # without a card since there is no human to answer one. Recorded as
+            # auto so the audit trail shows it was policy, not a human decision.
+            shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
+            record(f"tool {name}({shown})", f"auto ({origin})")
+            bridge.emit({"type": "echo", "text": f"✓ auto-approved ({origin}): {name}"})
+            return True
         request: dict[str, Any] = {
             "type": "approval_request",
             "kind": "tool",
@@ -854,10 +884,18 @@ class Client:
 class Session:
     """One open conversation: its own agent, log, transcript, and busy flag."""
 
-    def __init__(self, agent, logref: LogRef, bridge: Bridge):
+    def __init__(self, agent, logref: LogRef, bridge: Bridge,
+                 origin: str = "user", trigger_meta: dict | None = None):
         self.agent = agent
         self.logref = logref
         self.bridge = bridge
+        # Provenance (#160): "user" for a human-started chat, else "schedule" /
+        # "email" / "webhook". Drives the drawer's "Automated" grouping and the
+        # triggered-session capability policy (safe mutations auto-run, the rest
+        # hold pending the owner's approval). trigger_meta carries context (e.g.
+        # the message id that fired an email trigger).
+        self.origin = origin
+        self.trigger_meta = trigger_meta or {}
         self.busy = False
         self.runner: asyncio.Task | None = None
         self.queue: list[tuple[str, list[str]]] = []  # (text, attachments) waiting
@@ -1878,6 +1916,7 @@ class WebServer:
                         "ts": info.mtime,
                         "state": open_states.get(info.path.name, ""),
                         "cwd": open_cwds.get(info.path.name, ""),
+                        "origin": info.origin,
                     }
                     for info in infos
                 ],
@@ -2320,6 +2359,53 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return {"error": "listing failed"}, 500
         return data, data.pop("status", 200)
 
+    async def handle_trigger(self, request) -> JSONResponse:
+        """POST /trigger — programmatic ingress for NON-user origins (#160):
+        schedule / email / webhook. Loopback + token only; the model has no path
+        here (only local automation like the email poller calls it). Spawns a
+        Session tagged with the origin, launches the prompt as a task, and
+        returns the session name so the caller — and a later notification — can
+        deep-link straight to the automated session.
+
+        Security: the TOKEN is the gate. Behind a same-host reverse proxy every
+        request looks loopback, so loopback alone proves nothing — a production
+        server sets a token and only a caller holding it may trigger. When NO
+        token is configured (local dev), we fall back to requiring a loopback
+        peer so a 0.0.0.0-bound dev server isn't openly triggerable."""
+        if self.token:
+            if request.query_params.get("token") != self.token:
+                return JSONResponse({"error": "bad token"}, status_code=403)
+        else:
+            host = request.client.host if request.client else ""
+            if host not in ("127.0.0.1", "::1", "localhost"):
+                return JSONResponse({"error": "trigger needs a token or loopback"},
+                                    status_code=403)
+        try:
+            body = json.loads(await request.body() or b"{}")
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            return JSONResponse({"error": "prompt is required"}, status_code=400)
+        origin = str(body.get("origin") or "webhook").strip()
+        if origin == "user":
+            return JSONResponse({"error": "origin must not be 'user'"}, status_code=400)
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        title = str(body.get("title") or "").strip()
+
+        self._evict_idle()
+        session, _ = await asyncio.to_thread(self.open_session, None, origin, meta)
+        self.add_session(session)
+        if title:
+            session.custom_title = title
+            session.logref.log.set_title(title)
+        session.busy = True
+        session.bridge.emit({"type": "user", "text": prompt})
+        session.runner = asyncio.ensure_future(self._run_task(session, prompt))
+        return JSONResponse({"session": session.name, "origin": origin})
+
     async def handle_upload(self, request) -> JSONResponse:
         """POST /upload?name=<filename>, raw body — no multipart, so no extra
         dependency. Files land in <state_dir>/uploads (a session root, so the
@@ -2445,7 +2531,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         image_roots = self._image_roots()
 
         def build() -> tuple[bytes, str]:
-            messages, _, custom_title = SessionLog._parse(path)
+            messages, _, custom_title, _ = SessionLog._parse(path)
             title = custom_title or SessionLog._derive_title(messages) or "aish session"
             return export.render_session_pdf(messages, title, image_roots), title
 
@@ -2515,17 +2601,24 @@ def create_app(
     def get_loop():
         return server_ref[0].loop if server_ref else None
 
-    def open_session(path: Path | None) -> tuple[Session, list[dict]]:
+    def open_session(
+        path: Path | None,
+        origin: str = "user",
+        trigger_meta: dict | None = None,
+    ) -> tuple[Session, list[dict]]:
         """Build one Session: fresh agent wired to its own bridge/log. For an
         existing path the conversation is reloaded into the agent (the file
-        keeps growing in place — same semantics as `aish --resume`)."""
+        keeps growing in place — same semantics as `aish --resume`). `origin`
+        tags a NEW session's provenance (#160); for an existing path the
+        provenance recorded on disk wins so a cold-reopened triggered session
+        keeps its category."""
         history: list[dict] = []
         recorded_spec = ""
         custom_title: str | None = None
         if path is not None:
             # Parse BEFORE anything is appended: the last model record in
             # the file is the model this session must resume with.
-            history, recorded_spec, custom_title = SessionLog._parse(path)
+            history, recorded_spec, custom_title, origin = SessionLog._parse(path)
         log = SessionLog(path) if path is not None else SessionLog.new(state_dir)
         logref = LogRef(log)
         bridge = Bridge(get_loop)
@@ -2601,7 +2694,8 @@ def create_app(
             return "ERROR: agent not ready"
 
         approve, approve_write, approve_read, approve_tool, approve_import = make_web_approvers(
-            bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir
+            bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir,
+            get_origin=lambda: origin,
         )
         # Coalesce a command's per-line output into fewer, larger `stream`
         # events (issue #109) — huge output otherwise emits one WS event + one
@@ -2698,7 +2792,11 @@ def create_app(
                 except backends.BackendError:
                     pass
         logref.model(model_spec(agent))  # record what this session actually runs
-        session = Session(agent, logref, bridge)
+        if origin != "user":
+            # Persist provenance so a cold-reopened triggered session keeps its
+            # "Automated" grouping (#160); "user" is the default and needs none.
+            logref.origin(origin)
+        session = Session(agent, logref, bridge, origin=origin, trigger_meta=trigger_meta)
         session.custom_title = custom_title  # a renamed chat keeps its name hot
         session_holder.append(session)  # #95: the mid-task get/drain callbacks read it
         return session, history
@@ -2723,6 +2821,7 @@ def create_app(
         routes=[
             WebSocketRoute("/ws", server.handle_ws),
             Route("/upload", server.handle_upload, methods=["POST"]),
+            Route("/trigger", server.handle_trigger, methods=["POST"]),
             Route("/file", server.handle_file, methods=["GET"]),
             Route("/export/answer", server.handle_export_answer, methods=["POST"]),
             Route("/export/session", server.handle_export_session, methods=["GET"]),
