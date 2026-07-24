@@ -4479,6 +4479,7 @@ function openConsole() {
   if (consoleOpen) return; // already showing (e.g. a reconnect reattach)
   if (location.hash !== "#console") history.replaceState(null, "", "#console"); // deep-link: survives reload/restart
   $("pty-overlay").hidden = false;
+  document.body.classList.add("console-open"); // freeze the page behind it (iOS scroll)
   $("pty-share").hidden = true;
   setConsoleStatus("attaching…");
 
@@ -4558,6 +4559,7 @@ function hideConsole() {
   if (location.hash === "#console") history.replaceState(null, "", location.pathname + location.search);
   const ov = $("pty-overlay");
   ov.hidden = true;
+  document.body.classList.remove("console-open");
   ov.style.height = ""; ov.style.top = ""; // drop the viewport-fit inline styles
   $("pty-share").hidden = true;
   setConsoleCtrl(false);
@@ -4635,6 +4637,12 @@ if (window.visualViewport) {
   visualViewport.addEventListener("resize", consoleReflowViewport);
   visualViewport.addEventListener("scroll", consoleReflowViewport);
 }
+// Block browser pinch-zoom (#148): the font A-/A+ resize the terminal instead of
+// zooming the page. The viewport meta covers standalone PWAs; this catches the
+// iOS Safari pinch gesture it sometimes ignores. Double-tap zoom is handled by
+// the viewport meta / touch-action.
+document.addEventListener("gesturestart", (e) => e.preventDefault());
+document.addEventListener("gesturechange", (e) => e.preventDefault());
 
 $("file-input").addEventListener("change", async () => {
   for (const file of $("file-input").files) await uploadFile(file);

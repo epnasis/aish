@@ -2233,8 +2233,18 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   padding: 6px 8px; background: var(--ctp-base);
 }
 .pty-screen .xterm { height: 100%; }
-/* Momentum touch-scrolling of xterm's scrollback on iOS. */
-.pty-screen .xterm-viewport { -webkit-overflow-scrolling: touch; }
+/* iPhone: keep a swipe INSIDE the terminal (xterm scrollback, or the program's
+   pane in mouse mode) instead of scrolling the PWA page behind the overlay.
+   overscroll-behavior stops scroll-chaining; touch-action: pan-y allows the
+   vertical scroll but not pinch-zoom. */
+.pty-screen .xterm-viewport {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+#pty-overlay { overscroll-behavior: contain; }
+/* Freeze the page under the console so a swipe can't move it. */
+body.console-open { overflow: hidden; overscroll-behavior: none; }
 .pty-keys {
   display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto;
   border-top: 1px solid #26262b; background: rgba(20, 20, 24, 0.95);
