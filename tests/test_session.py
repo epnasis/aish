@@ -1,5 +1,6 @@
 import json
 import os
+import time
 
 from aish.session import SessionLog
 
@@ -649,3 +650,76 @@ def test_user_command_history_capped(tmp_path):
         _user_cmd(log, f"cmd{i}")
     log.close()
     assert len(SessionLog.user_command_history(tmp_path, limit=3)) == 3
+
+
+# --- restart recovery (#164) ------------------------------------------------
+# An interrupted task is one whose task_start never got its task_end: a killed
+# process writes nothing, so absence of the end marker IS the evidence.
+
+
+def test_pending_task_none_when_task_finished(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.task_start("do the thing")
+    log.message({"role": "user", "content": "do the thing"})
+    log.message({"role": "assistant", "content": "done"})
+    log.task_end()
+    log.close()
+    assert SessionLog.pending_task(log.path) is None
+
+
+def test_pending_task_reports_unfinished_task(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.task_start("first")
+    log.task_end()
+    log.task_start("second")  # killed mid-run
+    log.message({"role": "user", "content": "second"})
+    log.close()
+    pending = SessionLog.pending_task(log.path)
+    assert pending["prompt"] == "second"
+    assert pending["attempts"] == 1
+
+
+def test_pending_task_counts_attempts_since_last_end(tmp_path):
+    log = SessionLog.new(tmp_path)
+    for _ in range(3):
+        log.task_start("keeps dying")
+    assert SessionLog.pending_task(log.path)["attempts"] == 3
+    log.task_end()
+    assert SessionLog.pending_task(log.path) is None
+    log.close()
+
+
+def test_pending_task_ignores_logs_without_markers(tmp_path):
+    # A CLI session (which never writes task markers) is never resumable.
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "hi"})
+    log.close()
+    assert SessionLog.pending_task(log.path) is None
+
+
+def test_interrupted_sessions_newest_first_within_window(tmp_path):
+    stale = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+    stale.task_start("old and abandoned")
+    stale.close()
+    fresh = SessionLog(tmp_path / "session-20260102-000000-000000.jsonl")
+    fresh.task_start("interrupted just now")
+    fresh.close()
+    finished = SessionLog(tmp_path / "session-20260103-000000-000000.jsonl")
+    finished.task_start("ran fine")
+    finished.task_end()
+    finished.close()
+    now = time.time()
+    os.utime(stale.path, (now - 86400, now - 86400))
+    os.utime(fresh.path, (now - 60, now - 60))
+    os.utime(finished.path, (now - 30, now - 30))
+
+    found = SessionLog.interrupted_sessions(tmp_path, max_age_secs=3600)
+    assert [p.name for p, _ in found] == [fresh.path.name]
+    assert found[0][1]["prompt"] == "interrupted just now"
+    # A wider window reaches the stale one too, newest first.
+    wide = SessionLog.interrupted_sessions(tmp_path, max_age_secs=7 * 86400)
+    assert [p.name for p, _ in wide] == [fresh.path.name, stale.path.name]
+
+
+def test_interrupted_sessions_empty_state_dir(tmp_path):
+    assert SessionLog.interrupted_sessions(tmp_path, max_age_secs=3600) == []

@@ -5,6 +5,7 @@ import datetime
 import difflib
 import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -157,6 +158,56 @@ class SessionLog:
                 if trust_path and trust_path not in trusted:
                     trusted.append(trust_path)
         return cwd, trusted
+
+    @staticmethod
+    def pending_task(path: Path) -> dict | None:
+        """The task this session was still running when its process died, or
+        None when the last task finished normally (#164). A `task_start` record
+        with no matching `task_end` after it IS the interruption signal — a
+        killed process cannot write anything, so absence is the evidence.
+
+        `attempts` counts the task_start records since the last task_end, so a
+        task that keeps killing the server is resumed a bounded number of times
+        instead of crash-looping it forever."""
+        pending: dict | None = None
+        attempts = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            kind = record.get("kind")
+            if kind == "task_start":
+                attempts += 1
+                pending = {
+                    "prompt": record.get("prompt") or "",
+                    "ts": record.get("ts") or "",
+                    "attempts": attempts,
+                }
+            elif kind == "task_end":
+                pending, attempts = None, 0
+        return pending
+
+    @staticmethod
+    def interrupted_sessions(
+        state_dir: Path, max_age_secs: float
+    ) -> list[tuple[Path, dict]]:
+        """Every recently-active session log holding an unfinished task, newest
+        first (#164) — what the web server replays after a restart. The age
+        window is deliberate: resuming a day-old task would surprise more than
+        it helps, and the restarts this recovers from happen within minutes."""
+        cutoff = time.time() - max_age_secs
+        found: list[tuple[Path, dict]] = []
+        for path in SessionLog._by_recency(state_dir):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    break  # _by_recency is newest-first: everything older follows
+                pending = SessionLog.pending_task(path)
+            except OSError:
+                continue
+            if pending is not None:
+                found.append((path, pending))
+        return found
 
     @staticmethod
     def reconstruct_events(path: Path) -> list[dict] | None:
@@ -836,6 +887,22 @@ class SessionLog:
         read back by _parse so a cold-loaded triggered session keeps its
         provenance and the drawer can group it under "Automated" (#160)."""
         self._record("origin", origin=origin)
+
+    def task_start(self, prompt: str) -> None:
+        """Mark a model task as IN FLIGHT (#164). Paired with task_end, this is
+        the only durable trace that a task was running when the process died:
+        the web server resumes any session whose log ends on an unmatched
+        task_start. The prompt rides along for the case where the run died
+        before the user message itself was logged.
+
+        Written by the WEB server only — a CLI session dies with its terminal
+        and must never be resurrected by an unrelated aish-web start."""
+        self._record("task_start", prompt=prompt)
+
+    def task_end(self) -> None:
+        """The task reached its end — answered, errored, or cancelled. All three
+        are 'no longer in flight'; only a killed process leaves this unwritten."""
+        self._record("task_end")
 
     def step(self, step: dict) -> None:
         """Persist one structured activity-trace step so the trace is

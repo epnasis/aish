@@ -159,6 +159,29 @@ TRANSCRIPT_KEEP = 500
 # closed (its file persists — reopening it later just reloads the history).
 MAX_OPEN_SESSIONS = 6
 
+# Restart recovery (#164). A task killed mid-run (a deploy restart, a crash, an
+# OOM) has NOTHING to bring it back: a user chat sits half-answered until
+# somebody notices, and an automated one — an email trigger whose message the
+# poller has already marked processed — silently never happens at all. At
+# startup every session whose log ends on an unmatched task_start is resumed.
+# The three bounds keep that safe: only recent work is picked up, a task that
+# keeps killing the server is abandoned instead of crash-looping it, and a mass
+# restart can't stampede the backend with a dozen concurrent tasks.
+RESUME_WINDOW = 12 * 3600  # how far back an interrupted task is still resumed
+RESUME_MAX_ATTEMPTS = 3    # interrupted starts before a task is left alone
+RESUME_MAX_SESSIONS = 3    # tasks resumed per startup
+# Sent as the resumed turn when the interrupted run got far enough to log its
+# prompt: the request and the partial work are both already in the history, so
+# repeating the prompt would invite the model to redo side effects it may have
+# completed (an email already sent) rather than finish what is left.
+RESUME_NOTE = (
+    "[automatic resume] aish restarted while this task was still running, so the "
+    "previous attempt was cut off part-way. Everything above is what had already "
+    "happened. Do NOT repeat steps that already completed — especially anything "
+    "that sent, wrote, or changed something. Check what is actually still "
+    "missing, pick up from there, and finish the task."
+)
+
 # The global "Quake console" (issue #148 follow-up). ONE interactive PTY for
 # the whole server — not per-session — openable from any chat and surviving
 # chat-switches, disconnects, and (tmux-backed) aish-web restarts. When tmux is
@@ -869,6 +892,13 @@ While you work, messages the user sends are QUEUED and run one after \
 another; the user can also press Stop to cancel your current task — a \
 "(task stopped by user)" note means exactly that, so do not treat it as an \
 error.
+- If a user message starts with "[automatic resume]", aish was RESTARTED while \
+your previous task was still running and that same task has been picked up \
+again — the conversation above is your OWN interrupted work. You MUST check \
+what actually completed before acting (re-read the real state rather than \
+assuming from the transcript), you MUST NOT repeat any step that already sent, \
+wrote, or changed something, and you then finish whatever is still missing. \
+If everything was already done, say so instead of doing it twice.
 - QUICK REPLIES: you CAN turn a question into tap buttons, and the user \
 EXPECTS them — the web UI renders them the same on phone and desktop. \
 Whenever you end a message with a question whose \
@@ -1040,6 +1070,7 @@ class WebServer:
         # user-editable via config.toml [directory_picker], defaults otherwise.
         self.dir_ignore = list(dir_ignore_patterns or dir_ignore.DEFAULT_IGNORE)
         self.loop: asyncio.AbstractEventLoop | None = None
+        self.resumer: asyncio.Task | None = None  # startup restart-recovery (#164)
         self.sessions: dict[str, Session] = {}
         self.clients: set[Client] = set()
         self._default: Session | None = None  # bare-connection landing session
@@ -1068,11 +1099,65 @@ class WebServer:
 
     async def startup(self) -> None:
         self.loop = asyncio.get_running_loop()
+        # Off the startup path: reopening sessions touches disk and launches
+        # model work, and the server must be serving before any of that.
+        self.resumer = asyncio.ensure_future(self._resume_interrupted())
+
+    async def _resume_interrupted(self) -> None:
+        """Pick up where a killed process left off (#164) — see RESUME_WINDOW.
+        Applies to user chats and automated (triggered) sessions alike: neither
+        has anything else that would ever restart the task. A resumed session is
+        opened in the background exactly like a triggered one; its owner sees it
+        in the drawer, and a triggered one still pushes its finish notification.
+
+        Nothing here may propagate: a state dir that can't be read is a reason to
+        start without recovery, never a reason not to start."""
+        try:
+            pending = SessionLog.interrupted_sessions(self.state_dir, RESUME_WINDOW)
+        except OSError as exc:
+            print(f"[resume] could not scan {self.state_dir}: {exc}", file=sys.stderr)
+            return
+        resumed = 0
+        for path, info in pending:
+            if resumed >= RESUME_MAX_SESSIONS:
+                break
+            if path.name in self.sessions:  # already running (never after a restart)
+                continue
+            if info["attempts"] >= RESUME_MAX_ATTEMPTS:
+                print(f"[resume] {path.name}: left alone after {info['attempts']} "
+                      "interrupted attempts", file=sys.stderr)
+                continue
+            try:
+                # The same cold open a user's session-switch performs, so the
+                # resumed session replays its full prior transcript when its
+                # owner opens it — the resumed turn appends to that history
+                # rather than looking like a session that began mid-thought.
+                session = await self._open_by_name(path.name)
+                history = await asyncio.to_thread(SessionLog.load_messages, path)
+            except Exception as exc:  # noqa: BLE001 — one bad log must not stop the rest
+                print(f"[resume] {path.name}: reopen failed: {exc!r}", file=sys.stderr)
+                continue
+            if session is None:
+                continue
+            # A run that died before its own user message was logged left the
+            # model nothing to continue FROM, so that one re-issues the recorded
+            # prompt; every other resume continues the conversation (RESUME_NOTE).
+            text = RESUME_NOTE if any(m.get("role") == "user" for m in history) else info["prompt"]
+            if not text:
+                continue
+            session.busy = True
+            session.bridge.emit({"type": "user", "text": text})
+            session.runner = asyncio.ensure_future(self._run_task(session, text))
+            resumed += 1
+            print(f"[resume] {path.name}: retrying an interrupted task "
+                  f"(attempt {info['attempts'] + 1})", file=sys.stderr)
 
     async def shutdown(self) -> None:
         """Unblock everything so Ctrl-C exits promptly: workers parked on an
         approval slot would otherwise wait forever and keep the interpreter
         alive. Denials are recorded in the audit log like any other deny."""
+        if self.resumer is not None and not self.resumer.done():
+            self.resumer.cancel()  # a restart mid-recovery just recovers again
         for session in self.sessions.values():
             for uid in list(session.bridge.pending):
                 session.bridge.answer(uid, {"action": "deny"})
@@ -1647,6 +1732,12 @@ class WebServer:
         images: list[str] | None = None,
         documents: list[str] | None = None,
     ) -> None:
+        # Bracket the run on disk (#164). Only a killed process leaves the
+        # task_start unmatched, which is exactly what makes it the restart
+        # signal — every ordinary ending (answer, error, cancel) reaches the
+        # `finally`. The ! command path deliberately writes no marker: re-running
+        # the user's own shell command unattended is not a recovery, it's a risk.
+        session.logref.task_start(text)
         try:
             if images or documents:
                 result = await asyncio.to_thread(
@@ -1686,6 +1777,7 @@ class WebServer:
         except Exception as exc:  # noqa: BLE001 — a task bug must not kill the server
             session.bridge.emit({"type": "error", "text": f"task failed: {exc!r}"})
         finally:
+            session.logref.task_end()
             await self._finish_turn(session)
 
     async def _run_user_command(self, session: Session, command: str) -> None:

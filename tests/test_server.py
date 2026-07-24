@@ -3884,3 +3884,123 @@ class TestBridgeOnWait:
         # The gate still returns the answer despite the hook raising.
         assert bridge.ask({"type": "approval_request", "kind": "tool", "tool": "x"}) \
             == {"action": "approve"}
+
+
+class TestRestartResume:
+    """Restart recovery (#164): a task killed mid-run by a server restart is
+    picked up again at the next startup. Without this an interrupted automated
+    session — an email trigger the poller has already marked processed — simply
+    never happens, and nothing anywhere would ever notice."""
+
+    @staticmethod
+    def _interrupted_log(app_env, prompt="answer the mail", *, with_history=True,
+                         attempts=1, origin="email"):
+        """A session log in the state the OS leaves behind when the process is
+        killed mid-task: a task_start with no task_end."""
+        state_dir = Path(app_env["state_dir"])
+        log = SessionLog(state_dir / "session-20260101-120000-000000.jsonl")
+        log.model("fake")
+        if origin != "user":
+            log.origin(origin)
+        for _ in range(attempts):
+            log.task_start(prompt)
+            if with_history:
+                log.message({"role": "user", "content": prompt})
+        log.close()
+        return log.path
+
+    @staticmethod
+    def _wait(predicate, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def _resumed_prompt(self, chat):
+        """The text of the resumed turn as the model saw it: the last user
+        message of the first model call the resumed task made."""
+        for message in reversed(chat.calls[0]["messages"]):
+            if message.get("role") == "user":
+                return message.get("content", "")
+        return ""
+
+    def test_interrupted_task_resumes_at_startup(self, app_env):
+        path = self._interrupted_log(app_env)
+        client, chat = make_client(app_env, [model_says("sent the reply")])
+        with client:
+            server = client.app.state.server
+            assert self._wait(lambda: path.name in server.sessions), "never resumed"
+            session = server.sessions[path.name]
+            assert self._wait(lambda: not session.busy), "resumed task never finished"
+        # Continues the conversation instead of re-issuing the prompt, so work
+        # already done (a sent email) is not repeated.
+        assert "[automatic resume]" in self._resumed_prompt(chat)
+        assert session.origin == "email"  # provenance survives the resume
+        # The completed run closed its bracket: a second restart won't redo it.
+        assert SessionLog.pending_task(path) is None
+
+    def test_resume_reissues_prompt_when_nothing_was_logged(self, app_env):
+        # Killed before the user message itself was logged: the history holds
+        # nothing to continue from, so the recorded prompt is re-issued.
+        path = self._interrupted_log(app_env, "read msg 42", with_history=False)
+        client, chat = make_client(app_env, [model_says("read it")])
+        with client:
+            server = client.app.state.server
+            assert self._wait(lambda: path.name in server.sessions)
+            assert self._wait(lambda: not server.sessions[path.name].busy)
+        assert self._resumed_prompt(chat) == "read msg 42"
+
+    def test_finished_session_is_not_resumed(self, app_env):
+        state_dir = Path(app_env["state_dir"])
+        log = SessionLog(state_dir / "session-20260101-120000-000000.jsonl")
+        log.task_start("all done")
+        log.message({"role": "user", "content": "all done"})
+        log.task_end()
+        log.close()
+        client, chat = make_client(app_env, [])
+        with client:
+            time.sleep(0.3)
+            assert log.path.name not in client.app.state.server.sessions
+        assert chat.calls == []
+
+    def test_repeatedly_interrupted_task_is_abandoned(self, app_env):
+        # A task that keeps killing the server must not crash-loop it.
+        path = self._interrupted_log(app_env, attempts=server_module.RESUME_MAX_ATTEMPTS)
+        client, chat = make_client(app_env, [])
+        with client:
+            time.sleep(0.3)
+            assert path.name not in client.app.state.server.sessions
+        assert chat.calls == []
+
+    def test_stale_interrupted_task_is_not_resumed(self, app_env):
+        path = self._interrupted_log(app_env)
+        old = time.time() - server_module.RESUME_WINDOW - 60
+        os.utime(path, (old, old))
+        client, chat = make_client(app_env, [])
+        with client:
+            time.sleep(0.3)
+            assert path.name not in client.app.state.server.sessions
+        assert chat.calls == []
+
+    def test_task_markers_bracket_a_normal_run(self, app_env):
+        client, _ = make_client(app_env, [model_says("hi there")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+            path = Path(app_env["state_dir"]) / hello["session"]
+            assert SessionLog.pending_task(path) is None
+            kinds = [json.loads(line)["kind"] for line in path.read_text().splitlines()]
+            assert kinds.count("task_start") == 1 and kinds.count("task_end") == 1
+
+    def test_user_command_leaves_no_resume_marker(self, app_env):
+        # A ! command is the user's own shell action — re-running it unattended
+        # is a risk, not a recovery, so it writes no marker.
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "!echo hi"})
+            recv_until(ws, "done")
+            path = Path(app_env["state_dir"]) / hello["session"]
+            assert SessionLog.pending_task(path) is None
+            assert "task_start" not in path.read_text()

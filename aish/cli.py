@@ -142,6 +142,12 @@ class LogRef:
     def step(self, step: dict) -> None:
         self.log.step(step)
 
+    def task_start(self, prompt: str) -> None:
+        self.log.task_start(prompt)
+
+    def task_end(self) -> None:
+        self.log.task_end()
+
     def command_event(self, event: dict) -> None:
         self.log.command_event(event)
 
