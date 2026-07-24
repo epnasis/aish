@@ -4469,7 +4469,9 @@ function openPty() {
   screen.textContent = "";
   ptyTerm = new Terminal({
     cursorBlink: true,
-    fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+    // PragmataPro if the device (or the vendored @font-face) has it, else the
+    // system mono. Family-name variants cover the different PragmataPro builds.
+    fontFamily: '"PragmataPro Mono", "PragmataPro", "PragmataProMono", ui-monospace, "SF Mono", Menlo, Consolas, monospace',
     fontSize: ptyFontSize,
     scrollback: 5000,
     // Mouse reporting is forwarded to the program when it asks for it (tmux/vim
