@@ -4877,14 +4877,18 @@ buildPtySymbols();
     if (dy > DOWN && Math.abs(dy) > Math.abs(dx)) { e.preventDefault(); if (!armed) arm(true); }
     else if (armed && dy < DOWN) arm(false); // dragged back up before release
   }, { passive: false });
-  mid.addEventListener("touchend", () => {
+  mid.addEventListener("touchend", (e) => {
     if (cur && !scrolling) {
+      // Cancel iOS's synthesized mouse/click: without this the button's
+      // emulated mousedown steals focus from the xterm textarea AFTER our
+      // focus() below, and iOS dismisses the soft keyboard on every key.
+      e.preventDefault();
       consoleSend(armed ? cur.dataset.sym2 : cur.dataset.sym);
       consoleKeyFeedback(cur);
       if (consoleTerm) consoleTerm.focus();
     }
     reset();
-  });
+  }, { passive: false });
   mid.addEventListener("touchcancel", reset);
 })();
 
