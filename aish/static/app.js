@@ -4553,10 +4553,20 @@ function setConsoleSelectMode(on, quiet) {
   if (chip) chip.classList.toggle("on", on);
   const scr = $("pty-screen");
   if (scr) scr.classList.toggle("selecting", on);
-  if (on && !quiet) showToast("Select mode — drag to select · tap Select again to scroll");
-  // Clear any lingering selection on exit so the scroll handler resumes cleanly
-  // (it stands down whenever text is selected).
-  else if (!on && window.getSelection) window.getSelection().removeAllRanges();
+  if (on) {
+    // The paint writes into the DOCUMENT selection, which won't take while the
+    // xterm textarea is focused (keyboard up). Blur it — dropping the keyboard —
+    // so the selection sticks. Tapping the chip did this by side effect; a hold
+    // (on the terminal itself) left the textarea focused, so its drag never
+    // selected. This unifies both entry paths.
+    const ta = consoleTerminalTextarea();
+    if (ta) ta.blur();
+    if (!quiet) showToast("Select mode — drag to select · tap Select again to scroll");
+  } else if (window.getSelection) {
+    // Clear any lingering selection on exit so the scroll handler resumes cleanly
+    // (it stands down whenever text is selected).
+    window.getSelection().removeAllRanges();
+  }
 }
 
 let consoleLockY = 0; // page scroll offset captured while the console freezes it
