@@ -237,21 +237,34 @@
        capture happens on the hidden input below, which summons the keyboard. -->
   <!-- xterm.js mounts its own canvas + input textarea into this container. -->
   <div id="pty-screen" class="pty-screen" aria-live="polite"></div>
+  <!-- Sticky sides (esc/ctrl/tab left · arrows/keyboard right) frame a scrollable
+       middle of Blink-style symbol keys — tap = primary glyph, swipe down = the
+       small grey secondary. The symbol keys are injected by buildPtySymbols(). -->
   <div class="pty-keys" role="group" aria-label="control keys">
-    <button type="button" data-key="esc">esc</button>
-    <button type="button" data-key="ctrl" title="Sticky Ctrl: tap, then a key → Ctrl+key">ctrl</button>
-    <button type="button" data-key="ctrl-a" title="Ctrl-A — tmux prefix">C-A</button>
-    <button type="button" data-key="tab">tab</button>
-    <button type="button" data-key="arrows" class="pty-arrows" aria-label="arrow keys — drag a direction, hold to repeat" title="Arrows: drag ↑ ↓ ← →, hold to repeat">
-      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v17M3.5 12h17M12 3.5 9.7 6M12 3.5 14.3 6M12 20.5 9.7 18M12 20.5 14.3 18M3.5 12 6 9.7M3.5 12 6 14.3M20.5 12 18 9.7M20.5 12 18 14.3"/></svg>
-    </button>
-    <button type="button" data-key="copy">copy</button>
-    <button type="button" data-key="paste">paste</button>
-    <button type="button" data-key="kb" class="pty-key-kb" aria-label="show or hide keyboard">
-      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7">
-        <rect x="2.5" y="6" width="19" height="12" rx="2.2"/>
-        <path stroke-linecap="round" d="M6 10h0M10 10h0M14 10h0M18 10h0M6 13h0M18 13h0M9 13.2h6"/>
-      </svg></button>
+    <div class="pty-keys-side pty-keys-left">
+      <button type="button" data-key="esc">esc</button>
+      <button type="button" data-key="ctrl" title="Sticky Ctrl: tap, then a key → Ctrl+key">ctrl</button>
+      <button type="button" data-key="tab">tab</button>
+    </div>
+    <div class="pty-keys-mid" id="pty-syms">
+      <!-- symbol keys injected before these by buildPtySymbols() -->
+      <button type="button" data-key="copy" class="pty-iconbtn" aria-label="copy" title="copy">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2.5"/></svg>
+      </button>
+      <button type="button" data-key="paste" class="pty-iconbtn" aria-label="paste" title="paste">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="5" y="5" width="14" height="16" rx="2"/><path d="M9 5V4a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 4v1"/><path d="M9 5h6" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="pty-keys-side pty-keys-right">
+      <button type="button" data-key="arrows" class="pty-arrows" aria-label="arrow keys — drag a direction, hold to repeat" title="Arrows: drag ↑ ↓ ← →, hold to repeat">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v17M3.5 12h17M12 3.5 9.7 6M12 3.5 14.3 6M12 20.5 9.7 18M12 20.5 14.3 18M3.5 12 6 9.7M3.5 12 6 14.3M20.5 12 18 9.7M20.5 12 18 14.3"/></svg>
+      </button>
+      <button type="button" data-key="kb" class="pty-key-kb" aria-label="show or hide keyboard">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7">
+          <rect x="2.5" y="6" width="19" height="12" rx="2.2"/>
+          <path stroke-linecap="round" d="M6 10h0M10 10h0M14 10h0M18 10h0M6 13h0M18 13h0M9 13.2h6"/>
+        </svg></button>
+    </div>
   </div>
 </div>
 

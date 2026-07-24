@@ -4701,7 +4701,7 @@ document.querySelector(".pty-keys").addEventListener("click", (e) => {
   }
   if (btn.dataset.key === "copy") { consoleCopy(); return; }
   if (btn.dataset.key === "paste") { consolePaste(); return; }
-  const CTRL = { tab: "\t", esc: "\x1b", "ctrl-a": "\x01" }; // arrows: the drag pad below
+  const CTRL = { tab: "\t", esc: "\x1b" }; // arrows: the drag pad below
   const seq = CTRL[btn.dataset.key];
   if (seq != null) consoleSend(seq);
   if (consoleTerm) consoleTerm.focus();
@@ -4822,6 +4822,70 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
   }, { passive: false });
   btn.addEventListener("touchend", (e) => { e.preventDefault(); stop(); }, { passive: false });
   btn.addEventListener("touchcancel", stop);
+})();
+
+// Blink-style symbol keys (#153): each key shows a primary glyph with a smaller
+// grey secondary above it. TAP → primary; swipe DOWN on the key → the grey
+// secondary (armed while held, sent on release). A horizontal drag scrolls the
+// row instead of sending anything. Injected before the copy/paste icons so they
+// scroll together in the middle section.
+function buildPtySymbols() {
+  const mid = $("pty-syms");
+  if (!mid || mid.dataset.built) return;
+  // [primary (tap), secondary (swipe down)] — the iOS/Blink SmarterKeys set.
+  const SYMS = [
+    ["`", "~"], ["@", "#"], ["$", "^"], [";", ":"], ["-", "_"], ["=", "+"],
+    ["[", "{"], ["]", "}"], ["\\", "|"], ["<", "*"], [">", '"'], ["/", "?"],
+  ];
+  const anchor = mid.firstChild; // the copy/paste buttons stay after the symbols
+  for (const [s1, s2] of SYMS) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "pty-sym";
+    b.dataset.sym = s1; b.dataset.sym2 = s2;
+    const top = document.createElement("span"); top.className = "pty-sym2"; top.textContent = s2;
+    const bot = document.createElement("span"); bot.className = "pty-sym1"; bot.textContent = s1;
+    b.append(top, bot);
+    mid.insertBefore(b, anchor);
+  }
+  mid.dataset.built = "1";
+}
+buildPtySymbols();
+
+// Swipe-down interaction for the symbol keys. Wired once on the mid container
+// (delegation); copy/paste live here too but aren't .pty-sym, so they fall
+// through to the .pty-keys click handler unchanged.
+(() => {
+  const mid = $("pty-syms");
+  if (!mid) return;
+  const DOWN = 12;    // px downward before the secondary arms
+  const HSCROLL = 10; // px horizontal → treat as a row scroll, not a key press
+  let cur = null, sx = 0, sy = 0, armed = false, scrolling = false;
+  const arm = (on) => { armed = on; if (cur) cur.classList.toggle("sym-armed", on); };
+  const reset = () => { if (cur) cur.classList.remove("sym-armed"); cur = null; armed = false; scrolling = false; };
+  mid.addEventListener("touchstart", (e) => {
+    const btn = e.target.closest(".pty-sym");
+    if (!btn) { cur = null; return; }
+    cur = btn; sx = e.touches[0].clientX; sy = e.touches[0].clientY; armed = false; scrolling = false;
+  }, { passive: true });
+  mid.addEventListener("touchmove", (e) => {
+    if (!cur) return;
+    const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
+    if (!scrolling && Math.abs(dx) > HSCROLL && Math.abs(dx) > Math.abs(dy)) {
+      scrolling = true; arm(false); // horizontal wins → let the row scroll, cancel the key
+    }
+    if (scrolling) return; // native pan-x owns the horizontal scroll
+    if (dy > DOWN && Math.abs(dy) > Math.abs(dx)) { e.preventDefault(); if (!armed) arm(true); }
+    else if (armed && dy < DOWN) arm(false); // dragged back up before release
+  }, { passive: false });
+  mid.addEventListener("touchend", () => {
+    if (cur && !scrolling) {
+      consoleSend(armed ? cur.dataset.sym2 : cur.dataset.sym);
+      consoleKeyFeedback(cur);
+      if (consoleTerm) consoleTerm.focus();
+    }
+    reset();
+  });
+  mid.addEventListener("touchcancel", reset);
 })();
 
 $("file-input").addEventListener("change", async () => {
