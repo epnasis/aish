@@ -4806,6 +4806,19 @@ function openConsole() {
     return true;
   });
   consoleTerm.open(screen);
+  // Focus guard: while Select mode is on, the terminal textarea must stay
+  // BLURRED (keyboard down) or the document selection won't stick. xterm
+  // re-focuses its textarea on every touch (its mousedown handler), so a
+  // one-time blur loses the race — the keyboard springs back. Re-blur on any
+  // focus while selecting; harmless (and inactive) the rest of the time.
+  const _selTa = consoleTerminalTextarea();
+  if (_selTa) {
+    _selTa.addEventListener("focus", () => {
+      if (!consoleSelectMode) return;
+      _selTa.blur();
+      setTimeout(() => { if (consoleSelectMode && document.activeElement === _selTa) _selTa.blur(); }, 0);
+    });
+  }
   // THE input path; the model never reaches it. The sticky Ctrl chip (#148):
   // while "armed" or "locked" the next single char is sent as its control code
   // (Ctrl-A tmux prefix, Ctrl-F page down, …); "armed" is one-shot (disarms
@@ -5114,8 +5127,14 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
       new WheelEvent("wheel", { deltaY, deltaMode: 0, bubbles: true, cancelable: true })
     );
   }, { passive: false });
-  const end = () => { scrolling = false; selAnchor = null; touching = false; clearTimeout(holdTimer); };
-  screen.addEventListener("touchend", end);
+  const end = (e) => {
+    // In Select mode, swallow the lift so iOS doesn't synthesize a click that
+    // re-focuses the textarea (bringing the keyboard back). The focus guard
+    // above is the backstop; this avoids the flash.
+    if (consoleSelectMode && e && e.cancelable) e.preventDefault();
+    scrolling = false; selAnchor = null; touching = false; clearTimeout(holdTimer);
+  };
+  screen.addEventListener("touchend", end, { passive: false });
   screen.addEventListener("touchcancel", end);
 })();
 
