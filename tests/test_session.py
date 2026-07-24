@@ -201,6 +201,28 @@ def test_reconstruct_events_synthesizes_framing_for_legacy_command(tmp_path):
     assert ce["exit_code"] == 0  # ok=True → synthesized exit 0
 
 
+def test_reconstruct_events_multiline_user_command_replays_as_terminal(tmp_path):
+    # A user-direct (!) command with a MULTI-LINE body — e.g. `gh issue create`
+    # with a multi-line --body — must replay as its terminal block, NOT a plain
+    # blue user bubble showing the raw "[I ran … myself]" annotation. Regression
+    # for #154: the annotation regex needed re.DOTALL to span the newlines.
+    log = SessionLog.new(tmp_path)
+    cmd = "gh issue create --title X --body '### Problem\nline two\nline three'"
+    log.command_event({"kind": "cmd_start", "cwd": "/proj", "command": cmd})
+    log.command_event({"kind": "cmd_end", "status": "exit", "exit_code": 0})
+    log.message(
+        {"role": "user",
+         "content": f"[I ran `{cmd}` myself; output:]\nhttps://x/y/issues/1\n[exit code: 0]"}
+    )
+
+    events = SessionLog.reconstruct_events(log.path)
+    user_ev = next(e for e in events if e["type"] == "user")
+    assert user_ev["text"].startswith("!gh issue create")  # the ! command, not the annotation
+    assert "[I ran" not in user_ev["text"]
+    types = [e["type"] for e in events]
+    assert "command_start" in types and "command_end" in types  # terminal block, not a bubble
+
+
 def test_reconstruct_events_command_no_output_emits_no_stream(tmp_path):
     # A command with no output emits no stream event (matches the live path,
     # where zero output lines stream) — the block collapses its middle zone.

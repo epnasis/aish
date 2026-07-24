@@ -14,7 +14,11 @@ SNIPPET_MAX = 90  # preview line under the title in the web sessions drawer
 FUZZY_THRESHOLD = 0.55  # whole query vs whole title
 FUZZY_WORD_CUTOFF = 0.75  # single query word vs single session word
 _PUNCT = ".,;:!?()[]{}<>'\"`"
-_BANG_RE = re.compile(r"^\[I ran `(.+?)` myself")
+# DOTALL: a user-direct command can be multi-line (e.g. `gh issue create` with a
+# multi-line --body). Without it the capture stops at the first newline, the
+# annotation isn't recognized on replay, and it rehydrates as a plain blue user
+# bubble instead of its terminal block (#154).
+_BANG_RE = re.compile(r"^\[I ran `(.+?)` myself", re.DOTALL)
 
 # Model-facing search (the search_sessions tool): bounded so one call can
 # never flood a small context window.
