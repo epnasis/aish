@@ -2247,9 +2247,18 @@ body.console-open {
 .pty-sym.sym-armed .pty-sym1 { color: #6c6c74; }
 .pty-iconbtn { display: flex; align-items: center; padding: 8px 12px; }
 .pty-iconbtn svg { display: block; }
+/* Sticky side keys sit a touch smaller than the swipe keys so the row reads
+   evenly (they were noticeably bulkier). */
+.pty-keys-side button { font-size: 13px; padding: 6px 9px; }
 /* esc / ctrl / tab share one width so the mod keys line up (ctrl is abbreviated
    to "ctl" to fit the 3-char box). */
-.pty-modkey { min-width: 46px; text-align: center; }
+.pty-modkey { min-width: 40px; text-align: center; }
+/* Short vertical dividers marking the sticky/swipe boundaries — a pseudo flex
+   item at the inner edge of each side group. */
+.pty-keys-left::after, .pty-keys-right::before {
+  content: ""; flex: none; width: 1px; height: 22px; align-self: center;
+  background: #55555f; border-radius: 1px;
+}
 .pty-keys button:active { background: #2c2c30; }
 /* The sticky Ctrl chip glows while armed (the next key is sent as Ctrl+key). */
 .pty-keys button.armed { background: var(--ctp-mauve); color: #1e1e2e; border-color: var(--ctp-mauve); }
