@@ -4615,13 +4615,6 @@ function hideConsole() {
   if (consoleTerm) { consoleTerm.dispose(); consoleTerm = null; consoleFit = null; }
 }
 
-// Explicit destroy — kills the console (and, tmux-backed, its surviving
-// session) so a later open starts fresh. Distinct from Close = hide.
-function killConsole() {
-  if (consoleOpen) send({ type: "console_kill" });
-  hideConsole();
-}
-
 function onConsoleStarted(event) {
   if (!consoleOpen || !consoleTerm) return;
   consoleTerm.reset();
@@ -4644,7 +4637,6 @@ function onConsoleExit(code) {
 // only on this explicit user action — see onSelectionChange for the button's
 // visibility).
 $("pty-close").onclick = () => hideConsole();
-$("pty-kill").onclick = () => killConsole();
 $("pty-font-dec").onclick = () => consoleFontStep(-1);
 $("pty-font-inc").onclick = () => consoleFontStep(1);
 $("pty-share").onclick = () => {
