@@ -210,21 +210,21 @@ class TestDiscover:
         assert signature(str(tmp_path)) != sig1
 
 
-def test_wraps_parsed(tmp_path):
+def test_prefer_over_parsed(tmp_path):
     manifest = write_tool(
         tmp_path / "t",
         "---\nname: t\ndescription: d\nexec: ./run.sh\nmutating: no\n"
-        "wraps: gh issue create\n---\nb",
+        "prefer_over: gh issue create\n---\nb",
     )
     tool, errors = _parse_tool(manifest)
     assert errors == []
-    assert tool.wraps == "gh issue create"
+    assert tool.prefer_over == ("gh issue create",)
 
 
-def test_wraps_defaults_empty(tmp_path):
+def test_prefer_over_defaults_empty(tmp_path):
     manifest = write_tool(tmp_path / "t", VALID)
     tool, _ = _parse_tool(manifest)
-    assert tool.wraps == ""
+    assert tool.prefer_over == ()
 
 
 SECRET_TOOL = """---

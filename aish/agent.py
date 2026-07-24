@@ -784,10 +784,10 @@ class Agent:
         self._plugin_tools: dict[str, tool_plugins.Tool] = {}
         self._plugin_defs: list[dict] = []
         self._plugin_warned: set[str] = set()
-        # (wraps-prefix, tool-name) for exposed tools that declare `wraps:` —
-        # lets the agent nudge the model toward a tool when it runs the raw
-        # command the tool replaces (drift detection, issue #140).
-        self._tool_wraps: list[tuple[str, str]] = []
+        # (command-prefix, tool-name) for exposed tools that declare
+        # `prefer_over:` — lets the agent nudge the model toward a tool when it
+        # runs a raw command the tool should be used instead of (issue #140).
+        self._tool_prefer: list[tuple[str, str]] = []
         # Skill-read gate state: oversized preloaded skills the model must
         # read_skill (or explicitly waive) before other tools run; values are
         # refusals left before the gate auto-lifts. Rebuilt every run_task.
@@ -1939,19 +1939,20 @@ class Agent:
         gated_ok = self.approve_tool is not None
         exposed = [t for t in found if not t.mutating or gated_ok]
         self._plugin_defs = [tool_plugins.to_tool_def(t) for t in exposed]
-        # Only nudge toward tools the model can actually call.
-        self._tool_wraps = [(t.wraps, t.name) for t in exposed if t.wraps]
+        # Only nudge toward tools the model can actually call. A tool may list
+        # several command prefixes it should be preferred over.
+        self._tool_prefer = [(p, t.name) for t in exposed for p in t.prefer_over]
         for warning in warnings:
             if warning not in self._plugin_warned:
                 self._plugin_warned.add(warning)
                 self._note(f"⚠ tool skipped: {warning}")
 
     def _tool_for_command(self, command: str) -> str | None:
-        """The name of an available plugin tool whose `wraps:` prefix matches
-        this raw command, or None. Used to nudge the model off re-composing a
-        command a reliable tool already covers (issue #140)."""
+        """The name of an available plugin tool that declares (via `prefer_over`)
+        it should be used instead of this raw command, or None. Nudges the model
+        off re-composing a command a reliable tool already covers (issue #140)."""
         cmd = " ".join(command.split())
-        for prefix, name in self._tool_wraps:
+        for prefix, name in self._tool_prefer:
             p = " ".join(prefix.split())
             if p and (cmd == p or cmd.startswith(p + " ")):
                 return name
@@ -2037,8 +2038,8 @@ class Agent:
         ]
         if args.get("timeout"):
             lines.append(f"timeout: {int(args['timeout'])}")
-        if str(args.get("wraps", "") or "").strip():
-            lines.append(f"wraps: {str(args['wraps']).strip()}")
+        if str(args.get("prefer_over", "") or "").strip():
+            lines.append(f"prefer_over: {str(args['prefer_over']).strip()}")
         if str(args.get("secrets", "") or "").strip():
             lines.append(f"secrets: {str(args['secrets']).strip()}")
         lines.append(f"schema: {json.dumps(schema_obj)}")

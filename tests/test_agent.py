@@ -3019,7 +3019,7 @@ class TestPluginTools:
         tdir.mkdir(parents=True, exist_ok=True)
         (tdir / "TOOL.md").write_text(
             f"---\nname: {name}\ndescription: echo the text\nexec: ./run.sh\n"
-            f"mutating: {mutating}\nwraps: {wraps}\n"
+            f"mutating: {mutating}\nprefer_over: {wraps}\n"
             f'schema: {{"text": {{"type": "string"}}}}\n---\nbody\n'
         )
         p = tdir / "run.sh"
@@ -3031,6 +3031,21 @@ class TestPluginTools:
         agent, _ = make_agent(
             [
                 model_says(tool_calls=[tool_call("run_command", command="echo hi there")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("go")
+        assert any(
+            "greeter" in m["content"] and "prefer" in m["content"]
+            for m in tool_messages(agent.messages)
+        )
+
+    def test_prefer_over_list_nudges_on_any_entry(self, tmp_path):
+        self._write_tool_wraps(tmp_path, "greeter", "echo hi, printf hi")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="printf hi there")]),
                 model_says("done"),
             ],
             cwd=str(tmp_path),

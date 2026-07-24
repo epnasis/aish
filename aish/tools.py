@@ -789,11 +789,13 @@ TOOL_SCHEMAS = [
                         "description": "Optional prose body for the TOOL.md: how the "
                         "underlying CLI behaves, gotchas.",
                     },
-                    "wraps": {
+                    "prefer_over": {
                         "type": "string",
-                        "description": "Optional: the raw shell-command prefix this tool "
-                        "replaces (e.g. 'gh issue create'). If the model later runs that "
-                        "raw command, aish nudges it to use this tool instead.",
+                        "description": "Optional: raw command(s) this tool should be used "
+                        "INSTEAD OF — comma-separated, prefixes allowed (e.g. "
+                        "'gh issue create, gh issue new'). These need not be commands the "
+                        "tool wraps — list any raw command a person might reach for that "
+                        "this tool does better. If the model runs one, aish nudges it here.",
                     },
                     "secrets": {
                         "type": "string",

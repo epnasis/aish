@@ -60,7 +60,9 @@ class Tool:
     body: str
     dir: Path
     mtime: float = 0.0
-    wraps: str = ""  # optional shell-command prefix this tool replaces (drift nudge)
+    # raw command prefixes this tool should be used INSTEAD OF (drift nudge) —
+    # not necessarily commands it wraps; alternatives count too.
+    prefer_over: tuple[str, ...] = ()
     secrets: tuple[str, ...] = ()  # env-var names injected from the Keychain at exec
 
 
@@ -186,7 +188,9 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
             body=body.strip(),
             dir=tool_dir,
             mtime=mtime,
-            wraps=fields.get("wraps", "").strip(),
+            prefer_over=tuple(
+                p.strip() for p in fields.get("prefer_over", "").split(",") if p.strip()
+            ),
             secrets=secrets,
         ),
         [],
