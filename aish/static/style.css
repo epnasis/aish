@@ -2276,6 +2276,12 @@ body.console-open {
 .pty-sym.sym-armed .pty-sym1 { color: #6c6c74; }
 .pty-iconbtn { display: flex; align-items: center; padding: 8px 12px; }
 .pty-iconbtn svg { display: block; }
+/* Select-region mode active: the chip glows blue and the terminal shows a
+   selecting cursor + a subtle ring so it's clear scrolling is paused. */
+.pty-keys button.on { background: var(--ctp-blue); color: #1e1e2e; border-color: var(--ctp-blue); }
+.pty-screen.selecting { cursor: crosshair; box-shadow: inset 0 0 0 1.5px var(--ctp-blue); }
+.pty-screen.selecting .xterm-rows,
+.pty-screen.selecting .xterm-rows * { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
 /* Sticky side keys sit a touch smaller than the swipe keys so the row reads
    evenly (they were noticeably bulkier). */
 .pty-keys-side button { font-size: 13px; padding: 6px 9px; }

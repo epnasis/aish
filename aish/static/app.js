@@ -4514,6 +4514,11 @@ let lastConsoleClip = null;
 // tap to unlock — for repeated C-F page-downs / long Ctrl combos).
 let consoleCtrlMode = "off"; // "off" | "armed" | "locked"
 let lastCtrlTap = 0;
+// Select-region mode (touch): a phone can't drive tmux's drag-select (iOS only
+// synthesizes taps, not the continuous move tmux needs), so this mode paints a
+// native selection directly over the DOM rows from finger position instead. The
+// scroll hijack is suspended while it's on.
+let consoleSelectMode = false;
 
 // Catppuccin Mocha — matches the CSS palette applied to the command/code
 // surfaces, so the interactive terminal reads as one theme with them.
@@ -4540,6 +4545,18 @@ function setConsoleCtrlMode(mode) {
     chip.classList.toggle("armed", mode === "armed");
     chip.classList.toggle("locked", mode === "locked");
   }
+}
+
+function setConsoleSelectMode(on) {
+  consoleSelectMode = on;
+  const chip = document.querySelector('.pty-keys button[data-key="select"]');
+  if (chip) chip.classList.toggle("on", on);
+  const scr = $("pty-screen");
+  if (scr) scr.classList.toggle("selecting", on);
+  if (on) showToast("select mode — drag to paint a selection, then Copy");
+  // Clear any lingering selection on exit so the scroll handler resumes cleanly
+  // (it stands down whenever text is selected).
+  else if (window.getSelection) window.getSelection().removeAllRanges();
 }
 
 let consoleLockY = 0; // page scroll offset captured while the console freezes it
@@ -4585,6 +4602,7 @@ function consoleCopy() {
   if (!text) { consoleTerm.selectAll(); text = consoleTerm.getSelection(); consoleTerm.clearSelection(); }
   if (!text || !text.trim()) { showToast("nothing to copy"); return; }
   copyText(text).then((ok) => showToast(ok ? "copied" : "copy blocked"));
+  if (consoleSelectMode) setConsoleSelectMode(false); // painted a region → done, back to scroll
 }
 
 function consolePaste() {
@@ -4840,6 +4858,7 @@ function hideConsole() {
   ov.style.height = ""; ov.style.top = ""; ov.style.paddingBottom = ""; // drop viewport-fit inline styles
   $("pty-share").hidden = true;
   setConsoleCtrlMode("off");
+  if (consoleSelectMode) setConsoleSelectMode(false);
   if (consoleTerm) { consoleTerm.dispose(); consoleTerm = null; consoleFit = null; }
 }
 
@@ -4905,6 +4924,7 @@ document.querySelector(".pty-keys").addEventListener("click", (e) => {
     if (consoleTerm) consoleTerm.focus();
     return;
   }
+  if (btn.dataset.key === "select") { setConsoleSelectMode(!consoleSelectMode); return; }
   if (btn.dataset.key === "copy") { consoleCopy(); return; }
   if (btn.dataset.key === "paste") { consolePaste(); return; }
   const CTRL = { tab: "\t", esc: "\x1b" }; // arrows: the drag pad below
@@ -4968,17 +4988,60 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
   const screen = $("pty-screen");
   const SLOP = 10; // px of travel before a touch is judged a deliberate scroll drag
   let touchY = 0, startX = 0, startY = 0, scrolling = false;
+  let selAnchor = null; // collapsed caret Range where a select-mode drag began
+
+  // The text caret under a screen point (WebKit vs standard spelling).
+  const caretAt = (x, y) => {
+    if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
+    if (document.caretPositionFromPoint) {
+      const p = document.caretPositionFromPoint(x, y);
+      if (!p) return null;
+      const r = document.createRange(); r.setStart(p.offsetNode, p.offset); r.collapse(true); return r;
+    }
+    return null;
+  };
+  // Paint the selection from the drag's anchor caret to the caret under the
+  // finger, ordering the two so the range is valid whichever way you drag.
+  const paintTo = (x, y) => {
+    const focus = caretAt(x, y);
+    if (!selAnchor || !focus) return;
+    const range = document.createRange();
+    if (selAnchor.compareBoundaryPoints(Range.START_TO_START, focus) <= 0) {
+      range.setStart(selAnchor.startContainer, selAnchor.startOffset);
+      range.setEnd(focus.startContainer, focus.startOffset);
+    } else {
+      range.setStart(focus.startContainer, focus.startOffset);
+      range.setEnd(selAnchor.startContainer, selAnchor.startOffset);
+    }
+    const s = window.getSelection(); s.removeAllRanges(); s.addRange(range);
+  };
+
   screen.addEventListener("touchstart", (e) => {
-    if (e.touches.length !== 1) { scrolling = false; return; }
+    if (e.touches.length !== 1) { scrolling = false; selAnchor = null; return; }
     const t = e.touches[0];
+    if (consoleSelectMode) {
+      // Anchor here and keep the touch from reaching tmux/scroll — we own it.
+      selAnchor = caretAt(t.clientX, t.clientY);
+      window.getSelection().removeAllRanges();
+      e.preventDefault();
+      return;
+    }
     touchY = t.clientY; startX = t.clientX; startY = t.clientY; scrolling = false;
-  }, { passive: true });
+  }, { passive: false });
   screen.addEventListener("touchmove", (e) => {
     if (!consoleOpen || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    if (consoleSelectMode) {
+      // Paint an arbitrary region from finger position — independent of tmux,
+      // which touch can't drive as a drag.
+      e.preventDefault();
+      if (!selAnchor) { selAnchor = caretAt(t.clientX, t.clientY); return; }
+      paintTo(t.clientX, t.clientY);
+      return;
+    }
     // A live selection owns the touch: never scroll while text is selected —
     // let the native handles extend it (or leave it be for Copy/Share).
     if (consoleHasNativeSelection()) { scrolling = false; return; }
-    const t = e.touches[0];
     if (!scrolling) {
       // Wait for real travel before claiming the gesture; a hold or double-tap
       // stays below SLOP and passes through to iOS's native selection.
@@ -4997,6 +5060,9 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
       new WheelEvent("wheel", { deltaY, deltaMode: 0, bubbles: true, cancelable: true })
     );
   }, { passive: false });
+  const end = () => { scrolling = false; selAnchor = null; };
+  screen.addEventListener("touchend", end);
+  screen.addEventListener("touchcancel", end);
 })();
 
 // Blink-style arrow pad (#148): ONE key you drag for direction — drag ↑/↓/←/→
