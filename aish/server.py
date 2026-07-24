@@ -604,17 +604,23 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         resolve(request["id"], "approved" if approved else "denied")
         return approved
 
-    def approve_tool(name: str, args: dict) -> "bool | Approved | Denied":
+    def approve_tool(
+        name: str, args: dict, preview: "str | None" = None
+    ) -> "bool | Approved | Denied":
         # Reuses the command card verbatim (issue #141): same approve/deny +
         # comment verdicts, no denylist/auto-approval — a mutating tool always
         # prompts. Comment semantics match commands: deny+comment = STOP,
-        # approve+comment = HOLD-and-adjust.
+        # approve+comment = HOLD-and-adjust. A ground-truth preview (#157), when
+        # the tool provides one, gives the human a legible description of an
+        # otherwise-opaque (e.g. id-addressed) action.
         request: dict[str, Any] = {
             "type": "approval_request",
             "kind": "tool",
             "tool": name,
             "args": args,
         }
+        if preview:
+            request["preview"] = preview
         answer = bridge.ask(request)
         approved = answer.get("action") == "approve"
         comment = str(answer.get("comment") or "").strip()

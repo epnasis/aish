@@ -64,6 +64,7 @@ class Tool:
     # not necessarily commands it wraps; alternatives count too.
     prefer_over: tuple[str, ...] = ()
     secrets: tuple[str, ...] = ()  # env-var names injected from the Keychain at exec
+    preview: bool = False  # if set, resolve args to a human sentence before the gate (#157)
 
 
 def _truncate(text: str, head: int = _OUT_HEAD, tail: int = _OUT_TAIL) -> str:
@@ -148,6 +149,14 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
     if mutating is None:
         errors.append(f"{manifest}: mutating must be declared as yes/no (fail-closed)")
 
+    preview = False
+    if "preview" in fields:
+        parsed_preview = _parse_bool(fields["preview"])
+        if parsed_preview is None:
+            errors.append(f"{manifest}: preview must be yes/no if declared")
+        else:
+            preview = parsed_preview
+
     timeout = DEFAULT_TIMEOUT
     if "timeout" in fields:
         try:
@@ -192,6 +201,7 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
                 p.strip() for p in fields.get("prefer_over", "").split(",") if p.strip()
             ),
             secrets=secrets,
+            preview=preview,
         ),
         [],
     )
@@ -325,6 +335,55 @@ def execute(tool: Tool, args: dict, cwd: str, get_secret=None) -> str:
         return f"ERROR: tool {tool.name!r} failed to start: {exc}"
     out = (proc.stdout or "") + (proc.stderr or "")
     return f"{_truncate(out)}\n[exit code: {proc.returncode}]"
+
+
+PREVIEW_ENV_FLAG = "AISH_TOOL_PREVIEW"
+_PREVIEW_TIMEOUT = 20
+_PREVIEW_MAX = 600
+
+
+def preview(tool: Tool, args: dict, cwd: str, get_secret=None) -> str | None:
+    """Resolve a mutating tool's args to ONE human sentence shown on the approval
+    card BEFORE the gate (#157) — the tool's plan/commit gap, mirroring files.py's
+    diff. Runs the SAME wrapper with ``AISH_TOOL_PREVIEW=1`` set; the wrapper is
+    contracted to resolve + describe (e.g. ``rem show <id>``) WITHOUT mutating and
+    print the sentence to stdout. Fail-OPEN: any problem (no preview declared,
+    error, empty, timeout, unset secret) returns None so the caller falls back to
+    the raw-args card — a preview is an upgrade, never a dependency, and never a
+    blocker on the mutation itself."""
+    if not tool.preview:
+        return None
+    exe = resolve_executable(tool.dir, tool.executable)
+    if exe is None:
+        return None
+    env = dict(os.environ)
+    env[PREVIEW_ENV_FLAG] = "1"
+    if tool.secrets:
+        if get_secret is None:
+            from . import secrets as secrets_store
+
+            get_secret = secrets_store.get
+        for sec in tool.secrets:
+            value = get_secret(sec)
+            if value is None:
+                return None
+            env[sec] = value
+    try:
+        proc = subprocess.run(
+            [exe],
+            input=json.dumps(args),
+            capture_output=True,
+            text=True,
+            timeout=min(tool.timeout, _PREVIEW_TIMEOUT),
+            cwd=cwd,
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    text = (proc.stdout or "").strip()
+    return text[:_PREVIEW_MAX] if text else None
 
 
 def discover(cwd: str) -> tuple[list[Tool], list[str]]:

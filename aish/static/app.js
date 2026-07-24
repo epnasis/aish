@@ -3447,8 +3447,19 @@ function buildToolCard(card, event) {
   head.append(ico, htext);
   card.appendChild(head);
 
+  // Ground-truth preview (#157): a human-legible description of an otherwise
+  // opaque (e.g. id-addressed) action, resolved by the tool itself. Shown
+  // prominently; the raw args become a secondary detail below.
+  if (event.preview) {
+    const prev = document.createElement("div");
+    prev.className = "tool-preview";
+    prev.textContent = event.preview;
+    card.appendChild(prev);
+  }
+
   const argsWrap = document.createElement("div");
   argsWrap.className = "tool-args";
+  if (event.preview) argsWrap.classList.add("secondary");
   const entries = Object.entries(event.args || {});
   if (!entries.length) {
     const empty = document.createElement("div");

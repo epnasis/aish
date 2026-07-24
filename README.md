@@ -278,7 +278,11 @@ without bloating the context.
   schema + `mutating:` flag + an `exec` wrapper; the model's validated JSON
   arguments reach the wrapper on **stdin (no shell)**, so nothing gets mangled
   by quoting, and raw output + exit code come back. Read-only tools auto-run;
-  mutating ones prompt with the same approval card as a command. aish can also
+  mutating ones prompt with the same approval card as a command. When a mutating
+  tool acts on an opaque handle (an id), the manifest can add `preview: yes` so
+  the card shows a plain-language description of the exact action — *"Delete
+  'Call the dentist' (list Personal, due Fri 9:00)"* rather than `id=F5D0…` —
+  resolved by the tool itself, not the model. aish can also
   build one for you on the fly with **`create_tool`** — it drafts the manifest
   + wrapper, validates them (refusing to write anything that fails the linter),
   and shows both files for approval, manifest first.

@@ -371,9 +371,11 @@ def make_tool_approver(log):
     string — but there is no denylist or auto-approval: a mutating tool always
     prompts. CLI stays y/N (the comment/adjust verdicts are web-card-only)."""
 
-    def approve_tool(name: str, args: dict) -> bool:
+    def approve_tool(name: str, args: dict, preview: "str | None" = None) -> bool:
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
         print(f"\n{YELLOW}{BOLD}▶ run tool?{RESET} {BOLD}{name}{RESET}({shown})")
+        if preview:
+            print(f"{DIM}  {preview}{RESET}")
         try:
             answer = input(f"{YELLOW}[y/N]{RESET} ").strip().lower()
         except EOFError:
