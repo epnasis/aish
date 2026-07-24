@@ -4653,7 +4653,7 @@ document.querySelector(".pty-keys").addEventListener("click", (e) => {
   if (btn.dataset.key === "ctrl") { setConsoleCtrl(!consoleCtrlArmed); if (consoleTerm) consoleTerm.focus(); return; }
   if (btn.dataset.key === "copy") { consoleCopy(); return; }
   if (btn.dataset.key === "paste") { consolePaste(); return; }
-  const CTRL = { tab: "\t", esc: "\x1b", "ctrl-a": "\x01", up: "\x1b[A", down: "\x1b[B" };
+  const CTRL = { tab: "\t", esc: "\x1b", "ctrl-a": "\x01" }; // arrows: the drag pad below
   const seq = CTRL[btn.dataset.key];
   if (seq != null) consoleSend(seq);
   if (consoleTerm) consoleTerm.focus();
@@ -4717,6 +4717,39 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
       new WheelEvent("wheel", { deltaY, deltaMode: 0, bubbles: true, cancelable: true })
     );
   }, { passive: false });
+})();
+
+// Blink-style arrow pad (#148): ONE key you drag for direction — drag ↑/↓/←/→
+// sends that arrow key, and holding in a direction repeats it (a compact d-pad
+// instead of four chips, and it gives ← → which we lacked). Touch-only — the
+// key row is hidden on desktop, where a real keyboard has arrows. A tap without
+// a drag does nothing.
+(() => {
+  const btn = document.querySelector('.pty-keys button[data-key="arrows"]');
+  if (!btn) return;
+  const ARROW = { up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D" };
+  const THRESH = 14, REPEAT_MS = 110;
+  let ox = 0, oy = 0, dir = null, timer = null;
+  const dirOf = (dx, dy) => {
+    if (Math.abs(dx) < THRESH && Math.abs(dy) < THRESH) return null;
+    return Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up");
+  };
+  const press = (d) => { if (d && consoleOpen) { consoleSend(ARROW[d]); consoleKeyFeedback(btn); } };
+  const stop = () => { clearInterval(timer); timer = null; dir = null; };
+  btn.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    const t = e.touches[0]; ox = t.clientX; oy = t.clientY; dir = null;
+    clearInterval(timer);
+    timer = setInterval(() => { if (dir) press(dir); }, REPEAT_MS); // held in a direction repeats
+  }, { passive: false });
+  btn.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    const d = dirOf(t.clientX - ox, t.clientY - oy);
+    if (d && d !== dir) { dir = d; ox = t.clientX; oy = t.clientY; press(d); } // new direction: fire + re-anchor
+  }, { passive: false });
+  btn.addEventListener("touchend", (e) => { e.preventDefault(); stop(); }, { passive: false });
+  btn.addEventListener("touchcancel", stop);
 })();
 
 $("file-input").addEventListener("change", async () => {
