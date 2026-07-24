@@ -7,10 +7,11 @@ Two layers:
    feature IS subprocess execution, so a short-lived, controlled child in a
    tmp dir is the honest thing to exercise (per the acceptance criteria).
 
-2. The web wiring — the `pty_start`/`pty_in`/`pty_out`/`pty_exit` round trip
-   over the same TestClient WebSocket the rest of test_server uses, plus the
-   load-bearing security invariant: the model/agent has NO path to write PTY
-   input.
+2. The web wiring — the `console_open`/`console_in`/`console_out`/`console_exit`
+   round trip over the same TestClient WebSocket the rest of test_server uses,
+   plus the load-bearing security invariant: the model/agent has NO path to write
+   PTY input. The console is now GLOBAL (issue #148 follow-up) — those web tests
+   live in test_server.py::TestGlobalConsole.
 """
 
 import asyncio
@@ -157,12 +158,14 @@ def test_agent_and_tools_never_reference_pty():
         assert "PtySession" not in src, f"{name} must not reference PtySession"
 
 
-def test_only_the_user_socket_handler_writes_to_the_pty():
-    """`.pty.write(` (PTY input) must appear in exactly ONE place — the server's
-    `_pty_in` handler, driven solely by the user's socket. If a future edit
-    routes PTY input from anywhere else this fails, flagging the invariant."""
+def test_only_the_user_socket_handler_writes_to_the_console():
+    """`.console.write(` (PTY input) must appear in exactly ONE place — the
+    server's `_console_in` handler, driven solely by the user's socket. If a
+    future edit routes PTY input from anywhere else this fails, flagging the
+    invariant. The console is a single GLOBAL PtySession, so exactly one
+    construction site too."""
     src = (_SRC / "server.py").read_text(encoding="utf-8")
-    write_sites = src.count(".pty.write(")
-    assert write_sites == 1, f"expected 1 PTY-input site, found {write_sites}"
+    write_sites = src.count(".console.write(")
+    assert write_sites == 1, f"expected 1 console-input site, found {write_sites}"
     construct_sites = src.count("PtySession(")
     assert construct_sites == 1, f"expected 1 PtySession construction, found {construct_sites}"

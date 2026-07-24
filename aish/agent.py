@@ -1395,8 +1395,8 @@ class Agent:
         """Append a user-authored context turn WITHOUT running the model: the note
         becomes visible to the model on its next task and is logged so it survives
         `--resume`, but no answer is generated now. Backs the web "share selection
-        to context" action for interactive PTY sessions (issue #148), where the
-        terminal I/O is otherwise private to the terminal."""
+        to context" action for the global interactive console (issue #148), where
+        the terminal I/O is otherwise private to the terminal."""
         self._append({"role": "user", "content": text})
 
     def rebase(self, target: str, announce: bool = True) -> str:

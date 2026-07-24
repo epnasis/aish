@@ -3414,10 +3414,25 @@ class TestToolApproval:
             assert tool_results(chat)[-1]["content"] == DENIED_RESULT
 
 
-class TestInteractivePty:
-    """Issue #148: an interactive pseudo-terminal over the WebSocket. The USER
-    drives it (ungated, like `!`); the model has no path to its input. I/O is
-    private to the terminal unless explicitly shared to context."""
+def _alive(pid: int) -> bool:
+    """True while `pid` is a live (non-reaped) process. A fully-reaped pid raises
+    ProcessLookupError on signal 0; a zombie the parent hasn't wait()ed yet still
+    answers, so this is only used against processes the server owns and reaps."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class TestGlobalConsole:
+    """Issue #148 follow-up: ONE persistent GLOBAL console (the "Quake console")
+    for the whole server, not per-session. The USER drives it (ungated, like `!`);
+    the model has no path to its input. It survives viewer-leave, session close,
+    and disconnects. I/O is private unless explicitly shared. Tests inject a
+    trivial python echo loop as the console command, so no tmux/shell is needed."""
 
     _CHILD = (
         "import sys\n"
@@ -3431,102 +3446,143 @@ class TestInteractivePty:
 
         return f"{shlex.quote(_sys.executable)} -c {shlex.quote(self._CHILD)}"
 
-    def test_pty_start_in_and_out_over_the_socket(self, app_env):
-        client, _ = make_client(app_env, [])
+    def _client(self, app_env, responses=None, command=None):
+        return make_client(
+            app_env, responses or [], console_command=command or self._cmd()
+        )
+
+    def _drain_out(self, ws, wanted):
+        seen = ""
+        for _ in range(200):
+            event = ws.receive_json()
+            if event["type"] == "console_out":
+                seen += event["data"]
+                if wanted in seen:
+                    return seen
+        raise AssertionError(f"never saw {wanted!r} in console_out")
+
+    def test_console_is_global_on_the_server_not_the_session(self, app_env):
+        client, _ = self._client(app_env)
         with client, connected(client) as (ws, _, _):
-            ws.send_json({"type": "pty_start", "command": self._cmd()})
-            started = recv_until(ws, "pty_started")
-            assert started["command"] == self._cmd()
+            ws.send_json({"type": "console_open"})
+            recv_until(ws, "console_started")
+            server = client.app.state.server
+            # It lives on the WebServer, never on a Session.
+            assert server.console is not None
+            assert not hasattr(server.active, "pty")
+            ws.send_json({"type": "console_kill"})
+
+    def test_console_in_and_out_over_the_socket(self, app_env):
+        client, _ = self._client(app_env)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "console_open"})
+            recv_until(ws, "console_started")
             # Bytes IN over the socket → the child → bytes OUT over the socket.
-            ws.send_json({"type": "pty_in", "data": "hello\n"})
-            seen = ""
-            for _ in range(200):
-                event = ws.receive_json()
-                if event["type"] == "pty_out":
-                    seen += event["data"]
-                    if "GOT:hello" in seen:
-                        break
-            assert "GOT:hello" in seen
+            ws.send_json({"type": "console_in", "data": "hello\n"})
+            assert "GOT:hello" in self._drain_out(ws, "GOT:hello")
             # EOF ends the child; the exit is reported over the socket.
-            ws.send_json({"type": "pty_in", "data": "\x04"})
-            assert recv_until(ws, "pty_exit")["code"] == 0
-        # The session forgot the PTY once it exited (no dangling handle).
-        assert client.app.state.server.active.pty is None
+            ws.send_json({"type": "console_in", "data": "\x04"})
+            assert recv_until(ws, "console_exit")["code"] == 0
+        # The server forgot the console once it exited (no dangling handle).
+        assert client.app.state.server.console is None
 
-    def test_pty_kill_terminates_and_reports_exit(self, app_env):
-        client, _ = make_client(app_env, [])
+    def test_console_survives_viewer_leave_and_session_close(self, app_env):
+        client, _ = self._client(app_env, command="cat")  # blocks on stdin, stays alive
+        # Keep the TestClient (and thus the server) open ACROSS the ws disconnect —
+        # only the inner `connected` context closes the socket. Exiting `with
+        # client` would run lifespan shutdown, which is what detaches the console.
+        with client:
+            with connected(client) as (ws, _, _):
+                ws.send_json({"type": "console_open"})
+                recv_until(ws, "console_started")
+                server = client.app.state.server
+                assert server.console is not None
+                pid = server.console.pid
+                # Hiding the overlay must NOT kill it.
+                ws.send_json({"type": "console_close"})
+                assert server.console is not None
+            # Socket fully closed (viewer left) → console STILL running (global).
+            assert server.console is not None
+            assert _alive(pid), "console was killed on disconnect — it must persist"
+            # Closing a session must not touch the global console either.
+            server.active.close()
+            assert server.console is not None
+            assert _alive(pid)
+            server.console.kill()  # cleanup
+
+    def test_console_output_broadcasts_to_every_viewer(self, app_env):
+        client, _ = self._client(app_env)
+        with client:
+            with connected(client) as (ws1, _, _), connected(client) as (ws2, _, _):
+                ws1.send_json({"type": "console_open"})
+                recv_until(ws1, "console_started")
+                ws2.send_json({"type": "console_open"})  # attaches to the SAME console
+                recv_until(ws2, "console_started")
+                assert len(client.app.state.server.console_viewers) == 2
+                # One PTY: input from either socket, output to BOTH.
+                ws1.send_json({"type": "console_in", "data": "hi\n"})
+                assert "GOT:hi" in self._drain_out(ws1, "GOT:hi")
+                assert "GOT:hi" in self._drain_out(ws2, "GOT:hi")
+                ws1.send_json({"type": "console_kill"})
+
+    def test_reopen_attaches_to_the_existing_console(self, app_env):
+        client, _ = self._client(app_env, command="cat")
         with client, connected(client) as (ws, _, _):
-            ws.send_json({"type": "pty_start", "command": "cat"})  # blocks on stdin
-            recv_until(ws, "pty_started")
+            ws.send_json({"type": "console_open"})
+            recv_until(ws, "console_started")
+            first = client.app.state.server.console
+            # Hide, then reopen: a NEW console_started, but the SAME PtySession.
+            ws.send_json({"type": "console_close"})
+            ws.send_json({"type": "console_open"})
+            recv_until(ws, "console_started")
+            assert client.app.state.server.console is first
+            ws.send_json({"type": "console_kill"})
+
+    def test_console_kill_terminates_and_reports_exit(self, app_env):
+        client, _ = self._client(app_env, command="cat")
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "console_open"})
+            recv_until(ws, "console_started")
             server = client.app.state.server
-            assert server.active.pty is not None
-            pid = server.active.pty.pid
-            ws.send_json({"type": "pty_kill"})
-            recv_until(ws, "pty_exit")
-            assert server.active.pty is None
-            # The child is really gone — reaped, not a zombie.
+            pid = server.console.pid
+            ws.send_json({"type": "console_kill"})
+            recv_until(ws, "console_exit")
+            assert server.console is None
             deadline = time.time() + 5
-            while time.time() < deadline:
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    break
+            while time.time() < deadline and _alive(pid):
                 time.sleep(0.02)
-            with pytest.raises(ProcessLookupError):
-                os.kill(pid, 0)
+            assert not _alive(pid), "killed console left a zombie"
 
-    def test_pty_killed_on_disconnect(self, app_env):
-        client, _ = make_client(app_env, [])
+    def test_console_output_is_never_recorded_in_the_transcript(self, app_env):
+        # Console I/O is private: it must not enter any session transcript (and
+        # thus never a cold replay or the model's context) unless explicitly shared.
+        client, _ = self._client(app_env)
         with client, connected(client) as (ws, _, _):
-            ws.send_json({"type": "pty_start", "command": "cat"})
-            recv_until(ws, "pty_started")
-            server = client.app.state.server
-            pid = server.active.pty.pid
-        # Socket closed (context exit) → last viewer left → PTY killed + reaped.
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.02)
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
-        assert server.active.pty is None
-
-    def test_pty_output_is_never_recorded_in_the_transcript(self, app_env):
-        # Interactive I/O is private: it must not enter the transcript (and thus
-        # never a cold replay or the model's context) unless explicitly shared.
-        client, _ = make_client(app_env, [])
-        with client, connected(client) as (ws, _, _):
-            ws.send_json({"type": "pty_start", "command": self._cmd()})
-            recv_until(ws, "pty_started")
-            ws.send_json({"type": "pty_in", "data": "secret\n"})
-            for _ in range(100):
-                if ws.receive_json().get("type") == "pty_out":
-                    break
-            server = client.app.state.server
-            transcript = server.active.bridge.transcript
-            assert not any(e["type"].startswith("pty_") for e in transcript)
+            ws.send_json({"type": "console_open"})
+            recv_until(ws, "console_started")
+            ws.send_json({"type": "console_in", "data": "secret\n"})
+            self._drain_out(ws, "GOT:secret")
+            transcript = client.app.state.server.active.bridge.transcript
+            assert not any(e["type"].startswith("console_") for e in transcript)
             assert not any("secret" in json.dumps(e) for e in transcript)
-            ws.send_json({"type": "pty_kill"})
+            ws.send_json({"type": "console_kill"})
 
-    def test_share_injects_selection_into_model_context(self, app_env):
-        client, _ = make_client(app_env, [])
+    def test_share_injects_selection_into_the_viewed_chats_context(self, app_env):
+        client, _ = self._client(app_env, command="cat")
         with client, connected(client) as (ws, _, _):
-            ws.send_json({"type": "pty_start", "command": "cat"})
-            recv_until(ws, "pty_started")
-            ws.send_json({"type": "pty_share", "text": "device code ABC-123"})
-            recv_until(ws, "pty_shared")
-            ws.send_json({"type": "pty_kill"})
+            ws.send_json({"type": "console_open"})
+            recv_until(ws, "console_started")
+            ws.send_json({"type": "console_share", "text": "device code ABC-123"})
+            recv_until(ws, "console_shared")
+            ws.send_json({"type": "console_kill"})
         # The shared text is now a user turn the model will see — via the same
-        # user-message path as `!`, not the PTY stream.
+        # user-message path as `!`, not the console stream.
         messages = client.app.state.server.active.agent.messages
         assert any("device code ABC-123" in str(m.get("content", "")) for m in messages)
 
-    def test_model_run_command_never_touches_the_pty(self, app_env, tmp_path):
-        # A normal model task that runs a command must not create or feed a PTY:
-        # the model has no pty path. session.pty stays None throughout.
+    def test_model_run_command_never_touches_the_console(self, app_env, tmp_path):
+        # A normal model task that runs a command must not create or feed the
+        # console: the model has no console path. server.console stays None.
         client, _ = make_client(
             app_env,
             [
@@ -3539,4 +3595,4 @@ class TestInteractivePty:
             request = recv_until(ws, "approval_request")
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
             recv_until(ws, "done")
-            assert client.app.state.server.active.pty is None
+            assert client.app.state.server.console is None

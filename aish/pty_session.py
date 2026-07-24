@@ -8,9 +8,9 @@ command attached to a real pseudo-terminal so the program sees a TTY
 
 Security invariant (issue #148): this is the USER's own terminal. The only way
 bytes reach the PTY master is :meth:`PtySession.write`, and the ONLY caller of
-it is the server's ``pty_in`` WebSocket handler — the message a user types into
-their own terminal. The model/agent holds no reference to a PtySession and has
-no code path to it, exactly like the `!` command path is ungated because the
+it is the server's ``console_in`` WebSocket handler — the message a user types
+into their own terminal. The model/agent holds no reference to a PtySession and
+has no code path to it, exactly like the `!` command path is ungated because the
 user typing is their own authorization. Do NOT wire PtySession into the agent.
 
 Threading discipline mirrors Bridge: a blocking ``os.read`` on the event-loop
@@ -78,6 +78,11 @@ class PtySession:
         # controlling terminal (start_new_session=True → setsid); we keep the
         # master to read its output and write its input.
         self._master, slave = pty.openpty()
+        # The slave's device path — the child's controlling TTY. Captured before
+        # the slave fd is closed below because a caller (the tmux-backed global
+        # console) needs it to name this exact client to tmux, e.g.
+        # `tmux refresh-client -t <tty>` to force a repaint for a new viewer.
+        self.tty = os.ttyname(slave)
         child_env = dict(os.environ if env is None else env)
         # A sane terminal type so curses-lite programs emit standard SGR/erase
         # sequences the frontend's small parser understands.
@@ -108,7 +113,7 @@ class PtySession:
 
     def write(self, data: str) -> None:
         """Feed keystrokes to the PTY. THE ONLY input path — invoked solely by
-        the server's ``pty_in`` handler (the user's own socket). No model or
+        the server's ``console_in`` handler (the user's own socket). No model or
         agent code reaches this method (issue #148 security invariant)."""
         if self._closed:
             return
