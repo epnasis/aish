@@ -3,8 +3,9 @@
 // out of app.js by marker and runs it in an isolated vm against fake
 // dependencies — exercising the shipped branching, not a copy.
 //
-// The console is GLOBAL (#148 follow-up): Esc HIDES the overlay (hideConsole),
-// it does NOT kill — the console keeps running server-side.
+// The global console (#148 follow-up) treats Esc as a REAL terminal key
+// (vim/tmux/less): escapeExit does NOT touch it — it's closed via its button or
+// Ctrl+\. escapeExit only leaves the old `!` terminal-input mode (cmdMode).
 //
 // Run manually: node tests/js/test_escape_exit.js
 "use strict";
@@ -50,11 +51,11 @@ function check(name, fn) {
   }
 }
 
-check("console overlay open: Esc hides it (keeps running) and focuses composer", () => {
+check("console overlay open: Esc does NOT close it (real terminal key, passes to PTY)", () => {
   sandbox.consoleOpen = true;
   sandbox.cmdMode = false;
-  assert.strictEqual(sandbox.escapeExit(), true, "should report it acted");
-  assert.deepStrictEqual(calls, ["hideConsole", "input.focus"]);
+  assert.strictEqual(sandbox.escapeExit(), false, "must not act — Esc belongs to the program");
+  assert.deepStrictEqual(calls, []);
 });
 
 check("terminal mode (no overlay): Esc exits cmdMode", () => {
@@ -64,12 +65,12 @@ check("terminal mode (no overlay): Esc exits cmdMode", () => {
   assert.deepStrictEqual(calls, ["exitCmdMode"]); // exitCmdMode focuses input itself
 });
 
-check("console overlay wins over cmdMode when both are somehow set", () => {
+check("console open + cmdMode: Esc only exits cmdMode, never touches the console", () => {
   sandbox.consoleOpen = true;
   sandbox.cmdMode = true;
   assert.strictEqual(sandbox.escapeExit(), true);
-  assert.deepStrictEqual(calls, ["hideConsole", "input.focus"]);
-  assert.ok(!calls.includes("exitCmdMode"), "must not also exit cmdMode");
+  assert.deepStrictEqual(calls, ["exitCmdMode"]);
+  assert.ok(!calls.includes("hideConsole"), "must not close the console");
 });
 
 check("neither active: Esc is left alone (not hijacked)", () => {

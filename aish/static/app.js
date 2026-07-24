@@ -4378,9 +4378,9 @@ function composerInsert(ch) {
 // key still sends \x1b for programs that need it — only the hardware key means
 // "leave". [ESC-EXIT-START]
 function escapeExit() {
-  // Hardware Esc hides the console overlay — it does NOT kill it (the console is
-  // global and keeps running; reopening shows current state). #148 follow-up.
-  if (consoleOpen) { hideConsole(); input.focus(); return true; }
+  // Esc leaves the OLD `!` terminal-input mode. It deliberately does NOT touch
+  // the global console: there Esc is a real key (vim/tmux/less/…), so it passes
+  // through to the PTY — close the console with its button or Ctrl+\ instead.
   if (cmdMode) { exitCmdMode(); return true; } // exitCmdMode already focuses input
   return false;
 }
@@ -4544,10 +4544,10 @@ function openConsole() {
   // handling the key (and lets it bubble to the global Esc handler too).
   consoleTerm.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
-    // stopPropagation so the document-level handlers don't ALSO act on this key
-    // and undo what we just did (Ctrl+\ would otherwise re-toggle the console
-    // open right after we close it; Esc would re-run escapeExit harmlessly).
-    if (e.key === "Escape") { e.stopPropagation(); escapeExit(); return false; }
+    // Esc is a REAL terminal key here (vim/tmux/less) — let xterm send it to the
+    // PTY; the console is closed via its button or Ctrl+\, never Esc.
+    // stopPropagation on Ctrl+\ so the document handler doesn't re-toggle the
+    // console open right after we close it.
     if ((e.metaKey || e.ctrlKey) && e.key === "\\") { e.preventDefault(); e.stopPropagation(); hideConsole(); input.focus(); return false; }
     // Cmd/Ctrl+Shift+C/V for copy/paste — never plain Ctrl+C (that's SIGINT to
     // the program). Cmd (meta) alone works too on macOS where it can't collide.
