@@ -420,19 +420,32 @@ as a shell command — your own action, no model and no approval card — and th
 ＋ menu's *Terminal mode* keeps that running multiple commands in a row. Those
 run *non-interactively*, though, so anything that reads from a TTY (`gcloud auth
 login`, an `ssh` host-key prompt, a `sudo` password) would just hang. For those,
-the ＋ menu's **Interactive shell** opens a real pseudo-terminal in a full-screen
-overlay: a login shell you type into directly, with the program seeing a genuine
-TTY so it can prompt for input. Keystrokes go to the terminal and are *not*
-echoed locally — the terminal echoes what it wants, so a password prompt masks
-for free. Control-key chips (`^C`, `^D`, tab, esc, arrows) sit above the keyboard
-for the keys a soft keyboard can't send. It's a real terminal emulator (xterm.js,
-vendored locally — no CDN), so cursor-addressed output renders faithfully: your
-themed shell prompt, `gcloud auth`, `ssh`, and terminal apps all display
-correctly. The model has **no access** to
-this terminal: its input and output stay private to the overlay unless you
-select some output and tap **Share**, which drops that selection into the chat
-as context for the model's next turn. The interactive session is the user's
-alone — it never touches the approval gate and its I/O is never recorded.
+aish has a **global console** — one persistent, full-screen interactive
+pseudo-terminal shared across the whole app. Open it from any chat with the
+terminal icon in the top bar, the `⌘/Ctrl+\` shortcut, or the ＋ menu's
+**Interactive shell**; it floats above whatever chat you're in and stays put when
+you switch chats. It's a login shell you type into directly, with the program
+seeing a genuine TTY so it can prompt for input. Keystrokes go to the terminal
+and are *not* echoed locally — the terminal echoes what it wants, so a password
+prompt masks for free. Control-key chips (`^C`, `^D`, tab, esc, arrows) sit above
+the keyboard for the keys a soft keyboard can't send. It's a real terminal
+emulator (xterm.js, vendored locally — no CDN), so cursor-addressed output renders
+faithfully: your themed shell prompt, `gcloud auth`, `ssh`, and terminal apps all
+display correctly.
+
+The console is **persistent**: closing the overlay just hides it (a separate
+**Kill** destroys it), so whatever you were running keeps going and reopening
+shows its current state — across chat-switches, phone lock/unlock, and
+disconnects. When `tmux` is installed the console runs inside it (`tmux
+new-session -A -s aish-console`), so it and everything running in it even survive
+an `aish-web` restart — reopening reattaches and redraws where you left off.
+Without `tmux` the console still persists across chats and disconnects, just not
+across a server restart.
+
+The model has **no access** to this console: its input and output stay private to
+the overlay unless you select some output and tap **Share**, which drops that
+selection into the chat as context for the model's next turn. The console is the
+user's alone — it never touches the approval gate and its I/O is never recorded.
 
 **Parallel sessions**: several sessions can be open at once, each with its
 own agent, model, working directory, and running task. Start a task, hit the

@@ -30,6 +30,8 @@ import os
 import queue
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -126,10 +128,14 @@ TRANSCRIPT_KEEP = 500
 # closed (its file persists — reopening it later just reloads the history).
 MAX_OPEN_SESSIONS = 6
 
-# Concurrent interactive PTYs across all sessions (issue #148). Each holds a
-# child process + fds + a reader thread, so it's capped; one per session is the
-# design (Session.pty is a single slot), this bounds the cross-session total.
-MAX_OPEN_PTYS = 8
+# The global "Quake console" (issue #148 follow-up). ONE interactive PTY for
+# the whole server — not per-session — openable from any chat and surviving
+# chat-switches, disconnects, and (tmux-backed) aish-web restarts. When tmux is
+# present the console PTY runs `tmux new-session -A -s <name>`: attach-or-create,
+# so the shell lives in tmux's DETACHED server process and outlives aish-web;
+# our PTY is merely a tmux client. Without tmux we spawn $SHELL directly (global
+# + cross-chat + cross-disconnect, but NOT restart-surviving).
+TMUX_CONSOLE_SESSION = "aish-console"
 
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 EXPORT_MAX_BYTES = 5 * 1024 * 1024  # a single answer's markdown; generous ceiling
@@ -835,11 +841,6 @@ class Session:
         # action. Observers viewing this session see a "another tab is active"
         # hint; acting claims control. Never persisted — replay re-derives it.
         self.controller: Client | None = None
-        # The live interactive PTY (issue #148), if the user opened one. One per
-        # session; a new one replaces (and kills) the old. Held on the Session,
-        # NOT the agent — the model has no reference to it and no way to write
-        # to its input (the load-bearing security invariant).
-        self.pty: PtySession | None = None
 
     @property
     def viewers(self) -> set:
@@ -857,16 +858,10 @@ class Session:
         return "idle"
 
     def close(self) -> None:
-        self.kill_pty()  # no leaked interactive child/fds when a session goes away
+        # The interactive console is GLOBAL (WebServer.console), not owned by any
+        # session — a session going away never touches it (issue #148 follow-up).
         self.logref.log.close()
         self.agent.close()  # best-effort scratch-workspace cleanup (issue #70)
-
-    def kill_pty(self) -> None:
-        """Terminate and forget this session's interactive PTY, if any. Called on
-        close/evict/disconnect and before starting a new one — idempotent."""
-        if self.pty is not None:
-            self.pty.kill()
-            self.pty = None
 
 
 class WebServer:
@@ -878,7 +873,15 @@ class WebServer:
     shared across them. A default session is opened at startup and is where a
     bare (no ?session=) connection lands."""
 
-    def __init__(self, open_session, state_dir, config_path, token, dir_ignore_patterns=None):
+    def __init__(
+        self,
+        open_session,
+        state_dir,
+        config_path,
+        token,
+        dir_ignore_patterns=None,
+        console_command=None,
+    ):
         self.open_session = open_session  # (path | None) -> Session
         self.state_dir = state_dir
         self.uploads_dir = state_dir / "uploads"
@@ -891,6 +894,15 @@ class WebServer:
         self.sessions: dict[str, Session] = {}
         self.clients: set[Client] = set()
         self._default: Session | None = None  # bare-connection landing session
+        # The single GLOBAL interactive console (issue #148 follow-up), shared by
+        # every connection. Held here, NEVER on a Session — the model has no
+        # reference and no write path (the load-bearing security invariant).
+        self.console: PtySession | None = None
+        self.console_viewers: set[Client] = set()  # clients with the overlay open
+        self.console_tmux = False  # True once spawned tmux-backed (restart-surviving)
+        # Injectable spawn command (tests pass a trivial echo loop so no tmux/shell
+        # is needed); None → auto-detect tmux-or-$SHELL at first open.
+        self.console_command = console_command
 
     @property
     def active(self) -> Session:
@@ -913,7 +925,13 @@ class WebServer:
         for session in self.sessions.values():
             for uid in list(session.bridge.pending):
                 session.bridge.answer(uid, {"action": "deny"})
-            session.kill_pty()  # no leaked interactive children on shutdown (#148)
+        # Kill ONLY the console PTY (the tmux CLIENT) — this detaches; the tmux
+        # SESSION and everything running in it survive on the tmux server, so it
+        # reattaches on the next aish-web start (#148 follow-up). Without tmux the
+        # $SHELL child just dies with the server. NEVER `tmux kill-session` here.
+        if self.console is not None:
+            self.console.kill()
+            self.console = None
         for client in list(self.clients):
             with contextlib.suppress(Exception):
                 await client.ws.close()
@@ -1051,6 +1069,9 @@ class WebServer:
             client.sender.cancel()
             client.sender = None
         self.clients.discard(client)
+        # Stop fanning console output at this dead socket. The console itself is
+        # NEVER killed on disconnect — it's global and keeps running (#148).
+        self.console_viewers.discard(client)
         self._leave(client)
 
     def _leave(self, client: Client) -> None:
@@ -1063,12 +1084,6 @@ class WebServer:
             return
         session.viewers.discard(client)
         client.viewing = None
-        # An interactive PTY is tied to being watched: once no one is viewing the
-        # session, kill it so a program blocked on input (e.g. a hung `gcloud
-        # auth`) can't linger unattended (issue #148 cleanup). Background MODEL
-        # tasks are unaffected — they keep running with no viewer by design.
-        if not session.viewers:
-            session.kill_pty()
         if session.controller is client:
             session.controller = None
             self._broadcast_role(session)
@@ -1203,28 +1218,35 @@ class WebServer:
         elif kind == "create_issue":
             self._claim(client)
             await self._create_issue(client)
-        elif kind == "pty_start":
-            self._claim(client)
-            await self._pty_start(client, str(message.get("command", "")))
-        elif kind == "pty_in":
-            # Keystrokes from the USER's own socket → the PTY master. This is the
-            # ONLY path to PTY input (issue #148): no model/agent code reaches
-            # it. Claims control like any other action.
-            self._claim(client)
-            self._pty_in(client, message.get("data", ""))
-        elif kind == "pty_resize":
-            self._pty_resize(
+        elif kind == "console_open":
+            # Open/attach the GLOBAL console (spawns it if not already running).
+            # Viewing the console is not a session action, so it does NOT claim
+            # control of whatever chat this client happens to show.
+            await self._console_open(client)
+        elif kind == "console_in":
+            # Keystrokes from the USER's own socket → the console PTY. This is the
+            # ONLY path to console input (issue #148): no model/agent code reaches
+            # it.
+            self._console_in(client, message.get("data", ""))
+        elif kind == "console_resize":
+            self._console_resize(
                 client, message.get("cols", 80), message.get("rows", 24)
             )
-        elif kind == "pty_kill":
+        elif kind == "console_close":
+            # Hide/detach only: stop this client viewing; the console keeps
+            # running (the Quake-console lifetime is server-scoped, not per-tab).
+            self.console_viewers.discard(client)
+        elif kind == "console_kill":
+            # Explicit "kill the console" (distinct from Close). Actually destroys
+            # it — for tmux that means the surviving session too.
+            await self._console_kill(client)
+        elif kind == "console_share":
+            # Explicit "share this selection to the model" (issue #148): console
+            # I/O is private by default; only this user action injects a slice of
+            # it into the CURRENTLY-VIEWED chat's context, via the same
+            # user-message path as `!`. Claims control of that chat like any edit.
             self._claim(client)
-            self._pty_kill(client)
-        elif kind == "pty_share":
-            # Explicit "share this selection to the model" (issue #148): PTY I/O
-            # is private by default; only this user action injects a slice of it
-            # into the model's context, via the same user-message path as `!`.
-            self._claim(client)
-            await self._pty_share(client, str(message.get("text", "")))
+            await self._console_share(client, str(message.get("text", "")))
         elif kind == "dequeue":
             self._dequeue(client, str(message.get("text", "")))
         elif kind == "dequeue_cwd":
@@ -1523,85 +1545,155 @@ class WebServer:
         finally:
             await self._finish_turn(session)
 
-    # -- interactive PTY (issue #148) --------------------------------------
-    # A real pseudo-terminal so TTY-reading programs (gcloud auth, ssh, sudo)
-    # work interactively. This is the USER's own terminal: ungated like the `!`
-    # path, and — crucially — the model has NO write path to it. Bytes reach the
-    # PTY only through _pty_in, driven solely by the user's socket. I/O stays
-    # private to the terminal (never recorded, never in model context) unless the
-    # user explicitly shares a selection via _pty_share.
+    # -- global interactive console (issue #148 follow-up) -----------------
+    # ONE real pseudo-terminal for the whole server (the "Quake console") so
+    # TTY-reading programs (gcloud auth, ssh, sudo) work interactively from any
+    # chat. It is the USER's own terminal: ungated like the `!` path, and —
+    # crucially — the model has NO write path to it. Bytes reach the PTY only
+    # through _console_in, driven solely by the user's socket. Output is private
+    # to the terminal (never recorded, never in model context) and fans out to
+    # every client with the overlay open; only an explicit _console_share slices
+    # a selection into the currently-viewed chat's context.
 
-    def _count_ptys(self) -> int:
-        return sum(1 for s in self.sessions.values() if s.pty is not None)
+    def _resolve_console_command(self) -> tuple[str, bool]:
+        """The console spawn command and whether it is tmux-backed. An injected
+        command (tests) wins verbatim and gets no tmux semantics. Otherwise a
+        tmux `new-session -A` (attach-or-create → survives aish-web restarts) when
+        tmux is on PATH, else the login $SHELL directly (no restart survival)."""
+        if self.console_command:
+            return self.console_command, False
+        if shutil.which("tmux"):
+            return f"tmux new-session -A -s {shlex.quote(TMUX_CONSOLE_SESSION)}", True
+        return (os.environ.get("SHELL") or "/bin/bash"), False
 
-    async def _pty_start(self, client: Client, command: str) -> None:
-        session = client.viewing
-        if session is None:
-            return
-        # Default to the user's login shell — the general interactive workspace
-        # from which they run gcloud/ssh/sudo/etc.; a specific command is honored.
-        command = command.strip() or os.environ.get("SHELL") or "/bin/bash"
-        # A new PTY in THIS session replaces its own (killed below), so only
-        # count OTHER sessions' PTYs toward the cross-session cap.
-        if session.pty is None and self._count_ptys() >= MAX_OPEN_PTYS:
-            await client.ws.send_json(
-                {
-                    "type": "pty_error",
-                    "text": "too many interactive terminals open — close one first",
-                }
-            )
-            return
-        session.kill_pty()  # one PTY per session; replace any prior
-        # Audit trail: the user's own action, same decision tag as `!` commands.
-        session.logref.command(f"[interactive] {command}", "user-direct")
+    def _console_cwd(self) -> str:
+        """Starting dir for a fresh console — the default session's workspace so
+        it opens somewhere sensible. (tmux ignores it when reattaching to an
+        existing session; it only applies on first creation.)"""
+        if self._default is not None:
+            return self._default.agent.cwd
+        return os.getcwd()
+
+    def _console_out(self, text: str) -> None:
+        """Fan console output to every viewer. Runs on the loop thread (PtySession
+        marshals via call_soon_threadsafe), so touching the outboxes is safe.
+        Pushed straight to outboxes, never through a bridge — console I/O is
+        global and NEVER recorded into any session's transcript (issue #148)."""
+        for client in self.console_viewers:
+            client.outbox.put_nowait({"type": "console_out", "data": text})
+
+    def _console_exit(self, code: int) -> None:
+        """The console PTY ended (the shell exited, or the tmux client detached).
+        Forget it — the next open respawns/reattaches — and tell every viewer."""
+        self.console = None
+        self.console_tmux = False
+        for client in self.console_viewers:
+            client.outbox.put_nowait({"type": "console_exit", "code": code})
+
+    async def _console_open(self, client: Client) -> None:
+        """Attach `client` to the global console, spawning it on first open (or
+        after a restart/exit — a tmux spawn then REATTACHES to the surviving
+        session and tmux redraws current state). A second viewer of an
+        already-running console gets a `tmux refresh-client` poke so its fresh,
+        blank terminal is repainted with the current screen."""
         loop = self.loop
         assert loop is not None, "no event loop yet"
-        bridge = session.bridge
-        name = session.name
+        self.console_viewers.add(client)
+        if self.console is None:
+            command, tmux = self._resolve_console_command()
+            self.console_tmux = tmux
+            cwd = self._console_cwd()
+            # Audit trail on the default session's log: the user's own action,
+            # same decision tag as `!`. The I/O itself stays unrecorded.
+            if self._default is not None:
+                self._default.logref.command(f"[console] {command}", "user-direct")
+            # Announce BEFORE spawning so the client resets its screen before any
+            # console_out can arrive (both reach the loop in emit order).
+            await client.ws.send_json(
+                {"type": "console_started", "command": self._console_label(), "cwd": cwd}
+            )
+            self.console = PtySession(
+                command, cwd, self._console_out, self._console_exit, loop
+            )
+        else:
+            # Already running: reset just THIS newcomer's screen, then repaint it.
+            await client.ws.send_json(
+                {
+                    "type": "console_started",
+                    "command": self._console_label(),
+                    "cwd": self._console_cwd(),
+                }
+            )
+            self._console_refresh()
 
-        def on_output(text: str) -> None:
-            # Live-only, NOT recorded: interactive I/O is private to the terminal
-            # and must never enter the transcript or the model's context
-            # (issue #148). Fans out to every viewer, like all bridge events.
-            bridge.emit({"type": "pty_out", "data": text}, record=False)
+    def _console_label(self) -> str:
+        """A short human label for the console header (the raw tmux command is
+        noise). Reflects the actual backing so 'tmux' signals restart-survival."""
+        if self.console_command:
+            return self.console_command
+        if self.console_tmux:
+            return f"tmux · {TMUX_CONSOLE_SESSION}"
+        return os.path.basename(os.environ.get("SHELL") or "/bin/bash")
 
-        def on_exit(code: int) -> None:
-            sess = self.sessions.get(name)
-            if sess is not None and sess.pty is pty:
-                sess.pty = None
-            bridge.emit({"type": "pty_exit", "code": code}, record=False)
-
-        # Announce BEFORE spawning so the frontend resets its screen before any
-        # pty_out can arrive (both events reach the loop via call_soon_threadsafe;
-        # emitting first keeps ordering deterministic).
-        bridge.emit(
-            {"type": "pty_started", "command": command, "cwd": session.agent.cwd},
-            record=False,
-        )
-        pty = PtySession(command, session.agent.cwd, on_output, on_exit, loop)
-        session.pty = pty
-
-    def _pty_in(self, client: Client, data: object) -> None:
-        session = client.viewing
-        if session is None or session.pty is None or not isinstance(data, str):
+    def _console_refresh(self) -> None:
+        """Force tmux to repaint the console for a newly-attached viewer whose
+        xterm is blank. Only one tmux CLIENT exists (our PTY); `refresh-client`
+        targeted at its tty redraws the current screen. Best-effort, off the loop
+        (a short subprocess), and a no-op without tmux — new output repaints
+        anyway, this just avoids a blank wait until then."""
+        if not self.console_tmux or self.console is None:
             return
-        session.pty.write(data)
+        tty = self.console.tty
 
-    def _pty_resize(self, client: Client, cols: object, rows: object) -> None:
-        session = client.viewing
-        if session is None or session.pty is None:
+        def _poke() -> None:
+            with contextlib.suppress(Exception):
+                subprocess.run(
+                    ["tmux", "refresh-client", "-t", tty],
+                    timeout=5,
+                    capture_output=True,
+                )
+
+        threading.Thread(target=_poke, daemon=True).start()
+
+    def _console_in(self, client: Client, data: object) -> None:
+        # THE ONLY console-input path (issue #148): only the user's own socket
+        # reaches it; no model/agent code does.
+        if self.console is None or not isinstance(data, str):
+            return
+        self.console.write(data)
+
+    def _console_resize(self, client: Client, cols: object, rows: object) -> None:
+        # One PTY, possibly many viewers of different sizes: tmux has a single
+        # client (our PTY) and sizes the pane to it, so this is last-resize-wins.
+        # A viewer whose window differs sees a mis-sized pane until it (or another
+        # viewer) resizes; acceptable for a shared console.
+        if self.console is None:
             return
         try:
-            session.pty.resize(int(cols), int(rows))  # type: ignore[call-overload]
+            self.console.resize(int(cols), int(rows))  # type: ignore[call-overload]
         except (TypeError, ValueError):
             pass
 
-    def _pty_kill(self, client: Client) -> None:
-        session = client.viewing
-        if session is not None:
-            session.kill_pty()
+    async def _console_kill(self, client: Client) -> None:
+        """Explicit user "kill" — actually destroy the console (unlike Close,
+        which merely hides). For a tmux-backed console the SURVIVING session must
+        also go, else a later open would silently reattach to the very thing the
+        user asked to kill; run `tmux kill-session` off the loop first, then kill
+        the PTY (which _console_exit clears + broadcasts)."""
+        if self.console_tmux:
+            await asyncio.to_thread(self._tmux_kill_session)
+        if self.console is not None:
+            self.console.kill()  # reader thread observes EOF → _console_exit
 
-    async def _pty_share(self, client: Client, text: str) -> None:
+    def _tmux_kill_session(self) -> None:
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["tmux", "kill-session", "-t", TMUX_CONSOLE_SESSION],
+                timeout=5,
+                capture_output=True,
+            )
+
+    async def _console_share(self, client: Client, text: str) -> None:
         session = client.viewing
         if session is None:
             return
@@ -1613,16 +1705,16 @@ class WebServer:
             # them would race; sharing is a between-tasks action anyway.
             await client.ws.send_json(
                 {
-                    "type": "pty_error",
+                    "type": "console_error",
                     "text": "finish the current task first, then share to context",
                 }
             )
             return
         # Reuse the user-message path: append a user turn the model sees on its
         # NEXT task (no answer forced now), logged so it survives --resume. Echo
-        # a transcript marker so every viewer sees what was shared.
+        # a transcript marker so every viewer of THIS chat sees what was shared.
         session.agent.add_user_context(f"[Shared from my interactive terminal:]\n{text}")
-        session.bridge.emit({"type": "pty_shared", "text": text})
+        session.bridge.emit({"type": "console_shared", "text": text})
 
     async def _create_issue(self, client: Client) -> None:
         """File the stashed feedback draft on the pinned repo (#110). This is a
@@ -2334,8 +2426,12 @@ def create_app(
     token: str | None = None,
     cwd: str | None = None,
     aliases: dict[str, str] | None = None,
+    console_command: str | None = None,
 ) -> Starlette:
-    """The Starlette app; client_chat injects a scripted backend (tests)."""
+    """The Starlette app; client_chat injects a scripted backend (tests).
+
+    `console_command` injects the global console's spawn command (tests pass a
+    trivial echo loop so the console needs neither tmux nor a real shell)."""
     if cwd is None:
         cwd = default_workspace(os.getcwd())
         if cwd != os.getcwd():
@@ -2564,7 +2660,9 @@ def create_app(
     # The folder-browser / @-file ignore list is read from the same config.toml
     # the CLI uses (#87); a missing/malformed config degrades to defaults.
     dir_ignore_patterns = dir_ignore.load_patterns(load_config(config_path) if config_path else {})
-    server = WebServer(open_session, state_dir, config_path, token, dir_ignore_patterns)
+    server = WebServer(
+        open_session, state_dir, config_path, token, dir_ignore_patterns, console_command
+    )
     server_ref.append(server)
     first, _ = open_session(None)
     server.add_session(first)

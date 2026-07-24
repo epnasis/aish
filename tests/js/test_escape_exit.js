@@ -1,7 +1,10 @@
 // Node-only, dependency-free regression check for issue #143 (Esc exits
-// terminal mode / the interactive PTY overlay). Pulls the real escapeExit()
+// terminal mode / the global console overlay). Pulls the real escapeExit()
 // out of app.js by marker and runs it in an isolated vm against fake
 // dependencies — exercising the shipped branching, not a copy.
+//
+// The console is GLOBAL (#148 follow-up): Esc HIDES the overlay (hideConsole),
+// it does NOT kill — the console keeps running server-side.
 //
 // Run manually: node tests/js/test_escape_exit.js
 "use strict";
@@ -24,10 +27,10 @@ function extract(startMarker, endMarker) {
 
 const calls = [];
 const sandbox = {
-  ptyOpen: false,
+  consoleOpen: false,
   cmdMode: false,
   input: { focus() { calls.push("input.focus"); } },
-  closePty(kill) { calls.push(`closePty(${kill})`); sandbox.ptyOpen = false; },
+  hideConsole() { calls.push("hideConsole"); sandbox.consoleOpen = false; },
   exitCmdMode() { calls.push("exitCmdMode"); sandbox.cmdMode = false; },
 };
 vm.createContext(sandbox);
@@ -47,30 +50,30 @@ function check(name, fn) {
   }
 }
 
-check("PTY overlay open: Esc closes it (killing the process) and focuses composer", () => {
-  sandbox.ptyOpen = true;
+check("console overlay open: Esc hides it (keeps running) and focuses composer", () => {
+  sandbox.consoleOpen = true;
   sandbox.cmdMode = false;
   assert.strictEqual(sandbox.escapeExit(), true, "should report it acted");
-  assert.deepStrictEqual(calls, ["closePty(true)", "input.focus"]);
+  assert.deepStrictEqual(calls, ["hideConsole", "input.focus"]);
 });
 
 check("terminal mode (no overlay): Esc exits cmdMode", () => {
-  sandbox.ptyOpen = false;
+  sandbox.consoleOpen = false;
   sandbox.cmdMode = true;
   assert.strictEqual(sandbox.escapeExit(), true);
   assert.deepStrictEqual(calls, ["exitCmdMode"]); // exitCmdMode focuses input itself
 });
 
-check("PTY overlay wins over cmdMode when both are somehow set", () => {
-  sandbox.ptyOpen = true;
+check("console overlay wins over cmdMode when both are somehow set", () => {
+  sandbox.consoleOpen = true;
   sandbox.cmdMode = true;
   assert.strictEqual(sandbox.escapeExit(), true);
-  assert.deepStrictEqual(calls, ["closePty(true)", "input.focus"]);
+  assert.deepStrictEqual(calls, ["hideConsole", "input.focus"]);
   assert.ok(!calls.includes("exitCmdMode"), "must not also exit cmdMode");
 });
 
 check("neither active: Esc is left alone (not hijacked)", () => {
-  sandbox.ptyOpen = false;
+  sandbox.consoleOpen = false;
   sandbox.cmdMode = false;
   assert.strictEqual(sandbox.escapeExit(), false);
   assert.deepStrictEqual(calls, []);

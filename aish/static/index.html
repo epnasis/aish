@@ -33,6 +33,9 @@
       <span id="session-title">aish</span>
       <svg class="caret" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
+    <button id="console-btn" class="bar-btn icon" title="console (⌘/Ctrl+\)" aria-label="open console">
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
     <button id="new-chip" class="bar-btn icon" title="new chat" aria-label="new chat">
       <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
     </button>
@@ -228,21 +231,23 @@
 
 <div id="backdrop" hidden></div>
 
-<!-- interactive PTY overlay (#148): a real pseudo-terminal for programs that
-     read stdin. Keystrokes go to the PTY and are NOT echoed locally — the PTY
-     echoes, so password prompts (echo off) mask for free. Output renders via a
-     small line/SGR parser; no xterm.js, no full-screen TUI emulation. -->
+<!-- global console overlay (#148 follow-up): ONE persistent "Quake console" for
+     the whole app — a real pseudo-terminal, tmux-backed server-side so it (and
+     anything running in it) survives chat-switches, disconnects, and aish-web
+     restarts. Keystrokes go to the PTY and are NOT echoed locally (the PTY
+     echoes, so password prompts mask for free). Close HIDES it (keeps running);
+     Kill destroys it. Rendered by xterm.js. -->
 <div id="pty-overlay" hidden>
   <div class="pty-head">
     <div class="pty-title-wrap">
-      <span class="pty-title">Interactive</span>
       <span id="pty-status" class="pty-status"></span>
     </div>
     <div class="pty-head-tools">
       <button id="pty-font-dec" class="pty-headbtn pty-fontbtn" type="button" aria-label="smaller text">A−</button>
       <button id="pty-font-inc" class="pty-headbtn pty-fontbtn" type="button" aria-label="larger text">A+</button>
       <button id="pty-share" class="pty-headbtn" type="button" title="Share the selected output to the chat">Share ›</button>
-      <button id="pty-close" class="pty-headbtn" type="button" aria-label="close terminal">Close ✕</button>
+      <button id="pty-kill" class="pty-headbtn" type="button" title="Kill the console (destroys it)">Kill</button>
+      <button id="pty-close" class="pty-headbtn" type="button" aria-label="hide console" title="Hide (keeps running)">Close ✕</button>
     </div>
   </div>
   <!-- tabindex so the screen can hold selection for "share"; the real key

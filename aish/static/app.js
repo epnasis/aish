@@ -289,11 +289,11 @@ function handle(event) {
     case "session_deleted": showToast("session deleted"); break;
     case "session_renamed": onSessionRenamed(event); break;
     case "role": onRole(event); break;
-    case "pty_started": onPtyStarted(event); break;
-    case "pty_out": onPtyOut(event.data); break;
-    case "pty_exit": onPtyExit(event.code); break;
-    case "pty_shared": showToast("shared to context"); break;
-    case "pty_error": showToast(event.text); break;
+    case "console_started": onConsoleStarted(event); break;
+    case "console_out": onConsoleOut(event.data); break;
+    case "console_exit": onConsoleExit(event.code); break;
+    case "console_shared": showToast("shared to context"); break;
+    case "console_error": showToast(event.text); break;
   }
 }
 
@@ -355,11 +355,12 @@ function onHello(event) {
   // Server code changed since this page was built (or the page predates rev
   // stamping entirely) — reload; the replay mechanism restores the view.
   if (event.rev && event.rev !== PAGE_REV) { location.reload(); return; }
-  // A hello means a (re)attach — possibly to a different session. Any open
-  // interactive terminal belonged to the session we just left (the server
-  // killed its PTY when the last viewer left), so close the overlay without
-  // sending a stray kill (#148).
-  closePty(false);
+  // The interactive console is GLOBAL (#148 follow-up): it floats above whatever
+  // chat is shown and is untouched by a session switch. A hello also means a
+  // (re)connect, though — the server dropped us from the console viewer set on
+  // the old socket, so if the overlay is open re-attach to the still-running
+  // console (tmux redraws current state into the terminal).
+  if (consoleOpen) send({ type: "console_open" });
   $("model-name").textContent = event.model;
   setTitle(event.title);
   pagerSessions = event.pager || [];
@@ -1960,12 +1961,12 @@ function applySgr(params, classes) {
   }
 }
 
-// The interactive PTY (#148) renders through a real terminal emulator —
+// The global console (#148) renders through a real terminal emulator —
 // vendored xterm.js (static/vendor/xterm.js, a plain global like highlight.js).
 // Full cursor-addressing/erase/scroll support is what makes an interactive
 // shell (zsh line-editor redraw, autosuggestions), gcloud auth, and simple TUIs
 // render correctly — the old hand-rolled line model could not (#148 follow-up).
-// The controller lives further down; see openPty().
+// The controller lives further down; see openConsole().
 
 // ---- syntax highlighting (fenced code blocks) -----------------------------
 // hljs is vendor/highlight.min.js (static/vendor, no CDN) — a plain global,
@@ -4275,7 +4276,7 @@ $("composer-actions").addEventListener("click", (e) => {
     // server expands /feedback into the issue-filing flow (parse_feedback).
     case "feedback": composerInsert("/feedback "); break;
     case "terminal": enterCmdMode(); break;
-    case "interactive": openPty(); break;
+    case "interactive": openConsole(); break; // the global Quake console (#148)
   }
 });
 
@@ -4356,24 +4357,27 @@ function composerInsert(ch) {
 // key still sends \x1b for programs that need it — only the hardware key means
 // "leave". [ESC-EXIT-START]
 function escapeExit() {
-  if (ptyOpen) { closePty(true); input.focus(); return true; }
+  // Hardware Esc hides the console overlay — it does NOT kill it (the console is
+  // global and keeps running; reopening shows current state). #148 follow-up.
+  if (consoleOpen) { hideConsole(); input.focus(); return true; }
   if (cmdMode) { exitCmdMode(); return true; } // exitCmdMode already focuses input
   return false;
 }
 // [ESC-EXIT-END]
 
-// ---- interactive PTY overlay controller (#148) ---------------------------
-// A real terminal: xterm.js (vendored global) renders pty_out and captures
-// keystrokes, which are sent to the PTY as `pty_in` and NEVER echoed locally —
-// the PTY echoes what it wants, so a password prompt (echo off) masks for free.
-// Everything here is user-driven; the model has no path to pty_in (the server
-// enforces that too). xterm handles cursor addressing / erase / scroll, so an
-// interactive shell's line-editor redraw renders correctly (the hand-rolled
-// line model could not — that was the #148 follow-up bug).
-let ptyTerm = null; // the xterm.js Terminal while the overlay is open, else null
-let ptyFit = null;
-let ptyOpen = false;
-let ptyCtrlArmed = false; // the sticky Ctrl chip: next key is sent as Ctrl+key
+// ---- global interactive console overlay controller (#148 follow-up) ------
+// ONE "Quake console" for the whole app: a floating overlay above whatever chat
+// is shown, openable from any chat and untouched by chat-switches. A real
+// terminal — xterm.js (vendored global) renders console_out and captures
+// keystrokes, sent to the server's ONE PTY as `console_in` and NEVER echoed
+// locally (the PTY echoes, so password prompts mask for free). Everything here
+// is user-driven; the model has no path to console_in (the server enforces
+// that too). Close = HIDE (the console keeps running server-side); a separate
+// Kill destroys it. Backed by tmux server-side so it survives aish-web restarts.
+let consoleTerm = null; // the xterm.js Terminal while the overlay is open, else null
+let consoleFit = null;
+let consoleOpen = false;
+let consoleCtrlArmed = false; // the sticky Ctrl chip: next key is sent as Ctrl+key
 
 // Catppuccin Mocha — matches the CSS palette applied to the command/code
 // surfaces, so the interactive terminal reads as one theme with them.
@@ -4387,201 +4391,241 @@ const CATPPUCCIN_MOCHA = {
   brightCyan: "#94e2d5", brightWhite: "#a6adc8",
 };
 
-function setPtyStatus(text, exited) {
+function setConsoleStatus(text, exited) {
   const el = $("pty-status");
   el.textContent = text || "";
   el.classList.toggle("exited", Boolean(exited));
 }
 
-function setPtyCtrl(on) {
-  ptyCtrlArmed = on;
+function setConsoleCtrl(on) {
+  consoleCtrlArmed = on;
   const chip = document.querySelector('.pty-keys button[data-key="ctrl"]');
   if (chip) chip.classList.toggle("armed", on);
 }
 
-function ptyCopy() {
-  if (!ptyTerm) return;
+function consoleCopy() {
+  if (!consoleTerm) return;
   // Whatever is selected, else the whole screen — dragging to select is hard on
   // touch, so "copy" with no selection grabs everything. copyText() has the
   // execCommand fallback that works on the plain-http LAN server (no clipboard API).
-  let text = ptyTerm.getSelection();
-  if (!text) { ptyTerm.selectAll(); text = ptyTerm.getSelection(); ptyTerm.clearSelection(); }
+  let text = consoleTerm.getSelection();
+  if (!text) { consoleTerm.selectAll(); text = consoleTerm.getSelection(); consoleTerm.clearSelection(); }
   if (!text || !text.trim()) { showToast("nothing to copy"); return; }
   copyText(text).then((ok) => showToast(ok ? "copied" : "copy blocked"));
 }
 
-function ptyPaste() {
+function consolePaste() {
   // readText only works in a secure context; on plain http fall back to a native
-  // long-press paste onto the terminal (xterm forwards it as pty_in).
+  // long-press paste onto the terminal (xterm forwards it as console_in).
   if (navigator.clipboard && navigator.clipboard.readText && window.isSecureContext) {
     navigator.clipboard.readText().then(
-      (t) => { if (t) ptySend(t); if (ptyTerm) ptyTerm.focus(); },
-      () => { if (ptyTerm) ptyTerm.focus(); showToast("long-press the terminal, then Paste"); });
+      (t) => { if (t) consoleSend(t); if (consoleTerm) consoleTerm.focus(); },
+      () => { if (consoleTerm) consoleTerm.focus(); showToast("long-press the terminal, then Paste"); });
   } else {
-    if (ptyTerm) ptyTerm.focus();
+    if (consoleTerm) consoleTerm.focus();
     showToast("long-press the terminal, then Paste");
   }
 }
 
-function ptyTerminalTextarea() {
+function consoleTerminalTextarea() {
   const s = $("pty-screen");
   return s ? s.querySelector(".xterm-helper-textarea") : null;
 }
 
 // The ⌨ chip toggles the soft keyboard: focus summons it, blur hides it (the
 // only reliable way to dismiss the iOS keyboard).
-function ptyToggleKeyboard() {
-  const ta = ptyTerminalTextarea();
+function consoleToggleKeyboard() {
+  const ta = consoleTerminalTextarea();
   if (ta && document.activeElement === ta) ta.blur();
-  else if (ptyTerm) ptyTerm.focus();
+  else if (consoleTerm) consoleTerm.focus();
 }
 
-let ptyFontSize = Math.min(28, Math.max(8, +localStorage.getItem("ptyFontSize") || 13));
-function ptyFontStep(delta) {
-  ptyFontSize = Math.max(8, Math.min(28, ptyFontSize + delta));
-  localStorage.setItem("ptyFontSize", String(ptyFontSize));
-  if (ptyTerm) { ptyTerm.options.fontSize = ptyFontSize; ptyFitAndResize(); }
+let consoleFontSize = Math.min(28, Math.max(8, +localStorage.getItem("ptyFontSize") || 13));
+function consoleFontStep(delta) {
+  consoleFontSize = Math.max(8, Math.min(28, consoleFontSize + delta));
+  localStorage.setItem("ptyFontSize", String(consoleFontSize));
+  if (consoleTerm) { consoleTerm.options.fontSize = consoleFontSize; consoleFitAndResize(); }
 }
 
-function ptySend(data) {
-  if (ptyOpen) send({ type: "pty_in", data });
+function consoleSend(data) {
+  if (consoleOpen) send({ type: "console_in", data });
 }
 
 // Reflow to the current overlay size and tell the server (TIOCSWINSZ), so the
 // program wraps where xterm shows it.
-function ptyFitAndResize() {
-  if (!ptyOpen || !ptyFit || !ptyTerm) return;
-  try { ptyFit.fit(); } catch (e) { /* container not laid out yet */ }
-  send({ type: "pty_resize", cols: ptyTerm.cols, rows: ptyTerm.rows });
+function consoleFitAndResize() {
+  if (!consoleOpen || !consoleFit || !consoleTerm) return;
+  try { consoleFit.fit(); } catch (e) { /* container not laid out yet */ }
+  send({ type: "console_resize", cols: consoleTerm.cols, rows: consoleTerm.rows });
 }
 
-function openPty() {
+// Toggle the Quake console: open if hidden, hide if shown. The single entry
+// point for the top-bar icon, the ＋-menu item, and the Ctrl/Cmd+\ shortcut.
+function toggleConsole() {
+  if (consoleOpen) { hideConsole(); return; }
+  openConsole();
+}
+
+function openConsole() {
   closeSheets();
-  if (!send({ type: "pty_start", command: "" })) { // server runs the login shell
+  // Ask the server to attach us to the GLOBAL console (spawns it on first open,
+  // reattaches to the surviving tmux session after a restart). No command — the
+  // console's command is fixed server-side.
+  if (!send({ type: "console_open" })) {
     showToast("not connected — reconnecting…");
     return;
   }
+  if (consoleOpen) return; // already showing (e.g. a reconnect reattach)
   $("pty-overlay").hidden = false;
   $("pty-share").hidden = true;
-  setPtyStatus("starting…");
+  setConsoleStatus("attaching…");
 
   const screen = $("pty-screen");
   screen.textContent = "";
-  ptyTerm = new Terminal({
+  consoleTerm = new Terminal({
     cursorBlink: true,
     // PragmataPro if the device (or the vendored @font-face) has it, else the
     // system mono. Family-name variants cover the different PragmataPro builds.
     fontFamily: '"PragmataPro Mono", "PragmataPro", "PragmataProMono", ui-monospace, "SF Mono", Menlo, Consolas, monospace',
-    fontSize: ptyFontSize,
+    fontSize: consoleFontSize,
     scrollback: 5000,
     // Mouse reporting is forwarded to the program when it asks for it (tmux/vim
     // mouse mode), so a swipe scrolls the app's panes; otherwise the touch
     // scrolls xterm's own scrollback.
     theme: CATPPUCCIN_MOCHA,
   });
-  ptyFit = new FitAddon.FitAddon();
-  ptyTerm.loadAddon(ptyFit);
+  consoleFit = new FitAddon.FitAddon();
+  consoleTerm.loadAddon(consoleFit);
   // Clickable URLs (#148): auth CLIs print a login URL — often wrapped across
   // lines — that the user taps to open in the browser. The web-links addon
   // underlines links on hover and follows wrapped rows.
   if (window.WebLinksAddon) {
-    ptyTerm.loadAddon(new WebLinksAddon.WebLinksAddon(
+    consoleTerm.loadAddon(new WebLinksAddon.WebLinksAddon(
       (event, uri) => window.open(uri, "_blank", "noopener")
     ));
   }
-  ptyTerm.open(screen);
+  consoleTerm.open(screen);
   // THE input path; the model never reaches it. A sticky Ctrl chip (#148) arms
   // one keystroke: while armed, the next single char is sent as its control
   // code (Ctrl-A for the tmux prefix, Ctrl-W in vim, …), then disarms.
-  ptyTerm.onData((data) => {
-    if (ptyCtrlArmed && data.length === 1) {
+  consoleTerm.onData((data) => {
+    if (consoleCtrlArmed && data.length === 1) {
       const c = data.toUpperCase().charCodeAt(0);
       if (c >= 64 && c <= 95) data = String.fromCharCode(c & 0x1f); // ^@ .. ^_
-      setPtyCtrl(false);
+      setConsoleCtrl(false);
     }
-    ptySend(data);
+    consoleSend(data);
   });
-  // Hardware Esc leaves the overlay (#143) instead of going to the program; the
+  // Hardware Esc HIDES the overlay (#143) instead of going to the program; the
   // on-screen "esc" chip still sends \x1b. Returning false stops xterm from
   // handling the key (and lets it bubble to the global Esc handler too).
-  ptyTerm.attachCustomKeyEventHandler((e) => {
+  consoleTerm.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
     if (e.key === "Escape") { escapeExit(); return false; }
+    // Cmd/Ctrl+\ toggles the console closed too, matching the open shortcut.
+    if ((e.metaKey || e.ctrlKey) && e.key === "\\") { hideConsole(); input.focus(); return false; }
     // Cmd/Ctrl+Shift+C/V for copy/paste — never plain Ctrl+C (that's SIGINT to
     // the program). Cmd (meta) alone works too on macOS where it can't collide.
     const copyCombo = (e.metaKey && !e.ctrlKey) || (e.ctrlKey && e.shiftKey);
-    if (copyCombo && (e.key === "c" || e.key === "C")) { ptyCopy(); return false; }
-    if (copyCombo && (e.key === "v" || e.key === "V")) { ptyPaste(); return false; }
+    if (copyCombo && (e.key === "c" || e.key === "C")) { consoleCopy(); return false; }
+    if (copyCombo && (e.key === "v" || e.key === "V")) { consolePaste(); return false; }
     return true;
   });
-  ptyTerm.onSelectionChange(() => {
-    $("pty-share").hidden = !(ptyTerm && ptyTerm.getSelection().trim());
+  consoleTerm.onSelectionChange(() => {
+    $("pty-share").hidden = !(consoleTerm && consoleTerm.getSelection().trim());
   });
-  ptyOpen = true;
-  ptyFitAndResize();
-  requestAnimationFrame(ptyFitAndResize); // once the overlay has laid out
-  setTimeout(ptyFitAndResize, 120); // and after the mobile keyboard settles
-  ptyTerm.focus();
+  consoleOpen = true;
+  consoleReflowViewport();
+  requestAnimationFrame(consoleReflowViewport); // once the overlay has laid out
+  setTimeout(consoleReflowViewport, 120); // and after the mobile keyboard settles
+  consoleTerm.focus();
 }
 
-// kill=false when the PTY is already gone server-side (session switch/reconnect)
-// so we don't send a stray kill for a session we no longer view.
-function closePty(kill = true) {
-  if (!ptyOpen) return;
-  ptyOpen = false;
-  if (kill) send({ type: "pty_kill" });
-  $("pty-overlay").hidden = true;
+// Hide/detach the overlay — the console keeps running server-side (reopening
+// shows current state). Tells the server to stop fanning output at us.
+function hideConsole() {
+  if (!consoleOpen) return;
+  consoleOpen = false;
+  send({ type: "console_close" });
+  const ov = $("pty-overlay");
+  ov.hidden = true;
+  ov.style.height = ""; ov.style.top = ""; // drop the viewport-fit inline styles
   $("pty-share").hidden = true;
-  setPtyCtrl(false);
-  if (ptyTerm) { ptyTerm.dispose(); ptyTerm = null; ptyFit = null; }
+  setConsoleCtrl(false);
+  if (consoleTerm) { consoleTerm.dispose(); consoleTerm = null; consoleFit = null; }
 }
 
-function onPtyStarted(event) {
-  if (!ptyOpen || !ptyTerm) return;
-  ptyTerm.reset();
-  setPtyStatus(`${promptDir(event.cwd)} · ${event.command}`);
-  ptyFitAndResize();
+// Explicit destroy — kills the console (and, tmux-backed, its surviving
+// session) so a later open starts fresh. Distinct from Close = hide.
+function killConsole() {
+  if (consoleOpen) send({ type: "console_kill" });
+  hideConsole();
 }
 
-function onPtyOut(data) {
-  if (ptyTerm) ptyTerm.write(data);
+function onConsoleStarted(event) {
+  if (!consoleOpen || !consoleTerm) return;
+  consoleTerm.reset();
+  setConsoleStatus(`${promptDir(event.cwd)} · ${event.command}`);
+  consoleFitAndResize();
 }
 
-function onPtyExit(code) {
-  setPtyStatus(`exited (${code}) — tap Close`, true);
+function onConsoleOut(data) {
+  if (consoleTerm) consoleTerm.write(data);
+}
+
+function onConsoleExit(code) {
+  setConsoleStatus(`exited (${code}) — reopen to start again`, true);
   // Keep the overlay + scrollback up so the final output stays readable; the
-  // user closes explicitly.
+  // user reopens (respawn) or hides explicitly.
 }
 
 // Wire the overlay's controls once at load. Share sends the xterm SELECTION to
 // the chat as model context (the only path from the terminal to the model, and
 // only on this explicit user action — see onSelectionChange for the button's
 // visibility).
-$("pty-close").onclick = () => closePty(true);
-$("pty-font-dec").onclick = () => ptyFontStep(-1);
-$("pty-font-inc").onclick = () => ptyFontStep(1);
+$("pty-close").onclick = () => hideConsole();
+$("pty-kill").onclick = () => killConsole();
+$("pty-font-dec").onclick = () => consoleFontStep(-1);
+$("pty-font-inc").onclick = () => consoleFontStep(1);
 $("pty-share").onclick = () => {
-  const sel = ptyTerm ? ptyTerm.getSelection().trim() : "";
+  const sel = consoleTerm ? consoleTerm.getSelection().trim() : "";
   if (!sel) { showToast("select some output first, then Share"); return; }
-  send({ type: "pty_share", text: sel });
+  send({ type: "console_share", text: sel });
 };
 
 document.querySelector(".pty-keys").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-key]");
   if (!btn) return;
-  if (btn.dataset.key === "kb") { ptyToggleKeyboard(); return; }
-  if (btn.dataset.key === "ctrl") { setPtyCtrl(!ptyCtrlArmed); if (ptyTerm) ptyTerm.focus(); return; }
-  if (btn.dataset.key === "copy") { ptyCopy(); return; }
-  if (btn.dataset.key === "paste") { ptyPaste(); return; }
+  if (btn.dataset.key === "kb") { consoleToggleKeyboard(); return; }
+  if (btn.dataset.key === "ctrl") { setConsoleCtrl(!consoleCtrlArmed); if (consoleTerm) consoleTerm.focus(); return; }
+  if (btn.dataset.key === "copy") { consoleCopy(); return; }
+  if (btn.dataset.key === "paste") { consolePaste(); return; }
   const CTRL = { tab: "\t", esc: "\x1b", "ctrl-a": "\x01", up: "\x1b[A", down: "\x1b[B" };
   const seq = CTRL[btn.dataset.key];
-  if (seq != null) ptySend(seq);
-  if (ptyTerm) ptyTerm.focus();
+  if (seq != null) consoleSend(seq);
+  if (consoleTerm) consoleTerm.focus();
 });
 
-// xterm owns key capture (its own textarea) and reflow; a window resize just
-// refits the terminal to the new overlay size.
-window.addEventListener("resize", () => { if (ptyOpen) ptyFitAndResize(); });
+// Keep the overlay inside the VISIBLE viewport and refit xterm on any viewport
+// change — the iOS soft keyboard show/hide fires visualViewport resize (not
+// window resize), and a fixed element does not shrink above the keyboard on its
+// own, so without this the keys row hides behind the keyboard and the terminal
+// keeps its old cols/rows. Rotation comes through window resize/orientationchange.
+function consoleReflowViewport() {
+  if (!consoleOpen) return;
+  const ov = $("pty-overlay");
+  if (window.visualViewport) {
+    ov.style.height = `${visualViewport.height}px`;
+    ov.style.top = `${Math.max(0, visualViewport.offsetTop)}px`;
+  }
+  consoleFitAndResize();
+}
+window.addEventListener("resize", consoleReflowViewport);
+window.addEventListener("orientationchange", () => setTimeout(consoleReflowViewport, 250));
+if (window.visualViewport) {
+  visualViewport.addEventListener("resize", consoleReflowViewport);
+  visualViewport.addEventListener("scroll", consoleReflowViewport);
+}
 
 $("file-input").addEventListener("change", async () => {
   for (const file of $("file-input").files) await uploadFile(file);
@@ -5004,6 +5048,13 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     openSessionsSheet("");
   }
+  // Cmd/Ctrl+\ toggles the global "Quake console" (#148 follow-up). When the
+  // overlay itself has focus, xterm's own key handler catches this first; this
+  // is the OPEN path from anywhere else in the app.
+  if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+    e.preventDefault();
+    toggleConsole();
+  }
 });
 
 // Desktop only: auto-focusing on a phone would pop the keyboard over the
@@ -5401,6 +5452,7 @@ $("back-chip").onclick = () => openSessionsSheet("");
 $("session-chip").onclick = () => openSessionMenu();
 $("empty-hint").onclick = () => openSessionsSheet("");
 $("new-chip").onclick = () => requestNewChat();
+$("console-btn").onclick = () => toggleConsole(); // global Quake console (#148)
 
 // Welcome starter chips (#123): fill the composer with the prompt and send it.
 $("welcome").addEventListener("click", (e) => {
