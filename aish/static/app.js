@@ -4987,7 +4987,9 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
 (() => {
   const screen = $("pty-screen");
   const SLOP = 10; // px of travel before a touch is judged a deliberate scroll drag
-  const HOLD_MS = 500; // stationary hold that turns on Select mode
+  const HOLD_MS = 650; // stationary hold that turns on Select mode — kept just
+                       // past iOS's ~500ms long-press so the rows are still
+                       // user-select:none through its window (iOS won't grab it)
   let touchY = 0, startX = 0, startY = 0, scrolling = false;
   let selAnchor = null; // collapsed caret Range where a select-mode drag began
   // Hold-to-select: a stationary hold turns ON the same Select mode the chip

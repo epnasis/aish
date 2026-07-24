@@ -2222,20 +2222,13 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   overscroll-behavior: contain;
   touch-action: pan-y;
 }
-/* Touch text-selection: xterm sets user-select:none because on DESKTOP it draws
-   its own mouse-driven selection overlay. That leaves touch with nothing to
-   select (no mouse events), so on coarse-pointer devices we re-enable native
-   selection on the real DOM-rendered rows. A long-press then arms it (the touch
-   handler stands down from the scroll hijack — see app.js); a quick drag still
-   scrolls. Scoped to touch so desktop mouse-selection is unchanged. */
-@media (hover: none) and (pointer: coarse) {
-  .pty-screen .xterm .xterm-rows,
-  .pty-screen .xterm .xterm-rows * {
-    -webkit-user-select: text;
-    user-select: text;
-    -webkit-touch-callout: default;
-  }
-}
+/* Touch text-selection is enabled ONLY in Select mode (.pty-screen.selecting
+   rule, below) — NOT always. If the rows were always user-select:text, iOS would
+   start its OWN long-press selection on a hold touch and swallow the drag before
+   our paint could run, so hold-then-drag failed while button-then-drag (a fresh
+   touch that preventDefaults on touchstart and owns it) worked. With rows
+   non-selectable until the hold flips Select mode on, iOS never grabs the hold
+   touch and our paint owns the continued drag. */
 #pty-overlay { overscroll-behavior: contain; }
 /* Freeze the page under the console so an iOS swipe can't scroll the chat into
    view — position:fixed is the reliable lock (overflow:hidden alone isn't on
