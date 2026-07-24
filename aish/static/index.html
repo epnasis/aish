@@ -14,6 +14,7 @@
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="vendor/xterm.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -244,10 +245,8 @@
   </div>
   <!-- tabindex so the screen can hold selection for "share"; the real key
        capture happens on the hidden input below, which summons the keyboard. -->
-  <div id="pty-screen" class="pty-screen mono" tabindex="0" aria-live="polite"></div>
-  <input id="pty-capture" class="pty-capture" autocomplete="off"
-         autocapitalize="none" autocorrect="off" spellcheck="false"
-         inputmode="text" aria-label="terminal input">
+  <!-- xterm.js mounts its own canvas + input textarea into this container. -->
+  <div id="pty-screen" class="pty-screen" aria-live="polite"></div>
   <div class="pty-keys" role="group" aria-label="control keys">
     <button type="button" data-key="tab">tab</button>
     <button type="button" data-key="esc">esc</button>
@@ -382,6 +381,8 @@
 </div>
 
 <script src="vendor/highlight.min.js"></script>
+<script src="vendor/xterm.js"></script>
+<script src="vendor/xterm-addon-fit.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

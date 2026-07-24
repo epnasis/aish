@@ -1952,86 +1952,12 @@ function applySgr(params, classes) {
   }
 }
 
-// ---- interactive PTY: line model (#148) ----------------------------------
-// A SMALL line-oriented terminal — enough for prompts, progress bars, and
-// colored output from TTY programs (gcloud/ssh/sudo). NOT a full-screen
-// emulator: cursor-addressing CSI (vim/htop) is dropped by design. State is
-// { lines[], row, col }; \r returns to column 0, \n opens a line, \b steps
-// back, \t goes to the next 8-col stop, CSI-K erases within the line. SGR
-// color escapes are kept INLINE in the line text and colored at render time by
-// ansiFragment, so the model stays plain-string and testable without a DOM.
-const PTY_MAX_LINES = 5000; // scrollback cap so a long session can't grow forever
-
-function ptyNewState() { return { lines: [""], row: 0, col: 0 }; }
-
-function ptyWriteText(st, text) {
-  let line = st.lines[st.row] || "";
-  if (line.length < st.col) line += " ".repeat(st.col - line.length); // pad a gap
-  st.lines[st.row] = line.slice(0, st.col) + text + line.slice(st.col + text.length);
-  st.col += text.length;
-}
-
-function ptyEraseInLine(st, mode) {
-  const line = st.lines[st.row] || "";
-  if (mode === "1") st.lines[st.row] = " ".repeat(Math.min(st.col, line.length)) + line.slice(st.col);
-  else if (mode === "2") st.lines[st.row] = "";
-  else st.lines[st.row] = line.slice(0, st.col); // "" / "0": clear to end of line
-}
-
-function ptyApply(st, chunk) {
-  let i = 0;
-  while (i < chunk.length) {
-    const ch = chunk[i];
-    if (ch === "\x1b") {
-      if (chunk[i + 1] === "[") { // CSI: consume through a final byte @..~
-        let j = i + 2;
-        while (j < chunk.length && !(chunk[j] >= "@" && chunk[j] <= "~")) j++;
-        if (j >= chunk.length) break; // incomplete (split across chunks) — drop tail
-        const final = chunk[j];
-        if (final === "K") ptyEraseInLine(st, chunk.slice(i + 2, j));
-        else if (final === "m") ptyWriteText(st, chunk.slice(i, j + 1)); // keep SGR inline
-        // any other CSI (cursor moves, screen ops) is dropped — line-oriented only
-        i = j + 1;
-        continue;
-      }
-      if (chunk[i + 1] === "]") { // OSC (titles/hyperlinks): skip to BEL or ST
-        let j = i + 2;
-        while (j < chunk.length && chunk[j] !== "\x07" && !(chunk[j] === "\x1b" && chunk[j + 1] === "\\")) j++;
-        i = chunk[j] === "\x07" ? j + 1 : j + 2;
-        continue;
-      }
-      i++; continue; // lone ESC: drop it
-    }
-    if (ch === "\n") { st.row += 1; st.col = 0; if (st.lines[st.row] === undefined) st.lines[st.row] = ""; i++; continue; }
-    if (ch === "\r") { st.col = 0; i++; continue; }
-    if (ch === "\b") { if (st.col > 0) st.col -= 1; i++; continue; }
-    if (ch === "\t") { ptyWriteText(st, " ".repeat(8 - (st.col % 8))); i++; continue; }
-    if (ch < " ") { i++; continue; } // bell and other C0 controls: ignore
-    ptyWriteText(st, ch); i++;
-  }
-  if (st.lines.length > PTY_MAX_LINES) { // bound scrollback
-    const drop = st.lines.length - PTY_MAX_LINES;
-    st.lines.splice(0, drop);
-    st.row = Math.max(0, st.row - drop);
-  }
-  return st;
-}
-
-// Rebuild the screen from the line model: one `.ptol` span per line, SGR
-// colored via the same ansiFragment the run_command terminal block uses. Lines
-// are capped and output is coalesced, so a full rebuild per frame stays cheap.
-function ptyRenderScreen(el, st) {
-  const frag = document.createDocumentFragment();
-  for (const line of st.lines) {
-    const span = document.createElement("span");
-    span.className = "ptol";
-    span.appendChild(ansiFragment(line));
-    frag.appendChild(span);
-  }
-  el.textContent = "";
-  el.appendChild(frag);
-}
-// ---- end interactive PTY line model --------------------------------------
+// The interactive PTY (#148) renders through a real terminal emulator —
+// vendored xterm.js (static/vendor/xterm.js, a plain global like highlight.js).
+// Full cursor-addressing/erase/scroll support is what makes an interactive
+// shell (zsh line-editor redraw, autosuggestions), gcloud auth, and simple TUIs
+// render correctly — the old hand-rolled line model could not (#148 follow-up).
+// The controller lives further down; see openPty().
 
 // ---- syntax highlighting (fenced code blocks) -----------------------------
 // hljs is vendor/highlight.min.js (static/vendor, no CDN) — a plain global,
@@ -4429,21 +4355,33 @@ function escapeExit() {
 // [ESC-EXIT-END]
 
 // ---- interactive PTY overlay controller (#148) ---------------------------
-// The full-screen terminal. Keystrokes captured off a hidden input are sent to
-// the PTY as `pty_in` and NEVER echoed locally — the PTY echoes what it wants,
-// so a password prompt (echo off) masks for free. `pty_out` bytes render via
-// the line model above. Everything here is user-driven; the model has no path
-// to pty_in (the server enforces that too).
-let ptyState = null; // the line model, or null when the overlay is closed
+// A real terminal: xterm.js (vendored global) renders pty_out and captures
+// keystrokes, which are sent to the PTY as `pty_in` and NEVER echoed locally —
+// the PTY echoes what it wants, so a password prompt (echo off) masks for free.
+// Everything here is user-driven; the model has no path to pty_in (the server
+// enforces that too). xterm handles cursor addressing / erase / scroll, so an
+// interactive shell's line-editor redraw renders correctly (the hand-rolled
+// line model could not — that was the #148 follow-up bug).
+let ptyTerm = null; // the xterm.js Terminal while the overlay is open, else null
+let ptyFit = null;
 let ptyOpen = false;
-let ptyRenderQueued = false;
-
-function ptyScreenEl() { return $("pty-screen"); }
 
 function setPtyStatus(text, exited) {
   const el = $("pty-status");
   el.textContent = text || "";
   el.classList.toggle("exited", Boolean(exited));
+}
+
+function ptySend(data) {
+  if (ptyOpen) send({ type: "pty_in", data });
+}
+
+// Reflow to the current overlay size and tell the server (TIOCSWINSZ), so the
+// program wraps where xterm shows it.
+function ptyFitAndResize() {
+  if (!ptyOpen || !ptyFit || !ptyTerm) return;
+  try { ptyFit.fit(); } catch (e) { /* container not laid out yet */ }
+  send({ type: "pty_resize", cols: ptyTerm.cols, rows: ptyTerm.rows });
 }
 
 function openPty() {
@@ -4452,14 +4390,38 @@ function openPty() {
     showToast("not connected — reconnecting…");
     return;
   }
-  ptyState = ptyNewState();
-  ptyOpen = true;
   $("pty-overlay").hidden = false;
   $("pty-share").hidden = true;
-  ptyScreenEl().textContent = "";
   setPtyStatus("starting…");
-  ptySendResize();
-  focusPtyCapture();
+
+  const screen = $("pty-screen");
+  screen.textContent = "";
+  ptyTerm = new Terminal({
+    cursorBlink: true,
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+    fontSize: 13,
+    scrollback: 5000,
+    theme: { background: "#000000", foreground: "#e5e5ea" },
+  });
+  ptyFit = new FitAddon.FitAddon();
+  ptyTerm.loadAddon(ptyFit);
+  ptyTerm.open(screen);
+  ptyTerm.onData((data) => ptySend(data)); // THE input path; the model never reaches it
+  // Hardware Esc leaves the overlay (#143) instead of going to the program; the
+  // on-screen "esc" chip still sends \x1b. Returning false stops xterm from
+  // handling the key (and lets it bubble to the global Esc handler too).
+  ptyTerm.attachCustomKeyEventHandler((e) => {
+    if (e.type === "keydown" && e.key === "Escape") { escapeExit(); return false; }
+    return true;
+  });
+  ptyTerm.onSelectionChange(() => {
+    $("pty-share").hidden = !(ptyTerm && ptyTerm.getSelection().trim());
+  });
+  ptyOpen = true;
+  ptyFitAndResize();
+  requestAnimationFrame(ptyFitAndResize); // once the overlay has laid out
+  setTimeout(ptyFitAndResize, 120); // and after the mobile keyboard settles
+  ptyTerm.focus();
 }
 
 // kill=false when the PTY is already gone server-side (session switch/reconnect)
@@ -4469,72 +4431,19 @@ function closePty(kill = true) {
   ptyOpen = false;
   if (kill) send({ type: "pty_kill" });
   $("pty-overlay").hidden = true;
-  ptyState = null;
-  $("pty-capture").blur();
-}
-
-function ptySend(data) {
-  if (ptyOpen) send({ type: "pty_in", data });
-}
-
-function focusPtyCapture() {
-  const cap = $("pty-capture");
-  cap.value = "";
-  cap.focus();
-}
-
-// Estimate cols/rows from the screen box and a measured monospace char cell, so
-// the PTY wraps where the program expects (TIOCSWINSZ on the server).
-function ptyMetrics() {
-  const el = ptyScreenEl();
-  const probe = document.createElement("span");
-  probe.className = "ptol";
-  probe.style.position = "absolute";
-  probe.style.visibility = "hidden";
-  probe.style.whiteSpace = "pre";
-  probe.textContent = "0".repeat(20);
-  el.appendChild(probe);
-  const rect = probe.getBoundingClientRect();
-  const cw = rect.width / 20 || 8;
-  const lh = rect.height || 18;
-  probe.remove();
-  return {
-    cols: Math.max(20, Math.floor((el.clientWidth - 24) / cw)),
-    rows: Math.max(6, Math.floor(el.clientHeight / lh)),
-  };
-}
-
-function ptySendResize() {
-  if (!ptyOpen) return;
-  const { cols, rows } = ptyMetrics();
-  send({ type: "pty_resize", cols, rows });
-}
-
-function ptyRenderSoon() {
-  if (ptyRenderQueued) return;
-  ptyRenderQueued = true;
-  requestAnimationFrame(() => { ptyRenderQueued = false; ptyRenderNow(); });
-}
-
-function ptyRenderNow() {
-  if (!ptyState) return;
-  const el = ptyScreenEl();
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  ptyRenderScreen(el, ptyState);
-  if (atBottom) el.scrollTop = el.scrollHeight; // follow output unless scrolled up
+  $("pty-share").hidden = true;
+  if (ptyTerm) { ptyTerm.dispose(); ptyTerm = null; ptyFit = null; }
 }
 
 function onPtyStarted(event) {
-  if (!ptyOpen) return;
-  ptyState = ptyNewState();
+  if (!ptyOpen || !ptyTerm) return;
+  ptyTerm.reset();
   setPtyStatus(`${promptDir(event.cwd)} · ${event.command}`);
-  ptyRenderNow();
+  ptyFitAndResize();
 }
 
 function onPtyOut(data) {
-  if (!ptyState) return;
-  ptyApply(ptyState, String(data));
-  ptyRenderSoon();
+  if (ptyTerm) ptyTerm.write(data);
 }
 
 function onPtyExit(code) {
@@ -4543,69 +4452,30 @@ function onPtyExit(code) {
   // user closes explicitly.
 }
 
-// Wire the overlay's controls once at load.
+// Wire the overlay's controls once at load. Share sends the xterm SELECTION to
+// the chat as model context (the only path from the terminal to the model, and
+// only on this explicit user action — see onSelectionChange for the button's
+// visibility).
 $("pty-close").onclick = () => closePty(true);
 $("pty-share").onclick = () => {
-  const sel = (window.getSelection ? String(window.getSelection()) : "").trim();
+  const sel = ptyTerm ? ptyTerm.getSelection().trim() : "";
   if (!sel) { showToast("select some output first, then Share"); return; }
   send({ type: "pty_share", text: sel });
 };
 
-// Reveal Share only when there is a selection inside the terminal screen.
-document.addEventListener("selectionchange", () => {
-  if (!ptyOpen) return;
-  const sel = (window.getSelection ? String(window.getSelection()) : "").trim();
-  $("pty-share").hidden = !sel;
-});
-
 document.querySelector(".pty-keys").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-key]");
   if (!btn) return;
-  if (btn.dataset.key === "kb") { focusPtyCapture(); return; } // re-summon keyboard
+  if (btn.dataset.key === "kb") { if (ptyTerm) ptyTerm.focus(); return; } // re-summon keyboard
   const CTRL = { tab: "\t", esc: "\x1b", "ctrl-c": "\x03", "ctrl-d": "\x04", up: "\x1b[A", down: "\x1b[B" };
   const seq = CTRL[btn.dataset.key];
   if (seq != null) ptySend(seq);
-  focusPtyCapture();
+  if (ptyTerm) ptyTerm.focus();
 });
 
-// Text entry: beforeinput carries the inserted text (incl. mobile autocorrect)
-// and the soft-keyboard delete/return; we forward it and swallow it so nothing
-// is echoed locally (the PTY echoes). Special/navigation keys come via keydown.
-const ptyCaptureEl = $("pty-capture");
-ptyCaptureEl.addEventListener("beforeinput", (e) => {
-  if (!ptyOpen) return;
-  e.preventDefault();
-  const t = e.inputType;
-  if (t === "insertLineBreak" || t === "insertParagraph") ptySend("\r");
-  else if (t === "deleteContentBackward") ptySend("\x7f");
-  else if (t === "deleteWordBackward") ptySend("\x17"); // ^W
-  else if (e.data != null) ptySend(e.data);
-  ptyCaptureEl.value = "";
-});
-ptyCaptureEl.addEventListener("input", () => { ptyCaptureEl.value = ""; });
-ptyCaptureEl.addEventListener("keydown", (e) => {
-  if (!ptyOpen) return;
-  const k = e.key;
-  // Hardware Esc leaves the overlay (#143) rather than being sent to the PTY;
-  // the on-screen "esc" key remains the way to send \x1b to a program.
-  if (k === "Escape") { e.preventDefault(); escapeExit(); return; }
-  let seq = null;
-  if (k === "Enter") seq = "\r";
-  else if (k === "Backspace") seq = "\x7f";
-  else if (k === "Tab") seq = "\t";
-  else if (k === "ArrowUp") seq = "\x1b[A";
-  else if (k === "ArrowDown") seq = "\x1b[B";
-  else if (k === "ArrowRight") seq = "\x1b[C";
-  else if (k === "ArrowLeft") seq = "\x1b[D";
-  else if (e.ctrlKey && !e.metaKey && !e.altKey && k.length === 1) {
-    const c = k.toLowerCase().charCodeAt(0);
-    if (c >= 97 && c <= 122) seq = String.fromCharCode(c - 96); // ^A..^Z
-  }
-  // Printable keys fall through (seq stays null) so beforeinput handles them —
-  // sending here too would double them.
-  if (seq !== null) { e.preventDefault(); ptySend(seq); ptyCaptureEl.value = ""; }
-});
-window.addEventListener("resize", () => { if (ptyOpen) ptySendResize(); });
+// xterm owns key capture (its own textarea) and reflow; a window resize just
+// refits the terminal to the new overlay size.
+window.addEventListener("resize", () => { if (ptyOpen) ptyFitAndResize(); });
 
 $("file-input").addEventListener("change", async () => {
   for (const file of $("file-input").files) await uploadFile(file);

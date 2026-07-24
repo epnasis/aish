@@ -2193,22 +2193,14 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pty-headbtn:active { opacity: 0.6; }
 #pty-share { color: var(--blue); border-color: var(--blue-border); }
 #pty-share[hidden] { display: none; }
+/* xterm.js mounts its canvas + input textarea here; the container needs a
+   definite size for the fit addon to derive cols/rows. xterm.css styles the
+   inner .xterm; we only size it and paint the frame. */
 .pty-screen {
-  flex: 1; min-height: 0; overflow-y: auto; overflow-x: auto;
-  padding: 10px 12px 14px; color: #e6e6ea;
-  font-size: calc(14px * var(--fs)); line-height: 1.5;
-  white-space: pre; -webkit-user-select: text; user-select: text;
-  background: #0b0b0d;
+  flex: 1; min-height: 0; overflow: hidden;
+  padding: 6px 8px; background: #000000;
 }
-/* Each PTY line is its own span so the model rebuilds only what changed. */
-.pty-screen .ptol { display: block; min-height: 1.5em; }
-.pty-capture {
-  /* Off-screen but focusable: it summons the mobile keyboard and captures
-     keystrokes; typed text is forwarded to the PTY, never shown here (the PTY
-     echoes what it wants — so password prompts mask for free). */
-  position: absolute; left: -9999px; width: 1px; height: 1px;
-  opacity: 0; border: 0; padding: 0;
-}
+.pty-screen .xterm { height: 100%; }
 .pty-keys {
   display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto;
   border-top: 1px solid #26262b; background: rgba(20, 20, 24, 0.95);

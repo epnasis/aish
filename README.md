@@ -425,9 +425,10 @@ overlay: a login shell you type into directly, with the program seeing a genuine
 TTY so it can prompt for input. Keystrokes go to the terminal and are *not*
 echoed locally — the terminal echoes what it wants, so a password prompt masks
 for free. Control-key chips (`^C`, `^D`, tab, esc, arrows) sit above the keyboard
-for the keys a soft keyboard can't send. It renders line-oriented output with
-ANSI colors — enough for prompts, progress bars, and auth flows, but not a
-full-screen terminal (vim/htop are out of scope). The model has **no access** to
+for the keys a soft keyboard can't send. It's a real terminal emulator (xterm.js,
+vendored locally — no CDN), so cursor-addressed output renders faithfully: your
+themed shell prompt, `gcloud auth`, `ssh`, and terminal apps all display
+correctly. The model has **no access** to
 this terminal: its input and output stay private to the overlay unless you
 select some output and tap **Share**, which drops that selection into the chat
 as context for the model's next turn. The interactive session is the user's
