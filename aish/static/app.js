@@ -6275,6 +6275,38 @@ function armDeleteChat(item) {
 // ---- attention badge ----------------------------------------------------
 // A background session that finished (or needs you) sets the durable badge on
 // the ‹ Sessions button; opening the list clears it.
+// ---- Sessions tabs (Recent / Automated) ----------------------------------
+const SESSION_TAB_KEY = "aish-session-tab";
+let sessionTab = (() => {
+  try { return localStorage.getItem(SESSION_TAB_KEY) === "automated" ? "automated" : "recent"; }
+  catch { return "recent"; }
+})();
+let lastSessionEvent = null; // last session_list, so tab switches re-render offline
+let tabSwipeActive = false;   // a horizontal list swipe is in progress → rows stand down
+
+// SESSIONS_PARTITION_START
+// Split sessions into the two tabs and tally each tab's attention counters.
+// Automated = a triggered origin (schedule/email/webhook, #160); everything
+// else is a user chat. Counts are computed for BOTH tabs regardless of which
+// is showing, so the inactive tab's badge still flags things needing you.
+function partitionSessions(sessions) {
+  const isActive = (s) => s.state === "running" || s.state === "waiting";
+  const isAuto = (s) => Boolean(s.origin && s.origin !== "user");
+  const groups = { recent: [], automated: [] };
+  const counts = {
+    recent: { running: 0, waiting: 0 },
+    automated: { running: 0, waiting: 0 },
+  };
+  for (const s of sessions) {
+    const key = isAuto(s) ? "automated" : "recent";
+    groups[key].push(s);
+    if (s.state === "running") counts[key].running++;
+    else if (s.state === "waiting") counts[key].waiting++;
+  }
+  return { groups, counts, isActive };
+}
+// SESSIONS_PARTITION_END
+
 const attentionSessions = new Set();
 function refreshBadge() {
   const badge = $("back-badge");
@@ -6462,12 +6494,14 @@ function wrapSwipeDelete(row, info) {
   });
   row.addEventListener("pointermove", (e) => {
     if (startX === null) return;
+    if (tabSwipeActive) { set(open ? -88 : 0); return; } // a tab swipe owns this gesture
     dx = e.clientX - startX;
     if (Math.abs(dx) > 6) row.classList.add("dragging");
     set(Math.min(0, Math.max(-100, (open ? -88 : 0) + dx)));
   });
   const finish = () => {
     if (startX === null) return;
+    if (tabSwipeActive) { row.classList.remove("dragging"); set(open ? -88 : 0); startX = null; return; }
     const moved = Math.abs(dx) > 6;
     open = (open ? -88 : 0) + dx < -44;
     row.classList.remove("dragging");
@@ -6486,37 +6520,54 @@ function wrapSwipeDelete(row, info) {
   return wrap;
 }
 
-function renderSessions(event) {
+function renderTabCounts(id, c) {
+  const el = $(id);
+  el.replaceChildren();
+  const pill = (cls, n, label) => {
+    const p = document.createElement("span");
+    p.className = `seg-count ${cls}`;
+    p.textContent = String(n);
+    p.title = `${n} ${label}`;
+    el.appendChild(p);
+  };
+  if (c.running) pill("running", c.running, "running");
+  if (c.waiting) pill("waiting", c.waiting, "need approval");
+}
+
+function syncTabSelection() {
+  for (const id of ["tab-recent", "tab-automated"]) {
+    const btn = $(id);
+    btn.setAttribute("aria-selected", btn.dataset.tab === sessionTab ? "true" : "false");
+  }
+}
+
+function setSessionTab(tab) {
+  if ((tab !== "recent" && tab !== "automated") || tab === sessionTab) return;
+  sessionTab = tab;
+  try { localStorage.setItem(SESSION_TAB_KEY, tab); } catch { /* private mode */ }
+  if (lastSessionEvent) renderSessions(lastSessionEvent);
+}
+
+$("tab-recent").onclick = () => setSessionTab("recent");
+$("tab-automated").onclick = () => setSessionTab("automated");
+
+// Active (running / needs-approval) sessions float to the top under their own
+// header; the rest keep the date grouping. Shared by both tabs.
+function renderSessionList(sessions, current, isActive) {
   const list = $("sessions-list");
-  list.replaceChildren();
-  if (!event.sessions.length) {
-    list.textContent = "no matching sessions";
+  if (!sessions.length) {
+    const empty = document.createElement("div");
+    empty.className = "section-label";
+    empty.textContent = sessionTab === "automated"
+      ? "No automated sessions" : "No chats yet";
+    list.appendChild(empty);
     return;
   }
-  // Ranked search results are ordered by relevance, so date/status grouping
-  // would lie — render a flat list there. While browsing, running/waiting
-  // sessions surface under "Active now"; the rest keep date headers.
-  const grouped = !$("sessions-search").value.trim();
-  if (!grouped) {
-    for (const info of event.sessions) list.appendChild(sessionRow(info, event.current));
-    return;
-  }
-  const isActive = (s) => s.state === "running" || s.state === "waiting";
-  const isAuto = (s) => s.origin && s.origin !== "user";
-  const active = event.sessions.filter(isActive);
-  // Triggered sessions (#160) get their own "Automated" section so scheduled /
-  // email / webhook workflows are observable at a glance, separate from chats
-  // you started. Active ones still surface under "Active now" (they carry an
-  // origin tag there too), so exclude those to avoid double-listing.
-  const automated = event.sessions.filter((s) => isAuto(s) && !isActive(s));
-  const rest = event.sessions.filter((s) => !isActive(s) && !isAuto(s));
+  const active = sessions.filter(isActive);
+  const rest = sessions.filter((s) => !isActive(s));
   if (active.length) {
     list.appendChild(sectionLabel("Active now"));
-    for (const info of active) list.appendChild(sessionRow(info, event.current));
-  }
-  if (automated.length) {
-    list.appendChild(sectionLabel("Automated"));
-    for (const info of automated) list.appendChild(sessionRow(info, event.current));
+    for (const info of active) list.appendChild(sessionRow(info, current));
   }
   let lastGroup = null;
   for (const info of rest) {
@@ -6525,9 +6576,69 @@ function renderSessions(event) {
       list.appendChild(sectionLabel(group));
       lastGroup = group;
     }
-    list.appendChild(sessionRow(info, event.current));
+    list.appendChild(sessionRow(info, current));
   }
 }
+
+function renderSessions(event) {
+  lastSessionEvent = event;
+  const list = $("sessions-list");
+  list.replaceChildren();
+  // Ranked search results are ordered by relevance, so date/status grouping —
+  // and the tab split — would lie. Hide the tabs and render a flat list.
+  if ($("sessions-search").value.trim()) {
+    $("sessions-tabs").hidden = true;
+    if (!event.sessions.length) { list.textContent = "no matching sessions"; return; }
+    for (const info of event.sessions) list.appendChild(sessionRow(info, event.current));
+    return;
+  }
+  $("sessions-tabs").hidden = false;
+  const { groups, counts, isActive } = partitionSessions(event.sessions);
+  renderTabCounts("tab-recent-counts", counts.recent);
+  renderTabCounts("tab-automated-counts", counts.automated);
+  syncTabSelection();
+  renderSessionList(groups[sessionTab], event.current, isActive);
+}
+
+// Horizontal swipe on the list switches tabs (a thumb gesture, matching the
+// message-pager). It reuses that pager's axis disambiguation; once it locks
+// horizontal it sets tabSwipeActive so a same-gesture per-row swipe-delete
+// (which also reads horizontal pointer moves) stands down for this touch.
+(function attachSessionTabSwipe() {
+  const list = $("sessions-list");
+  let sx = 0, sy = 0, t0 = 0, tracking = false, horizontal = false, blocked = false;
+  list.addEventListener("touchstart", (e) => {
+    if (e.touches.length !== 1 || $("sessions-tabs").hidden) { tracking = false; return; }
+    const t = e.touches[0];
+    sx = t.clientX; sy = t.clientY; t0 = e.timeStamp;
+    tracking = true; horizontal = false; blocked = false;
+  }, { passive: true });
+  list.addEventListener("touchmove", (e) => {
+    if (!tracking || blocked) return;
+    const t = e.touches[0];
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    if (horizontal) return;
+    if (e.timeStamp - t0 > 300) { blocked = true; return; }   // slow start = scroll/select
+    if (Math.abs(dx) < 12 && Math.abs(dy) < 12) return;        // undecided yet
+    if (Math.abs(dx) < Math.abs(dy) * 1.4) { blocked = true; return; } // mostly vertical
+    horizontal = true;
+    tabSwipeActive = true;
+    for (const r of list.querySelectorAll(".session-row.dragging")) {
+      r.style.transform = ""; r.classList.remove("dragging"); // undo any nascent row-swipe
+    }
+  }, { passive: true });
+  const end = (e) => {
+    if (tracking && horizontal) {
+      const dx = (e.changedTouches[0] || {}).clientX - sx;
+      if (Math.abs(dx) > 50) setSessionTab(dx < 0 ? "automated" : "recent");
+    }
+    tracking = false; horizontal = false;
+    // Clear on the next tick so the row's own pointerup handler still sees it.
+    setTimeout(() => { tabSwipeActive = false; }, 0);
+  };
+  list.addEventListener("touchend", end);
+  list.addEventListener("touchcancel", end);
+})();
 
 const TRASH_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +

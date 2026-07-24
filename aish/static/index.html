@@ -286,6 +286,19 @@
     </div>
   </div>
   <div id="sessions-list" class="sheet-list"></div>
+  <!-- bottom tabs: thumb-reachable switch between your chats and automated
+       (triggered) sessions, each carrying live running / needs-approval
+       counters so attention is visible at a glance. Hidden while searching. -->
+  <div id="sessions-tabs" class="seg-tabs" role="tablist">
+    <button id="tab-recent" class="seg-tab" role="tab" data-tab="recent" aria-selected="true">
+      <span class="seg-label">Recent</span>
+      <span class="seg-counts" id="tab-recent-counts"></span>
+    </button>
+    <button id="tab-automated" class="seg-tab" role="tab" data-tab="automated" aria-selected="false">
+      <span class="seg-label">Automated</span>
+      <span class="seg-counts" id="tab-automated-counts"></span>
+    </button>
+  </div>
 </div>
 
 <!-- model sheet -->
