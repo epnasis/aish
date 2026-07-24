@@ -4756,25 +4756,45 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
   const btn = document.querySelector('.pty-keys button[data-key="arrows"]');
   if (!btn) return;
   const ARROW = { up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D" };
-  const THRESH = 14, REPEAT_MS = 110;
-  let ox = 0, oy = 0, dir = null, timer = null;
+  const THRESH = 14;         // px before a direction registers
+  const INITIAL_DELAY = 450; // hold this long before auto-repeat starts, so a
+                             // quick swipe sends exactly ONE arrow, not two
+  const NEAR_MS = 320, FAR_MS = 45; // repeat interval near vs far from the button
+  const FAR_DIST = 170;      // distance (px, from the button) that reaches FAR_MS
+  // Direction and distance are measured from the fixed touch-START point (no
+  // re-anchoring), so "how far from the button" grows as you drag out — the
+  // farther you hold, the faster it repeats.
+  let ox = 0, oy = 0, dir = null, curDist = 0, timer = null;
   const dirOf = (dx, dy) => {
     if (Math.abs(dx) < THRESH && Math.abs(dy) < THRESH) return null;
     return Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up");
   };
   const press = (d) => { if (d && consoleOpen) { consoleSend(ARROW[d]); consoleKeyFeedback(btn); } };
-  const stop = () => { clearInterval(timer); timer = null; dir = null; };
+  const intervalFor = (dist) => {
+    const t = Math.min(1, Math.max(0, (dist - THRESH) / (FAR_DIST - THRESH)));
+    return Math.round(NEAR_MS - t * (NEAR_MS - FAR_MS)); // farther → shorter → faster
+  };
+  const clear = () => { clearTimeout(timer); timer = null; };
+  const armRepeat = () => { // wait INITIAL_DELAY, then repeat, re-timed by distance each tick
+    clear();
+    timer = setTimeout(function tick() {
+      if (!dir) return;
+      press(dir);
+      timer = setTimeout(tick, intervalFor(curDist));
+    }, INITIAL_DELAY);
+  };
+  const stop = () => { clear(); dir = null; };
   btn.addEventListener("touchstart", (e) => {
     e.preventDefault();
-    const t = e.touches[0]; ox = t.clientX; oy = t.clientY; dir = null;
-    clearInterval(timer);
-    timer = setInterval(() => { if (dir) press(dir); }, REPEAT_MS); // held in a direction repeats
+    ox = e.touches[0].clientX; oy = e.touches[0].clientY; dir = null; curDist = 0; clear();
   }, { passive: false });
   btn.addEventListener("touchmove", (e) => {
     e.preventDefault();
-    const t = e.touches[0];
-    const d = dirOf(t.clientX - ox, t.clientY - oy);
-    if (d && d !== dir) { dir = d; ox = t.clientX; oy = t.clientY; press(d); } // new direction: fire + re-anchor
+    const dx = e.touches[0].clientX - ox, dy = e.touches[0].clientY - oy;
+    curDist = Math.hypot(dx, dy);
+    const d = dirOf(dx, dy);
+    if (!d) { stop(); return; }                        // back near the button: cancel
+    if (d !== dir) { dir = d; press(d); armRepeat(); } // new direction: one press, (re)start the delay
   }, { passive: false });
   btn.addEventListener("touchend", (e) => { e.preventDefault(); stop(); }, { passive: false });
   btn.addEventListener("touchcancel", stop);
