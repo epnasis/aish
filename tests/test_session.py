@@ -60,7 +60,7 @@ def test_title_record_excluded_from_conversation(tmp_path):
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
-    messages, _, custom_title = SessionLog._parse(log.path)
+    messages, _, custom_title, _ = SessionLog._parse(log.path)
     assert custom_title == "Renamed"
     assert all(m.get("role") in ("user", "assistant") for m in messages)
 
@@ -71,7 +71,7 @@ def test_empty_title_ignored(tmp_path):
     log.message({"role": "user", "content": "real title"})
     log.set_title("   ")
     assert SessionLog.info(log.path).title == "real title"
-    _, _, custom_title = SessionLog._parse(log.path)
+    _, _, custom_title, _ = SessionLog._parse(log.path)
     assert custom_title is None
 
 

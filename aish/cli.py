@@ -136,6 +136,9 @@ class LogRef:
     def model(self, spec: str) -> None:
         self.log.model(spec)
 
+    def origin(self, origin: str) -> None:
+        self.log.origin(origin)
+
     def step(self, step: dict) -> None:
         self.log.step(step)
 
