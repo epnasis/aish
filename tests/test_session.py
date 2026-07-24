@@ -37,7 +37,7 @@ def test_custom_title_wins_hot_and_cold(tmp_path):
     assert SessionLog.info(log.path).title == "My Renamed Chat"
     assert SessionLog._peek_title(log.path) == "My Renamed Chat"
     # pager_titles (cold path) reflects the custom title too.
-    assert SessionLog.pager_titles(tmp_path) == [(log.path.name, "My Renamed Chat")]
+    assert SessionLog.pager_titles(tmp_path) == [(log.path.name, "My Renamed Chat", "user")]
 
 
 def test_latest_title_record_wins(tmp_path):
@@ -283,7 +283,7 @@ def test_pager_cap_applies_after_skipping_blank_sessions(tmp_path):
     for i in range(5):  # newer blank files (pre-fix debris) must not crowd it out
         (tmp_path / f"session-20260102-00000{i}-000000.jsonl").touch()
     pages = SessionLog.pager_titles(tmp_path, limit=3)
-    assert [name for name, _ in pages] == [old.name]
+    assert [name for name, _, _ in pages] == [old.name]
 
 
 def test_model_empty_for_sessions_without_record(tmp_path):

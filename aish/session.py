@@ -507,14 +507,16 @@ class SessionLog:
         return title
 
     @staticmethod
-    def _peek_title(path: Path) -> str | None:
-        """A label per session for the drawer/pager, without loading the whole
-        conversation. A custom title (latest `kind:"title"` record) wins; else
-        the first user message. None = no user input yet and never renamed (an
-        empty chat). The scan reads the whole file because a title record is
-        appended at the end, but the log is small and this stays one pass."""
+    def _peek(path: Path) -> tuple[str | None, str]:
+        """(title, origin) per session for the drawer/pager, without loading the
+        whole conversation. A custom title (latest `kind:"title"` record) wins;
+        else the first user message. A None title = no user input yet and never
+        renamed (an empty chat). The scan reads the whole file because a title
+        record is appended at the end, but the log is small and this stays one
+        pass — the origin record rides along for free."""
         first_user: str | None = None
         custom: str | None = None
+        origin = "user"
         try:
             with path.open(encoding="utf-8") as fh:
                 for line in fh:
@@ -527,6 +529,8 @@ class SessionLog:
                         title = (record.get("title") or "").strip()
                         if title:
                             custom = title
+                    elif kind == "origin":
+                        origin = (record.get("origin") or "user").strip() or "user"
                     elif (
                         first_user is None
                         and kind == "message"
@@ -534,9 +538,16 @@ class SessionLog:
                     ):
                         first_user = SessionLog._derive_title([record])
         except OSError:
-            return None
+            return None, origin
         title = custom if custom is not None else first_user
-        return SessionLog._truncate_title(title) if title is not None else None
+        return (
+            SessionLog._truncate_title(title) if title is not None else None,
+            origin,
+        )
+
+    @staticmethod
+    def _peek_title(path: Path) -> str | None:
+        return SessionLog._peek(path)[0]
 
     @staticmethod
     def _by_recency(state_dir: Path) -> list[Path]:
@@ -553,17 +564,19 @@ class SessionLog:
         return [path for _, path in stamped]
 
     @staticmethod
-    def pager_titles(state_dir: Path, limit: int = 30) -> list[tuple[str, str]]:
-        """(name, title) pages for the web UI's swipe pager: the `limit` most
-        recent chats that have a title, same recency ordering as the drawer,
+    def pager_titles(state_dir: Path, limit: int = 30) -> list[tuple[str, str, str]]:
+        """(name, title, origin) pages for the web UI's swipe pager: the `limit`
+        most recent chats that have a title, same recency ordering as the drawer,
         flipped oldest→newest so back = older. Chats with no user input yet
         are not pages — the cap applies after skipping them, so blank files
-        can never crowd real chats out of the pager."""
+        can never crowd real chats out of the pager. The origin rides along so
+        the pager can page within the Recent/Automated lane the chat belongs to
+        (#160), matching the Sessions screen's tabs."""
         pages = []
         for path in SessionLog._by_recency(state_dir):
-            title = SessionLog._peek_title(path)
+            title, origin = SessionLog._peek(path)
             if title is not None:
-                pages.append((path.name, title))
+                pages.append((path.name, title, origin))
                 if len(pages) == limit:
                     break
         pages.reverse()

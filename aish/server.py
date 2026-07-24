@@ -1248,16 +1248,26 @@ class WebServer:
     def _hello(
         self,
         session: Session,
-        pager: list[tuple[str, str]] | None = None,
+        pager: list[tuple[str, str, str]] | None = None,
         cmd_history: list[str] | None = None,
     ) -> dict:
         # The swipe pager pages through recent chats oldest→newest by last
-        # interaction — open or not; resume loads cold ones from disk. The
-        # current session is always a page even before its first message
-        # (a fresh chat is the newest thing by definition).
-        pages = [{"name": name, "title": title} for name, title in pager or []]
+        # interaction — open or not; resume loads cold ones from disk. Each page
+        # carries its origin so the client pages within one lane (Recent vs
+        # Automated, #160). The current session is always a page even before its
+        # first message (a fresh chat is the newest thing by definition).
+        pages = [
+            {"name": name, "title": title, "origin": origin}
+            for name, title, origin in pager or []
+        ]
         if all(page["name"] != session.name for page in pages):
-            pages.append({"name": session.name, "title": self._title(session)})
+            pages.append(
+                {
+                    "name": session.name,
+                    "title": self._title(session),
+                    "origin": session.origin,
+                }
+            )
         return {
             "type": "hello",
             "model": model_spec(session.agent),

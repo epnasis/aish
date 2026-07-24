@@ -3757,6 +3757,26 @@ class TestTriggerEndpoint:
             assert session.origin == "email"
             assert session.trigger_meta == {"msg": "abc"}
 
+    def test_pager_pages_carry_origin(self, app_env):
+        # The swipe pager pages within one lane (Recent vs Automated), so every
+        # page needs its origin — including cold ones read off disk.
+        client, _ = make_client(app_env, [model_says("triaged"), model_says("ok")],
+                                token="secret")
+        with client, connected(client, "/ws?token=secret") as (ws, hello, _):
+            mine = hello["session"]
+            ws.send_json({"type": "task", "text": "my own chat"})
+            recv_until(ws, "done")
+            r = client.post("/trigger?token=secret",
+                            json={"prompt": "new mail", "origin": "email"})
+            auto = r.json()["session"]
+            with connected(client, f"/ws?token=secret&session={auto}") as (auto_ws, _, _):
+                recv_until(auto_ws, "done")
+            ws.send_json({"type": "resume", "path": mine})
+            hello = recv_until(ws, "hello")
+            origins = {p["name"]: p["origin"] for p in hello["pager"]}
+            assert origins[mine] == "user"
+            assert origins[auto] == "email"
+
     def test_trigger_rejects_bad_token(self, app_env):
         client, _ = make_client(app_env, [model_says("x")], token="secret")
         with client:

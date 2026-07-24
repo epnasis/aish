@@ -5905,7 +5905,8 @@ function toggleWrap() {
 // sideways and it follows the finger; a pill names the target chat and
 // turns blue once release would switch. Pages are the recent chats —
 // open or not, resume loads cold ones from disk — ordered oldest→newest
-// by last interaction (hello.pager), with Safari's direction semantics:
+// by last interaction (hello.pager) and confined to the current chat's
+// lane (Recent vs Automated, see pagerLane), with Safari's semantics:
 // swipe right = back = older chat, swipe left = forward = newer — or a
 // brand-new chat once past the newest. Touches near the screen edges are
 // left to Safari's back/forward gesture, and pans starting inside
@@ -5932,9 +5933,26 @@ const swipe = {
   startX: 0, startY: 0, dx: 0, width: 1, startTime: 0,
 };
 
+// PAGER_LANE_START
+// The pager pages within ONE lane, matching the Sessions screen's Recent /
+// Automated tabs (#160): swiping through chats you started must never land on
+// a triggered session, or the reverse. Lane = the origin bucket, same rule as
+// partitionSessions. A page the client doesn't know (a brand-new chat not yet
+// on disk) is a Recent chat — new chats are always yours.
+function pagerLane(page) {
+  return page && page.origin && page.origin !== "user" ? "automated" : "recent";
+}
+
+function laneNeighbor(pages, current, direction) {
+  const lane = pagerLane(pages.find((s) => s.name === current));
+  const inLane = pages.filter((s) => pagerLane(s) === lane);
+  const index = inLane.findIndex((s) => s.name === current);
+  return index < 0 ? null : inLane[index + direction] || null;
+}
+// PAGER_LANE_END
+
 function sessionNeighbor(direction) {
-  const index = pagerSessions.findIndex((s) => s.name === currentSession);
-  return index < 0 ? null : pagerSessions[index + direction] || null;
+  return laneNeighbor(pagerSessions, currentSession, direction);
 }
 
 // Safari semantics: back (swipe right, -1) = older chat, forward (swipe
@@ -5945,7 +5963,11 @@ const NEW_CHAT_TARGET = { fresh: true, title: "New chat" };
 function swipeTarget(direction) {
   const neighbor = sessionNeighbor(direction);
   if (neighbor) return neighbor;
-  return direction === 1 && sessionTitled ? NEW_CHAT_TARGET : null;
+  // A new chat is always a Recent chat, so it only exists past the newest page
+  // of the Recent lane — the Automated lane simply ends (you can't hand-start
+  // a triggered session).
+  const lane = pagerLane(pagerSessions.find((s) => s.name === currentSession));
+  return direction === 1 && sessionTitled && lane === "recent" ? NEW_CHAT_TARGET : null;
 }
 
 function scrollsHorizontally(node) {
