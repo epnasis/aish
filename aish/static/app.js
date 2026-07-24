@@ -69,6 +69,13 @@ const urlToken = new URLSearchParams(location.search).get("token");
 if (urlToken) localStorage.setItem("aish-token", urlToken);
 const token = localStorage.getItem("aish-token");
 
+// The shareable URL carries a PUBLIC session id WITHOUT the .jsonl storage
+// extension, so the link doesn't leak the file-based store — a move to a DB
+// would only change these two functions (or push the mapping server-side).
+// The wire protocol still uses the store name.
+const publicSession = (name) => (name || "").replace(/\.jsonl$/, "");
+const storeSession = (id) => (!id || id.endsWith(".jsonl") ? id : `${id}.jsonl`);
+
 // ---- websocket lifecycle -------------------------------------------------
 let ws = null;
 let backoff = 1000;
@@ -88,8 +95,12 @@ function connect() {
   // Name the session this device was on: after a server restart the active
   // session is a fresh empty chat, and without this every reconnect (and
   // every rev-mismatch reload) would silently move the user there.
-  const lastSession = localStorage.getItem("aish-session");
-  if (lastSession) params.set("session", lastSession);
+  // A shared/deep link names the session (?session=<public id>); it wins on
+  // load, else resume the last session this device was on. Map the public id
+  // back to the store name for the server.
+  const urlSession = new URLSearchParams(location.search).get("session");
+  const lastSession = urlSession || localStorage.getItem("aish-session");
+  if (lastSession) params.set("session", storeSession(lastSession));
   const query = params.size ? `?${params}` : "";
   ws = new WebSocket(`${proto}//${location.host}${BASE}ws${query}`);
   ws.onopen = () => {
@@ -373,8 +384,9 @@ function onHello(event) {
   // identifies the session's log for debugging), alongside the token and any
   // #console hash. replaceState so it doesn't spam browser history.
   const su = new URL(location.href);
-  if (su.searchParams.get("session") !== event.session) {
-    su.searchParams.set("session", event.session);
+  const pubSession = publicSession(event.session);
+  if (su.searchParams.get("session") !== pubSession) {
+    su.searchParams.set("session", pubSession);
     history.replaceState(null, "", su.pathname + su.search + su.hash);
   }
   renderWorkspace(event);
@@ -4532,9 +4544,11 @@ function openConsole() {
   // handling the key (and lets it bubble to the global Esc handler too).
   consoleTerm.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
-    if (e.key === "Escape") { escapeExit(); return false; }
-    // Cmd/Ctrl+\ toggles the console closed too, matching the open shortcut.
-    if ((e.metaKey || e.ctrlKey) && e.key === "\\") { hideConsole(); input.focus(); return false; }
+    // stopPropagation so the document-level handlers don't ALSO act on this key
+    // and undo what we just did (Ctrl+\ would otherwise re-toggle the console
+    // open right after we close it; Esc would re-run escapeExit harmlessly).
+    if (e.key === "Escape") { e.stopPropagation(); escapeExit(); return false; }
+    if ((e.metaKey || e.ctrlKey) && e.key === "\\") { e.preventDefault(); e.stopPropagation(); hideConsole(); input.focus(); return false; }
     // Cmd/Ctrl+Shift+C/V for copy/paste — never plain Ctrl+C (that's SIGINT to
     // the program). Cmd (meta) alone works too on macOS where it can't collide.
     const copyCombo = (e.metaKey && !e.ctrlKey) || (e.ctrlKey && e.shiftKey);
@@ -5479,14 +5493,6 @@ $("empty-hint").onclick = () => openSessionsSheet("");
 $("new-chip").onclick = () => requestNewChat();
 $("console-btn").onclick = () => toggleConsole(); // global Quake console (#148)
 
-// Welcome starter chips (#123): fill the composer with the prompt and send it.
-$("welcome").addEventListener("click", (e) => {
-  const chip = e.target.closest(".welcome-chip");
-  if (!chip) return;
-  input.value = chip.dataset.fill;
-  resizeInput();
-  submitInput();
-});
 $("connbar").onclick = () => reconnect();
 
 // ---- session title menu -------------------------------------------------
