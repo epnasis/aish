@@ -130,15 +130,23 @@ _FONT_MEDIA = {".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf",
 
 async def serve_config_font(request):
     name = request.path_params["name"]
-    suffix = Path(name).suffix.lower()
-    if "/" in name or ".." in name or suffix not in _FONT_MEDIA:
+    if "/" in name or ".." in name or Path(name).suffix.lower() not in _FONT_MEDIA:
         return Response(status_code=404)
     path = CONFIG_FONT_DIR / name
+    # "mono" is the app's opinionated role font: serve whatever font the user
+    # dropped in the config dir (first woff2, else any font file) so a link to
+    # /fonts/mono.woff2 works regardless of the file's real name.
+    if not path.is_file() and Path(name).stem == "mono":
+        fonts = sorted(CONFIG_FONT_DIR.glob("*.woff2")) or sorted(
+            p for p in CONFIG_FONT_DIR.glob("*") if p.suffix.lower() in _FONT_MEDIA
+        )
+        if fonts:
+            path = fonts[0]
     if not path.is_file():
         return Response(status_code=404)  # no font installed — @font-face falls back
     return FileResponse(
         path,
-        media_type=_FONT_MEDIA[suffix],
+        media_type=_FONT_MEDIA[path.suffix.lower()],
         headers={"Cache-Control": "public, max-age=604800"},
     )
 

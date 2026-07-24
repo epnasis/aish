@@ -369,6 +369,14 @@ function onHello(event) {
   currentSession = event.session;
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
   localStorage.setItem("aish-session", event.session); // reconnects return here
+  // Deep-link the viewed session: the URL always names it (shareable, and it
+  // identifies the session's log for debugging), alongside the token and any
+  // #console hash. replaceState so it doesn't spam browser history.
+  const su = new URL(location.href);
+  if (su.searchParams.get("session") !== event.session) {
+    su.searchParams.set("session", event.session);
+    history.replaceState(null, "", su.pathname + su.search + su.hash);
+  }
   renderWorkspace(event);
   taskErrored = false; // fresh connected view — clear any stale red
   setBusy(event.busy);
@@ -4487,9 +4495,9 @@ function openConsole() {
   screen.textContent = "";
   consoleTerm = new Terminal({
     cursorBlink: true,
-    // PragmataPro if the device (or the vendored @font-face) has it, else the
-    // system mono. Family-name variants cover the different PragmataPro builds.
-    fontFamily: '"PragmataPro Mono", "PragmataPro", "PragmataProMono", ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+    // The config-served mono font (aish-mono) if present, else system mono —
+    // the same var(--mono) stack the code blocks and command output use.
+    fontFamily: '"aish-mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
     fontSize: consoleFontSize,
     scrollback: 5000,
     // Mouse reporting is forwarded to the program when it asks for it (tmux/vim
@@ -4544,7 +4552,7 @@ function openConsole() {
   // A webfont (the optional PragmataPro) loads async; xterm measures cell size at
   // open, so refit once it's ready or the grid is sized to the fallback metrics.
   if (document.fonts && document.fonts.load) {
-    document.fonts.load(`16px "PragmataPro Mono"`).then(
+    document.fonts.load(`16px "aish-mono"`).then(
       () => { if (consoleOpen) consoleReflowViewport(); }, () => {});
   }
   consoleTerm.focus();

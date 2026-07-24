@@ -2,12 +2,14 @@
    iMessage-style bubbles, SF system font; monospace reserved for command
    output, diffs, and code. */
 
-/* Optional licensed terminal font, served from the CONFIG dir (~/.config/aish/
-   fonts/) via /fonts/, never committed or bundled. If it isn't installed the
-   request 404s and the terminal's fontFamily stack falls back to system mono. */
+/* The app's opinionated mono font: whatever font the user drops in the CONFIG
+   dir (~/.config/aish/fonts/) is served at /fonts/mono.woff2 and used for EVERY
+   mono surface (terminal, code blocks, command output) via var(--mono). Never
+   committed or bundled; if absent the request 404s and --mono falls back to the
+   system mono stack. */
 @font-face {
-  font-family: "PragmataPro Mono";
-  src: url("/fonts/PragmataProMono.woff2") format("woff2");
+  font-family: "aish-mono";
+  src: url("/fonts/mono.woff2") format("woff2");
   font-weight: normal;
   font-style: normal;
   font-display: swap;
@@ -32,6 +34,8 @@
   --orange: #ff9f0a;
   --purple: #bf5af2;
   --cyan: #64d2ff;
+  /* Opinionated mono: the config-served font first, system mono as fallback. */
+  --mono: "aish-mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   /* Catppuccin Mocha — scoped to the terminal + command/code surfaces (not the
      app chrome): the interactive terminal (xterm), run_command output, and
      fenced code snippets. */
@@ -128,7 +132,7 @@ body.kb-open .sheet { padding-bottom: 14px; }
 body.kb-open #welcome { display: none; }
 
 .mono, pre, code {
-  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 15px;
 }
 /* Scale monospace CONTENT with the reading size (#118) — message code snippets
@@ -434,7 +438,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   display: flex;
   align-items: center;
   justify-content: center;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--mono);
   font-size: 42px;
   letter-spacing: -3px;
   background: radial-gradient(circle at 50% 28%, #16223c, #05070c 72%, #040509);
@@ -555,7 +559,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
    like the diff view so structure survives */
 .msg.echo, .msg.stream {
   color: var(--dim);
-  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: calc(13.8px * var(--fs));
   white-space: pre;
   overflow-x: auto;
@@ -871,7 +875,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .regen-chip svg { width: 19px; height: 19px; }
 .regen-chip:active { opacity: 0.5; }
-.answer-timing { margin-left: auto; font-family: ui-monospace, Menlo, monospace; font-size: 12.1px; color: var(--dim); padding-right: 6px; }
+.answer-timing { margin-left: auto; font-family: var(--mono); font-size: 12.1px; color: var(--dim); padding-right: 6px; }
 
 /* copy chip under your own prompt bubble, right-aligned with it */
 .user-tools {
@@ -1012,7 +1016,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .card-htitle { font-size: 16.7px; font-weight: 700; color: var(--fg); }
 .card-hsub { font-size: 13.2px; color: var(--dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-head.danger .card-hsub { color: var(--orange); }
-.card-hsub.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.card-hsub.mono { font-family: var(--mono); }
 .tool-args { margin: 10px 0 0; display: flex; flex-direction: column; gap: 6px; }
 .tool-arg { display: flex; gap: 8px; align-items: baseline; padding: 7px 10px; background: var(--code-bg, rgba(127,127,127,0.08)); border-radius: 8px; font-size: 12.7px; line-height: 1.5; }
 .tool-arg.block { flex-direction: column; gap: 3px; }
@@ -1025,12 +1029,12 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .import-meta { margin: 2px 0 8px; font-size: 12.5px; color: var(--dim); overflow-wrap: anywhere; }
 .import-flags { margin: 6px 0; padding: 8px 10px; border-radius: 8px; background: rgba(255,90,60,0.10); border: 1px solid rgba(255,90,60,0.35); }
 .import-flags-title { font-weight: 700; font-size: 12.7px; color: var(--orange, #e6603a); margin-bottom: 3px; }
-.import-flag { font-size: 12.5px; font-family: ui-monospace, Menlo, monospace; overflow-wrap: anywhere; }
+.import-flag { font-size: 12.5px; font-family: var(--mono); overflow-wrap: anywhere; }
 .import-skipped { margin: 4px 0 8px; font-size: 12px; color: var(--dim); font-style: italic; }
 .import-file-head { margin: 12px 0 3px; font-size: 12.5px; font-weight: 600; color: var(--dim); overflow-wrap: anywhere; }
 .import-file { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--code-bg, rgba(127,127,127,0.08)); font-size: 12.3px; line-height: 1.5; max-height: 280px; overflow: auto; white-space: pre; }
 .import-file code { white-space: pre; }
-.card-count { font-size: 12.7px; font-weight: 700; font-family: ui-monospace, monospace; flex: none; }
+.card-count { font-size: 12.7px; font-weight: 700; font-family: var(--mono); flex: none; }
 .card-count.add { color: var(--green); }
 .card-count.del { color: var(--red); }
 
@@ -1043,7 +1047,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   position: sticky; top: 6px;
   background: var(--bg); border-radius: 8px;
 }
-.cmd-dollar { color: var(--green); font-family: ui-monospace, monospace; font-size: calc(15px * var(--fs)); flex: none; }
+.cmd-dollar { color: var(--green); font-family: var(--mono); font-size: calc(15px * var(--fs)); flex: none; }
 .cmd-text { flex: 1; min-width: 0; font-size: calc(15px * var(--fs)); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
 .cmd-text.editing { outline: none; box-shadow: 0 0 0 2px var(--blue); border-radius: 5px; padding: 1px 5px; margin: -1px -5px; }
 .cmd-icon { flex: none; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: none; border: none; border-radius: 7px; color: var(--dim); }
@@ -1054,7 +1058,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 
 .card-where { display: flex; align-items: center; gap: 6px; padding: 9px 15px 2px; font-size: 13.8px; color: var(--dim); overflow: hidden; }
 .card-where svg { width: 12px; height: 12px; flex: none; }
-.card-where .where-path { font-family: ui-monospace, "SF Mono", Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-where .where-path { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .approval-card .escape-note { margin: 6px 14px 0; }
 
 /* width:auto on a textarea falls back to its intrinsic `cols` size, so set an
@@ -1070,7 +1074,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .seg:active { opacity: 0.7; }
 .scope-explain { margin-top: 7px; font-size: 13.2px; color: var(--dim); line-height: 1.4; }
 .scope-explain b { color: var(--fg); }
-.scope-explain .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.scope-explain .mono { font-family: var(--mono); }
 
 .card-actions { display: flex; gap: 8px; padding: 13px 14px 14px; }
 .card-actions button { border: none; border-radius: 12px; padding: 13px; font-size: 18.4px; font-weight: 700; }
@@ -1150,7 +1154,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .diff-inner { min-width: 100%; width: max-content; }
 .diff.diff-soft .diff-inner { width: auto; }
 /* one row = line-number gutter + text; add/del rows carry a full-width tint */
-.dl { display: flex; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13.8px; line-height: 1.55; }
+.dl { display: flex; font-family: var(--mono); font-size: 13.8px; line-height: 1.55; }
 .dl-no { flex: none; width: 46px; padding: 0 10px 0 4px; text-align: right; color: var(--dim); opacity: 0.6; user-select: none; }
 /* `flex: 0 0 auto` (not shrinkable) is what lets each row's max-content include
    the full line, so the row — and its tinted background — grows past the
@@ -1237,7 +1241,7 @@ body.wrap .stream-wrap > .msg.stream { padding-right: 30px; }
   padding: 4px 16px;
   font-size: 13.8px;
   color: var(--dim);
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--mono);
 }
 #statusline[hidden] { display: none; }
 #stop-btn {
@@ -1483,7 +1487,7 @@ body.wrap .stream-wrap > .msg.stream { padding-right: 30px; }
 }
 #cmd-prompt {
   flex-shrink: 0;
-  font-family: ui-monospace, Menlo, monospace;
+  font-family: var(--mono);
   font-size: 18.4px;
   color: var(--green);
   white-space: nowrap;
@@ -1494,7 +1498,7 @@ body.wrap .stream-wrap > .msg.stream { padding-right: 30px; }
   border: none;
   border-radius: 0;
   padding: 8px 2px;
-  font-family: ui-monospace, Menlo, monospace;
+  font-family: var(--mono);
   color: var(--green);
   caret-color: var(--green);
 }
@@ -1794,7 +1798,7 @@ body.wrap .stream-wrap > .msg.stream { padding-right: 30px; }
   border-radius: var(--r-control);
   padding: 10px 12px;
   font-size: 18.4px;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--mono);
 }
 .gate-card input:focus { outline: none; }
 .gate-card .primary {
@@ -1871,7 +1875,7 @@ body.awaiting-approval .trace.live {
 .trace-headtext { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .trace-title { font-size: 16.1px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trace-sub { font-size: 13.8px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.trace-tokens { font-family: ui-monospace, Menlo, monospace; font-size: 12.7px; color: var(--dim); flex: none; }
+.trace-tokens { font-family: var(--mono); font-size: 12.7px; color: var(--dim); flex: none; }
 .trace-chev { width: 16px; height: 16px; flex: none; color: var(--dim); transition: transform 0.2s; }
 .trace.open .trace-chev { transform: rotate(180deg); }
 .trace-body { display: none; padding: 2px 13px 12px; border-top: 0.5px solid var(--sep); }
@@ -1917,7 +1921,7 @@ body.awaiting-approval .trace.live {
    where the box starts, instead of running through it. */
 .step.active-step { background: #10203a; margin: 2px -8px 0; padding: 8px; border-radius: 10px; }
 .step.active-step .step-title { color: var(--blue); }
-.step-timer { font-family: ui-monospace, Menlo, monospace; font-size: 12.7px; font-weight: 600; color: var(--blue); margin-left: auto; padding-left: 8px; }
+.step-timer { font-family: var(--mono); font-size: 12.7px; font-weight: 600; color: var(--blue); margin-left: auto; padding-left: 8px; }
 .spin.spin-purple { width: 13px; height: 13px; border-color: var(--purple); border-top-color: transparent; }
 
 .step { position: relative; display: flex; gap: 11px; padding: 7px 0; }
@@ -1951,7 +1955,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .out-box { border-radius: 10px; background: var(--ctp-base); border: 0.5px solid var(--sep); overflow: hidden; }
 .out-box.error { border-color: var(--red-glow); }
 .out-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; }
-.out-label { flex: 1; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--dim); }
+.out-label { flex: 1; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--dim); }
 .out-box.error .out-label { color: var(--red); }
 .out-actions { display: flex; gap: 2px; align-items: center; }
 .out-wrap { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; background: none; border: none; border-radius: 7px; color: var(--dim); }
@@ -2214,7 +2218,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pty-title { color: #f2f2f7; font-weight: 700; font-size: 17px; }
 .pty-status {
   color: #98989e; font-size: 12.5px; white-space: nowrap; overflow: hidden;
-  text-overflow: ellipsis; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  text-overflow: ellipsis; font-family: var(--mono);
 }
 .pty-status.exited { color: var(--orange); }
 .pty-head-tools { display: flex; gap: 8px; flex: none; }
@@ -2252,7 +2256,7 @@ body.console-open { overflow: hidden; overscroll-behavior: none; }
 .pty-keys button {
   flex: none; border: 1px solid #3a3a3c; border-radius: 8px;
   background: #1c1c20; color: #d8d8dc; font-size: 14px; font-weight: 600;
-  padding: 8px 13px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  padding: 8px 13px; font-family: var(--mono);
 }
 .pty-keys button:active { background: #2c2c30; }
 /* The sticky Ctrl chip glows while armed (the next key is sent as Ctrl+key). */
