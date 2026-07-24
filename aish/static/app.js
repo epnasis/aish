@@ -4441,6 +4441,7 @@ function setConsoleCtrlMode(mode) {
 }
 
 let consoleLockY = 0; // page scroll offset captured while the console freezes it
+let lastConsoleSpawn = 0; // when the current console attached — crash-loop guard for auto-respawn
 
 // Press feedback for the on-screen key chips: a haptic tick (where the platform
 // exposes it — Android; iOS Safari has no web vibrate) plus a visual blink that
@@ -4593,6 +4594,7 @@ function openConsole() {
     $("pty-share").hidden = !(consoleTerm && consoleTerm.getSelection().trim());
   });
   consoleOpen = true;
+  lastConsoleSpawn = Date.now();
   consoleReflowViewport();
   requestAnimationFrame(consoleReflowViewport); // once the overlay has laid out
   setTimeout(consoleReflowViewport, 120); // and after the mobile keyboard settles
@@ -4635,9 +4637,20 @@ function onConsoleOut(data) {
 }
 
 function onConsoleExit(code) {
-  setConsoleStatus(`exited (${code}) — reopen to start again`, true);
-  // Keep the overlay + scrollback up so the final output stays readable; the
-  // user reopens (respawn) or hides explicitly.
+  if (!consoleOpen) return; // overlay already hidden — nothing to do
+  // The shell/tmux ended (the user typed `exit`, or detached). Respawn in place
+  // so they don't have to close & reopen — `tmux new-session -A` reattaches a
+  // surviving session (detach) or starts a fresh one (exit). Guard a crash-loop:
+  // if it dies again almost immediately, stop and leave the message up.
+  if (Date.now() - lastConsoleSpawn < 1500) {
+    setConsoleStatus(`exited (${code}) — tap the console button to retry`, true);
+    if (consoleTerm) { consoleTerm.dispose(); consoleTerm = null; consoleFit = null; }
+    consoleOpen = false;
+    return;
+  }
+  if (consoleTerm) { consoleTerm.dispose(); consoleTerm = null; consoleFit = null; }
+  consoleOpen = false; // let openConsole() run its full attach path again
+  openConsole();
 }
 
 // Wire the overlay's controls once at load. Share sends the xterm SELECTION to
