@@ -4521,6 +4521,70 @@ function consoleSend(data) {
   if (consoleOpen) send({ type: "console_in", data });
 }
 
+// [CONSOLE-LINKS-START]
+// A link provider for the console terminal that finds URLs even when they wrap
+// across rows tmux did NOT mark as soft-wrapped (#153). We reconstruct a logical
+// line by joining a row with its neighbours whenever the row is packed to the
+// right margin (no trailing space) — the geometry signal for a hard wrap — OR
+// xterm flagged the next row isWrapped (native soft-wrap). Then we scan the
+// joined text for http(s) URLs and map each match back to buffer coordinates.
+function consoleLinkProvider(term, onOpen) {
+  const URL_RE = /https?:\/\/[^\s"'`<>(){}\[\]|\\^]+/g;
+  const stripTrailing = (s) => s.replace(/[)\].,;:!?'"]+$/, ""); // drop sentence punctuation
+  const MAX_ROWS = 40; // cap the join so a screenful of full lines can't run away
+  const lineStr = (buf, y, trim) => { const ln = buf.getLine(y); return ln ? ln.translateToString(trim) : null; };
+  return {
+    provideLinks(yOneBased, cb) {
+      const buf = term.buffer.active;
+      const cols = term.cols;
+      const y0 = yOneBased - 1;
+      if (lineStr(buf, y0, true) == null) { cb(undefined); return; }
+      // Row y continues onto y+1 when the next row is a soft-wrap OR this row is
+      // filled to the last column (tmux hard-wrap — no trailing space to trim).
+      const continues = (y) => {
+        const cur = buf.getLine(y), nxt = buf.getLine(y + 1);
+        if (!cur || !nxt) return false;
+        if (nxt.isWrapped) return true;
+        return cur.translateToString(true).length >= cols;
+      };
+      let top = y0, bottom = y0;
+      while (top > 0 && (y0 - top) < MAX_ROWS && continues(top - 1)) top--;
+      while ((bottom - y0) < MAX_ROWS && continues(bottom)) bottom++;
+      // Concatenate the block; a row's chars map 1:1 to its columns (ASCII URLs),
+      // so a global string index maps to (row, col) via the recorded offsets.
+      const parts = [], starts = [];
+      let acc = "";
+      for (let y = top; y <= bottom; y++) {
+        starts.push(acc.length);
+        const s = lineStr(buf, y, true) || "";
+        parts.push(s);
+        acc += s;
+      }
+      const mapIdx = (gi) => {
+        let r = 0;
+        while (r + 1 < starts.length && starts[r + 1] <= gi) r++;
+        return { y: top + r, x: gi - starts[r] };
+      };
+      const links = [];
+      let m;
+      URL_RE.lastIndex = 0;
+      while ((m = URL_RE.exec(acc))) {
+        const text = stripTrailing(m[0]);
+        if (!text) continue;
+        try { new URL(text); } catch (e) { continue; } // reject non-URL matches
+        const s = mapIdx(m.index), e = mapIdx(m.index + text.length - 1);
+        links.push({
+          text,
+          range: { start: { x: s.x + 1, y: s.y + 1 }, end: { x: e.x + 1, y: e.y + 1 } },
+          activate: (ev, uri) => onOpen(ev, uri),
+        });
+      }
+      cb(links.length ? links : undefined);
+    },
+  };
+}
+// [CONSOLE-LINKS-END]
+
 // Reflow to the current overlay size and tell the server (TIOCSWINSZ), so the
 // program wraps where xterm shows it.
 function consoleFitAndResize() {
@@ -4572,14 +4636,14 @@ function openConsole() {
   });
   consoleFit = new FitAddon.FitAddon();
   consoleTerm.loadAddon(consoleFit);
-  // Clickable URLs (#148): auth CLIs print a login URL — often wrapped across
-  // lines — that the user taps to open in the browser. The web-links addon
-  // underlines links on hover and follows wrapped rows.
-  if (window.WebLinksAddon) {
-    consoleTerm.loadAddon(new WebLinksAddon.WebLinksAddon(
-      (event, uri) => window.open(uri, "_blank", "noopener")
-    ));
-  }
+  // Clickable URLs (#148/#153): auth CLIs print a login URL that wraps across
+  // rows. xterm's own web-links addon only rejoins rows it sees as soft-wrapped
+  // (isWrapped) — but our console runs inside tmux, which repaints its pane with
+  // absolute cursor moves, so a wrapped URL arrives as SEPARATE, non-wrapped
+  // rows the addon can't join. consoleLinkProvider joins by GEOMETRY instead.
+  consoleTerm.registerLinkProvider(
+    consoleLinkProvider(consoleTerm, (event, uri) => window.open(uri, "_blank", "noopener"))
+  );
   consoleTerm.open(screen);
   // THE input path; the model never reaches it. The sticky Ctrl chip (#148):
   // while "armed" or "locked" the next single char is sent as its control code
