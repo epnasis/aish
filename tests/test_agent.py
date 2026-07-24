@@ -2975,6 +2975,60 @@ class TestPluginTools:
         agent.run_task("go")
         assert not (tmp_path / ".aish" / "tools" / "greeter").exists()
 
+    def test_create_tool_flags_conflicting_knowledge(self, tmp_path, monkeypatch):
+        import aish.skills as skills_mod
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.setattr(skills_mod, "GLOBAL_SKILLS_DIR", empty)
+        monkeypatch.setattr(skills_mod, "GLOBAL_MEMORY_DIR", empty)
+        sk = tmp_path / ".aish" / "skills"
+        sk.mkdir(parents=True)
+        (sk / "attach.md").write_text(
+            "---\nname: attach-files\ndescription: attach a file to a github issue "
+            "with gh api\n---\nRun gh api repos/.../assets to attach.\n"
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._ct_call(
+                    name="gh_issue_attach", description="attach a file to a github issue",
+                    mutating=True, schema='{"path": {"type": "string", "required": true}}',
+                    wrapper="cat\n", prefer_over="gh api", scope="project")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_write=lambda plan: True,
+        )
+        agent.run_task("go")
+        created = [
+            m["content"] for m in tool_messages(agent.messages)
+            if "Created tool" in m["content"]
+        ]
+        assert created and "RECONCILE" in created[0]
+        assert "attach-files" in created[0]
+
+    def test_create_tool_no_reconcile_when_no_related_knowledge(self, tmp_path, monkeypatch):
+        import aish.skills as skills_mod
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.setattr(skills_mod, "GLOBAL_SKILLS_DIR", empty)
+        monkeypatch.setattr(skills_mod, "GLOBAL_MEMORY_DIR", empty)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._ct_call(
+                    name="widget_frobnicate", description="frobnicate a widget",
+                    mutating=False, schema="{}", wrapper="cat\n", scope="project")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_write=lambda plan: True,
+        )
+        agent.run_task("go")
+        created = [
+            m["content"] for m in tool_messages(agent.messages)
+            if "Created tool" in m["content"]
+        ]
+        assert created and "RECONCILE" not in created[0]
+
     def test_created_tool_is_immediately_callable(self, tmp_path):
         agent, _ = make_agent(
             [

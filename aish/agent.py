@@ -2083,7 +2083,50 @@ class Agent:
             return wrapper_res
         self._plugin_sig = None  # force a rescan so the new tool is offered
         self._note(f"→ created tool {name} at {base}")
-        return f"Created tool {name!r} at {base}. It is available on the next step."
+        result = f"Created tool {name!r} at {base}. It is available on the next step."
+        prefer_over = [
+            p.strip() for p in str(args.get("prefer_over", "") or "").split(",") if p.strip()
+        ]
+        stale = self._reconcile_candidates(
+            name, str(args.get("description", "")), prefer_over
+        )
+        if stale:
+            listed = "\n".join(f"- [{e.kind}] {e.name}: {e.description}" for e in stale)
+            result += (
+                f"\n\nRECONCILE KNOWLEDGE (do this now): {name!r} is now the PREFERRED "
+                "way to do this, so any saved skill/memory describing the OLD manual way "
+                "must not stay and contradict it. These existing entries look related:\n"
+                f"{listed}\n"
+                f"For EACH: if it tells you to do this task by hand, UPDATE it to use the "
+                f"{name!r} tool instead (edit the skill with edit_file, or remember() the "
+                "correction), or forget_memory() it if it is purely the superseded "
+                "command. KEEP entries that only add orthogonal context (labels, repo "
+                "conventions, IDs). Then say what you changed."
+            )
+        return result
+
+    def _reconcile_candidates(
+        self, name: str, description: str, prefer_over: list[str]
+    ) -> list:
+        """Skills/memories that may now conflict with a just-created tool (#150):
+        ones that mention a command the tool is preferred over, or that share the
+        tool's subject words. Detection is deterministic; the model judges which
+        actually conflict and reconciles them (gated). Capped, best-effort."""
+        try:
+            entries = skills.load_entries(self.cwd, self.lessons_path)
+        except Exception:  # noqa: BLE001 — reconciliation must never break creation
+            return []
+        subject = set(skills._content_words(f"{name} {description}"))
+        needles = [p.casefold() for p in prefer_over if p.strip()]
+        scored: list[tuple[int, Any]] = []
+        for entry in entries:
+            text = f"{entry.name} {entry.description} {entry.body}".casefold()
+            if needles and any(n in text for n in needles):
+                scored.append((100, entry))
+            elif len(subject & entry.words) >= 2:
+                scored.append((len(subject & entry.words), entry))
+        scored.sort(key=lambda pair: -pair[0])
+        return [entry for _score, entry in scored[:6]]
 
     def _commit_tool_file(self, target: Path, content: str, executable: bool) -> str | None:
         """Write one tool file through the diff-approval gate. Returns None on
