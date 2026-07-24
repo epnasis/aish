@@ -1897,6 +1897,14 @@ function onHistory(history) {
 
 // ---- ANSI SGR rendering --------------------------------------------------
 function ansiFragment(text) {
+  // man/groff render bold as `X\bX` and underline as `_\bX` (backspace
+  // overstrike). Convert to real bold/underline — SGR the parser below already
+  // understands — so they show as emphasis AND copy cleanly; left as-is the \b
+  // renders as a tofu box between every character and poisons the copied text.
+  text = text
+    .replace(/_\x08([^\n\x08])/g, "\x1b[4m$1\x1b[24m")   // underline: _\bX
+    .replace(/([^\n\x08])\x08\1/g, "\x1b[1m$1\x1b[22m")  // bold: X\bX
+    .replace(/.?\x08/g, "");                             // strip any leftover overstrike
   // OSC sequences (titles, hyperlinks) carry no visible text formatting.
   text = text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
   const frag = document.createDocumentFragment();
