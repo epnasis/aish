@@ -4400,18 +4400,47 @@ function setPtyCtrl(on) {
 }
 
 function ptyCopy() {
-  const sel = ptyTerm ? ptyTerm.getSelection() : "";
-  if (!sel) { showToast("select some text first"); return; }
-  if (navigator.clipboard) navigator.clipboard.writeText(sel).then(
-    () => showToast("copied"), () => showToast("copy blocked"));
+  if (!ptyTerm) return;
+  // Whatever is selected, else the whole screen — dragging to select is hard on
+  // touch, so "copy" with no selection grabs everything. copyText() has the
+  // execCommand fallback that works on the plain-http LAN server (no clipboard API).
+  let text = ptyTerm.getSelection();
+  if (!text) { ptyTerm.selectAll(); text = ptyTerm.getSelection(); ptyTerm.clearSelection(); }
+  if (!text || !text.trim()) { showToast("nothing to copy"); return; }
+  copyText(text).then((ok) => showToast(ok ? "copied" : "copy blocked"));
 }
 
 function ptyPaste() {
-  if (!navigator.clipboard || !navigator.clipboard.readText) { showToast("clipboard unavailable"); return; }
-  navigator.clipboard.readText().then((t) => {
-    if (t) ptySend(t); // straight to the PTY (the shell echoes it), like a real paste
+  // readText only works in a secure context; on plain http fall back to a native
+  // long-press paste onto the terminal (xterm forwards it as pty_in).
+  if (navigator.clipboard && navigator.clipboard.readText && window.isSecureContext) {
+    navigator.clipboard.readText().then(
+      (t) => { if (t) ptySend(t); if (ptyTerm) ptyTerm.focus(); },
+      () => { if (ptyTerm) ptyTerm.focus(); showToast("long-press the terminal, then Paste"); });
+  } else {
     if (ptyTerm) ptyTerm.focus();
-  }, () => showToast("clipboard blocked"));
+    showToast("long-press the terminal, then Paste");
+  }
+}
+
+function ptyTerminalTextarea() {
+  const s = $("pty-screen");
+  return s ? s.querySelector(".xterm-helper-textarea") : null;
+}
+
+// The ⌨ chip toggles the soft keyboard: focus summons it, blur hides it (the
+// only reliable way to dismiss the iOS keyboard).
+function ptyToggleKeyboard() {
+  const ta = ptyTerminalTextarea();
+  if (ta && document.activeElement === ta) ta.blur();
+  else if (ptyTerm) ptyTerm.focus();
+}
+
+let ptyFontSize = Math.min(28, Math.max(8, +localStorage.getItem("ptyFontSize") || 13));
+function ptyFontStep(delta) {
+  ptyFontSize = Math.max(8, Math.min(28, ptyFontSize + delta));
+  localStorage.setItem("ptyFontSize", String(ptyFontSize));
+  if (ptyTerm) { ptyTerm.options.fontSize = ptyFontSize; ptyFitAndResize(); }
 }
 
 function ptySend(data) {
@@ -4441,7 +4470,7 @@ function openPty() {
   ptyTerm = new Terminal({
     cursorBlink: true,
     fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
-    fontSize: 13,
+    fontSize: ptyFontSize,
     scrollback: 5000,
     // Mouse reporting is forwarded to the program when it asks for it (tmux/vim
     // mouse mode), so a swipe scrolls the app's panes; otherwise the touch
@@ -4527,6 +4556,8 @@ function onPtyExit(code) {
 // only on this explicit user action — see onSelectionChange for the button's
 // visibility).
 $("pty-close").onclick = () => closePty(true);
+$("pty-font-dec").onclick = () => ptyFontStep(-1);
+$("pty-font-inc").onclick = () => ptyFontStep(1);
 $("pty-share").onclick = () => {
   const sel = ptyTerm ? ptyTerm.getSelection().trim() : "";
   if (!sel) { showToast("select some output first, then Share"); return; }
@@ -4536,11 +4567,11 @@ $("pty-share").onclick = () => {
 document.querySelector(".pty-keys").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-key]");
   if (!btn) return;
-  if (btn.dataset.key === "kb") { if (ptyTerm) ptyTerm.focus(); return; } // re-summon keyboard
+  if (btn.dataset.key === "kb") { ptyToggleKeyboard(); return; }
   if (btn.dataset.key === "ctrl") { setPtyCtrl(!ptyCtrlArmed); if (ptyTerm) ptyTerm.focus(); return; }
   if (btn.dataset.key === "copy") { ptyCopy(); return; }
   if (btn.dataset.key === "paste") { ptyPaste(); return; }
-  const CTRL = { tab: "\t", esc: "\x1b", "ctrl-c": "\x03", "ctrl-d": "\x04", up: "\x1b[A", down: "\x1b[B" };
+  const CTRL = { tab: "\t", esc: "\x1b", "ctrl-a": "\x01", up: "\x1b[A", down: "\x1b[B" };
   const seq = CTRL[btn.dataset.key];
   if (seq != null) ptySend(seq);
   if (ptyTerm) ptyTerm.focus();

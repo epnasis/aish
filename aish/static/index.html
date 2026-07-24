@@ -239,6 +239,8 @@
       <span id="pty-status" class="pty-status"></span>
     </div>
     <div class="pty-head-tools">
+      <button id="pty-font-dec" class="pty-headbtn pty-fontbtn" type="button" aria-label="smaller text">A−</button>
+      <button id="pty-font-inc" class="pty-headbtn pty-fontbtn" type="button" aria-label="larger text">A+</button>
       <button id="pty-share" class="pty-headbtn" type="button" title="Share the selected output to the chat">Share ›</button>
       <button id="pty-close" class="pty-headbtn" type="button" aria-label="close terminal">Close ✕</button>
     </div>
@@ -250,14 +252,17 @@
   <div class="pty-keys" role="group" aria-label="control keys">
     <button type="button" data-key="esc">esc</button>
     <button type="button" data-key="ctrl" title="Sticky Ctrl: tap, then a key → Ctrl+key">ctrl</button>
-    <button type="button" data-key="ctrl-c">^C</button>
-    <button type="button" data-key="ctrl-d">^D</button>
+    <button type="button" data-key="ctrl-a" title="Ctrl-A — tmux prefix">C-A</button>
     <button type="button" data-key="tab">tab</button>
     <button type="button" data-key="up">↑</button>
     <button type="button" data-key="down">↓</button>
     <button type="button" data-key="copy">copy</button>
     <button type="button" data-key="paste">paste</button>
-    <button type="button" data-key="kb" class="pty-key-kb">keyboard</button>
+    <button type="button" data-key="kb" class="pty-key-kb" aria-label="show or hide keyboard">
+      <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7">
+        <rect x="2.5" y="6" width="19" height="12" rx="2.2"/>
+        <path stroke-linecap="round" d="M6 10h0M10 10h0M14 10h0M18 10h0M6 13h0M18 13h0M9 13.2h6"/>
+      </svg></button>
   </div>
 </div>
 

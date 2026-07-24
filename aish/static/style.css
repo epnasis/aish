@@ -2236,4 +2236,6 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pty-keys button:active { background: #2c2c30; }
 /* The sticky Ctrl chip glows while armed (the next key is sent as Ctrl+key). */
 .pty-keys button.armed { background: var(--ctp-mauve); color: #1e1e2e; border-color: var(--ctp-mauve); }
-.pty-key-kb { margin-left: auto; }
+.pty-key-kb { margin-left: auto; display: flex; align-items: center; padding: 6px 12px; }
+.pty-key-kb svg { display: block; }
+.pty-fontbtn { padding: 6px 11px; font-weight: 700; min-width: 40px; }
