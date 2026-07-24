@@ -3129,10 +3129,15 @@ function onApprovalRequest(event) {
     card.dataset.summary = `read ${event.path}`;
     buildReadCard(card, event);
   }
-  // Surface the single-key verdicts (handled by the global keydown) as tooltips,
-  // without disturbing any per-card title a builder already set.
-  for (const b of card.querySelectorAll("button.approve")) if (!b.title) b.title = "Approve (A)";
-  for (const b of card.querySelectorAll("button.deny")) if (!b.title) b.title = "Deny (D)";
+  // Surface the single-key shortcuts (handled by the global keydown) as tooltips.
+  // A builder-set title is kept and the key appended; otherwise the button's own
+  // label seeds it — so Install/Trust dir/etc. read correctly, not "Approve".
+  for (const sc of CARD_SHORTCUTS) {
+    const hint = `(${sc.key.toUpperCase()})`;
+    for (const b of card.querySelectorAll(sc.selector)) {
+      b.title = b.title ? `${b.title} ${hint}` : `${b.textContent || "Action"} ${hint}`;
+    }
+  }
   cards.set(event.id, card);
   pendingCards += 1;
   refreshStatusline();
@@ -5449,6 +5454,20 @@ $("backdrop").onclick = closeSheets;
 
 $("sessions-new").onclick = () => { send({ type: "new" }); closeSheets(); };
 
+// Single-key shortcuts for approval-card actions, one row per distinct button.
+// Keys MUST be unique (a card never binds one key to two actions) — enforced by
+// tests/js/test_approval_shortcut.js, which also checks every primary verdict
+// button (.approve/.deny/.trust) and the Edit toggle is covered here. Scope
+// segments (.seg) and copy (.copy-chip) are deliberately left to Tab: they
+// refine or duplicate the Approve verdict rather than being verdicts of their
+// own, and their natural mnemonics collide (Always vs Approve).
+const CARD_SHORTCUTS = [
+  { key: "a", selector: "button.approve" },  // Approve / Install / Just once
+  { key: "d", selector: "button.deny" },     // Deny
+  { key: "t", selector: "button.trust" },    // Trust dir (read card)
+  { key: "e", selector: "button.cmd-icon" }, // Edit the command in place
+];
+
 // The last approval card still awaiting a verdict (its Approve button is only
 // disabled once answerCard resolves it). Newest-first so stacked cards clear
 // bottom-up, matching where the eye is.
@@ -5468,17 +5487,19 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && escapeExit()) { e.preventDefault(); return; }
   if (e.key === "Escape" && (!$("backdrop").hidden || !$("sessions-sheet").hidden)) closeSheets();
 
-  // Approval-card single-key verdicts (TUI convention): A = approve, D = deny.
-  // Only while a card is pending and the user isn't typing into the comment
-  // field or editing a command — clicking routes through the button's own
-  // onclick so edit/scope/feedback handling stays in one place.
+  // Approval-card single-key actions (TUI convention): A = approve, D = deny,
+  // T = trust dir, E = edit. Only while a card is pending and the user isn't
+  // typing into the comment field or editing a command — clicking routes through
+  // the button's own onclick so edit/scope/feedback handling stays in one place.
+  // A key only acts when THIS card actually has that button, so T/E fall through
+  // harmlessly on cards that lack them.
   if (!e.metaKey && !e.ctrlKey && !e.altKey && !editingNow()) {
-    const key = e.key.toLowerCase();
-    if (key === "a" || key === "d") {
-      const card = activeApprovalCard();
-      if (card) {
+    const sc = CARD_SHORTCUTS.find((s) => s.key === e.key.toLowerCase());
+    if (sc) {
+      const btn = activeApprovalCard()?.querySelector(sc.selector);
+      if (btn && !btn.disabled) {
         e.preventDefault();
-        card.querySelector(key === "a" ? "button.approve" : "button.deny")?.click();
+        btn.click();
         return;
       }
     }
