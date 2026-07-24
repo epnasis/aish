@@ -4987,8 +4987,15 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
 (() => {
   const screen = $("pty-screen");
   const SLOP = 10; // px of travel before a touch is judged a deliberate scroll drag
+  const HOLD_MS = 500; // stationary hold that arms a transient word-select
   let touchY = 0, startX = 0, startY = 0, scrolling = false;
   let selAnchor = null; // collapsed caret Range where a select-mode drag began
+  // Transient hold-to-select (safe reintroduction): a stationary hold selects a
+  // word FOR THIS ONE GESTURE only — it never enters the persistent Select mode,
+  // so it can't wedge scrolling. On lift everything is normal again; the next
+  // drag scrolls (and clears the leftover selection). A scroll drag that starts
+  // before the timer fires cancels it, so scrolling always wins.
+  let holdTimer = 0, holdSelecting = false, touching = false;
 
   // The text caret under a screen point (WebKit vs standard spelling).
   const caretAt = (x, y) => {
@@ -4999,6 +5006,15 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
       const r = document.createRange(); r.setStart(p.offsetNode, p.offset); r.collapse(true); return r;
     }
     return null;
+  };
+  // Select the whole word under a point (the immediate feedback a hold gives).
+  const selectWordAt = (x, y) => {
+    const r = caretAt(x, y);
+    if (!r) return;
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.collapse(r.startContainer, r.startOffset);
+    if (s.modify) { s.modify("move", "backward", "word"); s.modify("extend", "forward", "word"); }
   };
   // Paint the selection from the drag's anchor caret to the caret under the
   // finger, ordering the two so the range is valid whichever way you drag.
@@ -5050,6 +5066,19 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
       return;
     }
     touchY = t.clientY; startX = t.clientX; startY = t.clientY; scrolling = false;
+    // Arm a transient hold-select: if the finger stays put ~0.5s (no scroll drag
+    // claimed it first), select the word under it for THIS gesture only.
+    touching = true; holdSelecting = false;
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(() => {
+      if (!touching || scrolling || consoleSelectMode || !consoleOpen) return;
+      holdSelecting = true;
+      selectWordAt(startX, startY);
+      const s = window.getSelection();
+      if (s.rangeCount) { const r = s.getRangeAt(0).cloneRange(); r.collapse(true); selAnchor = r; }
+      else selAnchor = caretAt(startX, startY);
+      if (navigator.vibrate) { try { navigator.vibrate(10); } catch (err) { /* ignore */ } }
+    }, HOLD_MS);
   }, { passive: false });
   screen.addEventListener("touchmove", (e) => {
     if (!consoleOpen || e.touches.length !== 1) return;
@@ -5062,11 +5091,18 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
       paintTo(t.clientX, t.clientY);
       return;
     }
-    // NOT in select mode → a finger drag always scrolls. (Precise selection is
-    // the explicit Select chip; scrolling must never be wedged off.)
+    if (holdSelecting) {
+      // The hold armed on this gesture → drag extends the word selection.
+      e.preventDefault();
+      paintTo(t.clientX, t.clientY);
+      return;
+    }
+    // NOT selecting → a finger drag scrolls. (Precise selection is the explicit
+    // Select chip; scrolling must never be wedged off.)
     if (!scrolling) {
       if (Math.abs(t.clientX - startX) < SLOP && Math.abs(t.clientY - startY) < SLOP) return;
       scrolling = true;
+      clearTimeout(holdTimer); // moved before the hold armed → it's a scroll
       touchY = t.clientY; // anchor here so the SLOP travel isn't scrolled in one jump
       // A deliberate scroll drag: drop any leftover selection so it can't stand
       // the handler down (a stale selection used to freeze scrolling).
@@ -5084,7 +5120,9 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
       new WheelEvent("wheel", { deltaY, deltaMode: 0, bubbles: true, cancelable: true })
     );
   }, { passive: false });
-  const end = () => { scrolling = false; selAnchor = null; };
+  // Lift → back to a neutral state. The selection (if the hold made one) is kept
+  // for Copy; the NEXT drag scrolls and clears it, so nothing stays wedged.
+  const end = () => { scrolling = false; selAnchor = null; touching = false; holdSelecting = false; clearTimeout(holdTimer); };
   screen.addEventListener("touchend", end);
   screen.addEventListener("touchcancel", end);
 })();
