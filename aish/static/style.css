@@ -2247,6 +2247,9 @@ body.console-open {
 .pty-sym.sym-armed .pty-sym1 { color: #6c6c74; }
 .pty-iconbtn { display: flex; align-items: center; padding: 8px 12px; }
 .pty-iconbtn svg { display: block; }
+/* esc / ctrl / tab share one width so the mod keys line up (ctrl is abbreviated
+   to "ctl" to fit the 3-char box). */
+.pty-modkey { min-width: 46px; text-align: center; }
 .pty-keys button:active { background: #2c2c30; }
 /* The sticky Ctrl chip glows while armed (the next key is sent as Ctrl+key). */
 .pty-keys button.armed { background: var(--ctp-mauve); color: #1e1e2e; border-color: var(--ctp-mauve); }
@@ -2260,7 +2263,7 @@ body.console-open {
   0% { background: var(--ctp-blue); color: #1e1e2e; transform: scale(0.94); }
   100% { }
 }
-.pty-key-kb { display: flex; align-items: center; padding: 6px 12px; }
+.pty-key-kb { display: flex; align-items: center; padding: 8px 12px; }
 .pty-key-kb svg { display: block; }
 .pty-arrows { display: flex; align-items: center; padding: 6px 14px; touch-action: none; } /* touch-action: none so the drag-pad owns the gesture */
 .pty-arrows svg { display: block; }
