@@ -692,7 +692,7 @@ class Agent:
         check_pending_cwd: Callable[[], str | None] | None = None,
         check_pending_messages: Callable[[], list[str]] | None = None,
         aliases: Mapping[str, str] | None = None,
-        approve_tool: Callable[[str, dict], Any] | None = None,
+        approve_tool: Callable[..., Any] | None = None,
         approve_import: Callable[..., Any] | None = None,
     ):
         self.model = model
@@ -1974,7 +1974,11 @@ class Agent:
                     f"ERROR: tool {tool.name!r} is mutating and no tool approver "
                     "is available; it cannot run."
                 )
-            decision = self.approve_tool(tool.name, args)
+            # Resolve args to a human sentence for the card BEFORE gating (#157);
+            # None when the tool declares no preview or resolution fails (raw-args
+            # fallback). Read-only, so it runs ungated.
+            preview_text = tool_plugins.preview(tool, args, self.cwd)
+            decision = self.approve_tool(tool.name, args, preview_text)
             if isinstance(decision, Denied):
                 # Deny + comment = STOP (issue #81): address the concern, then halt.
                 self._arm_stop_gate(decision.comment)

@@ -3413,6 +3413,37 @@ class TestToolApproval:
             assert not marker.exists()
             assert tool_results(chat)[-1]["content"] == DENIED_RESULT
 
+    def _write_preview_tool(self, cwd, name="pv"):
+        import stat
+        from pathlib import Path
+
+        tdir = Path(cwd) / ".aish" / "tools" / name
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "TOOL.md").write_text(
+            f"---\nname: {name}\ndescription: d\nexec: ./run.sh\nmutating: yes\npreview: yes\n"
+            f'schema: {{"id": {{"type": "string"}}}}\n---\nb\n'
+        )
+        p = tdir / "run.sh"
+        p.write_text(
+            "#!/bin/sh\n"
+            'if [ -n "$AISH_TOOL_PREVIEW" ]; then echo "would delete 42"; exit 0; fi\ncat\n'
+        )
+        p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    def test_preview_included_in_request(self, app_env, tmp_path):
+        self._write_preview_tool(app_env["cwd"])
+        client, _ = make_client(
+            app_env,
+            [model_says(tool_calls=[tool_call("pv", id="42")]), model_says("done")],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run tool"})
+            request = recv_until(ws, "approval_request")
+            assert request["kind"] == "tool"
+            assert request["preview"] == "would delete 42"
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+
 
 def _alive(pid: int) -> bool:
     """True while `pid` is a live (non-reaped) process. A fully-reaped pid raises

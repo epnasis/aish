@@ -190,6 +190,72 @@ class TestExecute:
         assert "timed out" in execute(tool, {"text": "x"}, cwd=str(tmp_path))
 
 
+# A wrapper that branches on the preview env flag: in preview mode it resolves
+# + describes (here, echoes a fixed sentence) WITHOUT the normal mutation.
+PREVIEW_SCRIPT = (
+    "#!/bin/sh\n"
+    'if [ -n "$AISH_TOOL_PREVIEW" ]; then echo "would do the thing"; exit 0; fi\n'
+    'echo "MUTATED"\n'
+)
+PREVIEW_MANIFEST = (
+    "---\nname: t\ndescription: d\nexec: ./run.sh\nmutating: yes\npreview: yes\n"
+    'schema: {"id": {"type": "string", "required": true}}\n---\nb'
+)
+
+
+class TestPreview:
+    def test_flag_parses(self, tmp_path):
+        tool, errors = _parse_tool(write_tool(tmp_path / "t", PREVIEW_MANIFEST))
+        assert not errors and tool.preview is True
+
+    def test_defaults_false(self, tmp_path):
+        tool, _ = _parse_tool(write_tool(tmp_path / "echoer", VALID))
+        assert tool.preview is False
+
+    def test_invalid_value_errors(self, tmp_path):
+        _, errors = _parse_tool(
+            write_tool(tmp_path / "t", PREVIEW_MANIFEST.replace("preview: yes", "preview: maybe"))
+        )
+        assert any("preview must be yes/no" in e for e in errors)
+
+    def test_returns_wrapper_sentence(self, tmp_path):
+        tool, _ = _parse_tool(
+            write_tool(tmp_path / "t", PREVIEW_MANIFEST, script=PREVIEW_SCRIPT)
+        )
+        assert tp.preview(tool, {"id": "x"}, cwd=str(tmp_path)) == "would do the thing"
+
+    def test_none_when_not_declared(self, tmp_path):
+        # Same wrapper, but manifest omits preview -> the seam never runs it.
+        tool, _ = _parse_tool(
+            write_tool(
+                tmp_path / "t",
+                PREVIEW_MANIFEST.replace("preview: yes\n", ""),
+                script=PREVIEW_SCRIPT,
+            )
+        )
+        assert tool.preview is False
+        assert tp.preview(tool, {"id": "x"}, cwd=str(tmp_path)) is None
+
+    def test_fails_open_on_nonzero(self, tmp_path):
+        tool, _ = _parse_tool(
+            write_tool(tmp_path / "t", PREVIEW_MANIFEST, script="#!/bin/sh\nexit 1\n")
+        )
+        assert tp.preview(tool, {"id": "x"}, cwd=str(tmp_path)) is None
+
+    def test_fails_open_on_empty(self, tmp_path):
+        tool, _ = _parse_tool(
+            write_tool(tmp_path / "t", PREVIEW_MANIFEST, script="#!/bin/sh\nexit 0\n")
+        )
+        assert tp.preview(tool, {"id": "x"}, cwd=str(tmp_path)) is None
+
+    def test_execute_does_not_set_flag(self, tmp_path):
+        # The normal (gated) run must NOT be in preview mode: the wrapper mutates.
+        tool, _ = _parse_tool(
+            write_tool(tmp_path / "t", PREVIEW_MANIFEST, script=PREVIEW_SCRIPT)
+        )
+        assert "MUTATED" in execute(tool, {"id": "x"}, cwd=str(tmp_path))
+
+
 class TestDiscover:
     def test_project_wins_and_warns_invalid(self, tmp_path):
         proj = tmp_path / ".aish" / "tools"

@@ -2861,7 +2861,7 @@ class TestPluginTools:
     def test_mutating_tool_offered_when_approver_wired(self, tmp_path):
         self._write_tool(tmp_path, "writer", mutating="yes")
         agent, chat = make_agent(
-            [model_says("done")], cwd=str(tmp_path), approve_tool=lambda n, a: True
+            [model_says("done")], cwd=str(tmp_path), approve_tool=lambda n, a, p=None: True
         )
         agent.run_task("go")
         assert "writer" in self._offered_tool_names(chat)
@@ -2871,7 +2871,7 @@ class TestPluginTools:
         self._mutating_tool(tmp_path, marker)
         agent, _ = make_agent(
             [model_says(tool_calls=[tool_call("writer", text="x")]), model_says("done")],
-            cwd=str(tmp_path), approve_tool=lambda n, a: True,
+            cwd=str(tmp_path), approve_tool=lambda n, a, p=None: True,
         )
         agent.run_task("go")
         assert marker.exists()
@@ -2883,7 +2883,7 @@ class TestPluginTools:
         self._mutating_tool(tmp_path, marker)
         agent, _ = make_agent(
             [model_says(tool_calls=[tool_call("writer", text="x")]), model_says("done")],
-            cwd=str(tmp_path), approve_tool=lambda n, a: None,
+            cwd=str(tmp_path), approve_tool=lambda n, a, p=None: None,
         )
         agent.run_task("go")
         assert not marker.exists()
@@ -2902,7 +2902,7 @@ class TestPluginTools:
                 model_says(tool_calls=[tool_call("run_command", command="echo hi")]),
                 model_says("acknowledged"),
             ],
-            cwd=str(tmp_path), approve_tool=lambda n, a: Denied("no thanks"),
+            cwd=str(tmp_path), approve_tool=lambda n, a, p=None: Denied("no thanks"),
         )
         result = agent.run_task("go")
         assert not marker.exists()
@@ -2917,12 +2917,59 @@ class TestPluginTools:
         self._mutating_tool(tmp_path, marker)
         agent, _ = make_agent(
             [model_says(tool_calls=[tool_call("writer", text="x")]), model_says("reworked")],
-            cwd=str(tmp_path), approve_tool=lambda n, a: Approved("shorter please"),
+            cwd=str(tmp_path), approve_tool=lambda n, a, p=None: Approved("shorter please"),
         )
         agent.run_task("go")
         assert not marker.exists()  # held, not run
         held = TOOL_HELD_FOR_ADJUSTMENT.split("{")[0]
         assert any(held in m["content"] for m in tool_messages(agent.messages))
+
+    def _write_preview_tool(self, cwd, name="pv"):
+        import stat
+
+        tdir = cwd / ".aish" / "tools" / name
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "TOOL.md").write_text(
+            f"---\nname: {name}\ndescription: d\nexec: ./run.sh\nmutating: yes\npreview: yes\n"
+            f'schema: {{"id": {{"type": "string", "required": true}}}}\n---\nbody\n'
+        )
+        p = tdir / "run.sh"
+        p.write_text(
+            "#!/bin/sh\n"
+            'if [ -n "$AISH_TOOL_PREVIEW" ]; then echo "would delete item 42"; exit 0; fi\ncat\n'
+        )
+        p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    def test_preview_passed_to_approver(self, tmp_path):
+        self._write_preview_tool(tmp_path)
+        seen = []
+
+        def approve(name, args, preview=None):
+            seen.append(preview)
+            return True
+
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("pv", id="42")]), model_says("done")],
+            cwd=str(tmp_path), approve_tool=approve,
+        )
+        agent.run_task("go")
+        assert seen == ["would delete item 42"]
+
+    def test_no_preview_passes_none(self, tmp_path):
+        # A mutating tool WITHOUT preview: the approver gets None (raw-args card).
+        self._write_tool(tmp_path, "writer", mutating="yes")
+        seen = []
+
+        def approve(name, args, preview=None):
+            seen.append(preview)
+            return True
+
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("writer", text="x")]), model_says("done")],
+            cwd=str(tmp_path), approve_tool=approve,
+        )
+        agent.run_task("go")
+        assert seen == [None]
 
     def test_create_tool_writes_files(self, tmp_path):
         import os
