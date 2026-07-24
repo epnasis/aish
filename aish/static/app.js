@@ -1643,10 +1643,10 @@ function addWorkspaceNote(change, path) {
 
 function addUserMsg(text) {
   const el = addMsg("user", text);
-  makeRecallable(el);
   const tools = document.createElement("div");
   tools.className = "user-tools";
-  tools.appendChild(copyChip(() => stripAttachmentNotes(el.textContent), "copy prompt"));
+  const getText = () => stripAttachmentNotes(el.textContent);
+  tools.append(reuseChip(getText), copyChip(getText, "copy prompt"));
   messagesEl.appendChild(tools);
   return el;
 }
@@ -3863,24 +3863,32 @@ function resizeInput() {
   updateEmptyHint(); // draft state gates the empty-chat hint (#132)
 }
 
-function makeRecallable(bubble) {
-  // Touch path for prompt recall (no arrow keys on phone keyboards): tap
-  // one of your bubbles to put its text back in the composer. Only fills
-  // an empty composer so a stray tap can't clobber a draft.
-  bubble.title = "tap to reuse this prompt";
-  bubble.addEventListener("click", () => {
-    const text = stripAttachmentNotes(bubble.textContent);
-    if (!text) return;
-    if (input.value.trim() && input.value.trim() !== text) {
-      showToast("clear the input first to reuse this prompt");
-      return;
-    }
-    input.value = text;
-    const end = text.length;
-    input.setSelectionRange(end, end);
-    resizeInput();
-    input.focus();
-  });
+// Put a previous prompt's text back in the composer. An EXPLICIT action (the
+// reuse chip on the message), not a click on the whole bubble — the big bubble
+// surface made stray taps clobber a draft (#155). Only fills an empty composer.
+function refillComposer(text) {
+  text = stripAttachmentNotes(text);
+  if (!text) return;
+  if (input.value.trim() && input.value.trim() !== text) {
+    showToast("clear the input first to reuse this prompt");
+    return;
+  }
+  input.value = text;
+  input.setSelectionRange(text.length, text.length);
+  resizeInput();
+  input.focus();
+}
+
+// A chip (beside copy) that refills the composer with the message text.
+function reuseChip(getText) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "copy-chip"; // same styling, sits next to the copy chip
+  btn.title = "reuse this prompt";
+  btn.setAttribute("aria-label", "reuse this prompt");
+  btn.append(pencilIcon());
+  btn.onclick = () => refillComposer(getText());
+  return btn;
 }
 
 function recallHistory(key) {
