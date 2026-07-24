@@ -3702,6 +3702,37 @@ class TestTriggeredCapabilityPolicy:
         assert not server_module._triggered_safe("gmail_send", {})
         assert not server_module._triggered_safe("gmail_trash", {"message_id": "m"})
 
+    def test_owner_scoped_send_auto_runs(self):
+        # A live send to the owner needs no approval (recipient-scoped autonomy).
+        approve_tool, bridge, _ = self._approver("email")
+        assert approve_tool("gmail_send",
+                            {"to": "pawel@wenda.eu", "body": "here you go"}) is True
+        assert bridge.asked == []
+
+    def test_send_to_third_party_still_holds(self):
+        approve_tool, bridge, _ = self._approver("email")
+        approve_tool("gmail_send", {"to": "stranger@evil.com", "body": "x"})
+        assert len(bridge.asked) == 1
+
+    def test_mixed_recipients_hold(self):
+        # Owner + a third party = NOT all-owner, so it holds.
+        approve_tool, bridge, _ = self._approver("email")
+        approve_tool("gmail_send",
+                     {"to": "pawel@wenda.eu, stranger@evil.com", "body": "x"})
+        assert len(bridge.asked) == 1
+
+    def test_all_recipients_owner_helper(self):
+        f = server_module._all_recipients_owner
+        assert f({"to": "pawel@wenda.eu"})
+        assert f({"to": "Pawel <pawel@wenda.email>"})  # display-name form
+        assert f({"to": "pawel@wenda.eu", "cc": "pawel@wenda.email"})
+        assert not f({"to": "pawel@wenda.eu", "bcc": "x@other.com"})
+        assert not f({"reply_to_msg_id": "abc"})  # reply recipient unverifiable
+        # A reply is unsafe EVEN with an owner `to` — it also hits the original
+        # (possibly third-party) sender.
+        assert not f({"reply_to_msg_id": "abc", "to": "pawel@wenda.eu"})
+        assert not f({})
+
 
 class TestTriggerEndpoint:
     """The loopback/token-gated /trigger ingress and origin plumbing (#160)."""

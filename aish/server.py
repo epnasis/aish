@@ -471,6 +471,42 @@ class WebStatus:
 # existing gate rather than a bespoke hold flow.
 TRIGGERED_SAFE_TOOLS = frozenset({"gmail_label"})
 
+# Recipient-scoped autonomy (#160 follow-up): a triggered session may send a
+# real email WITHOUT approval as long as EVERY recipient is the owner — the whole
+# prompt-injection risk is aish being steered into mailing a third party, and a
+# send that can only ever land in the owner's own inbox removes it. A send to
+# anyone else still holds. Override the address set with AISH_OWNER_ADDRESSES
+# (comma-separated); defaults to the wenda owner addresses.
+OWNER_ADDRESSES = frozenset(
+    a.strip().lower()
+    for a in os.environ.get(
+        "AISH_OWNER_ADDRESSES", "pawel@wenda.eu,pawel@wenda.email"
+    ).split(",")
+    if a.strip()
+)
+
+_ADDR_RE = re.compile(r"[\w.+-]+@[\w.-]+")
+
+
+def _all_recipients_owner(args: dict) -> bool:
+    """True iff the send has at least one recipient and every address across
+    to/cc/bcc is an owner address. A reply (reply_to_msg_id) is NEVER auto-safe,
+    even with an explicit owner `to`: a threaded reply ALSO goes to the original
+    message's sender, which is not verifiable from args (if the replied-to
+    message is from a third party, an owner-looking `to` would still exfiltrate
+    to them). Autonomous owner answers must therefore be a NEW email addressed
+    explicitly to an owner address — the model is told this in the trigger."""
+    if args.get("reply_to_msg_id"):
+        return False
+    recips: list[str] = []
+    for field in ("to", "cc", "bcc"):
+        val = args.get(field)
+        if val:
+            recips += _ADDR_RE.findall(str(val))
+    if not recips:
+        return False
+    return all(addr.lower() in OWNER_ADDRESSES for addr in recips)
+
 
 def _describe_hold(event: dict) -> str:
     """A short human phrase for a held approval_request, for the notification
@@ -496,9 +532,13 @@ def _triggered_safe(name: str, args: dict) -> bool:
     """Whether tool `name` with `args` may auto-run in a triggered session."""
     if name in TRIGGERED_SAFE_TOOLS:
         return True
-    # Saving a draft never leaves the mailbox; sending it does — so a triggered
-    # send is safe ONLY as a draft, and a live send still holds for approval.
-    return name == "gmail_send" and bool(args.get("draft"))
+    if name == "gmail_send":
+        # Safe when it never leaves the owner's own control: a draft (not sent),
+        # or a live send whose every recipient is the owner (recipient-scoped
+        # autonomy — aish can answer YOU without approval; mailing anyone else
+        # still holds).
+        return bool(args.get("draft")) or _all_recipients_owner(args)
+    return False
 
 
 def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir,
