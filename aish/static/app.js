@@ -3129,13 +3129,23 @@ function onApprovalRequest(event) {
     card.dataset.summary = `read ${event.path}`;
     buildReadCard(card, event);
   }
-  // Surface the single-key shortcuts (handled by the global keydown) as tooltips.
-  // A builder-set title is kept and the key appended; otherwise the button's own
-  // label seeds it — so Install/Trust dir/etc. read correctly, not "Approve".
+  // Surface the single-key shortcuts (handled by the global keydown). Every
+  // shortcut button gets a tooltip; the prominent verdict buttons also get a
+  // VISIBLE key badge, but only with a physical keyboard (FINE_POINTER) — a
+  // badge is noise on a touch device that can't use it. A builder-set title is
+  // kept and the key appended; otherwise the button's own label seeds it (so
+  // Install/Trust dir read correctly, not "Approve").
   for (const sc of CARD_SHORTCUTS) {
-    const hint = `(${sc.key.toUpperCase()})`;
+    const K = sc.key.toUpperCase();
     for (const b of card.querySelectorAll(sc.selector)) {
-      b.title = b.title ? `${b.title} ${hint}` : `${b.textContent || "Action"} ${hint}`;
+      b.title = b.title ? `${b.title} (${K})` : `${b.textContent || "Action"} (${K})`;
+      if (sc.badge && FINE_POINTER) {
+        const kb = document.createElement("span");
+        kb.className = "key-badge";
+        kb.textContent = K;
+        kb.setAttribute("aria-hidden", "true");
+        b.appendChild(kb);
+      }
     }
   }
   cards.set(event.id, card);
@@ -3143,6 +3153,15 @@ function onApprovalRequest(event) {
   refreshStatusline();
   messagesEl.appendChild(card);
   scrollToEnd(true);
+  // Modal-like focus (desktop only): the composer usually holds focus, so a
+  // bare "A" would type into it instead of approving. Move focus to the card
+  // container (NOT the feedback field — that would re-arm editingNow and defeat
+  // the shortcut) so the single-key verdicts work immediately. Touch devices
+  // have no physical keyboard and popping focus there just fights the composer.
+  if (FINE_POINTER) {
+    card.tabIndex = -1;
+    card.focus({ preventScroll: true });
+  }
   notify("aish — approval needed", card.dataset.summary);
 }
 
@@ -3175,6 +3194,14 @@ function answerCard(id, action, extra) {
   const card = cards.get(id);
   if (card) {
     for (const b of card.querySelectorAll("button, input, textarea")) b.disabled = true;
+  }
+  // Hand keyboard focus on: to the next still-pending card if one is stacked,
+  // otherwise back to the composer (desktop only — mirrors the modal focus on
+  // appear). activeApprovalCard() already skips this now-disabled card.
+  if (FINE_POINTER) {
+    const next = activeApprovalCard();
+    if (next) { next.tabIndex = -1; next.focus({ preventScroll: true }); }
+    else if (typeof input !== "undefined" && input) input.focus();
   }
 }
 
@@ -5462,10 +5489,10 @@ $("sessions-new").onclick = () => { send({ type: "new" }); closeSheets(); };
 // refine or duplicate the Approve verdict rather than being verdicts of their
 // own, and their natural mnemonics collide (Always vs Approve).
 const CARD_SHORTCUTS = [
-  { key: "a", selector: "button.approve" },  // Approve / Install / Just once
-  { key: "d", selector: "button.deny" },     // Deny
-  { key: "t", selector: "button.trust" },    // Trust dir (read card)
-  { key: "e", selector: "button.cmd-icon" }, // Edit the command in place
+  { key: "a", selector: "button.approve", badge: true }, // Approve / Install / Just once
+  { key: "d", selector: "button.deny", badge: true },    // Deny
+  { key: "t", selector: "button.trust", badge: true },   // Trust dir (read card)
+  { key: "e", selector: "button.cmd-icon" },             // Edit (icon button — tooltip only)
 ];
 
 // The last approval card still awaiting a verdict (its Approve button is only

@@ -1035,7 +1035,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .scope-explain .mono { font-family: var(--mono); }
 
 .card-actions { display: flex; gap: 8px; padding: 13px 14px 14px; }
-.card-actions button { border: none; border-radius: 12px; padding: 13px; font-size: 18.4px; font-weight: 700; }
+.card-actions button { border: none; border-radius: 12px; padding: 13px; font-size: 18.4px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
 .card-actions button:active { opacity: 0.8; }
 .card-actions button:disabled { opacity: 0.5; }
 .card-actions .approve { flex: 2; background: var(--green); color: var(--approve-fg); }
@@ -1043,6 +1043,17 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 /* read-card "Trust dir" — a secondary approve, tied to the orange accent */
 .card-actions .trust { flex: 1; background: var(--orange-glow); color: var(--orange); }
 .card-actions.even .approve, .card-actions.even .deny { flex: 1; }
+/* Visible single-key hint on verdict buttons (desktop only — see app.js). The
+   neutral translucent chip reads on green/red/orange button backgrounds while
+   inheriting the button's own text color. */
+.key-badge {
+  font-size: 11px; font-weight: 700; line-height: 1;
+  padding: 3px 6px; border-radius: 6px;
+  background: rgba(128, 128, 128, 0.22); color: inherit; opacity: 0.85;
+}
+/* Programmatic modal-like focus on a pending card: suppress the default outline
+   on the container (the card is already the visually dominant element). */
+.card:focus { outline: none; }
 
 /* the write-approval diff hunk sits flush inside the card body */
 .approval-card .diff { margin: 0; border-radius: 0; }
