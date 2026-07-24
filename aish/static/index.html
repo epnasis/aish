@@ -133,18 +133,12 @@
      it can never ride up over the headers when the keyboard shrinks the view. -->
 <div id="messages-wrap">
   <main id="messages"></main>
-  <!-- Empty-chat welcome (#123): brand mark + inviting greeting + a few starter
-       chips that fill-and-send. Shown by updateEmptyHint() only while the
-       transcript is empty; a click-through overlay centred in the messages area. -->
+  <!-- Empty-chat welcome (#123): brand mark + inviting greeting. Shown by
+       updateEmptyHint() only while the transcript is empty; a click-through
+       overlay centred in the messages area. -->
   <div id="welcome" hidden>
     <div class="welcome-logo" aria-hidden="true"><span class="wl-a">a</span><span class="wl-gt">&gt;</span></div>
     <h1 class="welcome-title">How can I help?</h1>
-    <p class="welcome-sub">Run commands, edit files, and browse the web — I always ask before anything changes.</p>
-    <div class="welcome-chips">
-      <button class="welcome-chip" type="button" data-fill="Give me a quick tour of this project.">Tour this project</button>
-      <button class="welcome-chip" type="button" data-fill="Run the test suite and show me the result.">Run the tests</button>
-      <button class="welcome-chip" type="button" data-fill="What changed in the last few commits?">Recent changes</button>
-    </div>
   </div>
 </div>
 
@@ -199,11 +193,7 @@
   </button>
   <button class="action-item" data-act="terminal">
     <span class="action-ico" style="background:var(--green-glow)"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="var(--green)" stroke-width="1.7"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5" fill="none" stroke="var(--green)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-    <span class="action-text"><span class="action-title">Terminal mode</span><span class="action-sub">Run shell commands — !</span></span>
-  </button>
-  <button class="action-item" data-act="interactive">
-    <span class="action-ico" style="background:var(--blue-glow)"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="var(--blue)" stroke-width="1.7"/><path d="M7 9l3 3-3 3" fill="none" stroke="var(--blue)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><circle cx="15.5" cy="15" r="1.1" fill="var(--blue)"/></svg></span>
-    <span class="action-text"><span class="action-title">Interactive shell</span><span class="action-sub">A real TTY — gcloud, ssh, sudo prompts</span></span>
+    <span class="action-text"><span class="action-title">Shell command</span><span class="action-sub">Run shell commands — !</span></span>
   </button>
 </div>
 

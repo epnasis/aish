@@ -457,31 +457,6 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   -webkit-text-fill-color: transparent;
   color: transparent;
 }
-.welcome-sub {
-  margin: 0;
-  max-width: 34ch;
-  font-size: calc(15px * var(--fs));
-  line-height: 1.45;
-  color: var(--dim);
-}
-.welcome-chips {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 6px;
-  pointer-events: auto;
-}
-.welcome-chip {
-  background: var(--bg-elev);
-  border: 0.5px solid var(--sep);
-  border-radius: 999px;
-  color: var(--fg);
-  font-size: calc(14px * var(--fs));
-  padding: 8px 15px;
-  -webkit-tap-highlight-color: transparent;
-}
-.welcome-chip:active { opacity: 0.6; }
 
 /* ---- empty-chat hint (teaches the resume affordances, #33) ---- */
 /* Bottom-anchored so it clears the centred welcome hero above it. */
@@ -2247,8 +2222,13 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   touch-action: pan-y;
 }
 #pty-overlay { overscroll-behavior: contain; }
-/* Freeze the page under the console so a swipe can't move it. */
-body.console-open { overflow: hidden; overscroll-behavior: none; }
+/* Freeze the page under the console so an iOS swipe can't scroll the chat into
+   view — position:fixed is the reliable lock (overflow:hidden alone isn't on
+   iOS). The scroll offset is preserved via body.style.top set in JS. */
+body.console-open {
+  position: fixed; left: 0; right: 0; width: 100%;
+  overflow: hidden; overscroll-behavior: none;
+}
 .pty-keys {
   display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto;
   border-top: 1px solid #26262b; background: rgba(20, 20, 24, 0.95);
@@ -2261,6 +2241,13 @@ body.console-open { overflow: hidden; overscroll-behavior: none; }
 .pty-keys button:active { background: #2c2c30; }
 /* The sticky Ctrl chip glows while armed (the next key is sent as Ctrl+key). */
 .pty-keys button.armed { background: var(--ctp-mauve); color: #1e1e2e; border-color: var(--ctp-mauve); }
+/* Visual feedback on every key-chip press (paired with a haptic where the device
+   supports it) — a quick blink so a tap registers even without key travel. */
+.pty-keys button.flash { animation: pty-key-flash 0.16s ease-out; }
+@keyframes pty-key-flash {
+  0% { background: var(--ctp-blue); color: #1e1e2e; transform: scale(0.94); }
+  100% { }
+}
 .pty-key-kb { margin-left: auto; display: flex; align-items: center; padding: 6px 12px; }
 .pty-key-kb svg { display: block; }
 .pty-fontbtn { padding: 6px 11px; font-weight: 700; min-width: 40px; }

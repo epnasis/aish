@@ -4296,8 +4296,8 @@ $("composer-actions").addEventListener("click", (e) => {
     // Prefill the trigger and let the user add detail (or just send) — the
     // server expands /feedback into the issue-filing flow (parse_feedback).
     case "feedback": composerInsert("/feedback "); break;
-    case "terminal": enterCmdMode(); break;
-    case "interactive": openConsole(); break; // the global Quake console (#148)
+    case "terminal": enterCmdMode(); break; // the `!` shell-command input mode
+    // The global console has its own top-bar button + Ctrl+\; not in this menu.
   }
 });
 
@@ -4424,6 +4424,18 @@ function setConsoleCtrl(on) {
   if (chip) chip.classList.toggle("armed", on);
 }
 
+let consoleLockY = 0; // page scroll offset captured while the console freezes it
+
+// Press feedback for the on-screen key chips: a haptic tick (where the platform
+// exposes it — Android; iOS Safari has no web vibrate) plus a visual blink that
+// works everywhere.
+function consoleKeyFeedback(btn) {
+  if (navigator.vibrate) { try { navigator.vibrate(8); } catch (e) { /* ignore */ } }
+  btn.classList.remove("flash");
+  void btn.offsetWidth; // reflow so the animation restarts on rapid repeats
+  btn.classList.add("flash");
+}
+
 function consoleCopy() {
   if (!consoleTerm) return;
   // Whatever is selected, else the whole screen — dragging to select is hard on
@@ -4499,7 +4511,11 @@ function openConsole() {
   if (consoleOpen) return; // already showing (e.g. a reconnect reattach)
   if (location.hash !== "#console") history.replaceState(null, "", "#console"); // deep-link: survives reload/restart
   $("pty-overlay").hidden = false;
-  document.body.classList.add("console-open"); // freeze the page behind it (iOS scroll)
+  // Freeze the page behind the overlay at its current scroll offset (iOS: a
+  // position:fixed body is the only reliable lock; restored on close).
+  consoleLockY = window.scrollY || 0;
+  document.body.style.top = `-${consoleLockY}px`;
+  document.body.classList.add("console-open");
   $("pty-share").hidden = true;
   setConsoleStatus("attaching…");
 
@@ -4582,6 +4598,8 @@ function hideConsole() {
   const ov = $("pty-overlay");
   ov.hidden = true;
   document.body.classList.remove("console-open");
+  document.body.style.top = "";
+  window.scrollTo(0, consoleLockY || 0); // restore the page scroll we froze
   ov.style.height = ""; ov.style.top = ""; // drop the viewport-fit inline styles
   $("pty-share").hidden = true;
   setConsoleCtrl(false);
@@ -4629,6 +4647,7 @@ $("pty-share").onclick = () => {
 document.querySelector(".pty-keys").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-key]");
   if (!btn) return;
+  consoleKeyFeedback(btn); // blink + haptic so a tap registers without key travel
   if (btn.dataset.key === "kb") { consoleToggleKeyboard(); return; }
   if (btn.dataset.key === "ctrl") { setConsoleCtrl(!consoleCtrlArmed); if (consoleTerm) consoleTerm.focus(); return; }
   if (btn.dataset.key === "copy") { consoleCopy(); return; }
