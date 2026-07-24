@@ -4407,7 +4407,11 @@ function escapeExit() {
 let consoleTerm = null; // the xterm.js Terminal while the overlay is open, else null
 let consoleFit = null;
 let consoleOpen = false;
-let consoleCtrlArmed = false; // the sticky Ctrl chip: next key is sent as Ctrl+key
+// The Ctrl chip is a 3-state sticky: "off" → tap → "armed" (one key sent as
+// Ctrl+key, then off) → double-tap → "locked" (EVERY key is Ctrl+key until you
+// tap to unlock — for repeated C-F page-downs / long Ctrl combos).
+let consoleCtrlMode = "off"; // "off" | "armed" | "locked"
+let lastCtrlTap = 0;
 
 // Catppuccin Mocha — matches the CSS palette applied to the command/code
 // surfaces, so the interactive terminal reads as one theme with them.
@@ -4427,10 +4431,13 @@ function setConsoleStatus(text, exited) {
   el.classList.toggle("exited", Boolean(exited));
 }
 
-function setConsoleCtrl(on) {
-  consoleCtrlArmed = on;
+function setConsoleCtrlMode(mode) {
+  consoleCtrlMode = mode;
   const chip = document.querySelector('.pty-keys button[data-key="ctrl"]');
-  if (chip) chip.classList.toggle("armed", on);
+  if (chip) {
+    chip.classList.toggle("armed", mode === "armed");
+    chip.classList.toggle("locked", mode === "locked");
+  }
 }
 
 let consoleLockY = 0; // page scroll offset captured while the console freezes it
@@ -4553,14 +4560,15 @@ function openConsole() {
     ));
   }
   consoleTerm.open(screen);
-  // THE input path; the model never reaches it. A sticky Ctrl chip (#148) arms
-  // one keystroke: while armed, the next single char is sent as its control
-  // code (Ctrl-A for the tmux prefix, Ctrl-W in vim, …), then disarms.
+  // THE input path; the model never reaches it. The sticky Ctrl chip (#148):
+  // while "armed" or "locked" the next single char is sent as its control code
+  // (Ctrl-A tmux prefix, Ctrl-F page down, …); "armed" is one-shot (disarms
+  // after the key), "locked" persists until the chip is tapped again.
   consoleTerm.onData((data) => {
-    if (consoleCtrlArmed && data.length === 1) {
+    if (consoleCtrlMode !== "off" && data.length === 1) {
       const c = data.toUpperCase().charCodeAt(0);
       if (c >= 64 && c <= 95) data = String.fromCharCode(c & 0x1f); // ^@ .. ^_
-      setConsoleCtrl(false);
+      if (consoleCtrlMode === "armed") setConsoleCtrlMode("off"); // one-shot
     }
     consoleSend(data);
   });
@@ -4611,7 +4619,7 @@ function hideConsole() {
   window.scrollTo(0, consoleLockY || 0); // restore the page scroll we froze
   ov.style.height = ""; ov.style.top = ""; ov.style.paddingBottom = ""; // drop viewport-fit inline styles
   $("pty-share").hidden = true;
-  setConsoleCtrl(false);
+  setConsoleCtrlMode("off");
   if (consoleTerm) { consoleTerm.dispose(); consoleTerm = null; consoleFit = null; }
 }
 
@@ -4650,7 +4658,14 @@ document.querySelector(".pty-keys").addEventListener("click", (e) => {
   if (!btn) return;
   consoleKeyFeedback(btn); // blink + haptic so a tap registers without key travel
   if (btn.dataset.key === "kb") { consoleToggleKeyboard(); return; }
-  if (btn.dataset.key === "ctrl") { setConsoleCtrl(!consoleCtrlArmed); if (consoleTerm) consoleTerm.focus(); return; }
+  if (btn.dataset.key === "ctrl") {
+    const now = Date.now();
+    if (now - lastCtrlTap < 350) setConsoleCtrlMode("locked"); // double-tap → lock Ctrl
+    else setConsoleCtrlMode(consoleCtrlMode === "off" ? "armed" : "off"); // tap: arm / unlock
+    lastCtrlTap = now;
+    if (consoleTerm) consoleTerm.focus();
+    return;
+  }
   if (btn.dataset.key === "copy") { consoleCopy(); return; }
   if (btn.dataset.key === "paste") { consolePaste(); return; }
   const CTRL = { tab: "\t", esc: "\x1b", "ctrl-a": "\x01" }; // arrows: the drag pad below

@@ -2247,6 +2247,9 @@ body.console-open {
 .pty-keys button:active { background: #2c2c30; }
 /* The sticky Ctrl chip glows while armed (the next key is sent as Ctrl+key). */
 .pty-keys button.armed { background: var(--ctp-mauve); color: #1e1e2e; border-color: var(--ctp-mauve); }
+/* Locked (double-tapped) Ctrl: held for EVERY key until tapped off — a solid,
+   pressed look distinct from the one-shot armed glow. */
+.pty-keys button.locked { background: var(--ctp-peach); color: #1e1e2e; border-color: var(--ctp-peach); box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.35); }
 /* Visual feedback on every key-chip press (paired with a haptic where the device
    supports it) — a quick blink so a tap registers even without key travel. */
 .pty-keys button.flash { animation: pty-key-flash 0.16s ease-out; }
