@@ -4,6 +4,7 @@ in a thread, so the worker-thread bridge is exercised for real). No model,
 no network; the only real commands executed are harmless touch/ls in tmp dirs.
 """
 
+import asyncio
 import contextlib
 import json
 import os
@@ -3874,6 +3875,49 @@ class TestHoldNotification:
         assert d({"kind": "tool", "tool": "t", "preview": "delete X"}).endswith("delete X")
         assert d({"kind": "command", "command": "rm x"}).startswith("run:")
         assert d({"kind": "write", "verb": "edit", "target": "/a"}) == "edit /a"
+
+
+class TestDoneNotification:
+    """Pushover notification when a TRIGGERED session finishes (#163), and its
+    viewer gating: a session someone is watching must stay silent, or every
+    message typed into an automated chat pushes a phone notification for work
+    happening on screen. Called directly — the coroutine is the whole unit."""
+
+    def _server(self, app_env, monkeypatch, calls):
+        monkeypatch.setattr(server_module.notify, "configured", lambda: True)
+        monkeypatch.setattr(server_module.notify, "pushover",
+                            lambda *a, **k: calls.append((a, k)) or True)
+        client, _ = make_client(app_env, [model_says("done")], token="secret")
+        return client.app.state.server
+
+    def _session(self, origin="email", viewers=()):
+        return SimpleNamespace(origin=origin, viewers=set(viewers),
+                               custom_title="Email: hi", name="session-x.jsonl")
+
+    def test_triggered_done_with_no_viewer_notifies(self, app_env, monkeypatch):
+        calls: list = []
+        server = self._server(app_env, monkeypatch, calls)
+        server.public_url = "https://aish.test"
+        asyncio.run(server._notify_done(self._session(), "sent the reply"))
+        assert len(calls) == 1
+        (title, body), kw = calls[0]
+        assert "finished" in title.lower() and "Email: hi" in title
+        assert body == "sent the reply"
+        assert kw["url"] == "https://aish.test/?session=session-x.jsonl"
+        assert kw["priority"] == 0
+
+    def test_triggered_done_with_a_viewer_stays_silent(self, app_env, monkeypatch):
+        calls: list = []
+        server = self._server(app_env, monkeypatch, calls)
+        session = self._session(viewers=[object()])
+        asyncio.run(server._notify_done(session, "sent the reply"))
+        assert calls == []
+
+    def test_user_session_never_notifies_on_done(self, app_env, monkeypatch):
+        calls: list = []
+        server = self._server(app_env, monkeypatch, calls)
+        asyncio.run(server._notify_done(self._session(origin="user"), "hi"))
+        assert calls == []
 
 
 class TestBridgeOnWait:

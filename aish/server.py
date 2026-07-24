@@ -1734,8 +1734,13 @@ class WebServer:
         """Ping the owner when a TRIGGERED session finishes (#163) — the
         'observe the outcome' half. The blocking Pushover POST is offloaded via
         to_thread so the event loop never stalls; a no-op for user sessions or
-        when Pushover is unconfigured. Best-effort: pushover() never raises."""
-        if session.origin == "user" or not notify.configured():
+        when Pushover is unconfigured. Best-effort: pushover() never raises.
+
+        Silent while anyone is viewing, mirroring notify_hold: an open tab
+        already shows the answer, and without this every message typed INTO an
+        automated session pushes a phone notification for work being watched
+        live."""
+        if session.origin == "user" or session.viewers or not notify.configured():
             return
         link = f"{self.public_url}/?session={session.name}" if self.public_url else None
         title = session.custom_title or "automated session"
