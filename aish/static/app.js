@@ -4600,7 +4600,7 @@ function hideConsole() {
   document.body.classList.remove("console-open");
   document.body.style.top = "";
   window.scrollTo(0, consoleLockY || 0); // restore the page scroll we froze
-  ov.style.height = ""; ov.style.top = ""; // drop the viewport-fit inline styles
+  ov.style.height = ""; ov.style.top = ""; ov.style.paddingBottom = ""; // drop viewport-fit inline styles
   $("pty-share").hidden = true;
   setConsoleCtrl(false);
   if (consoleTerm) { consoleTerm.dispose(); consoleTerm = null; consoleFit = null; }
@@ -4669,6 +4669,12 @@ function consoleReflowViewport() {
   if (window.visualViewport) {
     ov.style.height = `${visualViewport.height}px`;
     ov.style.top = `${Math.max(0, visualViewport.offsetTop)}px`;
+    // The keyboard already covers the home-indicator safe area, so drop the
+    // overlay's bottom inset while it's up — otherwise it renders as a dead
+    // black gap between the key row and the keyboard (#151). Restored (「」) when
+    // the keyboard is down so the keys still clear the home indicator.
+    const kbUp = visualViewport.height < window.innerHeight - 80;
+    ov.style.paddingBottom = kbUp ? "0px" : "";
   }
   consoleFitAndResize();
 }
