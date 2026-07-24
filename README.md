@@ -473,8 +473,11 @@ will switch — release earlier and it snaps back (on a trackpad the switch
 happens the moment the pill turns blue). Code blocks still scroll
 sideways normally; the gesture only engages on a clearly horizontal drag.
 On a keyboard, **Ctrl+H / Ctrl+L** page the same way (vim h/l: older /
-newer), and Cmd/Ctrl+Shift+O starts a new chat, Cmd/Ctrl+Shift+P opens
-session search.
+newer). **Ctrl/Cmd+N** starts a new chat, **Ctrl/Cmd+O** opens session
+search, and **Ctrl/Cmd+P** exports (prints) the session to PDF (the older
+Cmd/Ctrl+Shift+O / Shift+P command-palette combos still work). When an
+approval card is up, **A** approves and **D** denies it without reaching
+for the mouse.
 
 ```sh
 aish-web                      # http://127.0.0.1:8787, config-default model

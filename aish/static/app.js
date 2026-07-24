@@ -3114,6 +3114,10 @@ function onApprovalRequest(event) {
     card.dataset.summary = `read ${event.path}`;
     buildReadCard(card, event);
   }
+  // Surface the single-key verdicts (handled by the global keydown) as tooltips,
+  // without disturbing any per-card title a builder already set.
+  for (const b of card.querySelectorAll("button.approve")) if (!b.title) b.title = "Approve (A)";
+  for (const b of card.querySelectorAll("button.deny")) if (!b.title) b.title = "Deny (D)";
   cards.set(event.id, card);
   pendingCards += 1;
   refreshStatusline();
@@ -5430,21 +5434,62 @@ $("backdrop").onclick = closeSheets;
 
 $("sessions-new").onclick = () => { send({ type: "new" }); closeSheets(); };
 
+// The last approval card still awaiting a verdict (its Approve button is only
+// disabled once answerCard resolves it). Newest-first so stacked cards clear
+// bottom-up, matching where the eye is.
+function activeApprovalCard() {
+  const list = [...messagesEl.querySelectorAll(".card")];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const approve = list[i].querySelector("button.approve");
+    if (approve && !approve.disabled) return list[i];
+  }
+  return null;
+}
+// [ACTIVE-APPROVAL-CARD-END]
+
 document.addEventListener("keydown", (e) => {
   // Esc leaves terminal mode / the PTY overlay first (#143); only if neither is
   // active does it fall through to dismissing an open sheet.
   if (e.key === "Escape" && escapeExit()) { e.preventDefault(); return; }
   if (e.key === "Escape" && (!$("backdrop").hidden || !$("sessions-sheet").hidden)) closeSheets();
-  // Cmd/Ctrl+Shift+O = new chat, Cmd/Ctrl+Shift+P = search sessions
-  // (ChatGPT / command-palette conventions).
-  if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "o") {
-    e.preventDefault();
-    send({ type: "new" });
-    closeSheets();
+
+  // Approval-card single-key verdicts (TUI convention): A = approve, D = deny.
+  // Only while a card is pending and the user isn't typing into the comment
+  // field or editing a command — clicking routes through the button's own
+  // onclick so edit/scope/feedback handling stays in one place.
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && !editingNow()) {
+    const key = e.key.toLowerCase();
+    if (key === "a" || key === "d") {
+      const card = activeApprovalCard();
+      if (card) {
+        e.preventDefault();
+        card.querySelector(key === "a" ? "button.approve" : "button.deny")?.click();
+        return;
+      }
+    }
   }
-  if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "p") {
-    e.preventDefault();
-    openSessionsSheet("");
+
+  // Primary navigation shortcuts. Ctrl/Cmd+N = new chat, Ctrl/Cmd+O = search
+  // (open) sessions, Ctrl/Cmd+P = export (print) the session to PDF. The older
+  // Cmd/Ctrl+Shift+O (new) / Shift+P (search) command-palette combos still work.
+  if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+    const key = e.key.toLowerCase();
+    if (key === "n" || (e.shiftKey && key === "o")) {
+      e.preventDefault();
+      send({ type: "new" });
+      closeSheets();
+      return;
+    }
+    if (key === "o" || (e.shiftKey && key === "p")) {
+      e.preventDefault();
+      openSessionsSheet("");
+      return;
+    }
+    if (!e.shiftKey && key === "p") {
+      e.preventDefault();
+      exportSessionPdf();
+      return;
+    }
   }
   // Cmd/Ctrl+\ toggles the global "Quake console" (#148 follow-up). When the
   // overlay itself has focus, xterm's own key handler catches this first; this
