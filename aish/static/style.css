@@ -458,26 +458,6 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   color: transparent;
 }
 
-/* ---- empty-chat hint (teaches the resume affordances, #33) ---- */
-/* Bottom-anchored so it clears the centred welcome hero above it. */
-#empty-hint {
-  position: fixed;
-  left: 50%;
-  bottom: 92px;
-  transform: translateX(-50%);
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  background: none;
-  border: none;
-  color: var(--dim);
-  font-size: 15px;
-  white-space: nowrap;
-  z-index: 1;
-}
-#empty-hint[hidden] { display: none; }
-#empty-hint svg { width: 15px; height: 15px; flex-shrink: 0; }
-
 /* ---- swipe pager hint (target session while dragging sideways) ---- */
 #swipe-hint {
   position: fixed;

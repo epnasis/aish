@@ -1699,8 +1699,7 @@ function scrollToEnd(force) {
   updateEmptyHint(); // every content-adding path funnels through here
 }
 
-// Empty-state education (#33): a fresh chat with earlier sessions to go back
-// to points at the two resume affordances (swipe pager, history button).
+// Empty-state welcome hero (#123): shown only while the transcript is empty.
 function updateEmptyHint() {
   // A workspace-note (a UI /cd or dir-trust marker) is system metadata, not a
   // real turn — a fresh chat is still "empty" for onboarding after one, so the
@@ -1708,12 +1707,6 @@ function updateEmptyHint() {
   const empty = [...messagesEl.children].every((c) =>
     c.classList.contains("workspace-note")
   );
-  const hasOthers = pagerSessions.some((s) => s.name !== currentSession);
-  // The hint is fixed just above the composer, so a composer that grows tall
-  // paints its text right over it — hide it the moment there's a draft (#132).
-  // ($("input") not the `input` const: this can run before that TDZ binding.)
-  const composing = $("input").value.trim() !== "";
-  $("empty-hint").hidden = !hasOthers || !empty || composing;
   $("welcome").hidden = !empty; // brand hero on a fresh/empty chat (#123)
 }
 
@@ -5650,7 +5643,6 @@ document.addEventListener("keydown", (event) => {
 // sessions
 $("back-chip").onclick = () => openSessionsSheet("");
 $("session-chip").onclick = () => openSessionMenu();
-$("empty-hint").onclick = () => openSessionsSheet("");
 $("new-chip").onclick = () => requestNewChat();
 $("console-btn").onclick = () => toggleConsole(); // global Quake console (#148)
 
