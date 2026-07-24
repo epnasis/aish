@@ -4505,6 +4505,10 @@ function escapeExit() {
 let consoleTerm = null; // the xterm.js Terminal while the overlay is open, else null
 let consoleFit = null;
 let consoleOpen = false;
+// The text of the most recent tmux copy (arrives via OSC 52). iOS blocks the
+// clipboard write from that incoming-data handler (no user gesture), so we stash
+// it here and let the key-row Copy button write it within the user's tap.
+let lastConsoleClip = null;
 // The Ctrl chip is a 3-state sticky: "off" → tap → "armed" (one key sent as
 // Ctrl+key, then off) → double-tap → "locked" (EVERY key is Ctrl+key until you
 // tap to unlock — for repeated C-F page-downs / long Ctrl combos).
@@ -4574,6 +4578,10 @@ function consoleCopy() {
   // touch, so "copy" with no selection grabs everything. copyText() has the
   // execCommand fallback that works on the plain-http LAN server (no clipboard API).
   let text = consoleSelectionText();
+  // A fresh tmux copy (drag / double-tap → OSC 52) that iOS wouldn't let us
+  // write passively: consume it here, inside this tap's gesture. Consume-once so
+  // a later "copy everything" tap doesn't resurrect a stale selection.
+  if (!text && lastConsoleClip) { text = lastConsoleClip; lastConsoleClip = null; }
   if (!text) { consoleTerm.selectAll(); text = consoleTerm.getSelection(); consoleTerm.clearSelection(); }
   if (!text || !text.trim()) { showToast("nothing to copy"); return; }
   copyText(text).then((ok) => showToast(ok ? "copied" : "copy blocked"));
@@ -4759,7 +4767,14 @@ function openConsole() {
   // clipboard-READ request — we never answer it (don't leak the clipboard back).
   consoleTerm.parser.registerOscHandler(52, (data) => {
     const text = oscClipboardText(data);
-    if (text) copyText(text).then((ok) => showToast(ok ? "copied" : "copy blocked"));
+    if (text) {
+      // Stash it so the Copy button can grab it within a real tap, then TRY an
+      // immediate write — succeeds on desktop; on iOS (no user gesture here) it
+      // fails, so tell the user to tap Copy, which does have the gesture.
+      lastConsoleClip = text;
+      copyText(text).then((ok) =>
+        showToast(ok ? "copied to clipboard" : "selection ready — tap Copy to grab it"));
+    }
     return true;
   });
   consoleTerm.open(screen);
