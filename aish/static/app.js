@@ -4551,12 +4551,29 @@ function consoleKeyFeedback(btn) {
   btn.classList.add("flash");
 }
 
+// The current console selection as text. Desktop uses xterm's own mouse-driven
+// selection; touch uses the browser's NATIVE selection over the DOM rows (which
+// xterm's getSelection() doesn't see), so prefer that when it's inside the
+// terminal. Callers: Copy, Share, and the Share-button visibility.
+function consoleHasNativeSelection() {
+  const s = window.getSelection && window.getSelection();
+  if (!s || s.isCollapsed || !s.toString().trim()) return false;
+  const scr = $("pty-screen");
+  const node = s.anchorNode;
+  const el = node && (node.nodeType === 1 ? node : node.parentNode);
+  return Boolean(scr && el && scr.contains(el));
+}
+function consoleSelectionText() {
+  if (consoleHasNativeSelection()) return window.getSelection().toString();
+  return consoleTerm ? consoleTerm.getSelection() : "";
+}
+
 function consoleCopy() {
   if (!consoleTerm) return;
   // Whatever is selected, else the whole screen — dragging to select is hard on
   // touch, so "copy" with no selection grabs everything. copyText() has the
   // execCommand fallback that works on the plain-http LAN server (no clipboard API).
-  let text = consoleTerm.getSelection();
+  let text = consoleSelectionText();
   if (!text) { consoleTerm.selectAll(); text = consoleTerm.getSelection(); consoleTerm.clearSelection(); }
   if (!text || !text.trim()) { showToast("nothing to copy"); return; }
   copyText(text).then((ok) => showToast(ok ? "copied" : "copy blocked"));
@@ -4847,10 +4864,18 @@ $("pty-close").onclick = () => hideConsole();
 $("pty-font-dec").onclick = () => consoleFontStep(-1);
 $("pty-font-inc").onclick = () => consoleFontStep(1);
 $("pty-share").onclick = () => {
-  const sel = consoleTerm ? consoleTerm.getSelection().trim() : "";
+  const sel = consoleSelectionText().trim();
   if (!sel) { showToast("select some output first, then Share"); return; }
   send({ type: "console_share", text: sel });
 };
+// Native (touch) selection changes don't fire xterm's onSelectionChange, so
+// mirror the Share button's visibility off the document selection too — checking
+// the combined state so a collapsed native selection hides it (unless xterm
+// still holds one from a desktop mouse drag).
+document.addEventListener("selectionchange", () => {
+  if (!consoleOpen) return;
+  $("pty-share").hidden = !consoleSelectionText().trim();
+});
 
 document.querySelector(".pty-keys").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-key]");
@@ -4916,16 +4941,38 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
 // to the program (tmux / vim / less) when it has mouse mode on. preventDefault
 // so the page behind the console never moves. Wired once on the persistent
 // #pty-screen, guarded by consoleOpen. (#151 follow-up)
+//
+// Text selection (#151 follow-up): we ONLY hijack a real finger DRAG. A tap, double-tap, or
+// stationary long-press is never preventDefault'd, so iOS's own selection
+// gestures (double-tap a word, long-press) fire untouched on the DOM-rendered
+// rows (user-select re-enabled for touch in style.css). Once something IS
+// selected we stand down entirely, so dragging the selection handles extends it
+// and the selection survives for Copy/Share. Nobody drags to scroll after
+// holding/double-tapping, so "a plain drag = scroll" has no false positives.
 (() => {
   const screen = $("pty-screen");
-  let touchY = 0;
+  const SLOP = 10; // px of travel before a touch is judged a deliberate scroll drag
+  let touchY = 0, startX = 0, startY = 0, scrolling = false;
   screen.addEventListener("touchstart", (e) => {
-    if (e.touches.length === 1) touchY = e.touches[0].clientY;
+    if (e.touches.length !== 1) { scrolling = false; return; }
+    const t = e.touches[0];
+    touchY = t.clientY; startX = t.clientX; startY = t.clientY; scrolling = false;
   }, { passive: true });
   screen.addEventListener("touchmove", (e) => {
     if (!consoleOpen || e.touches.length !== 1) return;
+    // A live selection owns the touch: never scroll while text is selected —
+    // let the native handles extend it (or leave it be for Copy/Share).
+    if (consoleHasNativeSelection()) { scrolling = false; return; }
+    const t = e.touches[0];
+    if (!scrolling) {
+      // Wait for real travel before claiming the gesture; a hold or double-tap
+      // stays below SLOP and passes through to iOS's native selection.
+      if (Math.abs(t.clientX - startX) < SLOP && Math.abs(t.clientY - startY) < SLOP) return;
+      scrolling = true;
+      touchY = t.clientY; // anchor here so the SLOP travel isn't scrolled in one jump
+    }
     e.preventDefault(); // the swipe drives the terminal, not the page
-    const y = e.touches[0].clientY;
+    const y = t.clientY;
     const deltaY = touchY - y; // natural: swipe up → wheel down (toward newer)
     touchY = y;
     if (!deltaY) return;
