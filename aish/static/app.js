@@ -5032,10 +5032,33 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
     if (e.touches.length !== 1) { scrolling = false; selAnchor = null; return; }
     const t = e.touches[0];
     if (consoleSelectMode) {
-      // Anchor here and keep the touch from reaching tmux/scroll — we own it.
+      e.preventDefault(); // keep the touch from reaching tmux/scroll — we own it
+      const sel = window.getSelection();
+      // If a selection already exists, a touch near either END grabs THAT handle
+      // and re-anchors on the opposite (fixed) end — so you adjust one side
+      // independently, like iOS's selection handles, instead of restarting.
+      if (sel && !sel.isCollapsed && sel.rangeCount) {
+        const range = sel.getRangeAt(0);
+        const rects = range.getClientRects();
+        if (rects.length) {
+          const first = rects[0], last = rects[rects.length - 1];
+          const startPt = { x: first.left, y: first.top + first.height / 2 };
+          const endPt = { x: last.right, y: last.top + last.height / 2 };
+          const d = (p) => Math.hypot(t.clientX - p.x, t.clientY - p.y);
+          const dStart = d(startPt), dEnd = d(endPt);
+          const GRAB = 60; // generous touch target around each handle
+          if (Math.min(dStart, dEnd) <= GRAB) {
+            const grabStart = dStart <= dEnd;
+            const fixed = range.cloneRange();
+            fixed.collapse(!grabStart); // pin the opposite end; drag moves this one
+            selAnchor = fixed;
+            return; // keep the selection; touchmove drags the grabbed handle
+          }
+        }
+      }
+      // No selection, or a touch away from both handles → start a fresh region.
       selAnchor = caretAt(t.clientX, t.clientY);
-      window.getSelection().removeAllRanges();
-      e.preventDefault();
+      if (sel) sel.removeAllRanges();
       return;
     }
     touchY = t.clientY; startX = t.clientX; startY = t.clientY; scrolling = false;
