@@ -119,6 +119,29 @@ async def serve_index(request):  # noqa: ARG001 — Starlette route signature
     html = html.replace('href="style.css"', f'href="style.css?v={STATIC_REV}"')
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
+
+# Optional user-provided fonts (e.g. a licensed terminal font) live in the CONFIG
+# dir, NOT the repo/wheel — so licensed files are never committed or bundled, and
+# they survive reinstalls. Absent → 404, and the CSS @font-face falls back to the
+# system font stack. (#148)
+CONFIG_FONT_DIR = Path.home() / ".config" / "aish" / "fonts"
+_FONT_MEDIA = {".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf", ".otf": "font/otf"}
+
+
+async def serve_config_font(request):
+    name = request.path_params["name"]
+    suffix = Path(name).suffix.lower()
+    if "/" in name or ".." in name or suffix not in _FONT_MEDIA:
+        return Response(status_code=404)
+    path = CONFIG_FONT_DIR / name
+    if not path.is_file():
+        return Response(status_code=404)  # no font installed — @font-face falls back
+    return FileResponse(
+        path,
+        media_type=_FONT_MEDIA[suffix],
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
+
 # Replay buffer bounds: enough for a long task's worth of events; beyond it
 # the oldest are dropped and the client shows a truncation marker.
 TRANSCRIPT_MAX = 600
@@ -2681,6 +2704,7 @@ def create_app(
             Route("/export/answer", server.handle_export_answer, methods=["POST"]),
             Route("/export/session", server.handle_export_session, methods=["GET"]),
             Route("/dirs", server.handle_dirs, methods=["GET"]),
+            Route("/fonts/{name}", serve_config_font, methods=["GET"]),
             Route("/", serve_index, methods=["GET"]),
             Route("/index.html", serve_index, methods=["GET"]),
             Mount("/", StaticFiles(directory=STATIC_DIR, html=True)),

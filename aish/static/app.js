@@ -4538,6 +4538,12 @@ function openConsole() {
   consoleReflowViewport();
   requestAnimationFrame(consoleReflowViewport); // once the overlay has laid out
   setTimeout(consoleReflowViewport, 120); // and after the mobile keyboard settles
+  // A webfont (the optional PragmataPro) loads async; xterm measures cell size at
+  // open, so refit once it's ready or the grid is sized to the fallback metrics.
+  if (document.fonts && document.fonts.load) {
+    document.fonts.load(`16px "PragmataPro Mono"`).then(
+      () => { if (consoleOpen) consoleReflowViewport(); }, () => {});
+  }
   consoleTerm.focus();
 }
 

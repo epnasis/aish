@@ -2,6 +2,17 @@
    iMessage-style bubbles, SF system font; monospace reserved for command
    output, diffs, and code. */
 
+/* Optional licensed terminal font, served from the CONFIG dir (~/.config/aish/
+   fonts/) via /fonts/, never committed or bundled. If it isn't installed the
+   request 404s and the terminal's fontFamily stack falls back to system mono. */
+@font-face {
+  font-family: "PragmataPro Mono";
+  src: url("/fonts/PragmataProMono.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   /* Reading-text scale (#118): a menu stepper multiplies the reading surfaces
      so text gets bigger and REFLOWS within the same width (no horizontal scroll
