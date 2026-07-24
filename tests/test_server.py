@@ -3763,3 +3763,93 @@ class TestOriginPersistence:
         assert origin == "schedule"
         # And a fresh, untagged session parses as the default "user".
         assert SessionLog._info_from(path, [{"role": "user", "content": "x"}]).origin == "user"
+
+
+class TestHoldNotification:
+    """Pushover notification when an unattended triggered session holds (#163).
+    The notify_hold closure is reachable as bridge.on_wait, so its gating is
+    tested directly — no need to deadlock a real blocking approval."""
+
+    def _held_event(self):
+        return {"type": "approval_request", "kind": "tool",
+                "tool": "gmail_trash", "args": {"message_id": "m1"}, "id": "u1"}
+
+    def _spawn_email_session(self, client, monkeypatch, calls):
+        monkeypatch.setattr(server_module.notify, "configured", lambda: True)
+        monkeypatch.setattr(server_module.notify, "pushover",
+                            lambda *a, **k: calls.append((a, k)) or True)
+        r = client.post("/trigger?token=secret",
+                        json={"prompt": "go", "origin": "email", "title": "Email: hi"})
+        return client.app.state.server.sessions[r.json()["session"]]
+
+    def test_triggered_hold_with_no_viewer_notifies(self, app_env, monkeypatch):
+        monkeypatch.setenv("AISH_PUBLIC_URL", "https://aish.test")
+        client, _ = make_client(app_env, [model_says("done")], token="secret")
+        calls: list = []
+        with client:
+            session = self._spawn_email_session(client, monkeypatch, calls)
+            session.bridge.on_wait(self._held_event(), False)  # no viewers
+        assert len(calls) == 1
+        (title, body), kw = calls[0]
+        assert "approval" in title.lower() and "Email: hi" in title
+        assert "gmail_trash" in body
+        assert kw["url"].endswith(f"/?session={session.name}")
+        assert kw["url"].startswith("https://aish.test")
+        assert kw["priority"] == 1
+
+    def test_triggered_hold_with_a_viewer_stays_silent(self, app_env, monkeypatch):
+        client, _ = make_client(app_env, [model_says("done")], token="secret")
+        calls: list = []
+        with client:
+            session = self._spawn_email_session(client, monkeypatch, calls)
+            session.bridge.on_wait(self._held_event(), True)  # someone is watching
+        assert calls == []
+
+    def test_user_session_never_notifies_on_hold(self, app_env, monkeypatch):
+        monkeypatch.setattr(server_module.notify, "configured", lambda: True)
+        calls: list = []
+        monkeypatch.setattr(server_module.notify, "pushover",
+                            lambda *a, **k: calls.append(1))
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client:
+            default = client.app.state.server._default
+            assert default.origin == "user"
+            default.bridge.on_wait(self._held_event(), False)
+        assert calls == []
+
+    def test_describe_hold_shapes(self):
+        d = server_module._describe_hold
+        assert "gmail_trash" in d({"kind": "tool", "tool": "gmail_trash", "args": {}})
+        assert d({"kind": "tool", "tool": "t", "preview": "delete X"}).endswith("delete X")
+        assert d({"kind": "command", "command": "rm x"}).startswith("run:")
+        assert d({"kind": "write", "verb": "edit", "target": "/a"}) == "edit /a"
+
+
+class TestBridgeOnWait:
+    """The Bridge.ask hook that powers hold notifications fires before blocking
+    and reports whether anyone is viewing."""
+
+    def test_on_wait_fires_with_viewer_flag_and_does_not_block(self):
+        seen: list = []
+        bridge = server_module.Bridge(lambda: None)
+
+        def hook(event, has_viewers):
+            seen.append((event["kind"], has_viewers))
+            bridge.answer(event["id"], {"action": "deny"})  # unblock immediately
+
+        bridge.on_wait = hook
+        result = bridge.ask({"type": "approval_request", "kind": "tool", "tool": "x"})
+        assert result == {"action": "deny"}
+        assert seen == [("tool", False)]  # empty viewers → False
+
+    def test_on_wait_error_never_breaks_the_gate(self):
+        bridge = server_module.Bridge(lambda: None)
+
+        def boom(event, has_viewers):
+            bridge.answer(event["id"], {"action": "approve"})
+            raise RuntimeError("notify blew up")
+
+        bridge.on_wait = boom
+        # The gate still returns the answer despite the hook raising.
+        assert bridge.ask({"type": "approval_request", "kind": "tool", "tool": "x"}) \
+            == {"action": "approve"}

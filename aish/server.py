@@ -47,7 +47,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from . import backends, dir_ignore, export, tools
+from . import backends, dir_ignore, export, notify, tools
 from .agent import FEEDBACK_SWITCH_NOTE, Agent, ModelUnavailable, environment_context
 from .approval import (
     DEFAULT_ALLOWLIST,
@@ -287,12 +287,18 @@ class Bridge:
     snapshots and fan-out both need no locking.
     """
 
-    def __init__(self, get_loop):
+    def __init__(self, get_loop, on_wait=None):
         self._get_loop = get_loop
         self.viewers: set = set()  # Clients currently viewing this session
         self.pending: dict[str, queue.Queue] = {}
         self.transcript: list[dict] = []
         self.truncated = False
+        # Fired on the worker thread just before an approval blocks, with the
+        # request event + whether anyone is viewing (#163): the hook decides
+        # whether to push a notification (only for an unattended triggered
+        # session). Wrapped in try/except so a notify failure never blocks the
+        # gate. None = no notification wiring (CLI, tests).
+        self.on_wait = on_wait
 
     def emit(self, event: dict, record: bool = True) -> None:
         loop = self._get_loop()
@@ -331,6 +337,14 @@ class Bridge:
         slot: queue.Queue = queue.Queue(maxsize=1)
         self.pending[uid] = slot
         self.emit(event)
+        if self.on_wait is not None:
+            # has_viewers snapshot: the set is mutated on the loop thread, but a
+            # benign race (notify a moment after a viewer appears, or skip as
+            # one leaves) is harmless. Never let a notify error reach the gate.
+            try:
+                self.on_wait(event, bool(self.viewers))
+            except Exception:  # noqa: BLE001 — notification must not break approval
+                pass
         try:
             return slot.get()
         finally:
@@ -456,6 +470,26 @@ class WebStatus:
 # automated session and answers — the draft-and-hold model, built out of the
 # existing gate rather than a bespoke hold flow.
 TRIGGERED_SAFE_TOOLS = frozenset({"gmail_label"})
+
+
+def _describe_hold(event: dict) -> str:
+    """A short human phrase for a held approval_request, for the notification
+    body (#163) — so the push says WHAT needs approving, not just 'something'."""
+    kind = event.get("kind")
+    if kind == "tool":
+        tool = event.get("tool", "a tool")
+        if event.get("preview"):
+            return f"{tool}: {event['preview']}"
+        args = event.get("args") or {}
+        detail = ", ".join(f"{k}={v!r}" for k, v in list(args.items())[:2])
+        return f"{tool}({detail})" if detail else tool
+    if kind == "command":
+        return f"run: {event.get('command', '')}"
+    if kind == "write":
+        return f"{event.get('verb', 'write')} {event.get('target', 'a file')}"
+    if kind == "import":
+        return f"import skill {event.get('skill', '')}"
+    return "an action"
 
 
 def _triggered_safe(name: str, args: dict) -> bool:
@@ -978,6 +1012,8 @@ class WebServer:
         # Injectable spawn command (tests pass a trivial echo loop so no tmux/shell
         # is needed); None → auto-detect tmux-or-$SHELL at first open.
         self.console_command = console_command
+        # Base URL for notification deep-links (#163); set by create_app.
+        self.public_url = ""
 
     @property
     def active(self) -> Session:
@@ -1549,6 +1585,21 @@ class WebServer:
             self._run_task(session, text, images, documents)
         )
 
+    async def _notify_done(self, session: "Session", result: str) -> None:
+        """Ping the owner when a TRIGGERED session finishes (#163) — the
+        'observe the outcome' half. The blocking Pushover POST is offloaded via
+        to_thread so the event loop never stalls; a no-op for user sessions or
+        when Pushover is unconfigured. Best-effort: pushover() never raises."""
+        if session.origin == "user" or not notify.configured():
+            return
+        link = f"{self.public_url}/?session={session.name}" if self.public_url else None
+        title = session.custom_title or "automated session"
+        body = (result or "done").strip()[:300] or "done"
+        await asyncio.to_thread(
+            notify.pushover, f"aish finished — {title}", body,
+            url=link, url_title="Open session", priority=0,
+        )
+
     async def _run_task(
         self,
         session: Session,
@@ -1584,6 +1635,7 @@ class WebServer:
             if sources:
                 done["sources"] = list(sources)
             session.bridge.emit(done)
+            await self._notify_done(session, result)
         except ModelUnavailable as exc:
             session.bridge.emit(
                 {
@@ -2559,6 +2611,7 @@ def create_app(
     cwd: str | None = None,
     aliases: dict[str, str] | None = None,
     console_command: str | None = None,
+    public_url: str | None = None,
 ) -> Starlette:
     """The Starlette app; client_chat injects a scripted backend (tests).
 
@@ -2573,6 +2626,9 @@ def create_app(
         state_dir
         or os.environ.get("AISH_STATE_DIR", str(Path.home() / ".local" / "state" / "aish"))
     )
+    # Base URL for notification deep-links (#163): a push tap must open the
+    # session in the real UI, so this is the public origin, not the LAN bind.
+    public_url = (public_url or os.environ.get("AISH_PUBLIC_URL", "")).rstrip("/")
     allow_path = Path(allow_path or os.environ.get("AISH_ALLOWLIST", str(DEFAULT_ALLOWLIST)))
     deny_path = Path(deny_path or os.environ.get("AISH_DENYLIST", str(DEFAULT_DENYLIST)))
     lessons_path = Path(lessons_path or os.environ.get("AISH_LESSONS", str(DEFAULT_LESSONS)))
@@ -2625,6 +2681,31 @@ def create_app(
 
         agent_holder: list = []
         session_holder: list = []
+
+        def session_title() -> str:
+            if session_holder and session_holder[0].custom_title:
+                return session_holder[0].custom_title
+            return "automated session"
+
+        def notify_hold(event: dict, has_viewers: bool) -> None:
+            # Push the owner when an UNATTENDED triggered session holds on an
+            # approval it can't auto-run (#163). Scoped tightly: only non-user
+            # origins, only when nobody is viewing (an open tab already shows the
+            # card), only when Pushover is configured. Runs on the worker thread
+            # inside Bridge.ask's try/except — a slow/failed push can't stall the
+            # gate (10 s cap, silent on failure).
+            if origin == "user" or has_viewers or not notify.configured():
+                return
+            link = f"{public_url}/?session={log.path.name}" if public_url else None
+            notify.pushover(
+                f"aish needs approval — {session_title()}",
+                _describe_hold(event),
+                url=link,
+                url_title="Review & approve",
+                priority=1,  # high: bypass Pushover quiet hours
+            )
+
+        bridge.on_wait = notify_hold
 
         def get_scope():
             if agent_holder:
@@ -2807,6 +2888,7 @@ def create_app(
     server = WebServer(
         open_session, state_dir, config_path, token, dir_ignore_patterns, console_command
     )
+    server.public_url = public_url  # notification deep-link base (#163)
     server_ref.append(server)
     first, _ = open_session(None)
     server.add_session(first)
