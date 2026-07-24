@@ -4697,7 +4697,11 @@ function consoleReflowViewport() {
   const ov = $("pty-overlay");
   if (window.visualViewport) {
     ov.style.height = `${visualViewport.height}px`;
-    ov.style.top = `${Math.max(0, visualViewport.offsetTop)}px`;
+    // Pin to the top — the body is already frozen (body.console-open). Do NOT
+    // follow visualViewport.offsetTop: a swipe rubber-bands the visual viewport
+    // and, tracking offsetTop, the whole overlay slid down as if scrolling (the
+    // arrow-drag "console goes down" bug). offsetTop is ~0 with the body fixed.
+    ov.style.top = "0px";
     // The keyboard already covers the home-indicator safe area, so drop the
     // overlay's bottom inset while it's up — otherwise it renders as a dead
     // black gap between the key row and the keyboard (#151). Restored (「」) when
