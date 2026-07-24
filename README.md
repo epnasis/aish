@@ -331,3 +331,13 @@ uv run mypy
 Tests script the *model* side (a fake chat client returns canned tool-call
 responses), so the whole suite runs offline with nothing executed for real. See
 `CLAUDE.md` for architecture notes.
+
+---
+
+## License
+
+aish is licensed under the **GNU Affero General Public License v3.0 or later**
+([AGPL-3.0-or-later](LICENSE)). You are free to use, study, modify, and share it,
+but any modified version — **including one you run as a network service** (e.g.
+`aish-web`) — must offer its complete source under the same license to the people
+who use it. This deliberately keeps a hosted fork of the agent open.
