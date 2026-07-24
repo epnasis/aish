@@ -5025,7 +5025,11 @@ let dictating = false;
 let dictateRec = null;
 let dictateLang = localStorage.getItem("aish-dict-lang") || "en-US";
 let dictateBase = "";     // composer text present before dictation began (append)
-let dictateFinal = "";    // finalized transcript, accumulated across restarts
+let dictateFinal = "";    // committed transcript from COMPLETED recognition sessions
+let dictateSession = "";  // the CURRENT session's transcript — rebuilt from results
+                          // each event (never appended), so iOS re-firing the
+                          // cumulative transcript can't duplicate it (#97). Merged
+                          // into dictateFinal when the session ends.
 let dictateEnded = false; // set on stop-word / tap so onend won't restart
 let pendingSpeak = false; // current composer text came from dictation
 let speakNextReply = false; // armed when a dictated message is sent
@@ -5059,7 +5063,7 @@ function dictJoin(a, b) {
 }
 
 function renderDictation(interim) {
-  input.value = dictJoin(dictateBase, dictJoin(dictateFinal, interim));
+  input.value = dictJoin(dictateBase, dictJoin(dictJoin(dictateFinal, dictateSession), interim));
   resizeInput(); // note: never touch the "Ask aish" placeholder
   // Once the textarea hits its max height it scrolls internally — keep the
   // newest dictated words in view instead of stranding you at the top (#97).
@@ -5079,14 +5083,22 @@ function beginRec() {
   dictateRec.continuous = true;
   dictateRec.interimResults = true;
   dictateRec.onresult = (e) => {
-    let interim = "";
-    for (let i = e.resultIndex; i < e.results.length; i++) {
+    // Rebuild THIS session's transcript from all its results every event — never
+    // append per-event. Desktop Chrome accumulates finals across the session, and
+    // iOS re-fires the growing cumulative transcript (often flagged final and
+    // with resultIndex stuck at 0); rebuilding is correct for both and stops the
+    // iOS duplication (#97).
+    let final = "", interim = "";
+    for (let i = 0; i < e.results.length; i++) {
       const chunk = e.results[i][0].transcript;
-      if (e.results[i].isFinal) dictateFinal = dictJoin(dictateFinal, chunk.trim());
-      else interim += chunk;
+      if (e.results[i].isFinal) final += chunk + " "; else interim += chunk;
     }
-    const stripped = stripStopWord(dictateFinal);
-    if (stripped !== dictateFinal) { dictateFinal = stripped; stopDictation(); return; }
+    dictateSession = final.trim(); // REPLACE, not append
+    const combined = dictJoin(dictateFinal, dictateSession);
+    const stripped = stripStopWord(combined);
+    if (stripped !== combined) { // trailing "stop" ends dictation
+      dictateFinal = stripped; dictateSession = ""; stopDictation(); return;
+    }
     renderDictation(interim);
   };
   dictateRec.onerror = (e) => {
@@ -5095,6 +5107,10 @@ function beginRec() {
     stopDictation();
   };
   dictateRec.onend = () => {
+    // Commit this session's transcript before any restart — iOS ends on silence
+    // and a restarted session's results start empty, so without this the text so
+    // far would be lost (and, before the rebuild fix, re-accumulated).
+    if (dictateSession) { dictateFinal = dictJoin(dictateFinal, dictateSession); dictateSession = ""; }
     // iOS ends on silence — keep listening through pauses unless we ended on purpose.
     if (dictating && !dictateEnded) { try { dictateRec.start(); } catch { beginRec(); } }
   };
@@ -5107,6 +5123,7 @@ function startDictation() {
   primeTts(); // unlock iOS audio now (this runs inside the mic-tap gesture)
   dictateBase = input.value.trim();
   dictateFinal = "";
+  dictateSession = "";
   dictateEnded = false;
   dictating = true;
   $("dictate").classList.add("recording");
@@ -5114,6 +5131,7 @@ function startDictation() {
 }
 
 function restartDictation() { // e.g. after a language switch mid-dictation
+  if (dictateSession) { dictateFinal = dictJoin(dictateFinal, dictateSession); dictateSession = ""; }
   if (dictateRec) { dictateRec.onend = null; try { dictateRec.stop(); } catch { /* gone */ } }
   beginRec();
 }
