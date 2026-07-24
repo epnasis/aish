@@ -4365,11 +4365,30 @@ function escapeExit() {
 let ptyTerm = null; // the xterm.js Terminal while the overlay is open, else null
 let ptyFit = null;
 let ptyOpen = false;
+let ptyCtrlArmed = false; // the sticky Ctrl chip: next key is sent as Ctrl+key
+
+// Catppuccin Mocha — matches the CSS palette applied to the command/code
+// surfaces, so the interactive terminal reads as one theme with them.
+const CATPPUCCIN_MOCHA = {
+  background: "#1e1e2e", foreground: "#cdd6f4",
+  cursor: "#f5e0dc", cursorAccent: "#1e1e2e", selectionBackground: "#585b70",
+  black: "#45475a", red: "#f38ba8", green: "#a6e3a1", yellow: "#f9e2af",
+  blue: "#89b4fa", magenta: "#cba6f7", cyan: "#94e2d5", white: "#bac2de",
+  brightBlack: "#585b70", brightRed: "#f38ba8", brightGreen: "#a6e3a1",
+  brightYellow: "#f9e2af", brightBlue: "#89b4fa", brightMagenta: "#f5c2e7",
+  brightCyan: "#94e2d5", brightWhite: "#a6adc8",
+};
 
 function setPtyStatus(text, exited) {
   const el = $("pty-status");
   el.textContent = text || "";
   el.classList.toggle("exited", Boolean(exited));
+}
+
+function setPtyCtrl(on) {
+  ptyCtrlArmed = on;
+  const chip = document.querySelector('.pty-keys button[data-key="ctrl"]');
+  if (chip) chip.classList.toggle("armed", on);
 }
 
 function ptySend(data) {
@@ -4401,12 +4420,25 @@ function openPty() {
     fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
     fontSize: 13,
     scrollback: 5000,
-    theme: { background: "#000000", foreground: "#e5e5ea" },
+    // Mouse reporting is forwarded to the program when it asks for it (tmux/vim
+    // mouse mode), so a swipe scrolls the app's panes; otherwise the touch
+    // scrolls xterm's own scrollback.
+    theme: CATPPUCCIN_MOCHA,
   });
   ptyFit = new FitAddon.FitAddon();
   ptyTerm.loadAddon(ptyFit);
   ptyTerm.open(screen);
-  ptyTerm.onData((data) => ptySend(data)); // THE input path; the model never reaches it
+  // THE input path; the model never reaches it. A sticky Ctrl chip (#148) arms
+  // one keystroke: while armed, the next single char is sent as its control
+  // code (Ctrl-A for the tmux prefix, Ctrl-W in vim, …), then disarms.
+  ptyTerm.onData((data) => {
+    if (ptyCtrlArmed && data.length === 1) {
+      const c = data.toUpperCase().charCodeAt(0);
+      if (c >= 64 && c <= 95) data = String.fromCharCode(c & 0x1f); // ^@ .. ^_
+      setPtyCtrl(false);
+    }
+    ptySend(data);
+  });
   // Hardware Esc leaves the overlay (#143) instead of going to the program; the
   // on-screen "esc" chip still sends \x1b. Returning false stops xterm from
   // handling the key (and lets it bubble to the global Esc handler too).
@@ -4432,6 +4464,7 @@ function closePty(kill = true) {
   if (kill) send({ type: "pty_kill" });
   $("pty-overlay").hidden = true;
   $("pty-share").hidden = true;
+  setPtyCtrl(false);
   if (ptyTerm) { ptyTerm.dispose(); ptyTerm = null; ptyFit = null; }
 }
 
@@ -4467,6 +4500,7 @@ document.querySelector(".pty-keys").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-key]");
   if (!btn) return;
   if (btn.dataset.key === "kb") { if (ptyTerm) ptyTerm.focus(); return; } // re-summon keyboard
+  if (btn.dataset.key === "ctrl") { setPtyCtrl(!ptyCtrlArmed); if (ptyTerm) ptyTerm.focus(); return; }
   const CTRL = { tab: "\t", esc: "\x1b", "ctrl-c": "\x03", "ctrl-d": "\x04", up: "\x1b[A", down: "\x1b[B" };
   const seq = CTRL[btn.dataset.key];
   if (seq != null) ptySend(seq);

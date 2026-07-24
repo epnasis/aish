@@ -21,6 +21,24 @@
   --orange: #ff9f0a;
   --purple: #bf5af2;
   --cyan: #64d2ff;
+  /* Catppuccin Mocha — scoped to the terminal + command/code surfaces (not the
+     app chrome): the interactive terminal (xterm), run_command output, and
+     fenced code snippets. */
+  --ctp-base: #1e1e2e;
+  --ctp-mantle: #181825;
+  --ctp-surface0: #313244;
+  --ctp-text: #cdd6f4;
+  --ctp-subtext: #a6adc8;
+  --ctp-overlay: #7f849c;
+  --ctp-red: #f38ba8;
+  --ctp-green: #a6e3a1;
+  --ctp-yellow: #f9e2af;
+  --ctp-blue: #89b4fa;
+  --ctp-mauve: #cba6f7;
+  --ctp-pink: #f5c2e7;
+  --ctp-teal: #94e2d5;
+  --ctp-peach: #fab387;
+  --ctp-sky: #89dceb;
   /* Translucent iOS system fills — used for chips, selected rows, pill
      backgrounds that must read on any surface (they are grey-neutral). */
   --sep2: #48484a;
@@ -558,14 +576,14 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .a-dim { opacity: 0.6; }
 .a-i { font-style: italic; }
 .a-u { text-decoration: underline; }
-.a-fg30, .a-fg90 { color: #7c7c82; }
-.a-fg31, .a-fg91 { color: var(--red); }
-.a-fg32, .a-fg92 { color: var(--green); }
-.a-fg33, .a-fg93 { color: var(--yellow); }
-.a-fg34, .a-fg94 { color: var(--blue); }
-.a-fg35, .a-fg95 { color: #bf5af2; }
-.a-fg36, .a-fg96 { color: var(--cyan); }
-.a-fg37, .a-fg97 { color: #ffffff; }
+.a-fg30, .a-fg90 { color: var(--ctp-overlay); }
+.a-fg31, .a-fg91 { color: var(--ctp-red); }
+.a-fg32, .a-fg92 { color: var(--ctp-green); }
+.a-fg33, .a-fg93 { color: var(--ctp-yellow); }
+.a-fg34, .a-fg94 { color: var(--ctp-blue); }
+.a-fg35, .a-fg95 { color: var(--ctp-mauve); }
+.a-fg36, .a-fg96 { color: var(--ctp-teal); }
+.a-fg37, .a-fg97 { color: var(--ctp-text); }
 
 /* ---- markdown in answers ---- */
 .msg.md { white-space: normal; }
@@ -582,7 +600,8 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   padding: 2px 5px;
 }
 .msg.md pre {
-  background: var(--bg-elev);
+  background: var(--ctp-mantle);
+  color: var(--ctp-text);
   border-radius: var(--r-card);
   padding: 12px;
   margin: 10px 0;
@@ -591,18 +610,19 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md pre code { background: none; padding: 0; white-space: pre; }
 /* highlight.js token colors — mapped onto the app's own palette (no stock
    hljs theme shipped) so highlighted fences match the rest of the UI. */
-.hljs .hljs-keyword, .hljs .hljs-selector-tag, .hljs .hljs-literal { color: var(--purple); }
-.hljs .hljs-string, .hljs .hljs-attr, .hljs .hljs-regexp { color: var(--green); }
-.hljs .hljs-number, .hljs .hljs-symbol { color: var(--orange); }
-.hljs .hljs-comment, .hljs .hljs-quote { color: var(--dim); font-style: italic; }
-.hljs .hljs-title, .hljs .hljs-title.function_, .hljs .hljs-section { color: var(--blue); }
-.hljs .hljs-type, .hljs .hljs-class .hljs-title { color: var(--cyan); }
-.hljs .hljs-variable, .hljs .hljs-template-variable, .hljs .hljs-params { color: var(--fg); }
-.hljs .hljs-built_in, .hljs .hljs-name { color: var(--yellow); }
-.hljs .hljs-tag { color: var(--dim); }
-.hljs .hljs-attribute { color: var(--orange); }
-.hljs .hljs-deletion { color: var(--red); }
-.hljs .hljs-addition { color: var(--green); }
+.hljs { color: var(--ctp-text); }
+.hljs .hljs-keyword, .hljs .hljs-selector-tag, .hljs .hljs-literal { color: var(--ctp-mauve); }
+.hljs .hljs-string, .hljs .hljs-attr, .hljs .hljs-regexp { color: var(--ctp-green); }
+.hljs .hljs-number, .hljs .hljs-symbol { color: var(--ctp-peach); }
+.hljs .hljs-comment, .hljs .hljs-quote { color: var(--ctp-overlay); font-style: italic; }
+.hljs .hljs-title, .hljs .hljs-title.function_, .hljs .hljs-section { color: var(--ctp-blue); }
+.hljs .hljs-type, .hljs .hljs-class .hljs-title { color: var(--ctp-yellow); }
+.hljs .hljs-variable, .hljs .hljs-template-variable, .hljs .hljs-params { color: var(--ctp-text); }
+.hljs .hljs-built_in, .hljs .hljs-name { color: var(--ctp-red); }
+.hljs .hljs-tag { color: var(--ctp-subtext); }
+.hljs .hljs-attribute { color: var(--ctp-peach); }
+.hljs .hljs-deletion { color: var(--ctp-red); }
+.hljs .hljs-addition { color: var(--ctp-green); }
 .hljs .hljs-emphasis { font-style: italic; }
 .hljs .hljs-strong { font-weight: 700; }
 .msg.md blockquote {
@@ -1917,7 +1937,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* empty stdout/stderr: a compact one-liner (with the exit code) instead of an
    empty box carrying copy/wrap/expand controls for nothing. */
 .out-empty { font-size: 13.2px; color: var(--dim); padding: 2px 0; }
-.out-box { border-radius: 10px; background: var(--bg); border: 0.5px solid var(--sep); overflow: hidden; }
+.out-box { border-radius: 10px; background: var(--ctp-base); border: 0.5px solid var(--sep); overflow: hidden; }
 .out-box.error { border-color: var(--red-glow); }
 .out-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; }
 .out-label { flex: 1; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--dim); }
@@ -1930,7 +1950,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .out-actions .copy-chip svg { width: 15px; height: 15px; }
 .out-scroll { position: relative; max-height: 96px; overflow: auto; border-top: 0.5px solid var(--sep); transition: max-height 0.2s; }
 .out-box.expanded .out-scroll { max-height: 360px; }
-.out-body { padding: 8px 12px; font-size: calc(13.2px * var(--fs)); line-height: 1.6; color: var(--dim); white-space: pre; }
+.out-body { padding: 8px 12px; font-size: calc(13.2px * var(--fs)); line-height: 1.6; color: var(--ctp-text); white-space: pre; }
 .out-box.wrap-on .out-body, body.wrap .out-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 .out-fade { position: absolute; left: 0; right: 0; bottom: 0; height: 26px; pointer-events: none; background: linear-gradient(transparent, var(--bg)); display: none; }
 .out-box.collapsible:not(.expanded) .out-fade { display: block; }
@@ -1942,7 +1962,7 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
    inner scroll so iOS never scroll-traps it), and a pinned exit-code line.
    The two rules signal that the copy chip covers the output only. */
 .term-block {
-  margin-top: 8px; border-radius: 10px; background: #000;
+  margin-top: 8px; border-radius: 10px; background: var(--ctp-base);
   border: 0.5px solid var(--sep); overflow: hidden; font-size: 13.2px;
 }
 .term-prompt-wrap { position: relative; }
@@ -1954,12 +1974,13 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-block.term-cnowrap .term-prompt {
   white-space: pre; overflow-wrap: normal; word-break: normal; overflow-x: auto;
 }
-.term-dir { color: var(--blue); }
-.term-dollar { color: var(--green); margin: 0 6px 0 3px; }
-.term-cmd { color: var(--fg); }
+.term-dir { color: var(--ctp-blue); }
+.term-dollar { color: var(--ctp-green); margin: 0 6px 0 3px; }
+.term-cmd { color: var(--ctp-text); }
+.term-prompt { color: var(--ctp-text); }
 .term-rule { height: 0; border-top: 0.5px solid var(--sep); }
 .term-out-wrap { position: relative; }
-.term-out { padding: 8px 12px; line-height: 1.6; color: var(--dim); white-space: pre; overflow-x: auto; font-size: calc(15px * var(--fs)); }
+.term-out { padding: 8px 12px; line-height: 1.6; color: var(--ctp-text); white-space: pre; overflow-x: auto; font-size: calc(15px * var(--fs)); }
 /* Wrapping is owned solely by the per-block toggle (seeded from body.wrap at
    build time) — do NOT also key it off body.wrap, or the global setting would
    override the local toggle and it could never unwrap. */
@@ -2198,9 +2219,11 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
    inner .xterm; we only size it and paint the frame. */
 .pty-screen {
   flex: 1; min-height: 0; overflow: hidden;
-  padding: 6px 8px; background: #000000;
+  padding: 6px 8px; background: var(--ctp-base);
 }
 .pty-screen .xterm { height: 100%; }
+/* Momentum touch-scrolling of xterm's scrollback on iOS. */
+.pty-screen .xterm-viewport { -webkit-overflow-scrolling: touch; }
 .pty-keys {
   display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto;
   border-top: 1px solid #26262b; background: rgba(20, 20, 24, 0.95);
@@ -2211,4 +2234,6 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   padding: 8px 13px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 .pty-keys button:active { background: #2c2c30; }
+/* The sticky Ctrl chip glows while armed (the next key is sent as Ctrl+key). */
+.pty-keys button.armed { background: var(--ctp-mauve); color: #1e1e2e; border-color: var(--ctp-mauve); }
 .pty-key-kb { margin-left: auto; }

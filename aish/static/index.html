@@ -248,10 +248,11 @@
   <!-- xterm.js mounts its own canvas + input textarea into this container. -->
   <div id="pty-screen" class="pty-screen" aria-live="polite"></div>
   <div class="pty-keys" role="group" aria-label="control keys">
-    <button type="button" data-key="tab">tab</button>
     <button type="button" data-key="esc">esc</button>
+    <button type="button" data-key="ctrl" title="Sticky Ctrl: tap, then a key → Ctrl+key">ctrl</button>
     <button type="button" data-key="ctrl-c">^C</button>
     <button type="button" data-key="ctrl-d">^D</button>
+    <button type="button" data-key="tab">tab</button>
     <button type="button" data-key="up">↑</button>
     <button type="button" data-key="down">↓</button>
     <button type="button" data-key="kb" class="pty-key-kb">keyboard</button>
