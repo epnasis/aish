@@ -4922,16 +4922,19 @@ $("pty-font-dec").onclick = () => consoleFontStep(-1);
 $("pty-font-inc").onclick = () => consoleFontStep(1);
 // The contextual Copy button in the console header: it appears only when text
 // is selected, so it copies THAT selection (never "all"), then clears it and
-// leaves Select mode. Runs inside this tap's gesture, so the clipboard write is
-// allowed even on iOS / plain-http.
-$("pty-share").onclick = () => {
+// leaves Select mode. Handled on POINTERDOWN with preventDefault: tapping a
+// button otherwise collapses the current selection before a click handler runs,
+// so we'd read nothing (and neither copy nor exit). preventDefault keeps the
+// selection intact, and pointerdown is still a user gesture for the clipboard.
+$("pty-share").addEventListener("pointerdown", (e) => {
+  e.preventDefault();
   const sel = consoleSelectionText().trim();
-  if (!sel) { showToast("nothing selected"); return; }
-  copyText(sel).then((ok) => showToast(ok ? "copied" : "copy blocked"));
+  if (sel) copyText(sel).then((ok) => showToast(ok ? "copied" : "copy blocked"));
+  else showToast("nothing selected");
   if (window.getSelection) window.getSelection().removeAllRanges();
-  if (consoleSelectMode) setConsoleSelectMode(false);
+  if (consoleSelectMode) setConsoleSelectMode(false); // always leave Select mode
   $("pty-share").hidden = true;
-};
+});
 // Native (touch) selection changes don't fire xterm's onSelectionChange, so
 // mirror the Copy button's visibility off the document selection too — checking
 // the combined state so a collapsed native selection hides it (unless xterm
