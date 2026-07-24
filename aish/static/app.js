@@ -2747,6 +2747,7 @@ async function exportAnswerPdf(markdown, title, btn) {
   const query = new URLSearchParams({ title: (title || "").trim() || "aish answer" });
   if (token) query.set("token", token);
   if (btn) btn.disabled = true;
+  showToast("Exporting to PDF…", true);
   try {
     const response = await fetch(`${BASE}export/answer?${query}`, {
       method: "POST",
@@ -2759,6 +2760,7 @@ async function exportAnswerPdf(markdown, title, btn) {
       return;
     }
     saveBlob(await response.blob(), dispositionName(response, "aish-answer.pdf"));
+    showToast("Exported");
   } catch {
     showToast("export failed — is the server reachable?");
   } finally {
@@ -2766,18 +2768,31 @@ async function exportAnswerPdf(markdown, title, btn) {
   }
 }
 
-// Whole-session export (final answers only) — a plain GET the browser turns
-// into a download via Content-Disposition, so an anchor click is enough.
-function exportSessionPdf() {
-  if (!currentSession) return;
+// Whole-session export (final answers only). Rendering a long session takes a
+// few seconds, so this fetches the blob (rather than a fire-and-forget anchor)
+// to show a sticky "Exporting…" toast that resolves to done/failed — otherwise
+// pressing the shortcut or the menu item gives no sign anything happened.
+let sessionExporting = false;
+async function exportSessionPdf() {
+  if (!currentSession || sessionExporting) return;
+  sessionExporting = true;
+  showToast("Exporting session to PDF…", true);
   const query = new URLSearchParams({ session: currentSession });
   if (token) query.set("token", token);
-  const a = document.createElement("a");
-  a.href = `${BASE}export/session?${query}`;
-  a.download = "aish-session.pdf";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  try {
+    const response = await fetch(`${BASE}export/session?${query}`);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      showToast(`export failed: ${body.error || response.status}`);
+      return;
+    }
+    saveBlob(await response.blob(), dispositionName(response, "aish-session.pdf"));
+    showToast("Session exported");
+  } catch {
+    showToast("export failed — is the server reachable?");
+  } finally {
+    sessionExporting = false;
+  }
 }
 
 function exportChip(getText, getTitle) {
@@ -6634,12 +6649,19 @@ $("dir-use").onclick = () => {
 };
 // toast
 let toastTimer;
-function showToast(text) {
+// sticky keeps the toast up until the next showToast/hideToast — used for
+// in-progress feedback (e.g. a slow PDF export) that a later call resolves.
+function showToast(text, sticky = false) {
   const toast = $("toast");
   toast.textContent = text;
   toast.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toast.hidden = true; }, 3500);
+  if (!sticky) toastTimer = setTimeout(() => { toast.hidden = true; }, 3500);
+}
+
+function hideToast() {
+  clearTimeout(toastTimer);
+  $("toast").hidden = true;
 }
 
 // Copy to the clipboard with a toast, falling back to an execCommand copy off a
