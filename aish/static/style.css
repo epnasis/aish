@@ -2203,7 +2203,8 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   color: #d8d8dc; font-size: 13.5px; font-weight: 600; padding: 6px 13px;
 }
 .pty-headbtn:active { opacity: 0.6; }
-#pty-share { color: var(--blue); border-color: var(--blue-border); }
+#pty-share { color: var(--blue); border-color: var(--blue-border); display: inline-flex; align-items: center; gap: 5px; }
+#pty-share svg { display: block; }
 #pty-share[hidden] { display: none; }
 /* xterm.js mounts its canvas + input textarea here; the container needs a
    definite size for the fit addon to derive cols/rows. xterm.css styles the

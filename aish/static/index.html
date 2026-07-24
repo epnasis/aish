@@ -229,11 +229,11 @@
     <div class="pty-head-tools">
       <button id="pty-font-dec" class="pty-headbtn pty-fontbtn" type="button" aria-label="smaller text">A−</button>
       <button id="pty-font-inc" class="pty-headbtn pty-fontbtn" type="button" aria-label="larger text">A+</button>
-      <button id="pty-share" class="pty-headbtn" type="button" title="Share the selected output to the chat">Share ›</button>
+      <button id="pty-share" class="pty-headbtn" type="button" title="Copy the selection" aria-label="copy the selection"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2.5"/></svg>Copy</button>
       <button id="pty-close" class="pty-headbtn" type="button" aria-label="hide console" title="Hide (keeps running)">Close ✕</button>
     </div>
   </div>
-  <!-- tabindex so the screen can hold selection for "share"; the real key
+  <!-- the screen holds the selection for the Copy button; the real key
        capture happens on the hidden input below, which summons the keyboard. -->
   <!-- xterm.js mounts its own canvas + input textarea into this container. -->
   <div id="pty-screen" class="pty-screen" aria-live="polite"></div>

@@ -4920,13 +4920,20 @@ function onConsoleExit(code) {
 $("pty-close").onclick = () => hideConsole();
 $("pty-font-dec").onclick = () => consoleFontStep(-1);
 $("pty-font-inc").onclick = () => consoleFontStep(1);
+// The contextual Copy button in the console header: it appears only when text
+// is selected, so it copies THAT selection (never "all"), then clears it and
+// leaves Select mode. Runs inside this tap's gesture, so the clipboard write is
+// allowed even on iOS / plain-http.
 $("pty-share").onclick = () => {
   const sel = consoleSelectionText().trim();
-  if (!sel) { showToast("select some output first, then Share"); return; }
-  send({ type: "console_share", text: sel });
+  if (!sel) { showToast("nothing selected"); return; }
+  copyText(sel).then((ok) => showToast(ok ? "copied" : "copy blocked"));
+  if (window.getSelection) window.getSelection().removeAllRanges();
+  if (consoleSelectMode) setConsoleSelectMode(false);
+  $("pty-share").hidden = true;
 };
 // Native (touch) selection changes don't fire xterm's onSelectionChange, so
-// mirror the Share button's visibility off the document selection too — checking
+// mirror the Copy button's visibility off the document selection too — checking
 // the combined state so a collapsed native selection hides it (unless xterm
 // still holds one from a desktop mouse drag).
 document.addEventListener("selectionchange", () => {
