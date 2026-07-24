@@ -357,10 +357,11 @@ function onHello(event) {
   if (event.rev && event.rev !== PAGE_REV) { location.reload(); return; }
   // The interactive console is GLOBAL (#148 follow-up): it floats above whatever
   // chat is shown and is untouched by a session switch. A hello also means a
-  // (re)connect, though — the server dropped us from the console viewer set on
-  // the old socket, so if the overlay is open re-attach to the still-running
-  // console (tmux redraws current state into the terminal).
+  // (re)connect. `#console` is a deep-link that survives a reload / server
+  // restart (incl. the rev-reload above), so restore the overlay from it; on a
+  // plain reconnect it is already open and we just re-attach (tmux redraws).
   if (consoleOpen) send({ type: "console_open" });
+  else if (location.hash === "#console") openConsole();
   $("model-name").textContent = event.model;
   setTitle(event.title);
   pagerSessions = event.pager || [];
@@ -4476,6 +4477,7 @@ function openConsole() {
     return;
   }
   if (consoleOpen) return; // already showing (e.g. a reconnect reattach)
+  if (location.hash !== "#console") history.replaceState(null, "", "#console"); // deep-link: survives reload/restart
   $("pty-overlay").hidden = false;
   $("pty-share").hidden = true;
   setConsoleStatus("attaching…");
@@ -4553,6 +4555,7 @@ function hideConsole() {
   if (!consoleOpen) return;
   consoleOpen = false;
   send({ type: "console_close" });
+  if (location.hash === "#console") history.replaceState(null, "", location.pathname + location.search);
   const ov = $("pty-overlay");
   ov.hidden = true;
   ov.style.height = ""; ov.style.top = ""; // drop the viewport-fit inline styles

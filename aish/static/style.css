@@ -2250,3 +2250,8 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pty-key-kb { margin-left: auto; display: flex; align-items: center; padding: 6px 12px; }
 .pty-key-kb svg { display: block; }
 .pty-fontbtn { padding: 6px 11px; font-weight: 700; min-width: 40px; }
+/* The on-screen key chips are a TOUCH affordance; a desktop has a real keyboard
+   (Esc, Ctrl, Cmd/Ctrl+C/V), so hide the row there — the terminal fills the space. */
+@media (hover: hover) and (pointer: fine) {
+  .pty-keys { display: none; }
+}
