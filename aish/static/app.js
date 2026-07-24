@@ -4700,11 +4700,12 @@ if (window.visualViewport) {
 document.addEventListener("gesturestart", (e) => e.preventDefault());
 document.addEventListener("gesturechange", (e) => e.preventDefault());
 
-// iOS terminal scroll (#151/#154 follow-up): xterm's viewport doesn't reliably
-// scroll on touch, and any leftover page scroll drags the chat into view behind
-// the overlay. So drive the scrollback DIRECTLY from the touch delta and
-// preventDefault, so a one-finger swipe scrolls the terminal and the page can
-// never move. Wired once on the persistent #pty-screen; guarded by consoleOpen.
+// iOS terminal scroll: a touch swipe doesn't scroll xterm on its own, so
+// translate it into a real WHEEL event and let xterm handle it EXACTLY like the
+// desktop mouse wheel — scrollback in normal mode, and forwarded as mouse-wheel
+// to the program (tmux / vim / less) when it has mouse mode on. preventDefault
+// so the page behind the console never moves. Wired once on the persistent
+// #pty-screen, guarded by consoleOpen. (#151 follow-up)
 (() => {
   const screen = $("pty-screen");
   let touchY = 0;
@@ -4713,13 +4714,16 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
   }, { passive: true });
   screen.addEventListener("touchmove", (e) => {
     if (!consoleOpen || e.touches.length !== 1) return;
-    const vp = screen.querySelector(".xterm-viewport");
-    if (vp) {
-      const y = e.touches[0].clientY;
-      vp.scrollTop += touchY - y; // natural direction: swipe up scrolls down
-      touchY = y;
-    }
-    e.preventDefault(); // never let the swipe scroll the page behind the console
+    e.preventDefault(); // the swipe drives the terminal, not the page
+    const y = e.touches[0].clientY;
+    const deltaY = touchY - y; // natural: swipe up → wheel down (toward newer)
+    touchY = y;
+    if (!deltaY) return;
+    // Dispatch on the touched element so it routes through xterm's own wheel
+    // listeners (scrollback OR mouse-mode forwarding), same as a desktop wheel.
+    (e.target || screen).dispatchEvent(
+      new WheelEvent("wheel", { deltaY, deltaMode: 0, bubbles: true, cancelable: true })
+    );
   }, { passive: false });
 })();
 
