@@ -4548,6 +4548,19 @@ function consoleSend(data) {
   if (consoleOpen) send({ type: "console_in", data });
 }
 
+// [OSC52-DECODE-START]
+// Decode an OSC 52 clipboard payload ("<selection>;<base64>") to its text, or
+// null for a clipboard-READ request ("?") or malformed data. base64 → utf-8 via
+// atob + escape (atob yields a binary string; escape/decodeURIComponent widen
+// it back to the original multibyte characters).
+function oscClipboardText(data) {
+  const semi = data.indexOf(";");
+  const b64 = semi >= 0 ? data.slice(semi + 1) : "";
+  if (!b64 || b64 === "?") return null;
+  try { return decodeURIComponent(escape(atob(b64))); } catch (e) { return null; }
+}
+// [OSC52-DECODE-END]
+
 // [CONSOLE-LINKS-START]
 // A link provider for the console terminal that finds URLs even when they wrap
 // across rows tmux did NOT mark as soft-wrapped (#153). We reconstruct a logical
@@ -4671,6 +4684,16 @@ function openConsole() {
   consoleTerm.registerLinkProvider(
     consoleLinkProvider(consoleTerm, (event, uri) => window.open(uri, "_blank", "noopener"))
   );
+  // Clipboard bridge (#153): with tmux `set-clipboard on`, a copy on the REMOTE
+  // terminal (a mouse-drag selection, `y` in copy-mode, vim, …) emits an OSC 52
+  // sequence carrying the text. xterm.js ignores OSC 52 by default; handle it and
+  // write the decoded text to the LOCAL desktop clipboard. A "?" payload is a
+  // clipboard-READ request — we never answer it (don't leak the clipboard back).
+  consoleTerm.parser.registerOscHandler(52, (data) => {
+    const text = oscClipboardText(data);
+    if (text) copyText(text).then((ok) => showToast(ok ? "copied" : "copy blocked"));
+    return true;
+  });
   consoleTerm.open(screen);
   // THE input path; the model never reaches it. The sticky Ctrl chip (#148):
   // while "armed" or "locked" the next single char is sent as its control code
@@ -4694,11 +4717,12 @@ function openConsole() {
     // stopPropagation on Ctrl+\ so the document handler doesn't re-toggle the
     // console open right after we close it.
     if ((e.metaKey || e.ctrlKey) && e.key === "\\") { e.preventDefault(); e.stopPropagation(); hideConsole(); input.focus(); return false; }
-    // Cmd/Ctrl+Shift+C/V for copy/paste — never plain Ctrl+C (that's SIGINT to
-    // the program). Cmd (meta) alone works too on macOS where it can't collide.
+    // Cmd/Ctrl+Shift+C to copy the xterm selection — never plain Ctrl+C (that's
+    // SIGINT to the program). Cmd (meta) alone works too on macOS. Paste is NOT
+    // intercepted: xterm handles the browser paste event natively, and grabbing
+    // it here too pasted the text twice (#153).
     const copyCombo = (e.metaKey && !e.ctrlKey) || (e.ctrlKey && e.shiftKey);
     if (copyCombo && (e.key === "c" || e.key === "C")) { consoleCopy(); return false; }
-    if (copyCombo && (e.key === "v" || e.key === "V")) { consolePaste(); return false; }
     return true;
   });
   consoleTerm.onSelectionChange(() => {

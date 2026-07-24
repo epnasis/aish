@@ -1602,7 +1602,14 @@ class WebServer:
         if self.console_command:
             return self.console_command, False
         if shutil.which("tmux"):
-            return f"tmux new-session -A -s {shlex.quote(TMUX_CONSOLE_SESSION)}", True
+            # `set-clipboard on` (server-global) makes tmux emit an OSC 52
+            # clipboard sequence when you copy — including a mouse-drag copy — so
+            # the frontend's OSC 52 handler can put a REMOTE selection onto the
+            # local desktop clipboard (#153). Runs before new-session so the
+            # option is set whether we create or reattach; `\;` is tmux's command
+            # separator (sh passes the literal `;` through).
+            session = shlex.quote(TMUX_CONSOLE_SESSION)
+            return f"tmux set-option -g set-clipboard on \\; new-session -A -s {session}", True
         return (os.environ.get("SHELL") or "/bin/bash"), False
 
     def _console_cwd(self) -> str:
