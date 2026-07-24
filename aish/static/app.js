@@ -249,7 +249,12 @@ function handle(event) {
       if (!sessionTitled) setTitle(event.text.split("\n")[0]);
       rememberPrompt(stripAttachmentNotes(event.text));
       lastUserPrompt = stripAttachmentNotes(event.text); // for error Retry
-      turnAnchorEl = addUserMsg(event.text); // response-start anchor (until a trace supersedes it)
+      // A user-direct `!` command is already fully shown by the terminal block
+      // that follows — its prompt line carries the command. The extra blue
+      // user-input bubble duplicated that and, on a restored session, rendered
+      // the raw (multi-line) command as if typed into chat (#154). So skip the
+      // bubble for `!` commands; the turn-boundary handling above still runs.
+      turnAnchorEl = event.text.startsWith("!") ? null : addUserMsg(event.text);
       // Your own message always comes into view, even if you were scrolled up.
       if (!replaying) scrollToEnd(true);
       break;
