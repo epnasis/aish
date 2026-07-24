@@ -1873,12 +1873,10 @@ function updateScrollButton() {
 }
 
 messagesEl.addEventListener("scroll", updateScrollButton, { passive: true });
-// Re-evaluate on focus/blur so the arrows hide the instant the composer takes
-// focus (keyboard up) and reappear when it's dismissed (#115). Use $("input")
-// here, not the `input` const — it's declared later in the file, so referencing
-// the variable at this top-level line would hit its temporal dead zone.
-$("input").addEventListener("focus", updateScrollButton);
-$("input").addEventListener("blur", updateScrollButton);
+// The composer's focus/blur listeners (arrows hide the instant it takes focus,
+// #115) are attached in attachInputListeners together with keydown/input, since
+// terminal mode swaps the #input node for a fresh one (#156) and every listener
+// must move with it.
 
 $("scroll-down").onclick = () => {
   messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
@@ -3807,7 +3805,9 @@ function onApprovalResolved(event) {
 }
 
 // ---- composer + autocomplete ---------------------------------------------
-const input = $("input");
+// `let`, not `const`: terminal mode swaps this node for a fresh element (#156),
+// so the reference is reassigned by swapComposerInput.
+let input = $("input");
 
 // Half-typed text must survive the reloads the app performs on itself (rev
 // mismatch after a server upgrade) and PWA relaunches. Saved while typing,
@@ -3937,7 +3937,9 @@ $("composer").addEventListener("submit", (e) => {
   submitInput();
 });
 
-input.addEventListener("keydown", (e) => {
+// The composer's listeners live in named functions so they can be re-bound to
+// the fresh #input node terminal mode swaps in (attachInputListeners, #156).
+function onInputKeydown(e) {
   if (!$("suggest").hidden) {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
@@ -3973,20 +3975,20 @@ input.addEventListener("keydown", (e) => {
     e.preventDefault();
     submitInput();
   }
-});
+}
 
 // iOS soft keyboards don't fire a reliable Enter keydown on a <textarea> — the
 // return key arrives as a beforeinput/insertLineBreak. In terminal mode that
 // key must RUN the command like a real shell, not drop a newline. Desktop is
 // handled by the keydown above (which cancels this default), so no double-run.
-input.addEventListener("beforeinput", (e) => {
+function onInputBeforeInput(e) {
   if (cmdMode && e.inputType === "insertLineBreak") {
     e.preventDefault();
     submitCommand();
   }
-});
+}
 
-input.addEventListener("input", () => {
+function onInputInput() {
   // `!` as the sole character of an empty composer enters terminal mode (#100),
   // consuming the `!` — the mode's prompt implies it from then on.
   if (!cmdMode && input.value === "!") { enterCmdMode(); return; }
@@ -3998,7 +4000,19 @@ input.addEventListener("input", () => {
   saveDraft();
   resizeInput();
   updateSuggest();
-});
+}
+
+// Bind every composer listener to `el`. Terminal mode swaps #input for a fresh
+// node (so iOS reads the terminal keyboard attributes at first focus — #156),
+// and this re-binds the same handlers to whichever node is currently active.
+function attachInputListeners(el) {
+  el.addEventListener("focus", updateScrollButton);  // arrows hide on focus (#115)
+  el.addEventListener("blur", updateScrollButton);
+  el.addEventListener("keydown", onInputKeydown);
+  el.addEventListener("beforeinput", onInputBeforeInput);
+  el.addEventListener("input", onInputInput);
+}
+attachInputListeners(input);
 
 function atFragment(text) {
   const at = text.lastIndexOf("@");
@@ -4344,17 +4358,8 @@ function enterCmdMode() {
   $("cmd-prompt").hidden = false;
   refreshCmdPrompt();
   $("attach").setAttribute("aria-label", "exit terminal mode");
-  input.setAttribute("enterkeyhint", "go"); // iOS return key reads "Go" — it runs the command
-  // Terminal mode is a CLI, not prose: iOS otherwise capitalizes the first
-  // letter and autocorrects shell syntax into broken commands (#156). iOS only
-  // re-reads these on focus, so refocusInput() below forces them to apply now.
-  input.setAttribute("autocorrect", "off");
-  input.setAttribute("autocapitalize", "off");
-  input.setAttribute("spellcheck", "false");
-  input.placeholder = "";
-  input.value = "";
+  swapComposerInput(true); // fresh #input with terminal keyboard attrs (#156)
   resizeInput();
-  refocusInput();
   setInputTyping(true);
 }
 
@@ -4365,28 +4370,39 @@ function exitCmdMode() {
   $("cmd-prompt").hidden = true;
   hideSuggest();
   $("attach").setAttribute("aria-label", "actions");
-  input.removeAttribute("enterkeyhint"); // back to a normal multi-line composer
-  // Restore the prose defaults (matches index.html): chat wants sentence-case
-  // and spellcheck back (#156).
-  input.setAttribute("autocorrect", "on");
-  input.setAttribute("autocapitalize", "sentences");
-  input.setAttribute("spellcheck", "true");
-  input.placeholder = "Ask aish";
-  input.value = "";
+  swapComposerInput(false); // fresh #input back to prose keyboard attrs (#156)
   resizeInput();
-  refocusInput();
   setInputTyping(false);
 }
 
-// iOS applies autocorrect/autocapitalize/enterkeyhint changes only when an
-// element takes focus — an already-focused composer keeps the OLD keyboard. A
-// synchronous blur+focus in the same tick forces the soft keyboard to re-read
-// the attributes without visibly dismissing (the refocus lands before iOS
-// tears the keyboard down); on desktop it's a harmless no-op.
-function refocusInput() {
-  const active = document.activeElement === input;
-  if (active) input.blur();
-  input.focus();
+// Replace #input with a fresh <textarea> that carries the target mode's keyboard
+// attributes FROM BIRTH, then focus it. This is the reliable iOS fix for #156:
+// iOS reads autocorrect/autocapitalize/spellcheck (and enterkeyhint) only when a
+// field is first focused and ignores changes to an already-focused field — so
+// terminal mode can't just flip attributes on the shared composer. Swapping in a
+// new node and focusing it WITHIN the `!` keystroke (or exit tap) gesture makes
+// iOS pick up the terminal keyboard immediately. The clone keeps id="input", so
+// all composer CSS applies unchanged; every listener re-binds to the new node.
+function swapComposerInput(cmd) {
+  const fresh = input.cloneNode(false);
+  fresh.value = "";
+  if (cmd) {
+    fresh.setAttribute("autocorrect", "off");
+    fresh.setAttribute("autocapitalize", "off");
+    fresh.setAttribute("spellcheck", "false");
+    fresh.setAttribute("enterkeyhint", "go"); // iOS return key reads "Go" — runs the command
+    fresh.placeholder = "";
+  } else {
+    fresh.setAttribute("autocorrect", "on");
+    fresh.setAttribute("autocapitalize", "sentences");
+    fresh.setAttribute("spellcheck", "true");
+    fresh.removeAttribute("enterkeyhint");
+    fresh.placeholder = "Ask aish";
+  }
+  input.replaceWith(fresh);
+  input = fresh;
+  attachInputListeners(input);
+  input.focus(); // synchronous, within the user gesture → iOS shows the new keyboard
 }
 
 // Insert a trigger char and fire the input flow (mention / slash suggestions).
