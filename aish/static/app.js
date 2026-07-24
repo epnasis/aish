@@ -4692,6 +4692,29 @@ if (window.visualViewport) {
 document.addEventListener("gesturestart", (e) => e.preventDefault());
 document.addEventListener("gesturechange", (e) => e.preventDefault());
 
+// iOS terminal scroll (#151/#154 follow-up): xterm's viewport doesn't reliably
+// scroll on touch, and any leftover page scroll drags the chat into view behind
+// the overlay. So drive the scrollback DIRECTLY from the touch delta and
+// preventDefault, so a one-finger swipe scrolls the terminal and the page can
+// never move. Wired once on the persistent #pty-screen; guarded by consoleOpen.
+(() => {
+  const screen = $("pty-screen");
+  let touchY = 0;
+  screen.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 1) touchY = e.touches[0].clientY;
+  }, { passive: true });
+  screen.addEventListener("touchmove", (e) => {
+    if (!consoleOpen || e.touches.length !== 1) return;
+    const vp = screen.querySelector(".xterm-viewport");
+    if (vp) {
+      const y = e.touches[0].clientY;
+      vp.scrollTop += touchY - y; // natural direction: swipe up scrolls down
+      touchY = y;
+    }
+    e.preventDefault(); // never let the swipe scroll the page behind the console
+  }, { passive: false });
+})();
+
 $("file-input").addEventListener("change", async () => {
   for (const file of $("file-input").files) await uploadFile(file);
   $("file-input").value = "";
