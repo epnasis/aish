@@ -110,10 +110,24 @@ const OFFLINE_SEARCH_CHARS = 200000; // per-session searchable text kept for off
 
 let offlineDbPromise = null;
 
+// An IndexedDB open can hang FOREVER with no error and no `blocked` event: if a
+// deleteDatabase is pending (another tab of this app tapped "Clear offline
+// copies" while this one held a connection), a fresh open just queues behind it
+// indefinitely. Unguarded, every offline read would await a promise that never
+// settles — the first paint silently never happens and the app looks like it
+// simply lost the feature. Time it out instead and degrade to online-only; the
+// promise is not cached on failure, so the next attempt retries cleanly.
+const OFFLINE_OPEN_TIMEOUT_MS = 8000;
+
 function offlineOpen() {
   if (offlineDbPromise) return offlineDbPromise;
   offlineDbPromise = new Promise((resolve, reject) => {
     if (!self.indexedDB) { reject(new Error("no indexedDB")); return; }
+    const timer = setTimeout(() => reject(new Error("indexedDB open timed out")),
+                             OFFLINE_OPEN_TIMEOUT_MS);
+    const settle = (fn) => (value) => { clearTimeout(timer); fn(value); };
+    resolve = settle(resolve);
+    reject = settle(reject);
     const request = indexedDB.open(OFFLINE_DB, OFFLINE_DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -124,7 +138,14 @@ function offlineOpen() {
       if (!db.objectStoreNames.contains("events")) db.createObjectStore("events", { keyPath: "name" });
       if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv", { keyPath: "k" });
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      // The other half of the deadlock: if ANOTHER tab clears offline data,
+      // step aside instead of blocking its delete forever. Dropping the cached
+      // promise means the next read reopens on the rebuilt database.
+      db.onversionchange = () => { db.close(); offlineDbPromise = null; };
+      resolve(db);
+    };
     request.onerror = () => reject(request.error);
     request.onblocked = () => reject(new Error("indexedDB blocked"));
   }).catch((err) => {
@@ -510,13 +531,25 @@ function resumeSession(name) {
 async function offlineFirstPaint() {
   try {
     const urlSession = new URLSearchParams(location.search).get("session");
-    const name = storeSession(urlSession) || localStorage.getItem("aish-session");
-    if (!name) return;
-    const cached = await offlineLoad(name);
+    const remembered = storeSession(urlSession) || localStorage.getItem("aish-session");
+    let cached = remembered ? await offlineLoad(remembered) : null;
+    if (!cached) {
+      // The remembered chat can legitimately be missing from the mirror: an
+      // EMPTY new chat is never mirrored (the server's own listing skips it),
+      // and that is exactly what you leave behind by opening the app and not
+      // typing. Landing on a blank screen with no chat to swipe from would
+      // make the whole offline archive unreachable, so fall back to the newest
+      // chat there IS.
+      const metas = await offlineList();
+      const newest = metas.sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
+      if (newest) cached = await offlineLoad(newest.name);
+    }
     // The socket won the race — the authoritative transcript is already up.
     if (!cached || serverPainted) return;
-    currentSession = name;
+    currentSession = cached.meta.name;
     setTitle(cached.meta.title || "aish");
+    // Anchor the pager (and any reconnect) to what is actually on screen.
+    deepLinkSession(cached.meta.name);
     onReplay({ events: cached.events, truncated: false });
   } catch { /* no mirror yet — the socket will fill the page in */ }
 }
@@ -6491,8 +6524,35 @@ function laneNeighbor(pages, current, direction) {
 }
 // PAGER_LANE_END
 
+// [PAGER-SOURCE-START]
+// Where the pager's pages come from. Normally `hello.pager` — but that only
+// exists once a hello has landed, so a cold OFFLINE launch had no pages at all
+// and every swipe just rubber-banded (#165 follow-up). The mirror already holds
+// name/title/origin/ts for every cached chat, which is exactly what a page is,
+// so derive the list from it whenever the server's own list can't be trusted:
+// offline (where it is absent or stale), or before the first hello.
+//
+// Server parity: `pager_titles` returns the 30 most recent, oldest→newest.
+const PAGER_LIMIT = 30;
+
+function offlinePagerPages() {
+  return [...offlineMeta.values()]
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0))
+    .slice(-PAGER_LIMIT)
+    .map((meta) => ({ name: meta.name, title: meta.title, origin: meta.origin }));
+}
+
+function pagerPages() {
+  if (!offlineMode && pagerSessions.length) return pagerSessions;
+  const cached = offlinePagerPages();
+  // Offline with an empty mirror (nothing synced yet): fall back rather than
+  // returning nothing, so behaviour is never worse than before.
+  return cached.length ? cached : pagerSessions;
+}
+// [PAGER-SOURCE-END]
+
 function sessionNeighbor(direction) {
-  return laneNeighbor(pagerSessions, currentSession, direction);
+  return laneNeighbor(pagerPages(), currentSession, direction);
 }
 
 // Safari semantics: back (swipe right, -1) = older chat, forward (swipe
@@ -6506,7 +6566,11 @@ function swipeTarget(direction) {
   // A new chat is always a Recent chat, so it only exists past the newest page
   // of the Recent lane — the Automated lane simply ends (you can't hand-start
   // a triggered session).
-  const lane = pagerLane(pagerSessions.find((s) => s.name === currentSession));
+  // Starting a new chat needs the server. Offering that page offline would
+  // slide the transcript away and snap straight back, which reads as a broken
+  // gesture — end the lane instead.
+  if (offlineMode) return null;
+  const lane = pagerLane(pagerPages().find((s) => s.name === currentSession));
   return direction === 1 && sessionTitled && lane === "recent" ? NEW_CHAT_TARGET : null;
 }
 
