@@ -4110,3 +4110,122 @@ class TestRestartResume:
             path = Path(app_env["state_dir"]) / hello["session"]
             assert SessionLog.pending_task(path) is None
             assert "task_start" not in path.read_text()
+
+
+class TestOfflineMirror:
+    """Issue #165: the read-only endpoints the PWA mirrors conversations
+    through. They must serve a session straight off disk — no Agent, no session
+    slot — and must not resend what the client already holds."""
+
+    def test_index_lists_sessions_and_gates_on_token(self, app_env):
+        client, _ = make_client(app_env, [model_says("mirrored answer")], token="s3cret")
+        with client, connected(client, "/ws?token=s3cret") as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "a task worth keeping"})
+            recv_until(ws, "done")
+
+            assert client.get("/offline/index").status_code == 403
+            payload = client.get("/offline/index?token=s3cret").json()
+
+        assert payload["rev"]  # the frontend's staleness check rides along
+        row = next(s for s in payload["sessions"] if s["name"] == hello["session"])
+        assert row["title"] == "a task worth keeping"
+        assert row["origin"] == "user"
+        assert row["ts"] > 0
+
+    def test_session_returns_the_same_events_a_client_replays(self, app_env):
+        client, _ = make_client(app_env, [model_says("the recommendation")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "what should I do?"})
+            recv_until(ws, "done")
+            payload = client.get(f"/offline/session?session={hello['session']}").json()
+
+        # Same shape the live `replay` frame carries, which is what lets the
+        # cached copy render through the unchanged onReplay path.
+        assert payload["base"] == 0
+        assert payload["total"] == len(payload["events"])
+        types = [e["type"] for e in payload["events"]]
+        assert types[0] == "user" and types[-1] == "done"
+        assert payload["events"][0]["text"] == "what should I do?"
+        assert payload["events"][-1]["result"] == "the recommendation"
+        assert payload["title"] == "what should I do?"
+        assert payload["sig"]
+
+    def test_unknown_session_is_404_and_traversal_is_refused(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.get("/offline/session?session=nope.jsonl").status_code == 404
+            assert client.get(
+                "/offline/session?session=session-../../etc/passwd"
+            ).status_code == 404
+
+    def test_unchanged_session_answers_304_with_no_body(self, app_env):
+        client, _ = make_client(app_env, [model_says("done")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "first"})
+            recv_until(ws, "done")
+            url = f"/offline/session?session={hello['session']}"
+            first = client.get(url)
+            etag = first.headers["etag"]
+            again = client.get(url, headers={"If-None-Match": etag})
+
+        assert first.status_code == 200 and etag
+        assert again.status_code == 304
+        assert not again.content
+
+    def test_since_and_sig_return_only_the_new_events(self, app_env):
+        client, _ = make_client(
+            app_env, [model_says("answer one"), model_says("answer two")]
+        )
+        with client, connected(client) as (ws, hello, _):
+            url = f"/offline/session?session={hello['session']}"
+            ws.send_json({"type": "task", "text": "first"})
+            recv_until(ws, "done")
+            first = client.get(url).json()
+
+            ws.send_json({"type": "task", "text": "second"})
+            recv_until(ws, "done")
+            delta = client.get(f"{url}&since={first['total']}&sig={first['sig']}").json()
+            # A prefix the server can't vouch for falls back to the whole thing
+            # rather than silently splicing onto a stream that moved.
+            stale = client.get(f"{url}&since={first['total']}&sig=deadbeef").json()
+
+        assert delta["base"] == first["total"]
+        assert delta["events"][0] == {"type": "user", "text": "second"}
+        assert delta["events"][-1]["result"] == "answer two"
+        assert delta["total"] == first["total"] + len(delta["events"])
+
+        assert stale["base"] == 0
+        assert len(stale["events"]) == stale["total"]
+
+    def test_bulk_command_output_is_trimmed_but_the_answer_is_not(self, app_env, tmp_path):
+        # The mirror keeps the conversation verbatim and caps the noise: that
+        # asymmetry is what makes a full local archive affordable.
+        long_answer = "conclusion. " * 2000
+        path = tmp_path / "session-trim.jsonl"
+        huge = "x" * (server_module.OFFLINE_OUTPUT_CAP * 3)
+        records = [
+            {"kind": "message", "role": "user", "content": "run it"},
+            {"kind": "trace", "step": {"kind": "tool", "name": "read_file", "output": huge}},
+            {"kind": "message", "role": "assistant", "content": long_answer},
+        ]
+        path.write_text("".join(json.dumps(r) + "\n" for r in records))
+
+        events = server_module.offline_events(path)
+        step = next(e for e in events if e["type"] == "step")
+        assert len(step["output"]) < server_module.OFFLINE_OUTPUT_CAP + 200
+        assert "trimmed for offline" in step["output"]
+        assert step["output"].startswith("x") and step["output"].endswith("x")
+        # The answer is the whole point of going back to an old chat.
+        assert next(e for e in events if e["type"] == "done")["result"] == long_answer.strip()
+
+    def test_legacy_log_without_traces_still_mirrors(self, app_env, tmp_path):
+        # Pre-trace logs can't reconstruct an event stream; they fall back to the
+        # flat history blob the frontend already knows how to render, so old
+        # conversations are mirrored too instead of being silently skipped.
+        path = tmp_path / "session-legacy.jsonl"
+        path.write_text(
+            json.dumps({"kind": "message", "role": "user", "content": "old question"}) + "\n"
+        )
+        events = server_module.offline_events(path)
+        assert [e["type"] for e in events] == ["history"]
+        assert events[0]["messages"][0]["content"] == "old question"

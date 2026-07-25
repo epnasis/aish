@@ -76,6 +76,489 @@ const token = localStorage.getItem("aish-token");
 const publicSession = (name) => (name || "").replace(/\.jsonl$/, "");
 const storeSession = (id) => (!id || id.endsWith(".jsonl") ? id : `${id}.jsonl`);
 
+// ---- offline mirror (#165) ----------------------------------------------
+// A local copy of the conversation archive, so the installed app opens and
+// reads its history on a plane, on a foreign SIM, or with the server simply
+// off. Three things make this cheap rather than a second implementation:
+//
+//   * rendering is already a pure function of an event array — onHello() +
+//     onReplay() take exactly what the server sends, so a CACHED event array
+//     replays through the identical code path with no offline-specific
+//     renderer to drift;
+//   * the server reconstructs any session's event stream straight off disk
+//     (GET /offline/session), so syncing costs no session slot and no Agent;
+//   * search ranking is deterministic tiers, not a model, so it ports to JS
+//     and behaves the same offline as on.
+//
+// It doubles as a speed feature: the last session paints from IndexedDB before
+// the socket is even open, and a sync that changes nothing costs one small
+// request (ETag → 304) instead of re-downloading anything.
+//
+// Deliberately NOT offered offline: sending. Queuing prompts for later would
+// dispatch an agent that runs shell commands at a moment nobody is watching,
+// with the approval gate answered by a person who has moved on. Read-only is
+// not a limitation here, it is the correct scope.
+
+const OFFLINE_DB = "aish-offline";
+const OFFLINE_DB_VERSION = 1;
+// Aggressive mirror: everything that fits, newest first. Bulk command output is
+// already capped server-side (OFFLINE_OUTPUT_CAP), which is what makes a whole
+// archive fit in the space a handful of raw transcripts would take.
+const OFFLINE_MAX_BYTES = 150 * 1024 * 1024;
+const OFFLINE_MAX_SESSIONS = 200;
+const OFFLINE_SEARCH_CHARS = 200000; // per-session searchable text kept for offline search
+
+let offlineDbPromise = null;
+
+function offlineOpen() {
+  if (offlineDbPromise) return offlineDbPromise;
+  offlineDbPromise = new Promise((resolve, reject) => {
+    if (!self.indexedDB) { reject(new Error("no indexedDB")); return; }
+    const request = indexedDB.open(OFFLINE_DB, OFFLINE_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      // Metadata and bodies are separate stores on purpose: the session list
+      // and the search index read ONLY metadata, so opening the sessions sheet
+      // never deserializes megabytes of transcripts.
+      if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "name" });
+      if (!db.objectStoreNames.contains("events")) db.createObjectStore("events", { keyPath: "name" });
+      if (!db.objectStoreNames.contains("kv")) db.createObjectStore("kv", { keyPath: "k" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error("indexedDB blocked"));
+  }).catch((err) => {
+    offlineDbPromise = null; // a private-mode / quota refusal may succeed later
+    throw err;
+  });
+  return offlineDbPromise;
+}
+
+function idbRun(store, mode, fn) {
+  return offlineOpen().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(store, mode);
+        const result = fn(tx.objectStore(store));
+        tx.oncomplete = () => resolve(result && result.__req ? result.__req.result : result);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      })
+  );
+}
+
+const idbGet = (store, key) => idbRun(store, "readonly", (s) => ({ __req: s.get(key) }));
+const idbAll = (store) => idbRun(store, "readonly", (s) => ({ __req: s.getAll() }));
+const idbPut = (store, value) => idbRun(store, "readwrite", (s) => { s.put(value); });
+const idbDel = (store, key) => idbRun(store, "readwrite", (s) => { s.delete(key); });
+
+// Every offline read is best-effort: a browser in private mode, a denied quota
+// or a corrupt database must degrade to "online only", never to a broken app.
+const offlineSafe = (promise, fallback = null) => promise.catch(() => fallback);
+
+// ---- offline: what a cached session looks like ---------------------------
+// meta:   { name, title, snippet, ts, origin, pinned, openedAt, syncedAt,
+//           total, sig, bytes, text }
+// events: { name, events: [...] }   ← replayed verbatim through onReplay()
+
+function offlineSearchText(events) {
+  // Only what a person would search FOR: their own words and aish's answers.
+  // Command output is noise in a search index (and the bulk of the bytes).
+  const parts = [];
+  for (const event of events || []) {
+    if (event.type === "user" && event.text) parts.push(event.text);
+    else if (event.type === "done" && event.result) parts.push(event.result);
+    else if (event.type === "history") {
+      for (const m of event.messages || []) if (m.content) parts.push(m.content);
+    }
+  }
+  return parts.join("\n").slice(0, OFFLINE_SEARCH_CHARS).toLowerCase();
+}
+
+async function offlineSave(name, payload, events) {
+  const text = offlineSearchText(events);
+  const meta = {
+    name,
+    title: payload.title || "",
+    snippet: payload.snippet || "",
+    ts: payload.ts || Date.now() / 1000,
+    origin: payload.origin || "user",
+    pinned: Boolean(payload.pinned),
+    openedAt: payload.openedAt || 0,
+    syncedAt: Date.now(),
+    total: payload.total || events.length,
+    sig: payload.sig || "",
+    // Approximate, and that is fine — it decides eviction order, not correctness.
+    bytes: JSON.stringify(events).length + text.length,
+    text,
+  };
+  await idbPut("events", { name, events });
+  await idbPut("meta", meta);
+  return meta;
+}
+
+async function offlineLoad(name) {
+  const [meta, body] = await Promise.all([
+    offlineSafe(idbGet("meta", name)),
+    offlineSafe(idbGet("events", name)),
+  ]);
+  if (!meta || !body) return null;
+  return { meta, events: body.events || [] };
+}
+
+async function offlineList() {
+  return (await offlineSafe(idbAll("meta"), [])) || [];
+}
+
+// [OFFLINE-EVICT-START]
+// Which cached sessions to drop when over budget, lowest value first.
+// Priority, highest to lowest: explicitly pinned ("Available offline" — the
+// user's promise to themselves that a reference chat is always there), then the
+// session on screen, then most-recently-opened-on-this-device, then
+// most-recently-active anywhere (which is what makes a chat started on the
+// laptop readable on the phone without opening it first).
+function offlineEvictionOrder(metas, current) {
+  const value = (m) => Math.max(m.openedAt || 0, (m.ts || 0) * 1000);
+  return metas
+    .filter((m) => !m.pinned && m.name !== current)
+    .sort((a, b) => value(a) - value(b)); // oldest-value first = evict first
+}
+
+function offlineOverBudget(metas, maxBytes, maxSessions) {
+  const bytes = metas.reduce((sum, m) => sum + (m.bytes || 0), 0);
+  return bytes > maxBytes || metas.length > maxSessions;
+}
+
+// Returns the names to delete, in order, to get back under budget. Pinned
+// sessions are counted against the budget but never returned — a mirror that
+// silently dropped what you pinned would be worse than one that ran over.
+function offlinePlanEviction(metas, current, maxBytes, maxSessions) {
+  const doomed = offlineEvictionOrder(metas, current);
+  const keep = new Map(metas.map((m) => [m.name, m]));
+  const evict = [];
+  for (const meta of doomed) {
+    if (!offlineOverBudget([...keep.values()], maxBytes, maxSessions)) break;
+    keep.delete(meta.name);
+    evict.push(meta.name);
+  }
+  return evict;
+}
+// [OFFLINE-EVICT-END]
+
+async function offlineEnforceBudget(current) {
+  const metas = await offlineList();
+  const evict = offlinePlanEviction(metas, current, OFFLINE_MAX_BYTES, OFFLINE_MAX_SESSIONS);
+  for (const name of evict) {
+    await offlineSafe(idbDel("events", name));
+    await offlineSafe(idbDel("meta", name));
+  }
+  return evict.length;
+}
+
+// [OFFLINE-SEARCH-START]
+// Offline port of SessionLog.rank (session.py) — same tiers, same order, so a
+// search offline ranks like the same search online. Tiers 5..2 are exact ports;
+// tier 1's fuzzy match approximates difflib's SequenceMatcher with an
+// LCS ratio, which agrees with it for the typo-shaped cases it exists to catch.
+const OFFLINE_FUZZY_THRESHOLD = 0.55;  // whole query vs whole title
+const OFFLINE_FUZZY_WORD_CUTOFF = 0.75; // single query word vs single session word
+const OFFLINE_PUNCT_RE = /^[.,;:!?()[\]{}<>'"`]+|[.,;:!?()[\]{}<>'"`]+$/g;
+
+function lcsRatio(a, b) {
+  if (!a.length || !b.length) return 0;
+  // Rolling single row: query words and titles are short, and this runs per
+  // candidate per keystroke.
+  let prev = new Array(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i += 1) {
+    const row = new Array(b.length + 1).fill(0);
+    for (let j = 1; j <= b.length; j += 1) {
+      row[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], row[j - 1]);
+    }
+    prev = row;
+  }
+  return (2 * prev[b.length]) / (a.length + b.length);
+}
+
+function offlineRank(metas, query) {
+  const queryCf = query.split(/\s+/).filter(Boolean).join(" ").toLowerCase();
+  const words = queryCf ? queryCf.split(" ") : [];
+  if (!words.length) return metas.slice().sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  const scored = [];
+  for (const meta of metas) {
+    const titleCf = (meta.title || "").toLowerCase();
+    const contentCf = meta.text || "";
+    let score;
+    if (titleCf === queryCf) score = 5;
+    else if (titleCf.includes(queryCf)) score = 4;
+    else if (contentCf.includes(queryCf)) score = 3;
+    else if (words.every((w) => contentCf.includes(w))) score = 2;
+    else {
+      const vocab = new Set(
+        contentCf.split(/\s+/).map((w) => w.replace(OFFLINE_PUNCT_RE, "")).filter(Boolean)
+      );
+      const everyWordClose = words.every((w) => {
+        for (const candidate of vocab) {
+          if (lcsRatio(w, candidate) >= OFFLINE_FUZZY_WORD_CUTOFF) return true;
+        }
+        return false;
+      });
+      if (everyWordClose || lcsRatio(queryCf, titleCf) >= OFFLINE_FUZZY_THRESHOLD) score = 1;
+      else continue;
+    }
+    scored.push({ score, meta });
+  }
+  // Newest-first within a tier, matching the server (whose input is already
+  // recency-ordered and whose sort is stable).
+  scored.sort((a, b) => b.score - a.score || (b.meta.ts || 0) - (a.meta.ts || 0));
+  return scored.map((s) => s.meta);
+}
+// [OFFLINE-SEARCH-END]
+
+// ---- offline: connectivity ----------------------------------------------
+// "Offline" here means OUR server is unreachable, which is not the same as
+// navigator.onLine (a hotel wifi with no route home is "online"). The socket is
+// the ground truth; navigator.onLine only ever accelerates the conclusion.
+let offlineMode = false;
+
+function setOfflineMode(value) {
+  if (offlineMode === value) return;
+  offlineMode = value;
+  document.body.classList.toggle("offline", value);
+  const bar = $("offlinebar");
+  if (bar) bar.hidden = !value;
+  // One bar, not two: the offline bar says everything "reconnecting…" did and
+  // adds what still works, and it carries the same tap-to-retry. Retries keep
+  // running underneath either way.
+  if (value) $("connbar").hidden = true;
+  if (!value) offlineSyncSoon(0);
+}
+
+// ---- offline: background sync -------------------------------------------
+// One pass = fetch the catalogue, then fetch each session that changed, newest
+// first, one at a time. It is resumable by construction rather than by
+// bookkeeping: each session commits atomically, and the next pass recomputes
+// what is missing from the same timestamp comparison — so a sync interrupted by
+// a tunnel picks up exactly where it stopped, with no partial state to repair.
+
+const OFFLINE_SYNC_IDLE_MS = 5 * 60 * 1000; // periodic catch-up while connected
+const OFFLINE_SYNC_GAP_MS = 40;             // breathing room between sessions
+
+let offlineSyncing = false;
+let offlineSyncTimer = null;
+let offlinePersistAsked = false;
+const offlineMeta = new Map(); // name -> cached meta, for badges and lookups
+
+function offlineUrl(path, params) {
+  const url = new URL(BASE + path, location.href);
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
+  }
+  if (token) url.searchParams.set("token", token);
+  return url.toString();
+}
+
+// Opening a chat is the strongest signal that it matters to this device — it
+// outranks recency in the eviction order (offlineEvictionOrder).
+async function offlineTouch(name) {
+  const meta = await offlineSafe(idbGet("meta", name));
+  if (!meta) return;
+  meta.openedAt = Date.now();
+  await offlineSafe(idbPut("meta", meta));
+  offlineMeta.set(name, meta);
+}
+
+async function offlineRefreshMetaMap() {
+  offlineMeta.clear();
+  for (const meta of await offlineList()) offlineMeta.set(meta.name, meta);
+}
+
+async function offlineFetchSession(name, local) {
+  // since/sig ask for a delta; the ETag asks for nothing at all. Both are
+  // values the server minted — the client stores them opaquely and echoes them,
+  // so there is no protocol detail to get wrong on this side.
+  const url = offlineUrl("offline/session", {
+    session: name,
+    since: local?.total || "",
+    sig: local?.sig || "",
+  });
+  const headers = local?.etag ? { "If-None-Match": local.etag } : {};
+  const response = await fetch(url, { headers, cache: "no-store" });
+  if (response.status === 304) return "unchanged";
+  if (!response.ok) throw new Error(`offline sync ${response.status}`);
+  const payload = await response.json();
+  const previous = payload.base > 0 ? (await offlineLoad(name))?.events || [] : [];
+  // base > 0 means the server verified our prefix, so appending is safe;
+  // base === 0 means it did not, and the full stream replaces what we had.
+  const events =
+    payload.base > 0 ? previous.slice(0, payload.base).concat(payload.events) : payload.events;
+  const meta = await offlineSave(name, {
+    ...payload,
+    pinned: local?.pinned,
+    openedAt: local?.openedAt,
+  }, events);
+  meta.etag = response.headers.get("etag") || "";
+  await idbPut("meta", meta);
+  offlineMeta.set(name, meta);
+  return "updated";
+}
+
+async function offlineSyncOnce() {
+  if (offlineSyncing || offlineMode) return;
+  offlineSyncing = true;
+  try {
+    const response = await fetch(offlineUrl("offline/index"), { cache: "no-store" });
+    if (!response.ok) return; // 403 (bad token) or a server mid-restart: try later
+    const index = await response.json();
+    await offlineRefreshMetaMap();
+    const server = new Map(index.sessions.map((s) => [s.name, s]));
+
+    // A session deleted on the server is dropped locally too — a mirror that
+    // resurrects deleted chats is a surprise, not a feature. Pinned ones are
+    // the deliberate exception: pinning is the user saying "keep this for me".
+    for (const [name, meta] of offlineMeta) {
+      if (!server.has(name) && !meta.pinned) {
+        await offlineSafe(idbDel("events", name));
+        await offlineSafe(idbDel("meta", name));
+        offlineMeta.delete(name);
+      }
+    }
+
+    // The catalogue is newest-first, so a sync cut short by a dying connection
+    // has still fetched the sessions most likely to be wanted.
+    for (const info of index.sessions) {
+      if (offlineMode) break;
+      const local = offlineMeta.get(info.name);
+      // Second-resolution mtimes: only refetch on a strictly newer stamp, or
+      // the current session would be refetched on every single pass.
+      if (local && local.ts >= info.ts && local.total) continue;
+      try {
+        await offlineFetchSession(info.name, local);
+      } catch {
+        return; // network died mid-pass; the next pass resumes from here
+      }
+      await new Promise((resolve) => setTimeout(resolve, OFFLINE_SYNC_GAP_MS));
+    }
+    await offlineEnforceBudget(currentSession);
+    await offlineRefreshMetaMap();
+    if (!offlinePersistAsked && navigator.storage?.persist) {
+      // Ask ONCE, after there is something worth keeping: persistent storage
+      // exempts the mirror from the browser's eviction-under-pressure sweep.
+      offlinePersistAsked = true;
+      navigator.storage.persist().catch(() => {});
+    }
+  } catch { /* offline or blocked — the next trigger retries */ }
+  finally {
+    offlineSyncing = false;
+  }
+}
+
+function offlineSyncSoon(delay = 1500) {
+  clearTimeout(offlineSyncTimer);
+  offlineSyncTimer = setTimeout(() => {
+    offlineSyncOnce().finally(() => offlineSyncSoon(OFFLINE_SYNC_IDLE_MS));
+  }, delay);
+}
+
+// ---- offline: reading a cached session ----------------------------------
+let offlineViewing = false; // the transcript on screen came from the mirror
+let serverPainted = false;  // an authoritative replay has landed — don't overpaint it
+
+// The URL always names the viewed session (shareable, and it identifies the
+// log for debugging), alongside the token and any #console hash. replaceState
+// so it doesn't spam browser history.
+//
+// It is also what connect() reads to decide where to reconnect, and the URL
+// WINS over the last-session key — so a session opened from the mirror must
+// update it too. Without that, reading an old chat offline and then regaining
+// signal would yank you back to whatever chat the last hello had pinned here.
+function deepLinkSession(name) {
+  const url = new URL(location.href);
+  const pub = publicSession(name);
+  if (url.searchParams.get("session") === pub) return;
+  url.searchParams.set("session", pub);
+  history.replaceState(null, "", url.pathname + url.search + url.hash);
+}
+
+async function openCachedSession(name) {
+  const cached = await offlineLoad(name);
+  if (!cached) {
+    showToast("that chat isn't available offline");
+    return false;
+  }
+  offlineViewing = true;
+  currentSession = name;
+  setTitle(cached.meta.title || "aish");
+  try { localStorage.setItem("aish-session", name); } catch { /* private mode */ }
+  deepLinkSession(name); // so the reconnect lands on the chat being read
+  onReplay({ events: cached.events, truncated: false });
+  offlineTouch(name);
+  return true;
+}
+
+// Switching chats: the socket when there is one, the mirror when there isn't.
+function resumeSession(name) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    send({ type: "resume", path: name });
+    return;
+  }
+  openCachedSession(name);
+}
+
+// First paint. Runs before connect() so the last chat is on screen while the
+// socket is still opening — the same code path that made this cheap offline is
+// what makes it fast online. A server hello/replay overwrites it moments later.
+async function offlineFirstPaint() {
+  try {
+    const urlSession = new URLSearchParams(location.search).get("session");
+    const name = storeSession(urlSession) || localStorage.getItem("aish-session");
+    if (!name) return;
+    const cached = await offlineLoad(name);
+    // The socket won the race — the authoritative transcript is already up.
+    if (!cached || serverPainted) return;
+    currentSession = name;
+    setTitle(cached.meta.title || "aish");
+    onReplay({ events: cached.events, truncated: false });
+  } catch { /* no mirror yet — the socket will fill the page in */ }
+}
+
+// ---- offline: pinning ("Available offline") -----------------------------
+async function toggleOfflinePin() {
+  if (!currentSession) { showToast("no chat to pin yet"); return; }
+  const meta = (await offlineSafe(idbGet("meta", currentSession))) || null;
+  if (!meta) {
+    // Not mirrored yet (a brand-new chat, or a sync that hasn't reached it):
+    // fetch it now so "available offline" is true the moment it is promised.
+    try {
+      await offlineFetchSession(currentSession, null);
+    } catch {
+      showToast("can't save this chat offline right now");
+      return;
+    }
+  }
+  const current = (await offlineSafe(idbGet("meta", currentSession))) || null;
+  if (!current) { showToast("offline storage unavailable"); return; }
+  current.pinned = !current.pinned;
+  await idbPut("meta", current);
+  offlineMeta.set(currentSession, current);
+  showToast(current.pinned ? "kept available offline" : "no longer kept offline");
+}
+
+async function offlineClearAll() {
+  try {
+    const db = await offlineOpen();
+    db.close();
+    offlineDbPromise = null;
+    await new Promise((resolve) => {
+      const request = indexedDB.deleteDatabase(OFFLINE_DB);
+      request.onsuccess = request.onerror = request.onblocked = () => resolve();
+    });
+  } catch { /* nothing to clear */ }
+  offlineMeta.clear();
+  navigator.serviceWorker?.controller?.postMessage({ type: "CLEAR_CACHES" });
+  showToast("offline copies cleared");
+  offlineSyncSoon(2000);
+}
+
 // ---- websocket lifecycle -------------------------------------------------
 let ws = null;
 let backoff = 1000;
@@ -110,6 +593,8 @@ function connect() {
     $("connbar").hidden = true;
     connOk = true;
     updateDot();
+    setOfflineMode(false);
+    offlineSyncSoon(); // catch the mirror up on whatever happened while away
     checkAppVersion(); // server restarts are when the UI code changes
   };
   ws.onmessage = (raw) => handle(JSON.parse(raw.data));
@@ -133,12 +618,18 @@ function connect() {
     // Transient drop: defer the red dot + "reconnecting" bar past a grace window
     // so a sub-second blip stays invisible (#129). Arm once — don't reset it on
     // each failed retry, or a sustained outage would never surface.
-    if (connWarnTimer === null && $("connbar").hidden) {
+    // …and once the offline bar has taken over, don't re-arm: every failed
+    // retry would otherwise flash "reconnecting…" back on for an instant.
+    if (connWarnTimer === null && $("connbar").hidden && !offlineMode) {
       connWarnTimer = setTimeout(() => {
         connWarnTimer = null;
         connOk = false;
         updateDot();
         $("connbar").hidden = false;
+        // The socket has been down long enough to call it: switch the UI to
+        // read-from-the-mirror mode. Retries continue underneath, and the first
+        // successful onopen clears it.
+        setOfflineMode(true);
       }, CONN_WARN_DELAY);
     }
     reconnectTimer = setTimeout(connect, backoff);
@@ -193,14 +684,17 @@ async function checkAppVersion() {
       appVersion = tag;
     } else if (tag !== appVersion) {
       showToast("aish-web updated — reloading");
-      setTimeout(() => location.reload(), 1000);
+      setTimeout(() => reloadThrottled("asset"), 1000);
     }
   } catch { /* offline blip; next reconnect checks again */ }
 }
 
 function send(message) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    showToast("not connected");
+    // Offline is read-only by design (see the offline mirror notes above), so
+    // say which it is: a blip worth retrying, or a state the user should stop
+    // fighting. Composer drafts are already preserved either way.
+    showToast(offlineMode ? "offline — you can read past chats, not send" : "not connected");
     return false;
   }
   ws.send(JSON.stringify(message));
@@ -229,7 +723,7 @@ const cards = new Map(); // approval id -> card element
 function handle(event) {
   switch (event.type) {
     case "hello": onHello(event); break;
-    case "replay": onReplay(event); break;
+    case "replay": serverPainted = true; onReplay(event); break;
     case "user":
       closeAnswer();
       finishTrace(); // close any trace from a prior turn before the new one
@@ -293,7 +787,13 @@ function handle(event) {
     case "status": onStatus(event); break;
     case "approval_request": onApprovalRequest(event); break;
     case "approval_resolved": onApprovalResolved(event); break;
-    case "done": onDone(event); break;
+    case "done":
+      onDone(event);
+      // A finished turn is exactly what the mirror is missing; pull it now
+      // rather than at the next idle tick, so closing the laptop right after
+      // an answer still leaves that answer readable on the phone.
+      if (!replaying) offlineSyncSoon(2000);
+      break;
     case "history": onHistory(event.messages); break;
     case "session_list": renderSessions(event); break;
     case "model_list": renderModels(event); break;
@@ -367,10 +867,52 @@ const PAGE_REV = (() => {
   try { return new URL(script.src).searchParams.get("v"); } catch { return null; }
 })();
 
+// [OFFLINE-RELOAD-START]
+// A rev mismatch means this page runs older code than the server serves, and
+// the fix is a reload. With a service worker in front of index.html that is one
+// bad cache entry away from a loop: reload → SW serves the same stale HTML →
+// same stale rev → reload. Two independent guards, because a loop here bricks
+// the app on the device it happens on.
+//
+//  1. Purge the cached shell first, so the reload is guaranteed to re-fetch.
+//  2. Refuse to reload more than RELOAD_MAX times in RELOAD_WINDOW_MS. Running
+//     one revision behind is a papercut; an app that reboots forever is not
+//     usable at all, so when the guard trips we stay put and say so.
+const RELOAD_KEY = "aish-reloads";
+const RELOAD_WINDOW_MS = 60000;
+const RELOAD_MAX = 3;
+
+function reloadThrottled(reason) {
+  let history = [];
+  try { history = JSON.parse(sessionStorage.getItem(RELOAD_KEY) || "[]"); } catch { history = []; }
+  const now = Date.now();
+  history = history.filter((t) => now - t < RELOAD_WINDOW_MS);
+  if (history.length >= RELOAD_MAX) {
+    showToast("update loop detected — staying on this version");
+    return false;
+  }
+  history.push(now);
+  try { sessionStorage.setItem(RELOAD_KEY, JSON.stringify(history)); } catch { /* private mode */ }
+  const worker = navigator.serviceWorker?.controller;
+  if (!worker) { location.reload(); return true; }
+  // Give the purge a moment to land, but never hang on it — a reload that
+  // reuses the cache is still better than no reload.
+  let done = false;
+  const go = () => { if (!done) { done = true; location.reload(); } };
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    if (e.data && e.data.type === "SHELL_PURGED") go();
+  }, { once: true });
+  worker.postMessage({ type: "PURGE_SHELL", reason });
+  setTimeout(go, 1500);
+  return true;
+}
+// [OFFLINE-RELOAD-END]
+
 function onHello(event) {
   // Server code changed since this page was built (or the page predates rev
   // stamping entirely) — reload; the replay mechanism restores the view.
-  if (event.rev && event.rev !== PAGE_REV) { location.reload(); return; }
+  if (event.rev && event.rev !== PAGE_REV) { reloadThrottled("rev"); return; }
+  offlineViewing = false; // a live hello supersedes anything read from the mirror
   // The interactive console is GLOBAL (#148 follow-up): it floats above whatever
   // chat is shown and is untouched by a session switch. A hello also means a
   // (re)connect. `#console` is a deep-link that survives a reload / server
@@ -383,17 +925,10 @@ function onHello(event) {
   pagerSessions = event.pager || [];
   cmdHistory = event.cmd_history || []; // personal command palette (#104)
   currentSession = event.session;
+  offlineTouch(event.session); // MRU input to the mirror's eviction order
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
   localStorage.setItem("aish-session", event.session); // reconnects return here
-  // Deep-link the viewed session: the URL always names it (shareable, and it
-  // identifies the session's log for debugging), alongside the token and any
-  // #console hash. replaceState so it doesn't spam browser history.
-  const su = new URL(location.href);
-  const pubSession = publicSession(event.session);
-  if (su.searchParams.get("session") !== pubSession) {
-    su.searchParams.set("session", pubSession);
-    history.replaceState(null, "", su.pathname + su.search + su.hash);
-  }
+  deepLinkSession(event.session);
   renderWorkspace(event);
   taskErrored = false; // fresh connected view — clear any stale red
   setBusy(event.busy);
@@ -1795,7 +2330,12 @@ function reportViewport(label) {
     ` kbOpen=${document.body.classList.contains("kb-open")}` +
     ` active=${(document.activeElement || {}).id || "none"}` +
     ` standalone=${matchMedia("(display-mode: standalone)").matches} rev=${PAGE_REV}`;
-  try { send({ type: "client_debug", text }); } catch { /* socket down — skip */ }
+  // Pure telemetry: drop it silently when there is no socket. Routing it
+  // through send() would toast "not connected" at the user on every offline
+  // replay, for a message they never asked to send (#165).
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { send({ type: "client_debug", text }); } catch { /* socket died mid-send */ }
+  }
 }
 
 let lastVvReport = 0;
@@ -6038,6 +6578,17 @@ function commitPage(direction, target, width) {
   // only safe while a replay is coming to bring the next page in. On a dead
   // socket (server restart mid-deploy, tab detached by another device)
   // send() fails — snap home instead of leaving the app blank.
+  // Offline, the mirror can bring an existing page in — so paging through past
+  // chats keeps working, which is the gesture this app is navigated by. A NEW
+  // chat still needs the server, so that page snaps back.
+  if (!target.fresh && offlineMode) {
+    swipeInFrom = direction; // read by the onReplay openCachedSession triggers
+    messagesEl.style.transform = `translateX(${-direction * width}px)`;
+    openCachedSession(target.name).then((ok) => {
+      if (!ok) { swipeInFrom = 0; messagesEl.style.transform = ""; }
+    });
+    return;
+  }
   const requested = target.fresh
     ? send({ type: "new" })
     : send({ type: "resume", path: target.name });
@@ -6193,6 +6744,7 @@ $("new-chip").onclick = () => requestNewChat();
 $("console-btn").onclick = () => toggleConsole(); // global Quake console (#148)
 
 $("connbar").onclick = () => reconnect();
+$("offlinebar").onclick = () => reconnect(); // same affordance, one bar (#165)
 
 // ---- session title menu -------------------------------------------------
 // The tappable title opens a small menu of session actions (iOS Messages
@@ -6201,7 +6753,12 @@ function openSessionMenu() {
   const menu = $("session-menu");
   const del = menu.querySelector('[data-act="delete"]');
   if (del) resetDeleteChat(del); // never open still armed from a prior dismissal
+  const clear = menu.querySelector('[data-act="clear-offline"]');
+  if (clear) resetClearOffline(clear);
   $("wrap-state").textContent = document.body.classList.contains("wrap") ? "On" : "Off";
+  // "On" only for a deliberate pin. Everything is mirrored by default, so
+  // reporting "On" for merely-cached chats would make the toggle meaningless.
+  $("offline-state").textContent = offlineMeta.get(currentSession)?.pinned ? "On" : "Off";
   // Measure while shown-but-invisible so width is known before centering.
   menu.style.visibility = "hidden";
   menu.hidden = false;
@@ -6258,6 +6815,9 @@ $("session-menu").addEventListener("click", (e) => {
   // Rename swaps the menu for an inline title field (keeps the backdrop) —
   // no blocking window.prompt, which would also trap automation.
   if (item.dataset.act === "rename") { openRenameBox(); return; }
+  // Clearing every cached transcript is unrecoverable without a resync, so it
+  // arms in place like Delete chat rather than firing on one tap.
+  if (item.dataset.act === "clear-offline") { armClearOffline(item); return; }
   closeSheets(); // hides the menu + backdrop
   switch (item.dataset.act) {
     case "new": requestNewChat(); break;
@@ -6267,9 +6827,31 @@ $("session-menu").addEventListener("click", (e) => {
     case "export": exportSessionPdf(); break;
     case "workspace": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
     case "copylog": copyLogPath(); break;
+    case "offline": toggleOfflinePin(); break;
     case "reconnect": reconnect(); break;
   }
 });
+
+// Same two-tap arming as Delete chat, reusing its timing so the two
+// irreversible items in this menu behave identically.
+let clearOfflineTimer = null;
+function resetClearOffline(item) {
+  clearTimeout(clearOfflineTimer);
+  clearOfflineTimer = null;
+  item.classList.remove("armed");
+  item.querySelector(".menu-label").textContent = "Clear offline copies";
+}
+function armClearOffline(item) {
+  if (clearOfflineTimer) {
+    resetClearOffline(item);
+    closeSheets();
+    offlineClearAll();
+    return;
+  }
+  item.classList.add("armed");
+  item.querySelector(".menu-label").textContent = "Confirm clear";
+  clearOfflineTimer = setTimeout(() => resetClearOffline(item), 4000);
+}
 
 // The current-chat delete item's two-step confirm. The server refuses a
 // running session and lands the client on a fresh chat when the active one is
@@ -6339,9 +6921,42 @@ function refreshBadge() {
     badge.hidden = true;
   }
 }
+// The list is rendered from the local mirror FIRST and replaced by the server's
+// answer when it arrives. Online that just means the sheet paints instantly
+// instead of after a round trip; offline it is the only source, and search
+// keeps working because the ranking is a port of the server's own tiers
+// (offlineRank) rather than a different, weaker matcher.
+async function renderOfflineSessions(query) {
+  const metas = await offlineList();
+  if (!metas.length) return false;
+  renderSessions({
+    type: "session_list",
+    current: currentSession,
+    fromCache: true,
+    sessions: offlineRank(metas, query || "").map((meta) => ({
+      name: meta.name,
+      title: meta.title,
+      snippet: meta.snippet,
+      ts: meta.ts,
+      state: "", // liveness is a server fact; a mirror can only lie about it
+      cwd: "",
+      origin: meta.origin,
+      pinned: meta.pinned,
+    })),
+  });
+  return true;
+}
+
+function requestSessions(query) {
+  renderOfflineSessions(query);
+  // Don't call send() while offline: its toast would fire on every keystroke
+  // for a condition the offline bar already states.
+  if (ws && ws.readyState === WebSocket.OPEN) send({ type: "sessions", query });
+}
+
 $("sessions-search").addEventListener(
   "input",
-  debounce(() => send({ type: "sessions", query: $("sessions-search").value }), 150)
+  debounce(() => requestSessions($("sessions-search").value), 150)
 );
 
 function openSessionsSheet(query) {
@@ -6371,7 +6986,7 @@ function openSessionsSheet(query) {
       })
     );
   }
-  send({ type: "sessions", query });
+  requestSessions(query);
 }
 
 // Only the states the user can act on. "idle but open in server memory" is
@@ -6473,6 +7088,15 @@ function sessionRow(info, current) {
     tag.textContent = info.origin;
     head.appendChild(tag);
   }
+  // Kept offline on purpose (#165): this chat survives the eviction sweep, so
+  // it is here whether or not the server is.
+  if (info.pinned) {
+    const pin = document.createElement("span");
+    pin.className = "badge offline-pin";
+    pin.title = "kept available offline";
+    pin.textContent = "offline";
+    head.appendChild(pin);
+  }
   body.appendChild(head);
   if (info.cwd) {
     const dir = document.createElement("span");
@@ -6536,7 +7160,7 @@ function wrapSwipeDelete(row, info) {
   row.onclick = () => {
     if (row.dataset.swiped) return;      // this "click" was really a swipe
     if (open) { open = false; set(0); return; } // tap an open row → close it
-    send({ type: "resume", path: info.name });
+    resumeSession(info.name); // the socket if there is one, else the mirror
     closeSheets();
   };
   return wrap;
@@ -6604,6 +7228,14 @@ function renderSessionList(sessions, current, isActive) {
 
 function renderSessions(event) {
   lastSessionEvent = event;
+  // Carry the mirror's own facts onto server-supplied rows, so "kept offline"
+  // shows in the authoritative list too, not only in the cached one.
+  if (!event.fromCache) {
+    for (const info of event.sessions) {
+      const meta = offlineMeta.get(info.name);
+      if (meta) info.pinned = meta.pinned;
+    }
+  }
   const list = $("sessions-list");
   list.replaceChildren();
   // Ranked search results are ordered by relevance, so date/status grouping —
@@ -7113,4 +7745,10 @@ $("token-form").addEventListener("submit", (e) => {
   location.reload(); // reconnect with the new token from a clean slate
 });
 
+// Paint the last chat from the mirror, then open the socket. Not awaited: an
+// IndexedDB hiccup must never delay the connection, and whichever finishes
+// first is correct — a server replay overwrites the cached paint, and the
+// cached paint checks serverPainted before touching the DOM.
+offlineFirstPaint();
+offlineRefreshMetaMap();
 connect();

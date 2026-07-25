@@ -249,6 +249,12 @@ this UI. Highlights:
   and markdown images (local or web) rendered right in the chat.
 - **Native vision.** On vision-capable backends (Gemini, OpenAI, Claude, Ollama
   vision models), images you attach are actually *seen* by the model.
+- **Works offline.** The installed app opens and reads your past conversations
+  with no connection at all — on a plane, abroad, or with the server simply off.
+  Chats are mirrored to the device automatically (newest first), **search still
+  works** across everything cached, and the last chat paints from local storage
+  before the socket is even open, so it is faster online too. Sending is paused
+  while offline; reading is not. See below.
 
 ```sh
 aish-web                      # http://127.0.0.1:8787, config-default model
@@ -261,6 +267,32 @@ commands on the host, so it binds to `127.0.0.1` unless you opt into
 `--host 0.0.0.0`, and `AISH_WEB_TOKEN=<secret>` gates first access with
 `?token=<secret>` — recommended even on a home LAN. Direct `!` commands are
 deliberately **not** available from the web.
+
+### Offline
+
+The web UI keeps a local copy of your conversations, so the installed app is
+useful with no connection — the case it was built for is looking up what aish
+recommended while travelling.
+
+- **It always opens.** The app shell is cached by a service worker, so launching
+  offline gives you the real UI, never a browser error page. New versions still
+  reach you: the page is fetched network-first when there is a network, and a
+  reload throttle makes an update loop impossible.
+- **Everything is mirrored, newest first.** No "download this chat" step. Chats
+  from your other devices are included, because the mirror syncs from the
+  server's list, not from what you happened to open here.
+- **Search works offline**, over message *contents* and not just titles, using
+  the same ranking as online.
+- **Keep one forever.** Session menu → **Available offline** pins a chat so it
+  survives the storage sweep no matter how old it gets. **Clear offline copies**
+  in the same menu removes the local data.
+- **Sending is paused, deliberately.** Queuing a prompt to fire later would
+  dispatch an agent that runs shell commands with nobody watching and an
+  approval gate answered by someone who has moved on. Offline is read-only.
+
+Bulk command output is trimmed in the local copy (the conversation itself is
+kept verbatim), which is what lets a whole archive fit on a phone. Storage is
+capped, and least-recently-useful unpinned chats are dropped first.
 
 ---
 

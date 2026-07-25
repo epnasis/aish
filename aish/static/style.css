@@ -1246,6 +1246,26 @@ body.wrap .stream-wrap > .msg.stream { padding-right: 30px; }
 #connbar:active { opacity: 0.6; }
 #connbar[hidden] { display: none; }
 
+/* Offline mirror (#165). Calmer than #connbar's yellow: being offline is a
+   supported, fully-usable state (past chats read normally), not a warning. */
+#offlinebar {
+  display: block;
+  width: 100%;
+  border: none;
+  border-top: 0.5px solid var(--sep);
+  font-family: inherit;
+  text-align: left;
+  padding: 4px 16px;
+  font-size: 13.8px;
+  color: var(--dim);
+  background: var(--bg-elev);
+}
+#offlinebar:active { opacity: 0.6; }
+#offlinebar[hidden] { display: none; }
+/* Sending is the one thing that can't work — dim the composer so the toast on
+   submit confirms something the UI already implied. */
+body.offline #composer { opacity: 0.55; }
+
 /* ---- suggestions popover ---- */
 #suggest {
   background: var(--bg-elev);
@@ -1671,6 +1691,9 @@ body.wrap .stream-wrap > .msg.stream { padding-right: 30px; }
 .badge.st-running { color: var(--green); background: var(--green-glow); }
 .badge.st-waiting { color: #fff; background: var(--orange); }
 .badge.origin { color: var(--blue); background: var(--blue-glow); text-transform: uppercase; }
+/* Pinned for offline (#165) — deliberately quiet: it marks a durability
+   promise, not something needing attention. */
+.badge.offline-pin { color: var(--dim); background: var(--chip-bg); text-transform: uppercase; }
 .save-toggle { font-size: 15px; color: var(--dim); margin: 0 4px 8px; display: block; }
 
 /* workspace */
