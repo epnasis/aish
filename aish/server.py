@@ -194,6 +194,19 @@ TMUX_CONSOLE_SESSION = "aish-console"
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 EXPORT_MAX_BYTES = 5 * 1024 * 1024  # a single answer's markdown; generous ceiling
 
+# Offline mirror (#165). The PWA keeps a local copy of every session it can fit,
+# so an installed app opens and reads its history with no server reachable at
+# all. What the user goes back for is the CONVERSATION — the question, the
+# reasoning, the recommendation — while raw command output is what makes a
+# transcript big. So bulk output is capped on the way out: the mirror stays a
+# tenth of the size and a whole archive fits where a handful of sessions would.
+# The cap is applied SERVER-side, not in the browser, so the saving is bandwidth
+# too (the point of a mirror you sync over a phone connection).
+OFFLINE_OUTPUT_CAP = 8192   # per stream chunk / tool result, chars
+OFFLINE_OUTPUT_HEAD = 5500  # kept from the start (the command and how it began)
+OFFLINE_OUTPUT_TAIL = 2000  # kept from the end (how it finished — usually the point)
+OFFLINE_TRIM_NOTE = "\n… {n} chars trimmed for offline use — reconnect to see it all …\n"
+
 # Quick-reply safety net (issue #46). The model is told to end a question with
 # aish-reply:// chips, but small local models forget — so on the WEB surface a
 # final answer that ends in a question yet carries no chip gets a deterministic
@@ -207,6 +220,60 @@ FALLBACK_CHIPS = (
     "[No](aish-reply://no)",
     "[Tell me more](aish-reply://tell me more)",
 )
+
+
+def _trim_offline_text(text: str) -> str:
+    """Head + tail of an oversized blob, with the gap named. Both ends matter:
+    the start says what ran, the end says how it went."""
+    if len(text) <= OFFLINE_OUTPUT_CAP:
+        return text
+    dropped = len(text) - OFFLINE_OUTPUT_HEAD - OFFLINE_OUTPUT_TAIL
+    return (
+        text[:OFFLINE_OUTPUT_HEAD]
+        + OFFLINE_TRIM_NOTE.format(n=dropped)
+        + text[-OFFLINE_OUTPUT_TAIL:]
+    )
+
+
+def offline_events(path: Path) -> list[dict]:
+    """A session's replay event stream, sized for the offline mirror.
+
+    Identical to what a live client replays (same `reconstruct_events`, so the
+    cached transcript renders through the unchanged `onReplay` path) except
+    that bulk command output is capped — see OFFLINE_OUTPUT_CAP. A log too old
+    to reconstruct falls back to the flat history blob, exactly as
+    `_open_by_name` does, so every session mirrors rather than only modern ones.
+    """
+    events = SessionLog.reconstruct_events(path)
+    if events is None:
+        messages, _, _, _ = SessionLog._parse(path)
+        return [{"type": "history", "messages": messages}]
+    trimmed: list[dict] = []
+    for event in events:
+        kind = event.get("type")
+        # `stream` is the terminal panel's body; a tool step's `output` is the
+        # same bytes carried on the trace step. Cap both or the saving is halved.
+        if kind == "stream" and len(event.get("text") or "") > OFFLINE_OUTPUT_CAP:
+            event = {**event, "text": _trim_offline_text(event["text"])}
+        elif kind == "step" and len(event.get("output") or "") > OFFLINE_OUTPUT_CAP:
+            event = {**event, "output": _trim_offline_text(event["output"])}
+        trimmed.append(event)
+    return trimmed
+
+
+def _prefix_sig(events: list[dict], count: int) -> str:
+    """Fingerprint of the first `count` events — the delta protocol's proof
+    that the client's cached prefix is still the server's prefix.
+
+    Needed because reconstruction is NOT purely append-only: a command that was
+    still running when the client last synced reconstructs later as
+    `command_start → stream → command_end`, splicing events into the middle of
+    the stream. Comparing the prefix catches that and forces a full refetch;
+    the client never has to hash anything (it echoes back the sig it was given),
+    so there is no canonical-JSON agreement to get wrong across languages.
+    """
+    blob = json.dumps(events[:count], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
 def _ends_with_question(text: str) -> bool:
@@ -868,7 +935,8 @@ alternative approach or a side question and keep the main chat clean. Header \
 controls: a "‹ Sessions" back button (top left, \
 with a badge when a background session needs attention) opens the sessions \
 drawer; the centered session title opens a menu (new chat, rename this chat, \
-switch model, change directory, line wrap, export the chat to PDF, delete \
+switch model, change directory, line wrap, export the chat to PDF, keep this \
+chat available offline, clear offline copies, delete \
 this chat, workspace & jobs); the compose pencil (top right) starts a new \
 chat. Every \
 finished answer has a row of chips beneath it — copy, export that one answer \
@@ -892,6 +960,15 @@ While you work, messages the user sends are QUEUED and run one after \
 another; the user can also press Stop to cancel your current task — a \
 "(task stopped by user)" note means exactly that, so do not treat it as an \
 error.
+- The web UI WORKS OFFLINE for READING. Past conversations are mirrored to the \
+device automatically (newest first, including chats started on the user's other \
+devices), so with no connection the app still opens, past chats still open, and \
+SEARCH still works over their contents. The session menu's "Available offline" \
+pins a chat so it is never dropped from that local copy however old it gets, \
+and "Clear offline copies" removes the local data. SENDING is paused while \
+offline — by design, not by accident: a prompt queued for later would run \
+commands with nobody there to approve them. If the user asks how to keep a \
+conversation for reference while travelling, tell them to pin it that way.
 - If a user message starts with "[automatic resume]", aish was RESTARTED while \
 your previous task was still running and that same task has been picked up \
 again — the conversation above is your OWN interrupted work. You MUST check \
@@ -2759,6 +2836,107 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return JSONResponse({"error": f"export failed: {exc}"}, status_code=500)
         return self._pdf_response(data, export.safe_pdf_filename(title, "aish-session"))
 
+    # ---- offline mirror (#165) ------------------------------------------
+    # Two read-only endpoints, deliberately outside the WebSocket: the PWA's
+    # background sync must not need a session slot, and an Agent must never be
+    # constructed just because a phone wanted to read old text. Both mirror
+    # handle_export_session's shape — token check, name safety, work off-thread,
+    # straight off disk — because that is already the proven read-only path.
+
+    def _offline_path(self, request) -> Path | None:
+        """The requested session's log, or None when the name fails the same
+        path-safety check every by-name endpoint applies."""
+        name = request.query_params.get("session", "").strip()
+        safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
+        path = self.state_dir / name
+        if not safe or ".." in name or not path.is_file():
+            return None
+        return path
+
+    async def handle_offline_index(self, request) -> JSONResponse:
+        """GET /offline/index — the mirror's catalogue: every session's
+        identity and last-modified stamp. The client diffs it against what it
+        already holds, so a sync that changes nothing costs exactly one small
+        request instead of re-downloading the archive."""
+        if self.token and request.query_params.get("token") != self.token:
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        infos = await asyncio.to_thread(SessionLog.list_sessions, self.state_dir)
+        return JSONResponse(
+            {
+                "rev": STATIC_REV,
+                "sessions": [
+                    {
+                        "name": info.path.name,
+                        "title": info.title,
+                        "snippet": info.snippet,
+                        "ts": info.mtime,
+                        "origin": info.origin,
+                    }
+                    for info in infos
+                ],
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def handle_offline_session(self, request) -> Response | JSONResponse:
+        """GET /offline/session?session=<name>&since=<n>&sig=<s> — a session's
+        renderable event stream for the local mirror.
+
+        Three layers of "don't send what the client already has", cheapest
+        first: a matching `If-None-Match` returns 304 with no body at all; a
+        `since`/`sig` pair whose prefix still checks out returns only the events
+        after it; anything else returns the whole session. `sig` is always the
+        server's own fingerprint handed back unchanged, so the client stores two
+        opaque values and never has to reason about the protocol."""
+        if self.token and request.query_params.get("token") != self.token:
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        path = self._offline_path(request)
+        if path is None:
+            name = request.query_params.get("session", "").strip()
+            return JSONResponse({"error": f"no such session: {name}"}, status_code=404)
+
+        stat = path.stat()
+        # Weak validator: mtime+size identifies a version of an append-only log
+        # without reading it — the whole point is to answer an unchanged session
+        # without parsing megabytes of JSONL.
+        etag = f'W/"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-store"})
+
+        try:
+            since = max(0, int(request.query_params.get("since") or 0))
+        except ValueError:
+            since = 0
+        client_sig = request.query_params.get("sig") or ""
+
+        def build() -> dict:
+            events = offline_events(path)
+            messages, _, custom_title, origin = SessionLog._parse(path)
+            title = SessionLog._truncate_title(
+                custom_title or SessionLog._derive_title(messages)
+            )
+            total = len(events)
+            base = 0
+            if 0 < since <= total and client_sig and _prefix_sig(events, since) == client_sig:
+                base = since
+            return {
+                "session": path.name,
+                "title": title,
+                "snippet": SessionLog._derive_snippet(messages),
+                "origin": origin,
+                "ts": stat.st_mtime,
+                "base": base,       # index the returned events start at
+                "total": total,     # events the client should hold afterwards
+                "sig": _prefix_sig(events, total),
+                "events": events[base:],
+            }
+
+        try:
+            payload = await asyncio.to_thread(build)
+        except Exception as exc:  # noqa: BLE001 — a bad log is a 500, not a dead sync
+            return JSONResponse({"error": f"offline read failed: {exc}"}, status_code=500)
+        return JSONResponse(payload, headers={"ETag": etag, "Cache-Control": "no-store"})
+
 
 def create_app(
     model: str,
@@ -3078,6 +3256,8 @@ def create_app(
             Route("/export/answer", server.handle_export_answer, methods=["POST"]),
             Route("/export/session", server.handle_export_session, methods=["GET"]),
             Route("/dirs", server.handle_dirs, methods=["GET"]),
+            Route("/offline/index", server.handle_offline_index, methods=["GET"]),
+            Route("/offline/session", server.handle_offline_session, methods=["GET"]),
             Route("/fonts/{name}", serve_config_font, methods=["GET"]),
             Route("/", serve_index, methods=["GET"]),
             Route("/index.html", serve_index, methods=["GET"]),
