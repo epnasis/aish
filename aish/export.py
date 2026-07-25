@@ -99,48 +99,48 @@ def _link_callback(uri: str, rel: str) -> str:  # noqa: ARG001 — xhtml2pdf sig
 # Kept simple and readable; xhtml2pdf supports only a CSS subset, so this
 # leans on what it renders reliably (fonts, colors, table borders, spacing).
 _PAGE_CSS = """
-@page { size: a4; margin: 2cm 1.8cm; }
-body { font-family: "aishSans"; font-size: 11pt;
+@page { size: a4; margin: 1.5cm 1.3cm; }
+body { font-family: "aishSans"; font-size: 17.5pt;
        line-height: 1.45; color: #1c1c1e; }
-h1 { font-size: 20pt; margin: 0 0 10pt; }
-h2 { font-size: 15pt; margin: 16pt 0 6pt; }
-h3 { font-size: 12.5pt; margin: 14pt 0 5pt; }
-p { margin: 0 0 8pt; }
+h1 { font-size: 32pt; margin: 0 0 14pt; }
+h2 { font-size: 24pt; margin: 22pt 0 8pt; }
+h3 { font-size: 20pt; margin: 19pt 0 7pt; }
+p { margin: 0 0 11pt; }
 a { color: #0a63c9; text-decoration: none; }
-ul, ol { margin: 0 0 8pt; }
-li { margin: 0 0 3pt; }
-code { font-family: "aishMono"; font-size: 9.5pt;
+ul, ol { margin: 0 0 11pt; }
+li { margin: 0 0 4pt; }
+code { font-family: "aishMono"; font-size: 15pt;
        background: #f2f2f7; color: #1c1c1e; }
 /* -pdf-word-wrap: CJK breaks long unbreakable strings at any character so
    wide table cells wrap to the page instead of running off the right edge
    (xhtml2pdf maps it to reportlab's wordWrap='CJK'). Code blocks deliberately
    do NOT use it — see .codeblock and _reflow_code_blocks. */
-.codeblock { font-family: "aishMono"; font-size: 9pt; background: #f2f2f7;
-             color: #1c1c1e; padding: 8pt; margin: 0 0 8pt; }
-blockquote { color: #6c6c70; margin: 0 0 8pt; padding: 0 0 0 10pt;
+.codeblock { font-family: "aishMono"; font-size: 14pt; background: #f2f2f7;
+             color: #1c1c1e; padding: 9pt; margin: 0 0 11pt; }
+blockquote { color: #6c6c70; margin: 0 0 11pt; padding: 0 0 0 12pt;
              border-left: 2pt solid #d1d1d6; }
-table { border-collapse: collapse; margin: 0 0 8pt; }
-th, td { border: 0.5pt solid #d1d1d6; padding: 4pt 7pt; font-size: 10pt;
+table { border-collapse: collapse; margin: 0 0 11pt; }
+th, td { border: 0.5pt solid #d1d1d6; padding: 5pt 8pt; font-size: 15.5pt;
          -pdf-word-wrap: CJK; }
 th { background: #f2f2f7; }
-hr { border: none; border-top: 0.5pt solid #d1d1d6; margin: 14pt 0; }
-.aish-doc-header { color: #8e8e93; font-size: 9pt; margin: 0 0 14pt;
-                   border-bottom: 0.5pt solid #e5e5ea; padding-bottom: 8pt; }
+hr { border: none; border-top: 0.5pt solid #d1d1d6; margin: 18pt 0; }
+.aish-doc-header { color: #8e8e93; font-size: 14pt; margin: 0 0 18pt;
+                   border-bottom: 0.5pt solid #e5e5ea; padding-bottom: 9pt; }
 .aish-answer + .aish-answer { border-top: 0.5pt solid #e5e5ea;
-                             margin-top: 16pt; padding-top: 16pt; }
+                             margin-top: 20pt; padding-top: 20pt; }
 .aish-link-card { border: 0.5pt solid #d1d1d6; background: #f9f9fb;
-                  padding: 6pt 9pt; margin: 4pt 0 8pt; }
-.aish-link-note { color: #8e8e93; font-size: 8.5pt; }
-.aish-embed { margin: 4pt 0 8pt; }
-.aish-embed-caption { color: #6c6c70; font-size: 9pt; }
+                  padding: 7pt 10pt; margin: 5pt 0 11pt; }
+.aish-link-note { color: #8e8e93; font-size: 13pt; }
+.aish-embed { margin: 5pt 0 11pt; }
+.aish-embed-caption { color: #6c6c70; font-size: 14pt; }
 """
 
 _MD_EXTENSIONS = ["fenced_code", "tables", "sane_lists", "nl2br"]
 
 # Widest run kept on one code line before a hard break is inserted; ~the printable
-# A4 width at the 9pt mono size, so a long token wraps instead of overflowing the
+# A4 width at the 14pt mono size, so a long token wraps instead of overflowing the
 # margin (it replaces the CJK word-wrap that _reflow_code_blocks must avoid).
-_CODE_MAX_COLS = 90
+_CODE_MAX_COLS = 58
 
 # A fenced code block: <pre> wrapping an optional <code>, however markdown emits it.
 _PRE_BLOCK_RE = re.compile(
@@ -285,9 +285,9 @@ FETCH_TIMEOUT = 5.0
 FETCH_MAX_BYTES = 8 * 1024 * 1024
 MAX_REMOTE_FETCHES = 12  # per exported document, so N broken links can't stack N timeouts
 
-# Printable A4 width at our margins is ~493pt; images are scaled down to this
+# Printable A4 width at our margins is ~521pt; images are scaled down to this
 # (xhtml2pdf needs explicit width/height — it does no max-width clamping).
-_IMG_MAX_WIDTH = 460
+_IMG_MAX_WIDTH = 490
 
 # Ports of the app.js embed whitelist (embedForLink): only strictly-matched
 # YouTube ids / Google Maps queries ever become a fetch URL.
