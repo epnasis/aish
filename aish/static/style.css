@@ -2364,3 +2364,58 @@ body.console-open {
 @media (hover: hover) and (pointer: fine) {
   .pty-keys { display: none; }
 }
+
+/* ---- dictation scratchpad ------------------------------------------------ */
+/* Floats over the bottom of the terminal, above the key row (its `bottom` is set
+   in JS from the key row's height) — floating rather than taking flex space so
+   opening it never re-fits xterm and resizes the remote tmux pane. */
+#pty-pad {
+  position: absolute; left: 0; right: 0; z-index: 3;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px 10px;
+  background: rgba(24, 24, 28, 0.98);
+  border-top: 1px solid #3a3a3c;
+  box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.45);
+}
+#pty-pad[hidden] { display: none; }
+.pad-bar { display: flex; align-items: center; gap: 8px; }
+.pad-btn {
+  flex: none; border: 1px solid #3a3a3c; border-radius: 999px;
+  background: #1c1c20; color: #d8d8dc; font-size: 13.5px; font-weight: 600;
+  padding: 6px 13px;
+}
+.pad-btn:active { opacity: 0.6; }
+.pad-mic { display: flex; align-items: center; padding: 6px 11px; }
+.pad-mic svg { display: block; }
+/* Recording: the mic glows red and pulses — same language as the composer's. */
+.pad-mic.recording { color: var(--red); border-color: var(--red); }
+.pad-mic.recording svg { animation: mic-pulse 1.1s ease-in-out infinite; }
+.pad-lang { font-family: var(--mono); min-width: 44px; text-align: center; }
+#pad-history { margin: 0 auto; }
+.pad-send { color: var(--ctp-blue); border-color: var(--ctp-blue); }
+/* Last 10 sends, so a submission that landed in the wrong window (vim in normal
+   mode, a program that wasn't reading) can be recovered instead of retyped. */
+.pad-history {
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 34vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  border: 1px solid #2c2c30; border-radius: 10px; padding: 4px;
+}
+.pad-history[hidden] { display: none; }
+.pad-history button {
+  display: block; width: 100%; text-align: left;
+  background: none; border: none; border-radius: 7px;
+  color: #c8c8ce; font-family: var(--mono); font-size: 13px; line-height: 1.35;
+  padding: 7px 9px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pad-history button:active { background: #2c2c30; }
+.pad-history .pad-history-empty { color: #6c6c74; text-align: center; font-size: 13px; padding: 8px; }
+#pad-input {
+  width: 100%; resize: none; overflow-y: auto;
+  border: 1px solid #3a3a3c; border-radius: 10px;
+  background: #101014; color: #f2f2f7; caret-color: var(--ctp-blue);
+  font-family: var(--mono); font-size: 16px; line-height: 1.4; /* 16px: iOS zooms a focused field below it */
+  padding: 9px 11px;
+}
+#pad-input:focus { outline: none; border-color: var(--ctp-blue); }
+#pad-input::placeholder { color: #6c6c74; }

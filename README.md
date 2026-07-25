@@ -243,7 +243,10 @@ this UI. Highlights:
 - **Global interactive console.** The real TTY shell described above, openable
   from any chat (`⌘/Ctrl+\`), `tmux`-backed for restart survival.
 - **Voice.** Mic dictation into the composer and hands-free read-aloud of
-  replies — device-native speech, no cloud audio API, English/Polish.
+  replies — device-native speech, no cloud audio API, English/Polish. In the
+  console, double-tap the arrows key for a dictation scratchpad: speech is
+  staged there (correctable, with the last 10 sends recallable) and only reaches
+  the terminal when you tap Send.
 - **Export to PDF, copy anything, inline images.** Per-answer or whole-session
   PDF export (rendered locally), copy chips on every code block / table / answer,
   and markdown images (local or web) rendered right in the chat.

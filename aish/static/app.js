@@ -5479,6 +5479,7 @@ function openConsole() {
 // shows current state). Tells the server to stop fanning output at us.
 function hideConsole() {
   if (!consoleOpen) return;
+  if (padOpen()) closeConsolePad(); // never leave the mic live behind a hidden overlay
   consoleOpen = false;
   send({ type: "console_close" });
   if (location.hash === "#console") history.replaceState(null, "", location.pathname + location.search);
@@ -5597,6 +5598,7 @@ function consoleReflowViewport() {
     const kbUp = visualViewport.height < window.innerHeight - 80;
     ov.style.paddingBottom = kbUp ? "0px" : "";
   }
+  if (padOpen()) resizePadInput(); // the pad's max height follows the visible viewport
   consoleFitAndResize();
 }
 window.addEventListener("resize", consoleReflowViewport);
@@ -5779,7 +5781,13 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
     if (Math.abs(dx) < THRESH && Math.abs(dy) < THRESH) return null;
     return Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up");
   };
-  const press = (d) => { if (d && consoleOpen) { consoleSend(ARROW[d]); consoleKeyFeedback(btn); } };
+  // A DOUBLE-TAP (two taps that sent no arrow) opens the dictation scratchpad —
+  // free real estate on this key, since a tap without a drag does nothing.
+  const DOUBLE_MS = 400;
+  let pressed = false, lastTap = 0;
+  const press = (d) => {
+    if (d && consoleOpen) { pressed = true; consoleSend(ARROW[d]); consoleKeyFeedback(btn); }
+  };
   const intervalFor = (dist) => {
     const t = Math.min(1, Math.max(0, (dist - THRESH) / (FAR_DIST - THRESH)));
     return Math.round(NEAR_MS - t * (NEAR_MS - FAR_MS)); // farther → shorter → faster
@@ -5796,7 +5804,7 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
   const stop = () => { clear(); dir = null; };
   btn.addEventListener("touchstart", (e) => {
     e.preventDefault();
-    ox = e.touches[0].clientX; oy = e.touches[0].clientY; dir = null; curDist = 0; clear();
+    ox = e.touches[0].clientX; oy = e.touches[0].clientY; dir = null; curDist = 0; pressed = false; clear();
   }, { passive: false });
   btn.addEventListener("touchmove", (e) => {
     e.preventDefault();
@@ -5806,7 +5814,14 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
     if (!d) { stop(); return; }                        // back near the button: cancel
     if (d !== dir) { dir = d; press(d); armRepeat(); } // new direction: one press, (re)start the delay
   }, { passive: false });
-  btn.addEventListener("touchend", (e) => { e.preventDefault(); stop(); }, { passive: false });
+  btn.addEventListener("touchend", (e) => {
+    e.preventDefault();
+    stop();
+    if (pressed) { lastTap = 0; return; } // a drag, not a tap
+    const now = Date.now();
+    if (now - lastTap < DOUBLE_MS) { lastTap = 0; consoleKeyFeedback(btn); openConsolePad(); }
+    else lastTap = now;
+  }, { passive: false });
   btn.addEventListener("touchcancel", stop);
 })();
 
@@ -6131,9 +6146,26 @@ let dictateSession = "";  // the CURRENT session's transcript — rebuilt from r
 let dictateEnded = false; // set on stop-word / tap so onend won't restart
 let pendingSpeak = false; // current composer text came from dictation
 let speakNextReply = false; // armed when a dictated message is sent
+// Where the transcript lands: the chat composer, or the console's dictation
+// scratchpad. The engine is shared — only the target element and the
+// send-side behaviour differ.
+let dictateTarget = "composer"; // "composer" | "pad"
+let dictHold = false;     // pad: you're typing — don't let a result overwrite you
+
+function dictEl() {
+  return dictateTarget === "pad" ? $("pad-input") : input;
+}
 
 function setDictLang() {
-  $("dict-lang").textContent = dictateLang === "pl-PL" ? "PL" : "EN";
+  const label = dictateLang === "pl-PL" ? "PL" : "EN";
+  $("dict-lang").textContent = label;
+  $("pad-lang").textContent = label;
+}
+
+// Both mic buttons (composer + scratchpad) show the same recording state.
+function setDictRecording(on) {
+  $("dictate").classList.toggle("recording", on);
+  $("pad-mic").classList.toggle("recording", on);
 }
 
 function toggleDictLang() {
@@ -6161,11 +6193,14 @@ function dictJoin(a, b) {
 }
 
 function renderDictation(interim) {
-  input.value = dictJoin(dictateBase, dictJoin(dictJoin(dictateFinal, dictateSession), interim));
-  resizeInput(); // note: never touch the "Ask aish" placeholder
+  if (dictHold) return; // mid-edit in the scratchpad: your keystrokes win
+  const el = dictEl();
+  el.value = dictJoin(dictateBase, dictJoin(dictJoin(dictateFinal, dictateSession), interim));
+  if (dictateTarget === "pad") resizePadInput();
+  else resizeInput(); // note: never touch the "Ask aish" placeholder
   // Once the textarea hits its max height it scrolls internally — keep the
   // newest dictated words in view instead of stranding you at the top (#97).
-  input.scrollTop = input.scrollHeight;
+  el.scrollTop = el.scrollHeight;
 }
 
 // A trailing standalone "stop" ends dictation (deliberately NOT a silence timer,
@@ -6216,15 +6251,17 @@ function beginRec() {
   catch { showToast("couldn't start the mic"); stopDictation(); }
 }
 
-function startDictation() {
+function startDictation(target = "composer") {
   if (!SpeechRec || dictating) return;
   primeTts(); // unlock iOS audio now (this runs inside the mic-tap gesture)
-  dictateBase = input.value.trim();
+  dictateTarget = target;
+  dictHold = false;
+  dictateBase = dictEl().value.trim();
   dictateFinal = "";
   dictateSession = "";
   dictateEnded = false;
   dictating = true;
-  $("dictate").classList.add("recording");
+  setDictRecording(true);
   beginRec();
 }
 
@@ -6242,10 +6279,12 @@ function stopDictation() {
     try { dictateRec.stop(); } catch { /* already stopped */ }
     dictateRec = null;
   }
-  $("dictate").classList.remove("recording");
+  setDictRecording(false);
   renderDictation(""); // commit the final text, drop any trailing interim
-  if (input.value.trim()) pendingSpeak = true; // a reply to this should be spoken
-  input.focus();
+  const el = dictEl();
+  // TTS is a chat notion: a scratchpad line goes to a terminal, not to a model.
+  if (dictateTarget === "composer" && el.value.trim()) pendingSpeak = true;
+  el.focus();
 }
 
 // Voice-in → voice-out: after a dictated message's reply lands, read it aloud.
@@ -6279,6 +6318,185 @@ if (SpeechRec) {
   mic.addEventListener("pointercancel", cancelHold);
   mic.addEventListener("pointerleave", cancelHold);
 }
+
+// ---- console dictation scratchpad ----------------------------------------
+// Dictating straight into the terminal is unusable: iOS keyboard dictation
+// REWRITES the whole field on every recognition update (it re-punctuates and
+// corrects earlier words), and xterm forwards each rewrite to the PTY, which
+// cannot retract bytes it already wrote — so the line comes out as every
+// interim revision concatenated. This pad stages the text instead: nothing
+// reaches the PTY until you tap Send, which also means a spoken command can be
+// read and corrected before it runs. The transcription engine is the composer's
+// (#97), retargeted via dictateTarget.
+function resizePadInput() {
+  const el = $("pad-input");
+  const overlay = $("pty-overlay");
+  // Grow with the text, but never past ~40% of the overlay (the visual viewport
+  // height while the keyboard is up) — beyond that it scrolls internally.
+  const cap = Math.max(80, Math.round((overlay.clientHeight || window.innerHeight) * 0.4));
+  el.style.height = "auto";
+  el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
+  positionPad();
+}
+
+// The pad floats above the key row rather than taking flex space, so opening it
+// never re-fits xterm (which would resize the remote tmux pane). That means its
+// offset from the bottom is the key row's height — 0 on desktop, where the row
+// is display:none and offsetParent is null.
+function positionPad() {
+  const keys = document.querySelector(".pty-keys");
+  const h = keys && keys.offsetParent !== null ? keys.offsetHeight : 0;
+  $("pty-pad").style.bottom = `${h}px`;
+}
+
+function padOpen() {
+  return !$("pty-pad").hidden;
+}
+
+function openConsolePad() {
+  if (!consoleOpen) return;
+  const pad = $("pty-pad");
+  const el = $("pad-input");
+  if (!pad.hidden) { el.focus(); return; }
+  pad.hidden = false;
+  $("pad-history-list").hidden = true;
+  setDictLang();
+  resizePadInput();
+  // Focus inside the opening gesture so iOS raises the keyboard immediately.
+  el.focus();
+  if (SpeechRec) startDictation("pad"); // the pad exists to be spoken into
+}
+
+function closeConsolePad() {
+  if (dictating && dictateTarget === "pad") stopDictation();
+  dictateTarget = "composer";
+  dictHold = false;
+  clearTimeout(padEditTimer);
+  $("pad-input").value = "";
+  $("pad-history-list").hidden = true;
+  $("pty-pad").hidden = true;
+  if (consoleTerm) consoleTerm.focus();
+}
+
+// [PAD-HISTORY-START]
+// The last 10 sends, kept so a line that landed in the wrong place (vim in
+// normal mode, a program that wasn't reading stdin) can be re-sent instead of
+// re-dictated — losing a long spoken sentence to a bad submit is the exact
+// annoyance this pad is meant to remove.
+const PAD_HISTORY_KEY = "aish-pad-history";
+const PAD_HISTORY_MAX = 10;
+
+function padHistory() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PAD_HISTORY_KEY));
+    return Array.isArray(raw) ? raw.filter((t) => typeof t === "string" && t) : [];
+  } catch {
+    return []; // corrupt/absent — history is a convenience, never an error
+  }
+}
+
+function padHistoryPush(text) {
+  const kept = padHistory().filter((t) => t !== text); // re-sending moves it to the top
+  kept.unshift(text);
+  try {
+    localStorage.setItem(PAD_HISTORY_KEY, JSON.stringify(kept.slice(0, PAD_HISTORY_MAX)));
+  } catch { /* storage full / private mode */ }
+}
+// [PAD-HISTORY-END]
+
+function togglePadHistory() {
+  const box = $("pad-history-list");
+  if (!box.hidden) { box.hidden = true; return; }
+  box.replaceChildren();
+  const items = padHistory();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "pad-history-empty";
+    empty.textContent = "no previous dictations yet";
+    box.appendChild(empty);
+  }
+  for (const text of items) {
+    const entry = document.createElement("button");
+    entry.type = "button";
+    entry.textContent = text.replace(/\s+/g, " ");
+    entry.title = text;
+    entry.onclick = () => {
+      $("pad-input").value = text; // load, never auto-send — you may want to edit
+      box.hidden = true;
+      resizePadInput();
+      $("pad-input").focus();
+    };
+    box.appendChild(entry);
+  }
+  box.hidden = false;
+}
+
+// [PAD-SEND-START]
+function padSend(withEnter = true) {
+  const text = $("pad-input").value.replace(/\s+$/, "");
+  if (!text) { showToast("nothing to send"); return; }
+  padHistoryPush(text);
+  consoleSend(withEnter ? `${text}\r` : text);
+  closeConsolePad();
+}
+// [PAD-SEND-END]
+
+// Typing a correction while the mic is live: freeze rendering so the next
+// recognition event can't overwrite the edit, then re-baseline on the edited
+// text and restart recognition, so new speech appends to what you wrote.
+// Debounced — a restart per keystroke would shred the recognition session.
+let padEditTimer = 0;
+const PAD_EDIT_SETTLE = 700;
+
+function padManualEdit() {
+  resizePadInput();
+  if (!dictating || dictateTarget !== "pad") return;
+  dictHold = true;
+  clearTimeout(padEditTimer);
+  padEditTimer = setTimeout(() => {
+    dictateBase = $("pad-input").value;
+    dictateFinal = "";
+    dictateSession = "";
+    dictHold = false;
+    restartDictation();
+  }, PAD_EDIT_SETTLE);
+}
+
+$("pad-close").onclick = () => closeConsolePad();
+$("pad-history").onclick = () => togglePadHistory();
+$("pad-lang").onclick = () => toggleDictLang();
+$("pad-mic").onclick = () => {
+  if (dictating) {
+    stopDictation();
+    if (dictateTarget === "pad") return; // it was ours — the tap just stopped it
+  }
+  startDictation("pad");
+};
+$("pad-input").addEventListener("input", padManualEdit);
+$("pad-input").addEventListener("keydown", (e) => {
+  // Enter sends (a scratchpad line is a terminal line); Shift+Enter for a
+  // literal newline. Esc closes without sending.
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); padSend(true); }
+  else if (e.key === "Escape") { e.preventDefault(); closeConsolePad(); }
+});
+// Tap = send + Enter; hold = insert the text WITHOUT Enter, for filling in a
+// prompt you still want to review in the program itself.
+(() => {
+  const btn = $("pad-send");
+  let holdTimer = null;
+  let wasHold = false;
+  btn.addEventListener("pointerdown", () => {
+    wasHold = false;
+    holdTimer = setTimeout(() => { wasHold = true; padSend(false); showToast("inserted without Enter"); }, 550);
+  });
+  const cancelHold = () => clearTimeout(holdTimer);
+  btn.addEventListener("pointerup", () => {
+    clearTimeout(holdTimer);
+    if (!wasHold) padSend(true);
+  });
+  btn.addEventListener("pointercancel", cancelHold);
+  btn.addEventListener("pointerleave", cancelHold);
+})();
 
 function closeSheets() {
   // Blur a focused sheet input before hiding it: merely hiding leaves iOS to

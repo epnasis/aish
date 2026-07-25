@@ -277,11 +277,30 @@
         </svg></button>
     </div>
     <div class="pty-keys-side pty-keys-right">
-      <button type="button" data-key="arrows" class="pty-arrows" aria-label="arrow keys — drag a direction, hold to repeat" title="Arrows: drag ↑ ↓ ← →, hold to repeat">
+      <button type="button" data-key="arrows" class="pty-arrows" aria-label="arrow keys — drag a direction, hold to repeat; double-tap to dictate" title="Arrows: drag ↑ ↓ ← →, hold to repeat · double-tap to dictate">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v17M3.5 12h17M12 3.5 9.7 6M12 3.5 14.3 6M12 20.5 9.7 18M12 20.5 14.3 18M3.5 12 6 9.7M3.5 12 6 14.3M20.5 12 18 9.7M20.5 12 18 14.3"/></svg>
       </button>
       <button type="button" data-key="tab" class="pty-modkey">tab</button>
     </div>
+  </div>
+  <!-- Dictation scratchpad: iOS keyboard dictation typed straight into the
+       terminal concatenates every interim revision (the PTY can't retract bytes
+       already written), so speech is staged HERE and only reaches the PTY when
+       you tap Send. Opened by double-tapping the arrows key. Deliberately keeps
+       the default iOS autocorrect/autocapitalize (this is prose being spoken,
+       not terminal keystrokes) while rendering in the terminal's mono face. -->
+  <div id="pty-pad" hidden>
+    <div class="pad-bar">
+      <button id="pad-close" class="pad-btn" type="button" aria-label="close scratchpad" title="Close (discards the text)">✕</button>
+      <button id="pad-mic" class="pad-btn pad-mic" type="button" aria-label="start or stop dictation" title="Dictate (say &quot;stop&quot; to finish)">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3"/></svg>
+      </button>
+      <button id="pad-lang" class="pad-btn pad-lang" type="button" aria-label="dictation language" title="Dictation language">EN</button>
+      <button id="pad-history" class="pad-btn" type="button" aria-label="previous dictations" title="Previous dictations (last 10)">↺ Recent</button>
+      <button id="pad-send" class="pad-btn pad-send" type="button" aria-label="send to terminal" title="Send + Enter · hold to insert without Enter">Send ➤</button>
+    </div>
+    <div id="pad-history-list" class="pad-history" hidden></div>
+    <textarea id="pad-input" rows="1" enterkeyhint="send" placeholder="Speak or type, then Send…"></textarea>
   </div>
 </div>
 
