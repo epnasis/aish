@@ -2868,7 +2868,11 @@ def create_app(
                 _describe_hold(event),
                 url=link,
                 url_title="Review & approve",
-                priority=1,  # high: bypass Pushover quiet hours
+                # Normal priority deliberately: Pushover's high priority (1)
+                # is the one level that ignores quiet hours and always sounds,
+                # which turns an overnight hold into a 2am alarm. A held worker
+                # waits indefinitely, so the notification can wait for morning.
+                priority=0,
             )
 
         bridge.on_wait = notify_hold

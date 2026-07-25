@@ -3847,7 +3847,8 @@ class TestHoldNotification:
         assert "gmail_trash" in body
         assert kw["url"].endswith(f"/?session={session.name}")
         assert kw["url"].startswith("https://aish.test")
-        assert kw["priority"] == 1
+        # Normal priority: a hold must not bypass quiet hours (see notify_hold).
+        assert kw["priority"] == 0
 
     def test_triggered_hold_with_a_viewer_stays_silent(self, app_env, monkeypatch):
         client, _ = make_client(app_env, [model_says("done")], token="secret")
