@@ -39,7 +39,15 @@ const localStorage = {
   setItem: (k, v) => { store[k] = String(v); },
 };
 
-const padInput = { value: "" };
+const padInput = { value: "", focus() {} };
+const historyBox = {
+  hidden: true,
+  children: [],
+  scrollTop: 0,
+  scrollHeight: 999,
+  replaceChildren() { this.children = []; },
+  appendChild(node) { this.children.push(node); },
+};
 let sent = [];
 let toasts = [];
 let closed = 0;
@@ -47,22 +55,27 @@ let closed = 0;
 const sandbox = {
   localStorage,
   $: (id) => {
+    if (id === "pad-history-list") return historyBox;
     assert.strictEqual(id, "pad-input");
     return padInput;
   },
+  document: { createElement: (tag) => ({ tag, appendChild() {} }) },
   consoleSend: (data) => sent.push(data),
   showToast: (text) => toasts.push(text),
   closeConsolePad: () => { closed++; },
+  resizePadInput: () => {},
 };
 vm.createContext(sandbox);
 vm.runInContext(
   extract("// [PAD-HISTORY-START]", "// [PAD-HISTORY-END]") + "\n" +
   extract("// [PAD-SEND-START]", "// [PAD-SEND-END]") + "\n" +
+  extract("// [PAD-HISTORY-RENDER-START]", "// [PAD-HISTORY-RENDER-END]") + "\n" +
   "this.padHistory = padHistory; this.padHistoryPush = padHistoryPush;" +
-  "this.padSend = padSend; this.PAD_HISTORY_MAX = PAD_HISTORY_MAX;",
+  "this.padSend = padSend; this.PAD_HISTORY_MAX = PAD_HISTORY_MAX;" +
+  "this.togglePadHistory = togglePadHistory;",
   sandbox
 );
-const { padHistory, padHistoryPush, padSend, PAD_HISTORY_MAX } = sandbox;
+const { padHistory, padHistoryPush, padSend, PAD_HISTORY_MAX, togglePadHistory } = sandbox;
 
 // padHistory() builds its array inside the vm realm, so its prototype isn't
 // this realm's Array — copy through JSON before any deepStrictEqual.
@@ -122,5 +135,41 @@ reset();
 padInput.value = "cd /tmp\nls -la\n";
 padSend(true);
 assert.deepStrictEqual(sent, ["cd /tmp\nls -la\r"], "internal newlines preserved");
+
+// ---- history rendering ----------------------------------------------------
+// Stored newest-first, but rendered OLDEST-first so the newest entry sits at
+// the bottom of the list — nearest the textarea and your thumb.
+reset();
+padHistoryPush("oldest");
+padHistoryPush("middle");
+padHistoryPush("newest");
+historyBox.hidden = true;
+togglePadHistory();
+assert.strictEqual(historyBox.hidden, false, "opens the list");
+assert.deepStrictEqual(
+  historyBox.children.map((c) => c.textContent),
+  ["oldest", "middle", "newest"],
+  "newest rendered last (bottom of the list)"
+);
+assert.strictEqual(historyBox.scrollTop, historyBox.scrollHeight, "scrolled to the newest");
+
+// Clicking an entry LOADS it for review — it never sends by itself.
+historyBox.children[2].onclick();
+assert.strictEqual(padInput.value, "newest", "entry loads into the pad");
+assert.deepStrictEqual(sent, [], "loading an entry sends nothing");
+assert.strictEqual(historyBox.hidden, true, "picking an entry closes the list");
+
+togglePadHistory();
+togglePadHistory();
+assert.strictEqual(historyBox.hidden, true, "a second tap closes the list");
+
+// ---- Enter is a newline, not a send ---------------------------------------
+// Multi-line composing only works if Return stays a Return; a stray Return must
+// never fire a half-finished command at the terminal. Only the Send button
+// submits, so the pad's keydown handler must not reach padSend.
+const keydown = src.slice(src.indexOf('$("pad-input").addEventListener("keydown"'));
+const handler = keydown.slice(0, keydown.indexOf("});") + 3);
+assert(handler.includes("Escape"), "Esc still closes the pad");
+assert(!handler.includes("padSend"), "Enter must not send — only the Send button does");
 
 console.log("dictation pad: all checks passed");

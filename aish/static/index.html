@@ -300,7 +300,9 @@
       <button id="pad-send" class="pad-btn pad-send" type="button" aria-label="send to terminal" title="Send + Enter · hold to insert without Enter">Send ➤</button>
     </div>
     <div id="pad-history-list" class="pad-history" hidden></div>
-    <textarea id="pad-input" rows="1" enterkeyhint="send" placeholder="Speak or type, then Send…"></textarea>
+    <!-- enterkeyhint="enter": Return inserts a newline here (the pad composes
+         multi-line text); only the Send button submits to the terminal. -->
+    <textarea id="pad-input" rows="1" enterkeyhint="enter" placeholder="Speak or type, then Send…"></textarea>
   </div>
 </div>
 

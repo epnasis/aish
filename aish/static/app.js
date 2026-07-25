@@ -6404,6 +6404,7 @@ function padHistoryPush(text) {
 }
 // [PAD-HISTORY-END]
 
+// [PAD-HISTORY-RENDER-START]
 function togglePadHistory() {
   const box = $("pad-history-list");
   if (!box.hidden) { box.hidden = true; return; }
@@ -6415,7 +6416,9 @@ function togglePadHistory() {
     empty.textContent = "no previous dictations yet";
     box.appendChild(empty);
   }
-  for (const text of items) {
+  // Oldest first, so the NEWEST sits at the bottom — nearest the textarea and
+  // your thumb. Storage stays newest-first; only the rendering is reversed.
+  for (const text of items.slice().reverse()) {
     const entry = document.createElement("button");
     entry.type = "button";
     entry.textContent = text.replace(/\s+/g, " ");
@@ -6429,7 +6432,9 @@ function togglePadHistory() {
     box.appendChild(entry);
   }
   box.hidden = false;
+  box.scrollTop = box.scrollHeight; // a long list opens showing the newest
 }
+// [PAD-HISTORY-RENDER-END]
 
 // [PAD-SEND-START]
 function padSend(withEnter = true) {
@@ -6474,10 +6479,10 @@ $("pad-mic").onclick = () => {
 };
 $("pad-input").addEventListener("input", padManualEdit);
 $("pad-input").addEventListener("keydown", (e) => {
-  // Enter sends (a scratchpad line is a terminal line); Shift+Enter for a
-  // literal newline. Esc closes without sending.
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); padSend(true); }
-  else if (e.key === "Escape") { e.preventDefault(); closeConsolePad(); }
+  // Enter is a NEWLINE — the pad composes multi-line text, and a stray Return
+  // must never fire a command at the terminal. Only the Send button submits.
+  // Esc closes without sending.
+  if (e.key === "Escape") { e.preventDefault(); closeConsolePad(); }
 });
 // Tap = send + Enter; hold = insert the text WITHOUT Enter, for filling in a
 // prompt you still want to review in the program itself.
