@@ -555,6 +555,41 @@ async function offlineFirstPaint() {
 }
 
 // ---- offline: pinning ("Available offline") -----------------------------
+// [OFFLINE-PIN-STATE-START]
+// The pin lives in IndexedDB, and that is the ONLY place anything may read it
+// from. Reading it off the in-memory `offlineMeta` mirror instead was the "my
+// pin got reset" bug: that map is empty for a moment after every reload (it is
+// filled by an async refresh), so a pinned chat's menu showed "Off" — and
+// tapping the item to "pin" it read the real state and flipped it, silently
+// UNPINNING the chat the user was trying to protect. A label that can lie about
+// a toggle's state is worse than a slow one, so this is always a real read.
+async function offlineIsPinned(name) {
+  if (!name) return false;
+  const meta = await offlineSafe(idbGet("meta", name));
+  return Boolean(meta && meta.pinned);
+}
+// [OFFLINE-PIN-STATE-END]
+
+// The menu is already open when this resolves, so the label fills in a beat
+// later rather than being wrong immediately. "…" while reading, "—" if the
+// store can't be reached — never a confident wrong answer.
+async function refreshOfflinePinLabel() {
+  const label = $("offline-state");
+  if (!label) return;
+  label.textContent = "…";
+  const name = currentSession;
+  let pinned;
+  try {
+    pinned = await offlineIsPinned(name);
+  } catch {
+    label.textContent = "—";
+    return;
+  }
+  // The menu may have closed, or moved to another chat, while we were reading.
+  if ($("session-menu").hidden || name !== currentSession) return;
+  label.textContent = pinned ? "On" : "Off";
+}
+
 async function toggleOfflinePin() {
   if (!currentSession) { showToast("no chat to pin yet"); return; }
   const meta = (await offlineSafe(idbGet("meta", currentSession))) || null;
@@ -573,6 +608,7 @@ async function toggleOfflinePin() {
   current.pinned = !current.pinned;
   await idbPut("meta", current);
   offlineMeta.set(currentSession, current);
+  refreshOfflinePinLabel(); // keep the label honest if the menu is still open
   showToast(current.pinned ? "kept available offline" : "no longer kept offline");
 }
 
@@ -6822,7 +6858,8 @@ function openSessionMenu() {
   $("wrap-state").textContent = document.body.classList.contains("wrap") ? "On" : "Off";
   // "On" only for a deliberate pin. Everything is mirrored by default, so
   // reporting "On" for merely-cached chats would make the toggle meaningless.
-  $("offline-state").textContent = offlineMeta.get(currentSession)?.pinned ? "On" : "Off";
+  // Read from the store, never from the in-memory mirror — see offlineIsPinned.
+  refreshOfflinePinLabel();
   // Measure while shown-but-invisible so width is known before centering.
   menu.style.visibility = "hidden";
   menu.hidden = false;
@@ -7012,6 +7049,10 @@ async function renderOfflineSessions(query) {
 }
 
 function requestSessions(query) {
+  // The server's rows are decorated with pin state from the in-memory mirror,
+  // so make sure it is current before the response lands — otherwise the
+  // "offline" badge silently goes missing in the window after a reload.
+  offlineRefreshMetaMap();
   renderOfflineSessions(query);
   // Don't call send() while offline: its toast would fire on every keystroke
   // for a condition the offline bar already states.
