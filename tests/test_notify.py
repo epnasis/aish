@@ -65,3 +65,21 @@ def test_api_reject_is_false(creds, monkeypatch):
     monkeypatch.setattr(notify.urllib.request, "urlopen",
                         lambda *a, **k: _Resp(json.dumps({"status": 0}).encode()))
     assert notify.pushover("t", "m") is False
+
+
+class TestKillSwitch:
+    """AISH_NOTIFY=0 silences pushes without touching stored credentials."""
+
+    def test_disabled_sends_nothing(self, monkeypatch):
+        monkeypatch.setenv("AISH_NOTIFY", "0")
+        monkeypatch.setattr(notify.secrets, "get", lambda name: "set")
+        sent: list = []
+        monkeypatch.setattr(notify.urllib.request, "urlopen",
+                            lambda *a, **k: sent.append(1))
+        assert notify.pushover("t", "m") is False
+        assert notify.configured() is False
+        assert sent == []
+
+    def test_enabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("AISH_NOTIFY", raising=False)
+        assert notify.enabled() is True
