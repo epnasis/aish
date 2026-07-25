@@ -2396,16 +2396,16 @@ body.console-open {
 /* Last 10 sends, so a submission that landed in the wrong window (vim in normal
    mode, a program that wasn't reading) can be recovered instead of retyped. */
 .pad-history {
-  display: flex; flex-direction: column; gap: 4px;
+  display: flex; flex-direction: column; gap: 1px;
   max-height: 34vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
-  border: 1px solid #2c2c30; border-radius: 10px; padding: 4px;
+  border: 1px solid #2c2c30; border-radius: 10px; padding: 3px;
 }
 .pad-history[hidden] { display: none; }
 .pad-history button {
   display: block; width: 100%; text-align: left;
   background: none; border: none; border-radius: 7px;
-  color: #c8c8ce; font-family: var(--mono); font-size: 13px; line-height: 1.35;
-  padding: 7px 9px;
+  color: #c8c8ce; font-family: var(--mono); font-size: 13px; line-height: 1.3;
+  padding: 4px 9px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .pad-history button:active { background: #2c2c30; }
@@ -2414,7 +2414,7 @@ body.console-open {
   width: 100%; resize: none; overflow-y: auto;
   border: 1px solid #3a3a3c; border-radius: 10px;
   background: #101014; color: #f2f2f7; caret-color: var(--ctp-blue);
-  font-family: var(--mono); font-size: 16px; line-height: 1.4; /* 16px: iOS zooms a focused field below it */
+  font-family: var(--mono); font-size: 16px; line-height: 1.25; /* 16px: iOS zooms a focused field below it */
   padding: 9px 11px;
 }
 #pad-input:focus { outline: none; border-color: var(--ctp-blue); }
