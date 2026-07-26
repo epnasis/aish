@@ -3454,15 +3454,14 @@ def create_app(
         else:
             agent = Agent(client_chat=chat, num_ctx=num_ctx, think=think, **common)
             agent.provider = provider
-        agent.roots.append(uploads_dir.resolve())
         agent_holder.append(agent)
 
         if path is not None:
             agent.load_history(history)
             # Restore the workspace the session left off in (issue #94), set
             # directly (not via rebase/trust_root) so restoring logs no fresh
-            # record — a missing cwd falls back to the default, missing trusted
-            # dirs are skipped.
+            # record — a missing cwd falls back to the launch workspace, missing
+            # trusted dirs are skipped.
             restored_cwd, trusted = SessionLog.restore_state(path)
             agent.restore_workspace(restored_cwd, trusted)
             # Resume with the model this session last used (the drawer shows
@@ -3478,6 +3477,10 @@ def create_app(
                     agent.chat, agent.model, agent.provider = chat2, name2, provider2
                 except backends.BackendError:
                     pass
+        # The uploads dir belongs to the SERVER, not to any one chat, so it is
+        # added AFTER restore_workspace — which rebuilds roots to be exactly the
+        # session's own workspace and would otherwise drop it (#176).
+        agent.roots.append(uploads_dir.resolve())
         logref.model(model_spec(agent))  # record what this session actually runs
         if origin != "user" and path is None:
             # Persist provenance ONCE, when the session is created, so a

@@ -1084,6 +1084,12 @@ def handle_slash(
         return "exit"
     if command in ("/new", "/clear"):
         agent.reset()
+        # A new chat is a new session, and trusted dirs are session property
+        # (#176): it starts with only the current directory in scope. The dirs
+        # the previous chat trusted (/add-dir, or "trust this directory"
+        # answered at a prompt) belong to that chat and stay with it. cwd is
+        # kept — you are still in that directory in this terminal.
+        agent.restore_workspace(agent.cwd, [])
         logref.log = SessionLog.new(state_dir)
         logref.model(model_spec(agent))
         print("\033[2J\033[3J\033[H", end="")  # clear screen + scrollback
@@ -1110,7 +1116,11 @@ def handle_slash(
             switch_model(agent, recorded_spec)
         logref.model(model_spec(agent))
         # …and in the workspace it left off in (issue #94), not the one the
-        # session we just left happened to be sitting in.
+        # session we just left happened to be sitting in. restore_workspace is
+        # authoritative (#176): this REPL reuses one live Agent across the
+        # switch, so the roots must become exactly the resumed session's own —
+        # its recorded cwd (or the launch dir) plus the dirs it trusted, with
+        # the previous chat's /add-dir grants left behind.
         restored_cwd, trusted = SessionLog.restore_state(selected.path)
         agent.restore_workspace(restored_cwd, trusted)
         print(f"{DIM}resumed {len(messages)} messages from {selected.path.name}:{RESET}")
@@ -1587,9 +1597,15 @@ def main() -> int:
         description="Local LLM agent that runs CLI commands (with your approval).",
     )
     parser.add_argument("task", nargs="*", help="task to perform; omit for interactive mode")
+    default_model = os.environ.get("AISH_MODEL") or config.get("model") or "qwen3.6:35b-a3b"
     parser.add_argument(
         "--model",
-        default=os.environ.get("AISH_MODEL") or config.get("model") or "qwen3.6:35b-a3b",
+        # SUPPRESS instead of the default: argparse itself then records whether
+        # the flag was passed (hasattr below). Scanning sys.argv for "--model"
+        # missed the abbreviations argparse accepts — `--mo gemini:x` is an
+        # explicit flag, and treating it as absent let the resumed session's
+        # recorded model silently override what the user asked for (#176).
+        default=argparse.SUPPRESS,
         help="Ollama model name, or a cloud model: gemini:<m> / openai:<m> / "
         "claude:<m> (API keys via GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY; "
         "bare provider name picks its default), or claude-max[:opus|sonnet] to run on "
@@ -1624,6 +1640,9 @@ def main() -> int:
         "resumes the latest when input is piped)",
     )
     args = parser.parse_args()
+    explicit_model = hasattr(args, "model")  # see the --model SUPPRESS note above
+    if not explicit_model:
+        args.model = default_model
 
     if args.model == "claude-max" or args.model.startswith("claude-max:"):
         # Claude subscription path: the Agent SDK owns the loop, so this is a
@@ -1814,9 +1833,6 @@ def main() -> int:
         # cold open. A --model on the command line still wins: startup defaults
         # ($AISH_MODEL, config) are what the session's own model overrides, an
         # explicit flag is the user overriding the session on purpose.
-        explicit_model = any(
-            arg == "--model" or arg.startswith("--model=") for arg in sys.argv[1:]
-        )
         if recorded_spec and not explicit_model and recorded_spec != model_spec(agent):
             switch_model(agent, recorded_spec)
             logref.model(model_spec(agent))  # the log records what actually runs

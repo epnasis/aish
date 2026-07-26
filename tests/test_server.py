@@ -1829,6 +1829,26 @@ class TestSessions:
             assert hello2["cwd"] == str(elsewhere)
             assert str(shared.resolve()) in hello2["roots"]
 
+    def test_cold_open_keeps_the_servers_uploads_root(self, app_env, tmp_path):
+        # #176: restoring a workspace is AUTHORITATIVE — it rebuilds roots to be
+        # exactly that chat's own, so a dir from another chat can't ride along.
+        # The uploads dir belongs to the SERVER, not to any one chat, and is
+        # re-added afterwards; without that a cold-opened session would lose
+        # read access to its own attachments.
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "cd", "path": str(elsewhere)})
+            recv_until(ws, "workspace")
+
+        client2, _ = make_client(app_env, [])
+        with client2, connected(client2, f"/ws?session={name}") as (_, hello2, _):
+            uploads = client2.app.state.server.uploads_dir.resolve()
+            assert hello2["cwd"] == str(elsewhere)
+            assert str(uploads) in hello2["roots"]
+
     def test_cold_open_skips_vanished_cwd(self, app_env, tmp_path):
         # #94: a restored cwd that no longer exists falls back to the default
         # instead of crashing the cold open.
