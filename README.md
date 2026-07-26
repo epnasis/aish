@@ -246,7 +246,8 @@ this UI. Highlights:
   replies — device-native speech, no cloud audio API, English/Polish. In the
   console, double-tap the arrows key for a dictation scratchpad: speech is
   staged there (correctable, with the last 10 sends recallable) and only reaches
-  the terminal when you tap Send.
+  the terminal when you tap Send — and an unsent line survives an app update or
+  relaunch, so a restart mid-sentence doesn't cost you the sentence.
 - **Export to PDF, copy anything, inline images.** Per-answer or whole-session
   PDF export (rendered locally), copy chips on every code block / table / answer,
   and markdown images (local or web) rendered right in the chat.
