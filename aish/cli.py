@@ -1100,7 +1100,7 @@ def handle_slash(
         # picked history into the current chat AND copy its messages into the
         # current log, which silently grafted one conversation onto another and
         # left a triggered session's mail thread sitting in an unrelated chat.
-        messages, recorded_spec, _title, _origin = SessionLog._parse(selected.path)
+        messages, recorded_spec, *_ = SessionLog._parse(selected.path)
         agent.reset()
         agent.load_history(messages)
         logref.log = SessionLog(selected.path)  # keep writing where the chat lives
@@ -1679,7 +1679,7 @@ def main() -> int:
             if chosen is None:
                 print(f"{DIM}no previous session found — starting fresh{RESET}")
         if chosen is not None:
-            history, recorded_spec, _title, _origin = SessionLog._parse(chosen)
+            history, recorded_spec, *_ = SessionLog._parse(chosen)
             log = SessionLog(chosen)
     if log is None:
         log = SessionLog.new(state_dir)

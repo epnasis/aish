@@ -19,7 +19,7 @@ from starlette.testclient import TestClient
 import aish.notify as notify_module
 import aish.server as server_module
 from aish.agent import DENIED_RESULT, WRITE_DENIED
-from aish.server import create_app
+from aish.server import SESSION_TITLE_PROMPT, TITLE_PROMPT, create_app
 from aish.session import SessionLog
 
 
@@ -33,16 +33,42 @@ def model_says(content: str = "", tool_calls: list | None = None):
     )
 
 
+# Titling calls (#172 answer export, #175 chat auto-title) are one-shot side
+# calls — a bare prompt, no tools, outside the conversation. FakeChat answers
+# them WITHOUT consuming the script, so a test's response list stays a script of
+# its task turns and adding a titler didn't mean rewriting every test.
+_TITLE_PROMPTS = (
+    SESSION_TITLE_PROMPT.split("\n")[0],
+    TITLE_PROMPT.split("\n")[0],
+)
+
+
+def _is_title_call(kwargs: dict) -> bool:
+    messages = kwargs.get("messages") or []
+    if len(messages) != 1:
+        return False
+    return str(messages[0].get("content", "")).startswith(_TITLE_PROMPTS)
+
+
 class FakeChat:
     """Scripted backend. The web server always streams (on_token is wired),
     so stream=True returns the response as a one-chunk iterator — the same
-    shape ollama's streaming yields."""
+    shape ollama's streaming yields.
 
-    def __init__(self, responses: list):
+    `title` is the canned answer to a titling call. It defaults to None — the
+    backend declining to name things — so every test that doesn't care about
+    titles behaves exactly as it did before there was a titler."""
+
+    def __init__(self, responses: list, title: str | None = None):
         self.responses = list(responses)
-        self.calls: list[dict] = []
+        self.calls: list[dict] = []  # conversation turns only
+        self.title_calls: list[dict] = []
+        self.title = title
 
     def __call__(self, **kwargs):
+        if _is_title_call(kwargs):
+            self.title_calls.append(kwargs)
+            return model_says(self.title or "")
         self.calls.append(kwargs)
         response = self.responses.pop(0)
         if kwargs.get("stream"):
@@ -67,8 +93,8 @@ def app_env(tmp_path):
     }
 
 
-def make_client(app_env, responses, **kwargs):
-    chat = FakeChat(responses)
+def make_client(app_env, responses, title=None, **kwargs):
+    chat = FakeChat(responses, title=title)
     app = create_app("fake", client_chat=chat, **app_env, **kwargs)
     return TestClient(app), chat
 
@@ -2046,7 +2072,7 @@ class TestRename:
             row = next(s for s in listing["sessions"] if s["name"] == old.name)
             assert row["title"] == "Archived"
         # The renamed cold session still reconstructs its conversation cleanly.
-        messages, _, custom_title, _ = SessionLog._parse(old)
+        messages, _, custom_title, *_ = SessionLog._parse(old)
         assert custom_title == "Archived"
         assert messages == [{"role": "user", "content": "old topic"}]
 
@@ -2069,6 +2095,147 @@ class TestRename:
                 # rename stamps control first (a `role` event) before rejecting.
                 error = recv_until(ws, "error")
                 assert "no such session" in error["text"]
+
+
+class TestAutoTitle:
+    """#175 — a chat is named after its subject, not after its first prompt.
+
+    The stored name is the same append-only `kind:"title"` record a rename
+    writes, so the cold read path (drawer, pager) never makes a model call.
+    """
+
+    def _run(self, ws, text="tell me about the Bali eSIM options"):
+        ws.send_json({"type": "task", "text": text})
+        return recv_until(ws, "done")
+
+    def test_first_answer_names_the_chat_and_persists_it(self, app_env):
+        client, chat = make_client(
+            app_env, [model_says("Airalo is the one.")], title="Bali eSIM data plans"
+        )
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            self._run(ws)
+            renamed = recv_until(ws, "session_renamed")
+            assert renamed["title"] == "Bali eSIM data plans"
+            assert renamed["name"] == name
+        parsed = SessionLog._parse(app_env["state_dir"] / name)
+        assert parsed.title == "Bali eSIM data plans"
+        assert parsed.title_auto is True  # an auto name, replaceable by a later one
+
+    def test_the_titler_sees_the_conversation_not_the_whole_transcript(self, app_env):
+        client, chat = make_client(app_env, [model_says("Airalo.")], title="Bali eSIM plans")
+        with client, connected(client) as (ws, _, _):
+            self._run(ws)
+            recv_until(ws, "session_renamed")
+        prompt = chat.title_calls[-1]["messages"][0]["content"]
+        assert "Bali eSIM" in prompt and "Airalo." in prompt
+        assert len(chat.title_calls[-1]["messages"]) == 1  # never the real message list
+
+    def test_a_hand_typed_rename_is_never_overwritten(self, app_env):
+        """Even at a backoff slot the chat has plainly drifted to — naming is
+        the user's call the moment they make it, permanently."""
+        client, chat = make_client(
+            app_env,
+            [model_says("one"), model_says("two"), model_says("three")],
+            title="A Model Chosen Name",
+        )
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            self._run(ws)
+            recv_until(ws, "session_renamed")
+            ws.send_json({"type": "rename_session", "name": name, "title": "My own name"})
+            recv_until(ws, "session_renamed")
+            calls_after_rename = len(chat.title_calls)
+            self._run(ws, "completely unrelated subject now")  # turn 2
+            self._run(ws, "postgres index tuning please")  # turn 3 — a slot, drifted
+            assert len(chat.title_calls) == calls_after_rename  # never even asked
+        parsed = SessionLog._parse(app_env["state_dir"] / name)
+        assert parsed.title == "My own name"
+        assert parsed.title_auto is False
+
+    def test_a_stopped_turn_is_not_named(self, app_env, tmp_path):
+        """A cancel produced no content — naming a chat after it is noise."""
+        from aish.agent import CANCELLED_RESULT
+
+        marker = tmp_path / "never"
+        client, chat = make_client(
+            app_env,
+            [model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")])],
+            title="Should Not Appear",
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "touch it"})
+            recv_until(ws, "approval_request")
+            ws.send_json({"type": "stop"})
+            assert recv_until(ws, "done")["result"] == CANCELLED_RESULT
+        assert not chat.title_calls
+
+    def test_a_fork_earns_its_own_name_at_its_first_turn(self, app_env):
+        """The fork copies the parent's log, so without this it wears the
+        parent's name forever however far the tangent goes."""
+        client, chat = make_client(
+            app_env,
+            [model_says("zebra"), model_says("giraffes are taller")],
+            title="Parent chat name",
+        )
+        with client, connected(client) as (ws, hello, _):
+            source = hello["session"]
+            self._run(ws, "remember the zebra")
+            recv_until(ws, "session_renamed")
+            ws.send_json({"type": "fork"})
+            forked = recv_until(ws, "hello")["session"]
+            recv_until(ws, "replay")
+            assert forked != source
+            # The fork's FIRST turn retitles even though it is turn 2 of the
+            # copied conversation (no backoff slot, no drift gate).
+            chat.title = "Giraffe heights"
+            self._run(ws, "what about giraffes?")
+            renamed = recv_until(ws, "session_renamed")
+            assert renamed["name"] == forked
+            assert renamed["title"] == "Giraffe heights"
+        assert SessionLog._parse(app_env["state_dir"] / source).title == "Parent chat name"
+
+    def test_an_on_topic_second_turn_costs_no_model_call(self, app_env):
+        """Turn 3 is a backoff slot, but a chat still on its subject skips the
+        call entirely — the drift gate is free."""
+        client, chat = make_client(
+            app_env,
+            [model_says("a"), model_says("b"), model_says("c")],
+            title="Bali eSIM data plans",
+        )
+        with client, connected(client) as (ws, _, _):
+            self._run(ws, "which eSIM for Bali?")
+            recv_until(ws, "session_renamed")
+            assert len(chat.title_calls) == 1
+            self._run(ws, "and the data plans on Bali?")  # turn 2 — not a slot
+            self._run(ws, "cheapest Bali eSIM data plans?")  # turn 3 — slot, no drift
+            assert len(chat.title_calls) == 1  # still just the first
+
+    def test_a_conversation_that_moves_on_is_renamed(self, app_env):
+        client, chat = make_client(
+            app_env,
+            [model_says("a"), model_says("b"), model_says("c")],
+            title="Bali eSIM data plans",
+        )
+        with client, connected(client) as (ws, _, _):
+            self._run(ws, "which eSIM for Bali?")
+            recv_until(ws, "session_renamed")
+            chat.title = "Postgres index tuning"
+            self._run(ws, "different topic entirely now")
+            self._run(ws, "explain postgres index tuning please")  # turn 3 — drifted
+            renamed = recv_until(ws, "session_renamed")
+            assert renamed["title"] == "Postgres index tuning"
+        assert len(chat.title_calls) == 2
+
+    def test_a_backend_that_declines_leaves_the_name_alone(self, app_env):
+        """Empty/garbage reply, timeout, claude-max — every failure path keeps
+        the existing derived title. A name is never worth failing a turn."""
+        client, chat = make_client(app_env, [model_says("hi")], title=None)
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            assert self._run(ws, "a question about nothing")["result"] == "hi"
+        assert chat.title_calls  # it tried
+        assert SessionLog._parse(app_env["state_dir"] / name).title is None
 
 
 class TestFork:
@@ -3016,7 +3183,7 @@ class TestExportEndpoints:
     def test_export_answer_title_is_written_by_the_answers_own_model(self, app_env):
         """The prompt names the request, not the document (#172): the session's
         OWN model titles its answer, and that title names the file."""
-        client, chat = make_client(app_env, [model_says("Bali eSIM data plans")])
+        client, chat = make_client(app_env, [], title="Bali eSIM data plans")
         with client:
             with connected(client) as (ws, hello, _):
                 name = hello["session"]
@@ -3030,7 +3197,7 @@ class TestExportEndpoints:
             )
             # One extra call, tool-free and non-streaming, and it never touched
             # the conversation — a title must not become a turn in the log.
-            titling = chat.calls[-1]
+            titling = chat.title_calls[-1]
             assert not titling["tools"] and not titling.get("stream")
             assert len(titling["messages"]) == 1  # a bare prompt, not the conversation
             log = app_env["state_dir"] / name
@@ -3876,7 +4043,7 @@ class TestOriginPersistence:
                 recv_until(ws, "done")
         # Re-parse straight off disk: the origin record round-trips.
         path = Path(app_env["state_dir"]) / name
-        _, _, _, origin = SessionLog._parse(path)
+        origin = SessionLog._parse(path).origin
         assert origin == "schedule"
         # And a fresh, untagged session parses as the default "user".
         assert SessionLog._info_from(path, [{"role": "user", "content": "x"}]).origin == "user"

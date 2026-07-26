@@ -48,7 +48,13 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from . import backends, dir_ignore, export, notify, tools
-from .agent import FEEDBACK_SWITCH_NOTE, Agent, ModelUnavailable, environment_context
+from .agent import (
+    CANCELLED_RESULT,
+    FEEDBACK_SWITCH_NOTE,
+    Agent,
+    ModelUnavailable,
+    environment_context,
+)
 from .approval import (
     DEFAULT_ALLOWLIST,
     DEFAULT_DENYLIST,
@@ -82,7 +88,7 @@ from .cli import (
 from .embeddings import SemanticIndex
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .pty_session import PtySession
-from .session import SessionLog
+from .session import SessionLog, title_drifted
 
 if TYPE_CHECKING:
     from .claude_max import ClaudeMaxAgent
@@ -209,6 +215,27 @@ TITLE_PROMPT = (
 TITLE_SOURCE_CHARS = 4000  # the lead is enough to name a document, and keeps it one quick call
 TITLE_TIMEOUT = 25.0  # a slow local model must not hold the export hostage
 
+# Auto-titling a CHAT (#175). The chat title is otherwise the first user
+# message, which leaves a fork wearing its parent's name forever (the fork
+# copies the parent's log) and leaves a long conversation named after its
+# opening line. The model that answers the chat names it too.
+SESSION_TITLE_PROMPT = (
+    "Name this conversation, the way a chat app labels it in a sidebar.\n"
+    "Rules: 3-6 words. Name the SUBJECT the conversation is about — not what "
+    "was asked for, not the assistant's reply. Write it in the conversation's "
+    "own language. No quotes, no markdown, no trailing period. Reply with the "
+    "name alone and nothing else.\n\n"
+    "Current name: {current}\n\n"
+    "---\n{body}\n---"
+)
+# Enough to name a conversation: how it opened and where it is now. A pass over
+# the whole transcript would cost 50-100x the tokens for no better name.
+SESSION_TITLE_CHARS = 1500  # per exchange
+# Turns that get a title: 1, 3, 7, 15, 31 … — `(n + 1) & n == 0`. Logarithmic,
+# so a long chat is retitled a handful of times and can never thrash. Titles are
+# navigation: a name that moves every turn is worse than one slightly stale.
+RETITLE_FIRST_TURN = 1
+
 # Offline mirror (#165). The PWA keeps a local copy of every session it can fit,
 # so an installed app opens and reads its history with no server reachable at
 # all. What the user goes back for is the CONVERSATION — the question, the
@@ -261,7 +288,7 @@ def offline_events(path: Path) -> list[dict]:
     """
     events = SessionLog.reconstruct_events(path)
     if events is None:
-        messages, _, _, _ = SessionLog._parse(path)
+        messages = SessionLog._parse(path).messages
         return [{"type": "history", "messages": messages}]
     trimmed: list[dict] = []
     for event in events:
@@ -949,7 +976,10 @@ leaving this one untouched — tell them to use it when they want to try an \
 alternative approach or a side question and keep the main chat clean. Header \
 controls: a "‹ Sessions" back button (top left, \
 with a badge when a background session needs attention) opens the sessions \
-drawer; the centered session title opens a menu (new chat, rename this chat, \
+drawer. The chat's name is written for it automatically — after the first \
+answer, when a fork first differs from its parent, and occasionally if the \
+subject really changes; if the user renames it by hand that name is final and \
+is never rewritten. The centered session title opens a menu (new chat, rename this chat, \
 switch model, change directory, line wrap, export the chat to PDF, keep this \
 chat, delete \
 this chat, workspace & jobs); the compose pencil (top right) starts a new \
@@ -1113,7 +1143,14 @@ class Session:
         # switch and when the drafted issue is filed.
         self.feedback_block = False
         self.last_shown = time.monotonic()
-        self.custom_title: str | None = None  # a user-set name; overrides the derived title
+        self.custom_title: str | None = None  # a stored name; overrides the derived title
+        # Auto-titling (#175). `title_auto` says the stored name was written by
+        # the model, so the titler may replace it — a hand-typed rename sets it
+        # False and the titler never runs again. `retitle_forced` makes the next
+        # completed task retitle unconditionally: set on a fork, whose copied
+        # log otherwise carries the PARENT's title forever.
+        self.title_auto = False
+        self.retitle_forced = False
         # last-actor-drives (#102): whoever last performed a session-affecting
         # action. Observers viewing this session see a "another tab is active"
         # hint; acting claims control. Never persisted — replay re-derives it.
@@ -1899,6 +1936,8 @@ class WebServer:
                 done["sources"] = list(sources)
             session.bridge.emit(done)
             await self._notify_done(session, result)
+            if result != CANCELLED_RESULT:  # a stopped turn named nothing
+                await self._maybe_retitle(session)  # name it for its subject (#175)
         except ModelUnavailable as exc:
             session.bridge.emit(
                 {
@@ -2374,6 +2413,10 @@ class WebServer:
             session.agent.model = src_agent.model
             session.agent.provider = getattr(src_agent, "provider", "ollama")
             session.logref.model(model_spec(session.agent))
+        # The copied log carries the PARENT's history, so the derived title (and
+        # any inherited auto-title) names the parent. The fork earns its own name
+        # at its first completed turn — where it starts to differ (#175).
+        session.retitle_forced = True
         session.bridge.record(
             {
                 "type": "echo",
@@ -2438,6 +2481,7 @@ class WebServer:
             # touches the file; mirror the name into memory for the hot path.
             await asyncio.to_thread(session.logref.log.set_title, title)
             session.custom_title = title
+            session.title_auto = False  # hand-typed: the auto-titler stands down for good
         else:
             # A cold session: append with a transient log handle, then release
             # it so the file isn't held open by a background writer.
@@ -2849,6 +2893,108 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return fallback
         return title or fallback
 
+    # ---- auto-titling a chat (#175) --------------------------------------
+    # A title has to be readable off disk with no model call — the drawer lists
+    # sessions cold (`list_sessions`) and the pager peeks them (`_peek`). So it
+    # is computed at WRITE time and persisted as the same `kind:"title"` record
+    # a rename writes; the read path is untouched.
+
+    @staticmethod
+    def _title_source(session: Session) -> tuple[str, str, str]:
+        """(current title, exchanges to name from, the LATEST exchange alone).
+
+        The namer gets how the chat opened and where it is now — enough to name
+        a conversation, and far short of the whole transcript. The drift gate
+        gets only the latest exchange: measuring drift against the opening too
+        would mean a chat could never drift from a title derived from it.
+        """
+        messages = [
+            m
+            for m in getattr(session.agent, "messages", [])[1:]
+            if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()
+        ]
+        if not messages:
+            return "", "", ""
+
+        def render(items: list[dict]) -> str:
+            return "\n\n".join(
+                f"{m['role']}: {(m.get('content') or '').strip()[:SESSION_TITLE_CHARS]}"
+                for m in items
+            )
+
+        # First two messages and last two, never overlapping: for a short chat
+        # the tail is simply empty rather than a duplicate of the head.
+        head = messages[:2]
+        tail = messages[max(2, len(messages) - 2) :]
+        return WebServer._title(session), render([*head, *tail]), render(tail or head)
+
+    def _model_session_title(self, session: Session, current: str, body: str) -> str | None:
+        """Ask the session's own model to name the conversation (blocking; runs
+        in a thread). Same shape as `_model_title` — a bare prompt, no tools, no
+        run_task, so the naming turn never enters the conversation or the log."""
+        agent = getattr(session, "agent", None)
+        chat = getattr(agent, "chat", None)
+        if agent is None or chat is None:  # claude-max drives its own SDK loop
+            return None
+        prompt = SESSION_TITLE_PROMPT.format(current=current or "(none yet)", body=body)
+        try:
+            response = chat(
+                model=agent.model,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[],
+                options={"num_ctx": getattr(agent, "num_ctx", 8192)},
+                think=False,
+                stream=False,
+            )
+            return export.clean_title(response.message.content or "")
+        except Exception:  # noqa: BLE001 — a name is never worth failing a turn
+            return None
+
+    def _retitle_due(self, session: Session, turns: int, recent: str) -> bool:
+        """Whether this completed turn earns a model call.
+
+        Never for a hand-typed name (that decision is the user's, permanently).
+        Always on a fork's first turn — its copied log wears the parent's title.
+        Otherwise at turns 1, 3, 7, 15 … and, past the first, only once the chat
+        has actually moved off its current title (a free lexical check)."""
+        if session.custom_title and not session.title_auto:
+            return False
+        if session.retitle_forced:
+            return True
+        if turns != RETITLE_FIRST_TURN and (turns + 1) & turns:
+            return False
+        if turns == RETITLE_FIRST_TURN:
+            return True  # the title is still the raw prompt — always worth replacing
+        return title_drifted(WebServer._title(session), recent)
+
+    async def _maybe_retitle(self, session: Session) -> None:
+        """Name the chat after what it is about, once a turn has finished."""
+        turns = sum(
+            1 for m in getattr(session.agent, "messages", [])[1:] if m.get("role") == "user"
+        )
+        current, body, recent = self._title_source(session)
+        if not body or not self._retitle_due(session, turns, recent):
+            return
+        try:
+            title = await asyncio.wait_for(
+                asyncio.to_thread(self._model_session_title, session, current, body),
+                TITLE_TIMEOUT,
+            )
+        except Exception:  # noqa: BLE001 — timeout or backend blow-up: keep the old name
+            return
+        session.retitle_forced = False  # attempted; don't re-force on the next turn
+        if not title or title == current:
+            return
+        title = title[:RENAME_MAX]
+        await asyncio.to_thread(session.logref.log.set_title, title, True)
+        session.custom_title = title
+        session.title_auto = True
+        # record=False: a rename is UI state, not part of the transcript — cold
+        # replay re-reads the name from the log's own title record.
+        session.bridge.emit(
+            {"type": "session_renamed", "name": session.name, "title": title}, record=False
+        )
+
     async def handle_export_answer(self, request) -> Response | JSONResponse:
         """POST /export/answer, raw markdown body — renders one answer to a PDF
         the browser downloads. Conversion is local (see export.py); embedded
@@ -2892,7 +3038,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         image_roots = self._image_roots()
 
         def build() -> tuple[bytes, str]:
-            messages, _, custom_title, _ = SessionLog._parse(path)
+            messages, _, custom_title, _, _ = SessionLog._parse(path)
             title = custom_title or SessionLog._derive_title(messages) or "aish session"
             return export.render_session_pdf(messages, title, image_roots), title
 
@@ -2977,7 +3123,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
 
         def build() -> dict:
             events = offline_events(path)
-            messages, _, custom_title, origin = SessionLog._parse(path)
+            messages, _, custom_title, origin, _ = SessionLog._parse(path)
             title = SessionLog._truncate_title(
                 custom_title or SessionLog._derive_title(messages)
             )
@@ -3081,10 +3227,13 @@ def create_app(
         history: list[dict] = []
         recorded_spec = ""
         custom_title: str | None = None
+        title_auto = False
         if path is not None:
             # Parse BEFORE anything is appended: the last model record in
             # the file is the model this session must resume with.
-            history, recorded_spec, custom_title, origin = SessionLog._parse(path)
+            parsed = SessionLog._parse(path)
+            history, recorded_spec = parsed.messages, parsed.model
+            custom_title, origin, title_auto = parsed.title, parsed.origin, parsed.title_auto
         log = SessionLog(path) if path is not None else SessionLog.new(state_dir)
         logref = LogRef(log)
         bridge = Bridge(get_loop)
@@ -3299,6 +3448,7 @@ def create_app(
             logref.origin(origin)
         session = Session(agent, logref, bridge, origin=origin, trigger_meta=trigger_meta)
         session.custom_title = custom_title  # a renamed chat keeps its name hot
+        session.title_auto = title_auto  # …and a HAND-typed one is never overwritten (#175)
         session_holder.append(session)  # #95: the mid-task get/drain callbacks read it
         return session, history
 
