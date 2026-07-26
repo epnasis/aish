@@ -338,7 +338,7 @@ class TestSlashCommands:
         legacy = SessionInfo(path=tmp_path, when="2026-01-01 00:00", count=3, title="fix build")
         assert session_row(legacy) == "2026-01-01 00:00 ·   3 msgs · fix build"
 
-    def test_resume_loads_previous_replays_and_relogs(self, tmp_path, capsys):
+    def test_resume_loads_previous_replays_and_switches_the_log(self, tmp_path, capsys):
         from aish.cli import handle_slash
         from aish.session import SessionLog
 
@@ -354,7 +354,10 @@ class TestSlashCommands:
         )
         out = capsys.readouterr().out
         assert "old question" in out and "old answer" in out  # replayed on screen
-        # re-logged: current session file is self-contained
+        # Nothing is re-logged: resume SWITCHES the REPL to that session, so the
+        # log now IS the resumed file — its history is there because that is
+        # where it was written, and further turns append to the same chat.
+        assert logref.log.path == previous.path
         assert "old question" in logref.log.path.read_text()
 
     def test_resume_with_no_previous(self, tmp_path, capsys):
@@ -494,6 +497,119 @@ def test_resume_adopts_the_session_model_and_workspace(tmp_path, monkeypatch):
 
     assert (agent.provider, agent.model) == ("gemini", "gemini-3.5-flash")
     assert agent.cwd == str(workdir)
+
+
+def workspace_setup(tmp_path, *names):
+    """A state dir for sessions plus the named working directories."""
+    made = [tmp_path / "sessions", *(tmp_path / name for name in names)]
+    for path in made:
+        path.mkdir()
+    return made
+
+
+def scope_approver(tmp_path, agent):
+    """The real CLI approver bound to this agent's live scope — so a test can
+    assert on the APPROVAL DECISION (prompt vs auto-approve), not just on the
+    contents of agent.roots."""
+    from aish.cli import make_approver
+
+    return make_approver(
+        False, tmp_path / "allow.txt", None,
+        get_scope=lambda: (agent.cwd, agent.roots),
+        trust_dir=agent.trust_root,
+    )
+
+
+def test_resume_leaves_the_previous_chats_trusted_dirs_behind(tmp_path, monkeypatch):
+    """Trusted dirs are session property (#176). The CLI reuses ONE live Agent
+    across a /resume, so a dir trusted in the chat you leave must not stay
+    auto-approvable in the chat you land in — that is the auto-approval scope
+    outliving the chat that granted it."""
+    from aish.agent import Agent
+    from aish.cli import LogRef, handle_slash
+    from aish.session import SessionLog
+
+    sessions, old, extra, resumed_dir = workspace_setup(tmp_path, "old", "extra", "resumed")
+    earlier = SessionLog(sessions / "session-20260101-000000-000000.jsonl")
+    earlier.message({"role": "user", "content": "from january"})
+    earlier.workspace({"kind": "cwd", "cwd": str(resumed_dir)})
+
+    logref = LogRef(SessionLog.new(sessions))
+    agent = Agent(
+        model="fake", approve=lambda _c: None, client_chat=lambda **_k: None,
+        cwd=str(old), state_log=logref.workspace,
+    )
+    approve = scope_approver(tmp_path, agent)
+
+    scripted_input(monkeypatch, ["t"])  # 'trust this directory' at the prompt
+    assert approve(f"ls {extra}") == f"ls {extra}"
+    assert approve(f"ls {extra}") == f"ls {extra}"  # auto-approved now (no input left)
+    left_behind = logref.log
+
+    handle_slash("/resume", agent, logref, sessions)
+
+    assert agent.cwd == str(resumed_dir)
+    assert extra.resolve() not in agent.roots
+    # the trust stayed with the chat that granted it, on disk…
+    assert "trust_dir" in left_behind.path.read_text(encoding="utf-8")
+    # …and the gate asks again in the resumed chat, which never trusted it
+    scripted_input(monkeypatch, ["n"])
+    assert approve(f"ls {extra}") is None
+
+
+def test_resume_restores_the_dirs_that_session_trusted(tmp_path, monkeypatch):
+    """The other half of #176: a dir the resumed chat itself trusted is
+    persisted with it and comes back, so resuming never makes the user
+    re-answer a prompt they already answered in that chat."""
+    from aish.agent import Agent
+    from aish.cli import LogRef, handle_slash
+    from aish.session import SessionLog
+
+    sessions, work, shared = workspace_setup(tmp_path, "work", "shared")
+    logref = LogRef(SessionLog(sessions / "session-20260101-000000-000000.jsonl"))
+    agent = Agent(
+        model="fake", approve=lambda _c: None, client_chat=lambda **_k: None,
+        cwd=str(work), state_log=logref.workspace,
+    )
+    logref.message({"role": "user", "content": "from january"})
+    agent.add_root(str(shared))  # /add-dir, in this chat
+    approve = scope_approver(tmp_path, agent)
+    assert approve(f"ls {shared}") == f"ls {shared}"  # auto-approved, no prompt
+
+    handle_slash("/new", agent, logref, sessions)  # a different chat: not trusted here
+    assert shared.resolve() not in agent.roots
+    scripted_input(monkeypatch, ["n"])
+    assert approve(f"ls {shared}") is None
+
+    handle_slash("/resume", agent, logref, sessions)  # back to january
+
+    assert shared.resolve() in agent.roots
+    assert approve(f"ls {shared}") == f"ls {shared}"  # auto-approves again, no input
+
+
+def test_resume_without_a_recorded_cwd_returns_to_the_launch_dir(tmp_path):
+    """A session that never moved records no cwd. It must re-anchor to the dir
+    aish was launched in — the same base the web gives a cold-opened session —
+    not silently keep the cwd of the chat being left (#176)."""
+    from aish.agent import Agent
+    from aish.cli import LogRef, handle_slash
+    from aish.session import SessionLog
+
+    sessions, launch, moved = workspace_setup(tmp_path, "launch", "moved")
+    earlier = SessionLog(sessions / "session-20260101-000000-000000.jsonl")
+    earlier.message({"role": "user", "content": "from january"})  # no cwd record
+
+    agent = Agent(
+        model="fake", approve=lambda _c: None, client_chat=lambda **_k: None,
+        cwd=str(launch),
+    )
+    logref = LogRef(SessionLog.new(sessions))
+    agent.rebase(str(moved))  # the chat being left had wandered off
+
+    handle_slash("/resume", agent, logref, sessions)
+
+    assert agent.cwd == str(launch)
+    assert agent.roots == [launch.resolve()]
 
 
 def test_resume_picker_lists_slugs_and_selects_by_number(tmp_path, capsys, monkeypatch):
@@ -1249,3 +1365,79 @@ class TestParseFeedback:
         assert parse_feedback("/f") is not None  # unambiguous: only /feedback
         assert parse_feedback("/learn") is None
         assert parse_feedback("/model gemini") is None
+
+
+class TestLaunchResume:
+    """`aish --resume` at LAUNCH (cli.main), which had no test at all — so both
+    "adopts the session's model" and "an explicit --model still wins" were
+    implemented but unverified (#176). No model and no network: the backend is
+    a stub and run_task never reaches one."""
+
+    def launch(self, monkeypatch, tmp_path, argv):
+        import io
+        import sys
+
+        from aish import backends, cli
+        from aish.agent import Agent
+
+        state = tmp_path / "state"
+        workdir = tmp_path / "work"
+        for path in (state, workdir):
+            path.mkdir(exist_ok=True)
+        monkeypatch.chdir(workdir)
+        monkeypatch.setenv("AISH_STATE_DIR", str(state))
+        monkeypatch.setenv("AISH_CONFIG", str(tmp_path / "absent.toml"))
+        monkeypatch.setenv("AISH_ALLOWLIST", str(tmp_path / "allow.txt"))
+        monkeypatch.setenv("AISH_DENYLIST", str(tmp_path / "deny.txt"))
+        monkeypatch.setenv("AISH_LESSONS", str(tmp_path / "lessons.md"))
+        monkeypatch.delenv("AISH_MODEL", raising=False)
+        monkeypatch.setattr(cli, "_box", None)  # no interactive picker…
+        monkeypatch.setattr(sys, "stdin", io.StringIO())  # …piped: resume the latest
+        monkeypatch.setattr(backends, "make_chat", self.fake_backend)
+        monkeypatch.setattr(Agent, "run_task", lambda self, *a, **k: "done")
+        monkeypatch.setattr(sys, "argv", ["aish", *argv])
+        assert cli.main() == 0
+        return state
+
+    @staticmethod
+    def fake_backend(spec):
+        provider, _, name = spec.partition(":")
+        if not name:  # bare Ollama model name
+            return (lambda **_kw: None), "ollama", provider
+        return (lambda **_kw: None), provider, name
+
+    def recorded_session(self, tmp_path, spec):
+        from aish.session import SessionLog
+
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        log = SessionLog(state / "session-20260101-000000-000000.jsonl")
+        log.model(spec)
+        log.message({"role": "user", "content": "from january"})
+        return log
+
+    def test_adopts_the_recorded_model(self, tmp_path, monkeypatch, capsys):
+        self.recorded_session(tmp_path, "gemini:gemini-3.5-flash")
+        self.launch(monkeypatch, tmp_path, ["--resume", "carry", "on"])
+        assert "model gemini:gemini-3.5-flash" in capsys.readouterr().out
+
+    def test_explicit_model_beats_the_recorded_one(self, tmp_path, monkeypatch, capsys):
+        self.recorded_session(tmp_path, "gemini:gemini-3.5-flash")
+        self.launch(
+            monkeypatch, tmp_path, ["--model", "openai:gpt-9", "--resume", "carry", "on"]
+        )
+        assert "model openai:gpt-9" in capsys.readouterr().out
+
+    def test_abbreviated_model_flag_still_wins(self, tmp_path, monkeypatch, capsys):
+        """argparse accepts abbreviations, so `--mo` IS an explicit --model. The
+        old sys.argv string scan missed it and let the recorded model win."""
+        self.recorded_session(tmp_path, "gemini:gemini-3.5-flash")
+        self.launch(monkeypatch, tmp_path, ["--mo", "openai:gpt-9", "--resume", "carry", "on"])
+        assert "model openai:gpt-9" in capsys.readouterr().out
+
+    def test_without_the_flag_the_startup_default_is_used(self, tmp_path, monkeypatch, capsys):
+        """No flag, no session to adopt from: the default still fills in — the
+        SUPPRESS default must never leave args.model unset. No task, so this
+        reaches the banner and then exits the REPL on end-of-input."""
+        self.launch(monkeypatch, tmp_path, [])
+        assert "model qwen3.6:35b-a3b" in capsys.readouterr().out

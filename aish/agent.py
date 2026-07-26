@@ -724,6 +724,10 @@ class Agent:
         # an approval prompt. Execution is stateless for the model: cwd moves
         # only on user action (/cd, !cd) — a model-issued bare cd never runs.
         self.roots: list[Path] = [Path(self.cwd).resolve()]
+        # The dir this agent was launched in, kept for restore_workspace: a
+        # session that never recorded a cwd re-anchors HERE, never to wherever
+        # the chat being left happened to be sitting (#176).
+        self.launch_cwd = self.cwd
         self.on_message = on_message
         self.on_token = on_token
         self.job_log_dir = job_log_dir
@@ -929,15 +933,29 @@ class Agent:
         )
 
     def restore_workspace(self, cwd: str | None, trusted: list[str]) -> None:
-        """Reapply a session's persisted cwd + trusted dirs on resume/cold-open,
-        setting state DIRECTLY (never through rebase/trust_root) so restoring
+        """Reapply a session's persisted cwd + trusted dirs on resume/cold-open.
+
+        AUTHORITATIVE, not additive (#176): the roots become EXACTLY this
+        session's own workspace — its recorded cwd plus the dirs it recorded
+        trusting. Both failure directions are bugs, and roots is what scopes
+        approval.py's auto-approval, so neither may be tolerated: nothing rides
+        along from the chat being left (the CLI reuses ONE live Agent across
+        /resume, so an appended /add-dir used to widen the gate in a chat that
+        never granted it), and nothing this chat trusted is dropped.
+
+        State is set DIRECTLY (never through rebase/trust_root) so restoring
         emits no fresh cwd/trust record — that would be a replay feedback loop.
-        Missing paths degrade gracefully: a vanished cwd keeps the default, a
-        vanished trusted dir is skipped."""
-        if cwd and os.path.isdir(cwd):
-            self.cwd = cwd
-            self.roots[0] = Path(cwd).resolve()
-            self._sync_cwd_in_context()  # restored cwd shows in the system prompt too
+        Missing paths degrade gracefully: a session that recorded no cwd, or
+        whose cwd is gone, re-anchors to the LAUNCH workspace — the same base
+        the web gives a cold-opened session — and a vanished trusted dir is
+        skipped. Roots a process (not a session) owns — the web's uploads dir —
+        are re-added by their owner after this call."""
+        anchor = cwd if cwd and os.path.isdir(cwd) else self.launch_cwd
+        self.cwd = anchor
+        # Rebuilt in place: closures hand out this exact list (the approvers'
+        # get_scope, the web's root union), so it must stay the same object.
+        self.roots[:] = [Path(anchor).resolve()]
+        self._sync_cwd_in_context()  # restored cwd shows in the system prompt too
         for path in trusted:
             resolved = Path(path).resolve()
             if resolved.is_dir() and not any(

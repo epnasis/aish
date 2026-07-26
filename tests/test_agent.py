@@ -1691,6 +1691,48 @@ class TestWorkspacePersistence:
         assert agent.cwd == str(tmp_path)  # vanished cwd → keep the default
         assert gone_trust.resolve() not in agent.roots  # vanished trust → skipped
 
+    def test_restore_workspace_drops_another_sessions_trust(self, tmp_path):
+        """Restoring is authoritative, not additive (#176): the roots end up
+        being exactly the restored session's own workspace, so a dir trusted in
+        the chat being left cannot ride along into it."""
+        old, extra, resumed = tmp_path / "old", tmp_path / "extra", tmp_path / "resumed"
+        for path in (old, extra, resumed):
+            path.mkdir()
+        agent, _ = make_agent([], cwd=str(old))
+        agent.trust_root(str(extra))
+        assert extra.resolve() in agent.roots
+
+        agent.restore_workspace(str(resumed), [])
+
+        assert agent.roots == [resumed.resolve()]
+        assert extra.resolve() not in agent.roots
+
+    def test_restore_workspace_without_cwd_reanchors_to_the_launch_dir(self, tmp_path):
+        """A session that never recorded a cwd falls back to the dir this agent
+        was launched in — the same base the web gives a cold-opened session —
+        never to wherever the previous chat happened to be sitting (#176)."""
+        launch, moved = tmp_path / "launch", tmp_path / "moved"
+        launch.mkdir()
+        moved.mkdir()
+        agent, _ = make_agent([], cwd=str(launch))
+        agent.rebase(str(moved))  # the chat being left had moved elsewhere
+        assert agent.cwd == str(moved)
+
+        agent.restore_workspace(None, [])
+
+        assert agent.cwd == str(launch)
+        assert agent.roots == [launch.resolve()]
+
+    def test_restore_workspace_keeps_the_same_roots_list(self, tmp_path):
+        """Approvers hand out agent.roots through get_scope closures, so the
+        rebuild must mutate that list, never rebind it."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        agent, _ = make_agent([], cwd=str(tmp_path))
+        held = agent.roots
+        agent.restore_workspace(str(proj), [])
+        assert held is agent.roots and held == [proj.resolve()]
+
 
 class TestCancel:
     def test_cancel_stops_before_next_model_call(self, tmp_path):
