@@ -32,14 +32,14 @@ function extract(startMarker, endMarker) {
 const deckApi = extract("// [DECK-START]", "// [DECK-END]");
 const {
   addToDeck, removeFromDeck, touchDeck, recomputeWorkingSet,
-  seedWorkingSet, partitionRecent, deckToPages,
+  sweepWorkingSet, seedWorkingSet, partitionRecent, deckToPages,
 } = deckApi;
 const { swipeUpOpensDrawer } = extract("// [SWIPEUP-START]", "// [SWIPEUP-END]");
 const { searchbarSwipeDismisses } = extract("// [SEARCHDISMISS-START]", "// [SEARCHDISMISS-END]");
 
 for (const [name, fn] of Object.entries({ addToDeck, removeFromDeck, touchDeck,
-  recomputeWorkingSet, seedWorkingSet, partitionRecent, deckToPages, swipeUpOpensDrawer,
-  searchbarSwipeDismisses })) {
+  recomputeWorkingSet, sweepWorkingSet, seedWorkingSet, partitionRecent, deckToPages,
+  swipeUpOpensDrawer, searchbarSwipeDismisses })) {
   assert(typeof fn === "function", `failed to extract ${name}`);
 }
 
@@ -225,6 +225,42 @@ check("a short up-flick on the search bar does NOT dismiss", () => {
 
 check("a mostly-horizontal swipe on the search bar does NOT dismiss", () => {
   assert.strictEqual(searchbarSwipeDismisses({ startY: 700, endY: 640, dx: 90 }), false);
+});
+
+// ---- the sweep must not strand the deck ----------------------------------
+// Regression: coming back after longer than the eviction window aged out every
+// member at once. The deck emptied but kept `seeded`, so maybeSeedDeck returned
+// early forever — the working set then only ever held chats you happened to
+// open, and swiping between chats did nothing until you opened the drawer.
+check("sweeping away every member re-opens seeding", () => {
+  const out = sweepWorkingSet([member("a", 70), member("b", 90)], NOW, true);
+  assert.deepStrictEqual(out.members, []);
+  assert.strictEqual(out.seeded, false, "an all-evicted deck must be re-seedable");
+});
+
+check("a partial sweep keeps the deck seeded", () => {
+  const out = sweepWorkingSet([member("a", 70), member("fresh", 1)], NOW, true);
+  assert.deepStrictEqual(out.members.map((m) => m.name), ["fresh"]);
+  assert.strictEqual(out.seeded, true, "survivors mean the working set is still yours");
+});
+
+check("an already-empty deck keeps its flag — ✕ to zero is a choice, not staleness", () => {
+  const out = sweepWorkingSet([], NOW, true);
+  assert.deepStrictEqual(out.members, []);
+  assert.strictEqual(out.seeded, true);
+});
+
+check("sweeping never sets seeded on an unseeded deck", () => {
+  assert.strictEqual(sweepWorkingSet([member("a", 1)], NOW, false).seeded, false);
+  assert.strictEqual(sweepWorkingSet([], NOW, false).seeded, false);
+});
+
+check("the sweep still evicts exactly what recomputeWorkingSet evicts", () => {
+  const members = [member("a", 70), member("fresh", 1), member("edge", 47)];
+  assert.deepStrictEqual(
+    sweepWorkingSet(members, NOW, true).members,
+    recomputeWorkingSet(members, NOW),
+  );
 });
 
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }

@@ -7024,6 +7024,20 @@ function recomputeWorkingSet(members, now) {
   return members.filter((m) => now - (m.ts || 0) <= DECK_MAX_IDLE_MS);
 }
 
+function sweepWorkingSet(members, now, seeded) {
+  // The cold-start sweep, plus the one case that must re-open seeding: when it
+  // empties a deck that HAD members, every chat aged out together (you were away
+  // longer than the window) and the working set is stale, not chosen. Leaving
+  // `seeded` set there strands the user — `maybeSeedDeck` returns early forever,
+  // so the deck only ever holds the chats they happen to open and swiping between
+  // chats does nothing. Clearing it lets the next session_list refill the deck.
+  //
+  // An ALREADY-empty deck keeps its flag: that is someone who ✕-removed their way
+  // down to nothing, and re-seeding would overrule a deliberate choice.
+  const swept = recomputeWorkingSet(members, now);
+  return { members: swept, seeded: seeded && !(members.length && !swept.length) };
+}
+
 function seedWorkingSet(sessions, now) {
   // First run / empty saved deck / new device: adopt every session active within
   // the window, oldest-active first (matching the pager's oldest→newest so the
@@ -7108,7 +7122,7 @@ function saveDeck() {
     lastActiveAt = stored.lastActiveAt;
   }
   // Cold start (a): a fresh document load evicts anything idle past the window.
-  deck = recomputeWorkingSet(deck, Date.now());
+  ({ members: deck, seeded: deckSeeded } = sweepWorkingSet(deck, Date.now(), deckSeeded));
   saveDeck();
 })();
 
@@ -7121,7 +7135,7 @@ addEventListener("pagehide", () => { noteActivity(); saveDeck(); });
 // Cold start (b): returning to the foreground after a long hiddenness. Evict
 // stale members, never add — same discipline as a fresh load.
 function coldStartRecompute() {
-  deck = recomputeWorkingSet(deck, Date.now());
+  ({ members: deck, seeded: deckSeeded } = sweepWorkingSet(deck, Date.now(), deckSeeded));
   saveDeck();
   if (!$("sessions-sheet").hidden && lastSessionEvent) renderSessions(lastSessionEvent);
 }
