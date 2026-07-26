@@ -63,7 +63,7 @@ check("online, the server's list wins", () => {
     pagerSessions: [page("from-server")],
     mirror: [meta("from-mirror", 10)],
   });
-  eq(names(s.pagerPages()), ["from-server"]);
+  eq(names(s.pagerSource()), ["from-server"]);
 });
 
 check("a cold offline launch pages through the mirror", () => {
@@ -73,12 +73,12 @@ check("a cold offline launch pages through the mirror", () => {
     pagerSessions: [],
     mirror: [meta("a", 100), meta("b", 200)],
   });
-  eq(names(s.pagerPages()), ["a", "b"]);
+  eq(names(s.pagerSource()), ["a", "b"]);
 });
 
 check("before the first hello, the mirror fills in even while online", () => {
   const s = makeSandbox({ pagerSessions: [], mirror: [meta("a", 1)] });
-  eq(names(s.pagerPages()), ["a"]);
+  eq(names(s.pagerSource()), ["a"]);
 });
 
 check("offline, the mirror beats a stale in-memory server list", () => {
@@ -89,14 +89,14 @@ check("offline, the mirror beats a stale in-memory server list", () => {
     pagerSessions: [page("stale-only")],
     mirror: [meta("a", 1), meta("b", 2), meta("c", 3)],
   });
-  eq(names(s.pagerPages()), ["a", "b", "c"]);
+  eq(names(s.pagerSource()), ["a", "b", "c"]);
 });
 
 check("offline with nothing mirrored falls back instead of going blank", () => {
   const s = makeSandbox({ offlineMode: true, pagerSessions: [page("x")], mirror: [] });
-  eq(names(s.pagerPages()), ["x"]);
+  eq(names(s.pagerSource()), ["x"]);
   const empty = makeSandbox({ offlineMode: true, pagerSessions: [], mirror: [] });
-  eq(empty.pagerPages(), []);
+  eq(empty.pagerSource(), []);
 });
 
 check("mirror pages are oldest-to-newest, matching the server's order", () => {
@@ -104,14 +104,14 @@ check("mirror pages are oldest-to-newest, matching the server's order", () => {
     offlineMode: true,
     mirror: [meta("newest", 300), meta("oldest", 100), meta("middle", 200)],
   });
-  eq(names(s.pagerPages()), ["oldest", "middle", "newest"]);
+  eq(names(s.pagerSource()), ["oldest", "middle", "newest"]);
 });
 
 check("the mirror list is capped at the server's 30, keeping the newest", () => {
   const mirror = [];
   for (let i = 0; i < 45; i += 1) mirror.push(meta(`s${i}`, i));
   const s = makeSandbox({ offlineMode: true, mirror });
-  const got = names(s.pagerPages());
+  const got = names(s.pagerSource());
   assert.strictEqual(got.length, 30);
   assert.strictEqual(got[0], "s15", "should drop the oldest, not the newest");
   assert.strictEqual(got[29], "s44");
@@ -122,7 +122,7 @@ check("origin rides along so the pager keeps its Recent/Automated lanes", () => 
     offlineMode: true,
     mirror: [meta("chat", 1), meta("cron", 2, "schedule")],
   });
-  eq(s.pagerPages().map((p) => p.origin), ["user", "schedule"]);
+  eq(s.pagerSource().map((p) => p.origin), ["user", "schedule"]);
 });
 
 if (failures) {
