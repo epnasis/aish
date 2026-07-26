@@ -7552,7 +7552,6 @@ let sessionTab = (() => {
   catch { return "recent"; }
 })();
 let lastSessionEvent = null; // last session_list, so tab switches re-render offline
-let tabSwipeActive = false;   // a horizontal list swipe is in progress → rows stand down
 
 // SESSIONS_PARTITION_START
 // Split sessions into the two tabs and tally each tab's attention counters.
@@ -7830,14 +7829,12 @@ function wrapSwipeDelete(row, info) {
   });
   row.addEventListener("pointermove", (e) => {
     if (startX === null) return;
-    if (tabSwipeActive) { set(open ? -88 : 0); return; } // a tab swipe owns this gesture
     dx = e.clientX - startX;
     if (Math.abs(dx) > 6) row.classList.add("dragging");
     set(Math.min(0, Math.max(-100, (open ? -88 : 0) + dx)));
   });
   const finish = () => {
     if (startX === null) return;
-    if (tabSwipeActive) { row.classList.remove("dragging"); set(open ? -88 : 0); startX = null; return; }
     const moved = Math.abs(dx) > 6;
     open = (open ? -88 : 0) + dx < -44;
     row.classList.remove("dragging");
@@ -7978,45 +7975,10 @@ function renderRecentTab(sessions, current, isActive) {
   }
 }
 
-// Horizontal swipe on the list switches tabs (a thumb gesture, matching the
-// message-pager). It reuses that pager's axis disambiguation; once it locks
-// horizontal it sets tabSwipeActive so a same-gesture per-row swipe-delete
-// (which also reads horizontal pointer moves) stands down for this touch.
-(function attachSessionTabSwipe() {
-  const list = $("sessions-list");
-  let sx = 0, sy = 0, t0 = 0, tracking = false, horizontal = false, blocked = false;
-  list.addEventListener("touchstart", (e) => {
-    if (e.touches.length !== 1 || $("sessions-tabs").hidden) { tracking = false; return; }
-    const t = e.touches[0];
-    sx = t.clientX; sy = t.clientY; t0 = e.timeStamp;
-    tracking = true; horizontal = false; blocked = false;
-  }, { passive: true });
-  list.addEventListener("touchmove", (e) => {
-    if (!tracking || blocked) return;
-    const t = e.touches[0];
-    const dx = t.clientX - sx, dy = t.clientY - sy;
-    if (horizontal) return;
-    if (e.timeStamp - t0 > 300) { blocked = true; return; }   // slow start = scroll/select
-    if (Math.abs(dx) < 12 && Math.abs(dy) < 12) return;        // undecided yet
-    if (Math.abs(dx) < Math.abs(dy) * 1.4) { blocked = true; return; } // mostly vertical
-    horizontal = true;
-    tabSwipeActive = true;
-    for (const r of list.querySelectorAll(".session-row.dragging")) {
-      r.style.transform = ""; r.classList.remove("dragging"); // undo any nascent row-swipe
-    }
-  }, { passive: true });
-  const end = (e) => {
-    if (tracking && horizontal) {
-      const dx = (e.changedTouches[0] || {}).clientX - sx;
-      if (Math.abs(dx) > 50) setSessionTab(dx < 0 ? "automated" : "recent");
-    }
-    tracking = false; horizontal = false;
-    // Clear on the next tick so the row's own pointerup handler still sees it.
-    setTimeout(() => { tabSwipeActive = false; }, 0);
-  };
-  list.addEventListener("touchend", end);
-  list.addEventListener("touchcancel", end);
-})();
+// No horizontal tab-swipe on the sessions list: it sat on the same rows as the
+// per-row swipe-to-delete and always preempted it, so a row could never be
+// swiped away (#169). The Recent/Automated segmented buttons switch tabs; the
+// horizontal swipe surface belongs to swipe-to-delete alone.
 
 const TRASH_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
