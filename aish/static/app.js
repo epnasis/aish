@@ -1168,14 +1168,27 @@ function renderAnswerNow() {
 // drift apart and disagree on where a block actually ends.
 // The info string allows hyphens (valid per CommonMark, and needed for the
 // aish-issue feedback block, #110) — not just \w, which stops at a hyphen.
-const FENCE_RE = /^(`{3,}|~{3,})([\w-]*)\s*$/;
+// Up to 3 leading spaces are allowed (CommonMark), which is load-bearing for
+// blocks nested in a list (#172): the list parser strips exactly the item's
+// content column, so a fence the model indented by 4 under a `2. ` marker
+// arrives here still carrying 1 space. Demanding column 0 made it leak as
+// literal text. The same 0-3 allowance is applied to the other block markers
+// below (heading, quote, table) for the same reason.
+const FENCE_RE = /^( {0,3})(`{3,}|~{3,})([\w-]*)\s*$/;
 function fenceOpen(line) {
   const m = line.match(FENCE_RE);
-  return m ? { ch: m[1][0], len: m[1].length, lang: m[2] } : null;
+  return m ? { ch: m[2][0], len: m[2].length, lang: m[3], indent: m[1].length } : null;
 }
 function fenceCloses(line, fence) {
   const m = line.match(FENCE_RE);
-  return Boolean(m) && m[2] === "" && m[1][0] === fence.ch && m[1].length >= fence.len;
+  return Boolean(m) && m[3] === "" && m[2][0] === fence.ch && m[2].length >= fence.len;
+}
+// A fenced block's content loses the opening fence's own indentation (up to
+// that many spaces) — otherwise a nested fence indents every code line.
+function dedent(line, n) {
+  let k = 0;
+  while (k < n && line[k] === " ") k++;
+  return line.slice(k);
 }
 
 // Offset where the stable prefix ends: just past the last blank line that is
@@ -2669,7 +2682,7 @@ function renderMarkdown(text) {
       flush();
       const body = [];
       i++;
-      while (i < lines.length && !fenceCloses(lines[i], fence)) body.push(lines[i++]);
+      while (i < lines.length && !fenceCloses(lines[i], fence)) body.push(dedent(lines[i++], fence.indent));
       i++; // closing fence (or EOF while streaming)
       // A ```aish-issue block (#110) is a feedback draft, not code: render it as
       // a review card with Create/Edit controls instead of a raw code block.
@@ -2694,7 +2707,7 @@ function renderMarkdown(text) {
       frag.appendChild(holder);
       continue;
     }
-    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    const heading = line.match(/^ {0,3}(#{1,6})\s+(.*)$/);
     if (heading) {
       flush();
       const h = document.createElement("h" + Math.min(heading[1].length + 1, 6));
@@ -2746,12 +2759,12 @@ function renderMarkdown(text) {
       frag.appendChild(list);
       continue;
     }
-    if (/^\|.*\|\s*$/.test(line) && i + 1 < lines.length
-        && /^\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+    if (/^ {0,3}\|.*\|\s*$/.test(line) && i + 1 < lines.length
+        && /^ {0,3}\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
       flush();
       frag.appendChild(mdTable(lines, i));
       i += 2;
-      while (i < lines.length && /^\|.*\|\s*$/.test(lines[i])) i++;
+      while (i < lines.length && /^ {0,3}\|.*\|\s*$/.test(lines[i])) i++;
       continue;
     }
     if (/^\s*(---+|\*\*\*+)\s*$/.test(line)) {
@@ -2760,12 +2773,12 @@ function renderMarkdown(text) {
       i++;
       continue;
     }
-    if (/^>\s?/.test(line)) {
+    if (/^ {0,3}>\s?/.test(line)) {
       flush();
       const quote = document.createElement("blockquote");
       const body = [];
-      while (i < lines.length && /^>\s?/.test(lines[i])) {
-        body.push(lines[i].replace(/^>\s?/, ""));
+      while (i < lines.length && /^ {0,3}>\s?/.test(lines[i])) {
+        body.push(lines[i].replace(/^ {0,3}>\s?/, ""));
         i++;
       }
       quote.appendChild(renderMarkdown(body.join("\n")));
@@ -2801,7 +2814,7 @@ function mdTable(lines, start) {
   table.appendChild(thead);
   const tbody = document.createElement("tbody");
   const sourceRows = [lines[start], lines[start + 1]];
-  for (let row = start + 2; row < lines.length && /^\|.*\|\s*$/.test(lines[row]); row++) {
+  for (let row = start + 2; row < lines.length && /^ {0,3}\|.*\|\s*$/.test(lines[row]); row++) {
     sourceRows.push(lines[row]);
     const tr = document.createElement("tr");
     for (const cell of splitRow(lines[row])) {
