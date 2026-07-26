@@ -20,7 +20,7 @@ import aish.notify as notify_module
 import aish.server as server_module
 from aish.agent import DENIED_RESULT, WRITE_DENIED
 from aish.server import create_app
-from aish.session import SessionLog
+from aish.session import SessionLog, synthetic_kind
 
 
 def tool_call(name: str, **arguments):
@@ -3692,7 +3692,11 @@ class TestGlobalConsole:
         # The shared text is now a user turn the model will see — via the same
         # user-message path as `!`, not the console stream.
         messages = client.app.state.server.active.agent.messages
-        assert any("device code ABC-123" in str(m.get("content", "")) for m in messages)
+        shared = [m for m in messages if "device code ABC-123" in str(m.get("content", ""))]
+        assert shared
+        # …and it stays out of the transcript on replay too: live it produced no
+        # bubble (just the toast), so a reload must not invent one (#171).
+        assert synthetic_kind(shared[0]["content"]) == "note"
 
     def test_model_run_command_never_touches_the_console(self, app_env, tmp_path):
         # A normal model task that runs a command must not create or feed the
@@ -3839,6 +3843,32 @@ class TestTriggerEndpoint:
             session = client.app.state.server.sessions[name]
             assert session.origin == "email"
             assert session.trigger_meta == {"msg": "abc"}
+
+    def test_trigger_prompt_is_a_system_turn_live_and_on_replay(self, app_env):
+        # A schedule/email/webhook prompt is not the owner typing (#171), and
+        # what he types into that chat afterwards IS. Live and cold must agree.
+        client, _ = make_client(app_env, [model_says("triaged"), model_says("replied")],
+                                token="secret")
+        with client:
+            r = client.post("/trigger?token=secret",
+                            json={"prompt": "new mail from the bank", "origin": "email"})
+            name = r.json()["session"]
+            with connected(client, f"/ws?token=secret&session={name}") as (ws, _, _):
+                recv_until(ws, "done")
+                ws.send_json({"type": "task", "text": "reply to it"})
+                recv_until(ws, "done")
+            server = client.app.state.server
+            live = [e for e in server.sessions[name].bridge.transcript if e["type"] == "user"]
+            path = server.state_dir / name
+
+        assert [(e["text"], e.get("synthetic")) for e in live] == [
+            ("new mail from the bank", "trigger"),
+            ("reply to it", None),
+        ]
+        cold = [e for e in SessionLog.reconstruct_events(path) if e["type"] == "user"]
+        assert [(e["text"], e.get("synthetic")) for e in cold] == [
+            (e["text"], e.get("synthetic")) for e in live
+        ]
 
     def test_pager_pages_carry_origin(self, app_env):
         # The swipe pager pages within one lane (Recent vs Automated), so every
@@ -4168,6 +4198,27 @@ class TestRestartResume:
             assert self._wait(lambda: not server.sessions[log.path.name].busy)
         sent = [m for m in chat.calls[0]["messages"] if m.get("role") == "tool"]
         assert sent and len(sent[0]["content"]) == 4 * 2000  # untrimmed
+
+    def test_resume_note_renders_as_a_system_turn_live_and_on_replay(self, app_env):
+        # #171: the resume note is aish talking to itself, so it must never look
+        # like something the user typed — and it must look the same after a
+        # reload, which is why the live event and the cold replay are asserted
+        # together. The re-issued original prompt above it stays a real bubble.
+        path = self._interrupted_log(app_env, "answer the mail", origin="user")
+        client, _chat = make_client(app_env, [model_says("already sent")])
+        with client:
+            server = client.app.state.server
+            assert self._wait(lambda: path.name in server.sessions)
+            session = server.sessions[path.name]
+            assert self._wait(lambda: not session.busy)
+            live = [e for e in session.bridge.transcript if e["type"] == "user"]
+
+        assert [e.get("synthetic") for e in live] == ["resume"]  # the resumed turn
+        cold = [e for e in SessionLog.reconstruct_events(path) if e["type"] == "user"]
+        assert [(e["text"], e.get("synthetic")) for e in cold] == [
+            ("answer the mail", None),  # what the user really asked for
+            (live[0]["text"], "resume"),  # …and the same synthetic turn, framed alike
+        ]
 
     def test_resume_reissues_prompt_when_nothing_was_logged(self, app_env):
         # Killed before the user message itself was logged: the history holds

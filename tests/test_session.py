@@ -257,6 +257,84 @@ def test_reconstruct_events_command_no_output_emits_no_stream(tmp_path):
     assert seq == ["user", "command_start", "command_end", "step", "done"]
 
 
+def test_reconstruct_events_marks_the_resume_note_synthetic(tmp_path):
+    # #171: the restart-recovery note is aish talking to itself. It IS a real
+    # turn (it started a task), so it still opens one — but it carries the
+    # marker the frontend renders as a system row instead of a user bubble.
+    from aish.server import RESUME_NOTE
+
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "answer the mail"})
+    log.step({"kind": "tool", "name": "gmail_send", "ok": True})
+    log.message({"role": "user", "content": RESUME_NOTE})
+    log.step({"kind": "tool", "name": "gmail_search", "ok": True})
+    log.message({"role": "assistant", "content": "already sent"})
+
+    users = [e for e in SessionLog.reconstruct_events(log.path) if e["type"] == "user"]
+    assert [e.get("synthetic") for e in users] == [None, "resume"]
+    assert users[1]["text"] == RESUME_NOTE  # verbatim; only the framing changes
+
+
+def test_reconstruct_events_skips_aishs_own_notes(tmp_path):
+    # A nudge, a /cd announcement and shared console text are appended to the
+    # conversation as user turns but never shown live. Replaying them as
+    # bubbles both invented text the user never typed AND split the turn they
+    # sat inside — so they are dropped, which is exactly what live does (#171).
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "fix the tests"})
+    log.step({"kind": "tool", "name": "read_file", "ok": True})
+    log.message({"role": "user", "content": "[aish: you have issued this exact call…]"})
+    log.step({"kind": "tool", "name": "read_file", "ok": True})
+    log.message({"role": "assistant", "content": "fixed"})
+    log.message({"role": "user", "content": "[I moved the session to /proj with /cd — …]"})
+    log.message({"role": "user", "content": "[Shared from my interactive terminal:]\nkey=x"})
+
+    events = SessionLog.reconstruct_events(log.path)
+    assert [e["type"] for e in events] == ["user", "step", "step", "done"]
+    assert events[0]["text"] == "fix the tests"  # one turn, not three
+    assert events[-1]["result"] == "fixed"
+
+
+def test_reconstruct_events_marks_a_triggered_sessions_opening_prompt(tmp_path):
+    # An automation's prompt has no marker to match — arbitrary text — so it is
+    # identified by position + provenance: the opening turn of a non-user
+    # session. Anything the owner types INTO that chat afterwards is theirs.
+    log = SessionLog.new(tmp_path)
+    log.origin("email")
+    log.message({"role": "user", "content": "new mail from the bank — triage it"})
+    log.step({"kind": "tool", "name": "gmail_search", "ok": True})
+    log.message({"role": "assistant", "content": "triaged"})
+    log.message({"role": "user", "content": "reply to it"})
+    log.step({"kind": "tool", "name": "gmail_send", "ok": True})
+    log.message({"role": "assistant", "content": "replied"})
+
+    users = [e for e in SessionLog.reconstruct_events(log.path) if e["type"] == "user"]
+    assert [e.get("synthetic") for e in users] == ["trigger", None]
+
+
+def test_reconstruct_events_leaves_a_user_chats_first_prompt_alone(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "hello"})
+    log.step({"kind": "tool", "name": "read_file", "ok": True})
+    log.message({"role": "assistant", "content": "hi"})
+    users = [e for e in SessionLog.reconstruct_events(log.path) if e["type"] == "user"]
+    assert "synthetic" not in users[0]
+
+
+def test_derived_title_and_snippet_skip_aishs_own_notes(tmp_path):
+    # A chat opened with a /cd was titled with the announcement THAT produced,
+    # and the drawer showed it as "You: [I moved the session to …]" (#171).
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "[I moved the session to /proj with /cd — …]"})
+    log.message({"role": "user", "content": "what does this repo do?"})
+    log.message({"role": "assistant", "content": "it is a shell agent"})
+    log.message({"role": "user", "content": "[aish: you have reached the step limit…]"})
+    info = SessionLog.info(log.path)
+    assert info.title == "what does this repo do?"
+    assert "I moved the session" not in info.snippet
+    assert "aish:" not in info.snippet
+
+
 def test_reconstruct_events_none_for_legacy_log(tmp_path):
     # A session logged before trace records falls back to flat history.
     log = SessionLog.new(tmp_path)

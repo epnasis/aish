@@ -810,15 +810,24 @@ function handle(event) {
       taskErrored = false; // a new turn clears the prior error's red dot
       turnStart = replaying ? 0 : Date.now(); // timing readout on the answer
       setBusy(true);
-      if (!sessionTitled) setTitle(event.text.split("\n")[0]);
-      rememberPrompt(stripAttachmentNotes(event.text));
+      // A synthetic turn is aish's own text (a resume note, an automation's
+      // trigger prompt), so it must not seed the chat title or the composer's
+      // prompt history — both are records of what YOU asked (#171).
+      if (!sessionTitled && event.synthetic !== "resume") setTitle(event.text.split("\n")[0]);
+      if (!event.synthetic) rememberPrompt(stripAttachmentNotes(event.text));
       lastUserPrompt = stripAttachmentNotes(event.text); // for error Retry
       // A user-direct `!` command is already fully shown by the terminal block
       // that follows — its prompt line carries the command. The extra blue
       // user-input bubble duplicated that and, on a restored session, rendered
       // the raw (multi-line) command as if typed into chat (#154). So skip the
       // bubble for `!` commands; the turn-boundary handling above still runs.
-      turnAnchorEl = event.text.startsWith("!") ? null : addUserMsg(event.text);
+      // A synthetic turn takes the system-note row for the same reason: only
+      // the rendering differs, every turn side effect above still fires.
+      turnAnchorEl = event.text.startsWith("!")
+        ? null
+        : event.synthetic
+          ? addSystemMsg(event.synthetic, event.text)
+          : addUserMsg(event.text);
       // Your own message always comes into view, even if you were scrolled up.
       if (!replaying) scrollToEnd(true);
       break;
@@ -2277,6 +2286,39 @@ function addWorkspaceNote(change, path) {
   scrollToEnd();
   return el;
 }
+
+// [SYNTHETIC-START]
+// A turn aish wrote itself (#171): the restart-recovery note, or the prompt an
+// automation triggered a session with. It IS a real turn — it starts a task, so
+// every turn side effect still runs — but the human never typed it, so it takes
+// the quiet system-note row (the workspace marker's visual language) instead of
+// a blue user bubble that would read as their own words.
+const SYNTHETIC_LABELS = { resume: "Automatic resume", trigger: "Triggered request" };
+// The label already says "automatic resume"; printing the marker again on the
+// line below it is noise.
+const SYNTHETIC_PREFIX_RE = /^\s*\[automatic resume\]\s*/i;
+
+function addSystemMsg(kind, text) {
+  const el = document.createElement("div");
+  el.className = "msg system-note";
+  const ico = document.createElement("span");
+  ico.className = "sysnote-ico";
+  ico.innerHTML = kind === "trigger" ? traceSvg("chat", "currentColor") : RERUN_SVG;
+  const body = document.createElement("div");
+  body.className = "sysnote-body";
+  const label = document.createElement("div");
+  label.className = "sysnote-label";
+  label.textContent = SYNTHETIC_LABELS[kind] || "System";
+  const detail = document.createElement("div");
+  detail.className = "sysnote-text";
+  detail.textContent = text.replace(SYNTHETIC_PREFIX_RE, "");
+  body.append(label, detail);
+  el.append(ico, body);
+  messagesEl.appendChild(el);
+  scrollToEnd();
+  return el;
+}
+// [SYNTHETIC-END]
 
 function addUserMsg(text) {
   const el = addMsg("user", text);

@@ -225,6 +225,10 @@ STOP_GATE_REFUSAL = (
     "a variant or run anything else."
 )
 
+# These four nudges are appended to the conversation as user turns the human
+# never typed. The live UI shows nothing for them, so their shared `[aish: `
+# opening is what keeps a cold replay from rendering them as blue user bubbles
+# (session.synthetic_kind, #171) — a test pins it. Don't drop the prefix.
 LOOP_WARNING = (
     "[aish: you have issued this exact tool call {count} times and received "
     "identical output every time — repeating it cannot make progress. Change "
@@ -1417,7 +1421,9 @@ class Agent:
         becomes visible to the model on its next task and is logged so it survives
         `--resume`, but no answer is generated now. Backs the web "share selection
         to context" action for the global interactive console (issue #148), where
-        the terminal I/O is otherwise private to the terminal."""
+        the terminal I/O is otherwise private to the terminal. The caller's
+        `[…]` framing keeps the logged turn out of the replayed transcript, which
+        is where the live UI leaves it too (session.synthetic_kind, #171)."""
         self._append({"role": "user", "content": text})
 
     def rebase(self, target: str, announce: bool = True) -> str:
