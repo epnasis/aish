@@ -47,6 +47,101 @@ def test_plain_answer_still_renders():
     assert _pdf_ok(export.render_answer_pdf("# Hello\n\nA normal answer.", "T", ()))
 
 
+# ---- nested blocks in lists (#172, the PDF half) ---------------------------
+# The markdown the model writes constantly — a numbered list whose items carry
+# a paragraph, a code block, or a sub-list — used to lose BOTH its code blocks
+# (Python-Markdown's fenced_code ignores an indented fence) and its numbering
+# (xhtml2pdf drops an <li> marker as soon as the item has block content).
+
+_NESTED_LIST_MD = """\
+1. **First item**
+
+    A nested paragraph.
+
+2. **Second item**
+
+    ```javascript
+    function nested() {
+        return true;
+    }
+    ```
+
+    > A blockquote belonging to item 2.
+
+3. **Third item**
+
+    - a sub-bullet
+    - another
+"""
+
+
+def test_fenced_code_indented_under_a_list_item_is_a_code_block():
+    html = export._markdown_to_html_fragment(_NESTED_LIST_MD)
+    assert 'class="codeblock"' in html
+    assert "function nested()" in html
+    # The info string leaking into the text is the signature of the old bug:
+    # the fence degraded to one run of inline <code> starting "javascript…".
+    assert "<code>javascript" not in html
+    assert "```" not in html
+
+
+def test_list_markers_survive_block_content():
+    html = export._markdown_to_html_fragment(_NESTED_LIST_MD)
+    assert "<li>" not in html  # lists are rewritten; xhtml2pdf can't mark up an <li>
+    for n in (1, 2, 3):
+        assert f"{n}.{export._NBSP * 2}" in html
+    assert "text-indent: -" in html  # markers hang outside the item's text column
+
+
+def test_blockquote_indented_under_a_list_item_survives():
+    html = export._markdown_to_html_fragment(_NESTED_LIST_MD)
+    assert "<blockquote>" in html
+    assert "A blockquote belonging to item 2." in html
+
+
+def test_ordered_list_start_is_kept():
+    html = export._markdown_to_html_fragment("3. three\n4. four\n")
+    assert f"3.{export._NBSP * 2}three" in html
+    assert f"4.{export._NBSP * 2}four" in html
+
+
+def test_nested_list_indents_relative_to_its_parent_item():
+    """A sub-list lives inside its item's continuation <div>, so its own hanging
+    indent stacks on top of the parent's — xhtml2pdf renders nested <ul>s flat."""
+    html = export._markdown_to_html_fragment("1. outer\n\n    - inner\n")
+    outer_cont = html.index("margin: 0 0 0 ")  # the item's continuation wrapper
+    assert html.index(export._BULLET, outer_cont) > outer_cont
+
+
+def test_a_markdown_demo_block_is_not_raided_for_nested_fences():
+    """A column-0 ```markdown block showing an indented fence must survive
+    verbatim: treating its inner fence as a nested block would end the outer one
+    early and desync every block after it."""
+    md = "```markdown\n1. item\n    ```python\n    inner\n    ```\n```\n\nAfter.\n"
+    html = export._markdown_to_html_fragment(md)
+    assert html.count('class="codeblock"') == 1  # one block, not two
+    assert "```python" in html  # the demo's inner fence stayed literal text
+    assert "<p>After.</p>" in html  # nothing after it was swallowed
+
+
+def test_tall_code_block_inside_a_list_item_still_paginates():
+    """The rescued fence goes through the same <br>-split reflow as any other,
+    so the issue-#147 pagination guarantee holds inside a list too."""
+    code = "\n".join(f'    "key_{i}": {i},' for i in range(70))
+    markdown = f"1. big one\n\n    ```json\n{code}\n    ```\n\n2. after\n"
+    assert _pdf_ok(export.render_answer_pdf(markdown, "T", ()))
+
+
+def test_nested_list_answer_renders_to_a_pdf():
+    assert _pdf_ok(export.render_answer_pdf(_NESTED_LIST_MD, "T", ()))
+
+
+def test_dedent_line_only_eats_spaces_it_is_allowed_to():
+    assert export._dedent_line("        x", 4) == "    x"
+    assert export._dedent_line("  x", 4) == "x"  # fewer than asked for is fine
+    assert export._dedent_line("\tx", 4) == "\tx"  # never touches other whitespace
+
+
 def _tiny_png() -> bytes:
     import io
 

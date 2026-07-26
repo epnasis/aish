@@ -24,6 +24,7 @@ in the environment; without it map links fall back to the link card.
 """
 
 import base64
+import functools
 import html as html_lib
 import io
 import os
@@ -533,12 +534,204 @@ def _reflow_code_blocks(html: str) -> str:
     return _PRE_BLOCK_RE.sub(replace, html)
 
 
+# ---- markdown fixes for how xhtml2pdf actually renders (#172) --------------
+# Two defects that only show up in the PDF, both on the kind of markdown the
+# model writes constantly (a numbered list whose items carry a paragraph, a
+# code block, or a sub-list):
+#
+#   1. Python-Markdown's `fenced_code` matches a fence only at column 0, so a
+#      code block indented under a list item is never recognised and leaks out
+#      as one run of inline <code> with the info string ("javascript …") in it.
+#   2. xhtml2pdf drops an <li>'s marker entirely the moment the item contains a
+#      block child — which is exactly what a loose/multi-paragraph list item
+#      is — so the numbering disappears from the page even though the HTML is
+#      correct. It also renders nested lists flat, at the parent's indent.
+#
+# (1) is fixed by stashing indented fences as ready-made HTML *at their
+# original indentation*, so the block parser still attaches them to their list
+# item. (2) by rewriting lists into explicitly indented paragraphs with a
+# hanging indent and a marker we draw ourselves — verified to be the only list
+# shape xhtml2pdf renders reliably. Both live behind `_pdf_markdown_extension`
+# so `markdown` stays a deferred import.
+
+_NBSP = "\u00a0"  # nbsp: reportlab collapses a plain space after the marker
+_BULLET = "•"
+_BLOCK_TAGS = frozenset(
+    {"p", "pre", "div", "blockquote", "ul", "ol", "table", "hr",
+     "h1", "h2", "h3", "h4", "h5", "h6"}
+)
+# Hanging-indent width for a list marker: enough that a wrapped line lines up
+# under its item's first line. Approximate advance widths at the body size —
+# close enough by eye, and no font metrics to load.
+_MARKER_CHAR_PT = 6.0
+_MARKER_PAD_PT = 14.0
+
+
+def _dedent_line(line: str, width: int) -> str:
+    """Drop up to `width` leading spaces (never more, never other whitespace)."""
+    cut = 0
+    while cut < width and line[cut : cut + 1] == " ":
+        cut += 1
+    return line[cut:]
+
+
+def _pre_html(code: str, lang: str) -> str:
+    """The exact <pre><code> shape `fenced_code` emits, so `_reflow_code_blocks`
+    treats a rescued indented fence like any other code block."""
+    cls = f' class="language-{_escape_attr(lang)}"' if lang else ""
+    return f"<pre><code{cls}>{_escape(code)}</code></pre>"
+
+
+# Built lazily (and once) so `markdown` stays a deferred import — the classes
+# below subclass its base types, so they can't live at module level.
+@functools.lru_cache(maxsize=1)
+def _pdf_markdown_extension():  # noqa: ANN202 — markdown types are import-deferred
+    from xml.etree.ElementTree import Element
+
+    from markdown.extensions import Extension
+    from markdown.preprocessors import Preprocessor
+    from markdown.treeprocessors import Treeprocessor
+    from markdown.util import HTML_PLACEHOLDER_RE
+
+    class IndentedFence(Preprocessor):
+        """Rescue fenced code blocks that `fenced_code` skips for being indented."""
+
+        OPEN = re.compile(
+            r"^(?P<indent>[ ]*)(?P<fence>`{3,}|~{3,})[ ]*(?P<lang>[\w#.+-]*)[ ]*$"
+        )
+
+        def run(self, lines: list[str]) -> list[str]:
+            out: list[str] = []
+            i = 0
+            while i < len(lines):
+                open_m = self.OPEN.match(lines[i])
+                if not open_m:
+                    out.append(lines[i])
+                    i += 1
+                    continue
+                fence = open_m.group("fence")
+                # The close may be indented up to 3 spaces past the opening (the
+                # CommonMark allowance). Accepting ANY indentation would let the
+                # inner close of a ```markdown demo — a fence indented inside a
+                # column-0 block — end the outer block and desync everything
+                # after it.
+                closes = re.compile(
+                    rf"^[ ]{{0,{len(open_m.group('indent')) + 3}}}"
+                    rf"{re.escape(fence[0])}{{{len(fence)},}}[ ]*$"
+                )
+                end = i + 1
+                while end < len(lines) and not closes.match(lines[end]):
+                    end += 1
+                if end >= len(lines):  # unterminated — not our business
+                    out.append(lines[i])
+                    i += 1
+                    continue
+                indent = open_m.group("indent")
+                # A column-0 block is the stock extension's job, and its body is
+                # skipped wholesale so a demo fence indented INSIDE it (a model
+                # showing markdown syntax) can't be mistaken for a nested block.
+                if not indent:
+                    out.extend(lines[i : end + 1])
+                else:
+                    body = "\n".join(
+                        _dedent_line(line, len(indent)) for line in lines[i + 1 : end]
+                    )
+                    stashed = self.md.htmlStash.store(_pre_html(body, open_m.group("lang")))
+                    out.append(indent + stashed)  # indent keeps it inside the list item
+                i = end + 1
+            return out
+
+    class FlattenLists(Treeprocessor):
+        """Rewrite every <ul>/<ol> as indented paragraphs carrying their own
+        marker, because xhtml2pdf loses the marker on any item with block
+        content and never indents a sub-list."""
+
+        def run(self, root: Element) -> None:
+            self._descend(root)
+
+        def _descend(self, parent: Element) -> None:
+            for idx, child in enumerate(list(parent)):
+                if child.tag in ("ol", "ul"):
+                    parent[idx] = self._flatten(child)
+                else:
+                    self._descend(child)
+
+        def _flatten(self, list_el: Element) -> Element:
+            ordered = list_el.tag == "ol"
+            items = [child for child in list_el if child.tag == "li"]
+            try:
+                first = int(list_el.get("start", "1"))
+            except ValueError:
+                first = 1
+            markers = [
+                f"{first + n}." if ordered else _BULLET for n in range(len(items))
+            ]
+            hang = _MARKER_PAD_PT + _MARKER_CHAR_PT * max(
+                (len(marker) for marker in markers), default=1
+            )
+            out = Element("div")
+            out.set("style", "margin: 0 0 11pt")
+            for item, marker in zip(items, markers, strict=True):
+                lead, rest = self._split(item, marker + _NBSP * 2)
+                lead.set("style", f"margin: 0 0 4pt {hang:.0f}pt; text-indent: -{hang:.0f}pt")
+                out.append(lead)
+                if rest:
+                    # Continuation blocks are indented RELATIVE to the item, so a
+                    # sub-list nested inside simply adds its own hang on top.
+                    cont = Element("div")
+                    cont.set("style", f"margin: 0 0 0 {hang:.0f}pt")
+                    for block in rest:
+                        cont.append(block)
+                    self._descend(cont)
+                    out.append(cont)
+            return out
+
+        def _split(self, item: Element, prefix: str) -> tuple[Element, list[Element]]:
+            """The item's first line (marker + its leading inline content) and
+            whatever block content follows it."""
+            lead = Element("p")
+            kids = list(item)
+            if kids and kids[0].tag == "p" and not self._stashed(kids[0]):
+                source = kids.pop(0)
+                lead.text = prefix + (source.text or "")
+                for sub in source:
+                    lead.append(sub)
+                return lead, kids
+            lead.text = prefix + (item.text or "")
+            rest: list[Element] = []
+            for kid in kids:
+                if rest or kid.tag in _BLOCK_TAGS:
+                    rest.append(kid)
+                else:
+                    lead.append(kid)  # inline markup before the first block
+            return lead, rest
+
+        @staticmethod
+        def _stashed(el: Element) -> bool:
+            """A <p> holding only a raw-HTML placeholder (a fenced block). It has
+            to stay its own paragraph — the postprocessor only substitutes a bare
+            `<p>placeholder</p>`, so merging a marker into it would leak the
+            placeholder text into the PDF."""
+            return len(el) == 0 and bool(HTML_PLACEHOLDER_RE.fullmatch((el.text or "").strip()))
+
+    class PdfMarkdown(Extension):
+        def extendMarkdown(self, md) -> None:  # type: ignore[no-untyped-def]
+            # 26 puts it ahead of fenced_code (25); 5 runs after inline/prettify.
+            md.preprocessors.register(IndentedFence(md), "aish_indented_fence", 26)
+            md.treeprocessors.register(FlattenLists(md), "aish_pdf_lists", 5)
+
+    return PdfMarkdown()
+
+
 def _markdown_to_html_fragment(
     markdown_text: str, embedder: _MediaEmbedder | None = None
 ) -> str:
     import markdown as md
 
-    html = md.markdown(_strip_web_only(markdown_text), extensions=_MD_EXTENSIONS)
+    html = md.markdown(
+        _strip_web_only(markdown_text),
+        extensions=[*_MD_EXTENSIONS, _pdf_markdown_extension()],
+    )
     html = _reflow_code_blocks(html)  # splittable code blocks (#147)
     if embedder is not None:
         html = embedder.process(html)
