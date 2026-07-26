@@ -774,6 +774,12 @@ function send(message) {
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
+  // Safety net for the pager: a hidden page runs no transitions, so a slide
+  // that was starting as the phone locked can be sitting at its start value —
+  // i.e. the transcript parked off screen, which looks like an empty chat. If
+  // we are back in view with no swipe still expecting a landing replay, the
+  // transcript belongs at zero, so put it there outright.
+  if (!swipeInFrom && transcriptDisplaced()) unparkTranscript();
   // Cold start (b): returning after a long absence prunes the working set once,
   // BEFORE we note activity (which would reset the gap). See the deck lifecycle.
   if (Date.now() - lastActiveAt > COLD_START_GAP_MS) coldStartRecompute();
@@ -1054,21 +1060,26 @@ function onReplay(event) {
     // This replay is the landing half of a committed swipe: enter from the
     // side the old transcript left toward, completing the pager illusion.
     //
-    // The reset is driven by a forced reflow, NOT requestAnimationFrame: rAF
-    // does not fire while the page is hidden, and this transform is what parks
-    // the transcript off-screen. Lock the phone or switch apps between the
-    // commit and the landing replay and the rAF never runs — you come back to
-    // a chat whose content has slid away entirely, which reads as a broken app
-    // rather than a stalled animation. Reading offsetWidth flushes the
-    // "transition: none" starting position synchronously, so the transform
-    // below still animates when visible and simply lands when it is not.
+    // Nothing here may DEPEND on the animation running, because this transform
+    // is what parks the transcript off-screen: if the slide-back never
+    // completes, the chat has no visible content at all. A hidden page runs
+    // neither requestAnimationFrame nor CSS transitions — so lock the phone or
+    // switch apps between the commit and the landing replay and an animated
+    // recovery stalls at its START value, leaving the conversation parked off
+    // screen. So: forced reflow instead of rAF for the starting position, and
+    // animate ONLY when the page is actually visible. Nobody is watching an
+    // animation on a hidden page anyway.
     const from = swipeInFrom;
     swipeInFrom = 0;
-    messagesEl.style.transition = "none";
-    messagesEl.style.transform = `translateX(${from * messagesEl.clientWidth}px)`;
-    void messagesEl.offsetWidth;
-    messagesEl.style.transition = "transform 0.18s ease-out";
-    messagesEl.style.transform = "";
+    if (document.visibilityState === "visible") {
+      messagesEl.style.transition = "none";
+      messagesEl.style.transform = `translateX(${from * messagesEl.clientWidth}px)`;
+      void messagesEl.offsetWidth; // flush the start position so the next line animates
+      messagesEl.style.transition = "transform 0.18s ease-out";
+      messagesEl.style.transform = "";
+    } else {
+      unparkTranscript();
+    }
   } else {
     unparkTranscript();
   }
@@ -6946,6 +6957,15 @@ let swipeInFrom = 0; // set on commit; onReplay animates the new page in
 function unparkTranscript() {
   messagesEl.style.transition = "none";
   messagesEl.style.transform = "";
+}
+
+// Is the transcript actually off its resting position? Read the COMPUTED value,
+// not the inline style: clearing the inline transform only starts a transition,
+// and a transition that cannot run leaves the element sitting where it was while
+// the inline style already reads empty. That gap is exactly the bug.
+function transcriptDisplaced() {
+  const t = getComputedStyle(messagesEl).transform;
+  return !!t && t !== "none" && !/^matrix\(1,\s*0,\s*0,\s*1,\s*0,\s*0\)$/.test(t);
 }
 // [UNPARK-END]
 
