@@ -10,6 +10,14 @@ import pytest
 from aish import notify
 
 
+@pytest.fixture(autouse=True)
+def notifications_enabled(monkeypatch):
+    """This module tests the sender itself, so it opts out of the suite-wide
+    AISH_NOTIFY=0 guard (conftest). Safe: urlopen is stubbed in every test
+    here, so nothing leaves the machine either way."""
+    monkeypatch.delenv("AISH_NOTIFY", raising=False)
+
+
 @pytest.fixture
 def creds(monkeypatch):
     vals = {"PUSHOVER_TOKEN": "app-tok", "PUSHOVER_USER": "usr-key"}

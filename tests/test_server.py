@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 from starlette.testclient import TestClient
 
+import aish.notify as notify_module
 import aish.server as server_module
 from aish.agent import DENIED_RESULT, WRITE_DENIED
 from aish.server import create_app
@@ -3906,6 +3907,24 @@ class TestDoneNotification:
         assert body == "sent the reply"
         assert kw["url"] == "https://aish.test/?session=session-x.jsonl"
         assert kw["priority"] == 0
+
+    def test_suite_never_reaches_the_real_notifier(self, app_env, monkeypatch):
+        # Regression: the restart-recovery tests run an email-origin session to
+        # completion with no viewer, so _notify_done called the REAL
+        # notify.pushover — which reads the developer's live Keychain and
+        # pushed to their actual phone on every `pytest` run. The conftest
+        # kill switch must make that structurally impossible, with nothing
+        # here stubbed.
+        sent: list = []
+        monkeypatch.setattr(notify_module.urllib.request, "urlopen",
+                            lambda *a, **k: sent.append(1))
+        monkeypatch.setattr(notify_module.secrets, "get", lambda name: "real-cred")
+        client, _ = make_client(app_env, [model_says("done")], token="secret")
+        server = client.app.state.server
+        server.public_url = "https://aish.test"
+        assert notify_module.configured() is False
+        asyncio.run(server._notify_done(self._session(), "sent the reply"))
+        assert sent == []  # no POST, real creds present or not
 
     def test_triggered_done_with_a_viewer_stays_silent(self, app_env, monkeypatch):
         calls: list = []

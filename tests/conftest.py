@@ -1,9 +1,11 @@
 """Suite-wide isolation: Agent construction now scans the global skills dir
 (knowledge_index runs at every run_task), so tests must never see the
-developer's real ~/.config/aish/skills."""
+developer's real ~/.config/aish/skills — nor reach the developer's real
+phone."""
 
 import pytest
 
+from aish import notify as notify_module
 from aish import skills as skills_module
 
 
@@ -15,3 +17,20 @@ def isolated_global_skills(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(
         skills_module, "GLOBAL_MEMORY_DIR", tmp_path_factory.mktemp("global-memory")
     )
+
+
+@pytest.fixture(autouse=True)
+def no_real_notifications(monkeypatch):
+    """Never push to the developer's real phone.
+
+    `notify.configured()` reads the live macOS Keychain, so any test that runs
+    a triggered session to completion with no viewer — the restart-recovery
+    tests do exactly that — sent a REAL Pushover notification on every suite
+    run. The kill switch short-circuits `pushover()` before it touches
+    credentials or the network. Tests that assert on notification behaviour
+    still monkeypatch `notify.pushover`/`configured` themselves, which
+    overrides this; the one module that exercises the sender itself
+    (test_notify) clears the variable explicitly.
+    """
+    monkeypatch.setenv("AISH_NOTIFY", "0")
+    assert not notify_module.enabled()
