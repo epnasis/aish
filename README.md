@@ -363,6 +363,13 @@ report the finished answer — or what's done, what remains, and the next step.
 Sessions are the same JSONL files for terminal and web, so `aish --resume` can
 pick up a web session and vice versa.
 
+**Resuming always switches, never merges.** `aish --resume`, `/resume` in the
+terminal and the web session drawer all mean the same thing: the chosen session
+becomes the current one — its conversation, its log file, the model it last used
+and the directory it was working in. The chat you leave is untouched and can be
+resumed back the same way. Nothing is ever copied from one session's log into
+another's.
+
 ---
 
 ## Development

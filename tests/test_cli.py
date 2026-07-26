@@ -427,19 +427,73 @@ def two_session_setup(tmp_path):
     return agent, LogRef(SessionLog.new(tmp_path))
 
 
-def test_repeated_resume_walks_back_through_sessions(tmp_path, capsys, monkeypatch):
+def test_resume_switches_sessions_and_back(tmp_path, capsys, monkeypatch):
+    """Resume is a SWITCH, so the session left behind stays selectable — you can
+    hop back to it. (It used to be a merge, which had to hide already-imported
+    sessions from the picker to avoid duplicating them into the current chat.)"""
     from aish.cli import handle_slash
 
     agent, logref = two_session_setup(tmp_path)
-    resumed = set()
 
     scripted_input(monkeypatch, [""])  # Enter = latest
-    handle_slash("/resume", agent, logref, tmp_path, resumed)
+    handle_slash("/resume", agent, logref, tmp_path)
     assert "from february" in capsys.readouterr().out
-    handle_slash("/resume", agent, logref, tmp_path, resumed)  # one left: auto-loads
+    assert logref.log.path.name == "session-20260201-000000-000000.jsonl"
+
+    handle_slash("/resume", agent, logref, tmp_path)  # one left: auto-loads
     assert "from january" in capsys.readouterr().out
-    handle_slash("/resume", agent, logref, tmp_path, resumed)
-    assert "no earlier session" in capsys.readouterr().out
+    assert logref.log.path.name == "session-20260101-000000-000000.jsonl"
+
+    handle_slash("/resume", agent, logref, tmp_path)  # february is on offer again
+    assert "from february" in capsys.readouterr().out
+    assert logref.log.path.name == "session-20260201-000000-000000.jsonl"
+
+
+def test_resume_writes_to_the_session_it_switched_to(tmp_path):
+    """The chat being left must not absorb the resumed one: no history merged
+    into the agent, and not one byte copied into the log left behind."""
+    from aish.cli import handle_slash
+
+    agent, logref = two_session_setup(tmp_path)
+    left_behind = logref.log
+    left_behind.message({"role": "user", "content": "current chat"})
+    before = left_behind.path.read_text(encoding="utf-8")
+
+    handle_slash("/resume 2", agent, logref, tmp_path)  # the january session
+
+    assert left_behind.path.read_text(encoding="utf-8") == before
+    assert logref.log.path.name == "session-20260101-000000-000000.jsonl"
+    contents = [m.get("content") for m in agent.messages]
+    assert "from january" in contents
+    assert "current chat" not in contents
+
+
+def test_resume_adopts_the_session_model_and_workspace(tmp_path, monkeypatch):
+    """Switching sessions switches everything the session recorded about itself,
+    matching what the web does when it cold-opens one (#94)."""
+    from aish import backends
+    from aish.agent import Agent
+    from aish.cli import LogRef, handle_slash
+    from aish.session import SessionLog
+
+    workdir = tmp_path / "elsewhere"
+    workdir.mkdir()
+    older = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+    older.model("gemini:gemini-3.5-flash")
+    older.message({"role": "user", "content": "older chat"})
+    older.workspace({"kind": "cwd", "cwd": str(workdir)})
+
+    agent = Agent(model="fake", approve=lambda _c: None, client_chat=lambda **_k: None)
+    logref = LogRef(SessionLog.new(tmp_path))
+    monkeypatch.setattr(
+        backends, "make_chat",
+        lambda spec: (lambda **_k: None, "gemini", "gemini-3.5-flash"),
+    )
+
+    handle_slash("/resume", agent, logref, tmp_path)  # only one session: auto-selects
+
+    assert (agent.provider, agent.model) == ("gemini", "gemini-3.5-flash")
+    assert agent.cwd == str(workdir)
 
 
 def test_resume_picker_lists_slugs_and_selects_by_number(tmp_path, capsys, monkeypatch):
@@ -447,7 +501,7 @@ def test_resume_picker_lists_slugs_and_selects_by_number(tmp_path, capsys, monke
 
     agent, logref = two_session_setup(tmp_path)
     scripted_input(monkeypatch, ["2"])
-    handle_slash("/resume", agent, logref, tmp_path, set())
+    handle_slash("/resume", agent, logref, tmp_path)
     out = capsys.readouterr().out
     assert "1." in out and "2." in out  # numbered picker
     assert "from february" in out and "from january" in out  # slugs listed
@@ -458,7 +512,7 @@ def test_resume_with_numeric_arg_skips_picker(tmp_path, capsys):
     from aish.cli import handle_slash
 
     agent, logref = two_session_setup(tmp_path)
-    handle_slash("/resume 2", agent, logref, tmp_path, set())
+    handle_slash("/resume 2", agent, logref, tmp_path)
     out = capsys.readouterr().out
     assert "resume which?" not in out
     assert "session-20260101" in out
@@ -469,7 +523,7 @@ def test_resume_picker_cancel(tmp_path, capsys, monkeypatch):
 
     agent, logref = two_session_setup(tmp_path)
     scripted_input(monkeypatch, ["q"])
-    handle_slash("/resume", agent, logref, tmp_path, set())
+    handle_slash("/resume", agent, logref, tmp_path)
     assert "cancelled" in capsys.readouterr().out
     assert len(agent.messages) == 1  # nothing loaded
 
@@ -478,7 +532,7 @@ def test_resume_invalid_number(tmp_path, capsys):
     from aish.cli import handle_slash
 
     agent, logref = two_session_setup(tmp_path)
-    handle_slash("/resume 9", agent, logref, tmp_path, set())
+    handle_slash("/resume 9", agent, logref, tmp_path)
     assert "no such session" in capsys.readouterr().out
 
 
@@ -486,7 +540,7 @@ def test_resume_search_loads_single_match_directly(tmp_path, capsys):
     from aish.cli import handle_slash
 
     agent, logref = two_session_setup(tmp_path)
-    handle_slash("/resume january", agent, logref, tmp_path, set())
+    handle_slash("/resume january", agent, logref, tmp_path)
     out = capsys.readouterr().out
     assert "resume which?" not in out  # one match: no picker needed
     assert "resumed" in out and "session-20260101" in out
@@ -501,7 +555,7 @@ def test_resume_search_picker_defaults_to_best_match(tmp_path, capsys, monkeypat
     third.message({"role": "user", "content": "from january too"})
 
     scripted_input(monkeypatch, [""])  # Enter = best match
-    handle_slash("/resume from january", agent, logref, tmp_path, set())
+    handle_slash("/resume from january", agent, logref, tmp_path)
     out = capsys.readouterr().out
     # ranked picker: exact title first despite being oldest, then title phrase
     assert out.index("from january\n") < out.index("from january too")
@@ -512,7 +566,7 @@ def test_resume_search_no_match(tmp_path, capsys):
     from aish.cli import handle_slash
 
     agent, logref = two_session_setup(tmp_path)
-    handle_slash("/resume nonexistent topic", agent, logref, tmp_path, set())
+    handle_slash("/resume nonexistent topic", agent, logref, tmp_path)
     assert "no session matches" in capsys.readouterr().out
     assert len(agent.messages) == 1  # nothing loaded
 
@@ -522,7 +576,7 @@ def test_delete_picker_confirms_and_unlinks(tmp_path, capsys, monkeypatch):
 
     agent, logref = two_session_setup(tmp_path)
     scripted_input(monkeypatch, ["2", "y"])  # pick the older session, confirm
-    handle_slash("/delete", agent, logref, tmp_path, set())
+    handle_slash("/delete", agent, logref, tmp_path)
     out = capsys.readouterr().out
     assert "1." in out and "2." in out  # same numbered picker as /resume
     assert "deleted session-20260101" in out
@@ -535,7 +589,7 @@ def test_delete_default_answer_keeps_file(tmp_path, capsys, monkeypatch):
 
     agent, logref = two_session_setup(tmp_path)
     scripted_input(monkeypatch, ["1", ""])  # Enter at the y/N confirm = No
-    handle_slash("/delete", agent, logref, tmp_path, set())
+    handle_slash("/delete", agent, logref, tmp_path)
     assert "cancelled" in capsys.readouterr().out
     assert (tmp_path / "session-20260201-000000-000000.jsonl").exists()
 
@@ -545,7 +599,7 @@ def test_delete_prefix_and_numeric_arg_skip_picker(tmp_path, capsys, monkeypatch
 
     agent, logref = two_session_setup(tmp_path)
     scripted_input(monkeypatch, ["y"])
-    handle_slash("/del 2", agent, logref, tmp_path, set())
+    handle_slash("/del 2", agent, logref, tmp_path)
     out = capsys.readouterr().out
     assert "1." not in out  # numeric arg: no numbered list shown
     assert "deleted session-20260101" in out
@@ -560,7 +614,7 @@ def test_delete_excludes_current_session(tmp_path, capsys):
     agent = Agent(model="fake", approve=lambda _c: None, client_chat=lambda **_k: None)
     logref = LogRef(SessionLog.new(tmp_path))
     logref.message({"role": "user", "content": "live conversation"})
-    handle_slash("/delete", agent, logref, tmp_path, set())
+    handle_slash("/delete", agent, logref, tmp_path)
     assert "no earlier session to delete" in capsys.readouterr().out
     assert logref.log.path.exists()
 
@@ -579,7 +633,7 @@ def test_resume_uses_live_picker_when_interactive(tmp_path, capsys, monkeypatch)
             return search("january")[0]
 
     monkeypatch.setattr(cli, "_box", FakeBox())
-    handle_slash("/resume jan", agent, logref, tmp_path, set())
+    handle_slash("/resume jan", agent, logref, tmp_path)
     out = capsys.readouterr().out
     assert "resumed" in out and "session-20260101" in out
 
@@ -594,7 +648,7 @@ def test_resume_live_picker_cancel(tmp_path, capsys, monkeypatch):
         "_box",
         type("Box", (), {"pick": lambda self, s, initial="", render=str: None})(),
     )
-    handle_slash("/resume", agent, logref, tmp_path, set())
+    handle_slash("/resume", agent, logref, tmp_path)
     assert "cancelled" in capsys.readouterr().out
     assert len(agent.messages) == 1  # nothing loaded
 
@@ -611,7 +665,7 @@ def test_resume_lists_all_sessions_not_just_ten(tmp_path, capsys, monkeypatch):
     agent = Agent(model="fake", approve=lambda _c: None, client_chat=lambda **_k: None)
     logref = LogRef(SessionLog.new(tmp_path))
     scripted_input(monkeypatch, ["q"])
-    handle_slash("/resume", agent, logref, tmp_path, set())
+    handle_slash("/resume", agent, logref, tmp_path)
     out = capsys.readouterr().out
     assert " 12." in out and "task number 1" in out  # oldest still listed
     assert "2026-01-12" in out  # full start date with year

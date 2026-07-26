@@ -164,10 +164,12 @@ SLASH_COMMANDS = (
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
-  {CYAN}/resume{RESET}        pick an earlier session: type to filter by title, contents,
+  {CYAN}/resume{RESET}        switch to an earlier session — its conversation, log file,
+                 model and working directory. Type to filter by title, contents,
                  and model (exact match first, then phrase, words, fuzzy),
-                 ↑/↓ select, Enter loads, Esc cancels
-  {CYAN}/resume <n>{RESET}    load the n-th newest session directly
+                 ↑/↓ select, Enter switches, Esc cancels; the chat you leave is
+                 untouched and can be resumed back
+  {CYAN}/resume <n>{RESET}    switch to the n-th newest session directly
   {CYAN}/resume <text>{RESET} open the picker with the filter pre-filled
   {CYAN}/delete [n|text]{RESET} delete an earlier session permanently (same picker and
                  argument forms as /resume, then a y/N confirm; removes the
@@ -1063,7 +1065,6 @@ def handle_slash(
     agent: "Agent | ClaudeMaxAgent",
     logref: LogRef,
     state_dir: Path,
-    resumed: set | None = None,
     config_path: Path | None = None,
     chips_out: list[tuple[str, str]] | None = None,
 ) -> str:
@@ -1071,7 +1072,6 @@ def handle_slash(
     prefixes resolve (/res → /resume); ambiguous ones list the options.
     A /resume fills chips_out with the resumed session's pending quick-reply
     chips (#167) so the REPL loop can offer them, like a live answer."""
-    resumed = resumed if resumed is not None else set()
     command = task.split()[0].lower()
     if command not in SLASH_COMMANDS:
         matches = [c for c in SLASH_COMMANDS if c.startswith(command)]
@@ -1092,14 +1092,27 @@ def handle_slash(
     if command == "/resume":
         parts = task.split(maxsplit=1)
         arg = parts[1].strip() if len(parts) > 1 else ""
-        selected = pick_session(state_dir, arg, resumed | {logref.log.path}, "resume")
+        selected = pick_session(state_dir, arg, {logref.log.path}, "resume")
         if selected is None:
             return "handled"
-        messages = SessionLog.load_messages(selected.path)
-        resumed.add(selected.path)
+        # Resume SWITCHES this REPL to that session — the same thing `aish
+        # --resume` and the web drawer mean by the word. It used to merge the
+        # picked history into the current chat AND copy its messages into the
+        # current log, which silently grafted one conversation onto another and
+        # left a triggered session's mail thread sitting in an unrelated chat.
+        messages, recorded_spec, _title, _origin = SessionLog._parse(selected.path)
+        agent.reset()
         agent.load_history(messages)
-        for message in messages:  # keep the current session file self-contained
-            logref.message(message)
+        logref.log = SessionLog(selected.path)  # keep writing where the chat lives
+        # Continue on the model the session last used, like the web's cold open;
+        # a model that no longer loads leaves the current one in place.
+        if recorded_spec and recorded_spec != model_spec(agent):
+            switch_model(agent, recorded_spec)
+        logref.model(model_spec(agent))
+        # …and in the workspace it left off in (issue #94), not the one the
+        # session we just left happened to be sitting in.
+        restored_cwd, trusted = SessionLog.restore_state(selected.path)
+        agent.restore_workspace(restored_cwd, trusted)
         print(f"{DIM}resumed {len(messages)} messages from {selected.path.name}:{RESET}")
         chips = replay_history(messages)
         if chips_out is not None:
@@ -1128,7 +1141,6 @@ def handle_slash(
         except OSError as exc:
             print(f"{RED}cannot delete {selected.path.name}: {exc}{RESET}")
             return "handled"
-        resumed.discard(selected.path)
         print(f"{DIM}deleted {selected.path.name}{RESET}")
         return "handled"
     if command == "/rename":
@@ -1355,10 +1367,13 @@ over ALL earlier sessions with start date, message count, and the model each \
 session last used (summary = the session's first \
 user message): typing filters by title, full contents, and model name \
 deterministically (exact title match, then phrase, then all-words, then \
-fuzzy — no LLM involved), arrow keys select, Enter loads, Esc cancels; \
+fuzzy — no LLM involved), arrow keys select, Enter switches, Esc cancels; \
 /resume <text> \
-pre-fills the filter and /resume N loads the N-th newest directly; the \
-chosen session is replayed into this conversation. Session \
+pre-fills the filter and /resume N switches to the N-th newest directly. \
+Resuming SWITCHES this REPL to the chosen session — its conversation, its \
+log file, the model it last used and the directory it was working in all \
+become the current ones, and the chat being left is untouched (resume it \
+back the same way). It never merges two conversations. Session \
 files are append-only; /delete opens the same picker to permanently remove \
 an earlier session (conversation and audit log, y/N confirm — the current \
 session cannot be deleted). /new or /clear (or plain 'clear') starts a \
@@ -1639,7 +1654,7 @@ def main() -> int:
         _box = BoxPrompt(args.vi_mode, state_dir, SLASH_COMMANDS)
 
     history: list[dict] = []
-    resumed: set[Path] = set()
+    recorded_spec = ""  # the model the resumed session last ran on
     resumed_chips: list[tuple[str, str]] = []  # pending chips from a resumed final answer (#167)
     log: SessionLog | None = None
     if args.resume:
@@ -1664,9 +1679,8 @@ def main() -> int:
             if chosen is None:
                 print(f"{DIM}no previous session found — starting fresh{RESET}")
         if chosen is not None:
-            history = SessionLog.load_messages(chosen)
+            history, recorded_spec, _title, _origin = SessionLog._parse(chosen)
             log = SessionLog(chosen)
-            resumed.add(chosen)
     if log is None:
         log = SessionLog.new(state_dir)
     log.model(args.model)
@@ -1796,12 +1810,22 @@ def main() -> int:
         _box.get_cwd = lambda: agent.cwd  # /cd path completion follows the agent
     if history:
         agent.load_history(history)
+        # Continue on the model the session last used, like /resume and the web's
+        # cold open. A --model on the command line still wins: startup defaults
+        # ($AISH_MODEL, config) are what the session's own model overrides, an
+        # explicit flag is the user overriding the session on purpose.
+        explicit_model = any(
+            arg == "--model" or arg.startswith("--model=") for arg in sys.argv[1:]
+        )
+        if recorded_spec and not explicit_model and recorded_spec != model_spec(agent):
+            switch_model(agent, recorded_spec)
+            logref.model(model_spec(agent))  # the log records what actually runs
         # Restore the workspace the session left off in (cwd + trusted dirs)
         # rather than reverting to the launch dir (issue #94).
         restored_cwd, trusted = SessionLog.restore_state(log.path)
         agent.restore_workspace(restored_cwd, trusted)
         print(f"{DIM}resumed {len(history)} messages from {log.path.name}"
-              f" · model {args.model} · /help:{RESET}")
+              f" · model {model_spec(agent)} · /help:{RESET}")
         resumed_chips = replay_history(history)
 
     if args.task:
@@ -1851,7 +1875,7 @@ def main() -> int:
             expanded = parse_learn(task, lessons_path) or parse_feedback(task)
             if expanded is None:
                 if handle_slash(
-                    task, agent, logref, state_dir, resumed,
+                    task, agent, logref, state_dir,
                     config_path=config_path, chips_out=pending_chips,
                 ) == "exit":
                     return 0
