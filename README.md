@@ -240,7 +240,14 @@ this UI. Highlights:
   including any approval still waiting. Survives server restarts too.
 - **Parallel sessions.** Several chats open at once, each with its own agent,
   model, directory, and running task; live badges for running / needs-approval,
-  a toast when a background task finishes. Swipe sideways to page between chats.
+  a toast when a background task finishes. Swipe sideways to page between chats
+  in a **stable working set** whose order doesn't shuffle as you reply — chats
+  idle past 48h drop out of the swipe deck (only when you next open the app,
+  never mid-work) and stay reachable in the drawer's history; a new chat or an
+  opened-from-history one joins the deck, a fork lands next to its parent, and
+  the drawer's ✕ removes a chat from the deck without deleting it. Swipe up to
+  open the session drawer, which lists the working set (Recent) then everything
+  else in most-recently-used order.
 - **Global interactive console.** The real TTY shell described above, openable
   from any chat (`⌘/Ctrl+\`), `tmux`-backed for restart survival.
 - **Voice.** Mic dictation into the composer and hands-free read-aloud of
