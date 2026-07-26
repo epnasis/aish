@@ -663,6 +663,12 @@ function connect() {
   };
   ws.onmessage = (raw) => handle(JSON.parse(raw.data));
   ws.onclose = (event) => {
+    // A committed swipe parks the transcript off-screen and waits for the
+    // landing replay to bring the next page in. If the socket dies in that gap
+    // the replay never comes, and the chat is left blank behind a red dot with
+    // no gesture that can recover it. Un-park it: the page you were on is still
+    // the page you are on.
+    if (swipeInFrom) { swipeInFrom = 0; unparkTranscript(); }
     if (event.code === 4000) {
       connOk = false;
       updateDot();
@@ -1040,17 +1046,24 @@ function onReplay(event) {
   if (swipeInFrom) {
     // This replay is the landing half of a committed swipe: enter from the
     // side the old transcript left toward, completing the pager illusion.
+    //
+    // The reset is driven by a forced reflow, NOT requestAnimationFrame: rAF
+    // does not fire while the page is hidden, and this transform is what parks
+    // the transcript off-screen. Lock the phone or switch apps between the
+    // commit and the landing replay and the rAF never runs — you come back to
+    // a chat whose content has slid away entirely, which reads as a broken app
+    // rather than a stalled animation. Reading offsetWidth flushes the
+    // "transition: none" starting position synchronously, so the transform
+    // below still animates when visible and simply lands when it is not.
     const from = swipeInFrom;
     swipeInFrom = 0;
     messagesEl.style.transition = "none";
     messagesEl.style.transform = `translateX(${from * messagesEl.clientWidth}px)`;
-    requestAnimationFrame(() => {
-      messagesEl.style.transition = "transform 0.18s ease-out";
-      messagesEl.style.transform = "";
-    });
-  } else {
-    messagesEl.style.transition = "none";
+    void messagesEl.offsetWidth;
+    messagesEl.style.transition = "transform 0.18s ease-out";
     messagesEl.style.transform = "";
+  } else {
+    unparkTranscript();
   }
   messagesEl.replaceChildren();
   removeCwdChip(); // a session switch drops any stale cwd card; _show re-emits if pending (#92)
@@ -6917,6 +6930,17 @@ let pagerSessions = []; // [{name, title}] oldest→newest, from hello
 let currentSession = null;
 let currentLogPath = ""; // absolute JSONL log path for this session, from hello (#146)
 let swipeInFrom = 0; // set on commit; onReplay animates the new page in
+
+// [UNPARK-START]
+// Put the transcript back on screen, with no animation. A committed swipe parks
+// it off-screen on the promise that a landing replay will bring the next page
+// in; every path where that promise cannot be kept calls this, because the
+// failure mode is an app that looks empty rather than one that looks stuck.
+function unparkTranscript() {
+  messagesEl.style.transition = "none";
+  messagesEl.style.transform = "";
+}
+// [UNPARK-END]
 
 const EDGE_GUARD = 28; // px — Safari's back/forward gesture zone
 const DECIDE_AT = 12; // px of travel before the gesture picks an axis
