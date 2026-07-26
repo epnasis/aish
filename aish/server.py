@@ -261,7 +261,7 @@ def offline_events(path: Path) -> list[dict]:
     """
     events = SessionLog.reconstruct_events(path)
     if events is None:
-        messages, _, _, _ = SessionLog._parse(path)
+        messages, _, _, _, _ = SessionLog._parse(path)
         return [{"type": "history", "messages": messages}]
     trimmed: list[dict] = []
     for event in events:
@@ -1183,6 +1183,10 @@ class WebServer:
         self.console_command = console_command
         # Base URL for notification deep-links (#163); set by create_app.
         self.public_url = ""
+        # The workspace the server launched in; set by create_app. Sessions that
+        # never moved live here, so it is the baseline a session row's directory
+        # is judged against (see _row_cwd).
+        self.base_cwd = ""
 
     @property
     def active(self) -> Session:
@@ -2204,6 +2208,15 @@ class WebServer:
             except Exception:  # noqa: BLE001 — a dead socket is dropped on its own disconnect
                 pass
 
+    def _row_cwd(self, cwd: str) -> str:
+        """The directory to label a session row with, or "" for no label. A chat
+        that never left the server's own workspace stamps the SAME path on every
+        row, which is noise, not information — so the label appears only when the
+        session sits somewhere else."""
+        if not cwd or cwd == self.base_cwd:
+            return ""
+        return cwd
+
     async def _send_sessions(self, client: Client, query: str) -> None:
         # The active session is listed too (marked "current" in the drawer) —
         # its log is flushed per record, so reading it live is safe; a brand
@@ -2216,8 +2229,11 @@ class WebServer:
 
         infos = await asyncio.to_thread(load)
         open_states = {name: s.state() for name, s in self.sessions.items()}
-        # The working directory is known for sessions currently open in memory;
-        # the drawer shows it so parallel agents are legible at a glance.
+        # The working directory labels a row so parallel agents are legible at a
+        # glance. A session open in memory answers live (it may have moved since
+        # its last logged /cd); everything else falls back to the cwd recorded
+        # in its log, so a row's directory does not depend on the accident of
+        # which few sessions survived the MAX_OPEN_SESSIONS eviction sweep.
         open_cwds = {name: s.agent.cwd for name, s in self.sessions.items()}
         current = client.viewing.name if client.viewing is not None else ""
         await client.ws.send_json(
@@ -2231,7 +2247,9 @@ class WebServer:
                         "snippet": info.snippet,
                         "ts": info.mtime,
                         "state": open_states.get(info.path.name, ""),
-                        "cwd": open_cwds.get(info.path.name, ""),
+                        "cwd": self._row_cwd(
+                            open_cwds.get(info.path.name) or info.cwd
+                        ),
                         "origin": info.origin,
                     }
                     for info in infos
@@ -2892,7 +2910,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         image_roots = self._image_roots()
 
         def build() -> tuple[bytes, str]:
-            messages, _, custom_title, _ = SessionLog._parse(path)
+            messages, _, custom_title, _, _ = SessionLog._parse(path)
             title = custom_title or SessionLog._derive_title(messages) or "aish session"
             return export.render_session_pdf(messages, title, image_roots), title
 
@@ -2977,7 +2995,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
 
         def build() -> dict:
             events = offline_events(path)
-            messages, _, custom_title, origin = SessionLog._parse(path)
+            messages, _, custom_title, origin, _ = SessionLog._parse(path)
             title = SessionLog._truncate_title(
                 custom_title or SessionLog._derive_title(messages)
             )
@@ -3084,7 +3102,7 @@ def create_app(
         if path is not None:
             # Parse BEFORE anything is appended: the last model record in
             # the file is the model this session must resume with.
-            history, recorded_spec, custom_title, origin = SessionLog._parse(path)
+            history, recorded_spec, custom_title, origin, _ = SessionLog._parse(path)
         log = SessionLog(path) if path is not None else SessionLog.new(state_dir)
         logref = LogRef(log)
         bridge = Bridge(get_loop)
@@ -3309,6 +3327,7 @@ def create_app(
         open_session, state_dir, config_path, token, dir_ignore_patterns, console_command
     )
     server.public_url = public_url  # notification deep-link base (#163)
+    server.base_cwd = cwd  # baseline for the session rows' directory label
     server_ref.append(server)
     first, _ = open_session(None)
     server.add_session(first)

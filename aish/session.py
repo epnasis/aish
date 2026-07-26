@@ -61,6 +61,7 @@ class SessionInfo:
     snippet: str = ""  # last visible message — the drawer's preview line
     mtime: float = 0.0  # last interaction (epoch seconds), the recency sort key
     origin: str = "user"  # who started it: user | schedule | email | webhook (#160)
+    cwd: str = ""  # last logged working directory; "" when the chat never moved
 
 
 @dataclass
@@ -101,19 +102,21 @@ class SessionLog:
         return files[0] if files else None
 
     @staticmethod
-    def _parse(path: Path) -> tuple[list[dict], str, str | None, str]:
+    def _parse(path: Path) -> tuple[list[dict], str, str | None, str, str]:
         """One pass over the file: conversation messages (no audit records, no
         stale system prompt — a fresh one is built on resume), the last
         recorded model ("" for sessions that predate model records), the
-        latest custom title (None when the chat was never renamed), and the
+        latest custom title (None when the chat was never renamed), the
         session origin ("user" unless a `kind:"origin"` record says otherwise —
-        so triggered sessions cold-load with their provenance intact, #160). The
-        `kind:"title"`/`"origin"` records are metadata — they never enter
+        so triggered sessions cold-load with their provenance intact, #160), and
+        the latest working directory ("" when the chat never moved). The
+        `kind:"title"`/`"origin"`/`"cwd"` records are metadata — they never enter
         `messages`, so they can't leak into a resumed conversation."""
         messages: list[dict] = []
         model = ""
         custom_title: str | None = None
         origin = "user"
+        cwd = ""
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 record = json.loads(line)
@@ -128,10 +131,12 @@ class SessionLog:
                     custom_title = title
             elif kind == "origin":
                 origin = record.get("origin") or origin
+            elif kind == "cwd":
+                cwd = record.get("cwd") or cwd
             elif kind == "message" and record.get("role") != "system":
                 keys = ("role", "content", "tool_name", "images", "documents")
                 messages.append({k: v for k, v in record.items() if k in keys})
-        return messages, model, custom_title, origin
+        return messages, model, custom_title, origin, cwd
 
     @staticmethod
     def load_messages(path: Path) -> list[dict]:
@@ -597,6 +602,7 @@ class SessionLog:
         model: str = "",
         custom_title: str | None = None,
         origin: str = "user",
+        cwd: str = "",
     ) -> SessionInfo:
         title = custom_title if custom_title else SessionLog._derive_title(messages)
         title = SessionLog._truncate_title(title)
@@ -614,15 +620,16 @@ class SessionLog:
             snippet=SessionLog._derive_snippet(messages),
             mtime=mtime,
             origin=origin,
+            cwd=cwd,
         )
 
     @staticmethod
     def info(path: Path) -> SessionInfo | None:
         """Summary line for a session picker; None for empty sessions."""
-        messages, model, custom_title, origin = SessionLog._parse(path)
+        messages, model, custom_title, origin, cwd = SessionLog._parse(path)
         if not messages:
             return None
-        return SessionLog._info_from(path, messages, model, custom_title, origin)
+        return SessionLog._info_from(path, messages, model, custom_title, origin, cwd)
 
     @staticmethod
     def list_sessions(state_dir: Path, exclude: set | None = None) -> list[SessionInfo]:
@@ -648,7 +655,7 @@ class SessionLog:
         for path in SessionLog._by_recency(state_dir):
             if path in exclude:
                 continue
-            messages, model, custom_title, origin = SessionLog._parse(path)
+            messages, model, custom_title, origin, cwd = SessionLog._parse(path)
             if not messages:
                 continue
             content_cf = " ".join(
@@ -663,7 +670,9 @@ class SessionLog:
             title_cf = (custom_title or SessionLog._derive_title(messages)).casefold()
             entries.append(
                 SessionEntry(
-                    info=SessionLog._info_from(path, messages, model, custom_title, origin),
+                    info=SessionLog._info_from(
+                        path, messages, model, custom_title, origin, cwd
+                    ),
                     title_cf=title_cf,
                     content_cf=content_cf,
                     words=(

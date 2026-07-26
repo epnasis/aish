@@ -61,7 +61,7 @@ def test_title_record_excluded_from_conversation(tmp_path):
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
-    messages, _, custom_title, _ = SessionLog._parse(log.path)
+    messages, _, custom_title, _, _ = SessionLog._parse(log.path)
     assert custom_title == "Renamed"
     assert all(m.get("role") in ("user", "assistant") for m in messages)
 
@@ -72,8 +72,26 @@ def test_empty_title_ignored(tmp_path):
     log.message({"role": "user", "content": "real title"})
     log.set_title("   ")
     assert SessionLog.info(log.path).title == "real title"
-    _, _, custom_title, _ = SessionLog._parse(log.path)
+    _, _, custom_title, _, _ = SessionLog._parse(log.path)
     assert custom_title is None
+
+
+def test_info_carries_the_last_logged_cwd(tmp_path):
+    # The session's directory is metadata, like the title: the LAST recorded
+    # move wins, it never enters the conversation, and a chat that never moved
+    # reports "" (the reader cannot know the launch dir from the log alone).
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "hello"})
+    assert SessionLog.info(log.path).cwd == ""
+    log.workspace({"kind": "cwd", "cwd": "/tmp/one"})
+    log.workspace({"kind": "trust_dir", "path": "/tmp/trusted"})
+    log.workspace({"kind": "cwd", "cwd": "/tmp/two"})
+    info = SessionLog.info(log.path)
+    assert info.cwd == "/tmp/two"
+    assert [m["content"] for m in SessionLog.load_messages(log.path)] == ["hello"]
+    # The searchable listing carries it too — that is what the drawer reads.
+    entries = SessionLog.load_entries(tmp_path)
+    assert [e.info.cwd for e in entries] == ["/tmp/two"]
 
 
 def test_custom_title_is_searchable(tmp_path):

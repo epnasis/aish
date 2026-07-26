@@ -1521,6 +1521,45 @@ class TestSessions:
             assert fresh["session"] not in names
             assert session_a in names
 
+    def test_session_list_labels_directory_from_the_log_when_cold(self, app_env):
+        # The row's directory used to come ONLY from sessions still open in
+        # memory, so it showed on a handful of rows and silently vanished from
+        # the rest as the eviction sweep closed them. It now falls back to the
+        # cwd recorded in the log, and a session sitting in the server's own
+        # workspace shows none at all — the same path on every row is noise.
+        state_dir = app_env["state_dir"]
+        state_dir.mkdir(parents=True, exist_ok=True)
+        elsewhere = Path(app_env["cwd"]) / "worktree-a"
+        elsewhere.mkdir()
+        moved = state_dir / "session-20200101-000000-000000.jsonl"
+        moved.write_text(
+            '{"kind": "message", "role": "user", "content": "in the worktree"}\n'
+            + json.dumps({"kind": "cwd", "cwd": str(elsewhere)})
+            + '\n{"kind": "message", "role": "assistant", "content": "worktree answer"}\n',
+            encoding="utf-8",
+        )
+
+        client, _ = make_client(app_env, [model_says("home answer")])
+        with client, connected(client) as (ws, hello, _):
+            here = hello["session"]
+            ws.send_json({"type": "task", "text": "at home"})
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "sessions", "query": ""})
+            listing = recv_until(ws, "session_list")
+            rows = {s["name"]: s["cwd"] for s in listing["sessions"]}
+            assert rows[moved.name] == str(elsewhere)  # cold — read from its log
+            assert rows[here] == ""  # open, but never left the baseline workspace
+
+            # A live session outranks its log: it may have moved since the last
+            # recorded /cd, so the in-memory agent answers for it.
+            ws.send_json({"type": "cd", "path": str(elsewhere)})
+            recv_until(ws, "cwd_changed")
+            ws.send_json({"type": "sessions", "query": ""})
+            listing = recv_until(ws, "session_list")
+            rows = {s["name"]: s["cwd"] for s in listing["sessions"]}
+            assert rows[here] == str(elsewhere)
+
     def test_reviewing_old_session_keeps_order_until_new_message(self, app_env):
         # Resuming an older session only READS it: the file keeps its mtime,
         # so the MRU order (drawer + swipe pager) is unchanged. Only a new
@@ -2046,7 +2085,7 @@ class TestRename:
             row = next(s for s in listing["sessions"] if s["name"] == old.name)
             assert row["title"] == "Archived"
         # The renamed cold session still reconstructs its conversation cleanly.
-        messages, _, custom_title, _ = SessionLog._parse(old)
+        messages, _, custom_title, _, _ = SessionLog._parse(old)
         assert custom_title == "Archived"
         assert messages == [{"role": "user", "content": "old topic"}]
 
@@ -3876,7 +3915,7 @@ class TestOriginPersistence:
                 recv_until(ws, "done")
         # Re-parse straight off disk: the origin record round-trips.
         path = Path(app_env["state_dir"]) / name
-        _, _, _, origin = SessionLog._parse(path)
+        _, _, _, origin, _ = SessionLog._parse(path)
         assert origin == "schedule"
         # And a fresh, untagged session parses as the default "user".
         assert SessionLog._info_from(path, [{"role": "user", "content": "x"}]).origin == "user"
