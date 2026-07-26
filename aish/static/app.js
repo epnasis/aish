@@ -4676,6 +4676,7 @@ $("composer").addEventListener("submit", (e) => {
 
 // The composer's listeners live in named functions so they can be re-bound to
 // the fresh #input node terminal mode swaps in (attachInputListeners, #156).
+// [ENTER-START]
 function onInputKeydown(e) {
   if (!$("suggest").hidden) {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -4687,7 +4688,9 @@ function onInputKeydown(e) {
     }
     if (e.key === "Tab" || e.key === "Enter") {
       const chosen = suggest.items[suggest.index];
-      // Enter on an exactly-typed command/slash submits instead of re-completing.
+      // Re-completing an already-exact command would be a no-op, so Enter falls
+      // through instead: to the terminal-mode run below, or — in prose — to
+      // nothing but closing the popup (#170: only the send button submits).
       const exact = (suggest.kind === "slash" || suggest.kind === "cmd")
         && chosen[0] === input.value.trim();
       if (e.key === "Tab" || !exact) {
@@ -4695,6 +4698,7 @@ function onInputKeydown(e) {
         acceptSuggestion(chosen);
         return;
       }
+      if (!cmdMode) { e.preventDefault(); hideSuggest(); return; }
     }
     if (e.key === "Escape") {
       // First Esc only closes the suggestion popup; a second one leaves the
@@ -4708,7 +4712,12 @@ function onInputKeydown(e) {
     e.preventDefault();
     return;
   }
-  if (e.key === "Enter" && !e.shiftKey) {
+  // Enter submits ONLY in terminal mode — that mode is a shell prompt and
+  // running the command is the whole point of it (#100). Prose messages are
+  // sent by the send button alone (#170): a newline is the common intent, and
+  // autocorrect/IME/dictation all produce Returns that used to fire a
+  // half-written message. Don't "fix" this asymmetry back into symmetry.
+  if (e.key === "Enter" && !e.shiftKey && cmdMode) {
     e.preventDefault();
     submitInput();
   }
@@ -4718,12 +4727,14 @@ function onInputKeydown(e) {
 // return key arrives as a beforeinput/insertLineBreak. In terminal mode that
 // key must RUN the command like a real shell, not drop a newline. Desktop is
 // handled by the keydown above (which cancels this default), so no double-run.
+// Prose is untouched here for the same reason as above — the newline stands.
 function onInputBeforeInput(e) {
   if (cmdMode && e.inputType === "insertLineBreak") {
     e.preventDefault();
     submitCommand();
   }
 }
+// [ENTER-END]
 
 function onInputInput() {
   // `!` as the sole character of an empty composer enters terminal mode (#100),
