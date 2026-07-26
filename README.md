@@ -206,7 +206,9 @@ thousands of entries without bloating the context.
 1. **Approval gate.** Every proposed command is shown verbatim and waits for
    `y` / `n` / `a`lways / `s`ession / `e`dit. `a` saves the command's *prefix*
    (e.g. `gh issue create`, never a blanket `gh`) to a persistent allowlist; `s`
-   allows it for this session only. Auto-approval covers only a conservatively
+   allows it for this chat only — `/new`, `/clear` or resuming another chat
+   forgets it, and it is never written to disk.
+   Auto-approval covers only a conservatively
    parsed set of read-only commands, and is **scoped to the project directory** —
    commands whose paths escape it (absolute, `~`, `..`, resolved symlinks) prompt
    anyway, with a `t`rust option to widen the scope one directory at a time.
