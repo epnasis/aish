@@ -77,6 +77,7 @@ function world({ visible = false, offline = false, mirror = [] } = {}) {
     currentSession: null,
     lastSessionEvent: null,
     offlineMode: offline,
+    viewCache: new Map(), // onSessionDeleted drops the [VIEWCACHE] stash too
     _sent: [], _toasts: [], _saves: 0, _resumes: [], _newChats: 0,
     send(m) { sandbox._sent.push(m); return true; },
     showToast(t) { sandbox._toasts.push(t); },
