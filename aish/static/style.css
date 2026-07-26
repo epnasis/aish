@@ -1678,12 +1678,14 @@ body.offline #composer { opacity: 0.55; }
 .session-row .row-unrecent {
   flex: none;
   color: var(--dim);
-  font-size: 15px;
+  font-size: 18px;
   line-height: 1;
-  padding: 4px 6px;
-  margin: -4px -6px -4px 0;
+  padding: 9px 11px;
+  margin: -7px -9px -7px 0;
+  border-radius: 9px;
 }
 .session-row .row-unrecent:hover { color: var(--fg); }
+.session-row .row-unrecent:active { background: rgba(128, 128, 128, 0.22); }
 .session-row .row-delete.armed {
   color: var(--red);
   font-size: 13.8px;

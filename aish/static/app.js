@@ -7275,10 +7275,14 @@ messagesEl.addEventListener("touchcancel", endSwipe);
 const SWIPE_UP_ZONE = 130; // px from the bottom edge where an up-swipe is armed
 const SWIPE_UP_MIN = 55;   // px of upward travel required to commit
 function swipeUpOpensDrawer(g) {
-  // g: { startY, endY, dx, viewportH, keyboardUp, atBottom }
+  // g: { startY, endY, dx, viewportH, keyboardUp }
+  // The disambiguator is WHERE the swipe starts — the bottom zone is over the
+  // composer bar, which does not scroll — so transcript scroll position is
+  // irrelevant (an earlier `atBottom` gate made this fire only at the very
+  // bottom, which is the whole complaint). Start-zone + upward travel + a
+  // vertical-dominant path is enough.
   if (g.keyboardUp) return false;                            // composer owns vertical gestures
-  if (!g.atBottom) return false;                             // scrolled up → this is a scroll
-  if (g.viewportH - g.startY > SWIPE_UP_ZONE) return false;  // must start in the bottom zone
+  if (g.viewportH - g.startY > SWIPE_UP_ZONE) return false;  // must start in the bottom (composer) zone
   const up = g.startY - g.endY;                              // upward travel
   if (up < SWIPE_UP_MIN) return false;                       // too short: a tap or micro-scroll
   return Math.abs(g.dx) <= up * 0.8;                         // dominant vertical only
@@ -7300,7 +7304,7 @@ function swipeUpOpensDrawer(g) {
     if (swipeUpOpensDrawer({
       startY: sy, endY: t.clientY, dx: t.clientX - sx,
       viewportH: (window.visualViewport && visualViewport.height) || innerHeight,
-      keyboardUp: editingNow(), atBottom: nearBottom(),
+      keyboardUp: editingNow(),
     })) openSessionsSheet("");
   }, { passive: true });
 })();
@@ -7769,8 +7773,13 @@ function sessionRow(info, current, opts = {}) {
   const stamp = document.createElement("span");
   stamp.className = "stamp";
   stamp.textContent = sessionStamp(info.ts);
-  right.append(stamp, sessionDeleteControl(info));
-  if (opts.recent) right.append(sessionRemoveControl(info)); // ✕ = move to HISTORY (#169)
+  right.append(stamp);
+  // An OPEN (working-set) row shows only the ✕ = remove-from-working-set: one
+  // clear tap target, no destructive trash crammed beside a safe action (#169).
+  // Delete is still reachable by swiping the row left (wrapSwipeDelete). HISTORY
+  // rows keep the inline trash, where it sits alone and uncramped.
+  if (opts.recent) right.append(sessionRemoveControl(info));
+  else right.append(sessionDeleteControl(info));
   row.append(sessionIcon(info, isCurrent), body, right);
   return wrapSwipeDelete(row, info);
 }

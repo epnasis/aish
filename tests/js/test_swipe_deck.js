@@ -177,7 +177,7 @@ check("deckToPages falls back to the raw source when the deck is empty", () => {
 // ---- swipe-up decision seam ----------------------------------------------
 
 const upGesture = (over = {}) => Object.assign({
-  startY: 780, endY: 700, dx: 4, viewportH: 800, keyboardUp: false, atBottom: true,
+  startY: 780, endY: 700, dx: 4, viewportH: 800, keyboardUp: false,
 }, over);
 
 check("an upward swipe from the bottom zone opens the drawer", () => {
@@ -204,8 +204,9 @@ check("keyboard up suppresses it (composer owns the gesture)", () => {
   assert.strictEqual(swipeUpOpensDrawer(upGesture({ keyboardUp: true })), false);
 });
 
-check("scrolled up (not at bottom) suppresses it — an up-swipe is a scroll there", () => {
-  assert.strictEqual(swipeUpOpensDrawer(upGesture({ atBottom: false })), false);
+check("still opens when the transcript is scrolled up — the composer zone is the disambiguator, not scroll position", () => {
+  // regression: an earlier atBottom gate made this fire only at the very bottom
+  assert.strictEqual(swipeUpOpensDrawer(upGesture()), true);
 });
 
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
