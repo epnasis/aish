@@ -45,7 +45,7 @@ function makeWorld({ sheetHiddenAtStart, keyboardUp = false, consoleOpen = false
   const handlers = {};
   const sandbox = {
     consoleOpen,
-    touchConsumedByScroll: false,
+    touchConsumedByTranscript: false,
     innerWidth: 390,
     innerHeight: 844,
     editingNow: () => keyboardUp,
@@ -153,16 +153,32 @@ function ok(label, cond) { assert(cond, label); checks += 1; }
 //    these apart; only an explicit claim can.
 {
   const w = makeWorld({ sheetHiddenAtStart: true });
-  swipeUp(w, { dismissMidGesture: () => { w.handlers._sandbox.touchConsumedByScroll = true; } });
+  swipeUp(w, { dismissMidGesture: () => { w.handlers._sandbox.touchConsumedByTranscript = true; } });
   ok("a scroll-claimed touch does not open the drawer", w.state.opened === 0);
 }
 
 // 10. And the claim is reset per gesture, so the next real swipe-up still works.
 {
   const w = makeWorld({ sheetHiddenAtStart: true });
-  w.handlers._sandbox.touchConsumedByScroll = true; // stale from a previous gesture
+  w.handlers._sandbox.touchConsumedByTranscript = true; // stale from a previous gesture
   swipeUp(w);
   ok("touchstart clears a stale scroll claim", w.state.opened === 1);
+}
+
+// 11. A touch the pager claimed as a PAGE-DRAG must not open the drawer either.
+//     The claim protocol used to be one-sided (only the scroll stand-down set
+//     the flag), so a diagonal flick the pager took as a horizontal page-drag
+//     ALSO read as a swipe-up: one gesture switched chats and opened the drawer
+//     over the switch. With a phantom deck page that surfaced as a spurious
+//     "no such session" error apparently caused by opening/closing the drawer.
+{
+  const w = makeWorld({ sheetHiddenAtStart: true });
+  swipeUp(w, { dismissMidGesture: () => { w.handlers._sandbox.touchConsumedByTranscript = true; } });
+  ok("a page-drag-claimed touch does not open the drawer", w.state.opened === 0);
+  const pagerMove = src.slice(src.indexOf('messagesEl.addEventListener("touchmove"'),
+    src.indexOf('function commitPage'));
+  ok("the pager claims the touch when it goes horizontal, not only when it scrolls",
+    (pagerMove.match(/touchConsumedByTranscript = true/g) || []).length === 2);
 }
 
 console.log(`${checks} ok — all checks passed`);

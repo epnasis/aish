@@ -863,6 +863,11 @@ function handle(event) {
     case "step": traceStep(event); break;
     case "workspace": addWorkspaceNote(event.change, event.path); break;
     case "error":
+      // A by-name action (resume/delete/rename) answered "session is gone" is a
+      // navigation failure, not a task failure: prune the phantom and restore
+      // the view quietly instead of painting a red error over a chat that is
+      // fine. Matched by the machine-readable code, never the prose text.
+      if (event.code === "no_such_session") { onSessionGone(event.name || ""); break; }
       closeAnswer();
       finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
       addErrorMsg(event.text);
@@ -893,7 +898,8 @@ function handle(event) {
     case "job_list": $("ws-jobs").textContent = event.text || "—"; break;
     case "file_list": onFileList(event); break;
     case "session_state": onSessionState(event); break;
-    case "session_deleted": showToast("session deleted"); break;
+    case "session_deleted": onSessionDeleted(event); break;
+    case "deck_gone": dropGoneSessions(event.names || []); break;
     case "session_renamed": onSessionRenamed(event); break;
     case "role": onRole(event); break;
     case "console_started": onConsoleStarted(event); break;
@@ -1024,6 +1030,7 @@ function onHello(event) {
   // seed source (it carries `ts` for exactly this).
   maybeSeedDeck(pagerSessions);
   ensureCurrentInDeck(event); // the chat now on screen joins/stays in the working set (#169)
+  reconcileDeck(); // and members deleted while this device was away are pruned
   offlineTouch(event.session); // MRU input to the mirror's eviction order
   refreshOfflinePinUi();       // the toggle belongs to the chat now on screen
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
@@ -6931,14 +6938,18 @@ let pagerSessions = []; // [{name, title}] oldest→newest, from hello
 let currentSession = null;
 let currentLogPath = ""; // absolute JSONL log path for this session, from hello (#146)
 let swipeInFrom = 0; // set on commit; onReplay animates the new page in
-// A claim protocol in miniature. When the horizontal pager decides a touch is a
-// vertical SCROLL and stands down, it says so here — otherwise the window-level
-// swipe-up recognizer, which only sees geometry, treats the same finger as an
-// open-the-drawer gesture. The bottom zone it watches overlaps the transcript, so
-// a flick-scroll started low on a scrolled-up chat both scrolled AND opened the
-// drawer. Two recognizers on one surface need one of them to yield explicitly;
-// geometry alone cannot decide it.
-let touchConsumedByScroll = false;
+// A claim protocol in miniature. When the horizontal pager decides what a touch
+// IS — a vertical scroll it stands down for, or a page-drag it takes over — it
+// says so here; otherwise the window-level swipe-up recognizer, which only sees
+// geometry, treats the same finger as an open-the-drawer gesture. The bottom
+// zone it watches overlaps the transcript, so a flick-scroll started low on a
+// scrolled-up chat both scrolled AND opened the drawer — and a diagonal flick
+// the pager claimed as a page-drag both switched chats AND opened the drawer
+// over the switch (with a phantom page, the visible half of that double-fire
+// was a "no such session" error apparently caused by the drawer). Two
+// recognizers on one surface need one of them to yield explicitly; geometry
+// alone cannot decide it.
+let touchConsumedByTranscript = false;
 
 // [UNPARK-START]
 // ---- the pager's parked state has ONE owner ------------------------------
@@ -7176,6 +7187,19 @@ function partitionRecent(members, sessions) {
   };
 }
 
+function pruneDeck(members, goneNames, current) {
+  // Remove members whose session no longer EXISTS — and only those. `goneNames`
+  // must be server ground truth (a stat of the actual files: deck_check's
+  // answer, or a resume that failed with code "no_such_session"), never an
+  // absence heuristic: the pager list is capped at 30 while the deck can hold
+  // chats far past it, so "not in some list" must never delete a member. The
+  // chat on screen is never pruned — offline (or mid-race) it may be served
+  // from the local mirror the server knows nothing about.
+  const gone = new Set(goneNames);
+  gone.delete(current);
+  return members.filter((m) => !gone.has(m.name));
+}
+
 function deckToPages(members, source) {
   // The swipe order = deck order, with display metadata refreshed from the live
   // source (and the member's own cached title/origin as a fallback for chats
@@ -7332,6 +7356,58 @@ function removeFromWorkingSet(name) {
   if (!$("sessions-sheet").hidden && lastSessionEvent) renderSessions(lastSessionEvent);
 }
 
+// [DECK-GONE-START]
+// ---- deck vs reality: phantom pages ---------------------------------------
+// The deck is per-device localStorage, so it can outlive the sessions it names:
+// a chat deleted from the drawer — or from another device entirely — stays a
+// member. Such a phantom page made a swipe commit a resume that could only
+// error: no replay ever landed, the watchdog restored the view, and the gesture
+// looked simply ignored. Two ground-truth signals prune phantoms, and ONLY
+// these two (see pruneDeck for why no listing may be used as a third):
+//   - the server's `deck_gone` reply to the deck_check sent on every hello,
+//     which is what heals a stale deck with no user action; and
+//   - a by-name action failing with code "no_such_session".
+// Offline, nothing prunes: the mirror legitimately serves chats the server no
+// longer has, and no offline signal can tell "deleted" from "never synced".
+function dropGoneSessions(names) {
+  const next = pruneDeck(deck, names, currentSession);
+  if (next.length === deck.length) return;
+  deck = next;
+  // Pruning is not curation: deckCurated records the ✕'s deliberate shaping of
+  // the working set, and a deletion (often from another device) is neither.
+  saveDeck();
+  if (!$("sessions-sheet").hidden && lastSessionEvent) renderSessions(lastSessionEvent);
+}
+
+// A by-name action (resume, delete, rename) hit a session that is gone. For a
+// swiped resume this is the phantom-page case: the landing replay is never
+// coming, so hand the view back to the pager's owner NOW rather than leaving
+// the transcript parked until the watchdog fires — and prune the phantom so it
+// cannot eat the next swipe too.
+function onSessionGone(name) {
+  dropGoneSessions(name ? [name] : []);
+  if (swipeInFrom) reconcilePager();
+  showToast("that chat no longer exists");
+}
+
+function onSessionDeleted(event) {
+  // The deck must not outlive the file — a deleted chat left in the working
+  // set is how phantoms are born on the deleting device itself.
+  dropGoneSessions(event.name ? [event.name] : []);
+  showToast("session deleted");
+}
+
+// Every hello: ask the server which deck members still exist. Cheap (one stat
+// per name, off-loop, capped server-side) and self-healing: a deck that went
+// stale while this device was away — the common way phantoms accumulate —
+// repairs itself on the next connect with no user action. Runs only after the
+// hello's rev check passed, so it never speaks to a server that predates it.
+function reconcileDeck() {
+  const names = deck.map((m) => m.name).filter((n) => n !== currentSession);
+  if (names.length) send({ type: "deck_check", names });
+}
+// [DECK-GONE-END]
+
 function pagerPages() {
   return deckToPages(deck, pagerSource());
 }
@@ -7413,10 +7489,13 @@ messagesEl.addEventListener("touchmove", (event) => {
     // rest of this touch — a late preventDefault can't stop iOS anyway.
     if (Math.abs(dx) < Math.abs(dy) * 1.4) {
       swipe.blocked = true;
-      touchConsumedByScroll = true; // claimed as a scroll — see the flag's comment
+      touchConsumedByTranscript = true; // claimed as a scroll — see the flag's comment
       return;
     }
     swipe.horizontal = true;
+    // Claimed as a page-drag: the same finger must not ALSO read as a swipe-up
+    // at touchend, or one diagonal flick switches chats AND opens the drawer.
+    touchConsumedByTranscript = true;
   }
   event.preventDefault(); // page-drag now, not a scroll
   const target = swipeTarget(dx < 0 ? 1 : -1);
@@ -7547,7 +7626,7 @@ function searchbarSwipeDismisses(g) {
 (function attachSwipeUpToDrawer() {
   let sx = 0, sy = 0, active = false;
   addEventListener("touchstart", (e) => {
-    touchConsumedByScroll = false; // a fresh gesture: nobody has claimed it yet
+    touchConsumedByTranscript = false; // a fresh gesture: nobody has claimed it yet
     active = e.touches.length === 1
       // Whether an overlay owns the screen is decided HERE, at the start of the
       // gesture, not at touchend: this listener is on the window, so it runs
@@ -7564,7 +7643,7 @@ function searchbarSwipeDismisses(g) {
   addEventListener("touchend", (e) => {
     if (!active) return;
     active = false;
-    if (touchConsumedByScroll) return; // the transcript already used this finger
+    if (touchConsumedByTranscript) return; // the transcript already used this finger
     const t = e.changedTouches[0];
     if (!t) return;
     if (swipeUpOpensDrawer({
