@@ -188,7 +188,9 @@ thousands of entries without bloating the context.
   the wrapper on **stdin, no shell**. aish can **write one for you on the fly**
   with `create_tool`, drafting the manifest + wrapper and showing both for
   approval. Tools can hold their own secrets (macOS Keychain) and show a
-  plain-language preview of exactly what a mutating call will do.
+  plain-language preview of exactly what a mutating call will do — and when the
+  tool it writes is addressed by opaque ids, `create_tool` declares that preview
+  itself, so the approval card names the thing, not the token.
 - **Memory** — one fact per file (`~/.config/aish/memory/`), same format; the
   description line *is* the fact. Saved via `remember`.
 - **`./AISH.md`** — durable context you write (host facts, preferences), always

@@ -768,7 +768,12 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "The wrapper script body. It reads the JSON args on "
                         "stdin and prints output. Map the stable args to the real CLI here "
-                        "so the model never composes that command again.",
+                        "so the model never composes that command again. If you set "
+                        "'preview', the wrapper MUST check the AISH_TOOL_PREVIEW environment "
+                        "variable at the TOP: when it is set, RESOLVE the args (look the id "
+                        "up), print ONE human-readable sentence to stdout and exit 0 WITHOUT "
+                        "mutating anything — that sentence is what the user approves. A "
+                        "preview that mutates defeats the approval gate.",
                     },
                     "wrapper_lang": {
                         "type": "string",
@@ -803,6 +808,19 @@ TOOL_SCHEMAS = [
                         "wrapper needs (e.g. 'FASTMAIL_TOKEN'). aish injects them from the "
                         "Keychain into the wrapper's env at run time — you never put secret "
                         "VALUES in the tool. The user sets them with `aish secret set NAME`.",
+                    },
+                    "preview": {
+                        "type": "boolean",
+                        "description": "Set true when the tool's arguments are OPAQUE "
+                        "IDENTIFIERS (an id, a UUID, a message key) instead of human-legible "
+                        "text — the approval card then says WHAT is being acted on rather "
+                        "than showing a raw token, and you MUST write the AISH_TOOL_PREVIEW "
+                        "branch described under 'wrapper'. Example: reminders_delete takes "
+                        "id='F5D0CC92-…'; in preview mode its wrapper runs `rem show <id>` "
+                        "and prints \"Delete 'aish test — EDITED' (list Online, due Fri Jul "
+                        "31 9:00, flagged)\", so the user approves a reminder, not a token. "
+                        "Leave it false when every argument already explains itself (a "
+                        "title, a message body).",
                     },
                 },
                 "required": ["name", "description", "mutating", "schema", "wrapper"],
