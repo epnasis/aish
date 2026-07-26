@@ -2468,3 +2468,8 @@ body.console-open {
 }
 #pad-input:focus { outline: none; border-color: var(--ctp-blue); }
 #pad-input::placeholder { color: #6c6c74; }
+
+/* An armed swipe-to-delete (second tap commits). Deleting a chat is
+   irreversible — there is no undo and the offline mirror drops it on the next
+   sync — so the control states plainly that it is now live. */
+.swipe-del.armed { background: var(--red); font-weight: 700; }

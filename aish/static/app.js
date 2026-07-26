@@ -8152,7 +8152,39 @@ function wrapSwipeDelete(row, info) {
   del.type = "button";
   del.className = "swipe-del";
   del.textContent = "Delete";
-  del.onclick = (e) => { e.stopPropagation(); send({ type: "delete_session", name: info.name }); };
+  // [DELARM-START]
+  // Deleting a chat is IRREVERSIBLE — the log is unlinked, and the offline
+  // mirror drops server-deleted sessions on its next sync, so there is no copy
+  // to come back to. It used to happen on a single unconfirmed tap on a button
+  // a swipe had just slid under your thumb, one row away from the ✕ that merely
+  // moves a chat to HISTORY. The CLI's /delete has always asked [y/N]; this is
+  // the same action and gets the same standard. Two taps, not a modal: a dialog
+  // here would fight the swipe gesture and the PWA's keyboard handling.
+  let armed = false;
+  let armTimer = null;
+  const disarm = () => {
+    clearTimeout(armTimer);
+    armTimer = null;
+    if (!armed) return;
+    armed = false;
+    del.textContent = "Delete";
+    del.classList.remove("armed");
+  };
+  del.onclick = (e) => {
+    e.stopPropagation();
+    if (!armed) {
+      armed = true;
+      del.textContent = "Confirm";
+      del.classList.add("armed");
+      // Disarm on its own: a half-committed destructive control left sitting
+      // there is how the SECOND tap becomes accidental too.
+      armTimer = setTimeout(disarm, 4000);
+      return;
+    }
+    disarm();
+    send({ type: "delete_session", name: info.name });
+  };
+  // [DELARM-END]
   wrap.append(del, row);
   let startX = null, dx = 0, open = false;
   const set = (x) => { row.style.transform = x ? `translateX(${x}px)` : ""; };
@@ -8170,6 +8202,7 @@ function wrapSwipeDelete(row, info) {
     if (startX === null) return;
     const moved = Math.abs(dx) > 6;
     open = (open ? -88 : 0) + dx < -44;
+    if (!open) disarm(); // the row closed — the destructive control resets with it
     row.classList.remove("dragging");
     set(open ? -88 : 0);
     startX = null;
@@ -8179,7 +8212,7 @@ function wrapSwipeDelete(row, info) {
   row.addEventListener("pointercancel", finish);
   row.onclick = () => {
     if (row.dataset.swiped) return;      // this "click" was really a swipe
-    if (open) { open = false; set(0); return; } // tap an open row → close it
+    if (open) { open = false; disarm(); set(0); return; } // tap an open row → close it
     resumeSession(info.name); // the socket if there is one, else the mirror
     closeSheets();
   };
