@@ -116,13 +116,19 @@ check("a ✕-removed session stays out across a cold-start recompute", () => {
 });
 
 check("seed adopts <48h sessions oldest-active first, drops the stale", () => {
+  // A session's .ts is epoch SECONDS (the server's unit); seedWorkingSet converts
+  // to ms internally. NOW is ms, so session stamps are (ms age)/1000.
+  const sec = (ageHours) => (NOW - ageHours * HOUR) / 1000;
   const sessions = [
-    { name: "old", ts: NOW - 40 * HOUR, title: "old", origin: "user" },
-    { name: "newest", ts: NOW - 1 * HOUR, title: "newest", origin: "user" },
-    { name: "mid", ts: NOW - 10 * HOUR, title: "mid", origin: "user" },
-    { name: "ancient", ts: NOW - 100 * HOUR, title: "ancient", origin: "user" },
+    { name: "old", ts: sec(40), title: "old", origin: "user" },
+    { name: "newest", ts: sec(1), title: "newest", origin: "user" },
+    { name: "mid", ts: sec(10), title: "mid", origin: "user" },
+    { name: "ancient", ts: sec(100), title: "ancient", origin: "user" },
   ];
-  eq(names(seedWorkingSet(sessions, NOW)), ["old", "mid", "newest"]); // stale dropped, oldest→newest
+  const seeded = seedWorkingSet(sessions, NOW);
+  eq(names(seeded), ["old", "mid", "newest"]); // stale dropped, oldest→newest
+  // seeded members carry ms stamps, so a same-instant recompute keeps them all
+  eq(names(recomputeWorkingSet(seeded, NOW)), ["old", "mid", "newest"]);
 });
 
 // ---- drawer split: RECENT (working set) vs HISTORY (MRU rest) --------------

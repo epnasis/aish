@@ -246,8 +246,8 @@ this UI. Highlights:
   never mid-work) and stay reachable in the drawer's history; a new chat or an
   opened-from-history one joins the deck, a fork lands next to its parent, and
   the drawer's ✕ removes a chat from the deck without deleting it. Swipe up to
-  open the session drawer, which lists the working set (Recent) then everything
-  else in most-recently-used order.
+  open the session drawer, which lists the working set (Open) then everything
+  else (History) in most-recently-used order.
 - **Global interactive console.** The real TTY shell described above, openable
   from any chat (`⌘/Ctrl+\`), `tmux`-backed for restart survival.
 - **Voice.** Mic dictation into the composer and hands-free read-aloud of

@@ -6959,12 +6959,14 @@ function recomputeWorkingSet(members, now) {
 function seedWorkingSet(sessions, now) {
   // First run / empty saved deck / new device: adopt every session active within
   // the window, oldest-active first (matching the pager's oldest→newest so the
-  // most recent lands far right).
+  // most recent lands far right). A session's .ts is epoch SECONDS, but the deck
+  // works in ms (Date.now) — convert before comparing against the ms window and
+  // before storing it as a member stamp, or every session reads as ancient.
   return sessions
-    .filter((s) => now - (s.ts || 0) <= DECK_MAX_IDLE_MS)
-    .slice()
-    .sort((a, b) => (a.ts || 0) - (b.ts || 0))
-    .map((s) => ({ name: s.name, ts: s.ts || now, title: s.title, origin: s.origin }));
+    .map((s) => ({ s, ms: (s.ts || 0) * 1000 }))
+    .filter(({ ms }) => ms && now - ms <= DECK_MAX_IDLE_MS)
+    .sort((a, b) => a.ms - b.ms)
+    .map(({ s, ms }) => ({ name: s.name, ts: ms, title: s.title, origin: s.origin }));
 }
 
 function partitionRecent(members, sessions) {
@@ -6999,7 +7001,9 @@ function deckToPages(members, source) {
 // Persisted client-side (per device, no cross-device sync). Schema:
 //   { v, seeded, lastActiveAt, members: [{name, ts, title, origin}] }
 const DECK_KEY = "aish-deck";
-const DECK_VERSION = 1;
+// v2 discards v1 decks mis-seeded by a seconds-vs-ms bug (they held only the one
+// open chat); dropping them forces a correct re-seed from the last-48h window.
+const DECK_VERSION = 2;
 const COLD_START_GAP_MS = 45 * 60 * 1000; // hidden longer than this → treat as cold start
 let deck = [];
 let deckSeeded = false;
@@ -7921,14 +7925,16 @@ function renderSessions(event) {
   else renderSessionList(groups.automated, event.current, isActive);
 }
 
-// The Recent tab is split (#169): a RECENT section = the working-set deck in its
+// The Recent tab is split (#169): an OPEN section = the working-set deck in its
 // stable order (each row carries a ✕ that moves the chat to HISTORY), then
-// HISTORY = every other chat, keeping the Active-now float + date grouping.
+// HISTORY = every other chat, keeping the Active-now float + date grouping. The
+// header is "Open" (not "Recent") so it can't collide with the History date
+// bucket also named "Recent".
 function renderRecentTab(sessions, current, isActive) {
   const list = $("sessions-list");
   const { recent, history } = partitionRecent(deck, sessions);
   if (recent.length) {
-    list.appendChild(sectionLabel("Recent"));
+    list.appendChild(sectionLabel("Open"));
     for (const info of recent) list.appendChild(sessionRow(info, current, { recent: true }));
   }
   if (!recent.length && !history.length) {
