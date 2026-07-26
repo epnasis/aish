@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import tomllib
+import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -54,6 +55,107 @@ RESET = "\033[0m"
 
 ECHO_PREVIEW_LINES = 12
 REPLAY_TOOL_LINES = 4
+
+# Quick-reply chips (#167): the model ends a question with markdown links of
+# the form [Label](aish-reply://answer text) — the web UI renders each as a tap
+# button; the CLI surfaces them as a numbered menu the user picks by number.
+# The pattern mirrors app.js's INLINE_RE exactly: label is [^\]\n]+, the
+# url-encoded payload is [^)\n]*, both single-line.
+_CHIP_RE = re.compile(r"\[([^\]\n]+)\]\(aish-reply://([^)\n]*)\)")
+_CHIP_MID = "(aish-reply://"  # the fixed run after the label's closing ']'
+
+
+def _decode_reply(payload: str, label: str) -> str:
+    """Decode a chip payload the same way app.js's quickReplyChip does:
+    trim, percent-decode, fall back to the raw payload then to the label."""
+    reply = (payload or "").strip()
+    try:
+        decoded = urllib.parse.unquote(reply)
+        if decoded:
+            reply = decoded
+    except Exception:
+        pass
+    return reply or label.strip()
+
+
+def parse_reply_chips(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Split quick-reply chips out of an answer. Returns the answer with the
+    chip link syntax removed and the list of (label, decoded reply) chips."""
+    chips: list[tuple[str, str]] = []
+
+    def take(match: "re.Match[str]") -> str:
+        chips.append((match.group(1).strip(), _decode_reply(match.group(2), match.group(1))))
+        return ""
+
+    clean = _CHIP_RE.sub(take, text)
+    # Chips usually sit on their own trailing lines; stripping them leaves blank
+    # lines behind — collapse runs of blank lines and trim the tail.
+    clean = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", clean).rstrip()
+    return clean, chips
+
+
+def _chip_hold_index(buf: str) -> int:
+    """Index from which the tail of `buf` might still be forming a chip (so a
+    streaming caller holds it back); len(buf) when nothing could be. Only text
+    from an ambiguous '[' onward is held — normal text streams unchanged."""
+    start = 0
+    while True:
+        bracket = buf.find("[", start)
+        if bracket < 0:
+            return len(buf)
+        if _is_chip_prefix(buf[bracket:]):
+            return bracket
+        start = bracket + 1
+
+
+def _is_chip_prefix(s: str) -> bool:
+    """True when `s` (which starts with '[') could still grow into a full chip.
+    Structure: '[' label ']' '(aish-reply://' payload ')'."""
+    if "\n" in s:  # chips are single-line
+        return False
+    if "]" not in s:  # still typing the label
+        return True
+    idx = s.index("]")
+    if idx == 1:  # empty label — [^\]\n]+ needs at least one char
+        return False
+    rest = s[idx + 1:]  # should become '(aish-reply://' + payload
+    if len(rest) <= len(_CHIP_MID):
+        return _CHIP_MID.startswith(rest)
+    if not rest.startswith(_CHIP_MID):
+        return False
+    return ")" not in rest[len(_CHIP_MID):]  # a ')' would have closed the chip
+
+
+class ChipStream:
+    """Token-stream filter that strips aish-reply chip syntax as it streams, so
+    the raw link markup never flashes in the terminal. Holds back only the tail
+    that could still be forming a chip; everything else prints immediately."""
+
+    def __init__(self, emit):
+        self._emit = emit
+        self._buf = ""
+
+    def feed(self, token: str) -> None:
+        self._buf += token
+        # Drop any complete chips, emitting the text around them.
+        while True:
+            match = _CHIP_RE.search(self._buf)
+            if not match:
+                break
+            if match.start():
+                self._emit(self._buf[: match.start()])
+            self._buf = self._buf[match.end():]
+        # Emit everything that cannot be part of a still-forming chip.
+        hold = _chip_hold_index(self._buf)
+        if hold:
+            self._emit(self._buf[:hold])
+            self._buf = self._buf[hold:]
+
+    def close(self) -> None:
+        """Flush the held tail (a chip candidate that never completed)."""
+        if self._buf:
+            self._emit(self._buf)
+            self._buf = ""
 
 SLASH_COMMANDS = (
     "/add-dir", "/aliases", "/cd", "/clear", "/delete", "/dir-add", "/exit",
@@ -543,6 +645,25 @@ def print_sources(agent) -> None:
         title = source.get("title")
         line = f"{title} — {source['url']}" if title else source["url"]
         print(f"{DIM}  ↳ {line}{RESET}")
+
+
+def resolve_chip_selection(task: str, chips: list[tuple[str, str]]) -> str:
+    """A bare number picks the matching quick-reply chip's answer text; any
+    other input (including an out-of-range number, or when no menu is pending)
+    is returned unchanged as a normal message (#167)."""
+    if chips and task.isdigit() and 1 <= int(task) <= len(chips):
+        return chips[int(task) - 1][1]
+    return task
+
+
+def print_chip_menu(chips: list[tuple[str, str]]) -> None:
+    """Numbered list of quick-reply chips under an answer; the user selects one
+    by typing its number at the next prompt (#167)."""
+    if not chips:
+        return
+    print(f"{DIM}Quick replies (type a number to send):{RESET}")
+    for i, (label, _reply) in enumerate(chips, 1):
+        print(f"{DIM}  {i}.{RESET} {label}")
 
 
 def print_answer_images(agent, answer: str) -> None:
@@ -1197,6 +1318,19 @@ session roots; mentioning the path in prose alone does not display it. \
 Terminals that support inline graphics (iTerm2, kitty, WezTerm, ghostty) \
 then show the image right under your answer; elsewhere the path stays \
 visible as text.
+- QUICK REPLIES: you CAN turn a question into a pick-by-number menu, and the \
+user EXPECTS it. Whenever you end a message with a question whose likely \
+answers are a few short options (yes/no, pick-one, a short menu), you MUST \
+append one markdown link per option, each on its own line, formatted \
+[Label](aish-reply://answer text) — the CLI hides the link syntax and lists \
+the labels as a numbered menu the user picks by typing its number, sending \
+"answer text" as their reply, so write each payload as a complete, \
+ready-to-send message. Asking in prose alone does NOT create the menu; you \
+must add the link lines too. Example: after "Proceed with the deploy?" end \
+with [Yes, deploy](aish-reply://yes, deploy now) and \
+[No, hold off](aish-reply://no, hold off). Only offer chips that are a \
+useful next step (a continuation, an alternative, a concrete next action) — \
+never a chip whose only purpose is to end the conversation.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` is an alias for /cd — it moves the project directory and \
 re-anchors the session root. Ctrl-C cancels only the \
@@ -1542,8 +1676,15 @@ def main() -> int:
     if stream_answers:
         _timer = LiveTimer()
 
+    # Strip quick-reply chip syntax out of the streamed body (#167): the chips
+    # are surfaced as a numbered menu after the answer, not as raw markdown.
+    chip_stream = ChipStream(
+        lambda text: print(f"{GREEN}{text}{RESET}", end="", flush=True)
+    ) if stream_answers else None
+
     def print_token(token: str) -> None:
-        print(f"{GREEN}{token}{RESET}", end="", flush=True)
+        assert chip_stream is not None
+        chip_stream.feed(token)
 
     # The approver needs the agent's live cwd/roots, but the agent is built
     # with the approver — so the scope binds late through this holder.
@@ -1654,14 +1795,18 @@ def main() -> int:
         except ModelUnavailable as exc:
             print(f"{RED}model unavailable:{RESET} {exc}{_backend_hint(agent)}")
             return 1
+        if chip_stream is not None:
+            chip_stream.close()
+        clean, _chips = parse_reply_chips(result)
         if not stream_answers:
-            print(f"{GREEN}{result}{RESET}")
+            print(f"{GREEN}{clean}{RESET}")
         print_answer_images(agent, result)
         print_sources(agent)
         return 0
 
     if not history:  # a resumed session continues where it was — no big banner
         print(banner(f"model {args.model} · session {log.path.name} · /help · Ctrl-D quits"))
+    pending_chips: list[tuple[str, str]] = []  # quick-reply menu from the last answer
     while True:
         try:
             task = read_task(agent.cwd).strip()
@@ -1671,6 +1816,13 @@ def main() -> int:
         except KeyboardInterrupt:
             print(f"{DIM}(input cleared — Ctrl-D or /quit to exit){RESET}")
             continue
+        # A bare number selects the matching quick-reply chip; anything else is a
+        # normal message. Chips are one-shot — consumed by whatever comes next.
+        selected = resolve_chip_selection(task, pending_chips)
+        if selected != task:
+            print(f"{BOLD}❯{RESET} {selected}")
+        task = selected
+        pending_chips = []
         if task in ("exit", "quit"):
             return 0
         if task == "clear":  # parity with plain 'exit' — no slash needed
@@ -1699,10 +1851,14 @@ def main() -> int:
             continue
         try:
             result = agent.run_task(task)
+            if chip_stream is not None:
+                chip_stream.close()
+            clean, pending_chips = parse_reply_chips(result)
             if not stream_answers:
-                print(f"\n{GREEN}{result}{RESET}")
+                print(f"\n{GREEN}{clean}{RESET}")
             print_answer_images(agent, result)
             print_sources(agent)
+            print_chip_menu(pending_chips)
         except KeyboardInterrupt:
             print(f"\n{YELLOW}(task interrupted){RESET}")
         except ModelUnavailable as exc:
