@@ -1072,6 +1072,21 @@ function onReplay(event) {
 
 let answerFilling = false; // once the answer streams, the page stays put
 
+// Entering the "Answering…" phase — the model stopped calling tools and is
+// streaming its reply — collapses the still-open live timeline to its summary
+// so the answer isn't buried under a tall list of steps (#168). Fires once, at
+// the transition; a manual re-expand afterward is never fought (this doesn't
+// run again for the same answer). Mirrors the approval-card collapse idiom
+// (#65): only act on a live, open trace.
+function collapseTimelineForAnswering(t) {
+  if (t && t.el.classList.contains("live") && t.el.classList.contains("open")) {
+    t.el.classList.remove("open");
+    return true;
+  }
+  return false;
+}
+// [ANSWERING-COLLAPSE-END]
+
 function onToken(text) {
   sawAnswer = true;
   if (!answerEl) {
@@ -1080,11 +1095,9 @@ function onToken(text) {
     answerStableLen = 0;
     answerStableNodes = 0;
     // Content is streaming, but it may be mid-work narration before another
-    // tool call — NOT necessarily the final answer. So the live trace stays
-    // OPEN and keeps showing steps (and stays expandable); only finishTrace,
-    // when the turn actually ends, collapses it to "Worked for Xs". Meanwhile
-    // hold the page still so the text fills in from the top instead of the
-    // view chasing the streaming bottom.
+    // tool call — NOT necessarily the final answer; the trace stays expandable
+    // either way. Hold the page still so the text fills in from the top instead
+    // of the view chasing the streaming bottom.
     answerFilling = true;
     // The live "Thinking…" step is the last row on the timeline when the reply
     // starts streaming; relabel it so it reads as the answer landing, not more
@@ -1094,6 +1107,8 @@ function onToken(text) {
       currentTrace.thinkingRow.titleEl.textContent = "Answering…";
       currentTrace.thinkingRow.isAnswer = true;
     }
+    // Entering "Answering…" collapses the open timeline to its summary (#168).
+    collapseTimelineForAnswering(currentTrace);
     requestAnimationFrame(() => anchorAnswer(true));
   }
   answerText += text;
