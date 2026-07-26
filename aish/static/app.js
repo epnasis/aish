@@ -362,6 +362,8 @@ function setOfflineMode(value) {
 // a tunnel picks up exactly where it stopped, with no partial state to repair.
 
 const OFFLINE_SYNC_IDLE_MS = 5 * 60 * 1000; // periodic catch-up while connected
+const OFFLINE_SYNC_AFTER_DONE_MS = 15 * 1000; // debounce after a finished turn
+const FIRST_PAINT_GRACE_MS = 250; // let a fast LAN replay win the first paint outright
 const OFFLINE_SYNC_GAP_MS = 40;             // breathing room between sessions
 
 let offlineSyncing = false;
@@ -448,6 +450,13 @@ async function offlineSyncOnce() {
     // has still fetched the sessions most likely to be wanted.
     for (const info of index.sessions) {
       if (offlineMode) break;
+      // The chat on screen is the one you least need mirrored right now, and
+      // the one whose refetch costs the most (its mtime moves every turn, so
+      // it re-syncs on every pass — a full server-side re-parse plus an
+      // IndexedDB rewrite that grows with the chat). It catches up when the
+      // app goes hidden (see visibilitychange), which is when the mirror is
+      // actually about to be needed.
+      if (info.name === currentSession && document.visibilityState === "visible") continue;
       const local = offlineMeta.get(info.name);
       // Second-resolution mtimes: only refetch on a strictly newer stamp, or
       // the current session would be refetched on every single pass.
@@ -547,6 +556,14 @@ async function offlineFirstPaint() {
     }
     // The socket won the race — the authoritative transcript is already up.
     if (!cached || serverPainted) return;
+    // Short grace so a fast (LAN) replay wins OUTRIGHT: painting the mirror
+    // first meant rendering the whole chat twice back to back, with the
+    // authoritative paint queued behind the cached one — the app filled
+    // SLOWER at home, where the mirror is least needed. On a slow link the
+    // replay misses the window and the cached paint proceeds barely delayed,
+    // which is the case the mirror exists for.
+    await new Promise((resolve) => setTimeout(resolve, FIRST_PAINT_GRACE_MS));
+    if (serverPainted) return;
     currentSession = cached.meta.name;
     setTitle(cached.meta.title || "aish");
     refreshOfflinePinUi();
@@ -661,7 +678,15 @@ function connect() {
     offlineSyncSoon(); // catch the mirror up on whatever happened while away
     checkAppVersion(); // server restarts are when the UI code changes
   };
-  ws.onmessage = (raw) => handle(JSON.parse(raw.data));
+  ws.onmessage = (raw) => {
+    const event = JSON.parse(raw.data);
+    // A live transcript-affecting event invalidates the rendered-view stash
+    // (see [VIEWCACHE]). Marked HERE, not in handle(): the replay loop also
+    // funnels through handle(), and replayed events are exactly what the
+    // fingerprint already accounts for.
+    if (!VIEW_SAFE_EVENTS.has(event.type)) viewDirty = true;
+    handle(event);
+  };
   ws.onclose = (event) => {
     // A committed swipe parks the transcript off-screen and waits for the
     // landing replay to bring the next page in. If the socket dies in that gap
@@ -773,7 +798,16 @@ function send(message) {
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) return;
+  if (document.hidden) {
+    // Putting the app away is the moment the mirror matters: the sync loop
+    // skips the on-screen chat while visible (it re-syncs every turn and the
+    // user is looking at the live copy), so catch it up now — locking the
+    // phone right after an answer still leaves that answer readable offline.
+    // Called directly, not via offlineSyncSoon: a hidden page's timers may
+    // never fire.
+    offlineSyncOnce();
+    return;
+  }
   // Safety net for the pager: a hidden page runs no transitions, so a slide
   // that was starting as the phone locked can be sitting at its start value —
   // i.e. the transcript parked off screen, which looks like an empty chat. If
@@ -885,10 +919,12 @@ function handle(event) {
     case "approval_resolved": onApprovalResolved(event); break;
     case "done":
       onDone(event);
-      // A finished turn is exactly what the mirror is missing; pull it now
-      // rather than at the next idle tick, so closing the laptop right after
-      // an answer still leaves that answer readable on the phone.
-      if (!replaying) offlineSyncSoon(2000);
+      // A finished turn is what the mirror is missing — but syncing right
+      // away competed with the user's next action for the main thread and the
+      // server (the chat on screen re-parses on every pass, its mtime always
+      // moves). A calm debounce covers the multi-turn case; putting the app
+      // away is covered separately by the sync-on-hidden in visibilitychange.
+      if (!replaying) offlineSyncSoon(OFFLINE_SYNC_AFTER_DONE_MS);
       break;
     case "history": onHistory(event.messages); break;
     case "session_list": renderSessions(event); break;
@@ -1005,10 +1041,80 @@ function reloadThrottled(reason) {
 }
 // [OFFLINE-RELOAD-END]
 
+// [VIEWCACHE-START]
+// Rendered-transcript reuse: a session switch replays the full transcript and
+// rebuilds the whole DOM (markdown + highlighting for every answer), which is
+// what made swiping back and forth feel slow on long chats. When we LEAVE an
+// idle view we stash its rendered nodes, and when a replay for that session
+// arrives whose transcript is IDENTICAL to what those nodes were built from,
+// we swap them back in instead of rebuilding. Identity is a fingerprint of
+// the replay (event count + truncation + the last event): the transcript is
+// append-only while a session stays open, so any change moves the count or
+// the last event. Every mismatch falls back to a full rebuild — the cache can
+// make a switch faster, never wronger.
+const VIEW_CACHE_MAX = 4;
+const viewCache = new Map(); // session name → {nodes, fp, renderedAnswers}
+let viewFp = "";      // fingerprint of the replay the current view was built from
+let viewDirty = true; // events arrived since that replay → a stash would be stale
+
+// Event types that never touch the transcript DOM. Anything NOT listed marks
+// the view dirty — over-dirtying only costs a rebuild, never a stale screen.
+const VIEW_SAFE_EVENTS = new Set([
+  "hello", "replay", "session_list", "model_list", "role", "deck_gone",
+  "session_renamed", "session_deleted", "cmd_history", "jobs", "files", "dirs",
+  "console_started", "console_out", "console_exit", "console_error",
+  "console_shared",
+]);
+
+function replayFp(event) {
+  const events = event.events || [];
+  const last = events[events.length - 1];
+  // The last event is capped so a legacy one-blob `history` replay doesn't
+  // put megabytes into the key; length + head disambiguates just as well.
+  const tail = last ? JSON.stringify(last) : "";
+  return `${event.truncated ? "t" : ""}${events.length}:${tail.length}:${tail.slice(0, 2000)}`;
+}
+
+// A view is only worth stashing when its DOM is a pure function of the replay
+// it was built from: nothing arrived since (dirty), nothing is mid-flight
+// (busy / pending approval cards), and it wasn't painted from the mirror's
+// truncated copy (offlineViewing).
+function viewStashable(state) {
+  return Boolean(
+    state.name && state.fp && !state.dirty && !state.pendingCards &&
+    !state.busy && !state.offlineViewing
+  );
+}
+
+function stashCurrentView() {
+  const stashable = viewStashable({
+    name: currentSession,
+    fp: viewFp,
+    dirty: viewDirty,
+    pendingCards,
+    busy: clientBusy,
+    offlineViewing,
+  });
+  if (!stashable) return;
+  viewCache.delete(currentSession); // re-insert = move to MRU end
+  viewCache.set(currentSession, {
+    nodes: [...messagesEl.children],
+    fp: viewFp,
+    renderedAnswers,
+  });
+  while (viewCache.size > VIEW_CACHE_MAX) {
+    viewCache.delete(viewCache.keys().next().value);
+  }
+}
+// [VIEWCACHE-END]
+
 function onHello(event) {
   // Server code changed since this page was built (or the page predates rev
   // stamping entirely) — reload; the replay mechanism restores the view.
   if (event.rev && event.rev !== PAGE_REV) { reloadThrottled("rev"); return; }
+  // The DOM about to be replaced belongs to the chat we are leaving — stash it
+  // (if clean) before this hello repoints currentSession/offlineViewing.
+  stashCurrentView();
   offlineViewing = false; // a live hello supersedes anything read from the mirror
   // The interactive console is GLOBAL (#148 follow-up): it floats above whatever
   // chat is shown and is untouched by a session switch. A hello also means a
@@ -1083,13 +1189,27 @@ function onReplay(event) {
   answerStableNodes = 0;
   sawAnswer = false;
   renderedAnswers = 0; // fork ordinals restart with the rebuilt transcript
-  if (event.truncated) addMsg("notice", "… earlier events trimmed …");
-  replaying = true; // replayed history must not re-fire notifications
-  try {
-    for (const item of event.events) handle(item);
-  } finally {
-    replaying = false;
+  // [VIEWCACHE] An identical transcript re-lands on its already-rendered
+  // nodes — the swipe-back case. Only an exact fingerprint match qualifies
+  // (a stash is only taken from a clean idle view, so these nodes are a pure
+  // function of that same transcript); anything else rebuilds below.
+  const fp = replayFp(event);
+  const cached = viewCache.get(currentSession);
+  viewCache.delete(currentSession); // detached nodes are single-use either way
+  if (cached && cached.fp === fp) {
+    messagesEl.replaceChildren(...cached.nodes);
+    renderedAnswers = cached.renderedAnswers;
+  } else {
+    if (event.truncated) addMsg("notice", "… earlier events trimmed …");
+    replaying = true; // replayed history must not re-fire notifications
+    try {
+      for (const item of event.events) handle(item);
+    } finally {
+      replaying = false;
+    }
   }
+  viewFp = fp;
+  viewDirty = false;
   scrollToEnd(true);
   snapViewportSoon(); // session switches race keyboard dismissal with this rebuild (#8)
   setTimeout(() => reportViewport("after-replay"), 1200);
@@ -7394,6 +7514,7 @@ function onSessionDeleted(event) {
   // The deck must not outlive the file — a deleted chat left in the working
   // set is how phantoms are born on the deleting device itself.
   dropGoneSessions(event.name ? [event.name] : []);
+  if (event.name) viewCache.delete(event.name); // stashed DOM goes with it
   showToast("session deleted");
 }
 

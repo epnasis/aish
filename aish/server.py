@@ -1529,15 +1529,18 @@ class WebServer:
         """Point `client` at `session`: hello + full transcript replay, then
         live events from its own outbox. Does NOT affect other clients — each
         views independently (#102)."""
-        # Disk scan for the pager happens before the attach block below: it
-        # must not sit between joining the viewer set and the transcript
-        # snapshot.
-        pager = await asyncio.to_thread(SessionLog.pager_titles, self.state_dir)
-        # Cross-session command palette for terminal-mode autocomplete (#104),
-        # scanned off-thread alongside the pager before the attach block.
-        cmd_history = await asyncio.to_thread(
-            SessionLog.user_command_history, self.state_dir
-        )
+        # Disk scan for the pager and the terminal-mode command palette (#104)
+        # happens before the attach block below: it must not sit between
+        # joining the viewer set and the transcript snapshot. One thread hop
+        # for both — each is stat-cheap behind session.py's parse cache, so
+        # the hop itself is most of the cost now.
+        def scan() -> tuple[list, list]:
+            return (
+                SessionLog.pager_titles(self.state_dir),
+                SessionLog.user_command_history(self.state_dir),
+            )
+
+        pager, cmd_history = await asyncio.to_thread(scan)
         if client.sender:
             client.sender.cancel()
             client.sender = None
