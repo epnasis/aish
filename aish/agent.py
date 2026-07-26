@@ -2061,6 +2061,11 @@ class Agent:
             f"exec: ./{wrapper_name}",
             f"mutating: {mutating}",
         ]
+        preview = args.get("preview")
+        if preview not in (None, "", False):
+            # A non-bool goes through verbatim so the lint below rejects a bogus
+            # value instead of silently coercing it into a promised preview.
+            lines.append(f"preview: {'yes' if preview is True else str(preview).strip()}")
         if args.get("timeout"):
             lines.append(f"timeout: {int(args['timeout'])}")
         if str(args.get("prefer_over", "") or "").strip():

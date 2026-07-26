@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from aish import tool_plugins
 from aish.agent import DENIED_RESULT, Agent
 
 
@@ -3157,7 +3158,34 @@ class TestPluginTools:
         agent.run_task("go")
         assert order == ["TOOL.md", "run.sh"]  # interface before implementation
 
+    def _created_tool(self, tmp_path, **extra):
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._ct_call(
+                    name="deleter", description="delete by id", mutating=True,
+                    schema='{"id": {"type": "string", "required": true}}',
+                    wrapper="cat\n", scope="project", **extra)]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_write=lambda plan: True,
+        )
+        agent.run_task("go")
+        return tmp_path / ".aish" / "tools" / "deleter"
 
+    def test_create_tool_declares_preview(self, tmp_path):
+        tdir = self._created_tool(tmp_path, preview=True)
+        assert "preview: yes" in (tdir / "TOOL.md").read_text()
+        tool, errors = tool_plugins._parse_tool(tdir / "TOOL.md")
+        assert not errors and tool is not None and tool.preview is True
+
+    def test_create_tool_without_preview_stays_off(self, tmp_path):
+        tdir = self._created_tool(tmp_path)
+        assert "preview:" not in (tdir / "TOOL.md").read_text()
+        tool, errors = tool_plugins._parse_tool(tdir / "TOOL.md")
+        assert not errors and tool is not None and tool.preview is False
+
+    def test_create_tool_invalid_preview_refuses_to_write(self, tmp_path):
+        assert not self._created_tool(tmp_path, preview="maybe").exists()
 
     def _write_tool_wraps(self, cwd, name, wraps, mutating="no"):
         import stat
