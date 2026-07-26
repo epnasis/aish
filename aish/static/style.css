@@ -1675,6 +1675,15 @@ body.offline #composer { opacity: 0.55; }
   line-height: 0;
 }
 .session-row .row-delete svg { width: 15px; height: 15px; }
+.session-row .row-unrecent {
+  flex: none;
+  color: var(--dim);
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 6px;
+  margin: -4px -6px -4px 0;
+}
+.session-row .row-unrecent:hover { color: var(--fg); }
 .session-row .row-delete.armed {
   color: var(--red);
   font-size: 13.8px;

@@ -762,12 +762,18 @@ function send(message) {
     return false;
   }
   ws.send(JSON.stringify(message));
+  noteActivity(); // any outbound action counts as use, staving off the cold-start sweep
   return true;
 }
 
 document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  // Cold start (b): returning after a long absence prunes the working set once,
+  // BEFORE we note activity (which would reset the gap). See the deck lifecycle.
+  if (Date.now() - lastActiveAt > COLD_START_GAP_MS) coldStartRecompute();
+  noteActivity();
   // Phone unlock: reconnect immediately instead of waiting out the backoff.
-  if (!document.hidden && (!ws || ws.readyState === WebSocket.CLOSED)) connect();
+  if (!ws || ws.readyState === WebSocket.CLOSED) connect();
 });
 
 // ---- event dispatch ------------------------------------------------------
@@ -989,6 +995,7 @@ function onHello(event) {
   pagerSessions = event.pager || [];
   cmdHistory = event.cmd_history || []; // personal command palette (#104)
   currentSession = event.session;
+  ensureCurrentInDeck(event); // the chat now on screen joins/stays in the working set (#169)
   offlineTouch(event.session); // MRU input to the mirror's eviction order
   refreshOfflinePinUi();       // the toggle belongs to the chat now on screen
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
@@ -3482,6 +3489,7 @@ function forkChip(ordinal) {
   btn.appendChild(forkIcon());
   btn.onclick = () => {
     if (clientBusy) { showToast("can't fork while working"); return; }
+    pendingForkParent = currentSession; // the child inserts right of this parent (#169)
     send({ type: "fork", after: ordinal });
   };
   return btn;
@@ -4937,7 +4945,9 @@ function handleSlash(text) {
     case "/model": openModelSheet(arg); return true;
     case "/resume": case "/delete": openSessionsSheet(arg); return true;
     case "/new": case "/clear": return send({ type: "new" });
-    case "/fork": case "/branch": return send({ type: "fork" });
+    case "/fork": case "/branch":
+      pendingForkParent = currentSession; // child inserts right of parent (#169)
+      return send({ type: "fork" });
     case "/cd": return arg ? send({ type: "cd", path: arg }) : (openDirSheet(), true);
     case "/add-dir": case "/dir-add":
       return arg ? send({ type: "add_dir", path: arg }) : (openSheet("workspace-sheet"), true);
@@ -6893,7 +6903,7 @@ function offlinePagerPages() {
     .map((meta) => ({ name: meta.name, title: meta.title, origin: meta.origin }));
 }
 
-function pagerPages() {
+function pagerSource() {
   if (!offlineMode && pagerSessions.length) return pagerSessions;
   const cached = offlinePagerPages();
   // Offline with an empty mirror (nothing synced yet): fall back rather than
@@ -6901,6 +6911,213 @@ function pagerPages() {
   return cached.length ? cached : pagerSessions;
 }
 // [PAGER-SOURCE-END]
+
+// [DECK-START]
+// The "working-set deck" (#169): a STABLE, explicit ordered set of chats the
+// swipe carousel navigates and the drawer's RECENT section lists — decoupled
+// from the server's MRU ordering. The whole point is that the deck NEVER
+// reshuffles under the user while working: replying to an open chat leaves its
+// slot untouched (spatial memory holds), and stale-chat pruning happens ONLY at
+// cold start, never dynamically. Members are added by explicit user actions
+// (new chat, fork, open-from-history), evicted only by the >48h cold-start
+// sweep or an explicit ✕. These functions are PURE — all app state (the live
+// `deck`, localStorage, currentSession) lives below the marker so the ordering
+// logic is unit-testable in isolation.
+const DECK_MAX_IDLE_MS = 48 * 60 * 60 * 1000; // cold-start eviction window
+
+function deckIndexOf(members, name) {
+  return members.findIndex((m) => m.name === name);
+}
+
+function addToDeck(members, member, afterName) {
+  // Already in the deck → never move it (opening an in-deck chat just navigates
+  // to its existing slot). Fork → immediately right of its parent. Everything
+  // else (new chat, open-from-history) → far right, the browser-tab model.
+  if (deckIndexOf(members, member.name) >= 0) return members;
+  const next = members.slice();
+  const at = afterName == null ? -1 : deckIndexOf(next, afterName);
+  if (at >= 0) next.splice(at + 1, 0, member);
+  else next.push(member);
+  return next;
+}
+
+function removeFromDeck(members, name) {
+  return members.filter((m) => m.name !== name);
+}
+
+function touchDeck(members, name, now) {
+  // Bump a member's last-active stamp (feeds the >48h sweep) WITHOUT reordering.
+  return members.map((m) => (m.name === name ? { ...m, ts: now } : m));
+}
+
+function recomputeWorkingSet(members, now) {
+  // Cold start ONLY: evict members idle past the window, keep the rest in place.
+  // Never adds — this is the sole pruning point, so the deck can't churn mid-use.
+  return members.filter((m) => now - (m.ts || 0) <= DECK_MAX_IDLE_MS);
+}
+
+function seedWorkingSet(sessions, now) {
+  // First run / empty saved deck / new device: adopt every session active within
+  // the window, oldest-active first (matching the pager's oldest→newest so the
+  // most recent lands far right).
+  return sessions
+    .filter((s) => now - (s.ts || 0) <= DECK_MAX_IDLE_MS)
+    .slice()
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0))
+    .map((s) => ({ name: s.name, ts: s.ts || now, title: s.title, origin: s.origin }));
+}
+
+function partitionRecent(members, sessions) {
+  // Drawer split: RECENT = working-set members in deck order; HISTORY = every
+  // other session, left in the caller's MRU/date order. A session is in exactly
+  // one section (no duplication).
+  const byName = new Map(sessions.map((s) => [s.name, s]));
+  const inDeck = new Set(members.map((m) => m.name));
+  return {
+    recent: members.map((m) => byName.get(m.name)).filter(Boolean),
+    history: sessions.filter((s) => !inDeck.has(s.name)),
+  };
+}
+
+function deckToPages(members, source) {
+  // The swipe order = deck order, with display metadata refreshed from the live
+  // source (and the member's own cached title/origin as a fallback for chats
+  // beyond the 30-item pager window). An unseeded/empty deck shows the raw
+  // source, so a fresh or offline launch is never worse than before.
+  if (!members.length) return source;
+  const byName = new Map(source.map((p) => [p.name, p]));
+  return members.map((m) => {
+    const live = byName.get(m.name);
+    return live
+      ? { name: live.name, title: live.title, origin: live.origin }
+      : { name: m.name, title: m.title, origin: m.origin };
+  });
+}
+// [DECK-END]
+
+// ---- working-set deck: live state, persistence, lifecycle (#169) ----------
+// Persisted client-side (per device, no cross-device sync). Schema:
+//   { v, seeded, lastActiveAt, members: [{name, ts, title, origin}] }
+const DECK_KEY = "aish-deck";
+const DECK_VERSION = 1;
+const COLD_START_GAP_MS = 45 * 60 * 1000; // hidden longer than this → treat as cold start
+let deck = [];
+let deckSeeded = false;
+let lastActiveAt = Date.now();
+let pendingForkParent = null; // set when a fork is sent; the child inserts right of it
+
+function loadDeck() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DECK_KEY));
+    if (raw && raw.v === DECK_VERSION && Array.isArray(raw.members)) {
+      return {
+        members: raw.members.filter((m) => m && m.name),
+        seeded: Boolean(raw.seeded),
+        lastActiveAt: raw.lastActiveAt || Date.now(),
+      };
+    }
+  } catch { /* private mode / corrupt — fall through to a fresh deck */ }
+  return null;
+}
+
+function saveDeck() {
+  try {
+    localStorage.setItem(DECK_KEY, JSON.stringify(
+      { v: DECK_VERSION, seeded: deckSeeded, lastActiveAt, members: deck }
+    ));
+  } catch { /* private mode: the deck degrades to in-memory only */ }
+}
+
+(function initDeck() {
+  const stored = loadDeck();
+  if (stored) {
+    deck = stored.members;
+    deckSeeded = stored.seeded;
+    lastActiveAt = stored.lastActiveAt;
+  }
+  // Cold start (a): a fresh document load evicts anything idle past the window.
+  deck = recomputeWorkingSet(deck, Date.now());
+  saveDeck();
+})();
+
+function noteActivity() { lastActiveAt = Date.now(); }
+
+// Persist the deck (with a fresh lastActiveAt) as the tab is backgrounded, so a
+// PWA relaunch has an accurate gap to measure the cold-start sweep against.
+addEventListener("pagehide", () => { noteActivity(); saveDeck(); });
+
+// Cold start (b): returning to the foreground after a long hiddenness. Evict
+// stale members, never add — same discipline as a fresh load.
+function coldStartRecompute() {
+  deck = recomputeWorkingSet(deck, Date.now());
+  saveDeck();
+  if (!$("sessions-sheet").hidden && lastSessionEvent) renderSessions(lastSessionEvent);
+}
+
+function deckOriginFor(name, event) {
+  if (event && event.origin) return event.origin;
+  const p = pagerSessions.find((s) => s.name === name);
+  if (p && p.origin) return p.origin;
+  const meta = offlineMeta.get(name);
+  return (meta && meta.origin) || "user";
+}
+
+// Called on every hello: the session now on screen must be in the working set.
+// Existing members are touched (bumped, not moved); a newcomer inserts right of
+// a just-forked parent, else far right.
+function ensureCurrentInDeck(event) {
+  const now = Date.now();
+  noteActivity();
+  const name = event.session;
+  if (!name) return;
+  if (deckIndexOf(deck, name) >= 0) {
+    deck = touchDeck(deck, name, now);
+  } else {
+    const member = { name, ts: now, title: event.title || name, origin: deckOriginFor(name, event) };
+    const parent = pendingForkParent && deckIndexOf(deck, pendingForkParent) >= 0
+      ? pendingForkParent : null;
+    deck = addToDeck(deck, member, parent);
+  }
+  pendingForkParent = null;
+  saveDeck();
+}
+
+// First run only: adopt the sessions active within the window. Keeps the chat
+// currently on screen (esp. a brand-new empty one the server doesn't list yet).
+function maybeSeedDeck(sessions) {
+  if (deckSeeded || !sessions || !sessions.length) return;
+  let seed = seedWorkingSet(sessions, Date.now());
+  if (currentSession && deckIndexOf(seed, currentSession) < 0) {
+    const existing = deck.find((m) => m.name === currentSession)
+      || { name: currentSession, ts: Date.now(), title: currentSession, origin: "user" };
+    seed = addToDeck(seed, existing, null);
+  }
+  deck = seed;
+  deckSeeded = true;
+  saveDeck();
+}
+
+// The ✕ on a RECENT row / the ⋯ menu item: move a chat to HISTORY (it is NOT
+// deleted — still on disk, reopenable). Removing the chat on screen navigates to
+// its left neighbour, else the new right edge, else a fresh chat.
+function removeFromWorkingSet(name) {
+  const idx = deckIndexOf(deck, name);
+  if (idx < 0) return;
+  const wasCurrent = name === currentSession;
+  const leftNeighbor = idx > 0 ? deck[idx - 1] : null;
+  deck = removeFromDeck(deck, name);
+  saveDeck();
+  if (wasCurrent) {
+    const target = leftNeighbor || deck[deck.length - 1] || null;
+    if (target) resumeSession(target.name);
+    else requestNewChat();
+  }
+  if (!$("sessions-sheet").hidden && lastSessionEvent) renderSessions(lastSessionEvent);
+}
+
+function pagerPages() {
+  return deckToPages(deck, pagerSource());
+}
 
 function sessionNeighbor(direction) {
   return laneNeighbor(pagerPages(), currentSession, direction);
@@ -7042,6 +7259,47 @@ function endSwipe(event) {
 }
 messagesEl.addEventListener("touchend", endSwipe);
 messagesEl.addEventListener("touchcancel", endSwipe);
+
+// ---- swipe-UP to reveal the Sessions drawer (#169) -----------------------
+// A safe, discoverable shortcut: a dominant-vertical upward swipe that STARTS in
+// the bottom/composer safe zone opens the ‹ Sessions screen. Kept strictly out
+// of the horizontal pager's way (different axis) and the scroll's way (only when
+// the transcript is already at the bottom, so an up-swipe can't be a scroll) —
+// and never while the keyboard is up. The DECISION is a pure function so it can
+// be unit-tested without a DOM; the wiring below only feeds it live geometry.
+// [SWIPEUP-START]
+const SWIPE_UP_ZONE = 130; // px from the bottom edge where an up-swipe is armed
+const SWIPE_UP_MIN = 55;   // px of upward travel required to commit
+function swipeUpOpensDrawer(g) {
+  // g: { startY, endY, dx, viewportH, keyboardUp, atBottom }
+  if (g.keyboardUp) return false;                            // composer owns vertical gestures
+  if (!g.atBottom) return false;                             // scrolled up → this is a scroll
+  if (g.viewportH - g.startY > SWIPE_UP_ZONE) return false;  // must start in the bottom zone
+  const up = g.startY - g.endY;                              // upward travel
+  if (up < SWIPE_UP_MIN) return false;                       // too short: a tap or micro-scroll
+  return Math.abs(g.dx) <= up * 0.8;                         // dominant vertical only
+}
+// [SWIPEUP-END]
+
+(function attachSwipeUpToDrawer() {
+  let sx = 0, sy = 0, active = false;
+  addEventListener("touchstart", (e) => {
+    active = e.touches.length === 1;
+    if (active) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }
+  }, { passive: true });
+  addEventListener("touchend", (e) => {
+    if (!active) return;
+    active = false;
+    if (!$("sessions-sheet").hidden || !$("backdrop").hidden || consoleOpen) return; // overlay owns the screen
+    const t = e.changedTouches[0];
+    if (!t) return;
+    if (swipeUpOpensDrawer({
+      startY: sy, endY: t.clientY, dx: t.clientX - sx,
+      viewportH: (window.visualViewport && visualViewport.height) || innerHeight,
+      keyboardUp: editingNow(), atBottom: nearBottom(),
+    })) openSessionsSheet("");
+  }, { passive: true });
+})();
 
 // ---- trackpad pager (macOS Safari) ---------------------------------------
 // A two-finger horizontal swipe arrives as a wheel-event stream, not
@@ -7235,6 +7493,7 @@ $("session-menu").addEventListener("click", (e) => {
     case "export": exportSessionPdf(); break;
     case "workspace": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
     case "copylog": copyLogPath(); break;
+    case "unrecent": if (currentSession) removeFromWorkingSet(currentSession); break;
     case "reconnect": reconnect(); break;
   }
 });
@@ -7450,7 +7709,7 @@ function sessionIcon(info, isCurrent) {
   return wrap;
 }
 
-function sessionRow(info, current) {
+function sessionRow(info, current, opts = {}) {
   const isCurrent = info.name === current;
   const row = document.createElement("button");
   row.className = "row session-row" + (isCurrent ? " current" : "");
@@ -7507,8 +7766,23 @@ function sessionRow(info, current) {
   stamp.className = "stamp";
   stamp.textContent = sessionStamp(info.ts);
   right.append(stamp, sessionDeleteControl(info));
+  if (opts.recent) right.append(sessionRemoveControl(info)); // ✕ = move to HISTORY (#169)
   row.append(sessionIcon(info, isCurrent), body, right);
   return wrapSwipeDelete(row, info);
+}
+
+// The ✕ on a RECENT row: a NON-destructive "remove from working set" (moves the
+// chat to HISTORY — it is not deleted). One tap, no arming, since it is fully
+// reversible by reopening the chat.
+function sessionRemoveControl(info) {
+  const x = document.createElement("span");
+  x.className = "row-unrecent";
+  x.setAttribute("role", "button");
+  x.setAttribute("aria-label", `remove ${info.title || info.name} from working set`);
+  x.title = "remove from working set (keeps the chat)";
+  x.textContent = "✕";
+  x.onclick = (event) => { event.stopPropagation(); removeFromWorkingSet(info.name); };
+  return x;
 }
 
 // iOS swipe-left-to-delete. The row rides over a red Delete button; a tap on
@@ -7589,9 +7863,10 @@ $("tab-automated").onclick = () => setSessionTab("automated");
 
 // Active (running / needs-approval) sessions float to the top under their own
 // header; the rest keep the date grouping. Shared by both tabs.
-function renderSessionList(sessions, current, isActive) {
+function renderSessionList(sessions, current, isActive, opts = {}) {
   const list = $("sessions-list");
   if (!sessions.length) {
+    if (opts.skipEmpty) return; // the caller already handled the empty case (recent tab)
     const empty = document.createElement("div");
     empty.className = "section-label";
     empty.textContent = sessionTab === "automated"
@@ -7637,11 +7912,36 @@ function renderSessions(event) {
     return;
   }
   $("sessions-tabs").hidden = false;
+  maybeSeedDeck(event.sessions); // first run: adopt the recently-active chats (#169)
   const { groups, counts, isActive } = partitionSessions(event.sessions);
   renderTabCounts("tab-recent-counts", counts.recent);
   renderTabCounts("tab-automated-counts", counts.automated);
   syncTabSelection();
-  renderSessionList(groups[sessionTab], event.current, isActive);
+  if (sessionTab === "recent") renderRecentTab(groups.recent, event.current, isActive);
+  else renderSessionList(groups.automated, event.current, isActive);
+}
+
+// The Recent tab is split (#169): a RECENT section = the working-set deck in its
+// stable order (each row carries a ✕ that moves the chat to HISTORY), then
+// HISTORY = every other chat, keeping the Active-now float + date grouping.
+function renderRecentTab(sessions, current, isActive) {
+  const list = $("sessions-list");
+  const { recent, history } = partitionRecent(deck, sessions);
+  if (recent.length) {
+    list.appendChild(sectionLabel("Recent"));
+    for (const info of recent) list.appendChild(sessionRow(info, current, { recent: true }));
+  }
+  if (!recent.length && !history.length) {
+    const empty = document.createElement("div");
+    empty.className = "section-label";
+    empty.textContent = "No chats yet";
+    list.appendChild(empty);
+    return;
+  }
+  if (history.length) {
+    if (recent.length) list.appendChild(sectionLabel("History"));
+    renderSessionList(history, current, isActive, { skipEmpty: true });
+  }
 }
 
 // Horizontal swipe on the list switches tabs (a thumb gesture, matching the
