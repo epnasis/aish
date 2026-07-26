@@ -724,6 +724,13 @@ class Agent:
         # an approval prompt. Execution is stateless for the model: cwd moves
         # only on user action (/cd, !cd) — a model-issued bare cd never runs.
         self.roots: list[Path] = [Path(self.cwd).resolve()]
+        # Command prefixes the user allowed for THIS session only ('s' at the
+        # prompt / "Allow this session" on the card), unioned with the
+        # persistent allowlist but never written to disk. It lives here beside
+        # roots because both scope auto-approval and both are session property,
+        # so restore_workspace resets them together (#176) — the approvers read
+        # it live rather than owning a set whose lifetime is the process.
+        self.session_prefixes: set[str] = set()
         # The dir this agent was launched in, kept for restore_workspace: a
         # session that never recorded a cwd re-anchors HERE, never to wherever
         # the chat being left happened to be sitting (#176).
@@ -943,6 +950,12 @@ class Agent:
         /resume, so an appended /add-dir used to widen the gate in a chat that
         never granted it), and nothing this chat trusted is dropped.
 
+        The other half of that gate's session scope — session_prefixes, the
+        prefixes allowed with 's' — is dropped here for the same reason. It is
+        never restored: prefixes are not recorded on disk, so the honest
+        behaviour is that landing in a chat re-grants nothing and the user is
+        asked again, rather than inventing persistence the log cannot back.
+
         State is set DIRECTLY (never through rebase/trust_root) so restoring
         emits no fresh cwd/trust record — that would be a replay feedback loop.
         Missing paths degrade gracefully: a session that recorded no cwd, or
@@ -955,6 +968,7 @@ class Agent:
         # Rebuilt in place: closures hand out this exact list (the approvers'
         # get_scope, the web's root union), so it must stay the same object.
         self.roots[:] = [Path(anchor).resolve()]
+        self.session_prefixes.clear()  # same object rule as roots above
         self._sync_cwd_in_context()  # restored cwd shows in the system prompt too
         for path in trusted:
             resolved = Path(path).resolve()

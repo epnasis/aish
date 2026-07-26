@@ -690,20 +690,25 @@ def _triggered_safe(name: str, args: dict) -> bool:
 
 
 def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir,
-                       get_origin=None):
+                       get_origin=None, get_session_prefixes=None):
     """The three approval callbacks, backed by browser round trips. Mirrors
     cli.make_approver semantics exactly: denylist first (also on edited
     commands), then auto-approval scoped to the live session roots, then a
-    blocking approval card. session_prefixes backs the card's "Allow this
-    session" button — in-memory only, forgotten when the session closes;
-    "Always allow" saves the card's shown prefixes to the persistent
-    allowlist, same file as the CLI's 'a' answer.
+    blocking approval card. get_session_prefixes() -> the live set backing the
+    card's "Allow this session" button, owned by the session's AGENT beside its
+    roots (#176) so both halves of the gate's session scope have one lifetime;
+    in-memory only, forgotten when the session closes. "Always allow" saves the
+    card's shown prefixes to the persistent allowlist, same file as the CLI's
+    'a' answer.
     trust_dir(path) -> note widens the live roots when the card's "Trust
     directory" button answers a command or read escaping them."""
-    session_prefixes: set[str] = set()
+    own_prefixes: set[str] = set()
+
+    def session_prefixes() -> set[str]:
+        return get_session_prefixes() if get_session_prefixes else own_prefixes
 
     def known_prefixes() -> frozenset:
-        return frozenset(load_prefixes(allow_path)) | session_prefixes
+        return frozenset(load_prefixes(allow_path)) | session_prefixes()
 
     def record(command: str, decision: str) -> None:
         logref.command(command, decision)
@@ -768,7 +773,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             resolve(request["id"], "approved", comment)
             return granted()
         if action == "approve_session":
-            session_prefixes.update(suggestions)
+            session_prefixes().update(suggestions)
             bridge.emit(
                 {"type": "echo", "text": f"✓ session-allowed: {', '.join(suggestions)}"}
             )
@@ -3387,6 +3392,9 @@ def create_app(
         approve, approve_write, approve_read, approve_tool, approve_import = make_web_approvers(
             bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir,
             get_origin=lambda: origin,
+            get_session_prefixes=(
+                lambda: agent_holder[0].session_prefixes if agent_holder else set()
+            ),
         )
         # Coalesce a command's per-line output into fewer, larger `stream`
         # events (issue #109) — huge output otherwise emits one WS event + one

@@ -111,6 +111,10 @@ class ClaudeMaxAgent:
         return self.inner.roots
 
     @property
+    def session_prefixes(self):
+        return self.inner.session_prefixes
+
+    @property
     def aliases(self):
         return self.inner.aliases
 

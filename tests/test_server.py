@@ -598,6 +598,77 @@ class TestCommandApproval:
             assert auto is not None
             assert (tmp_path / "b").exists()
 
+    def _session_allow_responses(self, tmp_path):
+        return [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/a")]),
+            model_says("first done"),
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/b")]),
+            model_says("second done"),
+        ]
+
+    def test_allow_this_session_does_not_leak_into_another_session(self, app_env, tmp_path):
+        """The allowance belongs to the chat that granted it, not to the process
+        (#176) — it lives on that session's own agent beside its roots, so a
+        second chat in the same server is still asked."""
+        client, _ = make_client(app_env, self._session_allow_responses(tmp_path))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "touch a"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json(
+                {"type": "approval", "id": request["id"], "action": "approve_session"}
+            )
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "new"})
+            recv_until(ws, "hello")
+            recv_until(ws, "replay")
+
+            ws.send_json({"type": "task", "text": "touch b"})
+            second = recv_until(ws, "approval_request")  # asked again, not inherited
+            assert second["prefixes"] == ["touch"]
+            ws.send_json({"type": "approval", "id": second["id"], "action": "deny"})
+            recv_until(ws, "done")
+            assert not (tmp_path / "b").exists()
+
+    def test_allow_this_session_does_not_survive_a_cold_reopen(
+        self, app_env, tmp_path, monkeypatch
+    ):
+        """Prefixes are never written to disk, so a session evicted from memory
+        and reopened cold from its log re-grants nothing — the gate asks again
+        rather than a persistence the log cannot back (#176)."""
+        monkeypatch.setattr(server_module, "MAX_OPEN_SESSIONS", 2)
+        client, _ = make_client(app_env, self._session_allow_responses(tmp_path))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "new"})
+            name = recv_until(ws, "hello")["session"]
+            recv_until(ws, "replay")
+
+            ws.send_json({"type": "task", "text": "touch a"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json(
+                {"type": "approval", "id": request["id"], "action": "approve_session"}
+            )
+            recv_until(ws, "done")
+
+            # Move off it (viewerless), then churn past the cap so it is evicted.
+            server = client.app.state.server
+            for _ in range(2):
+                ws.send_json({"type": "new"})
+                recv_until(ws, "hello")
+                recv_until(ws, "replay")
+            assert name not in server.sessions
+
+            ws.send_json({"type": "resume", "path": name})  # reopened cold from disk
+            assert recv_until(ws, "hello")["session"] == name
+            recv_until(ws, "replay")
+
+            ws.send_json({"type": "task", "text": "touch b"})
+            second = recv_until(ws, "approval_request")
+            assert second["prefixes"] == ["touch"]
+            ws.send_json({"type": "approval", "id": second["id"], "action": "deny"})
+            recv_until(ws, "done")
+            assert not (tmp_path / "b").exists()
+
     def test_trust_directory_widens_roots_for_session(self, app_env, tmp_path_factory):
         """The card's "Trust directory" on a root-escaping command: the command
         runs, and allowlisted commands in that directory auto-approve after."""

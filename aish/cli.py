@@ -310,20 +310,27 @@ def make_approver(
     log,
     deny_path: Path = DEFAULT_DENYLIST,
     get_scope=None,
-    session_prefixes: set[str] | None = None,
+    get_session_prefixes=None,
     trust_dir=None,
 ):
     """get_scope() -> (cwd, roots): the agent's live directory scope, bound
     late because the agent is constructed after its approver. When present,
-    auto-approval is confined to the session roots. session_prefixes holds
-    prefixes allowed for this session only ('s' at the prompt) — unioned with
-    the persistent allowlist but never written to disk. trust_dir(path) -> note
+    auto-approval is confined to the session roots. get_session_prefixes() ->
+    the LIVE set of prefixes allowed for this session only ('s' at the prompt),
+    unioned with the persistent allowlist but never written to disk; it is owned
+    by the AGENT beside roots (#176) and late-bound for the same reason, so a
+    session switch resets both halves of the gate's session scope by
+    construction. Unwired (no agent), the approver owns a set of its own and the
+    allowance lasts exactly as long as the approver. trust_dir(path) -> note
     widens the live roots when the user answers 't' on a command that escapes
     them (also late-bound, in-memory only)."""
-    session_prefixes = set() if session_prefixes is None else session_prefixes
+    own_prefixes: set[str] = set()
+
+    def session_prefixes() -> set[str]:
+        return get_session_prefixes() if get_session_prefixes else own_prefixes
 
     def known_prefixes() -> frozenset:
-        return frozenset(load_prefixes(allow_path)) | session_prefixes
+        return frozenset(load_prefixes(allow_path)) | session_prefixes()
 
     def record(command: str, decision: str) -> None:
         if log:
@@ -385,7 +392,7 @@ def make_approver(
                 ).strip()
                 if typed.lower() == "s":
                     continue
-                session_prefixes.add(typed or suggestion)
+                session_prefixes().add(typed or suggestion)
                 print(f"{DIM}  session-allowed: {typed or suggestion}{RESET}")
             record(command, "approved+session")
             return command
@@ -1743,6 +1750,11 @@ def main() -> int:
             return agent_holder[0].cwd, agent_holder[0].roots
         return cwd, [Path(cwd).resolve()]
 
+    def get_session_prefixes() -> set[str]:
+        # The agent owns the 's' allowances so a session switch drops them with
+        # the roots (#176); before it exists nothing has been allowed yet.
+        return agent_holder[0].session_prefixes if agent_holder else set()
+
     def trust_dir(path: str) -> str:
         if agent_holder:
             return agent_holder[0].trust_root(path)
@@ -1761,7 +1773,8 @@ def main() -> int:
         agent = _ClaudeMaxAgent(
             model=model_name,
             approve=make_approver(
-                args.ask_all, allow_path, logref, deny_path, get_scope, trust_dir=trust_dir
+                args.ask_all, allow_path, logref, deny_path, get_scope,
+                get_session_prefixes, trust_dir=trust_dir,
             ),
             approve_write=make_write_approver(logref),
             approve_read=make_read_approver(logref, trust_dir=trust_dir),
@@ -1793,7 +1806,8 @@ def main() -> int:
             model=model_name,
             client_chat=chat,
             approve=make_approver(
-                args.ask_all, allow_path, logref, deny_path, get_scope, trust_dir=trust_dir
+                args.ask_all, allow_path, logref, deny_path, get_scope,
+                get_session_prefixes, trust_dir=trust_dir,
             ),
             approve_write=make_write_approver(logref),
             approve_read=make_read_approver(logref, trust_dir=trust_dir),

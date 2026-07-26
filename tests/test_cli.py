@@ -516,6 +516,7 @@ def scope_approver(tmp_path, agent):
     return make_approver(
         False, tmp_path / "allow.txt", None,
         get_scope=lambda: (agent.cwd, agent.roots),
+        get_session_prefixes=lambda: agent.session_prefixes,
         trust_dir=agent.trust_root,
     )
 
@@ -610,6 +611,101 @@ def test_resume_without_a_recorded_cwd_returns_to_the_launch_dir(tmp_path):
 
     assert agent.cwd == str(launch)
     assert agent.roots == [launch.resolve()]
+
+
+def prefix_grant_setup(tmp_path):
+    """One live CLI agent in `work`, its log, and the real approver bound to it —
+    plus an earlier session to /resume into."""
+    from aish.agent import Agent
+    from aish.cli import LogRef
+    from aish.session import SessionLog
+
+    sessions, work = workspace_setup(tmp_path, "work")
+    earlier = SessionLog(sessions / "session-20260101-000000-000000.jsonl")
+    earlier.message({"role": "user", "content": "from january"})
+    earlier.workspace({"kind": "cwd", "cwd": str(work)})
+
+    logref = LogRef(SessionLog.new(sessions))
+    agent = Agent(
+        model="fake", approve=lambda _c: None, client_chat=lambda **_k: None,
+        cwd=str(work), state_log=logref.workspace,
+    )
+    return sessions, agent, logref, scope_approver(tmp_path, agent)
+
+
+def test_session_prefix_allowance_lasts_only_that_session(tmp_path, monkeypatch):
+    """A prefix allowed with 's' is session property, exactly like a trusted dir
+    (#176): it auto-approves for the rest of THAT chat and the gate asks again in
+    the next one. The CLI reuses ONE live Agent across /new, so this used to leak
+    for the whole terminal."""
+    from aish.cli import handle_slash
+
+    sessions, agent, logref, approve = prefix_grant_setup(tmp_path)
+
+    scripted_input(monkeypatch, ["s", ""])  # 'session', accept the suggested prefix
+    assert approve("cargo build --quiet") == "cargo build --quiet"
+    assert approve("cargo build --release") == "cargo build --release"  # auto, no input
+
+    handle_slash("/new", agent, logref, sessions)
+
+    scripted_input(monkeypatch, ["n"])
+    assert approve("cargo build --release") is None
+
+
+def test_clear_also_drops_the_session_prefix_allowance(tmp_path, monkeypatch):
+    """/clear is the same session boundary as /new — it starts a new log."""
+    from aish.cli import handle_slash
+
+    sessions, agent, logref, approve = prefix_grant_setup(tmp_path)
+
+    scripted_input(monkeypatch, ["s", ""])
+    assert approve("cargo build --quiet") == "cargo build --quiet"
+
+    handle_slash("/clear", agent, logref, sessions)
+
+    scripted_input(monkeypatch, ["n"])
+    assert approve("cargo build --release") is None
+
+
+def test_resume_leaves_the_previous_chats_session_prefixes_behind(tmp_path, monkeypatch):
+    """Switching chats with /resume drops them too. Prefixes are NOT recorded on
+    disk, so — unlike trusted dirs — nothing comes back for the chat landed in:
+    the honest behaviour is to ask again rather than invent persistence."""
+    from aish.cli import handle_slash
+
+    sessions, agent, logref, approve = prefix_grant_setup(tmp_path)
+
+    scripted_input(monkeypatch, ["s", ""])
+    assert approve("cargo build --quiet") == "cargo build --quiet"
+
+    handle_slash("/resume", agent, logref, sessions)  # only one other: auto-selects
+
+    scripted_input(monkeypatch, ["n"])
+    assert approve("cargo build --release") is None
+    assert agent.session_prefixes == set()
+
+
+def test_always_allowlist_outlives_the_session_that_saved_it(tmp_path, monkeypatch):
+    """Only the 's' lifetime narrowed: 'a' is deliberately durable and
+    file-backed, so it keeps auto-approving after a session switch."""
+    from aish.cli import handle_slash
+
+    sessions, agent, logref, approve = prefix_grant_setup(tmp_path)
+    allow = tmp_path / "allow.txt"
+
+    scripted_input(monkeypatch, ["s", ""])
+    assert approve("cargo build --quiet") == "cargo build --quiet"
+    assert load_prefixes(allow) == []  # 's' never writes to disk
+
+    scripted_input(monkeypatch, ["a", ""])  # 'always', accept the suggested prefix
+    assert approve("cargo test --quiet") == "cargo test --quiet"
+    saved = load_prefixes(allow)
+    assert saved
+
+    handle_slash("/new", agent, logref, sessions)
+
+    assert load_prefixes(allow) == saved
+    assert approve("cargo test --release") == "cargo test --release"  # auto, no input
 
 
 def test_resume_picker_lists_slugs_and_selects_by_number(tmp_path, capsys, monkeypatch):
