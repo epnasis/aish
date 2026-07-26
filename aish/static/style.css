@@ -1686,6 +1686,8 @@ body.offline #composer { opacity: 0.55; }
 }
 .session-row .row-unrecent:hover { color: var(--fg); }
 .session-row .row-unrecent:active { background: rgba(128, 128, 128, 0.22); }
+/* Marks where the working set (Open) ends and date-grouped history begins (#169). */
+.session-list-divider { height: 0.5px; background: var(--sep); margin: 9px 12px; }
 .session-row .row-delete.armed {
   color: var(--red);
   font-size: 13.8px;

@@ -7967,7 +7967,13 @@ function renderRecentTab(sessions, current, isActive) {
     return;
   }
   if (history.length) {
-    if (recent.length) list.appendChild(sectionLabel("History"));
+    // No "History" label — OPEN vs the date buckets (Recent/Today/…) already read
+    // as distinct. A hairline just marks where the working set ends (#169).
+    if (recent.length) {
+      const divider = document.createElement("div");
+      divider.className = "session-list-divider";
+      list.appendChild(divider);
+    }
     renderSessionList(history, current, isActive, { skipEmpty: true });
   }
 }
