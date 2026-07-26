@@ -7394,16 +7394,26 @@ function searchbarSwipeDismisses(g) {
   });
 })();
 
+// [SWIPEUPWIRE-START]
 (function attachSwipeUpToDrawer() {
   let sx = 0, sy = 0, active = false;
   addEventListener("touchstart", (e) => {
-    active = e.touches.length === 1;
+    active = e.touches.length === 1
+      // Whether an overlay owns the screen is decided HERE, at the start of the
+      // gesture, not at touchend: this listener is on the window, so it runs
+      // LAST, after any element-level touchend has already reacted. The search
+      // bar's up-swipe dismiss (#169) closes the Sessions view in its own
+      // touchend, and re-reading the state afterwards saw a hidden sheet and
+      // reopened it on the very swipe that dismissed it — the sheet appeared
+      // not to close at all. Desktop hid the bug because the sheet auto-focuses
+      // its search field there, so `keyboardUp` suppressed the reopen; on a
+      // phone nothing takes focus and it fired every time.
+      && $("sessions-sheet").hidden && $("backdrop").hidden && !consoleOpen;
     if (active) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }
   }, { passive: true });
   addEventListener("touchend", (e) => {
     if (!active) return;
     active = false;
-    if (!$("sessions-sheet").hidden || !$("backdrop").hidden || consoleOpen) return; // overlay owns the screen
     const t = e.changedTouches[0];
     if (!t) return;
     if (swipeUpOpensDrawer({
@@ -7413,6 +7423,7 @@ function searchbarSwipeDismisses(g) {
     })) openSessionsSheet("");
   }, { passive: true });
 })();
+// [SWIPEUPWIRE-END]
 
 // ---- trackpad pager (macOS Safari) ---------------------------------------
 // A two-finger horizontal swipe arrives as a wheel-event stream, not
