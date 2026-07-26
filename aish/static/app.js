@@ -616,21 +616,12 @@ async function toggleOfflinePin() {
   showToast(current.pinned ? "kept available offline" : "no longer kept offline");
 }
 
-async function offlineClearAll() {
-  try {
-    const db = await offlineOpen();
-    db.close();
-    offlineDbPromise = null;
-    await new Promise((resolve) => {
-      const request = indexedDB.deleteDatabase(OFFLINE_DB);
-      request.onsuccess = request.onerror = request.onblocked = () => resolve();
-    });
-  } catch { /* nothing to clear */ }
-  offlineMeta.clear();
-  navigator.serviceWorker?.controller?.postMessage({ type: "CLEAR_CACHES" });
-  showToast("offline copies cleared");
-  offlineSyncSoon(2000);
-}
+// There is deliberately no "clear offline copies" action. The mirror manages
+// itself — capped, least-useful-first eviction, deleted chats dropped on the
+// next sync — so clearing was a control for a problem that doesn't arise, and
+// it also dropped the cached app shell, breaking "the app always opens offline"
+// until the next successful load. Disposal and repair are both covered by
+// deleting the installed app (or the browser's own clear-website-data).
 
 // ---- websocket lifecycle -------------------------------------------------
 let ws = null;
@@ -7178,8 +7169,6 @@ function openSessionMenu() {
   const menu = $("session-menu");
   const del = menu.querySelector('[data-act="delete"]');
   if (del) resetDeleteChat(del); // never open still armed from a prior dismissal
-  const clear = menu.querySelector('[data-act="clear-offline"]');
-  if (clear) resetClearOffline(clear);
   $("wrap-state").textContent = document.body.classList.contains("wrap") ? "On" : "Off";
   // Measure while shown-but-invisible so width is known before centering.
   menu.style.visibility = "hidden";
@@ -7237,9 +7226,6 @@ $("session-menu").addEventListener("click", (e) => {
   // Rename swaps the menu for an inline title field (keeps the backdrop) —
   // no blocking window.prompt, which would also trap automation.
   if (item.dataset.act === "rename") { openRenameBox(); return; }
-  // Clearing every cached transcript is unrecoverable without a resync, so it
-  // arms in place like Delete chat rather than firing on one tap.
-  if (item.dataset.act === "clear-offline") { armClearOffline(item); return; }
   closeSheets(); // hides the menu + backdrop
   switch (item.dataset.act) {
     case "new": requestNewChat(); break;
@@ -7252,27 +7238,6 @@ $("session-menu").addEventListener("click", (e) => {
     case "reconnect": reconnect(); break;
   }
 });
-
-// Same two-tap arming as Delete chat, reusing its timing so the two
-// irreversible items in this menu behave identically.
-let clearOfflineTimer = null;
-function resetClearOffline(item) {
-  clearTimeout(clearOfflineTimer);
-  clearOfflineTimer = null;
-  item.classList.remove("armed");
-  item.querySelector(".menu-label").textContent = "Clear offline copies";
-}
-function armClearOffline(item) {
-  if (clearOfflineTimer) {
-    resetClearOffline(item);
-    closeSheets();
-    offlineClearAll();
-    return;
-  }
-  item.classList.add("armed");
-  item.querySelector(".menu-label").textContent = "Confirm clear";
-  clearOfflineTimer = setTimeout(() => resetClearOffline(item), 4000);
-}
 
 // The current-chat delete item's two-step confirm. The server refuses a
 // running session and lands the client on a fresh chat when the active one is

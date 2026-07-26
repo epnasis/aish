@@ -290,7 +290,8 @@ recommended while travelling.
   the same ranking as online.
 - **Keep one forever.** The ⤓ icon in the header pins the chat you're reading —
   one tap, and it survives the storage sweep no matter how old it gets. Filled
-  means kept. **Clear offline copies** in the session menu removes local data.
+  means kept. Nothing else to manage: the mirror caps itself and drops the
+  least useful copies first, so there is no cache to clear by hand.
 - **Sending is paused, deliberately.** Queuing a prompt to fire later would
   dispatch an agent that runs shell commands with nobody watching and an
   approval gate answered by someone who has moved on. Offline is read-only.

@@ -230,8 +230,6 @@ self.addEventListener("message", (event) => {
         if (event.source) event.source.postMessage({ type: "SHELL_PURGED" });
       })
     );
-  } else if (data.type === "CLEAR_CACHES") {
-    event.waitUntil(Promise.all(CACHES.map((name) => caches.delete(name))));
   } else if (data.type === "SKIP_WAITING") {
     self.skipWaiting();
   }

@@ -119,8 +119,14 @@ function makeSandbox(store) {
       /\$\("offline-btn"\)\.onclick\s*=\s*\(\)\s*=>\s*toggleOfflinePin\(\)/.test(src),
       "the header toggle must be wired straight to toggleOfflinePin"
     );
-    // Clearing everything is a rare, destructive action and stays in the menu.
-    assert.ok(/data-act="clear-offline"/.test(html), "Clear offline copies should remain");
+    // There is no bulk "clear offline copies" action: the mirror manages its
+    // own size, and the old one also dropped the cached app shell, breaking
+    // "the app always opens offline" until the next successful load.
+    assert.ok(
+      !/data-act="clear-offline"/.test(html),
+      "the bulk clear action was removed — the mirror self-manages"
+    );
+    assert.ok(!/CLEAR_CACHES/.test(src), "no client should still ask the SW to wipe its caches");
   });
 
   if (failures) {
