@@ -668,7 +668,7 @@ function connect() {
     // the replay never comes, and the chat is left blank behind a red dot with
     // no gesture that can recover it. Un-park it: the page you were on is still
     // the page you are on.
-    if (swipeInFrom) { swipeInFrom = 0; unparkTranscript(); }
+    if (swipeInFrom) reconcilePager();
     if (event.code === 4000) {
       connOk = false;
       updateDot();
@@ -1060,26 +1060,9 @@ function onReplay(event) {
     // This replay is the landing half of a committed swipe: enter from the
     // side the old transcript left toward, completing the pager illusion.
     //
-    // Nothing here may DEPEND on the animation running, because this transform
-    // is what parks the transcript off-screen: if the slide-back never
-    // completes, the chat has no visible content at all. A hidden page runs
-    // neither requestAnimationFrame nor CSS transitions — so lock the phone or
-    // switch apps between the commit and the landing replay and an animated
-    // recovery stalls at its START value, leaving the conversation parked off
-    // screen. So: forced reflow instead of rAF for the starting position, and
-    // animate ONLY when the page is actually visible. Nobody is watching an
-    // animation on a hidden page anyway.
-    const from = swipeInFrom;
-    swipeInFrom = 0;
-    if (document.visibilityState === "visible") {
-      messagesEl.style.transition = "none";
-      messagesEl.style.transform = `translateX(${from * messagesEl.clientWidth}px)`;
-      void messagesEl.offsetWidth; // flush the start position so the next line animates
-      messagesEl.style.transition = "transform 0.18s ease-out";
-      messagesEl.style.transform = "";
-    } else {
-      unparkTranscript();
-    }
+    // reconcilePager owns the resting position and the deadline it clears — see
+    // its comment for why nothing here may depend on the animation running.
+    reconcilePager(swipeInFrom);
   } else {
     unparkTranscript();
   }
@@ -6948,12 +6931,65 @@ let pagerSessions = []; // [{name, title}] oldest→newest, from hello
 let currentSession = null;
 let currentLogPath = ""; // absolute JSONL log path for this session, from hello (#146)
 let swipeInFrom = 0; // set on commit; onReplay animates the new page in
+// A claim protocol in miniature. When the horizontal pager decides a touch is a
+// vertical SCROLL and stands down, it says so here — otherwise the window-level
+// swipe-up recognizer, which only sees geometry, treats the same finger as an
+// open-the-drawer gesture. The bottom zone it watches overlaps the transcript, so
+// a flick-scroll started low on a scrolled-up chat both scrolled AND opened the
+// drawer. Two recognizers on one surface need one of them to yield explicitly;
+// geometry alone cannot decide it.
+let touchConsumedByScroll = false;
 
 // [UNPARK-START]
-// Put the transcript back on screen, with no animation. A committed swipe parks
-// it off-screen on the promise that a landing replay will bring the next page
-// in; every path where that promise cannot be kept calls this, because the
-// failure mode is an app that looks empty rather than one that looks stuck.
+// ---- the pager's parked state has ONE owner ------------------------------
+// A committed swipe slides the transcript off-screen on the promise that a
+// landing replay will bring the next page in. That promise has three ways to go
+// unkept — a dead socket, a hidden page that runs no animation, a server that
+// never answers — and the cost of any of them is a chat with NO VISIBLE CONTENT,
+// which reads as a broken app rather than a stalled animation.
+//
+// So the park is owned here rather than maintained by whichever callback happens
+// to fire. It carries a DEADLINE, because the worst case is the one no event
+// announces: a zombie socket (readyState OPEN, dead underneath — the failure
+// `reconnect()` exists for) accepts the send and answers nothing, so no close
+// event ever arrives to trigger recovery.
+//
+// The design rule, and the reason this is a reconciler rather than one more
+// cleanup call site: **every failure path degrades to "no animation", never to
+// "no content".** The slide is an effect layered on top; losing it costs nothing.
+const PARK_DEADLINE_MS = 4000; // a landing replay is late past this — recover
+let parkWatchdog = null;
+
+function parkTranscript(direction, width) {
+  swipeInFrom = direction;
+  messagesEl.style.transform = `translateX(${-direction * width}px)`;
+  clearTimeout(parkWatchdog);
+  parkWatchdog = setTimeout(() => reconcilePager(), PARK_DEADLINE_MS);
+}
+
+// The ONLY writer of the transcript's resting position. `landingFrom` is the side
+// a page is arriving from on a successful landing; omit it to simply put the
+// transcript back where it belongs.
+function reconcilePager(landingFrom = 0) {
+  swipeInFrom = 0;
+  clearTimeout(parkWatchdog);
+  parkWatchdog = null;
+  if (landingFrom && document.visibilityState === "visible") {
+    // Animate the arrival — but only where it can actually run. A hidden page
+    // runs neither rAF nor CSS transitions, so an animated recovery stalls at
+    // its START value: the transcript parked off screen while the inline style
+    // already reads empty.
+    messagesEl.style.transition = "none";
+    messagesEl.style.transform = `translateX(${landingFrom * messagesEl.clientWidth}px)`;
+    void messagesEl.offsetWidth; // flush the start position so the next line animates
+    messagesEl.style.transition = "transform 0.18s ease-out";
+    messagesEl.style.transform = "";
+    return;
+  }
+  unparkTranscript();
+}
+
+// Put the transcript back on screen, with no animation.
 function unparkTranscript() {
   messagesEl.style.transition = "none";
   messagesEl.style.transform = "";
@@ -7075,31 +7111,57 @@ function recomputeWorkingSet(members, now) {
   return members.filter((m) => now - (m.ts || 0) <= DECK_MAX_IDLE_MS);
 }
 
-function sweepWorkingSet(members, now, seeded) {
+function sweepWorkingSet(members, now, seeded, curated) {
   // The cold-start sweep, plus the one case that must re-open seeding: when it
-  // empties a deck that HAD members, every chat aged out together (you were away
-  // longer than the window) and the working set is stale, not chosen. Leaving
-  // `seeded` set there strands the user — `maybeSeedDeck` returns early forever,
-  // so the deck only ever holds the chats they happen to open and swiping between
-  // chats does nothing. Clearing it lets the next session_list refill the deck.
+  // empties the deck, every chat aged out together (you were away longer than
+  // the window) and the working set is stale. Leaving `seeded` set there strands
+  // the user — `maybeSeedDeck` returns early forever, so the deck only ever
+  // holds the chats they happen to open and swiping between chats does nothing.
+  // Clearing it lets the next list refill the deck.
   //
-  // An ALREADY-empty deck keeps its flag: that is someone who ✕-removed their way
-  // down to nothing, and re-seeding would overrule a deliberate choice.
+  // `curated` is the exception, and it is READ, not inferred. An earlier version
+  // guessed intent from the emptiness transition ("was non-empty, now empty") to
+  // avoid re-seeding a deck someone had emptied on purpose. That guess is
+  // unsound in both directions, so the ✕ control records the fact instead.
   const swept = recomputeWorkingSet(members, now);
-  return { members: swept, seeded: seeded && !(members.length && !swept.length) };
+  return { members: swept, seeded: seeded && (curated || swept.length > 0) };
+}
+
+// THE deck-member constructor. Every producer of a candidate goes through here,
+// because "a session" arrives in three shapes: a server pager page and a
+// session_list row both stamp `ts` in epoch SECONDS, a deck member works in ms
+// (Date.now), and the offline mirror's pages carry no stamp at all. Converting
+// at each call site is what produced the v1 seconds-vs-ms mis-seed (see
+// DECK_VERSION) and, later, a seed source whose every page was discarded as
+// undated. One conversion, one place.
+function deckCandidate(raw, now) {
+  if (!raw || !raw.name) return null;
+  // Adoption is a FRESH LEASE, deliberately NOT the session's own age: this
+  // stamp drives the idle sweep, and dating a member by when the chat was last
+  // used would evict it before it had been part of a working set at all. It is
+  // also what makes seeding source-agnostic — a page with no `ts` seeds fine.
+  return { name: raw.name, ts: now, title: raw.title, origin: raw.origin };
+}
+
+// A source row's own last-activity stamp in ms — ORDERING only, never a member
+// stamp. Pager pages and session_list rows both report epoch seconds.
+function sourceMs(raw) {
+  return (Number(raw && raw.ts) || 0) * 1000;
 }
 
 function seedWorkingSet(sessions, now) {
-  // First run / empty saved deck / new device: adopt every session active within
-  // the window, oldest-active first (matching the pager's oldest→newest so the
-  // most recent lands far right). A session's .ts is epoch SECONDS, but the deck
-  // works in ms (Date.now) — convert before comparing against the ms window and
-  // before storing it as a member stamp, or every session reads as ancient.
+  // First run / empty saved deck / new device: adopt the WHOLE source, oldest
+  // first (matching the pager's oldest→newest so the most recent lands far
+  // right). Deliberately UNFILTERED: an empty deck already falls back to the
+  // full source in deckToPages, so any filter here can only REMOVE pages the
+  // user could otherwise reach. Seeding exists to give the swipe order
+  // stability, not to gatekeep reachability — the idle sweep is the policy that
+  // shrinks the deck, and it runs on the lease this stamps.
   return sessions
-    .map((s) => ({ s, ms: (s.ts || 0) * 1000 }))
-    .filter(({ ms }) => ms && now - ms <= DECK_MAX_IDLE_MS)
-    .sort((a, b) => a.ms - b.ms)
-    .map(({ s, ms }) => ({ name: s.name, ts: ms, title: s.title, origin: s.origin }));
+    .filter((s) => s && s.name)
+    .slice()
+    .sort((a, b) => sourceMs(a) - sourceMs(b))
+    .map((s) => deckCandidate(s, now));
 }
 
 function partitionRecent(members, sessions) {
@@ -7140,6 +7202,10 @@ const DECK_VERSION = 2;
 const COLD_START_GAP_MS = 45 * 60 * 1000; // hidden longer than this → treat as cold start
 let deck = [];
 let deckSeeded = false;
+// The user has deliberately shaped the working set (✕-removed at least one
+// chat). Recorded rather than inferred: it is the one fact that tells the sweep
+// an empty deck is a choice and not staleness.
+let deckCurated = false;
 let lastActiveAt = Date.now();
 let pendingForkParent = null; // set when a fork is sent; the child inserts right of it
 
@@ -7150,6 +7216,7 @@ function loadDeck() {
       return {
         members: raw.members.filter((m) => m && m.name),
         seeded: Boolean(raw.seeded),
+        curated: Boolean(raw.curated),
         lastActiveAt: raw.lastActiveAt || Date.now(),
       };
     }
@@ -7160,7 +7227,8 @@ function loadDeck() {
 function saveDeck() {
   try {
     localStorage.setItem(DECK_KEY, JSON.stringify(
-      { v: DECK_VERSION, seeded: deckSeeded, lastActiveAt, members: deck }
+      { v: DECK_VERSION, seeded: deckSeeded, curated: deckCurated,
+        lastActiveAt, members: deck }
     ));
   } catch { /* private mode: the deck degrades to in-memory only */ }
 }
@@ -7170,10 +7238,12 @@ function saveDeck() {
   if (stored) {
     deck = stored.members;
     deckSeeded = stored.seeded;
+    deckCurated = stored.curated;
     lastActiveAt = stored.lastActiveAt;
   }
   // Cold start (a): a fresh document load evicts anything idle past the window.
-  ({ members: deck, seeded: deckSeeded } = sweepWorkingSet(deck, Date.now(), deckSeeded));
+  ({ members: deck, seeded: deckSeeded } =
+    sweepWorkingSet(deck, Date.now(), deckSeeded, deckCurated));
   saveDeck();
 })();
 
@@ -7186,7 +7256,8 @@ addEventListener("pagehide", () => { noteActivity(); saveDeck(); });
 // Cold start (b): returning to the foreground after a long hiddenness. Evict
 // stale members, never add — same discipline as a fresh load.
 function coldStartRecompute() {
-  ({ members: deck, seeded: deckSeeded } = sweepWorkingSet(deck, Date.now(), deckSeeded));
+  ({ members: deck, seeded: deckSeeded } =
+    sweepWorkingSet(deck, Date.now(), deckSeeded, deckCurated));
   saveDeck();
   if (!$("sessions-sheet").hidden && lastSessionEvent) renderSessions(lastSessionEvent);
 }
@@ -7223,10 +7294,18 @@ function ensureCurrentInDeck(event) {
 // currently on screen (esp. a brand-new empty one the server doesn't list yet).
 function maybeSeedDeck(sessions) {
   if (deckSeeded || !sessions || !sessions.length) return;
-  let seed = seedWorkingSet(sessions, Date.now());
+  const now = Date.now();
+  let seed = seedWorkingSet(sessions, now);
+  // Adopting NOTHING must not count as seeded. It used to: the flag was set
+  // unconditionally, so a source that yielded no candidates left the deck
+  // holding only the chat on screen — and a ONE-member deck is worse than an
+  // empty one, because deckToPages falls back to the full source only when the
+  // deck is empty. That pinned the pager to a single page permanently and
+  // swiping between chats did nothing. Staying unseeded lets a later list do it.
+  if (!seed.length) return;
   if (currentSession && deckIndexOf(seed, currentSession) < 0) {
     const existing = deck.find((m) => m.name === currentSession)
-      || { name: currentSession, ts: Date.now(), title: currentSession, origin: "user" };
+      || deckCandidate({ name: currentSession, title: currentSession, origin: "user" }, now);
     seed = addToDeck(seed, existing, null);
   }
   deck = seed;
@@ -7243,6 +7322,7 @@ function removeFromWorkingSet(name) {
   const wasCurrent = name === currentSession;
   const leftNeighbor = idx > 0 ? deck[idx - 1] : null;
   deck = removeFromDeck(deck, name);
+  deckCurated = true; // shaping the working set is a choice the sweep must respect
   saveDeck();
   if (wasCurrent) {
     const target = leftNeighbor || deck[deck.length - 1] || null;
@@ -7331,7 +7411,11 @@ messagesEl.addEventListener("touchmove", (event) => {
     if (Math.abs(dx) < DECIDE_AT && Math.abs(dy) < DECIDE_AT) return;
     // Mostly-vertical (or diagonal) start: it's a scroll, stand down for the
     // rest of this touch — a late preventDefault can't stop iOS anyway.
-    if (Math.abs(dx) < Math.abs(dy) * 1.4) { swipe.blocked = true; return; }
+    if (Math.abs(dx) < Math.abs(dy) * 1.4) {
+      swipe.blocked = true;
+      touchConsumedByScroll = true; // claimed as a scroll — see the flag's comment
+      return;
+    }
     swipe.horizontal = true;
   }
   event.preventDefault(); // page-drag now, not a scroll
@@ -7351,10 +7435,9 @@ function commitPage(direction, target, width) {
   // chats keeps working, which is the gesture this app is navigated by. A NEW
   // chat still needs the server, so that page snaps back.
   if (!target.fresh && offlineMode) {
-    swipeInFrom = direction; // read by the onReplay openCachedSession triggers
-    messagesEl.style.transform = `translateX(${-direction * width}px)`;
+    parkTranscript(direction, width); // read by the onReplay openCachedSession triggers
     openCachedSession(target.name).then((ok) => {
-      if (!ok) { swipeInFrom = 0; messagesEl.style.transform = ""; }
+      if (!ok) reconcilePager();
     });
     return;
   }
@@ -7362,11 +7445,12 @@ function commitPage(direction, target, width) {
     ? send({ type: "new" })
     : send({ type: "resume", path: target.name });
   if (!requested) {
-    messagesEl.style.transform = "";
+    reconcilePager();
     return;
   }
-  swipeInFrom = direction; // the landing replay animates in from this side
-  messagesEl.style.transform = `translateX(${-direction * width}px)`;
+  // A send that SUCCEEDS is not a landing that will happen: a zombie socket
+  // accepts it and answers nothing, so the park carries a deadline.
+  parkTranscript(direction, width);
 }
 
 function snapBack(direction, target, dx) {
@@ -7463,6 +7547,7 @@ function searchbarSwipeDismisses(g) {
 (function attachSwipeUpToDrawer() {
   let sx = 0, sy = 0, active = false;
   addEventListener("touchstart", (e) => {
+    touchConsumedByScroll = false; // a fresh gesture: nobody has claimed it yet
     active = e.touches.length === 1
       // Whether an overlay owns the screen is decided HERE, at the start of the
       // gesture, not at touchend: this listener is on the window, so it runs
@@ -7479,6 +7564,7 @@ function searchbarSwipeDismisses(g) {
   addEventListener("touchend", (e) => {
     if (!active) return;
     active = false;
+    if (touchConsumedByScroll) return; // the transcript already used this finger
     const t = e.changedTouches[0];
     if (!t) return;
     if (swipeUpOpensDrawer({

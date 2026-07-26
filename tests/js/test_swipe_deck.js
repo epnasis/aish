@@ -117,9 +117,12 @@ check("a ✕-removed session stays out across a cold-start recompute", () => {
   eq(names(deck), ["a", "b"]);                      // never reappears (no auto-add)
 });
 
-check("seed adopts <48h sessions oldest-active first, drops the stale", () => {
-  // A session's .ts is epoch SECONDS (the server's unit); seedWorkingSet converts
-  // to ms internally. NOW is ms, so session stamps are (ms age)/1000.
+check("seed adopts the WHOLE source oldest-active first, however old", () => {
+  // Seeding used to drop anything outside the 48h window. That made it stricter
+  // than the empty-deck fallback in deckToPages, so it could only ever remove
+  // pages the user could otherwise reach — and for a corpus where everything is
+  // older than the window it adopted nothing at all, stranding the pager.
+  // A session's .ts is epoch SECONDS (the server's unit); the deck works in ms.
   const sec = (ageHours) => (NOW - ageHours * HOUR) / 1000;
   const sessions = [
     { name: "old", ts: sec(40), title: "old", origin: "user" },
@@ -128,9 +131,9 @@ check("seed adopts <48h sessions oldest-active first, drops the stale", () => {
     { name: "ancient", ts: sec(100), title: "ancient", origin: "user" },
   ];
   const seeded = seedWorkingSet(sessions, NOW);
-  eq(names(seeded), ["old", "mid", "newest"]); // stale dropped, oldest→newest
-  // seeded members carry ms stamps, so a same-instant recompute keeps them all
-  eq(names(recomputeWorkingSet(seeded, NOW)), ["old", "mid", "newest"]);
+  eq(names(seeded), ["ancient", "old", "mid", "newest"]); // oldest→newest, none dropped
+  // Every adopted member gets a fresh lease, so the next sweep keeps them all.
+  eq(names(recomputeWorkingSet(seeded, NOW)), ["ancient", "old", "mid", "newest"]);
 });
 
 // ---- drawer split: RECENT (working set) vs HISTORY (MRU rest) --------------
@@ -233,32 +236,39 @@ check("a mostly-horizontal swipe on the search bar does NOT dismiss", () => {
 // early forever — the working set then only ever held chats you happened to
 // open, and swiping between chats did nothing until you opened the drawer.
 check("sweeping away every member re-opens seeding", () => {
-  const out = sweepWorkingSet([member("a", 70), member("b", 90)], NOW, true);
+  const out = sweepWorkingSet([member("a", 70), member("b", 90)], NOW, true, false);
   assert.deepStrictEqual(out.members, []);
   assert.strictEqual(out.seeded, false, "an all-evicted deck must be re-seedable");
 });
 
 check("a partial sweep keeps the deck seeded", () => {
-  const out = sweepWorkingSet([member("a", 70), member("fresh", 1)], NOW, true);
+  const out = sweepWorkingSet([member("a", 70), member("fresh", 1)], NOW, true, false);
   assert.deepStrictEqual(out.members.map((m) => m.name), ["fresh"]);
   assert.strictEqual(out.seeded, true, "survivors mean the working set is still yours");
 });
 
-check("an already-empty deck keeps its flag — ✕ to zero is a choice, not staleness", () => {
-  const out = sweepWorkingSet([], NOW, true);
+check("a CURATED deck keeps its flag — ✕ to zero is a choice, not staleness", () => {
+  // Intent is now READ from the recorded flag, not inferred from an emptiness
+  // transition: the old heuristic ("was non-empty, now empty") was unsound both
+  // ways, and this is the case it was trying to protect.
+  const out = sweepWorkingSet([member("a", 70)], NOW, true, true);
   assert.deepStrictEqual(out.members, []);
-  assert.strictEqual(out.seeded, true);
+  assert.strictEqual(out.seeded, true, "a curated deck is never re-seeded over");
+});
+
+check("an uncurated deck swept to nothing re-opens seeding", () => {
+  assert.strictEqual(sweepWorkingSet([member("a", 70)], NOW, true, false).seeded, false);
 });
 
 check("sweeping never sets seeded on an unseeded deck", () => {
-  assert.strictEqual(sweepWorkingSet([member("a", 1)], NOW, false).seeded, false);
-  assert.strictEqual(sweepWorkingSet([], NOW, false).seeded, false);
+  assert.strictEqual(sweepWorkingSet([member("a", 1)], NOW, false, false).seeded, false);
+  assert.strictEqual(sweepWorkingSet([], NOW, false, true).seeded, false);
 });
 
 check("the sweep still evicts exactly what recomputeWorkingSet evicts", () => {
   const members = [member("a", 70), member("fresh", 1), member("edge", 47)];
   assert.deepStrictEqual(
-    sweepWorkingSet(members, NOW, true).members,
+    sweepWorkingSet(members, NOW, true, false).members,
     recomputeWorkingSet(members, NOW),
   );
 });
@@ -269,18 +279,39 @@ check("the sweep still evicts exactly what recomputeWorkingSet evicts", () => {
 // only works because those pages carry `ts`. An undated page is discarded here,
 // which is exactly how the deck ended up holding just the chat on screen and the
 // swipe pager ended up with a single page.
-check("seeds from pager pages that carry a ts", () => {
+check("seeds every page, oldest-active first", () => {
   const pages = [
-    { name: "a", title: "A", origin: "user", ts: (NOW - 2 * HOUR) / 1000 },
     { name: "b", title: "B", origin: "user", ts: (NOW - 1 * HOUR) / 1000 },
+    { name: "a", title: "A", origin: "user", ts: (NOW - 2 * HOUR) / 1000 },
   ];
-  const seed = seedWorkingSet(pages, NOW);
-  assert.deepStrictEqual(seed.map((m) => m.name), ["a", "b"]); // oldest-active first
+  assert.deepStrictEqual(seedWorkingSet(pages, NOW).map((m) => m.name), ["a", "b"]);
 });
 
-check("an undated page cannot be seeded — the bug this pinned down", () => {
-  const undated = [{ name: "a", title: "A", origin: "user" }]; // no ts, as hello.pager used to be
-  assert.deepStrictEqual(seedWorkingSet(undated, NOW), []);
+check("seeding stamps a FRESH LEASE, not the chat's own age", () => {
+  // Stamping members with the session's last-activity time meant the very next
+  // cold start could sweep away a deck that had just been seeded. Adoption
+  // restarts the clock.
+  const old = [{ name: "a", title: "A", origin: "user", ts: (NOW - 400 * HOUR) / 1000 }];
+  const seed = seedWorkingSet(old, NOW);
+  assert.deepStrictEqual(seed.map((m) => m.ts), [NOW]);
+  assert.deepStrictEqual(sweepWorkingSet(seed, NOW, true, false).members, seed);
+});
+
+check("seeding is source-agnostic: an undated page still seeds", () => {
+  // hello.pager pages once carried no ts and were all discarded, leaving the
+  // deck empty. Ordering may need a stamp; ADOPTION must not.
+  const undated = [{ name: "a", title: "A", origin: "user" }];
+  assert.deepStrictEqual(seedWorkingSet(undated, NOW).map((m) => m.name), ["a"]);
+});
+
+check("seeding is not stricter than the empty-deck fallback", () => {
+  // deckToPages falls back to the full source for an empty deck, so any filter
+  // in seeding could only REMOVE pages the user could otherwise reach.
+  const pages = [
+    { name: "ancient", title: "A", origin: "user", ts: (NOW - 900 * HOUR) / 1000 },
+    { name: "recent", title: "R", origin: "user", ts: (NOW - 1 * HOUR) / 1000 },
+  ];
+  assert.strictEqual(seedWorkingSet(pages, NOW).length, deckToPages([], pages).length);
 });
 
 check("a tiny deck yields a tiny pager — why seeding on connect matters", () => {

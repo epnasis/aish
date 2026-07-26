@@ -45,6 +45,7 @@ function makeWorld({ sheetHiddenAtStart, keyboardUp = false, consoleOpen = false
   const handlers = {};
   const sandbox = {
     consoleOpen,
+    touchConsumedByScroll: false,
     innerWidth: 390,
     innerHeight: 844,
     editingNow: () => keyboardUp,
@@ -62,6 +63,7 @@ function makeWorld({ sheetHiddenAtStart, keyboardUp = false, consoleOpen = false
   vm.runInContext(extract("// [SWIPEUP-START]", "// [SWIPEUP-END]"), sandbox);
   vm.runInContext(extract("// [SWIPEUPWIRE-START]", "// [SWIPEUPWIRE-END]"), sandbox);
   assert(handlers.touchstart && handlers.touchend, "wiring did not register both listeners");
+  handlers._sandbox = sandbox; // tests poke the shared claim flag through this
   return { state, handlers };
 }
 
@@ -143,6 +145,24 @@ function ok(label, cond) { assert(cond, label); checks += 1; }
   w.handlers.touchstart({ touches: [{ clientX: 200, clientY: startY }, { clientX: 100, clientY: startY }] });
   w.handlers.touchend({ changedTouches: [{ clientX: 200, clientY: startY - 90 }] });
   ok("two fingers: no drawer", w.state.opened === 0);
+}
+
+// 9. A touch the transcript already claimed as a SCROLL is not a drawer gesture.
+//    The bottom zone overlaps the transcript, so a flick-scroll started low on a
+//    scrolled-up chat used to scroll AND open the drawer. Geometry cannot tell
+//    these apart; only an explicit claim can.
+{
+  const w = makeWorld({ sheetHiddenAtStart: true });
+  swipeUp(w, { dismissMidGesture: () => { w.handlers._sandbox.touchConsumedByScroll = true; } });
+  ok("a scroll-claimed touch does not open the drawer", w.state.opened === 0);
+}
+
+// 10. And the claim is reset per gesture, so the next real swipe-up still works.
+{
+  const w = makeWorld({ sheetHiddenAtStart: true });
+  w.handlers._sandbox.touchConsumedByScroll = true; // stale from a previous gesture
+  swipeUp(w);
+  ok("touchstart clears a stale scroll claim", w.state.opened === 1);
 }
 
 console.log(`${checks} ok — all checks passed`);
