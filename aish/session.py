@@ -21,6 +21,37 @@ _PUNCT = ".,;:!?()[]{}<>'\"`"
 # bubble instead of its terminal block (#154).
 _BANG_RE = re.compile(r"^\[I ran `(.+?)` myself", re.DOTALL)
 
+# Synthetic user turns (#171). aish writes text into the conversation as
+# role:"user" that the human never typed — the model must read it as the turn's
+# input, so it is logged exactly like a real message and the text itself is the
+# only thing a cold replay can classify it by. Every producer builds its note
+# from (or is pinned by test to) one of these markers, so the live UI and
+# reconstruct_events agree by construction — and logs written before #171
+# classify correctly too.
+RESUME_MARKER = "[automatic resume]"  # server.RESUME_NOTE — a real turn, system-styled
+# Notes appended around a turn that start no task at all: the internal nudges
+# (loop/stall/step-limit), the /cd and /add-dir announcements (the live UI shows
+# those as workspace markers), and console text shared into context (#148).
+# Live they never reach the transcript, so a replay must not invent a bubble —
+# and one landing mid-turn would also split that turn in two.
+_NOTE_MARKERS = (
+    "[aish: ",  # agent.LOOP_WARNING / STEP_LIMIT_NOTE / LOOP_STOP_NOTE / STALL_NOTE
+    "[I moved the session to ",  # Agent.rebase announce (/cd)
+    "[I added ",  # Agent.add_root announce (/add-dir)
+    "[Shared from my interactive terminal:]",  # console share
+)
+
+
+def synthetic_kind(content: str) -> str:
+    """Classify a user message aish wrote itself: `"resume"` for a synthetic
+    turn that really did start a task (rendered as a system row, never as a
+    blue user bubble), `"note"` for an annotation the live UI never showed at
+    all, `""` for text the human actually typed."""
+    text = content.lstrip()
+    if text.startswith(RESUME_MARKER):
+        return "resume"
+    return "note" if text.startswith(_NOTE_MARKERS) else ""
+
 # Model-facing search (the search_sessions tool): bounded so one call can
 # never flood a small context window.
 SEARCH_TOP = 5
@@ -263,6 +294,8 @@ class SessionLog:
         running_steps = 0  # started (thinking/tool) but not finished — a cut-off turn
         pending_start: dict | None = None
         pending_end: dict | None = None
+        origin = "user"
+        first_user = True  # the opening turn of a triggered session is its trigger
 
         def flush() -> None:
             nonlocal steps, answer, open_turn, running_steps
@@ -357,6 +390,8 @@ class SessionLog:
                 has_trace = True
                 ev = {"type": "workspace", "change": "trust", "path": record.get("path", "")}
                 (steps if open_turn else events).append(ev)
+            elif kind == "origin":
+                origin = record.get("origin") or origin
             elif kind == "cmd_start":
                 pending_start = {k: v for k, v in record.items() if k not in ("kind", "ts")}
             elif kind == "cmd_end":
@@ -374,8 +409,21 @@ class SessionLog:
                 else:
                     steps.append({"type": "step", **step})
             elif kind == "message" and record.get("role") == "user":
-                flush()  # close the previous turn before the next one opens
                 content = record.get("content", "")
+                synthetic = synthetic_kind(content)
+                if synthetic == "note":
+                    # aish's own annotation — live it never reached the transcript
+                    # at all, and treating it as a user message would also split
+                    # the turn it sits inside. Skipping it IS the parity (#171).
+                    continue
+                flush()  # close the previous turn before the next one opens
+                if not synthetic and origin != "user" and first_user:
+                    # A triggered session's opening turn is the trigger's own
+                    # prompt (#160): arbitrary text with no marker to match, so
+                    # position + provenance is what identifies it — the same
+                    # message handle_trigger marks live.
+                    synthetic = "trigger"
+                first_user = False
                 bang = _BANG_RE.match(content)
                 if bang:  # a ! command: replay it as its terminal block, not a bubble
                     events.append({"type": "user", "text": "!" + bang.group(1)})
@@ -388,7 +436,10 @@ class SessionLog:
                     emit_bang(bang.group(1), content)
                     flush()  # a ! command is its own closed turn (no model answer)
                 else:
-                    events.append({"type": "user", "text": content})
+                    event = {"type": "user", "text": content}
+                    if synthetic:
+                        event["synthetic"] = synthetic
+                    events.append(event)
                     open_turn = True
             elif kind == "message" and record.get("role") == "assistant":
                 # The task's answer is its last non-empty assistant text;
@@ -476,10 +527,14 @@ class SessionLog:
     @staticmethod
     def _derive_title(messages: list[dict]) -> str:
         """Untruncated title: the first user message — cheap, deterministic,
-        and it almost always names the task."""
+        and it almost always names the task. Notes aish wrote itself are not
+        the user's words and say nothing about the chat, so a session opened
+        with a `/cd` isn't titled with the announcement it produced (#171)."""
         for message in messages:
             if message.get("role") == "user":
                 content = " ".join((message.get("content") or "").split())
+                if synthetic_kind(content) == "note":
+                    continue
                 bang = _BANG_RE.match(content)
                 return f"! {bang.group(1)}" if bang else content
         return "(no user input)"
@@ -493,8 +548,8 @@ class SessionLog:
             if message.get("role") not in ("user", "assistant"):
                 continue
             content = " ".join((message.get("content") or "").split())
-            if not content:
-                continue
+            if not content or synthetic_kind(content) == "note":
+                continue  # "You: [I moved the session to …]" is aish talking, not you
             bang = _BANG_RE.match(content)
             if bang:
                 content = f"! {bang.group(1)}"

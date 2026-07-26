@@ -82,7 +82,7 @@ from .cli import (
 from .embeddings import SemanticIndex
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .pty_session import PtySession
-from .session import SessionLog
+from .session import RESUME_MARKER, SessionLog, synthetic_kind
 
 if TYPE_CHECKING:
     from .claude_max import ClaudeMaxAgent
@@ -174,8 +174,10 @@ RESUME_MAX_SESSIONS = 3    # tasks resumed per startup
 # prompt: the request and the partial work are both already in the history, so
 # repeating the prompt would invite the model to redo side effects it may have
 # completed (an email already sent) rather than finish what is left.
+# The marker is session.py's, not a literal: it is what classifies this turn as
+# synthetic on cold replay, so the two must never drift apart (#171).
 RESUME_NOTE = (
-    "[automatic resume] aish restarted while this task was still running, so the "
+    f"{RESUME_MARKER} aish restarted while this task was still running, so the "
     "previous attempt was cut off part-way. Everything above is what had already "
     "happened. Do NOT repeat steps that already completed — especially anything "
     "that sent, wrote, or changed something. Check what is actually still "
@@ -289,6 +291,20 @@ def _prefix_sig(events: list[dict], count: int) -> str:
     """
     blob = json.dumps(events[:count], sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def _user_event(text: str, synthetic: str = "") -> dict[str, Any]:
+    """The `user` transcript event, tagged when aish — not the human — wrote
+    the turn (#171). It is still a real turn (it starts a task, so the frontend
+    runs the whole turn-management path); only the rendering differs. `synthetic`
+    is passed explicitly only where the text carries no marker to classify by —
+    a trigger's prompt is arbitrary — and everything else is classified by the
+    same function `reconstruct_events` uses on replay, so the two agree."""
+    event: dict[str, Any] = {"type": "user", "text": text}
+    synthetic = synthetic or synthetic_kind(text)
+    if synthetic:
+        event["synthetic"] = synthetic
+    return event
 
 
 def _ends_with_question(text: str) -> bool:
@@ -1256,7 +1272,12 @@ class WebServer:
                         "UNKNOWN — check each before repeating it:\n- " \
                         + "\n- ".join(info["in_flight"])
             session.busy = True
-            session.bridge.emit({"type": "user", "text": text})
+            # A resume note is a real turn (it starts a task) that the human
+            # never typed, so it renders as a system row rather than a blue user
+            # bubble — classified by the SAME function the cold replay uses, so
+            # hot and cold cannot drift (#171). A re-issued original prompt is
+            # the user's own words and stays a normal bubble.
+            session.bridge.emit(_user_event(text))
             session.runner = asyncio.ensure_future(
                 self._run_task(session, text, resume=True)
             )
@@ -2736,7 +2757,11 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             session.custom_title = title
             session.logref.log.set_title(title)
         session.busy = True
-        session.bridge.emit({"type": "user", "text": prompt})
+        # The trigger's own prompt: a schedule, an email, a webhook — not the
+        # owner typing (#171). Marked here because the text is arbitrary; the
+        # replay identifies the same message by its position in a non-user
+        # session, since it is always that session's opening turn.
+        session.bridge.emit(_user_event(prompt, "trigger"))
         session.runner = asyncio.ensure_future(self._run_task(session, prompt))
         return JSONResponse({"session": session.name, "origin": origin})
 

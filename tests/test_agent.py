@@ -1560,6 +1560,28 @@ class TestRootScoping:
         note = agent.messages[-1]
         assert note["role"] == "user" and "/cd" in note["content"]
 
+    def test_aishs_own_user_turns_classify_as_synthetic_notes(self, tmp_path):
+        # These turns are appended as role:"user" and logged, but the human
+        # never typed them and the live UI shows nothing for them — a /cd is a
+        # workspace marker, a nudge is internal. A cold replay classifies them
+        # by their text, so the shape of every producer is pinned here (#171).
+        from aish.agent import LOOP_STOP_NOTE, LOOP_WARNING, STALL_NOTE, STEP_LIMIT_NOTE
+        from aish.session import synthetic_kind
+
+        root = tmp_path / "a"
+        other = tmp_path / "b"
+        root.mkdir()
+        other.mkdir()
+        agent, _ = make_agent([], cwd=str(root))
+        agent.rebase(str(other))
+        assert synthetic_kind(agent.messages[-1]["content"]) == "note"  # /cd announce
+        agent.add_root(str(root))
+        assert synthetic_kind(agent.messages[-1]["content"]) == "note"  # /add-dir announce
+        for nudge in (LOOP_WARNING, STEP_LIMIT_NOTE, LOOP_STOP_NOTE, STALL_NOTE):
+            assert synthetic_kind(nudge) == "note"
+        # …and a real prompt is never mistaken for one.
+        assert synthetic_kind("move the session to the other repo") == ""
+
     def test_rebase_bad_dir_is_error_and_keeps_root(self, tmp_path):
         agent, _ = make_agent([], cwd=str(tmp_path))
         result = agent.rebase(str(tmp_path / "missing"))

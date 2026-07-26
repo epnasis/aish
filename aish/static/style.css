@@ -551,6 +551,20 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.workspace-note .wsnote-label { font-weight: 600; color: var(--fg); }
 .msg.workspace-note .wsnote-path { color: var(--dim); overflow-wrap: anywhere; }
 
+/* A turn aish injected itself (issue #171): same quiet system-note language as
+   the workspace marker, so it can never be mistaken for something you typed. */
+.msg.system-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 2px;
+  font-size: 15px;
+}
+.msg.system-note .sysnote-ico { flex: 0 0 auto; line-height: 0; color: var(--dim); padding-top: 2px; }
+.msg.system-note .sysnote-ico svg { width: 16px; height: 16px; }
+.msg.system-note .sysnote-label { font-weight: 600; color: var(--fg); }
+.msg.system-note .sysnote-text { color: var(--dim); font-size: 13.8px; white-space: pre-wrap; }
+
 /* ---- ANSI colors in command output ---- */
 .a-b { font-weight: 700; }
 .a-dim { opacity: 0.6; }
