@@ -263,5 +263,34 @@ check("the sweep still evicts exactly what recomputeWorkingSet evicts", () => {
   );
 });
 
+// ---- seeding from the hello pager ----------------------------------------
+// Regression: the deck seeded only from a session_list, i.e. only if you opened
+// the Sessions drawer. Seeding now also runs on connect from hello.pager — which
+// only works because those pages carry `ts`. An undated page is discarded here,
+// which is exactly how the deck ended up holding just the chat on screen and the
+// swipe pager ended up with a single page.
+check("seeds from pager pages that carry a ts", () => {
+  const pages = [
+    { name: "a", title: "A", origin: "user", ts: (NOW - 2 * HOUR) / 1000 },
+    { name: "b", title: "B", origin: "user", ts: (NOW - 1 * HOUR) / 1000 },
+  ];
+  const seed = seedWorkingSet(pages, NOW);
+  assert.deepStrictEqual(seed.map((m) => m.name), ["a", "b"]); // oldest-active first
+});
+
+check("an undated page cannot be seeded — the bug this pinned down", () => {
+  const undated = [{ name: "a", title: "A", origin: "user" }]; // no ts, as hello.pager used to be
+  assert.deepStrictEqual(seedWorkingSet(undated, NOW), []);
+});
+
+check("a tiny deck yields a tiny pager — why seeding on connect matters", () => {
+  // deckToPages falls back to the raw source only for an EMPTY deck, so a deck
+  // holding just the chat on screen is strictly WORSE than none: it hides every
+  // other page. That asymmetry is what made the failure look like a dead gesture.
+  const source = [{ name: "a" }, { name: "b" }, { name: "c" }];
+  assert.strictEqual(deckToPages([], source).length, 3);
+  assert.strictEqual(deckToPages([{ name: "b", ts: NOW }], source).length, 1);
+});
+
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
 console.log("\nall checks passed");

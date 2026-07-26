@@ -1408,7 +1408,7 @@ class WebServer:
     def _hello(
         self,
         session: Session,
-        pager: list[tuple[str, str, str]] | None = None,
+        pager: list[tuple[str, str, str, float]] | None = None,
         cmd_history: list[str] | None = None,
     ) -> dict:
         # The swipe pager pages through recent chats oldest→newest by last
@@ -1417,8 +1417,8 @@ class WebServer:
         # Automated, #160). The current session is always a page even before its
         # first message (a fresh chat is the newest thing by definition).
         pages = [
-            {"name": name, "title": title, "origin": origin}
-            for name, title, origin in pager or []
+            {"name": name, "title": title, "origin": origin, "ts": ts}
+            for name, title, origin, ts in pager or []
         ]
         if all(page["name"] != session.name for page in pages):
             pages.append(
@@ -1426,6 +1426,10 @@ class WebServer:
                     "name": session.name,
                     "title": self._title(session),
                     "origin": session.origin,
+                    # Newest thing there is, by definition — and it must carry a
+                    # stamp like every other page or the client's deck would
+                    # discard it as undated.
+                    "ts": time.time(),
                 }
             )
         return {

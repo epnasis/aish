@@ -669,19 +669,29 @@ class SessionLog:
         return [path for _, path in stamped]
 
     @staticmethod
-    def pager_titles(state_dir: Path, limit: int = 30) -> list[tuple[str, str, str]]:
-        """(name, title, origin) pages for the web UI's swipe pager: the `limit`
-        most recent chats that have a title, same recency ordering as the drawer,
-        flipped oldest→newest so back = older. Chats with no user input yet
-        are not pages — the cap applies after skipping them, so blank files
+    def pager_titles(state_dir: Path, limit: int = 30) -> list[tuple[str, str, str, float]]:
+        """(name, title, origin, ts) pages for the web UI's swipe pager: the
+        `limit` most recent chats that have a title, same recency ordering as the
+        drawer, flipped oldest→newest so back = older. Chats with no user input
+        yet are not pages — the cap applies after skipping them, so blank files
         can never crowd real chats out of the pager. The origin rides along so
         the pager can page within the Recent/Automated lane the chat belongs to
-        (#160), matching the Sessions screen's tabs."""
+        (#160), matching the Sessions screen's tabs.
+
+        `ts` is the last-interaction mtime, the same stamp `list_sessions` reports.
+        The client's working-set deck seeds from whichever list it has, and it
+        filters candidates by age — with no stamp here every pager page read as
+        undated and was discarded, so a launch that never opened the Sessions
+        drawer seeded nothing and left the swipe pager with a single page."""
         pages = []
         for path in SessionLog._by_recency(state_dir):
             title, origin = SessionLog._peek(path)
             if title is not None:
-                pages.append((path.name, title, origin))
+                try:
+                    ts = path.stat().st_mtime
+                except OSError:  # vanished between the scan and here
+                    continue
+                pages.append((path.name, title, origin, ts))
                 if len(pages) == limit:
                     break
         pages.reverse()

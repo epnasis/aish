@@ -1671,6 +1671,31 @@ class TestSessions:
             hello = recv_until(ws, "hello")
             assert [p["name"] for p in hello["pager"]] == [first]
 
+    def test_every_pager_page_carries_a_usable_timestamp(self, app_env):
+        # The client's working-set deck seeds from the pager and filters seed
+        # candidates by age, so an undated page is silently discarded. With no
+        # `ts` here, a launch that never opened the Sessions drawer seeded
+        # NOTHING and the swipe pager was left with a single page — swiping
+        # between chats did nothing at all. Every page must carry a real stamp,
+        # including the current chat's synthesized page (the one with no file
+        # activity behind it yet).
+        client, _ = make_client(app_env, [model_says("ok")])
+        with client, connected(client) as (ws, hello, _):
+            first = hello["session"]
+            # The synthesized page for a brand-new, still-empty chat.
+            assert [p["name"] for p in hello["pager"]] == [first]
+            assert hello["pager"][0]["ts"] > 0
+            ws.send_json({"type": "task", "text": "remember the yak"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "new"})
+            hello = recv_until(ws, "hello")
+            # Now a real on-disk page plus the synthesized one: both stamped,
+            # and ordered oldest→newest by that stamp, matching the page order.
+            stamps = [p["ts"] for p in hello["pager"]]
+            assert len(stamps) == 2
+            assert all(isinstance(t, (int, float)) and t > 0 for t in stamps)
+            assert stamps == sorted(stamps)
+
     def test_pager_orders_by_last_interaction_and_spans_restarts(self, app_env):
         # Interacting with an old chat moves it to the newest end, and a
         # fresh server lists chats it never opened (swipe loads them from

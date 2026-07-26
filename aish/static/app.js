@@ -1010,6 +1010,13 @@ function onHello(event) {
   pagerSessions = event.pager || [];
   cmdHistory = event.cmd_history || []; // personal command palette (#104)
   currentSession = event.session;
+  // Seed on CONNECT, from the pager the hello already carries. Seeding used to
+  // happen only when a session_list arrived, i.e. only if you opened the Sessions
+  // drawer — so a fresh launch had a deck holding nothing but the chat on screen,
+  // and swiping between chats did nothing at all until you happened to open the
+  // drawer once. The pager is the same recency-ordered list, so it is a proper
+  // seed source (it carries `ts` for exactly this).
+  maybeSeedDeck(pagerSessions);
   ensureCurrentInDeck(event); // the chat now on screen joins/stays in the working set (#169)
   offlineTouch(event.session); // MRU input to the mirror's eviction order
   refreshOfflinePinUi();       // the toggle belongs to the chat now on screen
