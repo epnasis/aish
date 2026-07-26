@@ -3406,17 +3406,19 @@ function saveBlob(blob, filename) {
 }
 
 // Pull the server-derived (ASCII-transliterated) download name out of the
-// Content-Disposition header, so the file is titled from the prompt.
+// Content-Disposition header — the server names the file from the content.
 function dispositionName(response, fallback) {
   const cd = response.headers.get("Content-Disposition") || "";
   const m = cd.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)/i);
   try { return (m && decodeURIComponent(m[1])) || fallback; } catch { return fallback; }
 }
 
-async function exportAnswerPdf(markdown, title, btn) {
-  // The prompt that led to the answer titles the document AND (via the server's
-  // safe_pdf_filename) the download name; fall back to a generic title.
-  const query = new URLSearchParams({ title: (title || "").trim() || "aish answer" });
+async function exportAnswerPdf(markdown, btn) {
+  // No title is sent: the server has THIS session's model title its own answer
+  // (falling back to the answer's lead sentence), and that names both the
+  // document and the download. The prompt titled the request, not the document.
+  const query = new URLSearchParams();
+  if (currentSession) query.set("session", currentSession);
   if (token) query.set("token", token);
   if (btn) btn.disabled = true;
   showToast("Exporting to PDF…", true);
@@ -3467,14 +3469,14 @@ async function exportSessionPdf() {
   }
 }
 
-function exportChip(getText, getTitle) {
+function exportChip(getText) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "copy-chip";
   btn.title = "export answer to PDF";
   btn.setAttribute("aria-label", "export answer to PDF");
   btn.appendChild(pdfIcon());
-  btn.onclick = () => exportAnswerPdf(getText(), getTitle ? getTitle() : "", btn);
+  btn.onclick = () => exportAnswerPdf(getText(), btn);
   return btn;
 }
 
@@ -3526,7 +3528,7 @@ function attachAnswerTools(el, source, prompt) {
   // spacing as before, just reordered so the two most-used actions (TTS, Copy)
   // bracket the row instead of sitting next to Retry.
   if (TTS_OK) tools.appendChild(buildTtsBox(el));
-  tools.appendChild(exportChip(() => source, () => prompt || ""));
+  tools.appendChild(exportChip(() => source));
   tools.appendChild(forkChip(ordinal));
   // Regenerate: only the newest answer keeps it, so retire the previous one.
   // Gate on the per-answer `prompt` (populated by both the live and the
@@ -7301,6 +7303,43 @@ function swipeUpOpensDrawer(g) {
   return Math.abs(g.dx) <= up * 0.8;                         // dominant vertical only
 }
 // [SWIPEUP-END]
+
+// [SEARCHDISMISS-START]
+const SEARCH_DISMISS_MIN = 45; // px of upward travel on the search bar to dismiss
+function searchbarSwipeDismisses(g) {
+  // g: { startY, endY, dx } — an up-swipe on the bottom search bar (a fixed,
+  // non-scrolling zone, so unlike the list an up-swipe here is unambiguous)
+  // closes the Sessions view and returns to the active chat (#169).
+  const up = g.startY - g.endY;
+  if (up < SEARCH_DISMISS_MIN) return false;
+  return Math.abs(g.dx) <= up * 0.8; // vertical-dominant
+}
+// [SEARCHDISMISS-END]
+
+(function attachSearchbarSwipeDismiss() {
+  const bar = document.querySelector("#sessions-sheet .screen-searchbar");
+  if (!bar) return;
+  let sx = 0, sy = null, claimed = false;
+  bar.addEventListener("touchstart", (e) => {
+    if (e.touches.length !== 1) { sy = null; return; }
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; claimed = false;
+  }, { passive: true });
+  bar.addEventListener("touchmove", (e) => {
+    if (sy === null) return;
+    const up = sy - e.touches[0].clientY;
+    // Once it's clearly an upward drag, claim it (preventDefault) so the search
+    // input doesn't take focus and flash the keyboard on the way out.
+    if (up > 12) claimed = true;
+    if (claimed) e.preventDefault();
+  }, { passive: false });
+  bar.addEventListener("touchend", (e) => {
+    if (sy === null) return;
+    const t = e.changedTouches[0];
+    const go = t && searchbarSwipeDismisses({ startY: sy, endY: t.clientY, dx: t.clientX - sx });
+    sy = null;
+    if (go) { $("sessions-search").blur(); closeSheets(); }
+  });
+})();
 
 (function attachSwipeUpToDrawer() {
   let sx = 0, sy = 0, active = false;

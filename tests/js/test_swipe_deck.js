@@ -35,9 +35,11 @@ const {
   seedWorkingSet, partitionRecent, deckToPages,
 } = deckApi;
 const { swipeUpOpensDrawer } = extract("// [SWIPEUP-START]", "// [SWIPEUP-END]");
+const { searchbarSwipeDismisses } = extract("// [SEARCHDISMISS-START]", "// [SEARCHDISMISS-END]");
 
 for (const [name, fn] of Object.entries({ addToDeck, removeFromDeck, touchDeck,
-  recomputeWorkingSet, seedWorkingSet, partitionRecent, deckToPages, swipeUpOpensDrawer })) {
+  recomputeWorkingSet, seedWorkingSet, partitionRecent, deckToPages, swipeUpOpensDrawer,
+  searchbarSwipeDismisses })) {
   assert(typeof fn === "function", `failed to extract ${name}`);
 }
 
@@ -207,6 +209,22 @@ check("keyboard up suppresses it (composer owns the gesture)", () => {
 check("still opens when the transcript is scrolled up — the composer zone is the disambiguator, not scroll position", () => {
   // regression: an earlier atBottom gate made this fire only at the very bottom
   assert.strictEqual(swipeUpOpensDrawer(upGesture()), true);
+});
+
+check("an up-swipe on the search bar dismisses the Sessions view", () => {
+  assert.strictEqual(searchbarSwipeDismisses({ startY: 700, endY: 640, dx: 4 }), true);
+});
+
+check("a downward swipe on the search bar does NOT dismiss", () => {
+  assert.strictEqual(searchbarSwipeDismisses({ startY: 700, endY: 760, dx: 4 }), false);
+});
+
+check("a short up-flick on the search bar does NOT dismiss", () => {
+  assert.strictEqual(searchbarSwipeDismisses({ startY: 700, endY: 680, dx: 4 }), false);
+});
+
+check("a mostly-horizontal swipe on the search bar does NOT dismiss", () => {
+  assert.strictEqual(searchbarSwipeDismisses({ startY: 700, endY: 640, dx: 90 }), false);
 });
 
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
