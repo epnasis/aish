@@ -142,6 +142,65 @@ def test_dedent_line_only_eats_spaces_it_is_allowed_to():
     assert export._dedent_line("\tx", 4) == "\tx"  # never touches other whitespace
 
 
+# ---- titling an exported answer (#172) -------------------------------------
+
+
+def test_derive_title_prefers_a_lead_heading():
+    assert export.derive_title("# Quarterly report\n\nBody text.") == "Quarterly report"
+    assert export.derive_title("### 1. Using a parser\n\nBody.") == "1. Using a parser"
+
+
+def test_derive_title_uses_the_first_prose_when_there_is_no_lead_heading():
+    """A later heading is a section, not the document's title — the opening
+    prose is what the reader meets first."""
+    md = "You are correct. `gmail_search` filters.\n\n## Details\n\nMore."
+    assert export.derive_title(md) == "You are correct. gmail_search filters"
+
+
+def test_derive_title_trims_a_long_lead_to_its_first_sentence():
+    md = "Short opener. " + "Then a much longer second sentence that runs on. " * 3
+    assert export.derive_title(md) == "Short opener"
+
+
+def test_derive_title_skips_code_blocks_and_rules():
+    md = "---\n\n```python\n# not a title\nx = 1\n```\n\nThe actual opening line."
+    assert export.derive_title(md) == "The actual opening line"
+
+
+def test_derive_title_strips_inline_markup_and_list_markers():
+    md = "- **Bold lead** with a [link](https://example.com) and `code`"
+    assert export.derive_title(md) == "Bold lead with a link and code"
+
+
+def test_derive_title_truncates_on_a_word_boundary():
+    md = "Here is a difficult nested markdown test case to see how the renderer copes."
+    title = export.derive_title(md)
+    assert len(title) <= export.TITLE_MAX + 1  # +1 for the ellipsis
+    assert title.endswith("…") and "  " not in title
+    assert md.startswith(title[:-1])  # a prefix of the source, never a cut word
+
+
+def test_derive_title_falls_back_on_empty_content():
+    assert export.derive_title("", "aish answer") == "aish answer"
+    assert export.derive_title("```\nonly code\n```", "aish answer") == "aish answer"
+
+
+def test_clean_title_unwraps_what_models_pad_a_title_with():
+    assert export.clean_title('  "Bali eSIM data plans"  ') == "Bali eSIM data plans"
+    assert export.clean_title("Title: **Quarterly report**") == "Quarterly report"
+    assert export.clean_title("## Zmiana lotu na QR960") == "Zmiana lotu na QR960"
+    # Models often preamble before the real line; the last line is the title.
+    assert export.clean_title("Sure, here you go:\nBali eSIM data plans") == (
+        "Bali eSIM data plans"
+    )
+
+
+def test_clean_title_rejects_a_non_title_so_the_caller_can_fall_back():
+    assert export.clean_title("") is None
+    assert export.clean_title("   \n\n  ") is None
+    assert export.clean_title("I'm sorry, but I cannot " + "help with that. " * 12) is None
+
+
 def _tiny_png() -> bytes:
     import io
 

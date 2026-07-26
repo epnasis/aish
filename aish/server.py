@@ -194,6 +194,21 @@ TMUX_CONSOLE_SESSION = "aish-console"
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 EXPORT_MAX_BYTES = 5 * 1024 * 1024  # a single answer's markdown; generous ceiling
 
+# Titling an exported answer (#172). The prompt that produced an answer names
+# the request ("test it with some difficult nested markdown"), not the document,
+# and an answer's own opening line is a conversational lead-in ("You are
+# correct.") — so the model that wrote the answer writes its title too.
+TITLE_PROMPT = (
+    "Write a short title for the document below. It will be the PDF's heading "
+    "and filename.\n"
+    "Rules: 3-6 words. Name what the document is ABOUT — never echo its opening "
+    "words. Write it in the document's own language. No quotes, no markdown, no "
+    "trailing period. Reply with the title alone and nothing else.\n\n"
+    "---\n{body}\n---"
+)
+TITLE_SOURCE_CHARS = 4000  # the lead is enough to name a document, and keeps it one quick call
+TITLE_TIMEOUT = 25.0  # a slow local model must not hold the export hostage
+
 # Offline mirror (#165). The PWA keeps a local copy of every session it can fit,
 # so an installed app opens and reads its history with no server reachable at
 # all. What the user goes back for is the CONVERSATION — the question, the
@@ -942,7 +957,10 @@ chat. Every \
 finished answer has a row of chips beneath it — copy, export that one answer \
 to PDF, and (where available) read-aloud. Both PDF exports render markdown \
 locally and download the file; the whole-chat export includes only your final \
-answers, not thinking or intermediate steps. Exported PDFs embed pictures: \
+answers, not thinking or intermediate steps. A single-answer PDF is titled and \
+named after the ANSWER (you write that title yourself when asked), not after \
+the prompt that produced it; a whole-chat PDF uses the chat's title. \
+Exported PDFs embed pictures: \
 local image paths inside the session's directories, web images, Google Maps \
 snapshots (needs GOOGLE_MAPS_API_KEY set), and YouTube thumbnails are inlined; \
 anything unavailable becomes a captioned link card. A \
@@ -2788,12 +2806,57 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             roots.append(Path(session.agent.scratch_dir).resolve())
         return roots
 
+    def _model_title(self, session: Session, markdown_text: str) -> str | None:
+        """Ask the session's OWN model to title its answer (blocking; runs in a
+        thread). Same model that wrote the answer — it already has the subject
+        matter, and no other backend gets to see the text. Called directly, not
+        through run_task, so nothing lands in the conversation or the log.
+
+        None on anything unusual (no chat callable — claude-max drives its own
+        SDK loop and exposes none — a transport error, or a reply that isn't a
+        title); the caller falls back to the deterministic lead."""
+        agent = getattr(session, "agent", None)
+        chat = getattr(agent, "chat", None)
+        if agent is None or chat is None:
+            return None
+        prompt = TITLE_PROMPT.format(body=markdown_text[:TITLE_SOURCE_CHARS])
+        try:
+            response = chat(
+                model=agent.model,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[],
+                options={"num_ctx": getattr(agent, "num_ctx", 8192)},
+                think=False,
+                stream=False,
+            )
+            return export.clean_title(response.message.content or "")
+        except Exception:  # noqa: BLE001 — a title is never worth failing an export
+            return None
+
+    async def _answer_title(self, session_name: str, markdown_text: str) -> str:
+        """The exported answer's title. The model writes it; `derive_title` (the
+        answer's lead heading or first sentence) is the floor whenever it can't
+        — a title is a nicety, so it never blocks or fails an export."""
+        fallback = export.derive_title(markdown_text)
+        session = self.sessions.get(session_name) or self._default
+        if session is None:
+            return fallback
+        try:
+            title = await asyncio.wait_for(
+                asyncio.to_thread(self._model_title, session, markdown_text), TITLE_TIMEOUT
+            )
+        except Exception:  # noqa: BLE001 — timeout or backend blow-up, same answer
+            return fallback
+        return title or fallback
+
     async def handle_export_answer(self, request) -> Response | JSONResponse:
-        """POST /export/answer?title=<title>, raw markdown body — renders one
-        answer to a PDF the browser downloads. Conversion is local (see
-        export.py); embedded media (remote images, map snapshots, video
-        thumbnails) may be fetched at export time, each bounded by a timeout
-        with link-card fallback."""
+        """POST /export/answer, raw markdown body — renders one answer to a PDF
+        the browser downloads. Conversion is local (see export.py); embedded
+        media (remote images, map snapshots, video thumbnails) may be fetched at
+        export time, each bounded by a timeout with link-card fallback.
+
+        The document title (and so the download name) comes from the ANSWER, not
+        from the prompt that produced it — see `_answer_title`."""
         if self.token and request.query_params.get("token") != self.token:
             return JSONResponse({"error": "bad token"}, status_code=403)
         raw = await request.body()
@@ -2802,7 +2865,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         if len(raw) > EXPORT_MAX_BYTES:
             return JSONResponse({"error": "answer too large to export"}, status_code=413)
         markdown_text = raw.decode("utf-8", errors="replace")
-        title = request.query_params.get("title", "").strip() or "aish answer"
+        title = await self._answer_title(request.query_params.get("session", ""), markdown_text)
         image_roots = self._image_roots()
 
         def build() -> bytes:

@@ -258,7 +258,9 @@ this UI. Highlights:
   relaunch, so a restart mid-sentence doesn't cost you the sentence.
 - **Export to PDF, copy anything, inline images.** Per-answer or whole-session
   PDF export (rendered locally), copy chips on every code block / table / answer,
-  and markdown images (local or web) rendered right in the chat.
+  and markdown images (local or web) rendered right in the chat. A single-answer
+  PDF is titled and filed after what the answer is *about* — the model that wrote
+  it writes the title — not after the prompt that asked for it.
 - **Native vision.** On vision-capable backends (Gemini, OpenAI, Claude, Ollama
   vision models), images you attach are actually *seen* by the model.
 - **Works offline.** The installed app opens and reads your past conversations

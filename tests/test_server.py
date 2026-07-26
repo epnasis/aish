@@ -2998,18 +2998,60 @@ class TestExportMedia:
 
 class TestExportEndpoints:
     def test_export_answer_returns_pdf_attachment(self, app_env):
+        """With no usable backend the title falls back to the answer's own lead
+        — here its heading — and names the download."""
         client, _ = make_client(app_env, [])
         with client:
             response = client.post(
-                "/export/answer?title=my+answer",
+                "/export/answer",
                 content="# Answer\n\nBody text — with unicode →.".encode(),
             )
             assert response.status_code == 200
             assert response.headers["content-type"] == "application/pdf"
-            assert 'attachment; filename="my-answer.pdf"' in (
+            assert 'attachment; filename="Answer.pdf"' in (
                 response.headers["content-disposition"]
             )
             assert response.content.startswith(b"%PDF")
+
+    def test_export_answer_title_is_written_by_the_answers_own_model(self, app_env):
+        """The prompt names the request, not the document (#172): the session's
+        OWN model titles its answer, and that title names the file."""
+        client, chat = make_client(app_env, [model_says("Bali eSIM data plans")])
+        with client:
+            with connected(client) as (ws, hello, _):
+                name = hello["session"]
+            response = client.post(
+                f"/export/answer?session={name}",
+                content=b"You are correct. Airalo is a good choice on Bali.",
+            )
+            assert response.status_code == 200
+            assert 'filename="Bali-eSIM-data-plans.pdf"' in (
+                response.headers["content-disposition"]
+            )
+            # One extra call, tool-free and non-streaming, and it never touched
+            # the conversation — a title must not become a turn in the log.
+            titling = chat.calls[-1]
+            assert not titling["tools"] and not titling.get("stream")
+            assert len(titling["messages"]) == 1  # a bare prompt, not the conversation
+            log = app_env["state_dir"] / name
+            if log.exists():
+                assert "Bali eSIM data plans" not in log.read_text(encoding="utf-8")
+
+    def test_export_answer_title_falls_back_when_the_model_rambles(self, app_env):
+        """A chatty or failed reply must not name the file — the deterministic
+        lead takes over."""
+        rambling = model_says("Sure! " + "Here is some prose about your document. " * 6)
+        client, _ = make_client(app_env, [rambling])
+        with client:
+            with connected(client) as (ws, hello, _):
+                name = hello["session"]
+            response = client.post(
+                f"/export/answer?session={name}",
+                content=b"# Quarterly report\n\nBody.",
+            )
+            assert 'filename="Quarterly-report.pdf"' in (
+                response.headers["content-disposition"]
+            )
 
     def test_export_answer_rejects_empty_body(self, app_env):
         client, _ = make_client(app_env, [])

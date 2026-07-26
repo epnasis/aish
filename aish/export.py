@@ -223,6 +223,110 @@ def _strip_web_only(markdown_text: str) -> str:
     return text.strip()
 
 
+# ---- naming an exported answer --------------------------------------------
+# The prompt that produced an answer makes a poor title: it's a request ("check
+# why X", "test it with some difficult nested markdown"), usually imperative and
+# often long, and it names the question rather than the document. The answer's
+# own lead — its heading, or failing that its opening sentence — describes what
+# is actually in the PDF, and it names the file the same way.
+#
+# Derivation is deterministic and local. Asking the model for a nicer title
+# would mean a round-trip on every export and, on a cloud backend, sending the
+# answer off the machine — which is exactly what this module promises not to do.
+
+TITLE_MAX = 60  # a title, not a summary — long enough for a heading, short for a filename
+
+_TITLE_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+_TITLE_HEADING_RE = re.compile(r"^#{1,6}\s+(.*)$")
+_TITLE_RULE_RE = re.compile(r"^([-*_])(?:\s*\1){2,}\s*$")
+# Leading block markers, so a document opening with a bullet or a quote titles
+# from the text rather than from the marker.
+_TITLE_LEADER_RE = re.compile(r"^(?:>\s*|[-*+]\s+|\d+[.)]\s+|\|)+")
+_TITLE_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+_TITLE_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_TITLE_EMPHASIS_RE = re.compile(r"[*_]{1,3}([^*_]+)[*_]{1,3}")
+_TITLE_TAG_RE = re.compile(r"<[^>]+>")
+_TITLE_SENTENCE_RE = re.compile(r"(?<=[.!?])\s")
+_TITLE_TRIM = " \t.:;,–—-"
+
+
+def _title_plain(text: str) -> str:
+    """Inline markdown reduced to the words it renders as."""
+    text = _TITLE_IMAGE_RE.sub(r"\1", text)
+    text = _TITLE_LINK_RE.sub(r"\1", text)
+    text = _TITLE_EMPHASIS_RE.sub(r"\1", text)
+    text = _TITLE_TAG_RE.sub("", text).replace("`", "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _title_shorten(text: str) -> str:
+    text = text.strip().strip("#").strip(_TITLE_TRIM)
+    if len(text) <= TITLE_MAX:
+        return text
+    sentence = _TITLE_SENTENCE_RE.split(text, maxsplit=1)[0].strip(_TITLE_TRIM)
+    if sentence and len(sentence) <= TITLE_MAX:
+        return sentence
+    cut = text[:TITLE_MAX]
+    if " " in cut:
+        cut = cut[: cut.rindex(" ")]  # never cut a word in half
+    return cut.strip(_TITLE_TRIM) + "…"
+
+
+_TITLE_LABEL_RE = re.compile(r"^(?:title|tytuł)\s*[:\-]\s*", re.IGNORECASE)
+
+
+def clean_title(text: str) -> str | None:
+    """A model-written title reduced to something usable, or None if it isn't.
+
+    Models pad a one-line answer: a `Title:` label, surrounding quotes, a
+    markdown heading, or a sentence of preamble before the real line. The last
+    non-empty line is the title in every one of those shapes. None means "this
+    isn't a title" — the caller falls back to `derive_title`, so a chatty or
+    empty reply degrades to the deterministic lead instead of naming the file
+    after the model's apology.
+    """
+    lines = [line.strip() for line in (text or "").replace("\r\n", "\n").split("\n")]
+    candidates = [line for line in lines if line]
+    if not candidates:
+        return None
+    title = _TITLE_LABEL_RE.sub("", candidates[-1]).strip()
+    title = _title_plain(title.lstrip("#").strip()).strip("\"'“”‘’ ")
+    title = title.strip(_TITLE_TRIM)
+    # A paragraph is not a title: rather than truncate the model's prose into
+    # something arbitrary, hand the job back to the deterministic path.
+    if not title or len(title) > TITLE_MAX * 2:
+        return None
+    return _title_shorten(title)
+
+
+def derive_title(markdown_text: str, fallback: str = "aish answer") -> str:
+    """A short title for an exported answer, taken from the answer itself.
+
+    Whichever comes first wins: a lead heading (the document's own title) or the
+    first line of prose (trimmed to its first sentence when that fits). Code
+    blocks are skipped entirely — a fence is never a title.
+    """
+    fence = ""
+    for raw in _strip_web_only(markdown_text or "").replace("\r\n", "\n").split("\n"):
+        line = raw.strip()
+        marker = _TITLE_FENCE_RE.match(line)
+        if fence:
+            if marker and marker.group(1)[0] == fence:
+                fence = ""
+            continue
+        if marker:
+            fence = marker.group(1)[0]
+            continue
+        if not line or _TITLE_RULE_RE.match(line):
+            continue
+        heading = _TITLE_HEADING_RE.match(line)
+        body = heading.group(1) if heading else _TITLE_LEADER_RE.sub("", line)
+        title = _title_shorten(_title_plain(body))
+        if title:
+            return title
+    return fallback
+
+
 _EMOJI_JOINERS = frozenset({0x200D, 0xFE0E, 0xFE0F})  # ZWJ + variation selectors
 _TAG_SPLIT_RE = re.compile(r"(<[^>]*>)")
 _emoji_cps: frozenset[int] | None = None
