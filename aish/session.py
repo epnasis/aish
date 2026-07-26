@@ -8,7 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import NamedTuple, TextIO
 
 TITLE_MAX = 60
 SNIPPET_MAX = 90  # preview line under the title in the web sessions drawer
@@ -62,6 +62,46 @@ DETAIL_MAX_CHARS = 6000
 DETAIL_TAIL_MESSAGES = 20
 RECALL_SESSIONS_TOP = 3  # sessions shown in the recall tool's fallback section
 _SESSION_NAME_RE = re.compile(r"^session-[0-9-]+\.jsonl$")
+
+# Auto-titling (#175): how far a chat has to move before its title is worth a
+# model call. Words of 4+ characters carry the subject; if enough of the title's
+# words are still being used, the conversation is where the title says it is.
+DRIFT_MIN_WORD = 4
+DRIFT_KEPT_RATIO = 0.34
+
+
+class ParsedLog(NamedTuple):
+    """One pass over a session log. A NamedTuple rather than a bare tuple so
+    metadata can be added without breaking every unpacking call site."""
+
+    messages: list[dict]
+    model: str
+    title: str | None
+    origin: str
+    cwd: str
+    title_auto: bool
+
+
+def _content_words(text: str) -> set[str]:
+    stripped = (word.strip(_PUNCT).casefold() for word in (text or "").split())
+    return {word for word in stripped if len(word) >= DRIFT_MIN_WORD}
+
+
+def title_drifted(title: str, recent_text: str) -> bool:
+    """Has the conversation moved away from what its title says (#175)?
+
+    A free, deterministic gate in front of the model call that rewrites a
+    title: a chat still using the title's subject words does not need renaming.
+    Deliberately lexical — no embedding call, no network — because spending a
+    model call to decide whether to spend a model call is a bad trade. The cost
+    of being wrong is small either way: a false "no drift" leaves a stale title
+    until the next backoff step, a false "drift" buys one cheap extra call.
+    """
+    wanted = _content_words(title)
+    if not wanted:
+        return True  # a title with nothing to match on is worth replacing
+    kept = wanted & _content_words(recent_text)
+    return (len(kept) / len(wanted)) < DRIFT_KEPT_RATIO
 
 # Terminal-mode command autocomplete (#104): the personal command palette is
 # built from the user's own successful ! commands across sessions. Both caps
@@ -133,19 +173,21 @@ class SessionLog:
         return files[0] if files else None
 
     @staticmethod
-    def _parse(path: Path) -> tuple[list[dict], str, str | None, str, str]:
+    def _parse(path: Path) -> ParsedLog:
         """One pass over the file: conversation messages (no audit records, no
         stale system prompt — a fresh one is built on resume), the last
         recorded model ("" for sessions that predate model records), the
-        latest custom title (None when the chat was never renamed), the
-        session origin ("user" unless a `kind:"origin"` record says otherwise —
-        so triggered sessions cold-load with their provenance intact, #160), and
-        the latest working directory ("" when the chat never moved). The
-        `kind:"title"`/`"origin"`/`"cwd"` records are metadata — they never enter
-        `messages`, so they can't leak into a resumed conversation."""
+        latest stored title (None when the chat was never titled) and whether
+        that title was auto-generated (#175), the session origin ("user" unless
+        a `kind:"origin"` record says otherwise — so triggered sessions cold-load
+        with their provenance intact, #160), and the latest working directory
+        ("" when the chat never moved). The `kind:"title"`/`"origin"`/`"cwd"`
+        records are metadata — they never enter `messages`, so they can't leak
+        into a resumed conversation."""
         messages: list[dict] = []
         model = ""
         custom_title: str | None = None
+        title_auto = False
         origin = "user"
         cwd = ""
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -160,6 +202,9 @@ class SessionLog:
                 title = (record.get("title") or "").strip()
                 if title:  # latest non-empty title wins
                     custom_title = title
+                    # Records written before auto-titling (#175) carry no flag,
+                    # and every one of those was a hand-typed rename.
+                    title_auto = bool(record.get("auto"))
             elif kind == "origin":
                 origin = record.get("origin") or origin
             elif kind == "cwd":
@@ -167,11 +212,11 @@ class SessionLog:
             elif kind == "message" and record.get("role") != "system":
                 keys = ("role", "content", "tool_name", "images", "documents")
                 messages.append({k: v for k, v in record.items() if k in keys})
-        return messages, model, custom_title, origin, cwd
+        return ParsedLog(messages, model, custom_title, origin, cwd, title_auto)
 
     @staticmethod
     def load_messages(path: Path) -> list[dict]:
-        return SessionLog._parse(path)[0]
+        return SessionLog._parse(path).messages
 
     @staticmethod
     def restore_state(path: Path) -> tuple[str | None, list[str]]:
@@ -681,10 +726,12 @@ class SessionLog:
     @staticmethod
     def info(path: Path) -> SessionInfo | None:
         """Summary line for a session picker; None for empty sessions."""
-        messages, model, custom_title, origin, cwd = SessionLog._parse(path)
-        if not messages:
+        parsed = SessionLog._parse(path)
+        if not parsed.messages:
             return None
-        return SessionLog._info_from(path, messages, model, custom_title, origin, cwd)
+        return SessionLog._info_from(
+            path, parsed.messages, parsed.model, parsed.title, parsed.origin, parsed.cwd
+        )
 
     @staticmethod
     def list_sessions(state_dir: Path, exclude: set | None = None) -> list[SessionInfo]:
@@ -710,7 +757,7 @@ class SessionLog:
         for path in SessionLog._by_recency(state_dir):
             if path in exclude:
                 continue
-            messages, model, custom_title, origin, cwd = SessionLog._parse(path)
+            messages, model, custom_title, origin, cwd, _ = SessionLog._parse(path)
             if not messages:
                 continue
             content_cf = " ".join(
@@ -981,11 +1028,15 @@ class SessionLog:
     def command(self, command: str, decision: str) -> None:
         self._record("command", command=command, decision=decision)
 
-    def set_title(self, title: str) -> None:
+    def set_title(self, title: str, auto: bool = False) -> None:
         """Rename the chat with an append-only `kind:"title"` record — no
         rewrite of the log. The latest such record wins on parse/peek; the
-        derived first-user-message title is the fallback when none exists."""
-        self._record("title", title=title.strip())
+        derived first-user-message title is the fallback when none exists.
+
+        `auto` marks a title the model wrote (#175). It is what lets a hand-
+        typed rename be permanent: the auto-titler stands down for good once
+        the winning record is a manual one."""
+        self._record("title", title=title.strip(), auto=auto)
 
     def origin(self, origin: str) -> None:
         """Record who started this session (schedule | email | webhook — never

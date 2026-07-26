@@ -2,7 +2,7 @@ import json
 import os
 import time
 
-from aish.session import SessionLog
+from aish.session import SessionLog, title_drifted
 
 
 def test_roundtrip_messages_and_commands(tmp_path):
@@ -61,7 +61,7 @@ def test_title_record_excluded_from_conversation(tmp_path):
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
-    messages, _, custom_title, _, _ = SessionLog._parse(log.path)
+    messages, _, custom_title, *_ = SessionLog._parse(log.path)
     assert custom_title == "Renamed"
     assert all(m.get("role") in ("user", "assistant") for m in messages)
 
@@ -72,7 +72,7 @@ def test_empty_title_ignored(tmp_path):
     log.message({"role": "user", "content": "real title"})
     log.set_title("   ")
     assert SessionLog.info(log.path).title == "real title"
-    _, _, custom_title, _, _ = SessionLog._parse(log.path)
+    custom_title = SessionLog._parse(log.path).title
     assert custom_title is None
 
 
@@ -860,3 +860,52 @@ def test_pending_task_in_flight_uses_command_for_shell_steps(tmp_path):
     log.step({"kind": "tool_start", "name": "run_command", "command": "make release"})
     log.close()
     assert SessionLog.pending_task(log.path)["in_flight"] == ["run_command: make release"]
+
+
+# ---- auto-titling (#175) ---------------------------------------------------
+
+
+def test_set_title_records_whether_the_model_or_the_user_named_it(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.set_title("Model chose this", auto=True)
+    log.close()
+    parsed = SessionLog._parse(log.path)
+    assert parsed.title == "Model chose this" and parsed.title_auto is True
+
+
+def test_a_hand_typed_rename_after_an_auto_title_wins(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.set_title("Model chose this", auto=True)
+    log.set_title("I chose this")  # a rename defaults to manual
+    log.close()
+    parsed = SessionLog._parse(log.path)
+    assert parsed.title == "I chose this" and parsed.title_auto is False
+
+
+def test_a_title_record_from_before_auto_titling_reads_as_manual(tmp_path):
+    """Every title record written before #175 was a hand-typed rename, so a
+    missing `auto` flag must never be read as "the model can replace this"."""
+    log = SessionLog.new(tmp_path)
+    log._record("title", title="An old rename")  # no auto key at all
+    log.close()
+    assert SessionLog._parse(log.path).title_auto is False
+
+
+def test_title_drifted_is_false_while_the_subject_words_are_still_used():
+    assert not title_drifted(
+        "Bali eSIM data plans", "user: which Bali eSIM has the best data plans?"
+    )
+
+
+def test_title_drifted_is_true_once_the_conversation_moves_on():
+    assert title_drifted("Bali eSIM data plans", "user: explain postgres index tuning")
+
+
+def test_title_drifted_ignores_short_words_that_carry_no_subject():
+    """'the', 'a', 'is' match everything — a gate built on them never fires."""
+    assert title_drifted("The cost of a trip", "user: is it the one that a person is on")
+
+
+def test_title_drifted_on_a_title_with_nothing_to_match():
+    assert title_drifted("", "anything at all")
+    assert title_drifted("a b c", "a b c")  # all words below the length floor

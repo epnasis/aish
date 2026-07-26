@@ -378,6 +378,13 @@ report the finished answer — or what's done, what remains, and the next step.
 Sessions are the same JSONL files for terminal and web, so `aish --resume` can
 pick up a web session and vice versa.
 
+**Chats name themselves.** A web chat is named after what it's *about*, not
+after the words you happened to open with — the model that answers it writes the
+name, and rewrites it if the conversation genuinely moves on (rarely: a name you
+navigate by shouldn't keep changing). A fork gets its own name at its first new
+turn, so branching a tangent doesn't leave two rows with the same label. Rename
+one yourself and that's final — the automatic naming stands down for good.
+
 **Resuming always switches, never merges.** `aish --resume`, `/resume` in the
 terminal and the web session drawer all mean the same thing: the chosen session
 becomes the current one — its conversation, its log file, the model it last used
