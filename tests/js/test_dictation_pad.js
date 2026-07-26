@@ -37,6 +37,7 @@ let store = {};
 const localStorage = {
   getItem: (k) => (k in store ? store[k] : null),
   setItem: (k, v) => { store[k] = String(v); },
+  removeItem: (k) => { delete store[k]; },
 };
 
 const padInput = { value: "", focus() {} };
@@ -51,6 +52,7 @@ const historyBox = {
 let sent = [];
 let toasts = [];
 let closed = 0;
+let closedDiscard = null; // the discard flag padSend passes to closeConsolePad
 
 const sandbox = {
   localStorage,
@@ -62,26 +64,31 @@ const sandbox = {
   document: { createElement: (tag) => ({ tag, appendChild() {} }) },
   consoleSend: (data) => sent.push(data),
   showToast: (text) => toasts.push(text),
-  closeConsolePad: () => { closed++; },
+  closeConsolePad: (discard) => { closed++; closedDiscard = discard; },
   resizePadInput: () => {},
 };
 vm.createContext(sandbox);
 vm.runInContext(
+  extract("// [PAD-DRAFT-START]", "// [PAD-DRAFT-END]") + "\n" +
   extract("// [PAD-HISTORY-START]", "// [PAD-HISTORY-END]") + "\n" +
   extract("// [PAD-SEND-START]", "// [PAD-SEND-END]") + "\n" +
   extract("// [PAD-HISTORY-RENDER-START]", "// [PAD-HISTORY-RENDER-END]") + "\n" +
   "this.padHistory = padHistory; this.padHistoryPush = padHistoryPush;" +
   "this.padSend = padSend; this.PAD_HISTORY_MAX = PAD_HISTORY_MAX;" +
-  "this.togglePadHistory = togglePadHistory;",
+  "this.togglePadHistory = togglePadHistory; this.savePadDraft = savePadDraft;" +
+  "this.padDraft = padDraft; this.PAD_DRAFT_KEY = PAD_DRAFT_KEY;",
   sandbox
 );
 const { padHistory, padHistoryPush, padSend, PAD_HISTORY_MAX, togglePadHistory } = sandbox;
+const { savePadDraft, padDraft, PAD_DRAFT_KEY } = sandbox;
 
 // padHistory() builds its array inside the vm realm, so its prototype isn't
 // this realm's Array — copy through JSON before any deepStrictEqual.
 const hist = () => JSON.parse(JSON.stringify(padHistory()));
 
-const reset = () => { store = {}; sent = []; toasts = []; closed = 0; padInput.value = ""; };
+const reset = () => {
+  store = {}; sent = []; toasts = []; closed = 0; closedDiscard = null; padInput.value = "";
+};
 
 // ---- history --------------------------------------------------------------
 reset();
@@ -163,6 +170,37 @@ togglePadHistory();
 togglePadHistory();
 assert.strictEqual(historyBox.hidden, true, "a second tap closes the list");
 
+// ---- draft survival -------------------------------------------------------
+// An unsent pad must survive the reload the app performs on itself after an
+// update, and a PWA relaunch — that is the whole point of staging the text.
+reset();
+padInput.value = "half a spoken sentence";
+savePadDraft();
+assert.strictEqual(store[PAD_DRAFT_KEY], "half a spoken sentence", "draft persisted");
+padInput.value = "";
+assert.strictEqual(padDraft(), "half a spoken sentence", "…and readable back after a reload");
+
+savePadDraft(); // an empty pad has no draft to keep
+assert.strictEqual(PAD_DRAFT_KEY in store, false, "emptying the box clears the draft");
+
+// Sending is the one thing that discards it — the text is out the door, so
+// padSend closes the pad with the discard flag set (closeConsolePad, which owns
+// the clearing, keeps the draft on every other close).
+reset();
+padInput.value = "echo hi";
+savePadDraft();
+padSend(true);
+assert.strictEqual(closedDiscard, true, "a send discards the draft");
+
+// Recalling a history entry re-arms the draft, so a reload keeps the recalled
+// line too.
+reset();
+padHistoryPush("git status");
+historyBox.hidden = true;
+togglePadHistory();
+historyBox.children[0].onclick();
+assert.strictEqual(padDraft(), "git status", "a recalled entry is itself a draft");
+
 // ---- Enter is a newline, not a send ---------------------------------------
 // Multi-line composing only works if Return stays a Return; a stray Return must
 // never fire a half-finished command at the terminal. Only the Send button
@@ -171,5 +209,13 @@ const keydown = src.slice(src.indexOf('$("pad-input").addEventListener("keydown"
 const handler = keydown.slice(0, keydown.indexOf("});") + 3);
 assert(handler.includes("Escape"), "Esc still closes the pad");
 assert(!handler.includes("padSend"), "Enter must not send — only the Send button does");
+
+// The ✕ must NOT discard: a mis-tapped close losing a spoken sentence is the
+// failure this pad exists to prevent, so it closes with no discard flag.
+const closeWiring = src.slice(src.indexOf('$("pad-close").onclick'));
+assert(
+  /\$\("pad-close"\)\.onclick = \(\) => closeConsolePad\(\);/.test(closeWiring.slice(0, 200)),
+  "the pad's ✕ closes without discarding the draft"
+);
 
 console.log("dictation pad: all checks passed");

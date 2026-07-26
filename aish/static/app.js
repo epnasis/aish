@@ -513,6 +513,7 @@ async function openCachedSession(name) {
   deepLinkSession(name); // so the reconnect lands on the chat being read
   onReplay({ events: cached.events, truncated: false });
   offlineTouch(name);
+  refreshOfflinePinUi();
   return true;
 }
 
@@ -548,6 +549,7 @@ async function offlineFirstPaint() {
     if (!cached || serverPainted) return;
     currentSession = cached.meta.name;
     setTitle(cached.meta.title || "aish");
+    refreshOfflinePinUi();
     // Anchor the pager (and any reconnect) to what is actually on screen.
     deepLinkSession(cached.meta.name);
     onReplay({ events: cached.events, truncated: false });
@@ -570,24 +572,26 @@ async function offlineIsPinned(name) {
 }
 // [OFFLINE-PIN-STATE-END]
 
-// The menu is already open when this resolves, so the label fills in a beat
-// later rather than being wrong immediately. "…" while reading, "—" if the
-// store can't be reached — never a confident wrong answer.
-async function refreshOfflinePinLabel() {
-  const label = $("offline-state");
-  if (!label) return;
-  label.textContent = "…";
+// The top-bar toggle's appearance, always from a real read. It stays dimmed
+// ("unknown") until the store answers, because a toggle that shows the wrong
+// state invites a tap that does the opposite of what the user wanted — that is
+// exactly how pinned chats were getting silently unpinned.
+async function refreshOfflinePinUi() {
+  const button = $("offline-btn");
+  if (!button) return;
   const name = currentSession;
+  button.classList.add("unknown");
   let pinned;
   try {
     pinned = await offlineIsPinned(name);
   } catch {
-    label.textContent = "—";
-    return;
+    return; // stays dimmed: we genuinely don't know
   }
-  // The menu may have closed, or moved to another chat, while we were reading.
-  if ($("session-menu").hidden || name !== currentSession) return;
-  label.textContent = pinned ? "On" : "Off";
+  if (name !== currentSession) return; // switched chats mid-read
+  button.classList.remove("unknown");
+  button.classList.toggle("on", pinned);
+  button.setAttribute("aria-pressed", pinned ? "true" : "false");
+  button.title = pinned ? "kept available offline — tap to stop" : "keep available offline";
 }
 
 async function toggleOfflinePin() {
@@ -608,7 +612,7 @@ async function toggleOfflinePin() {
   current.pinned = !current.pinned;
   await idbPut("meta", current);
   offlineMeta.set(currentSession, current);
-  refreshOfflinePinLabel(); // keep the label honest if the menu is still open
+  refreshOfflinePinUi(); // reflect the new state on the toggle immediately
   showToast(current.pinned ? "kept available offline" : "no longer kept offline");
 }
 
@@ -995,6 +999,7 @@ function onHello(event) {
   cmdHistory = event.cmd_history || []; // personal command palette (#104)
   currentSession = event.session;
   offlineTouch(event.session); // MRU input to the mirror's eviction order
+  refreshOfflinePinUi();       // the toggle belongs to the chat now on screen
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
   localStorage.setItem("aish-session", event.session); // reconnects return here
   deepLinkSession(event.session);
@@ -5473,6 +5478,14 @@ function openConsole() {
       () => { if (consoleOpen) consoleReflowViewport(); }, () => {});
   }
   consoleTerm.focus();
+  // First console open of this page load: if an unsent dictation survived the
+  // reload (app update, PWA relaunch), bring the pad back with it — without
+  // starting the mic. Once consumed, later opens leave the pad closed unless
+  // you ask for it; the draft is still restored when you do open it.
+  if (padRestorePending) {
+    padRestorePending = false;
+    if (padDraft()) openConsolePad(false);
+  }
 }
 
 // Hide/detach the overlay — the console keeps running server-side (reopening
@@ -6196,7 +6209,7 @@ function renderDictation(interim) {
   if (dictHold) return; // mid-edit in the scratchpad: your keystrokes win
   const el = dictEl();
   el.value = dictJoin(dictateBase, dictJoin(dictJoin(dictateFinal, dictateSession), interim));
-  if (dictateTarget === "pad") resizePadInput();
+  if (dictateTarget === "pad") { resizePadInput(); savePadDraft(); } // no input event fires
   else resizeInput(); // note: never touch the "Ask aish" placeholder
   // Once the textarea hits its max height it scrolls internally — keep the
   // newest dictated words in view instead of stranding you at the top (#97).
@@ -6353,25 +6366,64 @@ function padOpen() {
   return !$("pty-pad").hidden;
 }
 
-function openConsolePad() {
+// [PAD-DRAFT-START]
+// Unsent pad text must survive the reloads the app performs on itself (a rev
+// mismatch after an update) and PWA relaunches — losing a long spoken sentence
+// to a restart is the same annoyance the history ring exists for. Mirrors the
+// composer's `aish-draft`: saved on every change (dictation writes the value
+// directly, which fires no input event, so renderDictation saves too), plus on
+// pagehide, and cleared once the text is actually sent.
+const PAD_DRAFT_KEY = "aish-pad-draft";
+let padRestorePending = true; // consumed by the first openConsole of this page load
+
+function savePadDraft() {
+  const text = $("pad-input").value;
+  try {
+    if (text) localStorage.setItem(PAD_DRAFT_KEY, text);
+    else localStorage.removeItem(PAD_DRAFT_KEY);
+  } catch { /* storage full / private mode */ }
+}
+
+function padDraft() {
+  try { return localStorage.getItem(PAD_DRAFT_KEY) || ""; } catch { return ""; }
+}
+
+function clearPadDraft() {
+  try { localStorage.removeItem(PAD_DRAFT_KEY); } catch { /* nothing to clear */ }
+}
+// [PAD-DRAFT-END]
+
+addEventListener("pagehide", savePadDraft);
+
+function openConsolePad(dictate = true) {
   if (!consoleOpen) return;
   const pad = $("pty-pad");
   const el = $("pad-input");
   if (!pad.hidden) { el.focus(); return; }
+  const draft = padDraft();
+  if (draft && !el.value) el.value = draft; // survived a reload / relaunch
   pad.hidden = false;
   $("pad-history-list").hidden = true;
   setDictLang();
   resizePadInput();
   // Focus inside the opening gesture so iOS raises the keyboard immediately.
   el.focus();
-  if (SpeechRec) startDictation("pad"); // the pad exists to be spoken into
+  // Restoring a draft does NOT auto-start the mic: you may want to send or edit
+  // what came back, and after a reload there is no gesture to unlock audio.
+  if (dictate && SpeechRec) startDictation("pad"); // the pad exists to be spoken into
+  else if (draft) showToast("restored your unsent dictation");
 }
 
-function closeConsolePad() {
+// Closing KEEPS the text (the draft is what you reopen into) — only sending it,
+// or emptying the box yourself, discards it. Losing a spoken sentence to a
+// mis-tapped ✕ would be the same failure this pad exists to prevent.
+function closeConsolePad(discard = false) {
   if (dictating && dictateTarget === "pad") stopDictation();
   dictateTarget = "composer";
   dictHold = false;
   clearTimeout(padEditTimer);
+  if (discard) clearPadDraft();
+  else savePadDraft(); // before the box is emptied below
   $("pad-input").value = "";
   $("pad-history-list").hidden = true;
   $("pty-pad").hidden = true;
@@ -6427,6 +6479,7 @@ function togglePadHistory() {
       $("pad-input").value = text; // load, never auto-send — you may want to edit
       box.hidden = true;
       resizePadInput();
+      savePadDraft();
       $("pad-input").focus();
     };
     box.appendChild(entry);
@@ -6442,7 +6495,7 @@ function padSend(withEnter = true) {
   if (!text) { showToast("nothing to send"); return; }
   padHistoryPush(text);
   consoleSend(withEnter ? `${text}\r` : text);
-  closeConsolePad();
+  closeConsolePad(true); // sent — discard the draft
 }
 // [PAD-SEND-END]
 
@@ -6455,6 +6508,7 @@ const PAD_EDIT_SETTLE = 700;
 
 function padManualEdit() {
   resizePadInput();
+  savePadDraft();
   if (!dictating || dictateTarget !== "pad") return;
   dictHold = true;
   clearTimeout(padEditTimer);
@@ -7068,6 +7122,7 @@ $("console-btn").onclick = () => toggleConsole(); // global Quake console (#148)
 
 $("connbar").onclick = () => reconnect();
 $("offlinebar").onclick = () => reconnect(); // same affordance, one bar (#165)
+$("offline-btn").onclick = () => toggleOfflinePin();
 
 // ---- session title menu -------------------------------------------------
 // The tappable title opens a small menu of session actions (iOS Messages
@@ -7079,10 +7134,6 @@ function openSessionMenu() {
   const clear = menu.querySelector('[data-act="clear-offline"]');
   if (clear) resetClearOffline(clear);
   $("wrap-state").textContent = document.body.classList.contains("wrap") ? "On" : "Off";
-  // "On" only for a deliberate pin. Everything is mirrored by default, so
-  // reporting "On" for merely-cached chats would make the toggle meaningless.
-  // Read from the store, never from the in-memory mirror — see offlineIsPinned.
-  refreshOfflinePinLabel();
   // Measure while shown-but-invisible so width is known before centering.
   menu.style.visibility = "hidden";
   menu.hidden = false;
@@ -7151,7 +7202,6 @@ $("session-menu").addEventListener("click", (e) => {
     case "export": exportSessionPdf(); break;
     case "workspace": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
     case "copylog": copyLogPath(); break;
-    case "offline": toggleOfflinePin(); break;
     case "reconnect": reconnect(); break;
   }
 });

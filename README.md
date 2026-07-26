@@ -286,9 +286,9 @@ recommended while travelling.
   server's list, not from what you happened to open here.
 - **Search works offline**, over message *contents* and not just titles, using
   the same ranking as online.
-- **Keep one forever.** Session menu → **Available offline** pins a chat so it
-  survives the storage sweep no matter how old it gets. **Clear offline copies**
-  in the same menu removes the local data.
+- **Keep one forever.** The ⤓ icon in the header pins the chat you're reading —
+  one tap, and it survives the storage sweep no matter how old it gets. Filled
+  means kept. **Clear offline copies** in the session menu removes local data.
 - **Sending is paused, deliberately.** Queuing a prompt to fire later would
   dispatch an agent that runs shell commands with nobody watching and an
   approval gate answered by someone who has moved on. Offline is read-only.

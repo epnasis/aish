@@ -85,29 +85,42 @@ function makeSandbox(store) {
     assert.strictEqual(await sandbox.offlineIsPinned("a.jsonl"), true);
   });
 
-  await check("the menu label is not wired to the in-memory mirror", async () => {
-    // Structural guard: whatever fills #offline-state must not read offlineMeta.
+  await check("the toggle's appearance is not wired to the in-memory mirror", async () => {
+    // Structural guard: whatever paints the toggle must not read offlineMeta.
     // This is the wiring that regressed, and a unit test on offlineIsPinned
     // alone would not catch someone reintroducing the shortcut at the call site.
-    const label = src.slice(
-      src.indexOf("function refreshOfflinePinLabel"),
+    const ui = src.slice(
+      src.indexOf("async function refreshOfflinePinUi"),
       src.indexOf("async function toggleOfflinePin")
     );
-    assert.ok(label, "refreshOfflinePinLabel not found");
+    assert.ok(ui, "refreshOfflinePinUi not found");
     assert.ok(
-      !/offlineMeta/.test(label),
-      "the pin label must not read offlineMeta — read the store via offlineIsPinned"
+      !/offlineMeta/.test(ui),
+      "the pin toggle must not read offlineMeta — read the store via offlineIsPinned"
     );
-    assert.ok(/offlineIsPinned/.test(label), "the pin label must go through offlineIsPinned");
-    // And openSessionMenu must delegate rather than compute the label itself.
-    const menu = src.slice(
-      src.indexOf("function openSessionMenu"),
-      src.indexOf("function openRenameBox")
+    assert.ok(/offlineIsPinned/.test(ui), "the pin toggle must go through offlineIsPinned");
+    // Until the store answers, the icon must claim NEITHER state: an "off"
+    // looking toggle on a pinned chat is what made a tap unpin it.
+    assert.ok(/unknown/.test(ui), "the toggle must have an unread/unknown state");
+  });
+
+  await check("the toggle is one tap, from the header", async () => {
+    // The whole point of the icon (#165 follow-up): reachable without opening
+    // a menu, and the old menu item is gone rather than a second source.
+    const html = fs.readFileSync(
+      path.join(__dirname, "..", "..", "aish", "static", "index.html"), "utf8"
+    );
+    assert.ok(/id="offline-btn"/.test(html), "header toggle missing from index.html");
+    assert.ok(
+      !/data-act="offline"/.test(html),
+      "the session-menu item should be gone — the icon replaces it"
     );
     assert.ok(
-      !/offline-state["']\)\.textContent\s*=/.test(menu),
-      "openSessionMenu must not set #offline-state directly"
+      /\$\("offline-btn"\)\.onclick\s*=\s*\(\)\s*=>\s*toggleOfflinePin\(\)/.test(src),
+      "the header toggle must be wired straight to toggleOfflinePin"
     );
+    // Clearing everything is a rare, destructive action and stays in the menu.
+    assert.ok(/data-act="clear-offline"/.test(html), "Clear offline copies should remain");
   });
 
   if (failures) {

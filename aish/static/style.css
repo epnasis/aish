@@ -164,6 +164,16 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .bar-btn.icon svg { width: 24px; height: 24px; display: block; }
 .bar-btn:active { opacity: 0.5; }
 
+/* Offline pin toggle (#165). Three states, and the third one matters: until
+   the store has actually been read we must not claim either answer, or the
+   user acts on a wrong icon — the bug that silently unpinned chats. */
+#offline-btn .pin-on { display: none; }
+#offline-btn.on .pin-off { display: none; }
+#offline-btn.on .pin-on { display: block; }
+#offline-btn { color: var(--dim); }        /* off: present but not shouting */
+#offline-btn.on { color: var(--blue); }    /* kept offline: filled, accented */
+#offline-btn.unknown { opacity: 0.35; }    /* state not read yet */
+
 /* back to the sessions list, with an attention badge */
 .nav-back {
   display: inline-flex;

@@ -936,7 +936,7 @@ controls: a "‹ Sessions" back button (top left, \
 with a badge when a background session needs attention) opens the sessions \
 drawer; the centered session title opens a menu (new chat, rename this chat, \
 switch model, change directory, line wrap, export the chat to PDF, keep this \
-chat available offline, clear offline copies, delete \
+chat, clear offline copies, delete \
 this chat, workspace & jobs); the compose pencil (top right) starts a new \
 chat. Every \
 finished answer has a row of chips beneath it — copy, export that one answer \
@@ -963,9 +963,11 @@ error.
 - The web UI WORKS OFFLINE for READING. Past conversations are mirrored to the \
 device automatically (newest first, including chats started on the user's other \
 devices), so with no connection the app still opens, past chats still open, and \
-SEARCH still works over their contents. The session menu's "Available offline" \
-pins a chat so it is never dropped from that local copy however old it gets, \
-and "Clear offline copies" removes the local data. SENDING is paused while \
+SEARCH still works over their contents. The download icon in the header (⤓, \
+beside the terminal and new-chat icons) is a ONE-TAP toggle that pins the chat \
+being read so it is never dropped from that local copy however old it gets — \
+filled means kept; the session menu's "Clear offline copies" removes the local \
+data. SENDING is paused while \
 offline — by design, not by accident: a prompt queued for later would run \
 commands with nobody there to approve them. If the user asks how to keep a \
 conversation for reference while travelling, tell them to pin it that way.
