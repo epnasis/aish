@@ -3779,6 +3779,28 @@ class TestTriggerEndpoint:
             assert origins[mine] == "user"
             assert origins[auto] == "email"
 
+    def test_cold_open_does_not_rewrite_provenance(self, app_env):
+        """Reopening a triggered session must leave its log alone. The origin
+        record is already on disk (open_session just parsed it back), and
+        re-writing it appended a record — plus the pending model one it flushed
+        — on every open, bumping the mtime that orders every recency list."""
+        client, _ = make_client(app_env, [model_says("triaged")], token="secret")
+        with client:
+            r = client.post("/trigger?token=secret",
+                            json={"prompt": "new mail", "origin": "email"})
+            name = r.json()["session"]
+            with connected(client, f"/ws?token=secret&session={name}") as (ws, _, _):
+                recv_until(ws, "done")
+            server = client.app.state.server
+            path = server.state_dir / name
+            before, mtime = path.read_bytes(), path.stat().st_mtime_ns
+
+            session, _history = server.open_session(path)  # the cold-open path
+
+            assert session.origin == "email"  # provenance survives the round trip
+            assert path.read_bytes() == before  # …without one byte written back
+            assert path.stat().st_mtime_ns == mtime
+
     def test_trigger_rejects_bad_token(self, app_env):
         client, _ = make_client(app_env, [model_says("x")], token="secret")
         with client:

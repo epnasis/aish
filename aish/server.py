@@ -3224,9 +3224,15 @@ def create_app(
                 except backends.BackendError:
                     pass
         logref.model(model_spec(agent))  # record what this session actually runs
-        if origin != "user":
-            # Persist provenance so a cold-reopened triggered session keeps its
-            # "Automated" grouping (#160); "user" is the default and needs none.
+        if origin != "user" and path is None:
+            # Persist provenance ONCE, when the session is created, so a
+            # cold-reopened triggered session keeps its "Automated" grouping
+            # (#160); "user" is the default and needs none. An existing path
+            # already carries the record — _parse read it back a few lines up —
+            # and re-writing it on every cold open appended a record (plus the
+            # pending model one it flushed) and bumped the file's mtime, which
+            # hoists the session to the top of every recency-ordered list.
+            # Opening a session must not count as activity in it.
             logref.origin(origin)
         session = Session(agent, logref, bridge, origin=origin, trigger_meta=trigger_meta)
         session.custom_title = custom_title  # a renamed chat keeps its name hot
