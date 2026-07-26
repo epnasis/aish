@@ -915,3 +915,59 @@ def test_title_drifted_ignores_short_words_that_carry_no_subject():
 def test_title_drifted_on_a_title_with_nothing_to_match():
     assert title_drifted("", "anything at all")
     assert title_drifted("a b c", "a b c")  # all words below the length floor
+
+
+# ---- parse cache (perf: session-list / pager scans) -------------------------
+
+
+def test_cached_parse_serves_unchanged_files_and_notices_appends(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "first"})
+    first = SessionLog._cached_parse(log.path)
+    assert SessionLog._cached_parse(log.path) is first  # same object = cache hit
+    log.message({"role": "assistant", "content": "reply"})
+    fresh = SessionLog._cached_parse(log.path)
+    assert fresh is not first
+    assert [m["content"] for m in fresh.messages] == ["first", "reply"]
+
+
+def test_load_entries_reflects_new_messages_and_renames(tmp_path):
+    """The entry cache must never serve a stale search vocabulary: appending a
+    message or renaming the chat changes the stat key, so the entry rebuilds."""
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "talk about xylophones"})
+    assert "xylophones" in SessionLog.load_entries(tmp_path)[0].content_cf
+    log.message({"role": "assistant", "content": "and now quokkas"})
+    log.set_title("Renamed chat")
+    entry = SessionLog.load_entries(tmp_path)[0]
+    assert "quokkas" in entry.content_cf
+    assert entry.info.title == "Renamed chat"
+
+
+def test_recency_scan_prunes_caches_for_deleted_sessions_only(tmp_path):
+    from aish import session as session_module
+
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "hello"})
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+    other = SessionLog.new(other_dir)
+    other.message({"role": "user", "content": "other dir"})
+    SessionLog.load_entries(tmp_path)
+    SessionLog.load_entries(other_dir)
+    assert str(log.path) in session_module._PARSE_CACHE
+    log.close()
+    log.path.unlink()
+    SessionLog._by_recency(tmp_path)
+    assert str(log.path) not in session_module._PARSE_CACHE
+    assert str(log.path) not in session_module._ENTRY_CACHE
+    # Another state dir's entries are not this dir's to prune.
+    assert str(other.path) in session_module._PARSE_CACHE
+
+
+def test_user_command_history_reflects_commands_run_after_a_cached_scan(tmp_path):
+    log = SessionLog.new(tmp_path)
+    _user_cmd(log, "ls")
+    assert SessionLog.user_command_history(tmp_path) == ["ls"]
+    _user_cmd(log, "git status")
+    assert set(SessionLog.user_command_history(tmp_path)) == {"ls", "git status"}

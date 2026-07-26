@@ -362,6 +362,7 @@ function setOfflineMode(value) {
 // a tunnel picks up exactly where it stopped, with no partial state to repair.
 
 const OFFLINE_SYNC_IDLE_MS = 5 * 60 * 1000; // periodic catch-up while connected
+const OFFLINE_SYNC_AFTER_DONE_MS = 15 * 1000; // debounce after a finished turn
 const OFFLINE_SYNC_GAP_MS = 40;             // breathing room between sessions
 
 let offlineSyncing = false;
@@ -448,6 +449,13 @@ async function offlineSyncOnce() {
     // has still fetched the sessions most likely to be wanted.
     for (const info of index.sessions) {
       if (offlineMode) break;
+      // The chat on screen is the one you least need mirrored right now, and
+      // the one whose refetch costs the most (its mtime moves every turn, so
+      // it re-syncs on every pass — a full server-side re-parse plus an
+      // IndexedDB rewrite that grows with the chat). It catches up when the
+      // app goes hidden (see visibilitychange), which is when the mirror is
+      // actually about to be needed.
+      if (info.name === currentSession && document.visibilityState === "visible") continue;
       const local = offlineMeta.get(info.name);
       // Second-resolution mtimes: only refetch on a strictly newer stamp, or
       // the current session would be refetched on every single pass.
@@ -773,7 +781,16 @@ function send(message) {
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) return;
+  if (document.hidden) {
+    // Putting the app away is the moment the mirror matters: the sync loop
+    // skips the on-screen chat while visible (it re-syncs every turn and the
+    // user is looking at the live copy), so catch it up now — locking the
+    // phone right after an answer still leaves that answer readable offline.
+    // Called directly, not via offlineSyncSoon: a hidden page's timers may
+    // never fire.
+    offlineSyncOnce();
+    return;
+  }
   // Safety net for the pager: a hidden page runs no transitions, so a slide
   // that was starting as the phone locked can be sitting at its start value —
   // i.e. the transcript parked off screen, which looks like an empty chat. If
@@ -885,10 +902,12 @@ function handle(event) {
     case "approval_resolved": onApprovalResolved(event); break;
     case "done":
       onDone(event);
-      // A finished turn is exactly what the mirror is missing; pull it now
-      // rather than at the next idle tick, so closing the laptop right after
-      // an answer still leaves that answer readable on the phone.
-      if (!replaying) offlineSyncSoon(2000);
+      // A finished turn is what the mirror is missing — but syncing right
+      // away competed with the user's next action for the main thread and the
+      // server (the chat on screen re-parses on every pass, its mtime always
+      // moves). A calm debounce covers the multi-turn case; putting the app
+      // away is covered separately by the sync-on-hidden in visibilitychange.
+      if (!replaying) offlineSyncSoon(OFFLINE_SYNC_AFTER_DONE_MS);
       break;
     case "history": onHistory(event.messages); break;
     case "session_list": renderSessions(event); break;

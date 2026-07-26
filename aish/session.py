@@ -62,6 +62,9 @@ DETAIL_MAX_CHARS = 6000
 DETAIL_TAIL_MESSAGES = 20
 RECALL_SESSIONS_TOP = 3  # sessions shown in the recall tool's fallback section
 _SESSION_NAME_RE = re.compile(r"^session-[0-9-]+\.jsonl$")
+# _derive_title's placeholder for a chat with no real user message — _peek
+# compares against it so such chats stay out of the pager (title None).
+_NO_USER_INPUT = "(no user input)"
 
 # Auto-titling (#175): how far a chat has to move before its title is worth a
 # model call. Words of 4+ characters carry the subject; if enough of the title's
@@ -80,6 +83,20 @@ class ParsedLog(NamedTuple):
     origin: str
     cwd: str
     title_auto: bool
+    user_cmds: list[str]  # successful user-direct ! commands, in file order
+
+
+# Stat-keyed caches for the read-only listing paths (drawer, pager, offline
+# index, command palette): those re-scan the whole state dir on every call, and
+# with hundreds of session logs the repeated JSONL parsing was the bulk of a
+# session-switch's server time — GIL-holding work that also slowed the event
+# loop. A (mtime_ns, size) key identifies a version of an append-only log
+# without reading it, so an unchanged file costs one stat. The caches serve
+# SHARED objects, so only paths that never mutate what they read may use them —
+# resume paths hand messages to an Agent that trims tool outputs IN PLACE
+# (_trim_tool_message), and those stay on the raw `_parse` by design.
+_PARSE_CACHE: dict[str, tuple[tuple[int, int], "ParsedLog"]] = {}
+_ENTRY_CACHE: dict[str, tuple[tuple[int, int], "SessionEntry | None"]] = {}
 
 
 def _content_words(text: str) -> set[str]:
@@ -190,6 +207,8 @@ class SessionLog:
         title_auto = False
         origin = "user"
         cwd = ""
+        user_cmds: list[str] = []
+        pending_cmd: str | None = None  # a user ! command awaiting its exit status
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 record = json.loads(line)
@@ -209,10 +228,47 @@ class SessionLog:
                 origin = record.get("origin") or origin
             elif kind == "cwd":
                 cwd = record.get("cwd") or cwd
+            elif kind == "command":
+                # Any command record resets the pending one, so a model command
+                # can never inherit a preceding user command's exit status.
+                pending_cmd = (
+                    record.get("command")
+                    if record.get("decision") == "user-direct"
+                    else None
+                )
+            elif kind == "cmd_end" and pending_cmd is not None:
+                if record.get("status") == "exit" and record.get("exit_code") == 0:
+                    user_cmds.append(pending_cmd)
+                pending_cmd = None
             elif kind == "message" and record.get("role") != "system":
                 keys = ("role", "content", "tool_name", "images", "documents")
                 messages.append({k: v for k, v in record.items() if k in keys})
-        return ParsedLog(messages, model, custom_title, origin, cwd, title_auto)
+        return ParsedLog(
+            messages, model, custom_title, origin, cwd, title_auto, user_cmds
+        )
+
+    @staticmethod
+    def _cached_parse(path: Path) -> ParsedLog:
+        """`_parse` behind the stat-keyed cache — for READ-ONLY consumers only
+        (the returned object is shared; see the cache comment above ParsedLog).
+        A stat/read race can at worst cache newer content under an older key,
+        which the next stat corrects — it can never serve content older than
+        its key claims."""
+        key = None
+        try:
+            stat = path.stat()
+            key = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            pass
+        spath = str(path)
+        if key is not None:
+            hit = _PARSE_CACHE.get(spath)
+            if hit is not None and hit[0] == key:
+                return hit[1]
+        parsed = SessionLog._parse(path)
+        if key is not None:
+            _PARSE_CACHE[spath] = (key, parsed)
+        return parsed
 
     @staticmethod
     def load_messages(path: Path) -> list[dict]:
@@ -582,7 +638,7 @@ class SessionLog:
                     continue
                 bang = _BANG_RE.match(content)
                 return f"! {bang.group(1)}" if bang else content
-        return "(no user input)"
+        return _NO_USER_INPUT
 
     @staticmethod
     def _derive_snippet(messages: list[dict]) -> str:
@@ -613,41 +669,21 @@ class SessionLog:
 
     @staticmethod
     def _peek(path: Path) -> tuple[str | None, str]:
-        """(title, origin) per session for the drawer/pager, without loading the
-        whole conversation. A custom title (latest `kind:"title"` record) wins;
-        else the first user message. A None title = no user input yet and never
-        renamed (an empty chat). The scan reads the whole file because a title
-        record is appended at the end, but the log is small and this stays one
-        pass — the origin record rides along for free."""
-        first_user: str | None = None
-        custom: str | None = None
-        origin = "user"
+        """(title, origin) per session for the drawer/pager. A custom title
+        (latest `kind:"title"` record) wins; else the first user message. A
+        None title = no user input yet and never renamed (an empty chat).
+        Served from the parse cache, so an unchanged log costs one stat."""
         try:
-            with path.open(encoding="utf-8") as fh:
-                for line in fh:
-                    try:
-                        record = json.loads(line)
-                    except ValueError:
-                        continue
-                    kind = record.get("kind")
-                    if kind == "title":
-                        title = (record.get("title") or "").strip()
-                        if title:
-                            custom = title
-                    elif kind == "origin":
-                        origin = (record.get("origin") or "user").strip() or "user"
-                    elif (
-                        first_user is None
-                        and kind == "message"
-                        and record.get("role") == "user"
-                    ):
-                        first_user = SessionLog._derive_title([record])
+            parsed = SessionLog._cached_parse(path)
         except OSError:
-            return None, origin
-        title = custom if custom is not None else first_user
+            return None, "user"
+        title = parsed.title
+        if title is None:
+            derived = SessionLog._derive_title(parsed.messages)
+            title = None if derived == _NO_USER_INPUT else derived
         return (
             SessionLog._truncate_title(title) if title is not None else None,
-            origin,
+            parsed.origin,
         )
 
     @staticmethod
@@ -666,7 +702,17 @@ class SessionLog:
             except OSError:
                 continue
         stamped.sort(reverse=True)
-        return [path for _, path in stamped]
+        paths = [path for _, path in stamped]
+        # Deleted sessions leave the parse caches with the same sweep that
+        # notices them gone. Keys from OTHER state dirs (tests use several)
+        # are not this dir's to prune.
+        live = {str(path) for path in paths}
+        for cache in (_PARSE_CACHE, _ENTRY_CACHE):
+            for spath in [
+                s for s in cache if s not in live and Path(s).parent == state_dir
+            ]:
+                cache.pop(spath, None)
+        return paths
 
     @staticmethod
     def pager_titles(state_dir: Path, limit: int = 30) -> list[tuple[str, str, str, float]]:
@@ -736,7 +782,7 @@ class SessionLog:
     @staticmethod
     def info(path: Path) -> SessionInfo | None:
         """Summary line for a session picker; None for empty sessions."""
-        parsed = SessionLog._parse(path)
+        parsed = SessionLog._cached_parse(path)
         if not parsed.messages:
             return None
         return SessionLog._info_from(
@@ -758,18 +804,25 @@ class SessionLog:
         return infos
 
     @staticmethod
-    def load_entries(state_dir: Path, exclude: set | None = None) -> list["SessionEntry"]:
-        """Searchable sessions by last interaction, newest first, read from
-        disk once — so a live picker can re-rank on every keystroke without
-        touching files."""
-        exclude = exclude or set()
-        entries = []
-        for path in SessionLog._by_recency(state_dir):
-            if path in exclude:
-                continue
-            messages, model, custom_title, origin, cwd, _ = SessionLog._parse(path)
-            if not messages:
-                continue
+    def _cached_entry(path: Path) -> "SessionEntry | None":
+        """A session's SessionEntry (None for empty sessions), cached by the
+        same stat key as the parse — building the search vocabulary casefolds
+        every message, which is the expensive half of `load_entries`."""
+        key = None
+        try:
+            stat = path.stat()
+            key = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            pass
+        spath = str(path)
+        if key is not None:
+            hit = _ENTRY_CACHE.get(spath)
+            if hit is not None and hit[0] == key:
+                return hit[1]
+        parsed = SessionLog._cached_parse(path)
+        entry: SessionEntry | None = None
+        if parsed.messages:
+            messages, model = parsed.messages, parsed.model
             content_cf = " ".join(
                 " ".join((m.get("content") or "").split()) for m in messages
             ).casefold()
@@ -779,20 +832,35 @@ class SessionLog:
             model_words = frozenset(re.split(r"[^a-z0-9.]+", model_cf)) - {""}
             # A renamed chat is findable by its custom name, so the searchable
             # title is the effective one (custom overrides the derived).
-            title_cf = (custom_title or SessionLog._derive_title(messages)).casefold()
-            entries.append(
-                SessionEntry(
-                    info=SessionLog._info_from(
-                        path, messages, model, custom_title, origin, cwd
-                    ),
-                    title_cf=title_cf,
-                    content_cf=content_cf,
-                    words=(
-                        frozenset(w.strip(_PUNCT) for w in content_cf.split()) - {""}
-                    ) | model_words,
-                    model_cf=model_cf,
-                )
+            title_cf = (parsed.title or SessionLog._derive_title(messages)).casefold()
+            entry = SessionEntry(
+                info=SessionLog._info_from(
+                    path, messages, model, parsed.title, parsed.origin, parsed.cwd
+                ),
+                title_cf=title_cf,
+                content_cf=content_cf,
+                words=(
+                    frozenset(w.strip(_PUNCT) for w in content_cf.split()) - {""}
+                ) | model_words,
+                model_cf=model_cf,
             )
+        if key is not None:
+            _ENTRY_CACHE[spath] = (key, entry)
+        return entry
+
+    @staticmethod
+    def load_entries(state_dir: Path, exclude: set | None = None) -> list["SessionEntry"]:
+        """Searchable sessions by last interaction, newest first, read from
+        disk once — so a live picker can re-rank on every keystroke without
+        touching files."""
+        exclude = exclude or set()
+        entries = []
+        for path in SessionLog._by_recency(state_dir):
+            if path in exclude:
+                continue
+            entry = SessionLog._cached_entry(path)
+            if entry is not None:
+                entries.append(entry)
         return entries
 
     @staticmethod
@@ -813,34 +881,18 @@ class SessionLog:
         last_seen: dict[str, int] = {}
         order = 0  # monotonic across the whole scan; higher = more recent run
         # Oldest→newest over recent sessions so a later run of the same command
-        # wins the recency tie-break; the scan is bounded to stay mtime-cheap.
+        # wins the recency tie-break. The command/exit pairing happens in
+        # `_parse` (ParsedLog.user_cmds), so an unchanged log costs one stat.
         recent = SessionLog._by_recency(state_dir)[:USER_HISTORY_SESSIONS]
         for path in reversed(recent):
-            pending: str | None = None  # a user command awaiting its exit status
             try:
-                lines = path.read_text(encoding="utf-8").splitlines()
+                cmds = SessionLog._cached_parse(path).user_cmds
             except OSError:
                 continue
-            for line in lines:
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                kind = record.get("kind")
-                if kind == "command":
-                    # Any command record resets the pending one, so a model
-                    # command can never inherit a preceding user command's exit.
-                    pending = (
-                        record.get("command")
-                        if record.get("decision") == "user-direct"
-                        else None
-                    )
-                elif kind == "cmd_end" and pending is not None:
-                    if record.get("status") == "exit" and record.get("exit_code") == 0:
-                        counts[pending] = counts.get(pending, 0) + 1
-                        last_seen[pending] = order
-                        order += 1
-                    pending = None
+            for cmd in cmds:
+                counts[cmd] = counts.get(cmd, 0) + 1
+                last_seen[cmd] = order
+                order += 1
         ranked = sorted(
             counts, key=lambda cmd: (counts[cmd], last_seen[cmd]), reverse=True
         )
