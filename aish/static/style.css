@@ -2119,8 +2119,22 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
 .screen-title-row { display: flex; align-items: flex-end; justify-content: space-between; }
 .screen-title { font-size: 36.8px; font-weight: 700; letter-spacing: -0.5px; color: var(--fg); }
+/* Search is docked at the BOTTOM of the screen, following the iOS 15+ Safari
+   model: the field lives where the thumb already is, and the list above it
+   stays the whole screen. */
+.screen-searchbar {
+  flex: none;
+  padding: 7px 14px calc(7px + env(safe-area-inset-bottom));
+  background: var(--bar-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-top: 0.5px solid var(--sep);
+}
+/* The keyboard covers the home-indicator inset, so keeping it would render as
+   a dead strip between the field and the keyboard (mirrors #composer). */
+body.kb-open .screen-searchbar { padding-bottom: 7px; }
 .screen-search {
-  display: flex; align-items: center; gap: 7px; margin-top: 10px;
+  display: flex; align-items: center; gap: 7px;
   background: var(--input-bg2); border-radius: 11px; padding: 6px 11px;
 }
 .screen-search svg { width: 16px; height: 16px; flex: none; color: var(--dim); }
@@ -2131,27 +2145,25 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .screen-search input::placeholder { color: var(--dim); }
 .screen .sheet-list { flex: 1; padding: 0 6px; }
 
-/* ---- Sessions bottom tab bar (Recent / Automated) ------------------------
-   A thumb-reachable segmented control docked at the bottom of the Sessions
-   screen; horizontal swipe on the list switches between the same two tabs. */
+/* ---- Sessions tabs (Recent / Automated) ---------------------------------
+   An iOS segmented control under the screen title; horizontal swipe on the
+   list switches between the same two tabs. */
 .seg-tabs {
-  flex: none;
-  display: flex; gap: 4px;
-  padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
-  background: var(--bar-bg);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  border-top: 0.5px solid var(--sep);
+  display: flex; gap: 2px; margin-top: 10px;
+  padding: 2px; border-radius: 10px; background: var(--row-sel-bg);
 }
 .seg-tabs[hidden] { display: none; }
 .seg-tab {
   flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px;
-  padding: 9px 10px; border: none; border-radius: 11px;
+  padding: 6px 10px; border: none; border-radius: 8px;
   background: transparent; color: var(--dim);
   font-size: 15.5px; font-weight: 600; cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
-.seg-tab[aria-selected="true"] { background: var(--bg-elev2); color: var(--fg); }
+.seg-tab[aria-selected="true"] {
+  background: var(--sep2); color: var(--fg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.32);
+}
 .seg-tab:active { background: var(--bg-elev2); }
 .seg-counts { display: flex; align-items: center; gap: 4px; }
 .seg-count {
