@@ -226,6 +226,17 @@ thousands of entries without bloating the context.
 4. **Audit trail.** Every command and decision (approved / denied / edited /
    auto) is logged with the session in `~/.local/state/aish/`.
 
+> **Note on what the logs contain.** Session logs are **plaintext JSONL**, and
+> they record command *output* as well as commands — so anything a command
+> printed is in them, including a token an env dump or a misfired `cat` put on
+> screen. The same goes for what `/learn` distills into `~/.config/aish/`. They
+> are yours alone (owner-readable, never uploaded), but they are not encrypted
+> and they are exactly the kind of thing a `~/.config` backup repo sweeps up.
+> If you work with credentials, either point that backup somewhere private or
+> prune the state directory periodically. Secrets aish holds *itself* are not
+> affected: `aish secret` keeps those in the macOS Keychain precisely so they
+> can't land in a file.
+
 ---
 
 ## The web UI
