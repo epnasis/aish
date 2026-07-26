@@ -4,6 +4,7 @@ numbered-menu selection, and the streaming chip-stripping filter."""
 from aish.cli import (
     ChipStream,
     parse_reply_chips,
+    replay_history,
     resolve_chip_selection,
 )
 
@@ -95,3 +96,46 @@ def test_chip_stream_passes_plain_text_through():
     stream.feed(text)
     stream.close()
     assert "".join(out) == text
+
+
+# --- resume must offer the final answer's chips, like a live turn (#167) ---
+
+
+def test_replay_history_returns_final_answer_chips(capsys):
+    history = [
+        {"role": "user", "content": "deploy?"},
+        {
+            "role": "assistant",
+            "content": (
+                "Ready to deploy?\n\n"
+                "[Yes, deploy](aish-reply://yes, deploy now)\n"
+                "[No, hold off](aish-reply://no, hold off)"
+            ),
+        },
+    ]
+    pending = replay_history(history)
+    assert pending == [("Yes, deploy", "yes, deploy now"), ("No, hold off", "no, hold off")]
+    out = capsys.readouterr().out
+    # the raw chip syntax is stripped from the replayed body...
+    assert "aish-reply://" not in out
+    assert "[Yes, deploy]" not in out
+    # ...and the numbered menu is shown so the user can pick on resume
+    assert "Ready to deploy?" in out
+    assert "1." in out and "Yes, deploy" in out
+
+
+def test_replay_history_trailing_user_turn_consumes_chips(capsys):
+    history = [
+        {"role": "assistant", "content": "Pick one:\n[A](aish-reply://a)\n[B](aish-reply://b)"},
+        {"role": "user", "content": "actually, tell me more"},
+    ]
+    # the user already answered past the chips — nothing is pending on resume
+    assert replay_history(history) == []
+
+
+def test_replay_history_answer_without_chips_has_no_pending(capsys):
+    history = [
+        {"role": "user", "content": "status?"},
+        {"role": "assistant", "content": "All done, nothing pending."},
+    ]
+    assert replay_history(history) == []

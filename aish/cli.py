@@ -677,22 +677,31 @@ def print_answer_images(agent, answer: str) -> None:
         term_image.emit(path, protocol)
 
 
-def replay_history(messages: list[dict]) -> None:
-    """Print a loaded conversation so the user sees what they resumed."""
+def replay_history(messages: list[dict]) -> list[tuple[str, str]]:
+    """Print a loaded conversation so the user sees what they resumed, and
+    return the quick-reply chips still pending from the final answer (#167):
+    a resumed session must offer the last turn's chips just like a live one,
+    and its chip link syntax is stripped from the printed body, never shown raw.
+    A trailing user turn consumes the chips, so it resets them to empty."""
+    pending: list[tuple[str, str]] = []
     for message in messages:
         role = message.get("role")
         content = (message.get("content") or "").strip()
         if not content:
             continue
         if role == "user":
+            pending = []
             print(f"\n{BOLD}❯{RESET} {content}")
         elif role == "assistant":
+            content, pending = parse_reply_chips(content)
             print(f"{GREEN}{content}{RESET}")
         else:
             lines = content.splitlines()
             print(DIM + "\n".join(f"  {line}" for line in lines[:REPLAY_TOOL_LINES]) + RESET)
             if len(lines) > REPLAY_TOOL_LINES:
                 print(f"{DIM}  … ({len(lines) - REPLAY_TOOL_LINES} more lines){RESET}")
+    print_chip_menu(pending)
+    return pending
 
 
 CATALOG_TTL = datetime.timedelta(hours=24)
@@ -1056,9 +1065,12 @@ def handle_slash(
     state_dir: Path,
     resumed: set | None = None,
     config_path: Path | None = None,
+    chips_out: list[tuple[str, str]] | None = None,
 ) -> str:
     """Dispatch a /command; returns 'exit' or 'handled'. Unambiguous
-    prefixes resolve (/res → /resume); ambiguous ones list the options."""
+    prefixes resolve (/res → /resume); ambiguous ones list the options.
+    A /resume fills chips_out with the resumed session's pending quick-reply
+    chips (#167) so the REPL loop can offer them, like a live answer."""
     resumed = resumed if resumed is not None else set()
     command = task.split()[0].lower()
     if command not in SLASH_COMMANDS:
@@ -1089,7 +1101,9 @@ def handle_slash(
         for message in messages:  # keep the current session file self-contained
             logref.message(message)
         print(f"{DIM}resumed {len(messages)} messages from {selected.path.name}:{RESET}")
-        replay_history(messages)
+        chips = replay_history(messages)
+        if chips_out is not None:
+            chips_out[:] = chips
         return "handled"
     if command == "/delete":
         parts = task.split(maxsplit=1)
@@ -1626,6 +1640,7 @@ def main() -> int:
 
     history: list[dict] = []
     resumed: set[Path] = set()
+    resumed_chips: list[tuple[str, str]] = []  # pending chips from a resumed final answer (#167)
     log: SessionLog | None = None
     if args.resume:
         chosen: Path | None = None
@@ -1787,7 +1802,7 @@ def main() -> int:
         agent.restore_workspace(restored_cwd, trusted)
         print(f"{DIM}resumed {len(history)} messages from {log.path.name}"
               f" · model {args.model} · /help:{RESET}")
-        replay_history(history)
+        resumed_chips = replay_history(history)
 
     if args.task:
         try:
@@ -1806,7 +1821,8 @@ def main() -> int:
 
     if not history:  # a resumed session continues where it was — no big banner
         print(banner(f"model {args.model} · session {log.path.name} · /help · Ctrl-D quits"))
-    pending_chips: list[tuple[str, str]] = []  # quick-reply menu from the last answer
+    # quick-reply menu from the last answer; seeded from a resumed final answer (#167)
+    pending_chips: list[tuple[str, str]] = resumed_chips
     while True:
         try:
             task = read_task(agent.cwd).strip()
@@ -1835,7 +1851,8 @@ def main() -> int:
             expanded = parse_learn(task, lessons_path) or parse_feedback(task)
             if expanded is None:
                 if handle_slash(
-                    task, agent, logref, state_dir, resumed, config_path=config_path
+                    task, agent, logref, state_dir, resumed,
+                    config_path=config_path, chips_out=pending_chips,
                 ) == "exit":
                     return 0
                 continue
