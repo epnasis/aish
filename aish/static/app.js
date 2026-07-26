@@ -1257,11 +1257,8 @@ function addSources(sources) {
   summary.textContent = `Sources (${sources.length})`;
   details.appendChild(summary);
   for (const source of sources) {
-    const row = document.createElement("a");
+    const row = externalAnchor(source.url);
     row.className = "source-row";
-    row.href = source.url;
-    row.target = "_blank";
-    row.rel = "noopener noreferrer";
     const name = document.createElement("span");
     name.className = "source-name";
     let host = source.url;
@@ -2709,17 +2706,44 @@ function renderMarkdown(text) {
       i++;
       continue;
     }
-    if (/^(\s*)([-*+]|\d+[.)])\s+/.test(line)) {
+    if (/^(\s*)(?:[-*+]|\d+[.)])\s+/.test(line)) {
       flush();
-      const ordered = /^\s*\d/.test(line);
+      const opener = line.match(/^(\s*)(?:[-*+]|(\d+)[.)])\s+/);
+      const baseIndent = opener[1].length;
+      const ordered = opener[2] !== undefined;
       const list = document.createElement(ordered ? "ol" : "ul");
+      // An ordered list that doesn't start at 1 keeps its true first number via
+      // the start attribute, so a fragment picking up after a nested block never
+      // silently renumbers from 1 (#166).
+      if (ordered && parseInt(opener[2], 10) !== 1) list.setAttribute("start", opener[2]);
+      const leadOf = (s) => s.match(/^\s*/)[0].length;
       while (i < lines.length) {
-        const item = lines[i].match(/^\s*(?:[-*+]|\d+[.)])\s+(.*)$/);
-        if (!item) break;
-        const li = document.createElement("li");
-        li.appendChild(inlineMd(item[1]));
-        list.appendChild(li);
+        const itemLine = lines[i];
+        const m = itemLine.match(/^(\s*)(?:[-*+]|\d+[.)])(\s+)(.*)$/);
+        if (!m || m[1].length !== baseIndent) break; // not an item at this level
+        const contentCol = itemLine.length - m[3].length; // column the text starts at
+        const parts = [m[3]];
         i++;
+        // Absorb the item's continuation — blank lines plus lines indented under
+        // the marker (a nested paragraph, code block, or sub-list) — instead of
+        // breaking out of the list and restarting numbering (#166). Blank lines
+        // are buffered and kept only when more indented content follows them.
+        let pending = [];
+        while (i < lines.length) {
+          const cont = lines[i];
+          if (cont.trim() === "") { pending.push(""); i++; continue; }
+          if (leadOf(cont) <= baseIndent) break; // a sibling item or dedented text ends it
+          parts.push(...pending, cont.slice(Math.min(contentCol, leadOf(cont))));
+          pending = [];
+          i++;
+        }
+        const li = document.createElement("li");
+        if (parts.length === 1) {
+          li.appendChild(inlineMd(parts[0])); // flat item — identical to before
+        } else {
+          li.appendChild(renderMarkdown(parts.join("\n"))); // nested blocks under the item
+        }
+        list.appendChild(li);
       }
       frag.appendChild(list);
       continue;
@@ -2816,6 +2840,20 @@ const INLINE_RE = new RegExp(
   "|!\\[([^\\]\\n]*)\\]\\(([^)\\s]+)\\)"
 );
 
+// Every external http(s) link the transcript renders opens in the user's real
+// browser, not an in-app webview (#165): target=_blank hands the URL to the OS,
+// and rel="noopener noreferrer" severs the opener/referrer channel. Routing all
+// transcript anchors through this one helper keeps the invariant structural.
+// The in-app aish-*:// schemes (quick replies) render as buttons, never anchors,
+// so they keep their own click handling and are never given target=_blank.
+function externalAnchor(href) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  return a;
+}
+
 // Images (#9): ![alt](https://…) embeds a web image; ![alt](/abs/path.png)
 // is rewritten to the token-gated /file endpoint, which only serves image
 // files inside the active session's roots. Any other scheme stays as the
@@ -2831,10 +2869,7 @@ function inlineImage(alt, target) {
   } else {
     return document.createTextNode(`![${alt}](${target})`);
   }
-  const link = document.createElement("a");
-  link.href = src;
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
+  const link = externalAnchor(src);
   link.className = "img-link";
   const img = document.createElement("img");
   img.className = "md-img";
@@ -3133,10 +3168,7 @@ function inlineMd(text) {
       if (embed) {
         frag.appendChild(embed);
       } else {
-        const link = document.createElement("a");
-        link.href = match[6];
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
+        const link = externalAnchor(match[6]);
         link.appendChild(inlineMd(match[5]));
         frag.appendChild(link);
       }
