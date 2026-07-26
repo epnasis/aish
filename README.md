@@ -102,7 +102,8 @@ exact query and URL; answers cite the pages they read.
 
 Replies stream token-by-token and render as markdown — tables, code, links,
 inline images the model generates. When it asks a follow-up, tappable
-quick-reply chips appear.
+quick-reply chips appear — in the terminal they show as a numbered menu you
+pick from by typing the option's number.
 
 ![A finished answer with the exchange rate, sources, and quick-reply follow-up chips](docs/images/answer.png)
 
