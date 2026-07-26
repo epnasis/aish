@@ -6855,12 +6855,45 @@ function offlinePagerPages() {
     .map((meta) => ({ name: meta.name, title: meta.title, origin: meta.origin }));
 }
 
-function pagerPages() {
+function pagerSource() {
   if (!offlineMode && pagerSessions.length) return pagerSessions;
   const cached = offlinePagerPages();
   // Offline with an empty mirror (nothing synced yet): fall back rather than
   // returning nothing, so behaviour is never worse than before.
   return cached.length ? cached : pagerSessions;
+}
+
+// [DECK-START]
+// The swipe carousel navigates a STABLE "deck" order, decoupled from the
+// server's MRU ordering the drawer uses (#169). The MRU list (`hello.pager`) is
+// re-sent on every hello — a reply, a switch, a new chat — so deriving the swipe
+// order straight from it reshuffled the deck under the user: a chat that was
+// "two swipes left" jumped elsewhere the moment you replied to it, breaking the
+// spatial memory the gesture depends on. Instead each pager refresh is
+// RECONCILED into a persistent order: chats already in the deck keep their slot
+// (their title/origin still refresh from the live source at render time), chats
+// new to the deck — a fresh chat, or one opened from the history drawer — append
+// to the END (the browser-tab model, so existing positions never shift), and
+// chats that dropped out of the pager window fall out of the deck. The drawer is
+// untouched: `renderSessions` renders the server's MRU `session_list` verbatim.
+let deckOrder = []; // session names, in stable deck order (oldest-joined first)
+
+function reconcileDeck(order, pages) {
+  const present = new Set(pages.map((p) => p.name));
+  const deck = order.filter((name) => present.has(name)); // keep order, drop gone chats
+  const known = new Set(deck);
+  for (const page of pages) {
+    if (!known.has(page.name)) { deck.push(page.name); known.add(page.name); } // append newcomers
+  }
+  return deck;
+}
+// [DECK-END]
+
+function pagerPages() {
+  const source = pagerSource();
+  deckOrder = reconcileDeck(deckOrder, source);
+  const byName = new Map(source.map((p) => [p.name, p]));
+  return deckOrder.map((name) => byName.get(name)).filter(Boolean);
 }
 // [PAGER-SOURCE-END]
 
