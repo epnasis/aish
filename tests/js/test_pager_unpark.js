@@ -62,6 +62,7 @@ function world({ visible = false } = {}) {
     clientWidth: 1100,
   };
   const timers = [];
+  const rafs = []; // rAF callbacks — hostile mode never fires them
   const sandbox = {
     messagesEl: el,
     swipeInFrom: 0,
@@ -69,12 +70,14 @@ function world({ visible = false } = {}) {
     getComputedStyle: () => ({ transform: el._computed }),
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     clearTimeout: (id) => { if (id) timers[id - 1] = null; },
+    requestAnimationFrame: (fn) => { rafs.push(fn); return rafs.length; },
   };
   vm.createContext(sandbox);
   vm.runInContext(extract("// [UNPARK-START]", "// [UNPARK-END]"), sandbox);
   // Settling a transition is what a VISIBLE page does; hostile mode never calls it.
   sandbox._settle = () => { el._computed = el.style.transform || "none"; };
   sandbox._timers = timers;
+  sandbox._rafs = rafs;
   sandbox._el = el;
   return sandbox;
 }
@@ -94,15 +97,51 @@ const AT_REST = (w) => !w.transcriptDisplaced();
   ok("hidden landing clears swipeInFrom", w.swipeInFrom === 0);
 }
 
-// 2. commit → landing replay, VISIBLE: it animates, and settling lands it.
+// 2. commit → landing replay, VISIBLE: the landing is STAGED static at the
+//    entry side first (the caller builds content and sets scrollTop while
+//    NOTHING transitions — moving scrollTop mid-transition left iOS painting
+//    blank tiles), the slide starts on the next frame, and a settle timer
+//    owns the resting state whatever became of the animation.
 {
   const w = world({ visible: true });
   w.parkTranscript(1, 1100);
   w.reconcilePager(1);
-  ok("visible landing animates", w._el.style.transition === "transform 0.18s ease-out");
-  ok("visible landing forces a reflow so the animation has a start point", w._el._reflows >= 1);
+  ok("landing stages static at the entry side — no transition running",
+    w._el.style.transition === "none" && w.transcriptDisplaced());
+  ok("the slide is deferred to the next frame", w._rafs.length === 1);
+  w._rafs[0]();
+  ok("the next frame starts the slide", w._el.style.transition === "transform 0.18s ease-out");
   w._settle();
   ok("visible landing ends at rest once settled", AT_REST(w));
+  // The settle timer is the guarantee the animation is not: firing it after a
+  // clean slide is a no-op that leaves the transcript at rest.
+  const settle = w._timers.filter(Boolean).find((t) => t.ms <= 500);
+  ok("a landing arms a settle", Boolean(settle));
+  settle.fn();
+  ok("settle after a clean slide keeps the rest position", AT_REST(w));
+}
+
+// 2b. The slide's frame NEVER fires (page hidden mid-landing): the settle
+//     alone must still put the staged transcript back on screen.
+{
+  const w = world({ visible: true });
+  w.parkTranscript(1, 1100);
+  w.reconcilePager(1);
+  ok("staged off screen while waiting on a frame", w.transcriptDisplaced());
+  const settle = w._timers.filter(Boolean).find((t) => t.ms <= 500);
+  settle.fn(); // the rAF never ran — only the settle can recover
+  ok("settle recovers a landing whose frame never fired", AT_REST(w));
+}
+
+// 2c. A NEWER committed swipe owns the transform: a stale settle stands down.
+{
+  const w = world({ visible: true });
+  w.parkTranscript(1, 1100);
+  w.reconcilePager(1);
+  const settle = w._timers.filter(Boolean).find((t) => t.ms <= 500);
+  w.parkTranscript(-1, 1100); // user swiped again before the settle fired
+  settle.fn();
+  ok("a stale settle never unparks a newly-committed swipe", w.transcriptDisplaced());
 }
 
 // 3. commit → socket close: no landing is coming, recover now.
@@ -128,12 +167,14 @@ const AT_REST = (w) => !w.transcriptDisplaced();
 }
 
 // 5. A landing that DOES arrive must disarm the deadline, or a later firing
-//    would yank a legitimately animating page.
+//    would yank a legitimately animating page. (The short settle it arms
+//    instead is not a deadline — firing it after a clean slide is a no-op.)
 {
   const w = world({ visible: true });
   w.parkTranscript(-1, 1100);
   w.reconcilePager(-1);
-  ok("a landing disarms the deadline", w._timers.filter(Boolean).length === 0);
+  ok("a landing disarms the deadline",
+    w._timers.filter(Boolean).every((t) => t.ms <= 500));
 }
 
 // 6. Re-parking replaces the old deadline rather than stacking them.

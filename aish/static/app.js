@@ -517,6 +517,10 @@ async function openCachedSession(name) {
   }
   offlineViewing = true;
   currentSession = name;
+  // A switch with no hello resets the fingerprint itself (same rule as the
+  // prefetch paint): the previous chat's fp must never "noop" this replay.
+  viewFp = "";
+  viewDirty = true;
   setTitle(cached.meta.title || "aish");
   try { localStorage.setItem("aish-session", name); } catch { /* private mode */ }
   deepLinkSession(name); // so the reconnect lands on the chat being read
@@ -1248,17 +1252,7 @@ function setRolePill(active) {
 }
 
 function onReplay(event) {
-  if (swipeInFrom) {
-    // This replay is the landing half of a committed swipe: enter from the
-    // side the old transcript left toward, completing the pager illusion.
-    //
-    // reconcilePager owns the resting position and the deadline it clears — see
-    // its comment for why nothing here may depend on the animation running.
-    reconcilePager(swipeInFrom);
-  } else {
-    unparkTranscript();
-  }
-  // [VIEWCACHE] Decide the landing before touching anything (see
+  // [VIEWCACHE] Decide the landing BEFORE touching any transform (see
   // replayLanding for the three outcomes and why each is safe).
   const fp = replayFp(event);
   const landing = replayLanding({
@@ -1273,8 +1267,25 @@ function onReplay(event) {
     // unlock) and a prefetched swipe already painted. Keep the DOM, the
     // reading position, and even a read-aloud in progress: rebuilding here is
     // what made every app-open jump to the bottom and re-render the world.
+    // Deliberately NO unpark: after a prefetched swipe this replay arrives
+    // MID entry animation, and unparking would jump-cut it — the reconciler's
+    // settle owns the resting position.
+    if (swipeInFrom) reconcilePager(swipeInFrom);
     viewFp = fp;
     return;
+  }
+  if (swipeInFrom) {
+    // This replay is the landing half of a committed swipe: enter from the
+    // side the old transcript left toward, completing the pager illusion.
+    //
+    // reconcilePager owns the resting position and the deadline it clears — see
+    // its comment for why nothing here may depend on the animation running.
+    // It STAGES the entry (static, off to one side) and starts the slide next
+    // frame, so everything below — content build, scrollTop — runs on an
+    // element that is not transitioning.
+    reconcilePager(swipeInFrom);
+  } else {
+    unparkTranscript();
   }
   stopSpeaking(); // the active button is about to be detached with the DOM
   messagesEl.replaceChildren();
@@ -7203,18 +7214,40 @@ function reconcilePager(landingFrom = 0) {
   clearTimeout(parkWatchdog);
   parkWatchdog = null;
   if (landingFrom && document.visibilityState === "visible") {
-    // Animate the arrival — but only where it can actually run. A hidden page
-    // runs neither rAF nor CSS transitions, so an animated recovery stalls at
-    // its START value: the transcript parked off screen while the inline style
-    // already reads empty.
+    // STAGE the arrival now — static at the entry side, no transition — and
+    // start the slide only on the NEXT frame. The caller (onReplay) builds
+    // the landing content and sets scrollTop between these two moments, and
+    // that ordering is load-bearing: moving scrollTop while a transform
+    // transition runs left iOS WebKit compositing stale tiles — a fully
+    // black page (header and composer fine) until a finger-scroll forced a
+    // repaint. A page hidden before the frame fires stays staged; the
+    // visibilitychange safety net unparks any displaced transcript with no
+    // swipe in flight, same as every other stalled-animation path.
     messagesEl.style.transition = "none";
     messagesEl.style.transform = `translateX(${landingFrom * messagesEl.clientWidth}px)`;
-    void messagesEl.offsetWidth; // flush the start position so the next line animates
-    messagesEl.style.transition = "transform 0.18s ease-out";
-    messagesEl.style.transform = "";
+    requestAnimationFrame(() => {
+      messagesEl.style.transition = "transform 0.18s ease-out";
+      messagesEl.style.transform = "";
+    });
+    // Whatever became of the animation, the resting state is owned HERE: the
+    // settle unparks (idempotent after a clean slide) and nudges the scroll
+    // so WebKit rasterizes any tiles the landing left blank.
+    setTimeout(settlePagerLanding, SETTLE_AFTER_MS);
     return;
   }
   unparkTranscript();
+}
+
+const SETTLE_AFTER_MS = 260; // entry slide is 180ms; settle just after it
+
+function settlePagerLanding() {
+  if (swipeInFrom) return; // a newer committed swipe owns the transform now
+  unparkTranscript();
+  // Repaint nudge: a same-value write is optimized away, so step off by one
+  // and back. Invisible, and it forces the compositor to refresh the tiles.
+  const top = messagesEl.scrollTop || 0;
+  messagesEl.scrollTop = top > 0 ? top - 1 : top + 1;
+  messagesEl.scrollTop = top;
 }
 
 // Put the transcript back on screen, with no animation.
@@ -7762,6 +7795,11 @@ function commitPage(direction, target, width) {
     const pre = freshPrefetch(target.name);
     if (pre) {
       currentSession = target.name;
+      // A switch with no hello must reset the fingerprint itself, or the OLD
+      // chat's fp could collide with the prefetched one and "noop" the wrong
+      // DOM onto the new chat's name.
+      viewFp = "";
+      viewDirty = true;
       if (target.title) setTitle(target.title);
       onReplay({ events: pre.events, truncated: pre.truncated });
     }
