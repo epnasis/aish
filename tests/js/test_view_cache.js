@@ -148,6 +148,25 @@ check("re-stashing a session replaces its entry and refreshes MRU order", () => 
   assert.strictEqual(JSON.stringify(inCtx("[...viewCache.keys()]")), '["b","a"]');
 });
 
+check("replayLanding: identical clean transcript no-ops (the reconnect case)", () => {
+  const { replayLanding } = sandbox;
+  const base = { fp: "f1", viewFp: "f1", viewDirty: false, hasDom: true, cachedFp: undefined };
+  assert.strictEqual(replayLanding(base), "noop");
+  // Any live event since the paint forces a rebuild — the dirty gate.
+  assert.strictEqual(replayLanding({ ...base, viewDirty: true }), "rebuild");
+  // An empty pane never no-ops, whatever the fingerprints say.
+  assert.strictEqual(replayLanding({ ...base, hasDom: false }), "rebuild");
+  // A different transcript rebuilds (or reuses a matching stash).
+  assert.strictEqual(replayLanding({ ...base, fp: "f2" }), "rebuild");
+  assert.strictEqual(replayLanding({ ...base, fp: "f2", cachedFp: "f2" }), "reuse");
+  // A stash with a stale fingerprint is never reused.
+  assert.strictEqual(replayLanding({ ...base, fp: "f2", cachedFp: "f1" }), "rebuild");
+  // No fingerprint at all (empty replay edge) always rebuilds.
+  assert.strictEqual(
+    replayLanding({ fp: "", viewFp: "", viewDirty: false, hasDom: true }), "rebuild"
+  );
+});
+
 check("transcript-affecting events are not in the safe list", () => {
   for (const type of ["user", "step", "done", "stream", "error", "token",
                       "command_start", "approval_request"]) {
