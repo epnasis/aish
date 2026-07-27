@@ -1610,6 +1610,9 @@ class WebServer:
             await self._send_sessions(client, str(message.get("query", "")))
         elif kind == "resume":
             await self._resume(client, str(message.get("path", "")))
+        elif kind == "peek":
+            # VIEW message: prefetching a swipe neighbor claims nothing.
+            await self._peek(client, str(message.get("path", "")))
         elif kind == "deck_check":
             # VIEW message: reconciling the client's swipe deck against disk
             # never claims control of anything.
@@ -2415,6 +2418,28 @@ class WebServer:
             await client.ws.send_json(self._gone_error(name))
             return
         await self._show(client, session)
+
+    async def _peek(self, client: Client, name: str) -> None:
+        """VIEW message: a session's transcript snapshot WITHOUT switching to
+        it — the client prefetches its swipe neighbors so a committed swipe
+        paints instantly instead of showing a blank page for a round trip.
+        No claim, no hello, no viewer-set change, nothing recorded; the answer
+        goes only to the asking client. A miss answers `gone` on the peek
+        itself — NOT the resume path's error event, whose toast would blame
+        the user for a request they never made — so the deck still self-heals
+        silently."""
+        session = await self._open_by_name(name)
+        if session is None:
+            await client.ws.send_json({"type": "peek", "name": name, "gone": True})
+            return
+        await client.ws.send_json(
+            {
+                "type": "peek",
+                "name": name,
+                "events": list(session.bridge.transcript),
+                "truncated": session.bridge.truncated,
+            }
+        )
 
     async def _new_session(self, client: Client) -> None:
         self._evict_idle()

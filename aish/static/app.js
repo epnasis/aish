@@ -935,6 +935,7 @@ function handle(event) {
     case "file_list": onFileList(event); break;
     case "session_state": onSessionState(event); break;
     case "session_deleted": onSessionDeleted(event); break;
+    case "peek": onPeek(event); break;
     case "deck_gone": dropGoneSessions(event.names || []); break;
     case "session_renamed": onSessionRenamed(event); break;
     case "role": onRole(event); break;
@@ -1063,7 +1064,7 @@ const VIEW_SAFE_EVENTS = new Set([
   "hello", "replay", "session_list", "model_list", "role", "deck_gone",
   "session_renamed", "session_deleted", "cmd_history", "jobs", "files", "dirs",
   "console_started", "console_out", "console_exit", "console_error",
-  "console_shared",
+  "console_shared", "peek",
 ]);
 
 function replayFp(event) {
@@ -1084,6 +1085,23 @@ function viewStashable(state) {
     state.name && state.fp && !state.dirty && !state.pendingCards &&
     !state.busy && !state.offlineViewing
   );
+}
+
+// What to do when a replay lands, cheapest first:
+//   "noop"    — the view ALREADY shows this exact transcript (same fingerprint,
+//               nothing arrived since it was painted). The reconnect re-replay
+//               — every phone unlock — and the second half of a prefetched
+//               swipe land here: keep the DOM and the scroll position.
+//   "reuse"   — a stash of this transcript exists: swap the rendered nodes in.
+//   "rebuild" — anything else: render from the events. Always correct.
+// The dirty gate protects every edge at once: any live event since the last
+// paint (a card, a stream line, an injected turn) forces the rebuild path.
+function replayLanding(state) {
+  if (state.fp && state.fp === state.viewFp && !state.viewDirty && state.hasDom) {
+    return "noop";
+  }
+  if (state.cachedFp && state.cachedFp === state.fp) return "reuse";
+  return "rebuild";
 }
 
 function stashCurrentView() {
@@ -1108,6 +1126,61 @@ function stashCurrentView() {
 }
 // [VIEWCACHE-END]
 
+// [PREFETCH-START]
+// Swipe-neighbor prefetch: after a view settles, quietly ask the server for
+// the transcripts one page left and right (`peek` — a VIEW message: no claim,
+// no hello, nothing recorded). A committed swipe then paints the prefetched
+// events immediately instead of showing a blank parked page for a full round
+// trip; the authoritative replay that follows lands on the SAME fingerprint
+// and no-ops (see replayLanding), so nothing renders twice. A stale peek (the
+// neighbor moved since) just fingerprint-misses into the normal rebuild.
+const PREFETCH_MAX_AGE_MS = 90 * 1000;
+const PREFETCH_KEEP = 4;
+const prefetched = new Map(); // name → {events, truncated, ts}
+let peekTimer = null;
+
+function schedulePeeks() {
+  clearTimeout(peekTimer);
+  peekTimer = setTimeout(requestNeighborPeeks, 900);
+}
+
+function requestNeighborPeeks() {
+  if (offlineMode || !ws || ws.readyState !== WebSocket.OPEN) return;
+  for (const direction of [-1, 1]) {
+    const target = sessionNeighbor(direction);
+    if (target && target.name && !prefetched.has(target.name)) {
+      send({ type: "peek", path: target.name });
+    }
+  }
+}
+
+function onPeek(event) {
+  if (!event.name) return;
+  if (event.gone) {
+    // A phantom neighbor: heal the deck quietly — no toast for a request
+    // the user never made.
+    dropGoneSessions([event.name]);
+    return;
+  }
+  prefetched.set(event.name, {
+    events: event.events || [],
+    truncated: !!event.truncated,
+    ts: Date.now(),
+  });
+  while (prefetched.size > PREFETCH_KEEP) {
+    prefetched.delete(prefetched.keys().next().value);
+  }
+}
+
+// Single-use: consumed on the swipe that lands on it; the next hello re-peeks.
+function freshPrefetch(name) {
+  const pre = prefetched.get(name);
+  if (!pre) return null;
+  prefetched.delete(name);
+  return Date.now() - pre.ts <= PREFETCH_MAX_AGE_MS ? pre : null;
+}
+// [PREFETCH-END]
+
 function onHello(event) {
   // Server code changed since this page was built (or the page predates rev
   // stamping entirely) — reload; the replay mechanism restores the view.
@@ -1115,6 +1188,12 @@ function onHello(event) {
   // The DOM about to be replaced belongs to the chat we are leaving — stash it
   // (if clean) before this hello repoints currentSession/offlineViewing.
   stashCurrentView();
+  // viewFp describes the view of the chat we are LEAVING; on a real switch it
+  // must not survive, or a (however unlikely) cross-session fingerprint match
+  // could keep the wrong DOM via the "noop" landing. A prefetched swipe set
+  // currentSession before this hello, so it reads as "same session" and keeps
+  // the fingerprint of the content it painted — exactly right.
+  if (event.session !== currentSession) { viewFp = ""; viewDirty = true; }
   offlineViewing = false; // a live hello supersedes anything read from the mirror
   // The interactive console is GLOBAL (#148 follow-up): it floats above whatever
   // chat is shown and is untouched by a session switch. A hello also means a
@@ -1151,6 +1230,7 @@ function onHello(event) {
   // hide the indicator — this tab is the presumed driver.
   setRolePill(false);
   updateEmptyHint();
+  schedulePeeks(); // warm the swipe neighbors once this view settles
 }
 
 // Multi-connection (#102): a subtle top-bar pill shows when ANOTHER tab/device
@@ -1168,7 +1248,6 @@ function setRolePill(active) {
 }
 
 function onReplay(event) {
-  stopSpeaking(); // the active button is about to be detached with the DOM
   if (swipeInFrom) {
     // This replay is the landing half of a committed swipe: enter from the
     // side the old transcript left toward, completing the pager illusion.
@@ -1179,6 +1258,25 @@ function onReplay(event) {
   } else {
     unparkTranscript();
   }
+  // [VIEWCACHE] Decide the landing before touching anything (see
+  // replayLanding for the three outcomes and why each is safe).
+  const fp = replayFp(event);
+  const landing = replayLanding({
+    fp,
+    viewFp,
+    viewDirty,
+    hasDom: messagesEl.childElementCount > 0,
+    cachedFp: viewCache.get(currentSession)?.fp,
+  });
+  if (landing === "noop") {
+    // The exact transcript on screen — the reconnect re-replay (every phone
+    // unlock) and a prefetched swipe already painted. Keep the DOM, the
+    // reading position, and even a read-aloud in progress: rebuilding here is
+    // what made every app-open jump to the bottom and re-render the world.
+    viewFp = fp;
+    return;
+  }
+  stopSpeaking(); // the active button is about to be detached with the DOM
   messagesEl.replaceChildren();
   removeCwdChip(); // a session switch drops any stale cwd card; _show re-emits if pending (#92)
   cards.clear();
@@ -1189,14 +1287,9 @@ function onReplay(event) {
   answerStableNodes = 0;
   sawAnswer = false;
   renderedAnswers = 0; // fork ordinals restart with the rebuilt transcript
-  // [VIEWCACHE] An identical transcript re-lands on its already-rendered
-  // nodes — the swipe-back case. Only an exact fingerprint match qualifies
-  // (a stash is only taken from a clean idle view, so these nodes are a pure
-  // function of that same transcript); anything else rebuilds below.
-  const fp = replayFp(event);
   const cached = viewCache.get(currentSession);
   viewCache.delete(currentSession); // detached nodes are single-use either way
-  if (cached && cached.fp === fp) {
+  if (landing === "reuse") {
     messagesEl.replaceChildren(...cached.nodes);
     renderedAnswers = cached.renderedAnswers;
   } else {
@@ -2519,9 +2612,13 @@ function updateEmptyHint() {
   // A workspace-note (a UI /cd or dir-trust marker) is system metadata, not a
   // real turn — a fresh chat is still "empty" for onboarding after one, so the
   // welcome hero stays until the user actually sends a message (#135).
-  const empty = [...messagesEl.children].every((c) =>
-    c.classList.contains("workspace-note")
-  );
+  // Fast path: this runs on EVERY content append (scrollToEnd funnels here),
+  // and a populated transcript can only be "empty" if it holds nothing but
+  // workspace notes — with more than a handful of children it never is, so
+  // skip the per-append array spread over hundreds of nodes.
+  const empty =
+    messagesEl.childElementCount <= 4 &&
+    [...messagesEl.children].every((c) => c.classList.contains("workspace-note"));
   $("welcome").hidden = !empty; // brand hero on a fresh/empty chat (#123)
 }
 
@@ -7618,13 +7715,18 @@ messagesEl.addEventListener("touchmove", (event) => {
     // at touchend, or one diagonal flick switches chats AND opens the drawer.
     touchConsumedByTranscript = true;
   }
-  event.preventDefault(); // page-drag now, not a scroll
+  // No preventDefault, and the listener is PASSIVE: a non-passive touchmove on
+  // the transcript scroller forced every scrolled frame to wait on the main
+  // thread — the single biggest scroll-jank source on the phone. #messages
+  // carries `touch-action: pan-y`, so the browser itself refuses to scroll a
+  // horizontally-started gesture (it decides at gesture start, same as the
+  // claim above) — the preventDefault had nothing left to prevent.
   const target = swipeTarget(dx < 0 ? 1 : -1);
   swipe.dx = target ? dx : dx / 3; // rubber-band where no page exists
   messagesEl.style.transition = "none";
   messagesEl.style.transform = `translateX(${swipe.dx}px)`;
   updateSwipeHint(target, dx, swipe.width * COMMIT_AT);
-}, { passive: false });
+}, { passive: true });
 
 function commitPage(direction, target, width) {
   // Ask the server before sliding the page away: the off-screen state is
@@ -7651,6 +7753,19 @@ function commitPage(direction, target, width) {
   // A send that SUCCEEDS is not a landing that will happen: a zombie socket
   // accepts it and answers nothing, so the park carries a deadline.
   parkTranscript(direction, width);
+  // [PREFETCH] A warm peek paints the landing NOW instead of leaving the page
+  // blank for the round trip. currentSession moves first (the same order
+  // openCachedSession uses) so the hello reads as "same session" and the
+  // authoritative replay no-ops on the matching fingerprint; if the neighbor
+  // moved since the peek, the fingerprint misses and the replay rebuilds.
+  if (!target.fresh) {
+    const pre = freshPrefetch(target.name);
+    if (pre) {
+      currentSession = target.name;
+      if (target.title) setTitle(target.title);
+      onReplay({ events: pre.events, truncated: pre.truncated });
+    }
+  }
 }
 
 function snapBack(direction, target, dx) {

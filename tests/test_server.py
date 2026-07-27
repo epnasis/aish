@@ -2257,6 +2257,65 @@ class TestDeckCheck:
             assert "no such session" in error["text"]
 
 
+class TestPeek:
+    """`peek` is the swipe-neighbor prefetch: a VIEW message answering another
+    session's transcript snapshot WITHOUT switching to it, so a committed
+    swipe can paint instantly. It must not move the client's view, must not
+    record anything, and a miss answers `gone` on the peek itself — never the
+    resume path's error event, whose toast would blame the user for a request
+    they never made."""
+
+    @staticmethod
+    def _write_session(state_dir, stamp, content="peek target topic"):
+        state_dir.mkdir(parents=True, exist_ok=True)
+        path = state_dir / f"session-20200101-{stamp:06d}-000000.jsonl"
+        path.write_text(
+            json.dumps({"kind": "message", "role": "user", "content": content}) + "\n"
+            + json.dumps({"kind": "message", "role": "assistant", "content": "the answer"})
+            + "\n",
+            encoding="utf-8",
+        )
+        return path.name
+
+    def test_peek_returns_events_without_switching_view(self, app_env):
+        name = self._write_session(app_env["state_dir"], 1)
+        client, _ = make_client(app_env, [model_says("hi there")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "peek", "path": name})
+            peek = recv_until(ws, "peek")
+            assert peek["name"] == name
+            assert peek["events"], "peek must carry the target's transcript"
+            texts = json.dumps(peek["events"])
+            assert "peek target topic" in texts
+            # The client's view did NOT move: a task typed now still runs in
+            # the original session (no hello/replay was pushed by the peek).
+            ws.send_json({"type": "task", "text": "still here"})
+            done = recv_until(ws, "done")
+            assert done is not None
+            assert hello["session"] != name
+
+    def test_peek_is_idempotent_and_records_nothing(self, app_env):
+        name = self._write_session(app_env["state_dir"], 2)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "peek", "path": name})
+            first = recv_until(ws, "peek")
+            ws.send_json({"type": "peek", "path": name})
+            second = recv_until(ws, "peek")
+            # Peeking must not grow the peeked transcript (nothing recorded).
+            assert len(first["events"]) == len(second["events"])
+
+    def test_peek_of_missing_session_answers_gone_not_error(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json(
+                {"type": "peek", "path": "session-19990101-000000-000000.jsonl"}
+            )
+            peek = recv_until(ws, "peek")
+            assert peek["gone"] is True
+            assert peek["name"] == "session-19990101-000000-000000.jsonl"
+
+
 class TestRename:
     def test_rename_active_session_updates_header_and_list(self, app_env):
         client, _ = make_client(app_env, [model_says("noted")])

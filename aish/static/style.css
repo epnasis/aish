@@ -276,15 +276,24 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
    with a breathing glow only while the session is actually working (#61). */
 /* Model status: green + static when connected & idle, green + glow while
    working, red when the connection/model is unavailable (#61). */
-.model-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: none; transition: background 0.3s ease; }
-.model-dot.working { animation: dot-glow 1.4s ease-in-out infinite; }
-.model-dot.bad { background: var(--red); animation: none; box-shadow: none; }
+.model-dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: none; transition: background 0.3s ease; }
+/* The busy glow is a ::after ring animated on transform/opacity ONLY: the dot
+   sits inside the backdrop-blurred top bar, and the old box-shadow keyframes
+   forced a repaint (and re-blur) of the bar every frame for as long as any
+   task ran — a constant background GPU cost on the phone. */
+.model-dot::after {
+  content: ""; position: absolute; inset: -4px; border-radius: 50%;
+  background: var(--green-glow); opacity: 0; transform: scale(0.5); z-index: -1;
+}
+.model-dot.working::after { animation: dot-glow 1.4s ease-in-out infinite; }
+.model-dot.bad { background: var(--red); animation: none; }
+.model-dot.bad::after { animation: none; opacity: 0; }
 @keyframes dot-glow {
-  0%, 100% { box-shadow: 0 0 0 0 var(--green-glow); }
-  50%      { box-shadow: 0 0 0 4px var(--green-glow); }
+  0%, 100% { opacity: 0; transform: scale(0.5); }
+  50%      { opacity: 1; transform: scale(1); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .model-dot.working { animation: none; box-shadow: 0 0 0 3px var(--green-glow); }
+  .model-dot.working::after { animation: none; opacity: 1; transform: scale(0.9); }
 }
 #model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
 #model-chip .caret { width: 12px; height: 12px; }
@@ -412,6 +421,21 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   overflow-y: auto;
   padding: 14px 14px 6px;
   overscroll-behavior: contain;
+  /* pan-y: the browser owns vertical scrolling on its own thread and refuses
+     to scroll horizontally-started gestures — which is what lets the pager's
+     touchmove listener be PASSIVE (no per-frame main-thread wait, the phone's
+     biggest scroll-jank source). Horizontally-scrollable children (code,
+     tables, terminal output) opt back in below. */
+  touch-action: pan-y;
+}
+/* Inside the transcript, these scroll horizontally themselves — restore native
+   horizontal panning where the gesture starts on them (the pager already
+   stands down there via its scrollsHorizontally guard). */
+#messages .msg.echo, #messages .msg.stream, #messages .msg.md pre,
+#messages .msg.md .md-table, #messages .card code, #messages .card .cmd,
+#messages .step-cmd, #messages .term-out, #messages .tool-arg-val,
+#messages .ws-section .mono, #messages .import-file {
+  touch-action: pan-x pan-y;
 }
 /* Message text scales with the reading-size stepper (#118); it inherits into
    paragraphs, lists, inline code, and (via em) the markdown headings below, so
