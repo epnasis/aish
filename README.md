@@ -298,8 +298,11 @@ aish-web --model gemini       # same --model forms as aish
 
 **Security:** whoever reaches this UI can drive an agent that runs approved
 commands on the host, so it binds to `127.0.0.1` unless you opt into
-`--host 0.0.0.0`, and `AISH_WEB_TOKEN=<secret>` gates first access with
-`?token=<secret>` — recommended even on a home LAN. Direct `!` commands are
+`--host 0.0.0.0`, and access **always** requires a token via `?token=<secret>`:
+set `AISH_WEB_TOKEN=<secret>` for a stable one, or a random token is generated
+at startup and printed in the launch URL. Cross-origin browser requests
+(WebSocket and `/trigger`) are rejected outright, so a page you happen to visit
+can't drive the agent from your browser. Direct `!` commands are
 deliberately **not** available from the web.
 
 ### Offline
@@ -333,8 +336,8 @@ capped, and least-recently-useful unpinned chats are dropped first.
 
 ## Automation (optional)
 
-aish can also act on its own — for jobs you set up and own. A loopback+token
-gated `POST /trigger` endpoint launches a task in a background session (from a
+aish can also act on its own — for jobs you set up and own. A token-gated
+`POST /trigger` endpoint launches a task in a background session (from a
 schedule, an incoming email, a webhook), observable when you open it. The
 capability policy is **draft-and-hold**: in an automated session, safe actions
 run unattended, but anything that reaches the outside world (a send *or draft*

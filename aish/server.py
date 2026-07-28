@@ -25,10 +25,12 @@ import argparse
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import json
 import os
 import queue
 import re
+import secrets  # stdlib — NOT aish.secrets (the Keychain store)
 import shlex
 import shutil
 import subprocess
@@ -40,6 +42,7 @@ from collections.abc import Callable, Sequence
 from email.utils import formataddr, getaddresses
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import uvicorn
 from starlette.applications import Starlette
@@ -158,6 +161,39 @@ def content_security_policy(host: str = "") -> str:
         "base-uri 'self'; "
         "form-action 'self'"
     )
+
+
+def origin_allowed(origin: str | None, host: str) -> bool:
+    """Same-origin gate for the WS handshake and POST /trigger (#178 P1-2).
+
+    WebSockets are exempt from the same-origin policy and a text/plain POST is
+    a CORS simple request (no preflight), so any page the owner visits can fire
+    both cross-origin — the drive-by vector. Browsers ALWAYS send an Origin
+    header on those, so: a present Origin whose host:port doesn't match the
+    request's own Host is rejected; a MISSING Origin (curl, the launchd poller,
+    native clients — not browsers) is allowed. Mirrors content_security_policy's
+    host discipline (_HOST_OK_RE), including the reverse-proxy case where
+    Origin `https://aish.wenda.eu` must match Host `aish.wenda.eu`."""
+    if not origin:
+        return True
+    try:
+        parts = urlsplit(origin)
+    except ValueError:
+        return False
+    # Rejects garbage and the literal "null" Origin (sandboxed iframe, file://),
+    # which is by definition not this origin.
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return False
+    if not host or not _HOST_OK_RE.match(host):
+        return False
+    origin_host = parts.netloc.lower()
+    own_host = host.lower()
+    if origin_host == own_host:
+        return True
+    # Default-port equivalence: a browser omits :443/:80 in Origin while the
+    # Host header (or the Origin, behind some proxies) may spell it out.
+    default = ":443" if parts.scheme == "https" else ":80"
+    return origin_host == own_host + default or origin_host + default == own_host
 
 
 class SecurityHeaders:
@@ -494,6 +530,7 @@ DECK_CHECK_MAX = 100  # names a single deck_check will stat (a deck is far small
 
 CLOSE_REPLACED = 4000  # another device connected; this socket is superseded
 CLOSE_BAD_TOKEN = 4403
+CLOSE_BAD_ORIGIN = 4405  # cross-origin WS handshake refused (#178 P1-2)
 
 
 class Bridge:
@@ -1342,13 +1379,23 @@ class WebServer:
         self.state_dir = state_dir
         self.uploads_dir = state_dir / "uploads"
         self.config_path = config_path
-        self.token = token
+        # The token is UNCONDITIONAL (#178 P1-2): with none configured, a
+        # random per-run token is generated here and printed in the launch URL
+        # by main(). There is no token-less mode — the `!` path is ungated by
+        # design, so an open socket is remote code execution.
+        self.token = token or secrets.token_urlsafe(24)
         # gitignore-style names hidden in the folder browser + @-file index (#87);
         # user-editable via config.toml [directory_picker], defaults otherwise.
         self.dir_ignore = list(dir_ignore_patterns or dir_ignore.DEFAULT_IGNORE)
         self.loop: asyncio.AbstractEventLoop | None = None
         self.resumer: asyncio.Task | None = None  # startup restart-recovery (#164)
         self.sessions: dict[str, Session] = {}
+        # Per-name in-flight cold opens (#178 P1-5): concurrent callers racing
+        # on the same name await ONE build instead of each constructing a
+        # Session — the loser's duplicate would overwrite the winner's in
+        # `sessions`, orphaning a live worker whose approval cards could never
+        # be answered (and double-appending to one log file).
+        self._opening: dict[str, asyncio.Future[Session | None]] = {}
         self.clients: set[Client] = set()
         self._default: Session | None = None  # bare-connection landing session
         # The single GLOBAL interactive console (issue #148 follow-up), shared by
@@ -1468,10 +1515,20 @@ class WebServer:
             with contextlib.suppress(Exception):
                 await client.ws.close()
 
-    def add_session(self, session: Session, default: bool = True) -> None:
+    def add_session(self, session: Session, *, default: bool) -> None:
+        """`default` is keyword-only with NO default value (#178 P1-6): every
+        call site must say whether this session becomes the bare-connection
+        landing spot. The old `default=True` let handle_trigger silently
+        re-point the default at an overnight automated session."""
         self.sessions[session.name] = session
         if default:
             self._default = session
+
+    def _token_ok(self, supplied: object) -> bool:
+        """Constant-time check of the ALWAYS-present access token (#178 P1-2).
+        Every gated endpoint requires it unconditionally — there is no
+        token-less mode to fall through to."""
+        return hmac.compare_digest(str(supplied or ""), self.token)
 
     def _evict_idle(self) -> None:
         """Close the longest-idle background session past the cap. Sessions that
@@ -1584,7 +1641,17 @@ class WebServer:
         }
 
     async def handle_ws(self, websocket: WebSocket) -> None:
-        if self.token and websocket.query_params.get("token") != self.token:
+        # Origin BEFORE token (#178 P1-2): WebSockets are exempt from the
+        # same-origin policy, so a browser page on any site can open this
+        # socket — same accept-then-close shape as the token path so the
+        # rejection is distinguishable from a dead server.
+        if not origin_allowed(
+            websocket.headers.get("origin"), websocket.headers.get("host", "")
+        ):
+            await websocket.accept()
+            await websocket.close(code=CLOSE_BAD_ORIGIN)
+            return
+        if not self._token_ok(websocket.query_params.get("token")):
             # Accept, THEN close: refusing the handshake would reach the
             # browser as a generic 1006 and the client couldn't tell a bad
             # token from a dead server (it would just retry forever).
@@ -2459,10 +2526,39 @@ class WebServer:
 
     async def _open_by_name(self, name: str) -> Session | None:
         """The open session called `name`, or loaded cold from disk; None when
-        no such session exists (or the name fails the path-safety checks)."""
+        no such session exists (or the name fails the path-safety checks).
+
+        Concurrent callers racing on the same name — restart recovery and a
+        reconnecting PWA's ?session=, the real trigger case — share ONE build
+        (#178 P1-5): the memory check and add_session are separated by two
+        awaits, so without the guard both would see None, both would construct
+        a Session, and the second add_session would orphan the first (its
+        viewers and worker kept, its approvals unroutable — parked forever).
+        The in-flight entry is removed on success AND failure, so a failed
+        open never poisons the name."""
         existing = self.sessions.get(name)
         if existing is not None:
             return existing
+        pending = self._opening.get(name)
+        if pending is not None:
+            return await pending
+        future: asyncio.Future[Session | None] = asyncio.get_running_loop().create_future()
+        self._opening[name] = future
+        try:
+            session = await self._cold_open(name)
+        except BaseException as exc:
+            future.set_exception(exc)
+            future.exception()  # consumed here; waiters (if any) still re-raise
+            raise
+        else:
+            future.set_result(session)
+            return session
+        finally:
+            del self._opening[name]
+
+    async def _cold_open(self, name: str) -> Session | None:
+        """Load `name` from its log into a fresh Session. Callers go through
+        _open_by_name, whose in-flight guard is what makes this single-flight."""
         safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
         path = self.state_dir / name
         if not safe or ".." in name or not path.is_file():
@@ -2923,7 +3019,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         the GIL — would otherwise freeze the whole server, not just the request.
         Isolating it means a stuck listing is killed and returns 504 while the
         server stays fully responsive (#86)."""
-        if self.token and request.query_params.get("token") != self.token:
+        if not self._token_ok(request.query_params.get("token")):
             return JSONResponse({"error": "bad token"}, status_code=403)
         raw = request.query_params.get("path", "").strip()
         data, status = await self._run_fs_child(
@@ -2968,25 +3064,25 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
 
     async def handle_trigger(self, request) -> JSONResponse:
         """POST /trigger — programmatic ingress for NON-user origins (#160):
-        schedule / email / webhook. Loopback + token only; the model has no path
-        here (only local automation like the email poller calls it). Spawns a
+        schedule / email / webhook. Token-gated; the model has no path here
+        (only local automation like the email poller calls it). Spawns a
         Session tagged with the origin, launches the prompt as a task, and
         returns the session name so the caller — and a later notification — can
         deep-link straight to the automated session.
 
-        Security: the TOKEN is the gate. Behind a same-host reverse proxy every
-        request looks loopback, so loopback alone proves nothing — a production
-        server sets a token and only a caller holding it may trigger. When NO
-        token is configured (local dev), we fall back to requiring a loopback
-        peer so a 0.0.0.0-bound dev server isn't openly triggerable."""
-        if self.token:
-            if request.query_params.get("token") != self.token:
-                return JSONResponse({"error": "bad token"}, status_code=403)
-        else:
-            host = request.client.host if request.client else ""
-            if host not in ("127.0.0.1", "::1", "localhost"):
-                return JSONResponse({"error": "trigger needs a token or loopback"},
-                                    status_code=403)
+        Security: the TOKEN is the gate, and it always exists (#178 P1-2 —
+        generated at startup when none is configured), so the old loopback
+        fallback is gone: behind a same-host reverse proxy every request looks
+        loopback, so it never proved anything. The Origin check runs FIRST —
+        a cross-origin text/plain POST is a CORS simple request (no preflight),
+        so any page the owner visits could otherwise fire one from the browser
+        (#178 P1-2); non-browser callers send no Origin and pass."""
+        if not origin_allowed(
+            request.headers.get("origin"), request.headers.get("host", "")
+        ):
+            return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
+        if not self._token_ok(request.query_params.get("token")):
+            return JSONResponse({"error": "bad token"}, status_code=403)
         try:
             body = json.loads(await request.body() or b"{}")
         except (ValueError, TypeError):
@@ -3004,7 +3100,9 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
 
         self._evict_idle()
         session, _ = await asyncio.to_thread(self.open_session, None, origin, meta)
-        self.add_session(session)
+        # NEVER the default (#178 P1-6): an overnight trigger must not become
+        # the landing spot for the next bare connect (nor eviction-immune).
+        self.add_session(session, default=False)
         if title:
             session.custom_title = title
             session.logref.log.set_title(title)
@@ -3021,7 +3119,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         """POST /upload?name=<filename>, raw body — no multipart, so no extra
         dependency. Files land in <state_dir>/uploads (a session root, so the
         agent's read_file auto-approves them)."""
-        if self.token and request.query_params.get("token") != self.token:
+        if not self._token_ok(request.query_params.get("token")):
             return JSONResponse({"error": "bad token"}, status_code=403)
         name = os.path.basename(request.query_params.get("name", "").strip())
         if not name or name.startswith(".") or name in ("..",):
@@ -3052,7 +3150,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         has no socket context, so with many concurrent viewers it must accept a
         path in scope for the session that produced it — the union of open
         sessions' roots, which for a single session is exactly that session.)"""
-        if self.token and request.query_params.get("token") != self.token:
+        if not self._token_ok(request.query_params.get("token")):
             return JSONResponse({"error": "bad token"}, status_code=403)
         raw = request.query_params.get("path", "").strip()
         if not raw:
@@ -3254,7 +3352,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
 
         The document title (and so the download name) comes from the ANSWER, not
         from the prompt that produced it — see `_answer_title`."""
-        if self.token and request.query_params.get("token") != self.token:
+        if not self._token_ok(request.query_params.get("token")):
             return JSONResponse({"error": "bad token"}, status_code=403)
         raw = await request.body()
         if not raw:
@@ -3279,7 +3377,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         answers (thinking/tool steps excluded) to a downloadable PDF, sourced
         from the persisted JSONL log. Embedded media follows the same rules as
         the answer export (see handle_export_answer)."""
-        if self.token and request.query_params.get("token") != self.token:
+        if not self._token_ok(request.query_params.get("token")):
             return JSONResponse({"error": "bad token"}, status_code=403)
         name = request.query_params.get("session", "").strip()
         safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
@@ -3321,7 +3419,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         identity and last-modified stamp. The client diffs it against what it
         already holds, so a sync that changes nothing costs exactly one small
         request instead of re-downloading the archive."""
-        if self.token and request.query_params.get("token") != self.token:
+        if not self._token_ok(request.query_params.get("token")):
             return JSONResponse({"error": "bad token"}, status_code=403)
         infos = await asyncio.to_thread(SessionLog.list_sessions, self.state_dir)
         return JSONResponse(
@@ -3351,7 +3449,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         after it; anything else returns the whole session. `sig` is always the
         server's own fingerprint handed back unchanged, so the client stores two
         opaque values and never has to reason about the protocol."""
-        if self.token and request.query_params.get("token") != self.token:
+        if not self._token_ok(request.query_params.get("token")):
             return JSONResponse({"error": "bad token"}, status_code=403)
         path = self._offline_path(request)
         if path is None:
@@ -3724,7 +3822,7 @@ def create_app(
     server.base_cwd = cwd  # baseline for the session rows' directory label
     server_ref.append(server)
     first, _ = open_session(None)
-    server.add_session(first)
+    server.add_session(first, default=True)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
@@ -3796,13 +3894,6 @@ def main() -> int:
     args = parser.parse_args()
 
     token = os.environ.get("AISH_WEB_TOKEN") or None
-    if args.host not in ("127.0.0.1", "localhost", "::1") and not token:
-        print(
-            "warning: serving without a token — anyone who can reach "
-            f"{args.host}:{args.port} can drive this agent (approvals included). "
-            "Set AISH_WEB_TOKEN to require one.",
-            file=sys.stderr,
-        )
     try:
         app = create_app(
             args.model,
@@ -3817,8 +3908,15 @@ def main() -> int:
     except backends.BackendError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    query = f"/?token={token}" if token else "/"
-    print(f"aish-web · model {args.model} · http://{args.host}:{args.port}{query}")
+    # Access always requires the token (#178 P1-2); when none was configured a
+    # random one was generated at startup, so the printed URL is the ONLY way
+    # in — hence the full URL, token included.
+    web_token = app.state.server.token
+    print(f"aish-web · model {args.model} · "
+          f"http://{args.host}:{args.port}/?token={web_token}")
+    if not token:
+        print("access token generated for this run — set AISH_WEB_TOKEN for a "
+              "stable one", file=sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     # uvicorn has finished its graceful shutdown (connections closed, lifespan
     # ran, pending approvals denied). A worker thread still inside a model
