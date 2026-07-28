@@ -1457,6 +1457,46 @@ class TestRememberTool:
         assert "already remembered" in tool_messages(agent.messages)[0]["content"]
         assert list(skills_module.GLOBAL_MEMORY_DIR.glob("*.md")) == []
 
+    def test_remember_threads_pinned_expires_force_and_semantic(self, tmp_path):
+        # #178 P1-7/P1-8: the tool args reach save_memory, and the agent's own
+        # SemanticIndex backs the near-duplicate gate.
+        from aish import skills as skills_module
+
+        calls = SimpleNamespace(n=0)
+
+        def scores(identity, entries):
+            calls.n += 1
+            return dict.fromkeys((id(e) for e in entries), 0.9)  # everything is a dupe
+
+        semantic = SimpleNamespace(scores=scores, error=None)
+        call1 = SimpleNamespace(function=SimpleNamespace(
+            name="remember",
+            arguments={"note": "always ask before rebooting", "name": "ask-reboot",
+                       "pinned": True, "expires": "2999-01-01"}))
+        call2 = SimpleNamespace(function=SimpleNamespace(
+            name="remember",
+            arguments={"note": "a different new fact", "name": "other"}))
+        call3 = SimpleNamespace(function=SimpleNamespace(
+            name="remember",
+            arguments={"note": "a different new fact", "name": "other", "force": True}))
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[call1]),
+                model_says(tool_calls=[call2]),
+                model_says(tool_calls=[call3]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+            semantic=semantic,
+        )
+        agent.run_task("learn it all")
+        text = (skills_module.GLOBAL_MEMORY_DIR / "ask-reboot.md").read_text()
+        assert "pinned: yes" in text and "expires: 2999-01-01" in text
+        results = [m["content"] for m in tool_messages(agent.messages)]
+        assert results[1].startswith("NOT saved") and "ask-reboot" in results[1]
+        assert calls.n >= 1  # the agent's semantic layer backed the gate
+        assert results[2].startswith("remembered")  # force overrode it
+
 
 class TestForgetMemoryTool:
     def test_forget_auto_approved_and_deletes_entry(self, tmp_path):
@@ -1974,6 +2014,31 @@ class TestRecallTool:
         result = tool_messages(agent.messages)[0]["content"]
         assert "[skill] uv-fix" in result
         assert result.index("[skill]") < result.index("session-20260101")
+
+    def test_recall_uses_the_semantic_layer(self, tmp_path):
+        # #178 P1-9: a query sharing no words with the entry still finds it
+        # when the agent's SemanticIndex vouches for the similarity.
+        from aish import skills as skills_module
+
+        skills_module.save_memory(
+            "For hotel or villa searches always run trippy",
+            skills_module.GLOBAL_MEMORY_DIR,
+            name="hotels-use-trippy",
+        )
+        def scores(query, entries):
+            return {id(e): (0.4 if e.name == "hotels-use-trippy" else 0.0) for e in entries}
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("recall", query="znajdź nocleg w Krakowie")]),
+                model_says("ok"),
+            ],
+            cwd=str(tmp_path),
+            semantic=SimpleNamespace(scores=scores, error=None),
+        )
+        agent.run_task("noclegi")
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "hotels-use-trippy" in result
 
     def test_detail_by_entry_name(self, tmp_path, project_scope):
         skills_dir = tmp_path / ".aish" / "skills"

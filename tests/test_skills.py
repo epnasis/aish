@@ -616,6 +616,79 @@ class TestPreflight:
         assert preload.unread == []
 
 
+class TestSemanticRecall:
+    """#178 P1-9: rank_entries/recall_text fuse embedding similarity with the
+    lexical tiers; lexical strong hits stay a deterministic rail, and a None
+    from the semantic layer degrades byte-identically to pure lexical."""
+
+    def _entries(self, tmp_path):
+        d = skills_module.GLOBAL_MEMORY_DIR
+        write_skill(
+            d,
+            "hotels-use-trippy.md",
+            "---\nname: hotels-use-trippy\n"
+            "description: For hotel or villa searches always run trippy\n---\n",
+        )
+        write_skill(
+            d,
+            "charts.md",
+            "---\nname: charts\ndescription: plotting data with gnuplot\n---\n",
+        )
+        return load_entries(str(tmp_path))
+
+    def _sims(self, table):
+        return lambda query, entries: {
+            id(e): table.get(e.name, 0.0) for e in entries
+        }
+
+    def test_cross_language_query_found_semantically(self, tmp_path):
+        entries = self._entries(tmp_path)
+        # A Polish query shares no words with the English entries — lexical
+        # ranking finds nothing, similarity must carry it.
+        assert rank_entries(entries, "znajdź nocleg w Krakowie") == []
+        ranked = rank_entries(
+            entries,
+            "znajdź nocleg w Krakowie",
+            semantic=self._sims({"hotels-use-trippy": 0.4, "charts": 0.05}),
+        )
+        assert [e.name for e in ranked] == ["hotels-use-trippy"]
+
+    def test_exact_name_rail_beats_high_similarity(self, tmp_path):
+        entries = self._entries(tmp_path)
+        ranked = rank_entries(
+            entries,
+            "charts",  # exact name = lexical tier 5, the guarantee rail
+            semantic=self._sims({"hotels-use-trippy": 0.9, "charts": 0.0}),
+        )
+        assert ranked[0].name == "charts"
+
+    def test_semantic_none_is_byte_identical_to_lexical(self, tmp_path):
+        entries = self._entries(tmp_path)
+        plain = rank_entries(entries, "villa searches")
+        fallen_back = rank_entries(entries, "villa searches", semantic=lambda q, e: None)
+        assert plain == fallen_back
+
+    def test_below_floor_and_no_lexical_hit_is_excluded(self, tmp_path):
+        entries = self._entries(tmp_path)
+        ranked = rank_entries(
+            entries,
+            "unrelated query",
+            semantic=self._sims({"hotels-use-trippy": 0.1, "charts": 0.1}),
+        )
+        assert ranked == []
+
+    def test_recall_text_threads_semantic(self, tmp_path):
+        self._entries(tmp_path)
+        out = recall_text(
+            str(tmp_path),
+            None,
+            "znajdź nocleg w Krakowie",
+            semantic=self._sims({"hotels-use-trippy": 0.4}),
+        )
+        assert "hotels-use-trippy" in out
+        assert "Nothing saved matches" not in out
+
+
 class TestNearDuplicateGate:
     """#178 P1-8: a NEW memory too similar to an existing one is refused with
     the existing entry's name; force overrides; updates are never gated."""

@@ -1794,6 +1794,10 @@ class Agent:
         return tool_plugins.execute(tool, args, cwd=self.cwd)
 
     def _recall(self, query: str, name: str | None) -> str:
+        # Embedding similarity reaches the deliberate-search path too (#178
+        # P1-9), not only preflight — same fallback discipline: scores()
+        # failing → None → recall_text is byte-identical to pure lexical.
+        semantic = self.semantic.scores if self.semantic is not None else None
         if self.origin != "user":
             # A triggered session must not search the whole past-session
             # archive (#178 P0-2): recall over every conversation ever held is
@@ -1801,13 +1805,17 @@ class Agent:
             # and it is the read half of the injected read→exfiltrate chain.
             # Knowledge entries (skills/memories) stay available.
             return (
-                skills.recall_text(self.cwd, self.lessons_path, query, name=name)
+                skills.recall_text(
+                    self.cwd, self.lessons_path, query, name=name, semantic=semantic
+                )
                 + "\n\n(Past-session archive search is unavailable in automated "
                 "sessions — only saved skills and memory were searched. Do not "
                 "retry with session names.)"
             )
         if self.state_dir is None:
-            return skills.recall_text(self.cwd, self.lessons_path, query, name=name)
+            return skills.recall_text(
+                self.cwd, self.lessons_path, query, name=name, semantic=semantic
+            )
         state_dir = Path(self.state_dir)
         exclude: set = set()
         if self.current_session is not None:
@@ -1821,6 +1829,7 @@ class Agent:
             session_detail=lambda session, q: SessionLog.search_excerpts(
                 state_dir, q, session=session
             ),
+            semantic=semantic,
         )
 
     def _collect_source(self, call: dict, result: str) -> None:

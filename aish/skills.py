@@ -520,8 +520,31 @@ def score_entries(entries: list[Entry], query: str) -> list[tuple[int, Entry]]:
     return ranked
 
 
-def rank_entries(entries: list[Entry], query: str) -> list[Entry]:
-    return [entry for _, entry in score_entries(entries, query)]
+def rank_entries(entries: list[Entry], query: str, semantic=None) -> list[Entry]:
+    """Ranked entries for a query, fusing embedding similarity into the
+    lexical tiers when `semantic` (SemanticIndex.scores, or None) is wired
+    (#178 P1-9) — recall is the path the model uses when it deliberately goes
+    looking, and a Polish query must find English entries there too, not only
+    in preflight. Mirrors preflight's combination rule: strong lexical hits
+    (exact name / whole query in name+description+keywords) stay a
+    deterministic guarantee rail on top, similarity orders everything else,
+    weaker lexical tiers break similarity ties. Without `semantic` — or when
+    it fails (returns None) — output is byte-identical to pure lexical."""
+    scored = score_entries(entries, query)
+    sims = semantic(query, entries) if semantic is not None else None
+    if sims is None:
+        return [entry for _, entry in scored]
+    lexical = {id(entry): score for score, entry in scored}
+    fused = []
+    for entry in entries:  # corpus order keeps ties stable
+        lex = lexical.get(id(entry), 0)
+        sim = sims.get(id(entry), 0.0)
+        if lex == 0 and sim < SEMANTIC_MIN_SIM:
+            continue
+        rail = lex if lex >= 4 else 0
+        fused.append((rail, sim, lex, entry))
+    fused.sort(key=lambda t: (-t[0], -t[1], -t[2]))
+    return [entry for _, _, _, entry in fused]
 
 
 def _word_in(task_padded: str, word: str) -> bool:
@@ -699,12 +722,14 @@ def recall_text(
     name: str | None = None,
     sessions_search=None,
     session_detail=None,
+    semantic=None,
 ) -> str:
     """Model-facing knowledge search (the recall tool), two-phase like
     search_sessions was: ranked matches with snippets, then one entry's full
     text by name. `sessions_search(query)` / `session_detail(name, query)`
     are injected by the agent so this module stays free of session-store
-    wiring; either may be None when no session store exists.
+    wiring; either may be None when no session store exists. `semantic` is
+    SemanticIndex.scores (or None), threaded into rank_entries (#178 P1-9).
     """
     entries = load_entries(cwd, lessons_path)
     if name:
@@ -713,7 +738,9 @@ def recall_text(
             return detail[:RECALL_DETAIL_CHARS]
         if session_detail is not None and name.startswith("session-"):
             return session_detail(name, query)
-        known = ", ".join(e.name for e in rank_entries(entries, query)[:RECALL_TOP])
+        known = ", ".join(
+            e.name for e in rank_entries(entries, query, semantic)[:RECALL_TOP]
+        )
         return (
             f"ERROR: nothing named {name!r}. Use a name from a recall result"
             + (f" (close matches: {known})" if known else "")
@@ -722,7 +749,7 @@ def recall_text(
     words = query.casefold().split()
     if not words:
         return "ERROR: recall needs a query (or a name from an earlier result)."
-    ranked = rank_entries(entries, query)
+    ranked = rank_entries(entries, query, semantic)
     lines = []
     if ranked:
         lines.append(f"Saved knowledge matching {query!r} (best first):")
