@@ -73,7 +73,13 @@ Rules:
    stale, wrong, or superseded, you MUST prune it: call forget_memory(<slug>)
    to delete it. To consolidate duplicates, remember() the one canonical fact,
    then forget_memory() each redundant slug (e.g. remember 'canonical-fact',
-   then forget_memory('old-dupe')).
+   then forget_memory('old-dupe')). When the user states a standing rule or
+   preference that must hold in every future task ('always ask before
+   pushing'), remember() it with pinned=true — pinned memories stay in your
+   context permanently. A fact with a known end date gets
+   expires='YYYY-MM-DD'. If remember answers 'NOT saved — a similar memory
+   already exists', UPDATE or forget that entry — force=true only for a
+   genuinely different fact.
    Entries are FOUND by their name/description/keywords line, so you MUST
    phrase the description like the tasks it should catch ("Use when the
    user wants to find, buy, or compare a product …"), never as a bare rule
