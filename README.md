@@ -275,7 +275,10 @@ this UI. Highlights:
   relaunch, so a restart mid-sentence doesn't cost you the sentence.
 - **Export to PDF, copy anything, inline images.** Per-answer or whole-session
   PDF export (rendered locally), copy chips on every code block / table / answer,
-  and markdown images (local or web) rendered right in the chat. A single-answer
+  and markdown images rendered right in the chat (local files, plus a small
+  whitelist of remote hosts — YouTube thumbnails, Google static maps; other
+  remote images are blocked by the page's Content-Security-Policy, which
+  closes a zero-click data-exfiltration channel). A single-answer
   PDF is titled and filed after what the answer is *about* — the model that wrote
   it writes the title — not after the prompt that asked for it.
 - **Native vision.** On vision-capable backends (Gemini, OpenAI, Claude, Ollama
@@ -334,9 +337,13 @@ aish can also act on its own — for jobs you set up and own. A loopback+token
 gated `POST /trigger` endpoint launches a task in a background session (from a
 schedule, an incoming email, a webhook), observable when you open it. The
 capability policy is **draft-and-hold**: in an automated session, safe actions
-run unattended, but anything that reaches the outside world (a live send to
-someone else, a delete, a share) **holds** — pausing indefinitely until you open
-the session and approve. A push notification (Pushover) tells you when a task
+run unattended, but anything that reaches the outside world (a send *or draft*
+addressed to anyone but you — recipients are strictly parsed and validated, not
+regex-matched — a delete, a share, and even a web fetch or search naming a host
+you never mentioned) **holds** — pausing indefinitely until you open
+the session and approve. Automated sessions also cannot search your past-session
+archive (saved skills and memory stay available), so an injected instruction
+cannot chain "read everything ever discussed" into "ship it to a new host". A push notification (Pushover) tells you when a task
 needs approval or finishes, with a deep link straight to it. This is how the
 same agent safely runs, say, an email assistant while you're asleep.
 
