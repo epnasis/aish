@@ -614,3 +614,80 @@ class TestPreflight:
         assert preload.text == ""
         assert preload.names == []
         assert preload.unread == []
+
+
+class TestLifecycle:
+    """#178 P1-8 retire primitives: `status: disabled` and `expires:` exclude
+    an entry everywhere without deleting the file."""
+
+    def _memory(self, front_extra, name="fact-one"):
+        write_skill(
+            skills_module.GLOBAL_MEMORY_DIR,
+            f"{name}.md",
+            f"---\nname: {name}\ndescription: a saved fact\n{front_extra}---\n",
+        )
+
+    def test_disabled_excluded_everywhere(self, tmp_path):
+        self._memory("status: disabled\n")
+        write_skill(
+            skills_module.GLOBAL_SKILLS_DIR,
+            "dead.md",
+            "---\nname: dead\ndescription: retired playbook\nstatus: disabled\n---\nx",
+        )
+        cwd = str(tmp_path)
+        assert all(e.name not in ("fact-one", "dead") for e in load_entries(cwd))
+        assert "fact-one" not in knowledge_index(cwd)
+        assert "dead" not in knowledge_index(cwd)
+        assert preflight(cwd, None, "apply the saved fact about the playbook").names == []
+        assert "dead" not in recall_text(cwd, None, "retired playbook")
+        assert ("dead", "retired playbook") not in list_skills(skills_module.skill_dirs(cwd))
+
+    def test_read_skill_names_disabled_instead_of_missing(self, tmp_path):
+        write_skill(
+            skills_module.GLOBAL_SKILLS_DIR,
+            "dead.md",
+            "---\nname: dead\ndescription: d\nstatus: disabled\n---\nbody",
+        )
+        out = load_skill("dead", skills_module.skill_dirs(str(tmp_path)))
+        assert "retired" in out and "disabled" in out
+        assert "body" not in out  # never serves a retired playbook
+
+    def test_expired_entry_acts_disabled(self, tmp_path):
+        self._memory("expires: 2000-01-01\n")
+        assert all(e.name != "fact-one" for e in load_entries(str(tmp_path)))
+        assert "a saved fact" not in knowledge_index(str(tmp_path))
+
+    def test_future_expiry_stays_active(self, tmp_path):
+        self._memory("expires: 2999-12-31\n")
+        assert any(e.name == "fact-one" for e in load_entries(str(tmp_path)))
+
+    def test_entry_valid_through_expiry_day(self):
+        from datetime import date
+
+        from aish.skills import Entry, entry_active
+
+        entry = Entry("e", "d", [], "", "memory", expires=date(2026, 8, 1))
+        assert entry_active(entry, today=date(2026, 8, 1))
+        assert not entry_active(entry, today=date(2026, 8, 2))
+
+    def test_malformed_expiry_warns_and_stays_active(self, tmp_path):
+        import pytest
+
+        with pytest.warns(UserWarning, match="expires"):
+            self._memory("expires: next-month\n")
+            entries = load_entries(str(tmp_path))
+        assert any(e.name == "fact-one" for e in entries)
+
+    def test_save_memory_writes_and_validates_expires(self, tmp_path):
+        d = tmp_path / "memory"
+        assert save_memory("temp fact", d, name="t", expires="2999-01-31").startswith(
+            "remembered"
+        )
+        assert "expires: 2999-01-31" in (d / "t.md").read_text()
+        assert save_memory("x", d, name="bad", expires="soon").startswith("ERROR")
+
+    def test_update_preserves_expiry_when_not_passed(self, tmp_path):
+        d = tmp_path / "memory"
+        save_memory("temp fact", d, name="t", expires="2999-01-31")
+        save_memory("temp fact updated", d, name="t")
+        assert "expires: 2999-01-31" in (d / "t.md").read_text()

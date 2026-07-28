@@ -9,6 +9,10 @@ Both are markdown files with optional frontmatter, discovered live:
     ---
     body ...
 
+Lifecycle frontmatter (#178 P1-8): `status: disabled` retires an entry
+without deleting it, and `expires: YYYY-MM-DD` retires it automatically past
+that date — see entry_active for what "retired" means everywhere.
+
 Skills live in ~/.config/aish/skills/ (global); memory entries mirror that
 layout under ~/.config/aish/memory/. Legacy one-line lessons in lessons.md
 are exposed as synthetic memory entries until migrated. Project-scope dirs
@@ -30,7 +34,9 @@ discoverable — for skills it states the trigger, for memory it IS the fact.
 
 import difflib
 import re
+import warnings
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 GLOBAL_SKILLS_DIR = Path.home() / ".config" / "aish" / "skills"
@@ -111,6 +117,8 @@ class Entry:
     mtime: float = 0.0
     path: Path | None = None
     words: frozenset = field(default_factory=frozenset)
+    status: str = ""  # "disabled" retires an entry without deleting it (#178 P1-8)
+    expires: date | None = None  # past this date the entry acts disabled
 
 
 # SECURITY (#178 P0-1, interim): project-scope discovery is OFF by default.
@@ -152,6 +160,7 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
     text = path.read_text(encoding="utf-8")
     default_name = path.parent.name if path.name == "SKILL.md" else path.stem
     name, description, keywords, body = default_name, "", [], text
+    status, expires = "", None
     if text.startswith("---"):
         parts = text.split("---", 2)
         if len(parts) == 3:
@@ -165,6 +174,10 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
                     description = value.strip()
                 elif key == "keywords":
                     keywords = [w.strip() for w in value.split(",") if w.strip()]
+                elif key == "status":
+                    status = value.strip().casefold()
+                elif key == "expires":
+                    expires = _parse_expiry(value.strip(), path)
     if not description:
         for line in body.strip().splitlines():
             if line.strip():
@@ -184,7 +197,40 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
         mtime=mtime,
         path=path,
         words=_build_words(name, description, " ".join(keywords), body),
+        status=status,
+        expires=expires,
     )
+
+
+def _parse_expiry(value: str, path: Path) -> date | None:
+    """Tolerant, dependency-free: a malformed date means no expiry (the entry
+    stays live — failing OPEN keeps knowledge available), with a warning so
+    the typo gets noticed."""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        warnings.warn(
+            f"{path}: unparseable expires date {value!r} ignored (use YYYY-MM-DD)",
+            stacklevel=2,
+        )
+        return None
+
+
+def entry_active(entry: Entry, today: date | None = None) -> bool:
+    """The retire primitives (#178 P1-8): `status: disabled` frontmatter, or a
+    past `expires: YYYY-MM-DD` date (an entry stays valid through its expiry
+    day). Inactive entries are excluded from load_entries — and with it the
+    index, preflight, recall, and save_memory's duplicate checks — while
+    load_skill names the reason instead of claiming the entry is missing.
+    Expiry is evaluated at read time, never baked in at parse time, so a
+    long-running process crosses the boundary without an mtime change."""
+    if entry.status == "disabled":
+        return False
+    if entry.expires is not None and (today or date.today()) > entry.expires:
+        return False
+    return True
 
 
 # Parsed entries keyed by path; re-parse only when the file's mtime moved.
@@ -273,17 +319,21 @@ def _lesson_entries(lessons_path) -> list[Entry]:
 
 
 def load_entries(cwd: str, lessons_path=None) -> list[Entry]:
-    """The full corpus in tie-break order: project-then-global skills,
-    memory entries (newest first), then legacy lessons."""
-    skills = _merged(skill_dirs(cwd), "skill")
-    memory = _merged(memory_dirs(cwd), "memory")
+    """The full ACTIVE corpus in tie-break order: project-then-global skills,
+    memory entries (newest first), then legacy lessons. Disabled/expired
+    entries never leave this function — every consumer (index, preflight,
+    recall, dedup) inherits the retirement for free."""
+    skills = [e for e in _merged(skill_dirs(cwd), "skill") if entry_active(e)]
+    memory = [e for e in _merged(memory_dirs(cwd), "memory") if entry_active(e)]
     memory.sort(key=lambda e: e.mtime, reverse=True)
     return skills + memory + _lesson_entries(lessons_path)
 
 
 def list_skills(dirs: list[Path]) -> list[tuple[str, str]]:
     """(name, description) pairs; earlier dirs win on duplicate names."""
-    return sorted((e.name, e.description) for e in _merged(dirs, "skill"))
+    return sorted(
+        (e.name, e.description) for e in _merged(dirs, "skill") if entry_active(e)
+    )
 
 
 def knowledge_index(cwd: str, lessons_path=None) -> str:
@@ -292,9 +342,13 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
     nothing exists."""
     sections = []
     *project_dirs, global_dir = skill_dirs(cwd)  # project dirs only when opted in (#178)
-    project = [e for d in project_dirs for e in _dir_entries(d, "skill")]
+    project = [e for d in project_dirs for e in _dir_entries(d, "skill") if entry_active(e)]
     names = {e.name for e in project}
-    globals_ = [e for e in _dir_entries(global_dir, "skill") if e.name not in names]
+    globals_ = [
+        e
+        for e in _dir_entries(global_dir, "skill")
+        if e.name not in names and entry_active(e)
+    ]
     globals_.sort(key=lambda e: e.mtime, reverse=True)
     room = max(0, INDEX_SKILLS_MAX - len(project))
     skills = project + globals_[:room]
@@ -313,7 +367,7 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
             "before acting: follow the skill over your built-in approach "
             "from training data.\n" + lines + note
         )
-    memory = _merged(memory_dirs(cwd), "memory")
+    memory = [e for e in _merged(memory_dirs(cwd), "memory") if entry_active(e)]
     memory.sort(key=lambda e: e.mtime, reverse=True)
     lessons = _lesson_entries(lessons_path)
     memory += lessons
@@ -352,6 +406,18 @@ def load_skill(name: str, dirs: list[Path]) -> str:
         return f"ERROR: invalid skill name {name!r}"
     for entry in _merged(dirs, "skill"):
         if entry.name == name:
+            if not entry_active(entry):
+                reason = (
+                    "status: disabled"
+                    if entry.status == "disabled"
+                    else f"expired {entry.expires}"
+                )
+                return (
+                    f"NOTE: skill {name!r} exists but is retired ({reason}) and is "
+                    "excluded from your index, preflight, and recall. Do not follow "
+                    f"it; edit its frontmatter at {entry.path} only if the user asks "
+                    "to re-enable it."
+                )
             return f"{_block_header(entry)}\n{entry.body}{_bundled_note(entry)}"
     available = ", ".join(n for n, _ in list_skills(dirs)) or "none"
     return f"ERROR: no skill named {name!r}. Available skills: {available}"
@@ -647,15 +713,26 @@ def recall_text(
 
 
 def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: str = "",
-                lessons_path=None) -> str:
+                lessons_path=None, expires: str | None = None) -> str:
     """Create or update one structured memory entry. Constrained to writing a
-    slug-named markdown file inside the memory dir — safe to auto-approve."""
+    slug-named markdown file inside the memory dir — safe to auto-approve.
+
+    `expires` ("YYYY-MM-DD") marks a fact with a known end date; past it the
+    entry acts disabled (see entry_active). Write-side validation is strict —
+    the model gets a correctable error, unlike the tolerant read side — and
+    on an update, None keeps the file's existing expiry."""
     text = " ".join(fact.split()).strip()
     if not text:
         return "ERROR: empty fact"
     slug = name.strip() or _slugify(text)
     if not NAME_RE.match(slug or ""):
         return f"ERROR: invalid memory name {slug!r}"
+    expiry: date | None = None
+    if expires is not None and expires.strip():
+        try:
+            expiry = date.fromisoformat(expires.strip())
+        except ValueError:
+            return f"ERROR: invalid expires date {expires!r} — use YYYY-MM-DD"
     existing = load_entries(cwd, lessons_path) if cwd else []
     for entry in existing:
         # Same-name file entries are the update path; path-less entries are
@@ -667,13 +744,18 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
     keyword_list = [w.strip() for w in keywords.split(",") if w.strip()]
     directory = Path(memory_dir)
     path = directory / f"{slug}.md"
-    front = [f"name: {slug}", f"description: {text}"]
-    if keyword_list:
-        front.append(f"keywords: {', '.join(keyword_list)}")
     body = ""
     try:
-        if path.is_file():  # update: keep any body detail below the fact line
-            body = _parse(path, "memory").body
+        if path.is_file():  # update: keep body detail + undeclared frontmatter
+            prior = _parse(path, "memory")
+            body = prior.body
+            if expiry is None:
+                expiry = prior.expires
+        front = [f"name: {slug}", f"description: {text}"]
+        if keyword_list:
+            front.append(f"keywords: {', '.join(keyword_list)}")
+        if expiry is not None:
+            front.append(f"expires: {expiry.isoformat()}")
         directory.mkdir(parents=True, exist_ok=True)
         path.write_text(
             "---\n" + "\n".join(front) + "\n---\n" + (body + "\n" if body else ""),

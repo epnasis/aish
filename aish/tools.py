@@ -503,6 +503,16 @@ TOOL_SCHEMAS = [
                             "provide them."
                         ),
                     },
+                    "expires": {
+                        "type": "string",
+                        "description": (
+                            "YYYY-MM-DD date after which the fact stops applying; "
+                            "the entry then drops out of your context and recall "
+                            "automatically. You MUST set it when the fact has a "
+                            "known end date (e.g. 'parking pass code is 4412' with "
+                            "expires: 2026-08-31). Omit for durable facts."
+                        ),
+                    },
                 },
                 "required": ["note"],
             },

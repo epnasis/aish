@@ -2031,6 +2031,7 @@ class Agent:
                 keywords=str(args.get("keywords", "") or ""),
                 cwd=self.cwd,
                 lessons_path=self.lessons_path,
+                expires=str(args.get("expires", "") or "") or None,
             )
             self._note(f"→ {result}")
             return result
