@@ -1799,6 +1799,7 @@ def main() -> int:
             status=_timer,
             state_dir=state_dir,
             current_session=lambda: logref.log.path,
+            aliases=config.get("aliases"),
         )
     else:
         assert chat is not None  # None only for claude-max, handled above

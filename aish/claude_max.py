@@ -19,6 +19,8 @@ multi-turn context by resuming the SDK session id between tasks.
 
 import asyncio
 import os
+import threading
+from functools import partial
 from typing import Any
 
 from . import tools
@@ -38,6 +40,8 @@ class ClaudeMaxAgent:
         approve=None,
         approve_write=None,
         approve_read=None,
+        approve_tool=None,
+        approve_import=None,
         echo=lambda _t: None,
         stream=None,
         max_steps: int = 25,
@@ -45,6 +49,11 @@ class ClaudeMaxAgent:
         context: str = "",
         on_message=None,
         on_token=None,
+        on_step=None,
+        on_command_start=None,
+        on_command_end=None,
+        step_log=None,
+        command_log=None,
         job_log_dir=None,
         lessons_path=None,
         status=None,
@@ -52,28 +61,55 @@ class ClaudeMaxAgent:
         current_session=None,
         state_log=None,
         on_state=None,
+        check_pending_cwd=None,
+        check_pending_messages=None,
+        semantic=None,
         aliases=None,
-        **_ignored,
     ):
+        # NO **kwargs sink here, deliberately (#178 P0-4): every capability an
+        # entry point passes must be either kept on this wrapper or forwarded
+        # to the inner Agent — an unknown kwarg is a wiring bug and must raise
+        # TypeError, not silently no-op a feature for claude-max sessions only.
+        #
         # The inner Agent supplies tool dispatch (approval, denylist, file
         # diffs, cd tracking); its chat client is never invoked. Workspace
         # sinks flow to it so /cd + dir-trust persist and emit for claude-max
-        # too (rebase/add_root/trust_root all delegate to the inner Agent).
+        # too (rebase/add_root/trust_root all delegate to the inner Agent), the
+        # trace/command sinks so a claude-max session logs + renders the same
+        # activity trace as every other backend, and the tool/import approvers
+        # so plugin tools and skill imports gate identically. on_message stays
+        # on this wrapper (display history is claude-max's own; the inner Agent
+        # never appends conversation turns), and status drives the SDK loop's
+        # "thinking" only — forwarding it would let a tool dispatch stop() the
+        # still-running task status.
         self.inner = Agent(
             model="unused",
             approve=approve or (lambda _c: None),
             approve_write=approve_write or (lambda _p: False),
             approve_read=approve_read or (lambda _p, _r: True),
+            approve_tool=approve_tool,
+            approve_import=approve_import,
             echo=echo,
             stream=stream,
             client_chat=self._never_called,
             cwd=cwd,
+            on_step=on_step,
+            on_command_start=on_command_start,
+            on_command_end=on_command_end,
+            step_log=step_log,
+            command_log=command_log,
             job_log_dir=job_log_dir,
             lessons_path=lessons_path,
             state_dir=state_dir,
             current_session=current_session,
             state_log=state_log,
             on_state=on_state,
+            # Inert under claude-max (the SDK owns the loop, so the inner
+            # run_task that polls these never runs) but forwarded so the
+            # wrapper keeps zero capability state of its own.
+            check_pending_cwd=check_pending_cwd,
+            check_pending_messages=check_pending_messages,
+            semantic=semantic,
             aliases=aliases,
         )
         self.model = model  # "" = the claude CLI's configured default
@@ -86,8 +122,13 @@ class ClaudeMaxAgent:
         self.messages: list[dict] = []  # display-only history (replay/logs)
         self._session_id: str | None = None
         self._pending_notes: list[str] = []
+        # The SDK may run tool handlers concurrently; the inner Agent is not
+        # thread-safe (_run_meta, _pending_skill_reads, cwd) and two approval
+        # prompts must never interleave — every entry into it serializes here.
+        self._dispatch_lock = threading.Lock()
         self._sdk = self._load_sdk()
-        self._server, self._tool_names = self._build_server()
+        self._tool_defs = self._current_tool_defs()
+        self._server, self._tool_names = self._build_server(self._tool_defs)
 
     # ------------------------------------------------------------ plumbing
 
@@ -157,7 +198,34 @@ class ClaudeMaxAgent:
             ) from exc
         return claude_agent_sdk
 
-    def _build_server(self):
+    def _current_tool_defs(self) -> list[dict]:
+        """Native tools plus discovered plugin tools (TOOL.md), exactly the set
+        Agent._chat_turn exposes — mutating plugin tools appear only when a
+        tool approver is wired (fail-closed in dispatch either way)."""
+        self.inner._refresh_plugin_tools()
+        return tools.TOOL_SCHEMAS + self.inner._plugin_defs
+
+    def _refresh_server(self) -> None:
+        """Rebuild the SDK MCP server when the exposed tool set moved (a
+        create_tool or a TOOL.md dropped mid-session shows up next task)."""
+        defs = self._current_tool_defs()
+        if defs != self._tool_defs:
+            self._tool_defs = defs
+            self._server, self._tool_names = self._build_server(defs)
+
+    def _locked_dispatch(self, name: str, args: dict) -> str:
+        """The single execution path for SDK tool calls: serialized entry into
+        the inner Agent, routed through _call_result so the same trace steps
+        (tool_start/tool) are emitted and exceptions are contained exactly as
+        in the native loop."""
+        with self._dispatch_lock:
+            return self.inner._call_result(
+                name,
+                partial(self.inner._timed, partial(self.inner._dispatch, name, args)),
+                args=args,
+            )
+
+    def _build_server(self, defs: list[dict]):
         sdk = self._sdk
         sdk_tools = []
         names = []
@@ -168,7 +236,7 @@ class ClaudeMaxAgent:
                 # prompts block on stdin, so push them to a worker thread.
                 try:
                     result = await asyncio.to_thread(
-                        self.inner._dispatch, name, args or {}
+                        self._locked_dispatch, name, args or {}
                     )
                 except Exception as exc:  # noqa: BLE001 — never kill the loop
                     result = f"ERROR: tool '{name}' failed internally: {exc!r}"
@@ -177,7 +245,7 @@ class ClaudeMaxAgent:
 
             return handler
 
-        for schema in tools.TOOL_SCHEMAS:
+        for schema in defs:
             function = schema["function"]
             name = function["name"]
             names.append(name)
@@ -218,6 +286,12 @@ class ClaudeMaxAgent:
         return result
 
     def run_task(self, task: str) -> str:
+        # The SDK owns the loop, so the inner Agent's run_task — where per-task
+        # state normally resets — never runs here. Reset it explicitly or a
+        # denial's stop gate (and stale _run_meta/skill gates/cancel) would
+        # wedge every later tool call in this AND future tasks (#178 P0-4).
+        self.inner._reset_task_state()
+        self._refresh_server()  # plugin tools created since last task
         prompt = task
         if self._pending_notes:
             prompt = "\n\n".join([*self._pending_notes, task])
