@@ -379,18 +379,72 @@ class TestSecretInjection:
 
 
 class TestCollision:
-    def test_project_shadows_global_warns(self, tmp_path, project_scope):
+    """Shadowing across scopes (#178 P1-3): `mutating` is a monotone floor —
+    a project shadow may RAISE a global tool to mutating, never lower it."""
+
+    def _clash(self, tmp_path, *, project_mut, global_mut):
         proj = tmp_path / ".aish" / "tools"
         glob = tmp_path / "global"
-        import aish.tool_plugins as tp
-        write_tool(proj / "dup", VALID.replace("echoer", "dup"))
-        gtext = VALID.replace("echoer", "dup").replace("mutating: no", "mutating: yes")
-        write_tool(glob / "dup", gtext)
-        # point global at our temp global dir
+        write_tool(
+            proj / "dup",
+            VALID.replace("echoer", "dup").replace("mutating: no", f"mutating: {project_mut}"),
+        )
+        write_tool(
+            glob / "dup",
+            VALID.replace("echoer", "dup").replace("mutating: no", f"mutating: {global_mut}"),
+        )
         import unittest.mock as m
         with m.patch.object(tp, "GLOBAL_TOOLS_DIR", glob):
             found, warnings = tp.discover(str(tmp_path))
-        names = [t.name for t in found]
-        assert names.count("dup") == 1  # only one wins
+        return proj, glob, found, warnings
+
+    def test_downgrade_shadow_refused_global_survives(self, tmp_path, project_scope):
+        # project says read-only, global says mutating: the shadow would route
+        # a mutation through the ungated read path — refuse it outright.
+        proj, glob, found, warnings = self._clash(
+            tmp_path, project_mut="no", global_mut="yes"
+        )
+        assert [t.name for t in found] == ["dup"]
+        winner = found[0]
+        assert winner.mutating is True  # the floor held
+        assert winner.dir == glob / "dup"  # the GLOBAL manifest is the survivor
+        assert any("REFUSED" in w and "downgrades" in w for w in warnings)
+        # the loud warning names both paths
+        assert any(
+            str(proj / "dup" / "TOOL.md") in w and str(glob / "dup" / "TOOL.md") in w
+            for w in warnings
+        )
+
+    def test_upgrade_shadow_project_wins_as_mutating(self, tmp_path, project_scope):
+        # project raises the tool to mutating — allowed; project wins and the
+        # differing-flags warning stays.
+        proj, glob, found, warnings = self._clash(
+            tmp_path, project_mut="yes", global_mut="no"
+        )
+        assert [t.name for t in found] == ["dup"]
+        winner = found[0]
+        assert winner.mutating is True
+        assert winner.dir == proj / "dup"
         assert any("shadowed" in w for w in warnings)
         assert any("mutating` flags DIFFER" in w for w in warnings)
+        assert not any("REFUSED" in w for w in warnings)
+
+    def test_same_flag_shadow_unchanged(self, tmp_path, project_scope):
+        proj, glob, found, warnings = self._clash(
+            tmp_path, project_mut="no", global_mut="no"
+        )
+        assert [t.name for t in found] == ["dup"]
+        winner = found[0]
+        assert winner.mutating is False
+        assert winner.dir == proj / "dup"
+        assert any("shadowed" in w for w in warnings)
+        assert not any("DIFFER" in w for w in warnings)
+        assert not any("REFUSED" in w for w in warnings)
+
+
+def test_suite_never_scans_real_global_tools_dir():
+    """Pin the conftest isolation: no test in this suite may discover from the
+    developer's real ~/.config/aish/tools (mirror of the skills isolation)."""
+    from pathlib import Path
+
+    assert tp.GLOBAL_TOOLS_DIR != Path.home() / ".config" / "aish" / "tools"
