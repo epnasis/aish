@@ -20,6 +20,7 @@ dependencies = [
 [project.scripts]
 aish = "aish.cli:main"
 aish-web = "aish.server:main"
+aish-email-poll = "aish.email_poll:main"
 
 [dependency-groups]
 dev = [

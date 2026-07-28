@@ -346,6 +346,16 @@ capped, and least-recently-useful unpinned chats are dropped first.
 aish can also act on its own — for jobs you set up and own. A token-gated
 `POST /trigger` endpoint launches a task in a background session (from a
 schedule, an incoming email, a webhook), observable when you open it. The
+ingress is hardened against delivery storms: a repeat POST carrying the same
+`meta.dedup_key` reuses the already-opened session instead of firing again,
+each origin is rate-limited, and concurrently running automated sessions are
+capped — over either limit the endpoint answers 429 with a Retry-After, and a
+well-behaved source just retries later. The bundled `aish-email-poll` command
+is the email source: it polls the bot mailbox via `gws`, accepts only
+DMARC-authenticated mail from the owner's addresses, and fires `/trigger` with
+the Gmail message id as the dedup key; a message is marked processed only
+after a successful trigger, so a refused or failed delivery retries on the
+next poll instead of being lost. The
 capability policy is **draft-and-hold**: in an automated session, safe actions
 run unattended, but anything that reaches the outside world (a send *or draft*
 addressed to anyone but you — recipients are strictly parsed and validated, not

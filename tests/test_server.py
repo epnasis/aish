@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shlex
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -164,6 +165,20 @@ def recv_until(ws, wanted: str, limit: int = 200) -> dict:
         if event["type"] == "error":
             raise AssertionError(f"error while waiting for {wanted!r}: {event['text']}")
     raise AssertionError(f"no {wanted!r} event within {limit} events")
+
+
+def drain_done(client, name, token=TEST_TOKEN):
+    """Wait for a background session's task to finish: attach and return once
+    `done` is seen — LIVE or already in the replay. A triggered task races the
+    attach, so `connected(...)` + recv_until(ws, "done") hangs whenever the
+    task finished first (its done is then replayed, never re-sent)."""
+    with client.websocket_connect(f"/ws?token={token}&session={name}") as ws:
+        hello = ws.receive_json()
+        replay = ws.receive_json()
+        assert hello["type"] == "hello" and replay["type"] == "replay"
+        if any(e.get("type") == "done" for e in replay["events"]):
+            return
+        recv_until(ws, "done")
 
 
 def recv_step(ws, kind: str, limit: int = 200) -> dict:
@@ -4683,6 +4698,197 @@ class TestTriggerEndpoint:
             with connected(client, f"/ws?token=secret&session={name}") as (ws, _, _):
                 recv_until(ws, "done")
             assert server._default is before
+
+
+class TestTriggerHardening:
+    """Idempotency, per-origin rate limit, and concurrency cap on /trigger
+    (#178 P1-10) — every refusal happens BEFORE a session is created."""
+
+    def test_dedup_key_reuses_the_session(self, app_env):
+        client, _ = make_client(app_env, [model_says("one")], token="secret")
+        with client:
+            server = client.app.state.server
+            before = set(server.sessions)
+            body = {"prompt": "mail", "origin": "email",
+                    "meta": {"dedup_key": "gmail-m1"}}
+            r1 = client.post("/trigger?token=secret", json=body)
+            assert r1.status_code == 200
+            name = r1.json()["session"]
+            drain_done(client, name, token="secret")
+            # The retry storm case: the same delivery POSTed again answers 200
+            # with the SAME session and opens nothing new.
+            r2 = client.post("/trigger?token=secret", json=body)
+            assert r2.status_code == 200
+            assert r2.json() == {"session": name, "origin": "email", "deduped": True}
+            assert set(server.sessions) - before == {name}
+
+    def test_no_dedup_key_fires_every_post(self, app_env):
+        # Backward compatibility: clients that send no key keep old behavior.
+        client, _ = make_client(app_env, [model_says("a"), model_says("b")],
+                                token="secret")
+        with client:
+            names = set()
+            for _ in range(2):
+                r = client.post("/trigger?token=secret",
+                                json={"prompt": "go", "origin": "email"})
+                assert r.status_code == 200
+                assert "deduped" not in r.json()
+                names.add(r.json()["session"])
+            assert len(names) == 2
+            for name in names:
+                drain_done(client, name, token="secret")
+
+    def test_dedup_key_expires(self, app_env, monkeypatch):
+        monkeypatch.setattr(server_module, "TRIGGER_DEDUP_TTL", -1)  # everything stale
+        client, _ = make_client(app_env, [model_says("a"), model_says("b")],
+                                token="secret")
+        with client:
+            body = {"prompt": "go", "origin": "email", "meta": {"dedup_key": "k"}}
+            names = set()
+            for _ in range(2):
+                r = client.post("/trigger?token=secret", json=body)
+                assert r.status_code == 200
+                names.add(r.json()["session"])
+                drain_done(client, r.json()["session"], token="secret")
+            assert len(names) == 2  # an expired key no longer dedupes
+
+    def test_rate_limit_429_before_any_session(self, app_env):
+        client, _ = make_client(app_env, [model_says("a"), model_says("b")],
+                                token="secret", trigger_rate_capacity=2,
+                                trigger_rate_refill_s=3600)
+        with client:
+            server = client.app.state.server
+            names = []
+            for _ in range(2):
+                r = client.post("/trigger?token=secret",
+                                json={"prompt": "go", "origin": "webhook"})
+                assert r.status_code == 200
+                names.append(r.json()["session"])
+            before = set(server.sessions)
+            r = client.post("/trigger?token=secret",
+                            json={"prompt": "go", "origin": "webhook"})
+            assert r.status_code == 429
+            assert r.headers["Retry-After"]
+            assert "rate limit" in r.json()["error"]
+            assert set(server.sessions) == before  # refused BEFORE creation
+            for name in names:
+                drain_done(client, name, token="secret")
+
+    def test_rate_limit_is_per_origin(self, app_env):
+        client, _ = make_client(app_env, [model_says("a"), model_says("b")],
+                                token="secret", trigger_rate_capacity=1,
+                                trigger_rate_refill_s=3600)
+        with client:
+            r1 = client.post("/trigger?token=secret",
+                             json={"prompt": "go", "origin": "email"})
+            assert r1.status_code == 200
+            assert client.post("/trigger?token=secret",
+                               json={"prompt": "go", "origin": "email"}).status_code == 429
+            # A different origin has its own bucket.
+            r2 = client.post("/trigger?token=secret",
+                             json={"prompt": "go", "origin": "schedule"})
+            assert r2.status_code == 200
+            for r in (r1, r2):
+                drain_done(client, r.json()["session"], token="secret")
+
+    def test_concurrency_cap_429_while_triggered_sessions_run(self, app_env):
+        release = threading.Event()
+
+        class BlockingChat:
+            """Holds the triggered task mid-run so the session stays busy."""
+
+            def __call__(self, **kwargs):
+                if _is_title_call(kwargs):
+                    return model_says("")
+                release.wait(timeout=10)
+                response = model_says("done")
+                return iter([response]) if kwargs.get("stream") else response
+
+        app = create_app("fake", client_chat=BlockingChat(), **app_env,
+                         token="secret", max_concurrent_triggered=1)
+        client = TokenClient(app, auto_token="secret")
+        try:
+            with client:
+                r1 = client.post("/trigger?token=secret",
+                                 json={"prompt": "go", "origin": "email"})
+                assert r1.status_code == 200  # busy is set before the POST returns
+                # Different origin, so the rate limiter is not what refuses it.
+                r2 = client.post("/trigger?token=secret",
+                                 json={"prompt": "go", "origin": "webhook"})
+                assert r2.status_code == 429
+                assert r2.headers["Retry-After"]
+                assert "concurrent" in r2.json()["error"]
+                release.set()
+                name = r1.json()["session"]
+                drain_done(client, name, token="secret")
+                # busy clears in _finish_turn, AFTER the done we just saw —
+                # wait for it so the next POST reads the settled count.
+                server = client.app.state.server
+                for _ in range(200):
+                    if not server.sessions[name].busy:
+                        break
+                    time.sleep(0.01)
+                # With the first one finished the cap admits the next.
+                r3 = client.post("/trigger?token=secret",
+                                 json={"prompt": "go", "origin": "webhook"})
+                assert r3.status_code == 200
+                drain_done(client, r3.json()["session"], token="secret")
+        finally:
+            release.set()
+
+
+class TestWorkerPool:
+    """Agent workers run on the DEDICATED executor (#178 Gate 3): a parked
+    approval holds a worker thread indefinitely, and on the shared default
+    executor a few of those starved the very _show/to_thread calls a client
+    needs to attach and answer them — livelock, restart-only recovery."""
+
+    def test_run_task_executes_on_a_worker_pool_thread(self, app_env):
+        seen: list[str] = []
+
+        class RecordingChat:
+            def __call__(self, **kwargs):
+                if _is_title_call(kwargs):
+                    return model_says("")
+                seen.append(threading.current_thread().name)
+                response = model_says("hi")
+                return iter([response]) if kwargs.get("stream") else response
+
+        app = create_app("fake", client_chat=RecordingChat(), **app_env,
+                         token=TEST_TOKEN)
+        client = TokenClient(app, auto_token=TEST_TOKEN)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+        assert seen and all(name.startswith("aish-worker") for name in seen)
+
+    def test_saturated_worker_pool_does_not_block_attach(self, app_env):
+        # With EVERY worker thread parked (as held approvals would), a viewer
+        # can still connect and replay — the short ops must never share the
+        # pool, or nobody could attach to answer what parked it.
+        client, _ = make_client(app_env, [model_says("ok")])
+        release = threading.Event()
+        try:
+            with client:
+                server = client.app.state.server
+                for _ in range(server_module.WORKER_POOL_SIZE):
+                    server.worker_pool.submit(release.wait, 30)
+                with connected(client) as (_ws, hello, replay):
+                    assert hello["session"]
+                    assert replay["events"] == []
+                release.set()
+        finally:
+            release.set()
+
+    def test_shutdown_does_not_wait_on_parked_workers(self, app_env):
+        client, _ = make_client(app_env, [model_says("ok")])
+        release = threading.Event()
+        with client:
+            server = client.app.state.server
+            server.worker_pool.submit(release.wait, 30)
+        # Reaching here means lifespan shutdown returned while the fake parked
+        # worker was still waiting (wait=False + cancel_futures).
+        release.set()
 
 
 class TestOriginPersistence:
