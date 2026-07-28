@@ -37,11 +37,14 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from email.utils import formataddr, getaddresses
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import uvicorn
 from starlette.applications import Starlette
+from starlette.datastructures import MutableHeaders
+from starlette.middleware import Middleware
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
@@ -113,6 +116,79 @@ def _static_rev() -> str:
 
 
 STATIC_REV = _static_rev()
+
+
+# ---------------------------------------------------------------------------
+# Security headers (#178 P0-2). A model answer containing ![](https://…)
+# renders as a live <img> the browser fetches with zero clicks — a prompt
+# injection's exfiltration channel needing no tool call at all. The CSP kills
+# it at the browser: img-src is limited to same-origin (/file, uploads),
+# data: URIs (style.css icons, base64 embeds) and the two remote image
+# families aish legitimately embeds (YouTube thumbnails, Google static maps —
+# the same whitelist export.py enforces server-side for PDFs). Everything
+# else is pinned to 'self': there are no inline <script>s, no eval, and the
+# only cross-origin frames are the strictly-matched YouTube/Maps embed cards
+# (app.js embedForLink). style-src needs 'unsafe-inline' because index.html
+# uses inline style= attributes on its inline-SVG icons (no injected-style
+# risk beyond what script-src already prevents). connect-src names the ws://
+# and wss:// forms of the request's own host explicitly — CSP3 'self' covers
+# same-origin WebSockets in current browsers, but the explicit forms keep the
+# socket working behind the wss reverse proxy and on older WebKit.
+# Referrer-Policy stops session-bearing URLs (?session=…) leaking to the
+# whitelisted image hosts. Applied to EVERY http response — index, static
+# files, /file, JSON, errors, sw.js (whose worker-scope CSP this also is).
+CSP_IMG_HOSTS = "https://img.youtube.com https://i.ytimg.com https://maps.googleapis.com"
+CSP_FRAME_HOSTS = "https://www.youtube-nocookie.com https://maps.google.com"
+_HOST_OK_RE = re.compile(r"^[A-Za-z0-9.\-:\[\]]+$")  # header-injection guard
+
+
+def content_security_policy(host: str = "") -> str:
+    connect = "'self'"
+    if host and _HOST_OK_RE.match(host):
+        connect += f" ws://{host} wss://{host}"
+    return (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        f"img-src 'self' data: {CSP_IMG_HOSTS}; "
+        f"connect-src {connect}; "
+        f"frame-src {CSP_FRAME_HOSTS}; "
+        "frame-ancestors 'none'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+
+
+class SecurityHeaders:
+    """Pure-ASGI middleware stamping the security headers on every HTTP
+    response (WebSocket scopes pass through untouched — headers are an HTTP
+    concept). Hand-rolled instead of BaseHTTPMiddleware so FileResponse /
+    streaming bodies are not re-buffered."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        host = ""
+        for key, value in scope.get("headers") or []:
+            if key == b"host":
+                host = value.decode("latin-1")
+                break
+        csp = content_security_policy(host)
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers.setdefault("Content-Security-Policy", csp)
+                headers.setdefault("Referrer-Policy", "no-referrer")
+                headers.setdefault("X-Content-Type-Options", "nosniff")
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 async def serve_index(request):  # noqa: ARG001 — Starlette route signature
@@ -613,11 +689,12 @@ class WebStatus:
 # Triggered-session capability policy (#160): a session NOT started by the user
 # (origin email/schedule/webhook) runs with no human at the keyboard. These
 # mutating tools are SAFE to auto-run there — reversible and non-exfiltrating:
-# relabeling mail, and saving (never sending) a draft. Everything else (sending
-# live mail, trashing, creating filters, sharing to Drive) falls through to the
-# normal approval card, which simply HOLDS pending until the owner opens the
-# automated session and answers — the draft-and-hold model, built out of the
-# existing gate rather than a bespoke hold flow.
+# relabeling mail, and mail (draft or live) whose every recipient is verifiably
+# the owner. Everything else (any send or draft addressed beyond the owner,
+# trashing, creating filters, sharing to Drive) falls through to the normal
+# approval card, which simply HOLDS pending until the owner opens the automated
+# session and answers — the draft-and-hold model, built out of the existing
+# gate rather than a bespoke hold flow.
 TRIGGERED_SAFE_TOOLS = frozenset({"gmail_label"})
 
 # Recipient-scoped autonomy (#160 follow-up): a triggered session may send a
@@ -634,7 +711,39 @@ OWNER_ADDRESSES = frozenset(
     if a.strip()
 )
 
-_ADDR_RE = re.compile(r"[\w.+-]+@[\w.-]+")
+def _parse_recipients(field: str) -> list[str] | None:
+    """Every address a recipient header field routes to, or None when the field
+    does not parse CLEANLY — the security rule (#178 P0-3): a decision about
+    what a string IS must never be made by a regex that finds things IN it.
+    The old `findall` approach saw the owner inside `"pawel@wenda.eu"@evil.com`
+    (a valid RFC 5322 quoted local-part routed to evil.com) and concluded the
+    send was owner-only. This parses with email.utils.getaddresses and then
+    rejects anything exotic: a parse-failure pair, a quoted local-part, a
+    local-part containing `@`, or a field that re-serializing the parsed
+    addresses does not reproduce (residue = something escaped the parse, which
+    lenient/older parsers are known to do). Rejection is safe — the caller
+    falls through to the approval card, never to an auto-send."""
+    pairs = getaddresses([field])
+    if not pairs:
+        return None
+    addrs: list[str] = []
+    for _display, addr in pairs:
+        if not addr:
+            return None  # ('', '') is getaddresses' malformed-input marker
+        local, sep, domain = addr.rpartition("@")
+        if not sep or not local or not domain:
+            return None
+        if "@" in local or '"' in addr or "'" in addr:
+            return None  # quoted/multi-@ local-parts route elsewhere than they read
+        addrs.append(addr)
+    # Residue check: rebuilding the field from what we parsed must reproduce it
+    # (whitespace/comma spacing normalized). Anything dropped or reinterpreted
+    # by the parser fails the comparison and the send holds for approval.
+    normalize = lambda s: re.sub(r"\s*,\s*", ", ", re.sub(r"\s+", " ", s.strip()))  # noqa: E731
+    rebuilt = ", ".join(formataddr(pair) for pair in pairs)
+    if normalize(field) != normalize(rebuilt):
+        return None
+    return addrs
 
 
 def _all_recipients_owner(args: dict) -> bool:
@@ -644,14 +753,21 @@ def _all_recipients_owner(args: dict) -> bool:
     message's sender, which is not verifiable from args (if the replied-to
     message is from a third party, an owner-looking `to` would still exfiltrate
     to them). Autonomous owner answers must therefore be a NEW email addressed
-    explicitly to an owner address — the model is told this in the trigger."""
+    explicitly to an owner address — the model is told this in the trigger.
+    Any field that does not parse cleanly (see _parse_recipients) counts as
+    not-owner, so a malformed/adversarial recipient holds instead of sending."""
     if args.get("reply_to_msg_id"):
         return False
     recips: list[str] = []
     for field in ("to", "cc", "bcc"):
         val = args.get(field)
-        if val:
-            recips += _ADDR_RE.findall(str(val))
+        if val is None or val == "" or val == []:
+            continue
+        text = ", ".join(str(v) for v in val) if isinstance(val, list) else str(val)
+        parsed = _parse_recipients(text)
+        if parsed is None:
+            return False
+        recips += parsed
     if not recips:
         return False
     return all(addr.lower() in OWNER_ADDRESSES for addr in recips)
@@ -682,11 +798,13 @@ def _triggered_safe(name: str, args: dict) -> bool:
     if name in TRIGGERED_SAFE_TOOLS:
         return True
     if name == "gmail_send":
-        # Safe when it never leaves the owner's own control: a draft (not sent),
-        # or a live send whose every recipient is the owner (recipient-scoped
-        # autonomy — aish can answer YOU without approval; mailing anyone else
-        # still holds).
-        return bool(args.get("draft")) or _all_recipients_owner(args)
+        # Safe only when it can never leave the owner's own control: every
+        # recipient verifiably the owner (recipient-scoped autonomy — aish can
+        # answer YOU without approval; mailing anyone else still holds). The
+        # recipient check applies to DRAFTS too (#178 P0-3): a draft addressed
+        # to a third party is a fully-staged exfiltration one mistaken tap from
+        # sending, so it stays draftable but through the card, never silently.
+        return _all_recipients_owner(args)
     return False
 
 
@@ -1081,9 +1199,11 @@ inline in the chat, and the user EXPECTS to see pictures this way. Whenever \
 your answer involves an image the user would want to look at — a chart or \
 diagram you just generated, a plot, a downloaded picture — you MUST embed \
 it: ![caption](/absolute/path.png) for a local file (png/jpg/gif/webp \
-inside the session roots), ![caption](https://…) for a web image. \
-Mentioning the file path in prose does NOT show the picture; always add \
-the image line too. Example: after saving /tmp/work/plot.png, end with \
+inside the session roots). Remote images are blocked by the browser's \
+security policy except YouTube thumbnails and Google static maps — for any \
+other web image, download it to a local file first and embed the local \
+path. Mentioning the file path in prose does NOT show the picture; always \
+add the image line too. Example: after saving /tmp/work/plot.png, end with \
 ![plot](/tmp/work/plot.png).
 - Safety denylist: unrecoverable command classes are blocked outright and \
 cannot be approved here at all (extendable in {deny_path}); suggest a safer \
@@ -3489,6 +3609,11 @@ def create_app(
 
         common = dict(
             model=model_name,
+            # Origin rides on the Agent too (#178 P0-2): a non-user session
+            # gates read_url/web_search on conversation provenance and scopes
+            # recall to knowledge entries — the agent needs to know it is
+            # unattended. claude-max swallows this (its own loop, #P0-4 scope).
+            origin=origin,
             approve=approve,
             approve_write=approve_write,
             approve_read=approve_read,
@@ -3623,6 +3748,7 @@ def create_app(
             Route("/index.html", serve_index, methods=["GET"]),
             Mount("/", StaticFiles(directory=STATIC_DIR, html=True)),
         ],
+        middleware=[Middleware(SecurityHeaders)],
         lifespan=lifespan,
     )
     app.state.server = server

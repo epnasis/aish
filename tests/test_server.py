@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shlex
 import time
 from pathlib import Path
@@ -292,6 +293,55 @@ class TestConnect:
             ws.send_json({"type": "task", "text": "research"})
             done = recv_until(ws, "done")
             assert done["sources"] == [{"url": "https://x.example/"}]
+
+
+class TestSecurityHeaders:
+    """#178 P0-2: CSP + Referrer-Policy stamped on EVERY http response class —
+    index, static assets, the service worker, JSON endpoints, and errors —
+    with img-src limited to self/data:/the whitelisted embed hosts (the
+    zero-click ![](https://attacker/…) exfiltration channel)."""
+
+    PATHS = ("/", "/app.js", "/sw.js", "/manifest.json", "/offline/index",
+             "/style.css", "/no-such-path-xyz")
+
+    def test_headers_on_every_response_class(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            for path in self.PATHS:
+                response = client.get(path)
+                csp = response.headers.get("content-security-policy")
+                assert csp, f"no CSP on {path}"
+                assert "default-src 'self'" in csp
+                assert "script-src 'self'" in csp
+                assert (
+                    "img-src 'self' data: https://img.youtube.com "
+                    "https://i.ytimg.com https://maps.googleapis.com" in csp
+                )
+                assert "frame-ancestors 'none'" in csp
+                assert "object-src 'none'" in csp
+                assert response.headers.get("referrer-policy") == "no-referrer"
+
+    def test_connect_src_names_websocket_forms_of_own_host(self, app_env):
+        # 'self' plus the explicit ws/wss forms of the request's Host header,
+        # so the socket keeps working behind the wss reverse proxy.
+        client, _ = make_client(app_env, [])
+        with client:
+            csp = client.get("/").headers["content-security-policy"]
+            assert "connect-src 'self' ws://testserver wss://testserver" in csp
+
+    def test_hostile_host_header_never_reaches_the_policy(self):
+        # Header-injection guard: a Host that could smuggle extra CSP sources
+        # (spaces/semicolons) degrades to bare 'self', not into the policy.
+        csp = server_module.content_security_policy("evil.com; img-src *")
+        assert "evil.com" not in csp and "img-src *" not in csp
+        assert "connect-src 'self';" in csp
+
+    def test_index_has_no_inline_scripts(self):
+        # script-src 'self' only holds because index.html loads all JS from
+        # files — an inline <script> added later would silently break the app.
+        html = (server_module.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        for tag in re.findall(r"<script\b[^>]*>", html):
+            assert "src=" in tag, f"inline script would violate CSP: {tag}"
 
 
 class TestQuickReplyPromptGuidance:
@@ -4184,14 +4234,23 @@ class TestTriggeredCapabilityPolicy:
         assert bridge.asked == []  # no card — auto-run, no human needed
         assert log.records and log.records[0][1] == "auto (email)"
 
-    def test_draft_send_is_safe_but_live_send_holds(self):
+    def test_draft_recipients_are_checked_too(self):
+        # #178 P0-3: a draft addressed to a third party is a staged
+        # exfiltration one tap from sending — it holds like a live send
+        # (still draftable, just through the card). Owner-addressed drafts
+        # keep their autonomy.
         approve_tool, bridge, _ = self._approver("email")
-        assert approve_tool("gmail_send", {"to": "x@y.z", "body": "hi", "draft": True}) is True
+        assert approve_tool(
+            "gmail_send", {"to": "pawel@wenda.eu", "body": "hi", "draft": True}
+        ) is True
         assert bridge.asked == []
-        # A live (non-draft) send falls through to the card = held for approval.
         approve_tool2, bridge2, _ = self._approver("email")
-        approve_tool2("gmail_send", {"to": "x@y.z", "body": "hi"})
+        approve_tool2("gmail_send", {"to": "x@y.z", "body": "hi", "draft": True})
         assert len(bridge2.asked) == 1 and bridge2.asked[0]["tool"] == "gmail_send"
+        # A live (non-draft) send to a third party falls through to the card.
+        approve_tool3, bridge3, _ = self._approver("email")
+        approve_tool3("gmail_send", {"to": "x@y.z", "body": "hi"})
+        assert len(bridge3.asked) == 1 and bridge3.asked[0]["tool"] == "gmail_send"
 
     def test_unsafe_tool_holds_in_triggered_session(self):
         approve_tool, bridge, _ = self._approver("email")
@@ -4207,7 +4266,15 @@ class TestTriggeredCapabilityPolicy:
 
     def test_triggered_safe_helper(self):
         assert server_module._triggered_safe("gmail_label", {})
-        assert server_module._triggered_safe("gmail_send", {"draft": True})
+        # A draft is no longer auto-safe on the draft flag alone (#178 P0-3):
+        # its recipients must be verifiably the owner, like a live send.
+        assert not server_module._triggered_safe("gmail_send", {"draft": True})
+        assert server_module._triggered_safe(
+            "gmail_send", {"draft": True, "to": "pawel@wenda.eu"}
+        )
+        assert not server_module._triggered_safe(
+            "gmail_send", {"draft": True, "to": "x@evil.com"}
+        )
         assert not server_module._triggered_safe("gmail_send", {})
         assert not server_module._triggered_safe("gmail_trash", {"message_id": "m"})
 
@@ -4241,6 +4308,40 @@ class TestTriggeredCapabilityPolicy:
         # (possibly third-party) sender.
         assert not f({"reply_to_msg_id": "abc", "to": "pawel@wenda.eu"})
         assert not f({})
+
+    def test_adversarial_recipients_never_pass_as_owner(self):
+        """#178 P0-3: the old regex FOUND the owner address inside adversarial
+        fields instead of validating what the field routes to. Every one of
+        these must hold for approval, not auto-send."""
+        f = server_module._all_recipients_owner
+        # Valid RFC 5322 quoted local-part — routes to evil.com, reads as owner.
+        assert not f({"to": '"pawel@wenda.eu"@evil.com'})
+        assert not f({"to": "pawel@wenda.eu@evil.com"})  # multi-@, malformed
+        assert not f({"to": "pawel@wenda.eu, attacker@evil.com"})
+        assert not f({"to": ["pawel@wenda.eu", "attacker@evil.com"]})
+        # Owner address as DISPLAY NAME on an attacker address.
+        assert not f({"to": "pawel@wenda.eu <attacker@evil.com>"})
+        assert not f({"to": '"pawel@wenda.eu" <attacker@evil.com>'})
+        # Owner address in an RFC comment beside an attacker address.
+        assert not f({"to": "attacker@evil.com (pawel@wenda.eu)"})
+        assert not f({"to": "<pawel@wenda.eu> attacker@evil.com"})  # residue
+        assert not f({"to": "pawel@wenda.eu; attacker@evil.com"})
+        assert not f({"to": ""})
+        assert not f({"to": "not-an-address"})
+        # An owner-only field in every legitimate spelling still passes.
+        assert f({"to": " pawel@wenda.eu "})
+        assert f({"to": "PAWEL@WENDA.EU"})  # case-insensitive owner match
+        assert f({"to": '"Wenda, Pawel" <pawel@wenda.eu>'})  # comma in quotes
+        assert f({"to": ["pawel@wenda.eu", "pawel@wenda.email"]})  # list form
+
+    def test_parse_recipients_rejects_residue_and_quoting(self):
+        p = server_module._parse_recipients
+        assert p("a@b.co, c@d.co") == ["a@b.co", "c@d.co"]
+        assert p("Some One <a@b.co>") == ["a@b.co"]
+        assert p('"pawel@wenda.eu"@evil.com') is None  # quoted local-part
+        assert p("a@b.co@c.co") is None  # multi-@ local-part / malformed
+        assert p("") is None
+        assert p("a@b.co extra-junk") is None  # residue escapes the parse
 
 
 class TestTriggerEndpoint:

