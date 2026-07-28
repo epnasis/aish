@@ -655,8 +655,33 @@ let reconnectTimer = null;
 let connWarnTimer = null;
 const CONN_WARN_DELAY = 2000;
 
+// [RETIRE-START]
+// The socket has ONE owner: the `ws` variable. connect() is reached from several
+// places (initial load, the onclose backoff timer, reconnect(), a foregrounding
+// phone) and each assigns a fresh socket to `ws` — but assigning the variable
+// does NOT dispose the socket it replaced. An orphaned socket left OPEN keeps its
+// onmessage handler alive and goes on delivering live events into handle(), so
+// every user bubble and every timeline step renders once PER surviving socket
+// (replay is immune — it replaceChildren()s — which is why only the live
+// "working" state doubled). Neutralize the predecessor before it can double-feed:
+// null its handlers so no stray onclose reschedules another connect, then close
+// it. Idempotent and safe on a CONNECTING/CLOSING/CLOSED socket.
+function retireSocket(sock) {
+  if (!sock) return;
+  sock.onmessage = null;
+  sock.onopen = null;
+  sock.onclose = null;
+  sock.onerror = null;
+  try { sock.close(); } catch { /* already closing/closed */ }
+}
+// [RETIRE-END]
+
 function connect() {
   clearTimeout(reconnectTimer);
+  // Exactly one live feed into handle(): drop whatever socket `ws` still points
+  // at (a zombie, a slow CONNECTING attempt, a dead one an onclose hasn't
+  // reported yet) before we overwrite the variable and lose the reference.
+  retireSocket(ws);
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const params = new URLSearchParams();
   if (token) params.set("token", token);
@@ -747,10 +772,9 @@ function reconnect() {
   backoff = 1000;
   connOk = false;
   updateDot();
-  if (ws) {
-    ws.onclose = null; // this close is deliberate; the connect() below replaces it
-    ws.close();
-  }
+  // connect() now retires the previous socket itself (see retireSocket), so the
+  // old hand-rolled teardown here is redundant — but keep the deliberate reset
+  // of backoff/dot above; the socket disposal belongs to connect().
   connect();
 }
 
