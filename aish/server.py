@@ -38,6 +38,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from email.utils import formataddr, getaddresses
 from pathlib import Path
@@ -276,6 +277,29 @@ TRANSCRIPT_KEEP = 500
 # Open sessions kept in memory at once; beyond this the longest-idle one is
 # closed (its file persists — reopening it later just reloads the history).
 MAX_OPEN_SESSIONS = 6
+
+# /trigger abuse guards (#178 P1-10). The webhook phase (#162) and any
+# scheduler reuse this one ingress, so a flapping check or an HA retry storm
+# must not spawn a session, a model run, and a push notification per delivery.
+#
+# Idempotency: meta.dedup_key → session name, a bounded in-memory LRU with a
+# TTL. Deliberately NOT durable: cross-restart dedup stays at the SOURCE (the
+# email poller's Gmail label marks a message processed on disk-of-record) —
+# the server-side key is defense against retry storms within one process
+# lifetime, nothing more.
+TRIGGER_DEDUP_TTL = 24 * 3600   # seconds a dedup_key is remembered
+TRIGGER_DEDUP_MAX = 512         # keys kept; least-recently-used dropped past this
+# Token bucket per `origin` value: capacity is the allowed burst, one token
+# earned per TRIGGER_RATE_REFILL_S sustained (~2/min). Injectable via
+# create_app for tests.
+TRIGGER_RATE_CAPACITY = 6.0
+TRIGGER_RATE_REFILL_S = 30.0    # seconds to earn one new token
+# Cap on concurrently RUNNING triggered sessions (origin != "user", busy).
+# Refusing with 429 is safe by contract: the poller marks a message processed
+# only AFTER a successful trigger, so a refused delivery retries on the next
+# poll instead of being lost.
+MAX_CONCURRENT_TRIGGERED = 3
+TRIGGER_RETRY_AFTER_S = 30      # Retry-After hint on either 429
 
 # Restart recovery (#164). A task killed mid-run (a deploy restart, a crash, an
 # OOM) has NOTHING to bring it back: a user chat sits half-answered until
@@ -1413,6 +1437,12 @@ class WebServer:
         # never moved live here, so it is the baseline a session row's directory
         # is judged against (see _row_cwd).
         self.base_cwd = ""
+        # /trigger abuse guards (#178 P1-10); the knobs are create_app-injectable.
+        self.trigger_rate_capacity = TRIGGER_RATE_CAPACITY
+        self.trigger_rate_refill_s = TRIGGER_RATE_REFILL_S
+        self.max_concurrent_triggered = MAX_CONCURRENT_TRIGGERED
+        self._trigger_dedup: OrderedDict[str, tuple[float, str]] = OrderedDict()
+        self._trigger_buckets: dict[str, tuple[float, float]] = {}
 
     @property
     def active(self) -> Session:
@@ -1529,6 +1559,50 @@ class WebServer:
         Every gated endpoint requires it unconditionally — there is no
         token-less mode to fall through to."""
         return hmac.compare_digest(str(supplied or ""), self.token)
+
+    # -- /trigger abuse guards (#178 P1-10) ---------------------------------
+
+    def _dedup_hit(self, key: str) -> str | None:
+        """The session already opened for this dedup_key, if remembered.
+        Expired entries are pruned on the way; a hit renews its LRU slot."""
+        now = time.monotonic()
+        expired = [
+            k for k, (ts, _) in self._trigger_dedup.items()
+            if now - ts > TRIGGER_DEDUP_TTL
+        ]
+        for k in expired:
+            del self._trigger_dedup[k]
+        hit = self._trigger_dedup.get(key)
+        if hit is None:
+            return None
+        self._trigger_dedup.move_to_end(key)
+        return hit[1]
+
+    def _dedup_store(self, key: str, session_name: str) -> None:
+        self._trigger_dedup[key] = (time.monotonic(), session_name)
+        self._trigger_dedup.move_to_end(key)
+        while len(self._trigger_dedup) > TRIGGER_DEDUP_MAX:
+            self._trigger_dedup.popitem(last=False)
+
+    def _trigger_rate_ok(self, origin: str) -> bool:
+        """Token bucket per origin value: trigger_rate_capacity is the burst,
+        one token earned per trigger_rate_refill_s sustained."""
+        now = time.monotonic()
+        tokens, last = self._trigger_buckets.get(
+            origin, (float(self.trigger_rate_capacity), now)
+        )
+        tokens = min(
+            float(self.trigger_rate_capacity),
+            tokens + (now - last) / self.trigger_rate_refill_s,
+        )
+        ok = tokens >= 1.0
+        self._trigger_buckets[origin] = ((tokens - 1.0) if ok else tokens, now)
+        return ok
+
+    def _running_triggered(self) -> int:
+        return sum(
+            1 for s in self.sessions.values() if s.origin != "user" and s.busy
+        )
 
     def _evict_idle(self) -> None:
         """Close the longest-idle background session past the cap. Sessions that
@@ -3076,7 +3150,13 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         loopback, so it never proved anything. The Origin check runs FIRST —
         a cross-origin text/plain POST is a CORS simple request (no preflight),
         so any page the owner visits could otherwise fire one from the browser
-        (#178 P1-2); non-browser callers send no Origin and pass."""
+        (#178 P1-2); non-browser callers send no Origin and pass.
+
+        Abuse guards (#178 P1-10), after the gates: meta.dedup_key idempotency
+        (a repeat POST answers 200 with the existing session + deduped:true),
+        a per-origin token bucket, and a cap on concurrently running
+        triggered sessions — both limits answer 429 + Retry-After before any
+        session is created."""
         if not origin_allowed(
             request.headers.get("origin"), request.headers.get("host", "")
         ):
@@ -3095,8 +3175,38 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         origin = str(body.get("origin") or "webhook").strip()
         if origin == "user":
             return JSONResponse({"error": "origin must not be 'user'"}, status_code=400)
-        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        raw_meta = body.get("meta")
+        meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
         title = str(body.get("title") or "").strip()
+
+        # Abuse guards (#178 P1-10), in this order: a dedup hit is an
+        # idempotent SUCCESS and consumes nothing (a retry storm re-sending
+        # one key must not burn rate tokens), and both 429s come BEFORE any
+        # session exists. No dedup_key → every POST fires (existing clients
+        # keep working unchanged).
+        dedup_key = str(meta.get("dedup_key") or "")
+        if dedup_key:
+            existing = self._dedup_hit(dedup_key)
+            if existing is not None:
+                return JSONResponse(
+                    {"session": existing, "origin": origin, "deduped": True}
+                )
+        retry_after = {"Retry-After": str(TRIGGER_RETRY_AFTER_S)}
+        if not self._trigger_rate_ok(origin):
+            return JSONResponse(
+                {"error": f"rate limit exceeded for origin {origin!r}"},
+                status_code=429,
+                headers=retry_after,
+            )
+        if self._running_triggered() >= self.max_concurrent_triggered:
+            # Refusal is safe by contract: the poller marks a message
+            # processed only AFTER a successful trigger, so a 429'd delivery
+            # retries on the next poll instead of being lost.
+            return JSONResponse(
+                {"error": "too many concurrent triggered sessions"},
+                status_code=429,
+                headers=retry_after,
+            )
 
         self._evict_idle()
         session, _ = await asyncio.to_thread(self.open_session, None, origin, meta)
@@ -3113,6 +3223,10 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         # session, since it is always that session's opening turn.
         session.bridge.emit(_user_event(prompt, "trigger"))
         session.runner = asyncio.ensure_future(self._run_task(session, prompt))
+        if dedup_key:
+            # Recorded only once the session actually exists, so a failed
+            # open never poisons the key for the retry that would succeed.
+            self._dedup_store(dedup_key, session.name)
         return JSONResponse({"session": session.name, "origin": origin})
 
     async def handle_upload(self, request) -> JSONResponse:
@@ -3517,6 +3631,9 @@ def create_app(
     aliases: dict[str, str] | None = None,
     console_command: str | None = None,
     public_url: str | None = None,
+    trigger_rate_capacity: float = TRIGGER_RATE_CAPACITY,
+    trigger_rate_refill_s: float = TRIGGER_RATE_REFILL_S,
+    max_concurrent_triggered: int = MAX_CONCURRENT_TRIGGERED,
 ) -> Starlette:
     """The Starlette app; client_chat injects a scripted backend (tests).
 
@@ -3820,6 +3937,11 @@ def create_app(
     )
     server.public_url = public_url  # notification deep-link base (#163)
     server.base_cwd = cwd  # baseline for the session rows' directory label
+    # /trigger guards (#178 P1-10), injectable so tests exercise the limits
+    # without hammering the endpoint in real time.
+    server.trigger_rate_capacity = trigger_rate_capacity
+    server.trigger_rate_refill_s = trigger_rate_refill_s
+    server.max_concurrent_triggered = max_concurrent_triggered
     server_ref.append(server)
     first, _ = open_session(None)
     server.add_session(first, default=True)
