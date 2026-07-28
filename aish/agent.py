@@ -1027,6 +1027,28 @@ class Agent:
             self._emit_step(kind="injected", text=msg)
             self.messages.append({"role": "user", "content": msg})
 
+    def _reset_task_state(self) -> None:
+        """Return every per-task field to a fresh task's starting point.
+
+        Called from the top of run_task AND by ClaudeMaxAgent before each SDK
+        task — the SDK owns that loop, so run_task never runs there, and any
+        per-task state reset only inside run_task would leak across claude-max
+        tasks forever (issue #178 P0-4: one denial-with-comment armed the stop
+        gate for the rest of the session). Add new per-task fields HERE, not
+        inline in run_task, so the two entry points can never drift. The loop
+        detector's `repeats` dict needs no entry: it is a run_task local,
+        per-task by construction.
+        """
+        self.task_sources = []
+        self._run_meta = None  # stale run_command detail must not tag a new task's first step
+        self._cancel.clear()  # a stale stop must not kill the new task
+        # Skill-read gates belong to the task that armed them; run_task re-arms
+        # from its own preflight right after this reset.
+        self._pending_skill_reads = {}
+        # A new task starts un-gated: any pending comment belonged to the last
+        # task and would otherwise stall the first tool call of this one.
+        self._pending_comment_response = False
+
     def run_task(
         self,
         task: str,
@@ -1090,10 +1112,8 @@ class Agent:
                 "⚑ semantic recall unavailable "
                 f"({self.semantic.error[:80]}); falling back to word matching"
             )
+        self._reset_task_state()
         self._pending_skill_reads = {n: GATE_MAX_REFUSALS for n in preload.unread}
-        # A new task starts un-gated: any pending comment belonged to the last
-        # task and would otherwise stall the first tool call of this one.
-        self._pending_comment_response = False
         self.messages.append(
             {"role": "system", "content": task_reminder(index, preload.text)}
         )
@@ -1105,8 +1125,6 @@ class Agent:
             )
         self._append(user_message)
 
-        self._cancel.clear()  # a stale stop must not kill the new task
-        self.task_sources = []
         task_started = time.perf_counter()
         tokens_in = tokens_out = 0
         repeats: dict[tuple, int] = {}  # (tool, args, result) -> occurrences
