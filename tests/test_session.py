@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 
 from aish.session import SessionLog, title_drifted
@@ -971,3 +972,133 @@ def test_user_command_history_reflects_commands_run_after_a_cached_scan(tmp_path
     assert SessionLog.user_command_history(tmp_path) == ["ls"]
     _user_cmd(log, "git status")
     assert set(SessionLog.user_command_history(tmp_path)) == {"ls", "git status"}
+
+
+class TestWriteLock:
+    """SessionLog._record is reached from more than one thread (the agent
+    worker logs the conversation while the event loop writes a rename or a
+    console-open audit record). An interleaved write on the buffered handle is
+    a torn JSONL line, and every reader `continue`s past garbage — silent
+    corruption. One per-instance lock serializes all file writes (#178 P2)."""
+
+    # Big enough that a single record exceeds the io buffer (8 KB), i.e. the
+    # multi-writer pattern the finding describes: a write that the handle
+    # cannot land in one buffered chunk.
+    PAYLOAD = "x" * 64 * 1024
+
+    def _hammer(self, log, n_threads=8, n_records=25):
+        """N threads × M mixed-kind records through one SessionLog; returns
+        the exceptions the writer threads raised (must be none)."""
+        barrier = threading.Barrier(n_threads)
+        errors = []
+
+        def writer(tid):
+            try:
+                # All threads race the very first record, so the lazy
+                # handle-open races too — the widest lock-less window.
+                barrier.wait(timeout=10)
+                for i in range(n_records):
+                    marker = f"payload-{tid}-{i}:"
+                    if i % 3 == 0:
+                        log.set_title(f"title {tid}-{i} {self.PAYLOAD}")
+                    elif i % 3 == 1:
+                        log.step({"type": "tool", "output": marker + self.PAYLOAD})
+                    else:
+                        log.message({"role": "user", "content": marker + self.PAYLOAD})
+            except Exception as exc:  # pragma: no cover - only without the lock
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(t,)) for t in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        assert not any(t.is_alive() for t in threads), "writer threads hung"
+        return errors
+
+    def test_concurrent_writers_never_tear_a_line(self, tmp_path):
+        # Integrity guard: catches tearing wherever the platform lets it
+        # happen. On CPython/macOS the GIL + BufferedWriter's own lock make
+        # single-handle appends line-atomic, so the deterministic lock-less
+        # failure lives in test_rewind_racing_writers_never_errors_or_tears
+        # (verified: it fails every run with the lock removed).
+        n_threads, n_records = 8, 25
+        log = SessionLog.new(tmp_path)
+        errors = self._hammer(log, n_threads, n_records)
+        log.close()
+
+        assert errors == []
+        lines = log.path.read_text(encoding="utf-8").splitlines()
+        # Every line is valid JSON — no interleaving artifacts.
+        records = [json.loads(line) for line in lines]
+        assert len(records) == n_threads * n_records
+        # Every record arrived whole: each non-title payload appears exactly
+        # once, intact, in the record kind its writer chose.
+        seen = set()
+        for record in records:
+            body = record.get("content") or record.get("step", {}).get("output") or ""
+            if body.startswith("payload-"):
+                marker, _, payload = body.partition(":")
+                assert payload == self.PAYLOAD
+                seen.add(marker)
+        expected = {
+            f"payload-{tid}-{i}"
+            for tid in range(n_threads)
+            for i in range(n_records)
+            if i % 3 != 0
+        }
+        assert seen == expected
+
+    def test_rewind_racing_writers_never_errors_or_tears(self, tmp_path):
+        # The other write shape: rewind_last_turn closes and rewrites the file
+        # while another thread appends. Lock-less this raises ("I/O operation
+        # on closed file") or tears; locked it just serializes.
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "seed"})
+        stop = threading.Event()
+        errors = []
+
+        def appender():
+            try:
+                while not stop.is_set():
+                    log.message({"role": "user", "content": "turn " + self.PAYLOAD})
+            except Exception as exc:  # pragma: no cover - only without the lock
+                errors.append(exc)
+
+        thread = threading.Thread(target=appender)
+        thread.start()
+        try:
+            for _ in range(50):
+                log.rewind_last_turn()
+        finally:
+            stop.set()
+            thread.join(timeout=30)
+        assert not thread.is_alive()
+        log.close()
+        assert errors == []
+        for line in log.path.read_text(encoding="utf-8").splitlines():
+            json.loads(line)  # every surviving line is whole
+
+    def test_writers_do_not_deadlock(self, tmp_path):
+        # No-deadlock sanity: a plain record from one thread completes while
+        # another thread writes — generous timeout, no nesting tricks.
+        log = SessionLog.new(tmp_path)
+        done = threading.Event()
+
+        def other():
+            for i in range(200):
+                log.step({"type": "note", "text": f"bg {i}"})
+            done.set()
+
+        thread = threading.Thread(target=other)
+        thread.start()
+        for i in range(200):
+            log.message({"role": "user", "content": f"fg {i}"})
+        assert done.wait(timeout=30), "background writer never finished"
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+        log.close()
+        records = [
+            json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert len(records) == 400

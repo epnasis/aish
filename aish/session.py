@@ -5,6 +5,7 @@ import datetime
 import difflib
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -170,12 +171,20 @@ class SessionLog:
         self.path = path
         self._fh: TextIO | None = None
         self._pending_model: str | None = None
+        # Serializes every write to the log file — and the shared write state
+        # feeding it (_fh, _pending_model). Writers live on more than one
+        # thread (the agent worker logs records while the event loop renames /
+        # audits), and an interleaved write on the buffered handle is a torn
+        # JSONL line every reader silently skips. Any NEW code path that
+        # appends to or rewrites the file must hold this lock.
+        self._write_lock = threading.Lock()
 
     def close(self) -> None:
         """Release the append handle; a session that never recorded anything
         has no handle and leaves no file."""
-        if self._fh is not None:
-            self._fh.close()
+        with self._write_lock:
+            if self._fh is not None:
+                self._fh.close()
 
     @classmethod
     def new(cls, state_dir: Path) -> "SessionLog":
@@ -605,25 +614,26 @@ class SessionLog:
         not the discarded attempt. Append-only otherwise, so this is the one
         rewrite: the handle is closed and reopened lazily on the next record.
         Returns False when there is no file yet or no user turn to drop."""
-        if not self.path.exists():
-            return False
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        cut: int | None = None
-        for i, line in enumerate(lines):
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if record.get("kind") == "message" and record.get("role") == "user":
-                cut = i
-        if cut is None:
-            return False
-        if self._fh is not None:
-            self._fh.close()
-            self._fh = None
-        kept = lines[:cut]
-        self.path.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
-        return True
+        with self._write_lock:
+            if not self.path.exists():
+                return False
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+            cut: int | None = None
+            for i, line in enumerate(lines):
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if record.get("kind") == "message" and record.get("role") == "user":
+                    cut = i
+            if cut is None:
+                return False
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
+            kept = lines[:cut]
+            self.path.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+            return True
 
     @staticmethod
     def _derive_title(messages: list[dict]) -> str:
@@ -1059,9 +1069,14 @@ class SessionLog:
         return "\n".join(lines)
 
     def _record(self, kind: str, **fields) -> None:
-        if self._pending_model is not None and kind != "model":
-            pending, self._pending_model = self._pending_model, None
-            self._record("model", model=pending)
+        with self._write_lock:
+            if self._pending_model is not None and kind != "model":
+                pending, self._pending_model = self._pending_model, None
+                self._write_line("model", model=pending)
+            self._write_line(kind, **fields)
+
+    def _write_line(self, kind: str, **fields) -> None:
+        """Append one record. Caller must hold _write_lock."""
         record = {
             "ts": datetime.datetime.now().isoformat(timespec="seconds"),
             "kind": kind,
@@ -1085,7 +1100,8 @@ class SessionLog:
         merely opening/resuming a session never touches its file. Session
         order everywhere is file mtime ("last interaction"), so reviewing an
         old session must not hoist it to most-recent; only new activity does."""
-        self._pending_model = spec
+        with self._write_lock:
+            self._pending_model = spec
 
     def command(self, command: str, decision: str) -> None:
         self._record("command", command=command, decision=decision)
