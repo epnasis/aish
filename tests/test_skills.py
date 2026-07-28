@@ -616,6 +616,68 @@ class TestPreflight:
         assert preload.unread == []
 
 
+class TestPinnedTier:
+    """#178 P1-7: pinned memories are standing rules — always in the index
+    under their own budget, never rotated out by newer facts' mtimes."""
+
+    def _pinned(self, name, description, extra="pinned: yes\n", ts=1000):
+        path = write_skill(
+            skills_module.GLOBAL_MEMORY_DIR,
+            f"{name}.md",
+            f"---\nname: {name}\ndescription: {description}\n{extra}---\n",
+        )
+        os.utime(path, (ts, ts))
+
+    def test_pinned_survives_recency_cap(self, tmp_path):
+        from aish.skills import INDEX_PINNED_MAX  # noqa: F401 (documents the tier)
+
+        self._pinned("always-ask-first", "Always ask before pushing", ts=1000)
+        for i in range(INDEX_MEMORY_MAX + 5):  # all newer than the pinned rule
+            path = write_skill(
+                skills_module.GLOBAL_MEMORY_DIR,
+                f"f{i:03d}.md",
+                f"---\nname: f{i:03d}\ndescription: fact {i}\n---\n",
+            )
+            os.utime(path, (2000 + i, 2000 + i))
+        text = knowledge_index(str(tmp_path))
+        assert "Standing rules" in text
+        assert "Always ask before pushing" in text
+        assert "fact 0" not in text  # unpinned recency cap unchanged
+
+    def test_pinned_order_is_by_name_not_mtime(self, tmp_path):
+        self._pinned("b-rule", "rule b", ts=3000)
+        self._pinned("a-rule", "rule a", ts=1000)  # older but first by name
+        text = knowledge_index(str(tmp_path))
+        assert text.index("- rule a") < text.index("- rule b")
+
+    def test_pinned_overflow_capped_with_note(self, tmp_path):
+        from aish.skills import INDEX_PINNED_MAX
+
+        for i in range(INDEX_PINNED_MAX + 2):
+            self._pinned(f"rule-{i:03d}", f"standing rule {i}", ts=1000 + i)
+        text = knowledge_index(str(tmp_path))
+        assert f"standing rule {INDEX_PINNED_MAX - 1}" in text  # name order: 000..019
+        assert f"standing rule {INDEX_PINNED_MAX}" not in text
+        assert "2 more standing rules" in text
+
+    def test_kind_policy_is_an_alias(self, tmp_path):
+        self._pinned("policy-rule", "policy fact", extra="kind: policy\n")
+        assert "Standing rules" in knowledge_index(str(tmp_path))
+
+    def test_disabled_pinned_rule_is_retired(self, tmp_path):
+        self._pinned("old-rule", "obsolete rule", extra="pinned: yes\nstatus: disabled\n")
+        assert "obsolete rule" not in knowledge_index(str(tmp_path))
+
+    def test_save_memory_pinned_roundtrip(self, tmp_path):
+        d = tmp_path / "memory"
+        save_memory("always confirm deletes", d, name="rule", pinned=True)
+        assert "pinned: yes" in (d / "rule.md").read_text()
+        save_memory("always confirm deletes v2", d, name="rule")  # None keeps it
+        assert "pinned: yes" in (d / "rule.md").read_text()
+        save_memory("always confirm deletes v3", d, name="rule", pinned=False)
+        assert "pinned" not in (d / "rule.md").read_text()
+
+
 class TestLifecycle:
     """#178 P1-8 retire primitives: `status: disabled` and `expires:` exclude
     an entry everywhere without deleting the file."""

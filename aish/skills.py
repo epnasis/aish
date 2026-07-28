@@ -50,6 +50,12 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # survive across tasks.
 INDEX_SKILLS_MAX = 30
 INDEX_MEMORY_MAX = 15
+# Standing rules (#178 P1-7): memory entries with `pinned: yes` frontmatter
+# render in EVERY index under their own budget, exempt from the mtime-recency
+# cap above — a behaviour rule ("never do X") must not silently rotate out of
+# the prompt because newer facts moved past it, and WHICH rules apply must
+# never depend on whose mtime moved last.
+INDEX_PINNED_MAX = 20
 
 # recall output caps — one call can never flood a small context window.
 RECALL_TOP = 8
@@ -119,6 +125,7 @@ class Entry:
     words: frozenset = field(default_factory=frozenset)
     status: str = ""  # "disabled" retires an entry without deleting it (#178 P1-8)
     expires: date | None = None  # past this date the entry acts disabled
+    pinned: bool = False  # standing rule: always indexed, own budget (#178 P1-7)
 
 
 # SECURITY (#178 P0-1, interim): project-scope discovery is OFF by default.
@@ -160,7 +167,7 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
     text = path.read_text(encoding="utf-8")
     default_name = path.parent.name if path.name == "SKILL.md" else path.stem
     name, description, keywords, body = default_name, "", [], text
-    status, expires = "", None
+    status, expires, pinned = "", None, False
     if text.startswith("---"):
         parts = text.split("---", 2)
         if len(parts) == 3:
@@ -178,6 +185,10 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
                     status = value.strip().casefold()
                 elif key == "expires":
                     expires = _parse_expiry(value.strip(), path)
+                elif key in ("pinned", "kind"):  # `kind: policy` = alias for pinned
+                    pinned = pinned or value.strip().casefold() in (
+                        "yes", "true", "1", "on", "policy",
+                    )
     if not description:
         for line in body.strip().splitlines():
             if line.strip():
@@ -199,6 +210,7 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
         words=_build_words(name, description, " ".join(keywords), body),
         status=status,
         expires=expires,
+        pinned=pinned,
     )
 
 
@@ -371,12 +383,29 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
     memory.sort(key=lambda e: e.mtime, reverse=True)
     lessons = _lesson_entries(lessons_path)
     memory += lessons
-    shown = memory[:INDEX_MEMORY_MAX]
+    # Standing rules (#178 P1-7): pinned entries render under their own budget,
+    # exempt from the recency cap, sorted by NAME — a touched file must never
+    # change which rules apply, and a stable order keeps the index byte-stable.
+    pinned = sorted((e for e in memory if e.pinned), key=lambda e: e.name)
+    unpinned = [e for e in memory if not e.pinned]
+    if pinned:
+        lines = "\n".join(f"- {e.description}" for e in pinned[:INDEX_PINNED_MAX])
+        note = (
+            f"\n(…and {len(pinned) - INDEX_PINNED_MAX} more standing rules — "
+            "search them with recall(<topic>))"
+            if len(pinned) > INDEX_PINNED_MAX
+            else ""
+        )
+        sections.append(
+            "Standing rules — pinned memory; you MUST apply every rule below "
+            "to EVERY task, without being asked:\n" + lines + note
+        )
+    shown = unpinned[:INDEX_MEMORY_MAX]
     if shown:
         lines = "\n".join(f"- {e.description}" for e in shown)
         note = (
             "\n(…and more saved memory — search it with recall(<topic>))"
-            if len(memory) > INDEX_MEMORY_MAX
+            if len(unpinned) > INDEX_MEMORY_MAX
             else ""
         )
         if lessons:
@@ -713,14 +742,18 @@ def recall_text(
 
 
 def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: str = "",
-                lessons_path=None, expires: str | None = None) -> str:
+                lessons_path=None, expires: str | None = None,
+                pinned: bool | None = None) -> str:
     """Create or update one structured memory entry. Constrained to writing a
     slug-named markdown file inside the memory dir — safe to auto-approve.
 
     `expires` ("YYYY-MM-DD") marks a fact with a known end date; past it the
     entry acts disabled (see entry_active). Write-side validation is strict —
     the model gets a correctable error, unlike the tolerant read side — and
-    on an update, None keeps the file's existing expiry."""
+    on an update, None keeps the file's existing expiry.
+
+    `pinned` marks a standing rule (always indexed, #178 P1-7); None keeps an
+    updated entry's existing flag, False explicitly unpins."""
     text = " ".join(fact.split()).strip()
     if not text:
         return "ERROR: empty fact"
@@ -751,9 +784,13 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
             body = prior.body
             if expiry is None:
                 expiry = prior.expires
+            if pinned is None:
+                pinned = prior.pinned
         front = [f"name: {slug}", f"description: {text}"]
         if keyword_list:
             front.append(f"keywords: {', '.join(keyword_list)}")
+        if pinned:
+            front.append("pinned: yes")
         if expiry is not None:
             front.append(f"expires: {expiry.isoformat()}")
         directory.mkdir(parents=True, exist_ok=True)

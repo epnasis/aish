@@ -503,6 +503,18 @@ TOOL_SCHEMAS = [
                             "provide them."
                         ),
                     },
+                    "pinned": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true ONLY for a standing rule or preference that "
+                            "MUST apply to every future task — e.g. the user says "
+                            "'never push to a remote without asking' → remember it "
+                            "with pinned: true. Pinned memories are always shown in "
+                            "your context as standing rules and never rotate out. "
+                            "Ordinary facts (paths, commands, one-off details) MUST "
+                            "stay unpinned."
+                        ),
+                    },
                     "expires": {
                         "type": "string",
                         "description": (
