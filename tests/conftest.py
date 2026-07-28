@@ -7,6 +7,7 @@ import pytest
 
 from aish import notify as notify_module
 from aish import skills as skills_module
+from aish import tool_plugins as tool_plugins_module
 
 
 @pytest.fixture(autouse=True)
@@ -17,6 +18,20 @@ def isolated_global_skills(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(
         skills_module, "GLOBAL_MEMORY_DIR", tmp_path_factory.mktemp("global-memory")
     )
+
+
+@pytest.fixture
+def project_scope(monkeypatch):
+    """Explicit opt-in to project-scope .aish discovery (#178 P0-1).
+
+    OFF by default everywhere — a cloned repo's .aish/{skills,memory,tools}
+    must never reach the model's prompt or execute. Tests that exercise the
+    project-scope MECHANICS (shadowing, project-wins ordering, project tool
+    dirs) request this fixture; the default-off security property itself is
+    pinned in test_skills.py / test_tool_plugins.py / test_agent.py.
+    """
+    monkeypatch.setattr(skills_module, "INCLUDE_PROJECT_DIRS", True)
+    monkeypatch.setattr(tool_plugins_module, "INCLUDE_PROJECT_DIRS", True)
 
 
 @pytest.fixture(autouse=True)

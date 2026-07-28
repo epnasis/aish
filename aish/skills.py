@@ -9,10 +9,11 @@ Both are markdown files with optional frontmatter, discovered live:
     ---
     body ...
 
-Skills live in ./.aish/skills/ (project, wins on name clash) or
-~/.config/aish/skills/ (global); memory entries mirror that layout under
-.aish/memory/ and ~/.config/aish/memory/. Legacy one-line lessons in
-lessons.md are exposed as synthetic memory entries until migrated.
+Skills live in ~/.config/aish/skills/ (global); memory entries mirror that
+layout under ~/.config/aish/memory/. Legacy one-line lessons in lessons.md
+are exposed as synthetic memory entries until migrated. Project-scope dirs
+(./.aish/skills, ./.aish/memory — project wins on name clash) exist in the
+code but are DISABLED by default (#178 P0-1): see INCLUDE_PROJECT_DIRS.
 
 A skill is either a flat `<name>.md` or an agentskills.io folder
 `<name>/SKILL.md` that may bundle `scripts/`, `references/`, `assets/`
@@ -112,12 +113,26 @@ class Entry:
     words: frozenset = field(default_factory=frozenset)
 
 
+# SECURITY (#178 P0-1, interim): project-scope discovery is OFF by default.
+# A cloned repository's ./.aish/skills + ./.aish/memory would otherwise inject
+# attacker-controlled prompt text into messages[0] on the first task after a
+# /cd into it. The code path stays alive behind this switch so the future
+# per-directory trust grant can re-enable it; NEITHER entry point (cli.py,
+# server.py) may set it — only tests opt in (the `project_scope` fixture).
+# tool_plugins.INCLUDE_PROJECT_DIRS is the same switch for ./.aish/tools.
+INCLUDE_PROJECT_DIRS = False
+
+
 def skill_dirs(cwd: str) -> list[Path]:
-    return [Path(cwd) / ".aish" / "skills", GLOBAL_SKILLS_DIR]
+    if INCLUDE_PROJECT_DIRS:
+        return [Path(cwd) / ".aish" / "skills", GLOBAL_SKILLS_DIR]
+    return [GLOBAL_SKILLS_DIR]
 
 
 def memory_dirs(cwd: str) -> list[Path]:
-    return [Path(cwd) / ".aish" / "memory", GLOBAL_MEMORY_DIR]
+    if INCLUDE_PROJECT_DIRS:
+        return [Path(cwd) / ".aish" / "memory", GLOBAL_MEMORY_DIR]
+    return [GLOBAL_MEMORY_DIR]
 
 
 def _slugify(text: str) -> str:
@@ -276,8 +291,8 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
     every task so new entries appear without a restart. Empty string when
     nothing exists."""
     sections = []
-    project_dir, global_dir = skill_dirs(cwd)
-    project = _dir_entries(project_dir, "skill")
+    *project_dirs, global_dir = skill_dirs(cwd)  # project dirs only when opted in (#178)
+    project = [e for d in project_dirs for e in _dir_entries(d, "skill")]
     names = {e.name for e in project}
     globals_ = [e for e in _dir_entries(global_dir, "skill") if e.name not in names]
     globals_.sort(key=lambda e: e.mtime, reverse=True)

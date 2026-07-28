@@ -82,8 +82,9 @@ Rules:
    preloaded, that is a defect: repair that entry's description/keywords
    (an improve-recall skill, if present, has the checklist).
 2c. TOOLS vs SKILLS: skills TEACH, tools DO. A plugin tool is a validated
-   TOOL.md (that you or the user added under .aish/tools/ or
-   ~/.config/aish/tools/) that you call with structured arguments instead of
+   TOOL.md (that you or the user added under ~/.config/aish/tools/ —
+   project-scope ./.aish/ discovery is disabled pending a per-directory
+   trust mechanism) that you call with structured arguments instead of
    composing a shell command — its JSON args reach the wrapper on stdin, so
    free-text like an email or issue body cannot be mangled by shell quoting.
    PREFER an existing plugin tool over re-composing the raw command it wraps.
@@ -406,8 +407,9 @@ LEARN_PROMPT = (
     "instead of creating a duplicate. If recall surfaces stale or duplicate "
     "memory, consolidate it: remember() the one canonical fact, then "
     "forget_memory() each redundant slug. Save multi-step procedures as skills — "
-    "a markdown file in ~/.config/aish/skills/ (or ./.aish/skills/ when "
-    "project-specific) with a trigger-phrased description ('Use when the "
+    "a markdown file in ~/.config/aish/skills/ (project-scope ./.aish/skills/ "
+    "is disabled and would not be read) "
+    "with a trigger-phrased description ('Use when the "
     "user asks to …'); save one-line facts and preferences with remember(). "
     "Entries are retrieved by matching their name/description/keywords "
     "against future tasks: phrase every description like the tasks it must "
@@ -2133,6 +2135,15 @@ class Agent:
             return "ERROR: no write approver available; cannot create a tool."
 
         if str(args.get("scope", "global")).strip() == "project":
+            if not tool_plugins.INCLUDE_PROJECT_DIRS:
+                # #178 P0-1: a tool written to ./.aish/tools would never be
+                # discovered — a silent no-op is worse than a refusal.
+                return (
+                    "ERROR: scope 'project' is unavailable — project-scope tool "
+                    "discovery (./.aish/tools) is disabled pending a per-directory "
+                    "trust mechanism, so a project tool would never be discovered "
+                    "or run. Call create_tool again with scope 'global'."
+                )
             base = Path(self.cwd) / ".aish" / "tools" / name
         else:
             base = tool_plugins.GLOBAL_TOOLS_DIR / name
