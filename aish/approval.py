@@ -19,6 +19,8 @@ import shutil
 from collections.abc import Collection
 from pathlib import Path
 
+from .files import is_sensitive_path
+
 DEFAULT_ALLOWLIST = Path.home() / ".config" / "aish" / "allow.txt"
 DEFAULT_DENYLIST = Path.home() / ".config" / "aish" / "deny.txt"
 
@@ -252,30 +254,50 @@ def _within_roots(target: Path, resolved_roots: list[Path]) -> bool:
     return any(target.is_relative_to(r) for r in resolved_roots)
 
 
+def _path_candidate(token: str) -> str | None:
+    """The path-like part of a token: the value of a --flag=value token, the
+    token itself otherwise, None for bare flags (never paths)."""
+    if token.startswith("-"):
+        return token.split("=", 1)[1] if "=" in token else None
+    return token
+
+
 def _token_escape(token: str, cwd: str, resolved_roots: list[Path]) -> tuple[bool, Path | None]:
-    """Conservative: only tokens that could name a path outside the session
-    roots trip this — absolute, ~-anchored, or containing '..'. Plain relative
-    tokens can't leave the cwd (itself verified to be under a root).
-    Returns (escapes, resolved target) — target is None when the escape can't
-    be resolved to a concrete path (fail closed, but nothing to offer trust on)."""
-    candidate = token.split("=", 1)[1] if token.startswith("-") and "=" in token else token
-    if token.startswith("-") and candidate is token:
+    """Whether a token resolves — symlinks and '..' defused — outside every
+    session root. A relative token with no '~'/'..'/absolute anchor can only
+    escape via a symlink, so it is resolved only when it names something on
+    disk: a token naming nothing (grep patterns, command words, files yet to
+    be created) can't leak anything and keeps auto-approving un-stat'ed.
+    Returns (escapes, resolved target) — target is provided whenever
+    resolution succeeded, also for in-root tokens, so callers can run further
+    checks on it (sensitivity); it is None when the token isn't path-like or
+    the escape can't be resolved (fail closed, but nothing to offer trust on)."""
+    candidate = _path_candidate(token)
+    if candidate is None:
         return False, None
     expanded = os.path.expanduser(candidate)
     anchored = os.path.isabs(expanded)
-    if not anchored and ".." not in Path(candidate).parts:
+    if (
+        not anchored
+        and ".." not in Path(candidate).parts
+        and not os.path.lexists(os.path.join(cwd, expanded))
+    ):
         return False, None
     try:
         target = (Path(expanded) if anchored else Path(cwd) / expanded).resolve()
-        if _within_roots(target, resolved_roots):
-            return False, None
-        return True, target
     except OSError:
         return True, None
+    return not _within_roots(target, resolved_roots), target
 
 
-def _token_escapes(token: str, cwd: str, resolved_roots: list[Path]) -> bool:
-    return _token_escape(token, cwd, resolved_roots)[0]
+def _token_needs_prompt(token: str, cwd: str, resolved_roots: list[Path]) -> bool:
+    """Escaping the roots forces a prompt; so does resolving to a path that
+    commonly holds credentials (mirrors the read_file sensitivity prompt —
+    `cat link-to-ssh-key` must not slip a secret through the shell path)."""
+    escaped, target = _token_escape(token, cwd, resolved_roots)
+    if escaped:
+        return True
+    return target is not None and is_sensitive_path(str(target), cwd)
 
 
 def _segment_escapes_roots(segment: str, cwd: str, resolved_roots: list[Path]) -> bool:
@@ -283,13 +305,14 @@ def _segment_escapes_roots(segment: str, cwd: str, resolved_roots: list[Path]) -
         tokens = shlex.split(segment)
     except ValueError:
         return True
-    return any(_token_escapes(t, cwd, resolved_roots) for t in tokens[1:])
+    return any(_token_needs_prompt(t, cwd, resolved_roots) for t in tokens[1:])
 
 
 def paths_escape_roots(command: str, cwd: str, roots) -> bool:
     """True when the command's cwd or any path-like argument resolves outside
-    every session root — such commands prompt instead of auto-approving, so a
-    read-only verb can't quietly pull files from elsewhere on the machine."""
+    every session root (symlinks defused) or onto a sensitive path — such
+    commands prompt instead of auto-approving, so a read-only verb can't
+    quietly pull files (or credentials) from elsewhere on the machine."""
     try:
         resolved_roots = [Path(r).resolve() for r in roots]
         if not _within_roots(Path(cwd).resolve(), resolved_roots):
