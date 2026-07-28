@@ -503,6 +503,38 @@ TOOL_SCHEMAS = [
                             "provide them."
                         ),
                     },
+                    "pinned": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true ONLY for a standing rule or preference that "
+                            "MUST apply to every future task — e.g. the user says "
+                            "'never push to a remote without asking' → remember it "
+                            "with pinned: true. Pinned memories are always shown in "
+                            "your context as standing rules and never rotate out. "
+                            "Ordinary facts (paths, commands, one-off details) MUST "
+                            "stay unpinned."
+                        ),
+                    },
+                    "expires": {
+                        "type": "string",
+                        "description": (
+                            "YYYY-MM-DD date after which the fact stops applying; "
+                            "the entry then drops out of your context and recall "
+                            "automatically. You MUST set it when the fact has a "
+                            "known end date (e.g. 'parking pass code is 4412' with "
+                            "expires: 2026-08-31). Omit for durable facts."
+                        ),
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": (
+                            "Only when a save was refused as similar to an existing "
+                            "entry AND you verified the facts are genuinely "
+                            "different: retry with force: true. Otherwise UPDATE the "
+                            "named entry (remember with its name) or forget_memory "
+                            "it — never force past a real duplicate."
+                        ),
+                    },
                 },
                 "required": ["note"],
             },

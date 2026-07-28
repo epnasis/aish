@@ -614,3 +614,310 @@ class TestPreflight:
         assert preload.text == ""
         assert preload.names == []
         assert preload.unread == []
+
+
+class TestSemanticRecall:
+    """#178 P1-9: rank_entries/recall_text fuse embedding similarity with the
+    lexical tiers; lexical strong hits stay a deterministic rail, and a None
+    from the semantic layer degrades byte-identically to pure lexical."""
+
+    def _entries(self, tmp_path):
+        d = skills_module.GLOBAL_MEMORY_DIR
+        write_skill(
+            d,
+            "hotels-use-trippy.md",
+            "---\nname: hotels-use-trippy\n"
+            "description: For hotel or villa searches always run trippy\n---\n",
+        )
+        write_skill(
+            d,
+            "charts.md",
+            "---\nname: charts\ndescription: plotting data with gnuplot\n---\n",
+        )
+        return load_entries(str(tmp_path))
+
+    def _sims(self, table):
+        return lambda query, entries: {
+            id(e): table.get(e.name, 0.0) for e in entries
+        }
+
+    def test_cross_language_query_found_semantically(self, tmp_path):
+        entries = self._entries(tmp_path)
+        # A Polish query shares no words with the English entries — lexical
+        # ranking finds nothing, similarity must carry it.
+        assert rank_entries(entries, "znajdź nocleg w Krakowie") == []
+        ranked = rank_entries(
+            entries,
+            "znajdź nocleg w Krakowie",
+            semantic=self._sims({"hotels-use-trippy": 0.4, "charts": 0.05}),
+        )
+        assert [e.name for e in ranked] == ["hotels-use-trippy"]
+
+    def test_exact_name_rail_beats_high_similarity(self, tmp_path):
+        entries = self._entries(tmp_path)
+        ranked = rank_entries(
+            entries,
+            "charts",  # exact name = lexical tier 5, the guarantee rail
+            semantic=self._sims({"hotels-use-trippy": 0.9, "charts": 0.0}),
+        )
+        assert ranked[0].name == "charts"
+
+    def test_semantic_none_is_byte_identical_to_lexical(self, tmp_path):
+        entries = self._entries(tmp_path)
+        plain = rank_entries(entries, "villa searches")
+        fallen_back = rank_entries(entries, "villa searches", semantic=lambda q, e: None)
+        assert plain == fallen_back
+
+    def test_below_floor_and_no_lexical_hit_is_excluded(self, tmp_path):
+        entries = self._entries(tmp_path)
+        ranked = rank_entries(
+            entries,
+            "unrelated query",
+            semantic=self._sims({"hotels-use-trippy": 0.1, "charts": 0.1}),
+        )
+        assert ranked == []
+
+    def test_recall_text_threads_semantic(self, tmp_path):
+        self._entries(tmp_path)
+        out = recall_text(
+            str(tmp_path),
+            None,
+            "znajdź nocleg w Krakowie",
+            semantic=self._sims({"hotels-use-trippy": 0.4}),
+        )
+        assert "hotels-use-trippy" in out
+        assert "Nothing saved matches" not in out
+
+
+class TestNearDuplicateGate:
+    """#178 P1-8: a NEW memory too similar to an existing one is refused with
+    the existing entry's name; force overrides; updates are never gated."""
+
+    def _seed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", tmp_path / "memory")
+        save_memory(
+            "the aish repo lives in ~/dev/aish",
+            tmp_path / "memory",
+            name="aish-repo-location",
+            cwd=str(tmp_path),
+        )
+
+    def test_lexical_near_duplicate_refused_with_name(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = save_memory(
+            "the aish repo lives at ~/dev/aish",  # near-identical wording
+            tmp_path / "memory",
+            name="aish-repo-path",
+            cwd=str(tmp_path),
+        )
+        assert result.startswith("NOT saved")
+        assert "aish-repo-location" in result
+        assert "force" in result
+        assert not (tmp_path / "memory" / "aish-repo-path.md").exists()
+
+    def test_force_overrides_the_gate(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = save_memory(
+            "the aish repo lives at ~/dev/aish",
+            tmp_path / "memory",
+            name="aish-repo-path",
+            cwd=str(tmp_path),
+            force=True,
+        )
+        assert result.startswith("remembered")
+        assert (tmp_path / "memory" / "aish-repo-path.md").is_file()
+
+    def test_update_to_same_slug_never_gated(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = save_memory(
+            "the aish repo lives at ~/dev/aish (moved note)",
+            tmp_path / "memory",
+            name="aish-repo-location",
+            cwd=str(tmp_path),
+        )
+        assert result.startswith("remembered")
+
+    def test_distinct_fact_saves_normally(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = save_memory(
+            "use uv run pytest for the test suite",
+            tmp_path / "memory",
+            name="test-runner",
+            cwd=str(tmp_path),
+        )
+        assert result.startswith("remembered")
+
+    def test_semantic_scores_gate_when_wired(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        high = lambda identity, entries: dict.fromkeys(map(id, entries), 0.9)  # noqa: E731
+        result = save_memory(
+            "completely different wording about the repository home",
+            tmp_path / "memory",
+            name="other-slug",
+            cwd=str(tmp_path),
+            semantic=high,
+        )
+        assert result.startswith("NOT saved")
+        assert "aish-repo-location" in result
+
+    def test_semantic_low_similarity_saves(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        low = lambda identity, entries: dict.fromkeys(map(id, entries), 0.1)  # noqa: E731
+        result = save_memory(
+            "the aish repo lives at ~/dev/aish",  # lexically close, semantically vouched apart
+            tmp_path / "memory",
+            name="aish-repo-path",
+            cwd=str(tmp_path),
+            semantic=low,
+        )
+        assert result.startswith("remembered")
+
+    def test_semantic_failure_falls_back_to_lexical(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = save_memory(
+            "the aish repo lives at ~/dev/aish",
+            tmp_path / "memory",
+            name="aish-repo-path",
+            cwd=str(tmp_path),
+            semantic=lambda identity, entries: None,  # ollama down
+        )
+        assert result.startswith("NOT saved")
+
+
+class TestPinnedTier:
+    """#178 P1-7: pinned memories are standing rules — always in the index
+    under their own budget, never rotated out by newer facts' mtimes."""
+
+    def _pinned(self, name, description, extra="pinned: yes\n", ts=1000):
+        path = write_skill(
+            skills_module.GLOBAL_MEMORY_DIR,
+            f"{name}.md",
+            f"---\nname: {name}\ndescription: {description}\n{extra}---\n",
+        )
+        os.utime(path, (ts, ts))
+
+    def test_pinned_survives_recency_cap(self, tmp_path):
+        from aish.skills import INDEX_PINNED_MAX  # noqa: F401 (documents the tier)
+
+        self._pinned("always-ask-first", "Always ask before pushing", ts=1000)
+        for i in range(INDEX_MEMORY_MAX + 5):  # all newer than the pinned rule
+            path = write_skill(
+                skills_module.GLOBAL_MEMORY_DIR,
+                f"f{i:03d}.md",
+                f"---\nname: f{i:03d}\ndescription: fact {i}\n---\n",
+            )
+            os.utime(path, (2000 + i, 2000 + i))
+        text = knowledge_index(str(tmp_path))
+        assert "Standing rules" in text
+        assert "Always ask before pushing" in text
+        assert "fact 0" not in text  # unpinned recency cap unchanged
+
+    def test_pinned_order_is_by_name_not_mtime(self, tmp_path):
+        self._pinned("b-rule", "rule b", ts=3000)
+        self._pinned("a-rule", "rule a", ts=1000)  # older but first by name
+        text = knowledge_index(str(tmp_path))
+        assert text.index("- rule a") < text.index("- rule b")
+
+    def test_pinned_overflow_capped_with_note(self, tmp_path):
+        from aish.skills import INDEX_PINNED_MAX
+
+        for i in range(INDEX_PINNED_MAX + 2):
+            self._pinned(f"rule-{i:03d}", f"standing rule {i}", ts=1000 + i)
+        text = knowledge_index(str(tmp_path))
+        assert f"standing rule {INDEX_PINNED_MAX - 1}" in text  # name order: 000..019
+        assert f"standing rule {INDEX_PINNED_MAX}" not in text
+        assert "2 more standing rules" in text
+
+    def test_kind_policy_is_an_alias(self, tmp_path):
+        self._pinned("policy-rule", "policy fact", extra="kind: policy\n")
+        assert "Standing rules" in knowledge_index(str(tmp_path))
+
+    def test_disabled_pinned_rule_is_retired(self, tmp_path):
+        self._pinned("old-rule", "obsolete rule", extra="pinned: yes\nstatus: disabled\n")
+        assert "obsolete rule" not in knowledge_index(str(tmp_path))
+
+    def test_save_memory_pinned_roundtrip(self, tmp_path):
+        d = tmp_path / "memory"
+        save_memory("always confirm deletes", d, name="rule", pinned=True)
+        assert "pinned: yes" in (d / "rule.md").read_text()
+        save_memory("always confirm deletes v2", d, name="rule")  # None keeps it
+        assert "pinned: yes" in (d / "rule.md").read_text()
+        save_memory("always confirm deletes v3", d, name="rule", pinned=False)
+        assert "pinned" not in (d / "rule.md").read_text()
+
+
+class TestLifecycle:
+    """#178 P1-8 retire primitives: `status: disabled` and `expires:` exclude
+    an entry everywhere without deleting the file."""
+
+    def _memory(self, front_extra, name="fact-one"):
+        write_skill(
+            skills_module.GLOBAL_MEMORY_DIR,
+            f"{name}.md",
+            f"---\nname: {name}\ndescription: a saved fact\n{front_extra}---\n",
+        )
+
+    def test_disabled_excluded_everywhere(self, tmp_path):
+        self._memory("status: disabled\n")
+        write_skill(
+            skills_module.GLOBAL_SKILLS_DIR,
+            "dead.md",
+            "---\nname: dead\ndescription: retired playbook\nstatus: disabled\n---\nx",
+        )
+        cwd = str(tmp_path)
+        assert all(e.name not in ("fact-one", "dead") for e in load_entries(cwd))
+        assert "fact-one" not in knowledge_index(cwd)
+        assert "dead" not in knowledge_index(cwd)
+        assert preflight(cwd, None, "apply the saved fact about the playbook").names == []
+        assert "dead" not in recall_text(cwd, None, "retired playbook")
+        assert ("dead", "retired playbook") not in list_skills(skills_module.skill_dirs(cwd))
+
+    def test_read_skill_names_disabled_instead_of_missing(self, tmp_path):
+        write_skill(
+            skills_module.GLOBAL_SKILLS_DIR,
+            "dead.md",
+            "---\nname: dead\ndescription: d\nstatus: disabled\n---\nbody",
+        )
+        out = load_skill("dead", skills_module.skill_dirs(str(tmp_path)))
+        assert "retired" in out and "disabled" in out
+        assert "body" not in out  # never serves a retired playbook
+
+    def test_expired_entry_acts_disabled(self, tmp_path):
+        self._memory("expires: 2000-01-01\n")
+        assert all(e.name != "fact-one" for e in load_entries(str(tmp_path)))
+        assert "a saved fact" not in knowledge_index(str(tmp_path))
+
+    def test_future_expiry_stays_active(self, tmp_path):
+        self._memory("expires: 2999-12-31\n")
+        assert any(e.name == "fact-one" for e in load_entries(str(tmp_path)))
+
+    def test_entry_valid_through_expiry_day(self):
+        from datetime import date
+
+        from aish.skills import Entry, entry_active
+
+        entry = Entry("e", "d", [], "", "memory", expires=date(2026, 8, 1))
+        assert entry_active(entry, today=date(2026, 8, 1))
+        assert not entry_active(entry, today=date(2026, 8, 2))
+
+    def test_malformed_expiry_warns_and_stays_active(self, tmp_path):
+        import pytest
+
+        with pytest.warns(UserWarning, match="expires"):
+            self._memory("expires: next-month\n")
+            entries = load_entries(str(tmp_path))
+        assert any(e.name == "fact-one" for e in entries)
+
+    def test_save_memory_writes_and_validates_expires(self, tmp_path):
+        d = tmp_path / "memory"
+        assert save_memory("temp fact", d, name="t", expires="2999-01-31").startswith(
+            "remembered"
+        )
+        assert "expires: 2999-01-31" in (d / "t.md").read_text()
+        assert save_memory("x", d, name="bad", expires="soon").startswith("ERROR")
+
+    def test_update_preserves_expiry_when_not_passed(self, tmp_path):
+        d = tmp_path / "memory"
+        save_memory("temp fact", d, name="t", expires="2999-01-31")
+        save_memory("temp fact updated", d, name="t")
+        assert "expires: 2999-01-31" in (d / "t.md").read_text()

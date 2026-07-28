@@ -9,6 +9,10 @@ Both are markdown files with optional frontmatter, discovered live:
     ---
     body ...
 
+Lifecycle frontmatter (#178 P1-8): `status: disabled` retires an entry
+without deleting it, and `expires: YYYY-MM-DD` retires it automatically past
+that date — see entry_active for what "retired" means everywhere.
+
 Skills live in ~/.config/aish/skills/ (global); memory entries mirror that
 layout under ~/.config/aish/memory/. Legacy one-line lessons in lessons.md
 are exposed as synthetic memory entries until migrated. Project-scope dirs
@@ -30,7 +34,9 @@ discoverable — for skills it states the trigger, for memory it IS the fact.
 
 import difflib
 import re
+import warnings
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 GLOBAL_SKILLS_DIR = Path.home() / ".config" / "aish" / "skills"
@@ -44,6 +50,12 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # survive across tasks.
 INDEX_SKILLS_MAX = 30
 INDEX_MEMORY_MAX = 15
+# Standing rules (#178 P1-7): memory entries with `pinned: yes` frontmatter
+# render in EVERY index under their own budget, exempt from the mtime-recency
+# cap above — a behaviour rule ("never do X") must not silently rotate out of
+# the prompt because newer facts moved past it, and WHICH rules apply must
+# never depend on whose mtime moved last.
+INDEX_PINNED_MAX = 20
 
 # recall output caps — one call can never flood a small context window.
 RECALL_TOP = 8
@@ -64,6 +76,15 @@ PREFLIGHT_HEAD_CHARS = 600  # teaser length for an oversized skill
 # peak near 0.21. Short identity lines compress the scale — do not expect
 # textbook 0.6+ values here.
 SEMANTIC_MIN_SIM = 0.24
+
+# Near-duplicate gate on save_memory (#178 P1-8): a NEW entry this similar to
+# an existing one is refused with the existing entry's name, so the model
+# updates instead of duplicating (force overrides). Both thresholds sit far
+# above the retrieval floor on purpose — only a confident near-duplicate may
+# block a save, and the exact-string check catches the trivial case first.
+# The semantic value is provisional until measured on the live corpus.
+DEDUP_MIN_SIM = 0.55  # identity line vs identity line through SemanticIndex.scores
+DEDUP_LEXICAL_RATIO = 0.75  # difflib fallback when embeddings are unavailable
 
 _PUNCT = ".,;:!?()[]{}<>'\"`"
 FUZZY_WORD_CUTOFF = 0.75  # single query word vs single entry word
@@ -111,6 +132,9 @@ class Entry:
     mtime: float = 0.0
     path: Path | None = None
     words: frozenset = field(default_factory=frozenset)
+    status: str = ""  # "disabled" retires an entry without deleting it (#178 P1-8)
+    expires: date | None = None  # past this date the entry acts disabled
+    pinned: bool = False  # standing rule: always indexed, own budget (#178 P1-7)
 
 
 # SECURITY (#178 P0-1, interim): project-scope discovery is OFF by default.
@@ -152,6 +176,7 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
     text = path.read_text(encoding="utf-8")
     default_name = path.parent.name if path.name == "SKILL.md" else path.stem
     name, description, keywords, body = default_name, "", [], text
+    status, expires, pinned = "", None, False
     if text.startswith("---"):
         parts = text.split("---", 2)
         if len(parts) == 3:
@@ -165,6 +190,14 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
                     description = value.strip()
                 elif key == "keywords":
                     keywords = [w.strip() for w in value.split(",") if w.strip()]
+                elif key == "status":
+                    status = value.strip().casefold()
+                elif key == "expires":
+                    expires = _parse_expiry(value.strip(), path)
+                elif key in ("pinned", "kind"):  # `kind: policy` = alias for pinned
+                    pinned = pinned or value.strip().casefold() in (
+                        "yes", "true", "1", "on", "policy",
+                    )
     if not description:
         for line in body.strip().splitlines():
             if line.strip():
@@ -184,7 +217,41 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
         mtime=mtime,
         path=path,
         words=_build_words(name, description, " ".join(keywords), body),
+        status=status,
+        expires=expires,
+        pinned=pinned,
     )
+
+
+def _parse_expiry(value: str, path: Path) -> date | None:
+    """Tolerant, dependency-free: a malformed date means no expiry (the entry
+    stays live — failing OPEN keeps knowledge available), with a warning so
+    the typo gets noticed."""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        warnings.warn(
+            f"{path}: unparseable expires date {value!r} ignored (use YYYY-MM-DD)",
+            stacklevel=2,
+        )
+        return None
+
+
+def entry_active(entry: Entry, today: date | None = None) -> bool:
+    """The retire primitives (#178 P1-8): `status: disabled` frontmatter, or a
+    past `expires: YYYY-MM-DD` date (an entry stays valid through its expiry
+    day). Inactive entries are excluded from load_entries — and with it the
+    index, preflight, recall, and save_memory's duplicate checks — while
+    load_skill names the reason instead of claiming the entry is missing.
+    Expiry is evaluated at read time, never baked in at parse time, so a
+    long-running process crosses the boundary without an mtime change."""
+    if entry.status == "disabled":
+        return False
+    if entry.expires is not None and (today or date.today()) > entry.expires:
+        return False
+    return True
 
 
 # Parsed entries keyed by path; re-parse only when the file's mtime moved.
@@ -273,17 +340,21 @@ def _lesson_entries(lessons_path) -> list[Entry]:
 
 
 def load_entries(cwd: str, lessons_path=None) -> list[Entry]:
-    """The full corpus in tie-break order: project-then-global skills,
-    memory entries (newest first), then legacy lessons."""
-    skills = _merged(skill_dirs(cwd), "skill")
-    memory = _merged(memory_dirs(cwd), "memory")
+    """The full ACTIVE corpus in tie-break order: project-then-global skills,
+    memory entries (newest first), then legacy lessons. Disabled/expired
+    entries never leave this function — every consumer (index, preflight,
+    recall, dedup) inherits the retirement for free."""
+    skills = [e for e in _merged(skill_dirs(cwd), "skill") if entry_active(e)]
+    memory = [e for e in _merged(memory_dirs(cwd), "memory") if entry_active(e)]
     memory.sort(key=lambda e: e.mtime, reverse=True)
     return skills + memory + _lesson_entries(lessons_path)
 
 
 def list_skills(dirs: list[Path]) -> list[tuple[str, str]]:
     """(name, description) pairs; earlier dirs win on duplicate names."""
-    return sorted((e.name, e.description) for e in _merged(dirs, "skill"))
+    return sorted(
+        (e.name, e.description) for e in _merged(dirs, "skill") if entry_active(e)
+    )
 
 
 def knowledge_index(cwd: str, lessons_path=None) -> str:
@@ -292,9 +363,13 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
     nothing exists."""
     sections = []
     *project_dirs, global_dir = skill_dirs(cwd)  # project dirs only when opted in (#178)
-    project = [e for d in project_dirs for e in _dir_entries(d, "skill")]
+    project = [e for d in project_dirs for e in _dir_entries(d, "skill") if entry_active(e)]
     names = {e.name for e in project}
-    globals_ = [e for e in _dir_entries(global_dir, "skill") if e.name not in names]
+    globals_ = [
+        e
+        for e in _dir_entries(global_dir, "skill")
+        if e.name not in names and entry_active(e)
+    ]
     globals_.sort(key=lambda e: e.mtime, reverse=True)
     room = max(0, INDEX_SKILLS_MAX - len(project))
     skills = project + globals_[:room]
@@ -313,16 +388,33 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
             "before acting: follow the skill over your built-in approach "
             "from training data.\n" + lines + note
         )
-    memory = _merged(memory_dirs(cwd), "memory")
+    memory = [e for e in _merged(memory_dirs(cwd), "memory") if entry_active(e)]
     memory.sort(key=lambda e: e.mtime, reverse=True)
     lessons = _lesson_entries(lessons_path)
     memory += lessons
-    shown = memory[:INDEX_MEMORY_MAX]
+    # Standing rules (#178 P1-7): pinned entries render under their own budget,
+    # exempt from the recency cap, sorted by NAME — a touched file must never
+    # change which rules apply, and a stable order keeps the index byte-stable.
+    pinned = sorted((e for e in memory if e.pinned), key=lambda e: e.name)
+    unpinned = [e for e in memory if not e.pinned]
+    if pinned:
+        lines = "\n".join(f"- {e.description}" for e in pinned[:INDEX_PINNED_MAX])
+        note = (
+            f"\n(…and {len(pinned) - INDEX_PINNED_MAX} more standing rules — "
+            "search them with recall(<topic>))"
+            if len(pinned) > INDEX_PINNED_MAX
+            else ""
+        )
+        sections.append(
+            "Standing rules — pinned memory; you MUST apply every rule below "
+            "to EVERY task, without being asked:\n" + lines + note
+        )
+    shown = unpinned[:INDEX_MEMORY_MAX]
     if shown:
         lines = "\n".join(f"- {e.description}" for e in shown)
         note = (
             "\n(…and more saved memory — search it with recall(<topic>))"
-            if len(memory) > INDEX_MEMORY_MAX
+            if len(unpinned) > INDEX_MEMORY_MAX
             else ""
         )
         if lessons:
@@ -352,6 +444,18 @@ def load_skill(name: str, dirs: list[Path]) -> str:
         return f"ERROR: invalid skill name {name!r}"
     for entry in _merged(dirs, "skill"):
         if entry.name == name:
+            if not entry_active(entry):
+                reason = (
+                    "status: disabled"
+                    if entry.status == "disabled"
+                    else f"expired {entry.expires}"
+                )
+                return (
+                    f"NOTE: skill {name!r} exists but is retired ({reason}) and is "
+                    "excluded from your index, preflight, and recall. Do not follow "
+                    f"it; edit its frontmatter at {entry.path} only if the user asks "
+                    "to re-enable it."
+                )
             return f"{_block_header(entry)}\n{entry.body}{_bundled_note(entry)}"
     available = ", ".join(n for n, _ in list_skills(dirs)) or "none"
     return f"ERROR: no skill named {name!r}. Available skills: {available}"
@@ -416,8 +520,31 @@ def score_entries(entries: list[Entry], query: str) -> list[tuple[int, Entry]]:
     return ranked
 
 
-def rank_entries(entries: list[Entry], query: str) -> list[Entry]:
-    return [entry for _, entry in score_entries(entries, query)]
+def rank_entries(entries: list[Entry], query: str, semantic=None) -> list[Entry]:
+    """Ranked entries for a query, fusing embedding similarity into the
+    lexical tiers when `semantic` (SemanticIndex.scores, or None) is wired
+    (#178 P1-9) — recall is the path the model uses when it deliberately goes
+    looking, and a Polish query must find English entries there too, not only
+    in preflight. Mirrors preflight's combination rule: strong lexical hits
+    (exact name / whole query in name+description+keywords) stay a
+    deterministic guarantee rail on top, similarity orders everything else,
+    weaker lexical tiers break similarity ties. Without `semantic` — or when
+    it fails (returns None) — output is byte-identical to pure lexical."""
+    scored = score_entries(entries, query)
+    sims = semantic(query, entries) if semantic is not None else None
+    if sims is None:
+        return [entry for _, entry in scored]
+    lexical = {id(entry): score for score, entry in scored}
+    fused = []
+    for entry in entries:  # corpus order keeps ties stable
+        lex = lexical.get(id(entry), 0)
+        sim = sims.get(id(entry), 0.0)
+        if lex == 0 and sim < SEMANTIC_MIN_SIM:
+            continue
+        rail = lex if lex >= 4 else 0
+        fused.append((rail, sim, lex, entry))
+    fused.sort(key=lambda t: (-t[0], -t[1], -t[2]))
+    return [entry for _, _, _, entry in fused]
 
 
 def _word_in(task_padded: str, word: str) -> bool:
@@ -595,12 +722,14 @@ def recall_text(
     name: str | None = None,
     sessions_search=None,
     session_detail=None,
+    semantic=None,
 ) -> str:
     """Model-facing knowledge search (the recall tool), two-phase like
     search_sessions was: ranked matches with snippets, then one entry's full
     text by name. `sessions_search(query)` / `session_detail(name, query)`
     are injected by the agent so this module stays free of session-store
-    wiring; either may be None when no session store exists.
+    wiring; either may be None when no session store exists. `semantic` is
+    SemanticIndex.scores (or None), threaded into rank_entries (#178 P1-9).
     """
     entries = load_entries(cwd, lessons_path)
     if name:
@@ -609,7 +738,9 @@ def recall_text(
             return detail[:RECALL_DETAIL_CHARS]
         if session_detail is not None and name.startswith("session-"):
             return session_detail(name, query)
-        known = ", ".join(e.name for e in rank_entries(entries, query)[:RECALL_TOP])
+        known = ", ".join(
+            e.name for e in rank_entries(entries, query, semantic)[:RECALL_TOP]
+        )
         return (
             f"ERROR: nothing named {name!r}. Use a name from a recall result"
             + (f" (close matches: {known})" if known else "")
@@ -618,7 +749,7 @@ def recall_text(
     words = query.casefold().split()
     if not words:
         return "ERROR: recall needs a query (or a name from an earlier result)."
-    ranked = rank_entries(entries, query)
+    ranked = rank_entries(entries, query, semantic)
     lines = []
     if ranked:
         lines.append(f"Saved knowledge matching {query!r} (best first):")
@@ -646,16 +777,64 @@ def recall_text(
     return "\n".join(lines)
 
 
+def _near_duplicate(identity: str, entries: list[Entry], semantic=None) -> Entry | None:
+    """The nearest existing memory entry when it is close enough to be the
+    same fact (#178 P1-8). `semantic` is `SemanticIndex.scores` (or None):
+    embedding similarity between identity lines when available; when it is
+    absent or fails, a conservative difflib ratio on the identity lines is the
+    floor — embeddings.py discipline, an upgrade never a dependency."""
+    if not entries:
+        return None
+    sims = semantic(identity, entries) if semantic is not None else None
+    if sims is not None:
+        best = max(entries, key=lambda e: sims.get(id(e), 0.0))
+        return best if sims.get(id(best), 0.0) >= DEDUP_MIN_SIM else None
+    from .embeddings import entry_text
+
+    closest: Entry | None = None
+    best_ratio = 0.0
+    identity_cf = identity.casefold()
+    for entry in entries:
+        ratio = difflib.SequenceMatcher(
+            None, identity_cf, entry_text(entry).casefold()
+        ).ratio()
+        if ratio > best_ratio:
+            closest, best_ratio = entry, ratio
+    return closest if best_ratio >= DEDUP_LEXICAL_RATIO else None
+
+
 def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: str = "",
-                lessons_path=None) -> str:
+                lessons_path=None, expires: str | None = None,
+                pinned: bool | None = None, force: bool = False,
+                semantic=None) -> str:
     """Create or update one structured memory entry. Constrained to writing a
-    slug-named markdown file inside the memory dir — safe to auto-approve."""
+    slug-named markdown file inside the memory dir — safe to auto-approve.
+
+    `expires` ("YYYY-MM-DD") marks a fact with a known end date; past it the
+    entry acts disabled (see entry_active). Write-side validation is strict —
+    the model gets a correctable error, unlike the tolerant read side — and
+    on an update, None keeps the file's existing expiry.
+
+    `pinned` marks a standing rule (always indexed, #178 P1-7); None keeps an
+    updated entry's existing flag, False explicitly unpins.
+
+    A NEW slug whose identity line lands too close to an existing memory is
+    refused with that entry's name (#178 P1-8) — near-duplicates compete for
+    index and preflight slots, so the model must update or forget the
+    existing entry instead, or pass `force` for a genuinely different fact.
+    Updates to an existing slug are never gated."""
     text = " ".join(fact.split()).strip()
     if not text:
         return "ERROR: empty fact"
     slug = name.strip() or _slugify(text)
     if not NAME_RE.match(slug or ""):
         return f"ERROR: invalid memory name {slug!r}"
+    expiry: date | None = None
+    if expires is not None and expires.strip():
+        try:
+            expiry = date.fromisoformat(expires.strip())
+        except ValueError:
+            return f"ERROR: invalid expires date {expires!r} — use YYYY-MM-DD"
     existing = load_entries(cwd, lessons_path) if cwd else []
     for entry in existing:
         # Same-name file entries are the update path; path-less entries are
@@ -667,13 +846,37 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
     keyword_list = [w.strip() for w in keywords.split(",") if w.strip()]
     directory = Path(memory_dir)
     path = directory / f"{slug}.md"
-    front = [f"name: {slug}", f"description: {text}"]
-    if keyword_list:
-        front.append(f"keywords: {', '.join(keyword_list)}")
+    if not force and not path.is_file():
+        identity = f"{slug}: {text}"
+        if keyword_list:
+            identity += f" (keywords: {', '.join(keyword_list)})"
+        similar = _near_duplicate(
+            identity, [e for e in existing if e.kind == "memory"], semantic
+        )
+        if similar is not None:
+            return (
+                f"NOT saved — a similar memory already exists — {similar.name}: "
+                f"\"{similar.description}\". UPDATE it instead (remember with "
+                f"name=\"{similar.name}\") or forget_memory(\"{similar.name}\") "
+                "first; only if this is genuinely a different fact, retry with "
+                "force=true."
+            )
     body = ""
     try:
-        if path.is_file():  # update: keep any body detail below the fact line
-            body = _parse(path, "memory").body
+        if path.is_file():  # update: keep body detail + undeclared frontmatter
+            prior = _parse(path, "memory")
+            body = prior.body
+            if expiry is None:
+                expiry = prior.expires
+            if pinned is None:
+                pinned = prior.pinned
+        front = [f"name: {slug}", f"description: {text}"]
+        if keyword_list:
+            front.append(f"keywords: {', '.join(keyword_list)}")
+        if pinned:
+            front.append("pinned: yes")
+        if expiry is not None:
+            front.append(f"expires: {expiry.isoformat()}")
         directory.mkdir(parents=True, exist_ok=True)
         path.write_text(
             "---\n" + "\n".join(front) + "\n---\n" + (body + "\n" if body else ""),

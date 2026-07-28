@@ -75,7 +75,8 @@ aish-web                                # serve the same agent to a browser
 
 Smaller machines: `ollama pull qwen3:8b && export AISH_MODEL=qwen3:8b`.
 Recommended extra: `ollama pull embeddinggemma` (~600 MB) — enables semantic
-matching of skills/memory to a task (falls back to word matching without it).
+matching of skills/memory to a task and inside the `recall` search (falls
+back to word matching without it).
 
 ---
 
@@ -194,7 +195,13 @@ thousands of entries without bloating the context.
   tool it writes is addressed by opaque ids, `create_tool` declares that preview
   itself, so the approval card names the thing, not the token.
 - **Memory** — one fact per file (`~/.config/aish/memory/`), same format; the
-  description line *is* the fact. Saved via `remember`.
+  description line *is* the fact. Saved via `remember`. A standing rule
+  ("never push without asking") can be **pinned** (`pinned: yes`) — always in
+  context under its own budget, never rotated out by newer facts. A fact with
+  a known end date can carry `expires: YYYY-MM-DD`, and `status: disabled`
+  retires an entry without deleting it. Saving a near-duplicate of an
+  existing memory is refused with the existing entry's name, so the corpus
+  consolidates instead of accumulating variants.
 - **`./AISH.md`** — durable context you write (host facts, preferences), always
   loaded in full.
 - **`/learn [hint]`** — distill the current conversation into skills/memory: it

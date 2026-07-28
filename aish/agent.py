@@ -73,7 +73,13 @@ Rules:
    stale, wrong, or superseded, you MUST prune it: call forget_memory(<slug>)
    to delete it. To consolidate duplicates, remember() the one canonical fact,
    then forget_memory() each redundant slug (e.g. remember 'canonical-fact',
-   then forget_memory('old-dupe')).
+   then forget_memory('old-dupe')). When the user states a standing rule or
+   preference that must hold in every future task ('always ask before
+   pushing'), remember() it with pinned=true — pinned memories stay in your
+   context permanently. A fact with a known end date gets
+   expires='YYYY-MM-DD'. If remember answers 'NOT saved — a similar memory
+   already exists', UPDATE or forget that entry — force=true only for a
+   genuinely different fact.
    Entries are FOUND by their name/description/keywords line, so you MUST
    phrase the description like the tasks it should catch ("Use when the
    user wants to find, buy, or compare a product …"), never as a bare rule
@@ -1794,6 +1800,10 @@ class Agent:
         return tool_plugins.execute(tool, args, cwd=self.cwd)
 
     def _recall(self, query: str, name: str | None) -> str:
+        # Embedding similarity reaches the deliberate-search path too (#178
+        # P1-9), not only preflight — same fallback discipline: scores()
+        # failing → None → recall_text is byte-identical to pure lexical.
+        semantic = self.semantic.scores if self.semantic is not None else None
         if self.origin != "user":
             # A triggered session must not search the whole past-session
             # archive (#178 P0-2): recall over every conversation ever held is
@@ -1801,13 +1811,17 @@ class Agent:
             # and it is the read half of the injected read→exfiltrate chain.
             # Knowledge entries (skills/memories) stay available.
             return (
-                skills.recall_text(self.cwd, self.lessons_path, query, name=name)
+                skills.recall_text(
+                    self.cwd, self.lessons_path, query, name=name, semantic=semantic
+                )
                 + "\n\n(Past-session archive search is unavailable in automated "
                 "sessions — only saved skills and memory were searched. Do not "
                 "retry with session names.)"
             )
         if self.state_dir is None:
-            return skills.recall_text(self.cwd, self.lessons_path, query, name=name)
+            return skills.recall_text(
+                self.cwd, self.lessons_path, query, name=name, semantic=semantic
+            )
         state_dir = Path(self.state_dir)
         exclude: set = set()
         if self.current_session is not None:
@@ -1821,6 +1835,7 @@ class Agent:
             session_detail=lambda session, q: SessionLog.search_excerpts(
                 state_dir, q, session=session
             ),
+            semantic=semantic,
         )
 
     def _collect_source(self, call: dict, result: str) -> None:
@@ -2024,6 +2039,7 @@ class Agent:
 
         if name == "remember":
             note = str(args.get("note", ""))
+            pinned = args.get("pinned")
             result = skills.save_memory(
                 note,
                 skills.GLOBAL_MEMORY_DIR,
@@ -2031,6 +2047,10 @@ class Agent:
                 keywords=str(args.get("keywords", "") or ""),
                 cwd=self.cwd,
                 lessons_path=self.lessons_path,
+                expires=str(args.get("expires", "") or "") or None,
+                pinned=None if pinned is None else bool(pinned),
+                force=bool(args.get("force", False)),
+                semantic=self.semantic.scores if self.semantic is not None else None,
             )
             self._note(f"→ {result}")
             return result
