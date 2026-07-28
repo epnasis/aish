@@ -4837,6 +4837,60 @@ class TestTriggerHardening:
             release.set()
 
 
+class TestWorkerPool:
+    """Agent workers run on the DEDICATED executor (#178 Gate 3): a parked
+    approval holds a worker thread indefinitely, and on the shared default
+    executor a few of those starved the very _show/to_thread calls a client
+    needs to attach and answer them — livelock, restart-only recovery."""
+
+    def test_run_task_executes_on_a_worker_pool_thread(self, app_env):
+        seen: list[str] = []
+
+        class RecordingChat:
+            def __call__(self, **kwargs):
+                if _is_title_call(kwargs):
+                    return model_says("")
+                seen.append(threading.current_thread().name)
+                response = model_says("hi")
+                return iter([response]) if kwargs.get("stream") else response
+
+        app = create_app("fake", client_chat=RecordingChat(), **app_env,
+                         token=TEST_TOKEN)
+        client = TokenClient(app, auto_token=TEST_TOKEN)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+        assert seen and all(name.startswith("aish-worker") for name in seen)
+
+    def test_saturated_worker_pool_does_not_block_attach(self, app_env):
+        # With EVERY worker thread parked (as held approvals would), a viewer
+        # can still connect and replay — the short ops must never share the
+        # pool, or nobody could attach to answer what parked it.
+        client, _ = make_client(app_env, [model_says("ok")])
+        release = threading.Event()
+        try:
+            with client:
+                server = client.app.state.server
+                for _ in range(server_module.WORKER_POOL_SIZE):
+                    server.worker_pool.submit(release.wait, 30)
+                with connected(client) as (_ws, hello, replay):
+                    assert hello["session"]
+                    assert replay["events"] == []
+                release.set()
+        finally:
+            release.set()
+
+    def test_shutdown_does_not_wait_on_parked_workers(self, app_env):
+        client, _ = make_client(app_env, [model_says("ok")])
+        release = threading.Event()
+        with client:
+            server = client.app.state.server
+            server.worker_pool.submit(release.wait, 30)
+        # Reaching here means lifespan shutdown returned while the fake parked
+        # worker was still waiting (wait=False + cancel_futures).
+        release.set()
+
+
 class TestOriginPersistence:
     """origin survives a cold reopen from the log (#160)."""
 

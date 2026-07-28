@@ -24,6 +24,7 @@ fanned out.
 import argparse
 import asyncio
 import contextlib
+import functools
 import hashlib
 import hmac
 import json
@@ -40,6 +41,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from email.utils import formataddr, getaddresses
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -300,6 +302,20 @@ TRIGGER_RATE_REFILL_S = 30.0    # seconds to earn one new token
 # poll instead of being lost.
 MAX_CONCURRENT_TRIGGERED = 3
 TRIGGER_RETRY_AFTER_S = 30      # Retry-After hint on either 429
+
+# Dedicated executor for AGENT WORKERS (#178 Gate 3) — the run_task /
+# run_user_command calls that can PARK indefinitely on an approval (Bridge.ask
+# blocks the worker thread on a queue.Queue until the browser answers). These
+# must never share the default to_thread executor (~min(32, cpu+4) threads):
+# a burst of triggers plus a few held approvals would exhaust it, at which
+# point _show's own to_thread calls queue BEHIND the parked workers and no
+# client can attach to answer the approvals that would free them — livelock,
+# restart-only recovery. Sizing: a parked approval holds one thread, so the
+# pool must exceed any plausible number of simultaneously-held sessions —
+# 32 covers MAX_OPEN_SESSIONS (6, exceedable by busy/viewed sessions) plus
+# MAX_CONCURRENT_TRIGGERED and restart-resumes several times over, and idle
+# threads cost only memory.
+WORKER_POOL_SIZE = 32
 
 # Restart recovery (#164). A task killed mid-run (a deploy restart, a crash, an
 # OOM) has NOTHING to bring it back: a user chat sits half-answered until
@@ -1443,6 +1459,12 @@ class WebServer:
         self.max_concurrent_triggered = MAX_CONCURRENT_TRIGGERED
         self._trigger_dedup: OrderedDict[str, tuple[float, str]] = OrderedDict()
         self._trigger_buckets: dict[str, tuple[float, float]] = {}
+        # Agent workers get their OWN pool so a parked approval can never
+        # starve the short ops (replay, log parsing, peeks) that stay on the
+        # default to_thread executor — see WORKER_POOL_SIZE.
+        self.worker_pool = ThreadPoolExecutor(
+            max_workers=WORKER_POOL_SIZE, thread_name_prefix="aish-worker"
+        )
 
     @property
     def active(self) -> Session:
@@ -1541,6 +1563,11 @@ class WebServer:
         if self.console is not None:
             self.console.kill()
             self.console = None
+        # Release the worker pool WITHOUT waiting on parked threads: the deny
+        # loop above already unblocked every held approval, and wait=False +
+        # cancel_futures (3.9+) drops anything still queued instead of
+        # deadlocking shutdown on a thread that never returns.
+        self.worker_pool.shutdown(wait=False, cancel_futures=True)
         for client in list(self.clients):
             with contextlib.suppress(Exception):
                 await client.ws.close()
@@ -1559,6 +1586,16 @@ class WebServer:
         Every gated endpoint requires it unconditionally — there is no
         token-less mode to fall through to."""
         return hmac.compare_digest(str(supplied or ""), self.token)
+
+    async def _in_worker(self, fn, *args, **kwargs):
+        """Run an agent-worker call — one that can PARK on an approval — on
+        the dedicated pool instead of asyncio's default executor, so held
+        approvals can never queue the short ops (replay/_show, parsing, peeks)
+        behind them. See WORKER_POOL_SIZE for the livelock this prevents."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self.worker_pool, functools.partial(fn, *args, **kwargs)
+        )
 
     # -- /trigger abuse guards (#178 P1-10) ---------------------------------
 
@@ -2211,15 +2248,15 @@ class WebServer:
                 # the normal "old task" trim would stub out exactly the results
                 # the resumed run must not recompute. claude-max keeps its own
                 # session state and takes no such flag.
-                result = await asyncio.to_thread(
+                result = await self._in_worker(
                     session.agent.run_task, text, images, documents, keep_history=True
                 )
             elif images or documents:
-                result = await asyncio.to_thread(
+                result = await self._in_worker(
                     session.agent.run_task, text, images, documents
                 )
             else:
-                result = await asyncio.to_thread(session.agent.run_task, text)
+                result = await self._in_worker(session.agent.run_task, text)
             # Backend-owned issue creation (#110): a text-only feedback draft
             # returns as one aish-issue block. Stash it (the pre-reviewed source
             # of truth for a later {type:create_issue}) and strip the raw fence
@@ -2274,7 +2311,9 @@ class WebServer:
                 # (issue #95); no manual _cwd_event send needed.
                 await asyncio.to_thread(session.agent.rebase, cd_target)
             else:
-                await asyncio.to_thread(session.agent.run_user_command, command)
+                # Worker pool, not to_thread: a user command can run long
+                # (a build, a watch) and must not occupy the default pool.
+                await self._in_worker(session.agent.run_user_command, command)
             # The output already streamed into its terminal block; an empty
             # `done` just clears the busy state without a duplicate answer bubble.
             session.bridge.emit({"type": "done", "result": ""})
@@ -2498,7 +2537,7 @@ class WebServer:
         otherwise sit as plain, unclickable text in the terminal block (#110)."""
         try:
             session.logref.command(command, "user-direct")
-            output = await asyncio.to_thread(session.agent.run_user_command, command)
+            output = await self._in_worker(session.agent.run_user_command, command)
             match = ISSUE_URL_RE.search(output)
             # A rendered-markdown confirmation carrying a clickable link to the
             # filed issue; empty (no answer bubble) if gh emitted no URL.
