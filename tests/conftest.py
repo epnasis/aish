@@ -1,7 +1,7 @@
-"""Suite-wide isolation: Agent construction now scans the global skills dir
-(knowledge_index runs at every run_task), so tests must never see the
-developer's real ~/.config/aish/skills — nor reach the developer's real
-phone."""
+"""Suite-wide isolation: Agent construction now scans the global skills and
+tools dirs (knowledge_index + the plugin-tool rescan run at every run_task),
+so tests must never see the developer's real ~/.config/aish — nor reach the
+developer's real phone."""
 
 import pytest
 
@@ -11,12 +11,15 @@ from aish import tool_plugins as tool_plugins_module
 
 
 @pytest.fixture(autouse=True)
-def isolated_global_skills(tmp_path_factory, monkeypatch):
+def isolated_global_dirs(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(
         skills_module, "GLOBAL_SKILLS_DIR", tmp_path_factory.mktemp("global-skills")
     )
     monkeypatch.setattr(
         skills_module, "GLOBAL_MEMORY_DIR", tmp_path_factory.mktemp("global-memory")
+    )
+    monkeypatch.setattr(
+        tool_plugins_module, "GLOBAL_TOOLS_DIR", tmp_path_factory.mktemp("global-tools")
     )
 
 
