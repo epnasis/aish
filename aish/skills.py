@@ -77,6 +77,15 @@ PREFLIGHT_HEAD_CHARS = 600  # teaser length for an oversized skill
 # textbook 0.6+ values here.
 SEMANTIC_MIN_SIM = 0.24
 
+# Near-duplicate gate on save_memory (#178 P1-8): a NEW entry this similar to
+# an existing one is refused with the existing entry's name, so the model
+# updates instead of duplicating (force overrides). Both thresholds sit far
+# above the retrieval floor on purpose — only a confident near-duplicate may
+# block a save, and the exact-string check catches the trivial case first.
+# The semantic value is provisional until measured on the live corpus.
+DEDUP_MIN_SIM = 0.55  # identity line vs identity line through SemanticIndex.scores
+DEDUP_LEXICAL_RATIO = 0.75  # difflib fallback when embeddings are unavailable
+
 _PUNCT = ".,;:!?()[]{}<>'\"`"
 FUZZY_WORD_CUTOFF = 0.75  # single query word vs single entry word
 
@@ -741,9 +750,36 @@ def recall_text(
     return "\n".join(lines)
 
 
+def _near_duplicate(identity: str, entries: list[Entry], semantic=None) -> Entry | None:
+    """The nearest existing memory entry when it is close enough to be the
+    same fact (#178 P1-8). `semantic` is `SemanticIndex.scores` (or None):
+    embedding similarity between identity lines when available; when it is
+    absent or fails, a conservative difflib ratio on the identity lines is the
+    floor — embeddings.py discipline, an upgrade never a dependency."""
+    if not entries:
+        return None
+    sims = semantic(identity, entries) if semantic is not None else None
+    if sims is not None:
+        best = max(entries, key=lambda e: sims.get(id(e), 0.0))
+        return best if sims.get(id(best), 0.0) >= DEDUP_MIN_SIM else None
+    from .embeddings import entry_text
+
+    closest: Entry | None = None
+    best_ratio = 0.0
+    identity_cf = identity.casefold()
+    for entry in entries:
+        ratio = difflib.SequenceMatcher(
+            None, identity_cf, entry_text(entry).casefold()
+        ).ratio()
+        if ratio > best_ratio:
+            closest, best_ratio = entry, ratio
+    return closest if best_ratio >= DEDUP_LEXICAL_RATIO else None
+
+
 def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: str = "",
                 lessons_path=None, expires: str | None = None,
-                pinned: bool | None = None) -> str:
+                pinned: bool | None = None, force: bool = False,
+                semantic=None) -> str:
     """Create or update one structured memory entry. Constrained to writing a
     slug-named markdown file inside the memory dir — safe to auto-approve.
 
@@ -753,7 +789,13 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
     on an update, None keeps the file's existing expiry.
 
     `pinned` marks a standing rule (always indexed, #178 P1-7); None keeps an
-    updated entry's existing flag, False explicitly unpins."""
+    updated entry's existing flag, False explicitly unpins.
+
+    A NEW slug whose identity line lands too close to an existing memory is
+    refused with that entry's name (#178 P1-8) — near-duplicates compete for
+    index and preflight slots, so the model must update or forget the
+    existing entry instead, or pass `force` for a genuinely different fact.
+    Updates to an existing slug are never gated."""
     text = " ".join(fact.split()).strip()
     if not text:
         return "ERROR: empty fact"
@@ -777,6 +819,21 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
     keyword_list = [w.strip() for w in keywords.split(",") if w.strip()]
     directory = Path(memory_dir)
     path = directory / f"{slug}.md"
+    if not force and not path.is_file():
+        identity = f"{slug}: {text}"
+        if keyword_list:
+            identity += f" (keywords: {', '.join(keyword_list)})"
+        similar = _near_duplicate(
+            identity, [e for e in existing if e.kind == "memory"], semantic
+        )
+        if similar is not None:
+            return (
+                f"NOT saved — a similar memory already exists — {similar.name}: "
+                f"\"{similar.description}\". UPDATE it instead (remember with "
+                f"name=\"{similar.name}\") or forget_memory(\"{similar.name}\") "
+                "first; only if this is genuinely a different fact, retry with "
+                "force=true."
+            )
     body = ""
     try:
         if path.is_file():  # update: keep body detail + undeclared frontmatter

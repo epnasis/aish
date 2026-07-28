@@ -2034,6 +2034,8 @@ class Agent:
                 lessons_path=self.lessons_path,
                 expires=str(args.get("expires", "") or "") or None,
                 pinned=None if pinned is None else bool(pinned),
+                force=bool(args.get("force", False)),
+                semantic=self.semantic.scores if self.semantic is not None else None,
             )
             self._note(f"→ {result}")
             return result

@@ -616,6 +616,101 @@ class TestPreflight:
         assert preload.unread == []
 
 
+class TestNearDuplicateGate:
+    """#178 P1-8: a NEW memory too similar to an existing one is refused with
+    the existing entry's name; force overrides; updates are never gated."""
+
+    def _seed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", tmp_path / "memory")
+        save_memory(
+            "the aish repo lives in ~/dev/aish",
+            tmp_path / "memory",
+            name="aish-repo-location",
+            cwd=str(tmp_path),
+        )
+
+    def test_lexical_near_duplicate_refused_with_name(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = save_memory(
+            "the aish repo lives at ~/dev/aish",  # near-identical wording
+            tmp_path / "memory",
+            name="aish-repo-path",
+            cwd=str(tmp_path),
+        )
+        assert result.startswith("NOT saved")
+        assert "aish-repo-location" in result
+        assert "force" in result
+        assert not (tmp_path / "memory" / "aish-repo-path.md").exists()
+
+    def test_force_overrides_the_gate(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = save_memory(
+            "the aish repo lives at ~/dev/aish",
+            tmp_path / "memory",
+            name="aish-repo-path",
+            cwd=str(tmp_path),
+            force=True,
+        )
+        assert result.startswith("remembered")
+        assert (tmp_path / "memory" / "aish-repo-path.md").is_file()
+
+    def test_update_to_same_slug_never_gated(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = save_memory(
+            "the aish repo lives at ~/dev/aish (moved note)",
+            tmp_path / "memory",
+            name="aish-repo-location",
+            cwd=str(tmp_path),
+        )
+        assert result.startswith("remembered")
+
+    def test_distinct_fact_saves_normally(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = save_memory(
+            "use uv run pytest for the test suite",
+            tmp_path / "memory",
+            name="test-runner",
+            cwd=str(tmp_path),
+        )
+        assert result.startswith("remembered")
+
+    def test_semantic_scores_gate_when_wired(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        high = lambda identity, entries: dict.fromkeys(map(id, entries), 0.9)  # noqa: E731
+        result = save_memory(
+            "completely different wording about the repository home",
+            tmp_path / "memory",
+            name="other-slug",
+            cwd=str(tmp_path),
+            semantic=high,
+        )
+        assert result.startswith("NOT saved")
+        assert "aish-repo-location" in result
+
+    def test_semantic_low_similarity_saves(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        low = lambda identity, entries: dict.fromkeys(map(id, entries), 0.1)  # noqa: E731
+        result = save_memory(
+            "the aish repo lives at ~/dev/aish",  # lexically close, semantically vouched apart
+            tmp_path / "memory",
+            name="aish-repo-path",
+            cwd=str(tmp_path),
+            semantic=low,
+        )
+        assert result.startswith("remembered")
+
+    def test_semantic_failure_falls_back_to_lexical(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = save_memory(
+            "the aish repo lives at ~/dev/aish",
+            tmp_path / "memory",
+            name="aish-repo-path",
+            cwd=str(tmp_path),
+            semantic=lambda identity, entries: None,  # ollama down
+        )
+        assert result.startswith("NOT saved")
+
+
 class TestPinnedTier:
     """#178 P1-7: pinned memories are standing rules — always in the index
     under their own budget, never rotated out by newer facts' mtimes."""

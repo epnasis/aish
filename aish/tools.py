@@ -525,6 +525,16 @@ TOOL_SCHEMAS = [
                             "expires: 2026-08-31). Omit for durable facts."
                         ),
                     },
+                    "force": {
+                        "type": "boolean",
+                        "description": (
+                            "Only when a save was refused as similar to an existing "
+                            "entry AND you verified the facts are genuinely "
+                            "different: retry with force: true. Otherwise UPDATE the "
+                            "named entry (remember with its name) or forget_memory "
+                            "it — never force past a real duplicate."
+                        ),
+                    },
                 },
                 "required": ["note"],
             },
