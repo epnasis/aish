@@ -94,10 +94,51 @@ def app_env(tmp_path):
     }
 
 
+# The access token is unconditional now (#178 P1-2): an app built without one
+# generates its own at startup. Tests get a fixed one so URLs stay printable.
+TEST_TOKEN = "test-token"
+
+
+class TokenClient(TestClient):
+    """TestClient that appends the app's token to any request not already
+    carrying one — the fixture-side answer to the unconditional token (#178
+    P1-2), so the hundreds of pre-existing bare `/ws`, `/upload?…` calls keep
+    working WITHOUT weakening the server-side requirement. Tests that pass an
+    explicit token= to make_client get `auto_token=None` (plain TestClient
+    behaviour), so their deliberate token omissions still hit the gate."""
+
+    def __init__(self, app, auto_token=None, **kwargs):
+        super().__init__(app, **kwargs)
+        self.auto_token = auto_token
+
+    def _tokened(self, url):
+        url = str(url)
+        if not self.auto_token or "token=" in url:
+            return url
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}token={self.auto_token}"
+
+    def request(self, method, url, **kwargs):
+        params = kwargs.get("params")
+        if params is not None:
+            # httpx REPLACES the URL query with `params`, so the token must
+            # ride inside params here, not on the URL.
+            if self.auto_token and "token" not in params:
+                kwargs["params"] = {**dict(params), "token": self.auto_token}
+            return super().request(method, url, **kwargs)
+        return super().request(method, self._tokened(url), **kwargs)
+
+    def websocket_connect(self, url, *args, **kwargs):
+        return super().websocket_connect(self._tokened(url), *args, **kwargs)
+
+
 def make_client(app_env, responses, title=None, **kwargs):
     chat = FakeChat(responses, title=title)
+    explicit_token = "token" in kwargs
+    kwargs.setdefault("token", TEST_TOKEN)
     app = create_app("fake", client_chat=chat, **app_env, **kwargs)
-    return TestClient(app), chat
+    auto = None if explicit_token else kwargs["token"]
+    return TokenClient(app, auto_token=auto), chat
 
 
 @contextlib.contextmanager
@@ -1531,6 +1572,11 @@ class RaisingChat:
         raise RuntimeError(self.message)
 
 
+def raising_client(app_env) -> TokenClient:
+    app = create_app("fake", client_chat=RaisingChat(), token=TEST_TOKEN, **app_env)
+    return TokenClient(app, auto_token=TEST_TOKEN)
+
+
 def recv_any(ws, wanted: str, limit: int = 200) -> dict:
     """Like recv_until but does NOT treat an `error` event as fatal — used
     when the error IS the event under test."""
@@ -1547,7 +1593,7 @@ class TestModelError:
     afterward is a graceful no-op, and a cold re-attach shows it finished."""
 
     def test_error_emits_terminal_and_clears_busy(self, app_env):
-        client = TestClient(create_app("fake", client_chat=RaisingChat(), **app_env))
+        client = raising_client(app_env)
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "task", "text": "do it"})
             error = recv_any(ws, "error")
@@ -1557,7 +1603,7 @@ class TestModelError:
             assert client.app.state.server.active.state() == "idle"
 
     def test_stop_after_error_is_graceful_noop(self, app_env):
-        client = TestClient(create_app("fake", client_chat=RaisingChat(), **app_env))
+        client = raising_client(app_env)
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "task", "text": "do it"})
             recv_any(ws, "error")
@@ -1570,7 +1616,7 @@ class TestModelError:
         # Re-attaching an errored session (switch away and back, or phone
         # lock/unlock) must report idle (not running) and replay the recorded
         # error — never a stuck "working" foreground.
-        client = TestClient(create_app("fake", client_chat=RaisingChat(), **app_env))
+        client = raising_client(app_env)
         with client, connected(client) as (ws, hello, _):
             name = hello["session"]
             ws.send_json({"type": "task", "text": "do it"})
@@ -1586,7 +1632,7 @@ class TestModelError:
 
     def test_errored_session_is_deletable(self, app_env):
         # busy cleared → state() == "idle" → the delete guard allows removal.
-        client = TestClient(create_app("fake", client_chat=RaisingChat(), **app_env))
+        client = raising_client(app_env)
         with client, connected(client) as (ws, hello, _):
             name = hello["session"]
             ws.send_json({"type": "task", "text": "do it"})
@@ -3114,6 +3160,168 @@ class TestTokenGate:
                 assert hello["model"] == "fake"
 
 
+class TestOriginGate:
+    """#178 P1-2: WebSockets are exempt from the same-origin policy and a
+    text/plain POST needs no preflight, so a browser Origin that isn't our own
+    Host is rejected BEFORE the token is even considered. A missing Origin
+    (curl, the launchd poller, native clients) passes — browsers always send
+    one on the cross-origin requests that are the drive-by vector."""
+
+    def test_cross_origin_ws_rejected_even_with_valid_token(self, app_env):
+        from starlette.websockets import WebSocketDisconnect
+
+        client, _ = make_client(app_env, [])
+        with client:
+            # TokenClient appends the VALID token — the origin alone rejects.
+            with client.websocket_connect(
+                "/ws", headers={"Origin": "https://evil.example"}
+            ) as ws:
+                with pytest.raises(WebSocketDisconnect) as exc:
+                    ws.receive_json()
+                assert exc.value.code == 4405
+
+    def test_same_origin_ws_accepted(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            # TestClient's Host header is "testserver".
+            with client.websocket_connect(
+                "/ws", headers={"Origin": "http://testserver"}
+            ) as ws:
+                assert ws.receive_json()["type"] == "hello"
+
+    def test_missing_origin_accepted(self, app_env):
+        # curl / the poller / native clients send no Origin header at all.
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (_ws, hello, _):
+            assert hello["type"] == "hello"
+
+    def test_trigger_cross_origin_rejected(self, app_env):
+        client, _ = make_client(app_env, [model_says("x")], token="secret")
+        with client:
+            r = client.post(
+                "/trigger?token=secret",
+                json={"prompt": "hi", "origin": "email"},
+                headers={"Origin": "https://evil.example"},
+            )
+            assert r.status_code == 403
+
+    def test_origin_matching_rules(self):
+        from aish.server import origin_allowed
+
+        # The reverse-proxy case that must keep working (aish.wenda.eu).
+        assert origin_allowed("https://aish.wenda.eu", "aish.wenda.eu")
+        assert origin_allowed("https://aish.wenda.eu:443", "aish.wenda.eu")
+        assert origin_allowed("http://192.168.10.20:8787", "192.168.10.20:8787")
+        assert origin_allowed(None, "aish.wenda.eu")
+        assert origin_allowed("", "aish.wenda.eu")
+        assert not origin_allowed("null", "aish.wenda.eu")
+        assert not origin_allowed("https://evil.example", "aish.wenda.eu")
+        assert not origin_allowed("https://aish.wenda.eu.evil.example", "aish.wenda.eu")
+        assert not origin_allowed("file://x", "aish.wenda.eu")
+        # A Host that fails the header-injection sanity check gates closed.
+        assert not origin_allowed("https://aish.wenda.eu", "bad host\r\nX: y")
+
+
+class TestUnconditionalToken:
+    """#178 P1-2: there is no token-less mode. An app built without a token
+    generates a random one at startup and every gated surface requires it."""
+
+    def test_no_token_app_still_gates_everything(self, app_env):
+        from starlette.websockets import WebSocketDisconnect
+
+        chat = FakeChat([model_says("ok")])
+        app = create_app("fake", client_chat=chat, **app_env)  # no token given
+        generated = app.state.server.token
+        assert generated  # generated, held in memory
+        client = TestClient(app)  # deliberately NOT TokenClient: no auto-append
+        with client:
+            assert client.post("/upload?name=a.txt", content=b"x").status_code == 403
+            assert client.get("/offline/index").status_code == 403
+            assert client.get("/dirs?path=/tmp").status_code == 403
+            assert client.post("/export/answer", content=b"# x").status_code == 403
+            # /trigger: the old loopback fallback is gone — token or nothing.
+            assert client.post("/trigger", json={"prompt": "x"}).status_code == 403
+            with client.websocket_connect("/ws") as ws:
+                with pytest.raises(WebSocketDisconnect) as exc:
+                    ws.receive_json()
+                assert exc.value.code == 4403
+            # The generated token is the way in.
+            with connected(client, f"/ws?token={generated}") as (_ws, hello, _):
+                assert hello["type"] == "hello"
+            r = client.post(
+                f"/trigger?token={generated}", json={"prompt": "go", "origin": "email"}
+            )
+            assert r.status_code == 200
+
+
+class TestConcurrentColdOpen:
+    """#178 P1-5: two callers racing a cold open of the same name (restart
+    recovery vs a reconnecting PWA) must share ONE Session — the duplicate
+    used to overwrite the first in `sessions`, orphaning a live worker whose
+    approval cards could never be answered."""
+
+    def test_racing_cold_opens_share_one_session(self, app_env):
+        client, _ = make_client(app_env, [])
+        server = client.app.state.server
+        # A session on disk but NOT in memory: write a log file directly.
+        state_dir = app_env["state_dir"]
+        log = SessionLog.new(state_dir)
+        log.message({"role": "user", "content": "hello from disk"})
+        log.close()
+        name = log.path.name
+        assert name not in server.sessions
+
+        opens = {"n": 0}
+        real_open = server.open_session
+
+        def counted(*args, **kwargs):
+            opens["n"] += 1
+            return real_open(*args, **kwargs)
+
+        server.open_session = counted
+
+        async def race():
+            return await asyncio.gather(
+                server._open_by_name(name), server._open_by_name(name)
+            )
+
+        a, b = asyncio.run(race())
+        assert a is not None
+        assert a is b
+        assert server.sessions[name] is a
+        assert opens["n"] == 1  # one build, shared — not two racing ones
+
+    def test_failed_open_does_not_poison_the_name(self, app_env):
+        client, _ = make_client(app_env, [])
+        server = client.app.state.server
+        state_dir = app_env["state_dir"]
+        log = SessionLog.new(state_dir)
+        log.message({"role": "user", "content": "hi"})
+        log.close()
+        name = log.path.name
+
+        real_open = server.open_session
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("disk hiccup")
+            return real_open(*args, **kwargs)
+
+        server.open_session = flaky
+
+        async def open_twice():
+            with pytest.raises(RuntimeError):
+                await server._open_by_name(name)
+            assert name not in server._opening  # entry removed on failure
+            return await server._open_by_name(name)
+
+        session = asyncio.run(open_twice())
+        assert session is not None
+        assert server.sessions[name] is session
+
+
 class TestSkillsRefresh:
     def test_skill_added_after_boot_is_advertised(self, app_env, project_scope):
         """Issue #31: the skills index is rebuilt per task, not captured at
@@ -4457,6 +4665,24 @@ class TestTriggerEndpoint:
         with client:
             r = client.post("/trigger?token=secret", json={"origin": "email"})
             assert r.status_code == 400
+
+    def test_trigger_does_not_move_the_default_session(self, app_env):
+        # #178 P1-6: an overnight trigger must not become the landing spot for
+        # the next bare connect (nor eviction-immune via default status).
+        client, _ = make_client(app_env, [model_says("done")], token="secret")
+        with client:
+            server = client.app.state.server
+            before = server._default
+            r = client.post("/trigger?token=secret",
+                            json={"prompt": "go", "origin": "email"})
+            assert r.status_code == 200
+            name = r.json()["session"]
+            assert server._default is before
+            assert server._default.name != name
+            # Let the background task finish so shutdown is clean.
+            with connected(client, f"/ws?token=secret&session={name}") as (ws, _, _):
+                recv_until(ws, "done")
+            assert server._default is before
 
 
 class TestOriginPersistence:
