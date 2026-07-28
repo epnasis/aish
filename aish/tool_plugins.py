@@ -37,6 +37,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 GLOBAL_TOOLS_DIR = Path.home() / ".config" / "aish" / "tools"
+# Soft budget on the TOTAL exposed tool count (native + plugin). Every tool
+# schema is resent on EVERY turn, so an unbounded tool list quietly eats the
+# context window (epic #178 item 14: 18 plugin tools ≈ 6.9k tokens/turn on a
+# 32k local window). The budget changes NOTHING — no tool is hidden — it only
+# produces a one-line consolidation nudge via budget_warning().
+TOOL_BUDGET = 25
 NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ARG_TYPES = {"string", "integer", "number", "boolean"}
@@ -460,6 +466,32 @@ def discover(cwd: str) -> tuple[list[Tool], list[str]]:
                 else:
                     tools[tool.name] = tool
     return list(tools.values()), warnings
+
+
+def budget_warning(names: list[str]) -> str | None:
+    """One-line nudge when the exposed tool count exceeds the soft TOOL_BUDGET,
+    or None when within budget. ``names`` is EVERY exposed tool name (native +
+    plugin — the schemas the model pays for each turn). The hint names the
+    largest ``<prefix>_*`` family (e.g. "9 reminders_*"): a per-subcommand
+    explosion is exactly the drift epic #141's tools-as-scalpel doctrine
+    forbids, and consolidating that family is the highest-value fix. Pure and
+    deterministic; behavior never changes — no tool is hidden."""
+    total = len(names)
+    if total <= TOOL_BUDGET:
+        return None
+    families: dict[str, int] = {}
+    for name in names:
+        prefix, sep, _ = name.partition("_")
+        if sep and prefix:
+            families[prefix] = families.get(prefix, 0) + 1
+    hint = ""
+    biggest = max(families.items(), key=lambda kv: (kv[1], kv[0]), default=None)
+    if biggest is not None and biggest[1] >= 2:
+        hint = f" (largest family: {biggest[1]} {biggest[0]}_* — consolidate those first)"
+    return (
+        f"{total} tools exposed exceeds the soft budget of {TOOL_BUDGET}; "
+        f"every tool schema costs context on every turn{hint}"
+    )
 
 
 def signature(cwd: str) -> tuple:

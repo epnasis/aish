@@ -2176,6 +2176,15 @@ class Agent:
             if warning not in self._plugin_warned:
                 self._plugin_warned.add(warning)
                 self._note(f"⚠ tool skipped: {warning}")
+        # Soft tool budget (#178 item 14): a one-line consolidation nudge when
+        # the total exposed count drifts past TOOL_BUDGET. Same dedup as the
+        # shadow warnings — once per rescan that changes the message, never
+        # per step, and no tool is ever hidden.
+        exposed_names = [s["function"]["name"] for s in tools.TOOL_SCHEMAS + self._plugin_defs]
+        budget_note = tool_plugins.budget_warning(exposed_names)
+        if budget_note is not None and budget_note not in self._plugin_warned:
+            self._plugin_warned.add(budget_note)
+            self._note(f"⚠ {budget_note}")
 
     def _tool_for_command(self, command: str) -> str | None:
         """The name of an available plugin tool that declares (via `prefer_over`)

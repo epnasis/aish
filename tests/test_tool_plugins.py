@@ -311,6 +311,94 @@ class TestDiscover:
         assert signature(str(tmp_path)) != sig1
 
 
+class TestToolBudget:
+    """Soft tool budget (#178 item 14): a one-line nudge past TOOL_BUDGET,
+    naming the largest <prefix>_* family; never a behavior change."""
+
+    def test_within_budget_no_warning(self):
+        names = [f"tool_{i}" for i in range(tp.TOOL_BUDGET)]
+        assert tp.budget_warning(names) is None
+
+    def test_at_budget_no_warning(self):
+        names = [f"t{i}" for i in range(tp.TOOL_BUDGET)]
+        assert tp.budget_warning(names) is None
+
+    def test_over_budget_warns_with_count(self):
+        names = [f"t{i}_x" for i in range(tp.TOOL_BUDGET + 1)]
+        warning = tp.budget_warning(names)
+        assert warning is not None
+        assert str(tp.TOOL_BUDGET + 1) in warning
+        assert str(tp.TOOL_BUDGET) in warning
+
+    def test_warning_names_dominant_family(self):
+        names = [f"reminders_{i}" for i in range(9)]
+        names += [f"gmail_{i}" for i in range(5)]
+        names += [f"solo{i}" for i in range(12)]  # 26 total, no underscore family
+        warning = tp.budget_warning(names)
+        assert warning is not None
+        assert "9 reminders_*" in warning
+        assert "gmail" not in warning
+
+    def test_no_family_hint_without_families(self):
+        names = [f"solo{i}" for i in range(tp.TOOL_BUDGET + 3)]
+        warning = tp.budget_warning(names)
+        assert warning is not None
+        assert "largest family" not in warning
+
+
+class TestBudgetWiring:
+    """The agent emits the budget nudge through the same warning channel as
+    shadow warnings — once per rescan, not per step."""
+
+    def _make_agent(self, echoes):
+        from aish.agent import Agent
+
+        return Agent(
+            model="fake",
+            approve=lambda _cmd: True,
+            client_chat=lambda **_kw: None,
+            echo=echoes.append,
+        )
+
+    def test_over_budget_notes_once(self, tmp_path, monkeypatch):
+        from aish import tools as native_tools
+
+        gdir = tmp_path / "gtools"
+        monkeypatch.setattr(tp, "GLOBAL_TOOLS_DIR", gdir)
+        # Enough plugin tools to land exactly one over the soft budget,
+        # whatever the native TOOL_SCHEMAS count is at the time.
+        need = tp.TOOL_BUDGET - len(native_tools.TOOL_SCHEMAS) + 1
+        for i in range(need):
+            write_tool(
+                gdir / f"fam_{i}",
+                f"---\nname: fam_{i}\ndescription: d\nexec: ./run.sh\nmutating: no\n---\nb",
+            )
+        echoes = []
+        agent = self._make_agent(echoes)
+        agent._refresh_plugin_tools()
+        assert any("soft budget" in e for e in echoes)
+        # unchanged signature → no rescan → no repeat
+        before = len(echoes)
+        agent._refresh_plugin_tools()
+        assert len(echoes) == before
+
+    def test_within_budget_no_note(self, tmp_path, monkeypatch):
+        from aish import tools as native_tools
+
+        gdir = tmp_path / "gtools"
+        monkeypatch.setattr(tp, "GLOBAL_TOOLS_DIR", gdir)
+        need = max(0, tp.TOOL_BUDGET - len(native_tools.TOOL_SCHEMAS))
+        for i in range(need):
+            write_tool(
+                gdir / f"fam_{i}",
+                f"---\nname: fam_{i}\ndescription: d\nexec: ./run.sh\nmutating: no\n---\nb",
+            )
+        echoes = []
+        agent = self._make_agent(echoes)
+        agent._refresh_plugin_tools()
+        assert not any("soft budget" in e for e in echoes)
+
+
 def test_prefer_over_parsed(tmp_path):
     manifest = write_tool(
         tmp_path / "t",
