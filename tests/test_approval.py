@@ -485,6 +485,100 @@ class TestEscapingDirs:
         assert escaping_dirs(f"cd {elsewhere}", str(root), [root]) == [str(elsewhere)]
 
 
+class TestSymlinkEscapes:
+    """#178 P1-1: a symlink INSIDE the root pointing outside it must prompt —
+    a relative token used to short-circuit the containment check unresolved,
+    so `cat notes.txt` with notes.txt -> /etc/passwd auto-approved. Symlinks
+    are routine in checked-out repos, so an attacker-supplied repo is a
+    natural carrier."""
+
+    @pytest.fixture
+    def world(self, tmp_path):
+        """A project root holding symlinks to stand-ins for /etc and ~/.ssh."""
+        root = tmp_path / "project"
+        root.mkdir()
+        etc = tmp_path / "etc"
+        etc.mkdir()
+        (etc / "passwd").write_text("root:x:0:0")
+        ssh = tmp_path / ".ssh"
+        ssh.mkdir()
+        (ssh / "id_rsa").write_text("KEY")
+        (root / "notes.txt").symlink_to(etc / "passwd")
+        (root / "keys").symlink_to(ssh)
+        return root, etc, ssh
+
+    def approvable(self, command, root):
+        return is_auto_approvable(command, [], cwd=str(root), roots=[root])
+
+    def test_relative_symlink_to_outside_file_prompts(self, world):
+        root, _, _ = world
+        for command in ("cat notes.txt", "grep x notes.txt", "head -5 notes.txt"):
+            assert not self.approvable(command, root), command
+
+    def test_relative_symlink_to_outside_dir_prompts(self, world):
+        root, _, _ = world
+        assert not self.approvable("ls keys", root)
+
+    def test_nested_path_through_outside_symlink_prompts(self, world):
+        root, _, _ = world
+        assert not self.approvable("cat keys/id_rsa", root)
+
+    def test_escaping_dirs_names_the_resolved_escape(self, world):
+        root, etc, ssh = world
+        assert escaping_dirs("cat notes.txt", str(root), [root]) == [str(etc)]
+        assert escaping_dirs("ls keys", str(root), [root]) == [str(ssh)]
+
+    def test_symlink_within_roots_still_approves(self, world):
+        root, _, _ = world
+        (root / "real.txt").write_text("x")
+        (root / "alias.txt").symlink_to(root / "real.txt")
+        assert self.approvable("cat alias.txt", root)
+
+    def test_regular_in_root_files_still_approve(self, world):
+        root, _, _ = world
+        (root / "README.md").write_text("x")
+        (root / "src").mkdir()
+        assert self.approvable("cat README.md", root)
+        assert self.approvable("grep foo src/", root)
+        assert self.approvable("ls -la", root)
+
+    def test_nonexistent_relative_tokens_still_approve(self, world):
+        """Tokens naming nothing on disk (patterns, words, future files)
+        can't escape via symlink and must not start prompting."""
+        root, _, _ = world
+        assert self.approvable("cat missing.txt", root)
+        assert self.approvable("grep TODO_PATTERN missing-dir/", root)
+
+
+class TestSensitiveOperands:
+    """#178 P1-1 second half: shell path operands get the same sensitivity
+    check as read_file, so `cat link-to-ssh-key` (or a plain in-root .env)
+    prompts even when containment holds."""
+
+    def approvable(self, command, root):
+        return is_auto_approvable(command, [], cwd=str(root), roots=[root])
+
+    def test_in_root_sensitive_file_prompts(self, tmp_path):
+        (tmp_path / ".env").write_text("SECRET=1")
+        assert not self.approvable("cat .env", tmp_path)
+
+    def test_symlink_to_in_root_sensitive_file_prompts(self, tmp_path):
+        (tmp_path / ".env").write_text("SECRET=1")
+        (tmp_path / "cfg").symlink_to(tmp_path / ".env")
+        assert not self.approvable("cat cfg", tmp_path)
+
+    def test_sensitive_word_as_mere_pattern_still_approves(self, tmp_path):
+        """'secrets' as a grep PATTERN names nothing on disk — only tokens
+        that resolve to an existing sensitive path prompt."""
+        (tmp_path / "file.txt").write_text("x")
+        assert self.approvable("grep secrets file.txt", tmp_path)
+
+    def test_sensitive_path_not_offered_as_trust_dir(self, tmp_path):
+        """An in-root sensitive file is not an escape: nothing to trust away."""
+        (tmp_path / ".env").write_text("SECRET=1")
+        assert escaping_dirs("cat .env", str(tmp_path), [tmp_path]) == []
+
+
 class TestScratchWorkspace:
     """Issue #70: writes and deletes are auto-approved ONLY when they resolve
     strictly inside the ephemeral scratch dir. Everything else fails closed."""
