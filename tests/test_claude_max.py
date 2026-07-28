@@ -104,7 +104,11 @@ def make_max_agent(monkeypatch, tmp_path, **kwargs):
 
 
 def write_plugin_tool(project_dir, name, *, mutating):
-    """A minimal valid TOOL.md + cat wrapper under <project>/.aish/tools/."""
+    """A minimal valid TOOL.md + cat wrapper under <project>/.aish/tools/.
+
+    Project scope is off by default (#178 P0-1), so callers must also request
+    the `project_scope` fixture or discovery will simply find nothing.
+    """
     tool_dir = project_dir / ".aish" / "tools" / name
     tool_dir.mkdir(parents=True)
     (tool_dir / "TOOL.md").write_text(
@@ -207,7 +211,9 @@ class TestConstructorWiring:
         with pytest.raises(TypeError):
             ClaudeMaxAgent(model="fake", bogus_capability=lambda: None)
 
-    def test_capability_callbacks_reach_inner_agent(self, monkeypatch, tmp_path):
+    def test_capability_callbacks_reach_inner_agent(
+        self, monkeypatch, tmp_path, project_scope
+    ):
         steps = []
         commands = []
         tool_approvals = []
@@ -254,14 +260,14 @@ class TestConstructorWiring:
         assert commands[0]["command"] == "echo traced"
 
     def test_mutating_plugin_tool_hidden_without_tool_approver(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path, project_scope
     ):
         write_plugin_tool(tmp_path, "gated", mutating=True)
         agent, fake = make_max_agent(monkeypatch, tmp_path)
         assert "gated" not in fake.handlers  # fail-closed: never offered ungated
 
     def test_plugin_tool_created_mid_session_registers_next_task(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path, project_scope
     ):
         agent, fake = make_max_agent(monkeypatch, tmp_path)
         assert "latecomer" not in fake.handlers
