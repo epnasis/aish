@@ -3065,7 +3065,7 @@ class TestTokenGate:
 
 
 class TestSkillsRefresh:
-    def test_skill_added_after_boot_is_advertised(self, app_env):
+    def test_skill_added_after_boot_is_advertised(self, app_env, project_scope):
         """Issue #31: the skills index is rebuilt per task, not captured at
         create_app time — a skill created while the server runs reaches the
         model on the next task without a restart."""
@@ -3870,6 +3870,10 @@ class TestFeedbackAttachmentSwitch:
 
 class TestToolApproval:
     """Mutating plugin tools reuse the command card verbatim over the WS."""
+
+    @pytest.fixture(autouse=True)
+    def _opt_in(self, project_scope):
+        """Tools are planted in the session cwd's .aish — explicit opt-in (#178 P0-1)."""
 
     def _write_tool(self, cwd, name, marker, mutating="yes"):
         import stat

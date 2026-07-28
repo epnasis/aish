@@ -1,7 +1,8 @@
 """Plugin tools: droppable TOOL.md manifests the model calls exactly like a
 native tool. A tool is a folder ``<name>/TOOL.md`` (plus an optional wrapper
-script and bundled files) under ``./.aish/tools/`` (project, wins on name
-clash) or ``~/.config/aish/tools/`` (global).
+script and bundled files) under ``~/.config/aish/tools/`` (global). The
+project scope (``./.aish/tools/``, wins on name clash) exists in the code but
+is DISABLED by default (#178 P0-1): see INCLUDE_PROJECT_DIRS.
 
 Design (epic #141 — skills-primary, tools-as-scalpel): a tool exists ONLY for
 a hot, shell-fragile, reliability-critical operation a documented skill snippet
@@ -42,8 +43,21 @@ _OUT_HEAD = 6000
 _OUT_TAIL = 2000
 
 
+# SECURITY (#178 P0-1, interim): project-scope discovery is OFF by default. A
+# read-only manifest in a cloned repository's ./.aish/tools would otherwise be
+# exposed to the model and run its bundled wrapper with NO approval card, no
+# denylist, no root scoping, and the full server environment. The code path
+# stays alive behind this switch so the future per-directory trust grant can
+# re-enable it; NEITHER entry point (cli.py, server.py) may set it — only
+# tests opt in (the `project_scope` fixture). skills.INCLUDE_PROJECT_DIRS is
+# the same switch for ./.aish/skills + ./.aish/memory.
+INCLUDE_PROJECT_DIRS = False
+
+
 def tool_dirs(cwd: str) -> list[Path]:
-    return [Path(cwd) / ".aish" / "tools", GLOBAL_TOOLS_DIR]
+    if INCLUDE_PROJECT_DIRS:
+        return [Path(cwd) / ".aish" / "tools", GLOBAL_TOOLS_DIR]
+    return [GLOBAL_TOOLS_DIR]
 
 
 @dataclass

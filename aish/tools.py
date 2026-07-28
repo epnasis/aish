@@ -786,8 +786,10 @@ TOOL_SCHEMAS = [
                     },
                     "scope": {
                         "type": "string",
-                        "description": "'global' (default, ~/.config/aish/tools, backed up) "
-                        "or 'project' (./.aish/tools).",
+                        "description": "'global' (default, ~/.config/aish/tools, backed "
+                        "up) — the only usable scope; 'project' (./.aish/tools) is "
+                        "disabled pending a per-directory trust mechanism and is "
+                        "refused.",
                     },
                     "notes": {
                         "type": "string",

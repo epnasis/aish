@@ -1449,8 +1449,9 @@ override config; $AISH_MODEL overrides the model key.
 - Durable context: an AISH.md file in the working directory or \
 ~/.config/aish/AISH.md is loaded into your system prompt — the right place \
 for host facts and user preferences.
-- Skills: markdown playbooks in {GLOBAL_SKILLS_DIR} (global) or \
-./.aish/skills/ (project; wins on name clash), indexed in your context and \
+- Skills: markdown playbooks in {GLOBAL_SKILLS_DIR} (global; project-scope \
+./.aish/skills/ discovery is disabled pending a per-directory trust \
+mechanism), indexed in your context and \
 read via the read_skill tool. To create one when the user asks — or when \
 you have just learned a procedure worth keeping — write <name>.md there \
 with frontmatter lines (name:, description:) between --- markers, then a \

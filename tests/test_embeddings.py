@@ -100,7 +100,7 @@ class TestPreflightSemantic:
     def _corpus(self, tmp_path, monkeypatch, files):
         monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
         monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", tmp_path / "gm")
-        d = tmp_path / ".aish" / "memory"
+        d = tmp_path / "gm"
         d.mkdir(parents=True)
         for name, description, keywords in files:
             kw = f"keywords: {keywords}\n" if keywords else ""

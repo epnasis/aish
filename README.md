@@ -174,7 +174,9 @@ thousands of entries without bloating the context.
 - **Skills** — playbooks for anything worth repeating. A markdown file
   `<name>.md`, or an [agentskills.io](https://agentskills.io)-compatible folder
   `<name>/SKILL.md` bundling `scripts/`, `references/`, `assets/`. Live in
-  `~/.config/aish/skills/` (global) or `./.aish/skills/` (per project). The
+  `~/.config/aish/skills/` (global; per-project `./.aish/skills/` discovery is
+  disabled pending a per-directory trust mechanism — a cloned repository must
+  not get to inject prompt text or executables). The
   skills matching a task are **preloaded into context automatically** — selected
   by embedding similarity — *before* the model's first turn, so it doesn't have
   to remember to look. **Import skills from the ecosystem** with `import_skill`
