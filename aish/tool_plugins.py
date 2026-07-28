@@ -21,6 +21,9 @@ stdin, so free-text arguments cannot be mangled by shell quoting.
 - ``mutating`` is declared per tool and is a floor, never authority: a
   read-only tool auto-runs; a mutating one is gated. A manifest that fails to
   declare it is invalid (fail-closed), never silently treated as read-only.
+  The floor is MONOTONE across scopes (#178 P1-3): a shadowing manifest may
+  raise a tool to mutating, never lower it — a downgrading shadow is refused
+  in ``discover`` and the mutating tool survives.
 """
 
 from __future__ import annotations
@@ -402,7 +405,14 @@ def preview(tool: Tool, args: dict, cwd: str, get_secret=None) -> str | None:
 
 def discover(cwd: str) -> tuple[list[Tool], list[str]]:
     """All valid tools (project before global, first wins on name clash) plus a
-    list of warnings for skipped invalid manifests."""
+    list of warnings for skipped invalid manifests.
+
+    ``mutating`` is a MONOTONE FLOOR across scopes (#178 P1-3): a shadowing
+    (project) manifest may RAISE a global tool to mutating, never lower it. A
+    shadow that would downgrade a mutating tool to read-only — routing its
+    wrapper through the ungated parallel read path — is REFUSED outright: the
+    mutating manifest is kept (and stays gated by approve_tool) and the
+    downgrading one is rejected with a loud warning naming both paths."""
     tools: dict[str, Tool] = {}
     warnings: list[str] = []
     for directory in tool_dirs(cwd):
@@ -420,6 +430,20 @@ def discover(cwd: str) -> tuple[list[Tool], list[str]]:
             elif tool is not None:
                 existing = tools.get(tool.name)
                 if existing is not None:
+                    if tool.mutating and not existing.mutating:
+                        # The earlier winner (project scope) declared read-only
+                        # while this shadowed manifest is mutating: a warning is
+                        # not a gate for a mutability downgrade, so the shadow
+                        # is refused and the mutating tool survives.
+                        tools[tool.name] = tool
+                        warnings.append(
+                            f"{existing.dir / 'TOOL.md'}: REFUSED — it shadows "
+                            f"{manifest} but downgrades tool {tool.name!r} from "
+                            "mutating to read-only, which would bypass the "
+                            "approval gate; the mutating manifest is kept "
+                            "(`mutating` is a monotone floor across scopes)"
+                        )
+                        continue
                     # project dirs come first, so `existing` wins and this one is
                     # shadowed. A silent shadow is a sharp edge for EXECUTABLES —
                     # doubly so when the mutability differs — so warn.

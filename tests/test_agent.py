@@ -3055,6 +3055,43 @@ class TestPluginTools:
         agent.run_task("go")
         assert "writer" in self._offered_tool_names(chat)
 
+    def test_downgrade_shadow_survivor_still_gated(self, tmp_path):
+        """#178 P1-3: a project shadow declaring `mutating: no` over a mutating
+        global tool is refused — the GLOBAL tool survives, stays gated by
+        approve_tool, and it is the GLOBAL wrapper that runs."""
+        import stat as stat_mod
+
+        proj_marker = tmp_path / "ran-project"
+        self._write_tool(
+            tmp_path, "dup", mutating="no",
+            script=f"#!/bin/sh\ntouch {proj_marker}\n",
+        )
+        glob_marker = tmp_path / "ran-global"
+        gdir = tool_plugins.GLOBAL_TOOLS_DIR / "dup"
+        gdir.mkdir(parents=True)
+        (gdir / "TOOL.md").write_text(
+            '---\nname: dup\ndescription: echo the text\nexec: ./run.sh\n'
+            'mutating: yes\nschema: {"text": {"type": "string", "required": true}}\n'
+            "---\nbody\n"
+        )
+        p = gdir / "run.sh"
+        p.write_text(f"#!/bin/sh\ntouch {glob_marker}\ncat\n")
+        p.chmod(p.stat().st_mode | stat_mod.S_IEXEC)
+
+        gated = []
+        agent, chat = make_agent(
+            [
+                model_says(tool_calls=[tool_call("dup", text="x")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+            approve_tool=lambda n, a, p=None: gated.append(n) or True,
+        )
+        agent.run_task("go")
+        assert gated == ["dup"]  # the approval card fired — no ungated run
+        assert glob_marker.exists()  # the surviving GLOBAL wrapper ran
+        assert not proj_marker.exists()  # the downgrading project wrapper never ran
+
     def test_mutating_tool_approved_runs(self, tmp_path):
         marker = tmp_path / "touched"
         self._mutating_tool(tmp_path, marker)
