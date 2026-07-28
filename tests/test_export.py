@@ -242,3 +242,83 @@ def test_youtube_shorts_shares_regex_with_watch_and_short_host():
         m = export._YOUTUBE_RE.match(url)
         assert m is not None, url
         assert (m.group(1) or m.group(2)) == vid, url
+
+
+# ---- SSRF guard on export-time image fetches (#178 P1-4) -------------------
+# fetch_image runs on URLs the MODEL wrote into an answer, from the trusted
+# server host, the moment the owner taps export — so it must refuse private /
+# link-local targets exactly like web.py's read_url does, and a refusal must
+# degrade to the link card, never crash the export.
+
+
+class _FakeResponse:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def read(self, n: int) -> bytes:
+        return self._data[:n]
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def _no_network(monkeypatch):
+    """Fail the test if anything tries to open a socket-backed URL."""
+
+    def boom(*args, **kwargs):  # pragma: no cover - reaching it IS the failure
+        raise AssertionError("network fetch attempted for a blocked URL")
+
+    monkeypatch.setattr(export.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(export.web._opener, "open", boom)
+
+
+def test_fetch_image_refuses_private_and_link_local_targets(monkeypatch):
+    _no_network(monkeypatch)
+    for url in (
+        "http://169.254.169.254/latest/meta-data/",  # cloud metadata
+        "http://192.168.10.1/admin?exfil=payload",  # LAN
+        "http://127.0.0.1:8080/",  # localhost
+        "http://[::1]/",  # IPv6 loopback
+    ):
+        assert export.fetch_image(url) is None, url
+
+
+def test_fetch_image_refuses_a_public_name_resolving_privately(monkeypatch):
+    # DNS-level SSRF: innocent-looking hostname, private A record.
+    _no_network(monkeypatch)
+    monkeypatch.setattr(
+        export.web.socket,
+        "getaddrinfo",
+        lambda host, *a, **k: [(2, 1, 6, "", ("10.0.0.7", 0))],
+    )
+    assert export.fetch_image("https://innocent.example.com/x.png") is None
+
+
+def test_fetch_image_still_fetches_public_hosts(monkeypatch):
+    monkeypatch.setattr(
+        export.web.socket,
+        "getaddrinfo",
+        lambda host, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
+    png = _tiny_png()
+    opened = []
+
+    def fake_open(request, timeout=None):
+        opened.append(request.full_url)
+        return _FakeResponse(png)
+
+    monkeypatch.setattr(export.web._opener, "open", fake_open)
+    assert export.fetch_image("https://example.com/x.png") == png
+    assert opened == ["https://example.com/x.png"]
+
+
+def test_blocked_image_degrades_to_link_card_not_a_crash(monkeypatch):
+    _no_network(monkeypatch)
+    html = '<img src="http://169.254.169.254/latest/meta-data/" alt="diagram" />'
+    out = export._MediaEmbedder(()).process(html)
+    assert "aish-link-card" in out  # captioned link card, the export still renders
+    assert "169.254.169.254" in out  # target shown as a link, never fetched
+    assert "<img" not in out  # no embedded image element survives

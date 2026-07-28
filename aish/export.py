@@ -36,6 +36,8 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
+from . import web
+
 # The heavy imports (reportlab via xhtml2pdf) are deferred into the render
 # function so importing this module — and starting the server — stays cheap.
 
@@ -418,15 +420,23 @@ _ATTR_RES = {
 def fetch_image(url: str) -> bytes | None:
     """GET a remote image with a hard timeout and size cap. Any failure —
     network error, non-2xx, oversize, offline — returns None and the caller
-    falls back to a captioned link card. http/https only.
+    falls back to a captioned link card. http/https only, PUBLIC hosts only:
+    the URL comes from model output, so without web.py's SSRF guard an
+    injected `![](http://169.254.169.254/…)` would fire a server-side GET at
+    cloud metadata / the LAN the moment the owner taps export (#178 P1-4).
+    web._opener re-runs the same check on every redirect hop.
 
     Module-level (and looked up via the module at call time) so tests
     monkeypatch it; nothing else in this module opens a socket."""
     if not url.startswith(("http://", "https://")):
         return None
+    try:
+        web._require_public(url)
+    except web.BlockedURLError:
+        return None
     request = urllib.request.Request(url, headers={"User-Agent": "aish-export"})
     try:
-        with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT) as response:  # noqa: S310 — scheme-checked above
+        with web._opener.open(request, timeout=FETCH_TIMEOUT) as response:
             data = response.read(FETCH_MAX_BYTES + 1)
     except Exception:
         return None
