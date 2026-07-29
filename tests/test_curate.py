@@ -158,6 +158,7 @@ class TestCurationPass:
         assert body["meta"]["dedup_key"] == f"curate-{NOW:%G-W%V}"
         assert "noisy" in body["prompt"]
         assert "MUST NOT call forget_memory" in body["prompt"]
+        assert "MUST NOT use run_command" in body["prompt"]
 
     def test_nothing_actionable_means_no_trigger(self, tmp_path):
         write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
