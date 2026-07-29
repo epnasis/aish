@@ -94,8 +94,10 @@ writes show a colored diff *before* anything touches disk.
 ### Nothing happens off-screen
 
 Each turn's work — thinking time, recalled knowledge, every tool call and its
-result — is grouped into one activity trace you can expand. Web lookups show the
-exact query and URL; answers cite the pages they read.
+result — is grouped into one activity trace you can expand. Even collapsed, its
+header narrates the current step live — "Running: git status", "Waiting for
+approval…", or the model's own words for what it's checking and why. Web
+lookups show the exact query and URL; answers cite the pages they read.
 
 ![The activity trace expanded: a web search, a thinking step, and the page it read, each timed](docs/images/activity-trace.png)
 

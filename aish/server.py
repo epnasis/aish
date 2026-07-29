@@ -763,12 +763,30 @@ class WebStatus:
         self._label = ""
         self._tokens = 0
         self._last = 0.0
+        self._note_text = ""
+        self._note_last = 0.0
 
     def start(self, label: str) -> None:
         self._label = label
         self._tokens = 0
         self._last = time.monotonic()
+        self._note_text = ""
+        self._note_last = 0.0
         self.bridge.emit({"type": "status", "state": "working", "label": label}, record=False)
+
+    def note(self, text: str) -> None:
+        """A one-line gist of what the model is doing right now (streaming
+        thinking text). Live-only like every status event; deduped + throttled
+        because the snippet is recomputed on every streamed chunk."""
+        now = time.monotonic()
+        if text == self._note_text or now - self._note_last < self.THROTTLE_SECS:
+            return
+        self._note_text = text
+        self._note_last = now
+        self.bridge.emit(
+            {"type": "status", "state": "working", "label": self._label, "note": text},
+            record=False,
+        )
 
     def add_tokens(self, count: int) -> None:
         self._tokens += count
