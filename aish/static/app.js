@@ -677,6 +677,15 @@ function retireSocket(sock) {
 }
 // [RETIRE-END]
 
+// [CONNECT-WIRE-START]
+// The other half of the socket's ownership (see [RETIRE] above): this is the
+// ONLY place that assigns `ws`. Fenced whole rather than just the wiring
+// statements because a choreography test has to CALL it — the interleavings
+// that produced #179 (a second connect over a live socket, a reconnect over a
+// zombie, an out-of-order onclose) are only reachable by replacing a socket for
+// real, not by re-reading the assignments. tests/js/test_choreo_socket_replace.js
+// runs this function against a controllable fake WebSocket; test_ownership.js
+// enforces that no third writer of `ws` appears outside this block.
 function connect() {
   clearTimeout(reconnectTimer);
   // Exactly one live feed into handle(): drop whatever socket `ws` still points
@@ -762,6 +771,7 @@ function connect() {
     backoff = Math.min(backoff * 2, 10000);
   };
 }
+// [CONNECT-WIRE-END]
 
 // Manual nudge (#18): standalone PWA mode has no browser chrome to refresh
 // from, so a stalled connection otherwise strands the user until they
@@ -827,7 +837,18 @@ function send(message) {
   return true;
 }
 
-document.addEventListener("visibilitychange", () => {
+// [WAKE-START]
+// Waking the app is the single most defect-dense moment in the client: the
+// phone has been asleep, so deferred work never ran, the socket may be dead
+// without ever having said so, and a swipe committed before the lock is still
+// waiting on a landing that is not coming. Three unrelated subsystems are
+// reconciled here, which is why this is a NAMED function registered by name
+// rather than an anonymous listener: tests/js/test_choreo_wake.js drives it
+// directly, and a listener you cannot call is a listener you cannot test.
+// (The two other visibilitychange listeners in this file are unrelated — the
+// viewport snap and the read-aloud wake lock — and are deliberately left alone;
+// this is fencing, not refactoring for its own sake.)
+function onPageWake() {
   if (document.hidden) {
     // Putting the app away is the moment the mirror matters: the sync loop
     // skips the on-screen chat while visible (it re-syncs every turn and the
@@ -850,7 +871,9 @@ document.addEventListener("visibilitychange", () => {
   noteActivity();
   // Phone unlock: reconnect immediately instead of waiting out the backoff.
   if (!ws || ws.readyState === WebSocket.CLOSED) connect();
-});
+}
+document.addEventListener("visibilitychange", onPageWake);
+// [WAKE-END]
 
 // ---- event dispatch ------------------------------------------------------
 let answerEl = null; // the assistant block tokens append to
@@ -7630,6 +7653,13 @@ const DECK_KEY = "aish-deck";
 // open chat); dropping them forces a correct re-seed from the last-48h window.
 const DECK_VERSION = 2;
 const COLD_START_GAP_MS = 45 * 60 * 1000; // hidden longer than this → treat as cold start
+// [DECK-STATE-START]
+// Every writer of the live `deck` array lives between here and [DECK-STATE-END],
+// with the sole exception of the phantom pruner in [DECK-GONE] below — those two
+// blocks are the deck's owners and test_ownership.js enforces it. The pure
+// ordering logic above ([DECK-START]…[DECK-END]) never touches this variable: it
+// takes members in and returns members out, which is what lets a new writer be a
+// call to one of these functions rather than another `deck = …` somewhere else.
 let deck = [];
 let deckSeeded = false;
 // The user has deliberately shaped the working set (✕-removed at least one
@@ -7761,6 +7791,7 @@ function removeFromWorkingSet(name) {
   }
   if (!$("sessions-sheet").hidden && lastSessionEvent) renderSessions(lastSessionEvent);
 }
+// [DECK-STATE-END]
 
 // [DECK-GONE-START]
 // ---- deck vs reality: phantom pages ---------------------------------------
