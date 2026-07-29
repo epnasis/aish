@@ -2952,11 +2952,19 @@ function reportViewport(label) {
 
 let lastVvReport = 0;
 
+// [VV-SETTLE-START]
 if (window.visualViewport) {
   const onViewportChange = () => {
-    syncKeyboardInset();
-    snapViewportHome();
-    scrollToEnd();
+    // A live transcript touch freezes settling (see [TOUCH-FREEZE]): the
+    // keyboard dismissal that touch just triggered would otherwise reflow and
+    // auto-scroll the content mid-press, cancelling the long-press selection
+    // the blur made possible. An established selection likewise must not be
+    // yanked to the bottom by a later keyboard show/hide.
+    if (viewportSettleAllowed()) {
+      syncKeyboardInset();
+      snapViewportHome();
+      if (!selectionActive()) scrollToEnd();
+    }
     if (Date.now() - lastVvReport > 400) {
       lastVvReport = Date.now();
       reportViewport("vv-change"); // #8/#24 diagnostics at the moment it matters
@@ -2965,6 +2973,7 @@ if (window.visualViewport) {
   visualViewport.addEventListener("resize", onViewportChange);
   visualViewport.addEventListener("scroll", onViewportChange);
 }
+// [VV-SETTLE-END]
 
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) snapViewportSoon(); // app-switcher restore can land in the short-window state
@@ -8104,7 +8113,41 @@ function updateSwipeHint(target, dx, commitPx) {
   hint.style.opacity = Math.min(Math.abs(dx) / 60, 1);
 }
 
+// [TOUCH-FREEZE-START]
+// iOS WebKit will not establish a text selection while an editable element
+// holds focus — the console's select mode blurs its textarea for exactly this
+// reason (#148) — so a long-press on an answer while composing could never
+// select it. Touching the transcript therefore hands focus back (dismissing
+// the keyboard, the platform chat-app convention), and the viewport settling
+// that dismissal triggers is FROZEN until the finger lifts: syncKeyboardInset's
+// reflow, snapViewportHome's window scroll, and scrollToEnd would each move the
+// text under the still-held finger, which cancels iOS's long-press gesture —
+// the very selection the blur just made possible. endSwipe runs the deferred
+// settle at touchend/touchcancel, when the gesture can no longer be disturbed.
+let transcriptTouchDown = false;
+
+function beginTranscriptTouch(activeEl, target) {
+  transcriptTouchDown = true;
+  const editable = activeEl &&
+    (activeEl.tagName === "TEXTAREA" || activeEl.tagName === "INPUT" || activeEl.isContentEditable);
+  // Never blur the element being touched — an approval card's own feedback
+  // field lives INSIDE the transcript, and tapping into it must keep focus.
+  if (editable && !activeEl.contains(target)) activeEl.blur();
+}
+
+function endTranscriptTouch(settle) {
+  if (!transcriptTouchDown) return;
+  transcriptTouchDown = false;
+  settle(); // whatever viewport settling the touch suppressed, run it now
+}
+
+function viewportSettleAllowed() {
+  return !transcriptTouchDown;
+}
+// [TOUCH-FREEZE-END]
+
 messagesEl.addEventListener("touchstart", (event) => {
+  beginTranscriptTouch(document.activeElement, event.target);
   if (event.touches.length !== 1) { swipe.tracking = false; return; }
   const touch = event.touches[0];
   swipe.tracking =
@@ -8212,6 +8255,10 @@ function snapBack(direction, target, dx) {
 }
 
 function endSwipe(event) {
+  // Deferred viewport settle (see [TOUCH-FREEZE]). scrollToEnd is deliberately
+  // NOT part of it: yanking to the bottom now would scroll a just-made
+  // selection out of view.
+  endTranscriptTouch(() => { syncKeyboardInset(); snapViewportSoon(); });
   const wasHorizontal = swipe.horizontal;
   swipe.tracking = false;
   swipe.horizontal = false;
