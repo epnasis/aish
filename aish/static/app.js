@@ -731,6 +731,36 @@ function retireSocket(sock) {
 }
 // [RETIRE-END]
 
+// [SESSION-FIREWALL-START]
+// Live deliveries are session-gated (#182). The bridge stamps every event it
+// fans out with its session's name; an event naming a session other than the
+// one on screen is dropped at the socket, BEFORE the dispatcher. This is the
+// firewall the client-side switch window needs: a prefetched swipe (and an
+// offline-mirror tap that later reconnects) moves `currentSession` before the
+// server has processed the resume, and until the server moves this viewer
+// between bridges the OLD session's live tail keeps arriving — its `done`
+// used to render a bubble into the NEW chat's view. phase 3's answerAbandoned
+// only covers one turn's leftovers; this gates every delivery.
+//
+// Unstamped events (client-direct messages: session_list, peek, deck_gone,
+// errors, console_*) always pass — no `session` field means "not scoped".
+// Two stamped-or-self-named types are cross-session BY DESIGN and exempt:
+//   hello         — the switch mechanism itself; it MOVES currentSession
+//   session_state — "a background chat finished", sent only to non-viewers
+// session_renamed is exempt too: its handler is by-name and idempotent, and
+// dropping it in the switch window would just desync a drawer/pager label.
+// Replayed events never reach this gate (the replay loop feeds handle()
+// directly) and carry no stamp anyway: the bridge stamps only the live
+// delivery, keeping the recorded transcript byte-identical to a cold
+// reconstruct_events replay.
+const SESSION_CROSS_EVENTS = new Set(["hello", "session_state", "session_renamed"]);
+
+function foreignSessionEvent(event, current) {
+  if (!event.session || SESSION_CROSS_EVENTS.has(event.type)) return false;
+  return event.session !== current;
+}
+// [SESSION-FIREWALL-END]
+
 // [CONNECT-WIRE-START]
 // The other half of the socket's ownership (see [RETIRE] above): this is the
 // ONLY place that assigns `ws`. Fenced whole rather than just the wiring
@@ -773,6 +803,11 @@ function connect() {
   };
   ws.onmessage = (raw) => {
     const event = JSON.parse(raw.data);
+    // Session firewall (#182, see [SESSION-FIREWALL]): a delivery for a chat
+    // that is not on screen never reaches the dispatcher. Checked before the
+    // dirty mark — a foreign event touches nothing in THIS view, and the
+    // foreign session's own next replay accounts for it by fingerprint.
+    if (foreignSessionEvent(event, currentSession)) return;
     // A live transcript-affecting event invalidates the rendered-view stash
     // (see [VIEWCACHE]). Marked HERE, not in handle(): the replay loop also
     // funnels through handle(), and replayed events are exactly what the

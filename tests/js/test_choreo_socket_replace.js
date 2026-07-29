@@ -47,6 +47,7 @@ function socketWorld() {
       connOk: true,
       offlineMode: false,
       viewDirty: false,
+      currentSession: null, // read by the real [SESSION-FIREWALL] fence (#182)
       VIEW_SAFE_EVENTS: new Set(["role"]),
       swipeInFrom: 0,
       updateDot() {},
@@ -60,6 +61,7 @@ function socketWorld() {
     },
   });
   w.load("// [RETIRE-START]", "// [RETIRE-END]");
+  w.load("// [SESSION-FIREWALL-START]", "// [SESSION-FIREWALL-END]"); // ws.onmessage calls it (#182)
   w.load("// [CONNECT-WIRE-START]", "// [CONNECT-WIRE-END]");
   // reconnect() sits just below the fence; extracted by its declaration, the
   // same way the deck/pager tests reach unfenced neighbours.
