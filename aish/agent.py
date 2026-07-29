@@ -2057,6 +2057,7 @@ class Agent:
         if name == "remember":
             note = str(args.get("note", ""))
             pinned = args.get("pinned")
+            disabled = args.get("disabled")
             result = skills.save_memory(
                 note,
                 skills.GLOBAL_MEMORY_DIR,
@@ -2068,6 +2069,7 @@ class Agent:
                 pinned=None if pinned is None else bool(pinned),
                 force=bool(args.get("force", False)),
                 semantic=self.semantic.scores if self.semantic is not None else None,
+                disabled=None if disabled is None else bool(disabled),
             )
             self._note(f"→ {result}")
             return result

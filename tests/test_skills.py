@@ -734,6 +734,27 @@ class TestPreflightPrecision:
         assert preload.mode == "lexical"
         assert preload.items == [{"name": "web-release", "kind": "memory", "score": 3}]
 
+    def test_save_memory_disabled_retires_and_revives(self, tmp_path, monkeypatch):
+        # #185: disable is the reversible retirement path — the entry drops
+        # out of load_entries (so index/preflight/recall lose it) without the
+        # file being deleted, and disabled=False brings it back.
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", tmp_path / "memory")
+        save_memory("a noisy fact", tmp_path / "memory", name="noisy", cwd=str(tmp_path))
+        result = save_memory(
+            "a noisy fact", tmp_path / "memory", name="noisy",
+            cwd=str(tmp_path), disabled=True,
+        )
+        assert "[disabled]" in result
+        assert "noisy" not in [e.name for e in skills_module.load_entries(str(tmp_path))]
+        # None preserves the retired state on an ordinary update…
+        save_memory("a noisy fact, reworded", tmp_path / "memory", name="noisy",
+                    cwd=str(tmp_path))
+        assert "noisy" not in [e.name for e in skills_module.load_entries(str(tmp_path))]
+        # …and False explicitly revives.
+        save_memory("a noisy fact, reworded", tmp_path / "memory", name="noisy",
+                    cwd=str(tmp_path), disabled=False)
+        assert "noisy" in [e.name for e in skills_module.load_entries(str(tmp_path))]
+
     def test_save_memory_caps_and_dedupes_keywords(self, tmp_path, monkeypatch):
         monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", tmp_path / "memory")
         many = ", ".join(["Alpha", "alpha", "beta", "BETA"] + [f"kw{i}" for i in range(10)])
