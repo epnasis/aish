@@ -2968,6 +2968,8 @@ if (window.visualViewport) {
       syncKeyboardInset();
       snapViewportHome();
       if (!selectionActive()) scrollToEnd();
+    } else {
+      trackViewportPan(); // frozen ≠ static: ride the browser's un-pan (see [TOUCH-FREEZE])
     }
     if (Date.now() - lastVvReport > 400) {
       lastVvReport = Date.now();
@@ -8147,6 +8149,19 @@ function endTranscriptTouch(settle) {
 
 function viewportSettleAllowed() {
   return !transcriptTouchDown;
+}
+
+// The one movement the freeze cannot suppress by inaction: the keyboard
+// dismissal makes iOS animate visualViewport.offsetTop back to 0, and a fixed
+// body still pinned at the OLD offset slides DOWN the screen by exactly that
+// much — losing the very text the finger is holding. Riding the pan (top
+// follows offsetTop, nothing else) keeps the app's box glued to the visual
+// viewport, so the content under the finger stays put; the kb-open toggle,
+// the height, and every scroll stay frozen until the finger lifts.
+function trackViewportPan() {
+  if (!window.visualViewport) return;
+  if (!document.body.classList.contains("kb-open")) return;
+  document.body.style.top = `${Math.max(visualViewport.offsetTop, 0)}px`;
 }
 // [TOUCH-FREEZE-END]
 

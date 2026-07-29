@@ -14,6 +14,12 @@
 // the deferred settle (without scrollToEnd — it would scroll the just-made
 // selection out of view).
 //
+// (3) Freezing is not enough: the dismissal makes iOS animate
+// visualViewport.offsetTop back to 0, and a fixed body still pinned at the
+// old offset slides DOWN the screen by exactly that much — losing the held
+// text anyway. While frozen, trackViewportPan rides the pan (body top
+// follows offsetTop; nothing reflows or scrolls).
+//
 // Run manually: node tests/js/test_transcript_select_guard.js
 "use strict";
 
@@ -46,9 +52,10 @@ assert(
 const touchstartWiring = src.indexOf("beginTranscriptTouch(document.activeElement, event.target)");
 assert(touchstartWiring !== -1, "transcript touchstart must call beginTranscriptTouch");
 
-function makeWorld({ selection = false } = {}) {
+function makeWorld({ selection = false, kbOpen = true, offsetTop = 0 } = {}) {
   const calls = { sync: 0, snapHome: 0, scrollEnd: 0, report: 0 };
   const vvHandlers = {};
+  const bodyClasses = new Set(kbOpen ? ["kb-open"] : []);
   const sandbox = {
     window: {},
     Date,
@@ -60,7 +67,14 @@ function makeWorld({ selection = false } = {}) {
     reportViewport: () => calls.report++,
     visualViewport: {
       height: 844,
+      offsetTop,
       addEventListener: (type, fn) => { vvHandlers[type] = fn; },
+    },
+    document: {
+      body: {
+        classList: { contains: (c) => bodyClasses.has(c) },
+        style: { top: kbOpen ? `${offsetTop}px` : "" },
+      },
     },
   };
   sandbox.window.visualViewport = sandbox.visualViewport;
@@ -146,6 +160,37 @@ function editableEl(containsTarget) {
   assert.strictEqual(calls.sync, 1, "layout still syncs with a selection present");
   assert.strictEqual(calls.snapHome, 1, "window snap still allowed with a selection");
   assert.strictEqual(calls.scrollEnd, 0, "scrollToEnd must stand down for a selection");
+}
+
+// --- 6. Mid-press, the body rides the browser's un-pan -----------------------
+// Keyboard was up with the page panned (offsetTop 38, body pinned at 38px).
+// The blur makes iOS animate offsetTop back to 0; each vv event while frozen
+// must move body.style.top in lockstep — and reflow/scroll nothing.
+{
+  const { sandbox, calls, vvHandlers } = makeWorld({ offsetTop: 38 });
+  const active = editableEl(false);
+  sandbox.beginTranscriptTouch(active.el, {});
+  for (const top of [20, 7, 0]) {
+    sandbox.visualViewport.offsetTop = top;
+    vvHandlers.scroll();
+    assert.strictEqual(sandbox.document.body.style.top, `${top}px`, "body top must follow the pan");
+  }
+  assert.strictEqual(calls.sync + calls.snapHome + calls.scrollEnd, 0, "tracking must not reflow or scroll");
+
+  // offsetTop dips negative mid-animation: clamp, same as syncKeyboardInset.
+  sandbox.visualViewport.offsetTop = -3;
+  vvHandlers.scroll();
+  assert.strictEqual(sandbox.document.body.style.top, "0px", "negative offsetTop clamps to 0");
+  sandbox.endTranscriptTouch(() => {});
+}
+
+// --- 7. No keyboard up (no kb-open pin): frozen events touch nothing ---------
+{
+  const { sandbox, vvHandlers } = makeWorld({ kbOpen: false, offsetTop: 12 });
+  sandbox.beginTranscriptTouch({ tagName: "DIV", isContentEditable: false, contains: () => false }, {});
+  vvHandlers.scroll();
+  assert.strictEqual(sandbox.document.body.style.top, "", "an unpinned body is never given a top");
+  sandbox.endTranscriptTouch(() => {});
 }
 
 console.log("transcript select guard: all assertions passed");

@@ -3243,6 +3243,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         raw_meta = body.get("meta")
         meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
         title = str(body.get("title") or "").strip()
+        model_override = str(body.get("model") or "").strip()
 
         # Abuse guards (#178 P1-10), in this order: a dedup hit is an
         # idempotent SUCCESS and consumes nothing (a retry storm re-sending
@@ -3274,7 +3275,18 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             )
 
         self._evict_idle()
-        session, _ = await asyncio.to_thread(self.open_session, None, origin, meta)
+        try:
+            session, _ = await asyncio.to_thread(
+                self.open_session, None, origin, meta, model_override
+            )
+        except backends.BackendError as exc:
+            # Fail CLOSED (#186): a privacy-scoped trigger asked for a model
+            # this server cannot build — refusing beats silently running the
+            # prompt (which may aggregate private-session excerpts) on the
+            # cloud default. 503 so the caller retries after fixing the model.
+            return JSONResponse(
+                {"error": f"model unavailable: {exc}"}, status_code=503
+            )
         # NEVER the default (#178 P1-6): an overnight trigger must not become
         # the landing spot for the next bare connect (nor eviction-immune).
         self.add_session(session, default=False)
@@ -3748,17 +3760,37 @@ def create_app(
         path: Path | None,
         origin: str = "user",
         trigger_meta: dict | None = None,
+        model_override: str = "",
     ) -> tuple[Session, list[dict]]:
         """Build one Session: fresh agent wired to its own bridge/log. For an
         existing path the conversation is reloaded into the agent (the file
         keeps growing in place — same semantics as `aish --resume`). `origin`
         tags a NEW session's provenance (#160); for an existing path the
         provenance recorded on disk wins so a cold-reopened triggered session
-        keeps its category."""
+        keeps its category.
+
+        `model_override` (new sessions only — a resumed session's recorded
+        model wins) runs THIS session on a different backend than the
+        server's default. It exists for privacy-scoped automation (#186):
+        the curation pass aggregates excerpts from every recent session, so
+        it must run on a model meeting the strictest bar among them — the
+        local one. It FAILS CLOSED: an unbuildable override raises
+        BackendError before the session log exists, because silently falling
+        back to the (possibly cloud) default is exactly the leak the
+        override exists to prevent."""
         history: list[dict] = []
         recorded_spec = ""
         custom_title: str | None = None
         title_auto = False
+        override_chat = None
+        if model_override and path is None:
+            if provider == "claude-max":
+                raise backends.BackendError(
+                    "model override is unsupported on a claude-max server"
+                )
+            # Build (and thereby validate) BEFORE SessionLog.new so a bad
+            # model can't leave an orphan log file behind.
+            override_chat = backends.make_chat(model_override)
         if path is not None:
             # Parse BEFORE anything is appended: the last model record in
             # the file is the model this session must resume with.
@@ -3973,6 +4005,11 @@ def create_app(
                     agent.chat, agent.model, agent.provider = chat2, name2, provider2
                 except backends.BackendError:
                     pass
+        if override_chat is not None and isinstance(agent, Agent):
+            # Per-session backend for a privacy-scoped trigger (#186); the
+            # claude-max case was refused before the log existed.
+            chat_o, provider_o, name_o = override_chat
+            agent.chat, agent.model, agent.provider = chat_o, name_o, provider_o
         # The uploads dir belongs to the SERVER, not to any one chat, so it is
         # added AFTER restore_workspace — which rebuilds roots to be exactly the
         # session's own workspace and would otherwise drop it (#176).

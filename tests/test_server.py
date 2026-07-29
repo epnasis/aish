@@ -4779,6 +4779,47 @@ class TestTriggerHardening:
             assert r2.json() == {"session": name, "origin": "email", "deduped": True}
             assert set(server.sessions) - before == {name}
 
+    def test_trigger_model_override_runs_the_session_on_it(self, app_env, monkeypatch):
+        # #186: a privacy-scoped trigger names its own model; the session runs
+        # on it and records it, independent of the server default.
+        override = FakeChat([model_says("done locally")])
+        monkeypatch.setattr(
+            server_module.backends, "make_chat",
+            lambda spec: (override, "ollama", spec),
+        )
+        client, _ = make_client(app_env, [], token="secret")
+        with client:
+            r = client.post("/trigger?token=secret", json={
+                "prompt": "curate", "origin": "schedule", "model": "qwen3:8b",
+            })
+            assert r.status_code == 200
+            name = r.json()["session"]
+            drain_done(client, name, token="secret")
+            agent = client.app.state.server.sessions[name].agent
+            assert agent.model == "qwen3:8b"
+            assert override.calls  # the override chat, not the server default
+
+    def test_trigger_model_override_fails_closed(self, app_env, monkeypatch):
+        # An unbuildable override must refuse — silently running the prompt on
+        # the (possibly cloud) default is the leak the override prevents. And
+        # the refusal happens before any session log exists.
+        def broken(spec):
+            raise server_module.backends.BackendError("no such model")
+
+        monkeypatch.setattr(server_module.backends, "make_chat", broken)
+        client, _ = make_client(app_env, [], token="secret")
+        with client:
+            server = client.app.state.server
+            logs_before = set(Path(app_env["state_dir"]).glob("session-*.jsonl"))
+            before = set(server.sessions)
+            r = client.post("/trigger?token=secret", json={
+                "prompt": "curate", "origin": "schedule", "model": "nope:missing",
+            })
+            assert r.status_code == 503
+            assert "model unavailable" in r.json()["error"]
+            assert set(server.sessions) == before
+            assert set(Path(app_env["state_dir"]).glob("session-*.jsonl")) == logs_before
+
     def test_no_dedup_key_fires_every_post(self, app_env):
         # Backward compatibility: clients that send no key keep old behavior.
         client, _ = make_client(app_env, [model_says("a"), model_says("b")],
