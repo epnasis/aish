@@ -47,8 +47,24 @@ const OWNED = {
     instead: "call ensureCurrentInDeck() / removeFromWorkingSet() / dropGoneSessions()",
     why: "the working set decides which chats a swipe can reach; a stray writer strands or resurrects pages",
   },
-  // Phase 2 lands the session-identity cluster here:
-  //   currentSession: { owners: ["SESSION-ENTER"], instead: "call enterSession()" }
+  currentSession: {
+    owners: ["SESSION-ENTER"],
+    instead: "call enterSession(name, {source, title, stash})",
+    why: "four hand-rolled variants each wrote a DIFFERENT subset of the facts coupled to identity"
+      + " (fingerprint, title, remembered session, URL, mirror bookkeeping), so a switch left the"
+      + " screen and the state naming different chats",
+  },
+  pendingForkParent: {
+    owners: ["DECK-STATE"],
+    instead: "call noteForkIntent() / forkParent()",
+    why: "a fork's deck anchor is a promise with a deadline; a writer that clears it on an"
+      + " unrelated event loses the placement it was recorded for",
+  },
+  // Phase 3 (streaming/render sweep) should land viewFp/viewDirty here. Not yet
+  // honest: after phase 2 their writers are [SESSION-ENTER] + [CONNECT-WIRE]'s
+  // dirty-mark + THREE inside onReplay, which is unfenced render-cluster code
+  // this phase deliberately did not touch. Fence onReplay's landing first — the
+  // manifest must describe the file, never an intention.
 };
 
 // ---- the checker ---------------------------------------------------------
