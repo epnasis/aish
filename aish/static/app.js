@@ -6027,7 +6027,12 @@ function onConsoleStarted(event) {
   if (!consoleOpen || !consoleTerm) return;
   consoleTerm.reset();
   consoleStartedSeen = true; // the real label has landed; stop writing placeholders
-  setConsoleStatus(`${promptDir(event.cwd)} · ${event.command}`);
+  // Header shows the console's identity (e.g. "tmux · aish-console"), NOT a cwd.
+  // The server only knows the DEFAULT session's workspace, not the tmux pane's
+  // real directory, so on a reattach the old cwd label read ~/aish while the
+  // shell was elsewhere — and it went stale the moment you cd'd anyway. The
+  // terminal's own prompt is the live, correct source of the cwd.
+  setConsoleStatus(event.command);
   consoleFitAndResize();
 }
 
