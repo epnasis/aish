@@ -616,6 +616,139 @@ class TestPreflight:
         assert preload.unread == []
 
 
+class TestPreflightPrecision:
+    """#183: unsolicited injection must be able to abstain. A separate,
+    higher similarity floor for preflight; keyword rails confirm against
+    similarity instead of bypassing it; pinned standing rules never compete
+    for topical slots; short follow-ups embed with conversation context;
+    the Preload records what selected each entry."""
+
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", tmp_path / "gm")
+
+    def _memory(self, tmp_path, name, description, keywords="", pinned=False):
+        kw = f"keywords: {keywords}\n" if keywords else ""
+        pin = "pinned: yes\n" if pinned else ""
+        write_skill(
+            tmp_path / "gm",
+            f"{name}.md",
+            f"---\nname: {name}\ndescription: {description}\n{kw}{pin}---\nbody of {name}\n",
+        )
+
+    def _sims(self, table):
+        return lambda query, entries: {id(e): table.get(e.name, 0.0) for e in entries}
+
+    def test_semantic_abstains_below_injection_floor(self, tmp_path, monkeypatch):
+        # 0.30 clears the old single SEMANTIC_MIN_SIM floor but is noise for
+        # an unsolicited injection — nothing must be injected.
+        self._isolate(tmp_path, monkeypatch)
+        self._memory(tmp_path, "gh-tricks", "gh api usage details")
+        preload = preflight(
+            str(tmp_path), None, "how do I get to the office",
+            semantic=self._sims({"gh-tricks": 0.30}),
+        )
+        assert preload.names == []
+        assert preload.mode == "semantic"
+
+    def test_semantic_injects_above_floor_with_diagnostics(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._memory(tmp_path, "gh-tricks", "gh api usage details")
+        preload = preflight(
+            str(tmp_path), None, "query the github api for me",
+            semantic=self._sims({"gh-tricks": 0.52}),
+        )
+        assert preload.names == ["gh-tricks"]
+        assert preload.mode == "semantic"
+        assert preload.items == [
+            {"name": "gh-tricks", "kind": "memory", "sim": 0.52, "rail": 0}
+        ]
+
+    def test_keyword_rail_confirms_against_similarity(self, tmp_path, monkeypatch):
+        # A model-authored keyword is a strong prior, not a bypass: it lowers
+        # the bar to SEMANTIC_MIN_SIM. Sim far below that = the conversation
+        # is not about this entry, keyword hit or not.
+        self._isolate(tmp_path, monkeypatch)
+        self._memory(
+            tmp_path, "issue-policy", "always open a github issue", keywords="code, issue"
+        )
+        task = "explain this code to me"
+        low = preflight(
+            str(tmp_path), None, task, semantic=self._sims({"issue-policy": 0.05})
+        )
+        assert low.names == []
+        confirmed = preflight(
+            str(tmp_path), None, task, semantic=self._sims({"issue-policy": 0.30})
+        )
+        assert confirmed.names == ["issue-policy"]
+        assert confirmed.items[0]["rail"] == 3
+
+    def test_name_rail_stays_unconditional(self, tmp_path, monkeypatch):
+        # Naming an entry outright is unambiguous — embeddings may not veto it
+        # (short names can embed poorly).
+        self._isolate(tmp_path, monkeypatch)
+        self._memory(tmp_path, "gh-tricks", "gh api usage details")
+        preload = preflight(
+            str(tmp_path), None, "apply gh-tricks to this request",
+            semantic=self._sims({"gh-tricks": 0.0}),
+        )
+        assert preload.names == ["gh-tricks"]
+        assert preload.items[0]["rail"] == 4
+
+    def test_pinned_never_competes_semantic_or_lexical(self, tmp_path, monkeypatch):
+        # A pinned standing rule already renders in EVERY task's index —
+        # winning a topical slot too would inject it twice and starve skills.
+        self._isolate(tmp_path, monkeypatch)
+        self._memory(
+            tmp_path, "reply-chips", "always append reply chips",
+            keywords="reply", pinned=True,
+        )
+        task = "reply to that message"
+        assert preflight(
+            str(tmp_path), None, task, semantic=self._sims({"reply-chips": 0.9})
+        ).names == []
+        assert preflight(str(tmp_path), None, task).names == []
+
+    def test_short_task_embeds_with_context_rails_do_not(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._memory(tmp_path, "maps-embed", "embed google maps for navigation")
+        queries = []
+
+        def spy(query, entries):
+            queries.append(query)
+            return {id(e): 0.5 for e in entries}
+
+        preflight(
+            str(tmp_path), None, "show on map",
+            semantic=spy, context="how do I drive to the office from home",
+        )
+        assert "how do I drive" in queries[-1]
+        long_task = "x" * (skills_module.PREFLIGHT_CONTEXT_TASK_CHARS + 10)
+        preflight(str(tmp_path), None, long_task, semantic=spy, context="stale topic")
+        assert "stale topic" not in queries[-1]
+
+    def test_lexical_mode_reports_itself(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._memory(tmp_path, "web-release", "steps to release", keywords="deploy")
+        preload = preflight(str(tmp_path), None, "please deploy the new version")
+        assert preload.mode == "lexical"
+        assert preload.items == [{"name": "web-release", "kind": "memory", "score": 3}]
+
+    def test_save_memory_caps_and_dedupes_keywords(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", tmp_path / "memory")
+        many = ", ".join(["Alpha", "alpha", "beta", "BETA"] + [f"kw{i}" for i in range(10)])
+        result = save_memory(
+            "a fact with too many keywords", tmp_path / "memory",
+            name="kw-cap", keywords=many, cwd=str(tmp_path),
+        )
+        assert result.startswith("remembered")
+        text = (tmp_path / "memory" / "kw-cap.md").read_text(encoding="utf-8")
+        line = next(ln for ln in text.splitlines() if ln.startswith("keywords:"))
+        saved = [w.strip() for w in line.removeprefix("keywords:").split(",")]
+        assert len(saved) == skills_module.KEYWORDS_MAX
+        assert saved[:3] == ["Alpha", "beta", "kw0"]
+
+
 class TestSemanticRecall:
     """#178 P1-9: rank_entries/recall_text fuse embedding similarity with the
     lexical tiers; lexical strong hits stay a deterministic rail, and a None

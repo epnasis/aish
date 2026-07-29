@@ -120,15 +120,25 @@ class TestPreflightSemantic:
         preload = preflight(str(tmp_path), None, "find a villa in bali", semantic=sims)
         assert preload.names == ["hotels"]  # charts below SEMANTIC_MIN_SIM
 
-    def test_exact_keyword_rail_beats_low_similarity(self, tmp_path, monkeypatch):
+    def test_exact_keyword_rail_lowers_the_bar_but_needs_confirmation(
+        self, tmp_path, monkeypatch
+    ):
+        # #183: keywords are model-authored, so a keyword hit is a strong
+        # prior — it admits the entry at SEMANTIC_MIN_SIM instead of the
+        # strict PREFLIGHT_MIN_SIM — but similarity near zero means the
+        # conversation is not about this entry, keyword hit or not.
         self._corpus(
             tmp_path,
             monkeypatch,
             [("prices", "never trust training data", "price"), ("other", "stuff", "")],
         )
-        sims = lambda task, entries: dict.fromkeys(map(id, entries), 0.0)  # noqa: E731
-        preload = preflight(str(tmp_path), None, "what is the price of X", semantic=sims)
-        assert preload.names == ["prices"]
+        task = "what is the price of X"
+        cold = lambda _t, entries: dict.fromkeys(map(id, entries), 0.0)  # noqa: E731
+        assert preflight(str(tmp_path), None, task, semantic=cold).names == []
+        warm = lambda _t, entries: dict.fromkeys(  # noqa: E731
+            map(id, entries), skills_module.SEMANTIC_MIN_SIM
+        )
+        assert preflight(str(tmp_path), None, task, semantic=warm).names == ["prices"]
 
     def test_semantic_failure_falls_back_to_lexical(self, tmp_path, monkeypatch):
         self._corpus(tmp_path, monkeypatch, [("hotels", "hotel and villa searches", "")])

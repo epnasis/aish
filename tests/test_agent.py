@@ -2267,6 +2267,50 @@ class TestPreflightInjection:
             str(m.get("content", "")).endswith(TASK_REMINDER) for m in agent.messages[1:]
         )
 
+    class _StubSemantic:
+        """Duck-types SemanticIndex: .scores + .error, recording each query."""
+
+        def __init__(self, sim=0.5):
+            self.sim = sim
+            self.error = None
+            self.queries: list[str] = []
+
+        def scores(self, task, entries):
+            self.queries.append(task)
+            return {id(e): self.sim for e in entries}
+
+    def test_short_follow_up_embeds_with_prior_user_turns(self, tmp_path):
+        # #183: a bare follow-up ("show on map") is a hopeless retrieval
+        # query alone — the embedding query must carry the conversation's
+        # topic from earlier user turns.
+        self._write_skill(tmp_path, "zzfrob", "Pull the lever.")
+        semantic = self._StubSemantic()
+        agent, _ = make_agent(
+            [model_says("first"), model_says("second")],
+            cwd=str(tmp_path), semantic=semantic,
+        )
+        agent.run_task("please zzfrob the thing carefully")
+        agent.run_task("show on map")
+        assert "zzfrob the thing carefully" in semantic.queries[-1]
+
+    def test_knowledge_trace_carries_selection_diagnostics(self, tmp_path):
+        # #183: the persisted trace step must make retrieval auditable from
+        # logs alone — per-entry sim + rail and the selection mode.
+        self._write_skill(tmp_path, "zzfrob", "Pull the lever.")
+        steps = []
+        semantic = self._StubSemantic(sim=0.61)
+        agent, _ = make_agent(
+            [model_says("done")], cwd=str(tmp_path),
+            semantic=semantic, step_log=steps.append,
+        )
+        agent.run_task("please zzfrob the thing")
+        knowledge = [s for s in steps if s.get("kind") == "knowledge"]
+        assert len(knowledge) == 1
+        assert knowledge[0]["mode"] == "semantic"
+        assert knowledge[0]["items"] == [
+            {"label": "zzfrob", "kind": "skill", "sim": 0.61, "rail": 4}
+        ]
+
 
 class TestSkillGate:
     """The read gate (issue #40): an oversized preloaded skill must be read
