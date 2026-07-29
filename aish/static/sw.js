@@ -53,11 +53,13 @@ const SHELL_ASSETS = [
   "favicon-32.png",
   "icon-180.png",
   "icon-192.png",
-  "vendor/xterm.css",
-  "vendor/xterm.js",
-  "vendor/xterm-addon-fit.js",
-  "vendor/highlight.min.js",
 ];
+// xterm (~285 KB) is deliberately NOT precached: it's lazy-loaded only when the
+// console opens, and the console needs a live socket anyway — it can never be
+// used offline, so bundling it into the offline shell was pure install weight
+// (#180). highlight.min.js IS needed offline (colorizing code in a replayed
+// answer) but is requested with a ?v= rev, so it rides cacheRevvedAssets below
+// with app.js/style.css rather than as an unversioned entry here.
 
 // Live data. These must never be served from a cache: a stale session list or a
 // replayed upload would be worse than an honest failure, and the app already
@@ -91,7 +93,9 @@ async function cacheRevvedAssets(cache) {
     const response = await cache.match("./");
     if (!response) return;
     const html = await response.clone().text();
-    const refs = [...html.matchAll(/(?:src|href)="((?:app\.js|style\.css)\?v=[^"]+)"/g)];
+    const refs = [
+      ...html.matchAll(/(?:src|href)="((?:app\.js|style\.css|vendor\/highlight\.min\.js)\?v=[^"]+)"/g),
+    ];
     await Promise.all(
       refs.map(([, ref]) => cache.add(new Request(ref, { cache: "reload" })).catch(() => {}))
     );

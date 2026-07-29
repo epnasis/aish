@@ -14,10 +14,27 @@
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="apple-touch-icon" href="icon-180.png">
-<link rel="stylesheet" href="vendor/xterm.css">
 <link rel="stylesheet" href="style.css">
+<!-- Critical boot CSS, inlined so the loader paints on the FIRST frame — before
+     style.css finishes and long before the ~500 KB of deferred JS parses. The
+     white screen it replaces was that whole download+parse window (#180). -->
+<style>
+  #boot-loader{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;
+    justify-content:center;background:#000;transition:opacity .25s ease}
+  #boot-loader.hide{opacity:0;pointer-events:none}
+  #boot-loader .spin{width:34px;height:34px;border-radius:50%;
+    border:3px solid rgba(255,255,255,.18);border-top-color:rgba(255,255,255,.75);
+    animation:boot-spin .8s linear infinite}
+  @keyframes boot-spin{to{transform:rotate(360deg)}}
+  @media (prefers-color-scheme: light){#boot-loader{background:#fff}
+    #boot-loader .spin{border-color:rgba(0,0,0,.15);border-top-color:rgba(0,0,0,.55)}}
+</style>
 </head>
 <body>
+<!-- Shown from the first paint, removed by hideBootLoader() once the app has
+     content (offline mirror paint, socket hello, or token gate). A safety timer
+     clears it even if boot wedges, so it can never trap the user (#180). -->
+<div id="boot-loader"><div class="spin" role="status" aria-label="Loading"></div></div>
 
 <header id="topbar">
   <!-- nav row: back to sessions · session title (menu) · new chat -->
@@ -448,9 +465,11 @@
   </div>
 </div>
 
-<script src="vendor/highlight.min.js"></script>
-<script src="vendor/xterm.js"></script>
-<script src="vendor/xterm-addon-fit.js"></script>
-<script src="app.js"></script>
+<!-- Only two scripts on the critical path now, both deferred so HTML parsing and
+     the boot loader paint without waiting on them. xterm (~285 KB) is NOT here —
+     it's lazy-loaded by ensureXterm() the first time the console opens, since it
+     is never needed to show a chat (#180). -->
+<script defer src="vendor/highlight.min.js"></script>
+<script defer src="app.js"></script>
 </body>
 </html>
