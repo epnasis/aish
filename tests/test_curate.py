@@ -157,10 +157,28 @@ class TestCurationPass:
         url, body = calls[0]
         assert "token=tok" in url
         assert body["origin"] == "schedule"
-        assert body["meta"]["dedup_key"] == f"curate-{NOW:%G-W%V}"
+        # Privacy default (#186): the curation prompt aggregates excerpts
+        # from every recent session, so the session runs LOCAL by default,
+        # and the dedup key is per-model so an experiment never dedupes
+        # into the scheduled run.
+        from aish.curate import DEFAULT_MODEL
+
+        assert body["model"] == DEFAULT_MODEL
+        assert body["meta"]["dedup_key"] == f"curate-{NOW:%G-W%V}-qwen3-8b"
         assert "noisy" in body["prompt"]
         assert "MUST NOT call forget_memory" in body["prompt"]
         assert "MUST NOT use run_command" in body["prompt"]
+
+    def test_model_override_via_flag_and_env(self, tmp_path):
+        self._actionable_state(tmp_path)
+        calls, fake_post = self._posts()
+        run_curate(post=fake_post, env={}, token="tok", state_dir=tmp_path,
+                   now=NOW, model="gemini:gemini-3.5-flash")
+        assert calls[-1][1]["model"] == "gemini:gemini-3.5-flash"
+        assert calls[-1][1]["meta"]["dedup_key"].endswith("-gemini-gemini-3-5-flash")
+        run_curate(post=fake_post, env={"AISH_CURATE_MODEL": "qwen3:4b"},
+                   token="tok", state_dir=tmp_path, now=NOW)
+        assert calls[-1][1]["model"] == "qwen3:4b"
 
     def test_nothing_actionable_means_no_trigger(self, tmp_path):
         write_log(tmp_path, "session-20260728-100000-000001.jsonl", [

@@ -147,13 +147,16 @@ def mark_processed(gws: Gws, msg_id: str, label_id: str) -> None:
 
 def trigger(base: str, token: str, prompt: str, meta: dict, title: str,
             post: Callable[..., PostResult] = http_post,
-            origin: str = "email") -> bool:
-    # `origin` parameterized for other automation entry points (the curation
-    # pass posts origin="schedule", #185); the email default keeps every
-    # existing caller byte-identical.
+            origin: str = "email", model: str = "") -> bool:
+    # `origin`/`model` parameterized for other automation entry points (the
+    # curation pass posts origin="schedule" with a privacy-scoped model
+    # override, #185/#186); the defaults keep every existing caller
+    # byte-identical.
     url = f"{base.rstrip('/')}/trigger?token={token}"
-    body = json.dumps({"prompt": prompt, "origin": origin, "meta": meta,
-                       "title": title}).encode()
+    payload = {"prompt": prompt, "origin": origin, "meta": meta, "title": title}
+    if model:
+        payload["model"] = model
+    body = json.dumps(payload).encode()
     try:
         status, headers, raw = post(url, body, 30)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:

@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -44,6 +45,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .email_poll import PostResult, http_post, read_token, trigger
+
+# The curation prompt aggregates task excerpts from EVERY recent session —
+# including chats that ran purely on the local model because their content
+# was private — so it must run on a model meeting the strictest privacy bar
+# among its sources: a LOCAL one. Cloud specs are for explicit experiments
+# (--model / AISH_CURATE_MODEL); the server refuses with 503 when the
+# requested model can't be built, never falling back to its cloud default.
+DEFAULT_MODEL = "qwen3:8b"
 
 LEDGER_DAYS = 14  # how far back the scan reads
 MIN_INJECTIONS = 4  # fewer than this is not evidence of dead weight
@@ -328,14 +337,19 @@ def run_curate(
     state_dir=None,
     now: datetime | None = None,
     dry_run: bool = False,
+    model: str | None = None,
 ) -> int:
     """One curation pass: scan, and trigger only when actionable. The ISO-week
-    dedup key means a retried launchd job (or an overlapping manual run)
-    cannot double-open a session within the same week."""
+    dedup key — suffixed with the model slug — means a retried launchd job
+    (or an overlapping manual run) cannot double-open a session within the
+    same week, while an explicit model experiment gets its own session
+    instead of deduping into the scheduled one."""
     env = os.environ if env is None else env
     now = now or datetime.now()
     if state_dir is None:
         state_dir = Path.home() / ".local" / "state" / "aish"
+    if model is None:
+        model = env.get("AISH_CURATE_MODEL", "").strip() or DEFAULT_MODEL
     ledger = scan_ledger(state_dir, now=now)
     report = render_report(ledger, corpus_identities())
     if not report:
@@ -352,14 +366,16 @@ def run_curate(
         return 2
     base = env.get("AISH_WEB_URL", "http://192.168.10.20:8787")
     week = f"{now:%G-W%V}"
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", model).strip("-").lower()
     ok = trigger(
         base,
         token,
         prompt,
-        meta={"dedup_key": f"curate-{week}"},
+        meta={"dedup_key": f"curate-{week}-{slug}"},
         title=f"Knowledge curation {week}",
         post=post,
         origin="schedule",
+        model=model,
     )
     return 0 if ok else 1
 
@@ -371,8 +387,17 @@ def main() -> int:
         action="store_true",
         help="print the curation prompt instead of triggering a session",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "model spec for the curation session (default: $AISH_CURATE_MODEL "
+            f"or {DEFAULT_MODEL}; keep it LOCAL — the prompt aggregates "
+            "excerpts from private sessions)"
+        ),
+    )
     args = parser.parse_args()
-    return run_curate(dry_run=args.dry_run)
+    return run_curate(dry_run=args.dry_run, model=args.model)
 
 
 if __name__ == "__main__":
