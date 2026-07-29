@@ -1169,6 +1169,18 @@ class Agent:
 # Pre-flight retrieval (issue #40): inject matching knowledge bodies
         # directly instead of hoping the model calls recall/read_skill. The
         # /8 keeps the injection a small slice of the context-char budget.
+        # A short follow-up carries the conversation's topic, not its own
+        # (#183), so recent user turns ride along as embedding-query context;
+        # aish's own synthetic notes ("[aish: …]", "[I moved the session…]")
+        # are skipped — they describe plumbing, not topic.
+        prior_user_text = " ".join(
+            content
+            for message in self.messages
+            if message.get("role") == "user"
+            and isinstance(content := message.get("content"), str)
+            and content.strip()
+            and not content.lstrip().startswith("[")
+        )
         preload = skills.preflight(
             self.cwd,
             self.lessons_path,
@@ -1178,6 +1190,7 @@ class Agent:
                 self.num_ctx * CHARS_PER_TOKEN_BUDGET // 8,
             ),
             semantic=self.semantic.scores if self.semantic is not None else None,
+            context=prior_user_text[-skills.PREFLIGHT_CONTEXT_CHARS :],
         )
         if self.semantic is not None and self.semantic.error and not self._semantic_warned:
             self._semantic_warned = True
@@ -1192,9 +1205,13 @@ class Agent:
         )
         if preload.names:
             self._note("⚑ preloaded knowledge: " + ", ".join(preload.names))
+            # sim/rail/score diagnostics persist to the session log via the
+            # trace sink, so retrieval precision stays auditable from logs
+            # alone (#183); the frontend chips read only label/kind.
             self._emit_step(
                 kind="knowledge",
-                items=[{"label": it["name"], "kind": it["kind"]} for it in preload.items],
+                mode=preload.mode,
+                items=[{"label": it.pop("name"), **it} for it in preload.items],
             )
         self._append(user_message)
 

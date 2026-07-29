@@ -74,8 +74,31 @@ PREFLIGHT_HEAD_CHARS = 600  # teaser length for an oversized skill
 # embeddinggemma with retrieval prefixes against real tasks: true matches
 # score 0.27-0.41 (incl. Polish task vs English entries), unrelated tasks
 # peak near 0.21. Short identity lines compress the scale — do not expect
-# textbook 0.6+ values here.
+# textbook 0.6+ values here. This is the floor for DELIBERATE search
+# (recall's ranked listing, which the model reads critically) and for
+# keyword-rail confirmation; unsolicited injection uses the stricter
+# PREFLIGHT_MIN_SIM below.
 SEMANTIC_MIN_SIM = 0.24
+# Unsolicited injection needs a higher bar than search (#183): preflight
+# puts bodies straight into context, so a marginal match is pure noise
+# there, and "inject nothing" must be a normal outcome — the old single
+# 0.24 floor sat below the live corpus's noise floor (the median real task
+# had 7-8 entries above it, so the top-4 slots ALWAYS filled). Calibrated
+# on a judged audit of 481 live injections (issue #183): relevant entries
+# scored median 0.458, irrelevant 0.290; replaying the verdicts, 0.35
+# yields ~76% precision vs ~45% at 0.24.
+PREFLIGHT_MIN_SIM = 0.35
+# A short follow-up ("show on map") is a hopeless retrieval query on its
+# own — mid-conversation injections were the most random in the #183 audit.
+# Below this task length the EMBEDDING query gains recent conversation
+# text; the keyword/name rails still scan only the current message, because
+# explicit invocation must come from what the user just said.
+PREFLIGHT_CONTEXT_TASK_CHARS = 200
+PREFLIGHT_CONTEXT_CHARS = 600
+
+# save_memory keyword cap (#183): keywords are a retrieval rail and the
+# model writes them — beyond a handful they stop being curated triggers.
+KEYWORDS_MAX = 8
 
 # Near-duplicate gate on save_memory (#178 P1-8): a NEW entry this similar to
 # an existing one is refused with the existing entry's name, so the model
@@ -622,11 +645,20 @@ class Preload:
     text: str = ""  # injectable knowledge blocks, "" when nothing qualifies
     names: list[str] = field(default_factory=list)  # best first, for the status echo
     unread: list[str] = field(default_factory=list)  # oversized skills the read gate enforces
-    items: list[dict] = field(default_factory=list)  # {name, kind} for a rich client's chips
+    # {name, kind} for a rich client's chips, plus selection diagnostics
+    # (#183): "sim"/"rail" in semantic mode, "score" in lexical mode — the
+    # trace persists them so retrieval quality is auditable from logs alone.
+    items: list[dict] = field(default_factory=list)
+    mode: str = ""  # "semantic" | "lexical" — which selector actually ran
 
 
 def preflight(
-    cwd: str, lessons_path, task: str, char_budget: int = PREFLIGHT_TOTAL_CHARS, semantic=None
+    cwd: str,
+    lessons_path,
+    task: str,
+    char_budget: int = PREFLIGHT_TOTAL_CHARS,
+    semantic=None,
+    context: str = "",
 ) -> Preload:
     """Pre-flight retrieval: the top skills/memories matching a task,
     rendered as blocks the agent injects directly — the model wakes up with
@@ -635,24 +667,52 @@ def preflight(
     arms the agent's read gate until read_skill loads the full body.
 
     `semantic` is `SemanticIndex.scores` (or None): embedding similarity
-    picks the entries, with exact name/keyword hits kept as a deterministic
-    guarantee rail. When it is absent or fails (returns None), the lexical
-    word-matching tiers below remain the floor."""
+    picks the entries. When it is absent or fails (returns None), the lexical
+    word-matching tiers below remain the floor.
+
+    Selection discipline (#183 — injection is unsolicited, so it must be
+    able to ABSTAIN): pinned standing rules never compete — they are already
+    in every task's index, and re-injecting their bodies only stole slots
+    from actual skills. In semantic mode a name hit stays an unconditional
+    guarantee (naming an entry is unambiguous), but a keyword hit is a
+    strong PRIOR, not a bypass: it lowers the similarity bar to
+    SEMANTIC_MIN_SIM instead of skipping it, because keywords are
+    model-authored and one generic word ("code") used to guarantee
+    injection on a third of all tasks. Everything else needs
+    PREFLIGHT_MIN_SIM. `context` (recent conversation text) joins the
+    embedding query only for short tasks — a bare follow-up is a hopeless
+    query alone — while the rails keep reading only the current message.
+    In lexical mode (no embeddings) the keyword rail remains a full
+    guarantee: there is no similarity signal to confirm against."""
     if not task.split():
         return Preload()
     task_padded = _pad_words(task)
-    entries = load_entries(cwd, lessons_path)
-    sims = semantic(task, entries) if semantic is not None else None
+    # Pinned entries are standing rules: always rendered in the index,
+    # never candidates for topical injection.
+    entries = [e for e in load_entries(cwd, lessons_path) if not e.pinned]
+    query = task
+    if context and len(task) < PREFLIGHT_CONTEXT_TASK_CHARS:
+        query = f"{task}\n{context[:PREFLIGHT_CONTEXT_CHARS]}"
+    sims = semantic(query, entries) if semantic is not None else None
     if sims is not None:
+        mode = "semantic"
         ranked = []
         for entry in entries:  # corpus order: project skills first, then newest
             rail = _exact_rail(entry, task_padded)
             sim = sims.get(id(entry), 0.0)
-            if rail or sim >= SEMANTIC_MIN_SIM:
+            # rail 4 = the entry's NAME in the task: unconditional (cosine
+            # may not veto an explicit mention). rail 3 = keyword hit: a
+            # strong prior that lowers the bar, never a bypass. No rail:
+            # the strict injection floor.
+            floor = PREFLIGHT_MIN_SIM if not rail else (
+                -1.0 if rail >= 4 else SEMANTIC_MIN_SIM
+            )
+            if sim >= floor:
                 ranked.append((rail, sim, entry))
         ranked.sort(key=lambda t: (-t[0], -t[1]))
-        chosen = [entry for _, _, entry in ranked]
+        chosen = [(entry, {"sim": round(sim, 3), "rail": rail}) for rail, sim, entry in ranked]
     else:
+        mode = "lexical"
         forward = {id(entry): score for score, entry in score_entries(entries, task)}
         picked = []
         for entry in entries:  # corpus order: project skills first, then newest
@@ -660,13 +720,13 @@ def preflight(
             if score >= PREFLIGHT_MIN_SCORE:
                 picked.append((score, entry))
         picked.sort(key=lambda pair: -pair[0])  # stable: corpus order within a tier
-        chosen = [entry for _, entry in picked]
+        chosen = [(entry, {"score": score}) for score, entry in picked]
     blocks: list[str] = []
     names: list[str] = []
     unread: list[str] = []
     items: list[dict] = []
     remaining = char_budget
-    for entry in chosen[:PREFLIGHT_TOP]:
+    for entry, diag in chosen[:PREFLIGHT_TOP]:
         if remaining < 200:  # no room left for anything useful
             break
         if entry.kind == "memory" or len(entry.body) <= PREFLIGHT_ENTRY_CHARS:
@@ -689,9 +749,9 @@ def preflight(
             unread.append(entry.name)
         blocks.append(block)
         names.append(entry.name)
-        items.append({"name": entry.name, "kind": entry.kind})
+        items.append({"name": entry.name, "kind": entry.kind, **diag})
         remaining -= len(block) + 2  # +2 covers the join's blank line
-    return Preload("\n\n".join(blocks), names, unread, items)
+    return Preload("\n\n".join(blocks), names, unread, items, mode)
 
 
 def _snippet(text: str, words: list[str], width: int = RECALL_SNIPPET_CHARS) -> str | None:
@@ -843,7 +903,16 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
         if entry.kind == "memory" and entry.description == text:
             if entry.path is None or entry.name != slug:
                 return "(already remembered)"
-    keyword_list = [w.strip() for w in keywords.split(",") if w.strip()]
+    # Keyword hygiene (#183): keywords feed a retrieval rail, and the model
+    # authors them — dedupe case-insensitively and cap the count so one
+    # entry cannot carpet-bomb the trigger space with generic words.
+    seen_kw: set[str] = set()
+    keyword_list = []
+    for word in (w.strip() for w in keywords.split(",")):
+        if word and word.casefold() not in seen_kw:
+            seen_kw.add(word.casefold())
+            keyword_list.append(word)
+    keyword_list = keyword_list[:KEYWORDS_MAX]
     directory = Path(memory_dir)
     path = directory / f"{slug}.md"
     if not force and not path.is_file():
