@@ -5573,10 +5573,21 @@ const CATPPUCCIN_MOCHA = {
   brightCyan: "#94e2d5", brightWhite: "#a6adc8",
 };
 
-// The one-time xterm load's own status text. Named because the post-load reset
-// has to compare against it: it may only clear ITS OWN message, never one the
-// server has since replaced it with.
+// The one-time xterm load's own status text.
 const CONSOLE_LOADING = "loading terminal…";
+
+// Has the server's console_started — the only source of the REAL status label —
+// landed for the open currently in progress? openConsole sends console_open
+// FIRST and only then writes its provisional "attaching…"/"loading terminal…"
+// text, so on a fast link the reply beats those writes and they clobber the real
+// label. Nothing rewrites it afterwards (console_started fires once per open), so
+// a placeholder then sat over a fully working terminal. Provisional text is
+// therefore only ever written while this is false.
+let consoleStartedSeen = false;
+
+function setProvisionalConsoleStatus(text) {
+  if (!consoleStartedSeen) setConsoleStatus(text);
+}
 
 function setConsoleStatus(text, exited) {
   const el = $("pty-status");
@@ -5839,10 +5850,17 @@ function ensureXterm() {
 
 async function openConsole() {
   closeSheets();
-  // Ask the server to attach us to the GLOBAL console (spawns it on first open,
-  // reattaches to the surviving tmux session after a restart). No command — the
-  // console's command is fixed server-side.
-  if (!send({ type: "console_open" })) {
+  // Attach is requested LAST, once the terminal exists (see the send at the end
+  // of this function). Sending console_open up here raced the server's
+  // console_started reply — the ONLY source of the real cwd/command label — ahead
+  // of consoleTerm being built; onConsoleStarted drops any event that lands before
+  // the terminal exists, so the reply was lost and "attaching…" sat over a working
+  // console forever. The lazy-xterm await widened that window. Building the
+  // terminal before requesting attach closes the race at its root (the
+  // consoleStartedSeen guard below is now just belt-and-suspenders). Here we only
+  // CHECK the socket is live — no send yet.
+  consoleStartedSeen = false; // a new open: no real label for it yet
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
     showToast("not connected — reconnecting…");
     return;
   }
@@ -5855,7 +5873,7 @@ async function openConsole() {
   document.body.style.top = `-${consoleLockY}px`;
   document.body.classList.add("console-open");
   $("pty-share").hidden = true;
-  setConsoleStatus("attaching…");
+  setProvisionalConsoleStatus("attaching…");
 
   const screen = $("pty-screen");
   screen.textContent = "";
@@ -5863,19 +5881,13 @@ async function openConsole() {
   // reopen resolves instantly. If it fails (offline mid-open), surface it and
   // leave the overlay recoverable rather than throwing into a half-open state.
   if (!window.Terminal || !window.FitAddon) {
-    setConsoleStatus(CONSOLE_LOADING);
+    setProvisionalConsoleStatus(CONSOLE_LOADING);
     try { await ensureXterm(); }
     catch { setConsoleStatus("couldn't load the terminal — check your connection"); return; }
     if (!consoleOpen && $("pty-overlay").hidden) return; // closed while loading
-    // Clear OUR loading text — but only if it is still what's on screen. The
-    // server's console_started can land during the await above and set the real
-    // label; blindly restoring "attaching…" here overwrote it, and since
-    // console_started only fires once per open, nothing ever replaced it again.
-    // The stale label then sat over a fully working terminal until the console
-    // was closed and reopened (by which point ensureXterm is memoized, there is
-    // no await, and the race cannot happen — which is why it only ever showed on
-    // the first open of a page load).
-    if ($("pty-status").textContent === CONSOLE_LOADING) setConsoleStatus("attaching…");
+    // Emulator ready: drop the loading text — unless console_started has since
+    // landed with the real label, which the guard inside this helper honours.
+    setProvisionalConsoleStatus("attaching…");
   }
   consoleTerm = new Terminal({
     cursorBlink: true,
@@ -5964,6 +5976,12 @@ async function openConsole() {
     $("pty-share").hidden = !(consoleTerm && consoleTerm.getSelection().trim());
   });
   consoleOpen = true;
+  // Terminal is fully built and its handlers wired — NOW request attach. The
+  // server's console_started/console_out replies can only arrive after this, so
+  // consoleTerm is guaranteed present when onConsoleStarted runs and the real
+  // label always lands (fixing the stuck "attaching…"). On a reconnect the
+  // re-attach is sent from onHello instead, where the terminal already exists.
+  send({ type: "console_open" });
   lastConsoleSpawn = Date.now();
   consoleReflowViewport();
   requestAnimationFrame(consoleReflowViewport); // once the overlay has laid out
@@ -6008,6 +6026,7 @@ function hideConsole() {
 function onConsoleStarted(event) {
   if (!consoleOpen || !consoleTerm) return;
   consoleTerm.reset();
+  consoleStartedSeen = true; // the real label has landed; stop writing placeholders
   setConsoleStatus(`${promptDir(event.cwd)} · ${event.command}`);
   consoleFitAndResize();
 }

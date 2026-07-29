@@ -65,33 +65,59 @@ assert.ok(
 
 console.log("test_xterm_lazy.js: all assertions passed");
 
-// ---- the post-load status reset may only clear ITS OWN message ------------
-// Regression: the first console open awaits the lazy xterm load, and the
-// server's console_started can land DURING that await and set the real label.
-// The reset then blindly restored "attaching…", clobbering it — and since
-// console_started fires once per open, nothing replaced it again, so a stale
-// "attaching…" sat over a fully working terminal. Only ever visible on the
-// first open of a page load (afterwards ensureXterm is memoized, so there is
-// no await and no race).
+// ---- placeholder status must never outlive the real one ------------------
+// Regression: openConsole sends console_open FIRST and only then writes its
+// provisional "attaching…"/"loading terminal…" text. On a fast link the server's
+// console_started reply beats those writes, so they clobbered the real label —
+// and console_started fires once per open, so nothing rewrote it: a placeholder
+// sat over a fully working terminal. Widened by the lazy xterm load, which adds
+// an await between the send and the last placeholder write.
 {
   const fs2 = require("fs");
   const path2 = require("path");
   const assert2 = require("assert");
+  const vm2 = require("vm");
   const app = fs2.readFileSync(
     path2.join(__dirname, "..", "..", "aish", "static", "app.js"), "utf8");
 
-  assert2(
-    /const CONSOLE_LOADING = "loading terminal…";/.test(app),
-    "the loading text must be a named constant so the reset can compare against it",
-  );
-  assert2(
-    /if \(\$\("pty-status"\)\.textContent === CONSOLE_LOADING\) setConsoleStatus\("attaching…"\);/
-      .test(app),
-    "the post-load reset must be guarded on the loading text still being shown",
-  );
-  assert2(
-    !/^\s*setConsoleStatus\("attaching…"\); \/\/ emulator ready/m.test(app),
-    "the unguarded post-load reset must not come back",
-  );
-  console.log("ok - post-load status reset only clears its own message");
+  // Every provisional write goes through the guarded helper, never straight to
+  // setConsoleStatus — that is what makes the rule enforceable rather than
+  // remembered at each call site.
+  for (const text of ["attaching…", "CONSOLE_LOADING"]) {
+    assert2(
+      new RegExp(`setProvisionalConsoleStatus\\(${text === "CONSOLE_LOADING" ? "CONSOLE_LOADING" : '"attaching…"'}\\)`)
+        .test(app),
+      `${text} must be written through setProvisionalConsoleStatus`,
+    );
+  }
+  assert2(!/\n  setConsoleStatus\("attaching…"\);/.test(app),
+    "no unguarded placeholder write may remain");
+  assert2(/consoleStartedSeen = false; \/\/ a new open/.test(app),
+    "the flag must reset as an open begins, before console_open is sent");
+  assert2(/consoleStartedSeen = true;/.test(app),
+    "console_started must record that the real label has landed");
+
+  // And the helper itself behaves: run the REAL function against a fake label.
+  const start = app.indexOf("const CONSOLE_LOADING");
+  const end = app.indexOf("function setConsoleCtrlMode");
+  // Give it a fake #pty-status: the slice defines the REAL setConsoleStatus,
+  // so stubbing that would test a copy rather than the shipped function.
+  const label = { textContent: "", classList: { toggle() {} } };
+  const sandbox = { consoleStartedSeen: false, $: () => label };
+  vm2.createContext(sandbox);
+  // vm does not surface top-level const/let on the sandbox, so rewrite the two
+  // declarations the test drives — the same trick the deck/pager extractors use.
+  const slice = app.slice(start, end)
+    .replace(/\nfunction (\w+)/g, "\nvar $1 = function $1")
+    .replace(/\nlet consoleStartedSeen/, "\nvar consoleStartedSeen");
+  vm2.runInContext(slice, sandbox);
+
+  sandbox.setProvisionalConsoleStatus("attaching…");
+  assert2.strictEqual(label.textContent, "attaching…", "placeholder shows before the real label");
+  sandbox.consoleStartedSeen = true;                       // console_started landed
+  sandbox.setConsoleStatus("~/aish · tmux · aish-console"); // with the real label
+  sandbox.setProvisionalConsoleStatus("attaching…");        // a late placeholder write
+  assert2.strictEqual(label.textContent, "~/aish · tmux · aish-console",
+    "a placeholder must never overwrite the real label");
+  console.log("ok - placeholder status never overwrites the real one");
 }
