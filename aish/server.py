@@ -238,6 +238,12 @@ async def serve_index(request):  # noqa: ARG001 — Starlette route signature
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     html = html.replace('src="app.js"', f'src="app.js?v={STATIC_REV}"')
     html = html.replace('href="style.css"', f'href="style.css?v={STATIC_REV}"')
+    # The one remaining vendor script on the critical path (xterm is lazy-loaded
+    # by app.js with the same rev). Stamping it makes a device cache it immutably
+    # and a deploy bust it — the old unstamped tag was a stale-after-update gap.
+    html = html.replace(
+        'src="vendor/highlight.min.js"', f'src="vendor/highlight.min.js?v={STATIC_REV}"'
+    )
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 

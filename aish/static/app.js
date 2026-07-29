@@ -574,6 +574,7 @@ async function offlineFirstPaint() {
     // Anchor the pager (and any reconnect) to what is actually on screen.
     deepLinkSession(cached.meta.name);
     onReplay({ events: cached.events, truncated: false });
+    hideBootLoader(); // the mirror painted before the socket — drop the spinner now
   } catch { /* no mirror yet — the socket will fill the page in */ }
 }
 
@@ -735,6 +736,7 @@ function connect() {
       connOk = false;
       updateDot();
       if (token) showToast("that token was rejected — check for typos");
+      hideBootLoader(); // reveal the token form instead of a spinner over it
       $("token-gate").hidden = false;
       $("token-input").focus();
       return;
@@ -1258,6 +1260,7 @@ function onHello(event) {
   // hide the indicator — this tab is the presumed driver.
   setRolePill(false);
   updateEmptyHint();
+  hideBootLoader(); // connected and about to replay — drop the first-paint spinner
   schedulePeeks(); // warm the swipe neighbors once this view settles
 }
 
@@ -5782,7 +5785,54 @@ function toggleConsole() {
   openConsole();
 }
 
-function openConsole() {
+// [XTERM-LAZY-START]
+// xterm.js (~285 KB) is the terminal emulator — needed ONLY when the console
+// opens, which most sessions never do. Keeping it off the boot path is the big
+// half of the white-screen fix (#180): it no longer downloads, parses, or
+// executes before the first chat can paint. These assets are loaded on demand
+// the first time the console opens, stamped with the page rev so a device
+// caches them immutably and a deploy busts them (the old static <script> tags
+// were unversioned — a known stale-after-update gap).
+function xtermAssetUrls(base, rev) {
+  const v = rev ? `?v=${rev}` : "";
+  return {
+    css: `${base}vendor/xterm.css${v}`,
+    js: [`${base}vendor/xterm.js${v}`, `${base}vendor/xterm-addon-fit.js${v}`],
+  };
+}
+
+let xtermReady = null; // memoized: load at most once per page
+function ensureXterm() {
+  if (window.Terminal && window.FitAddon) return Promise.resolve();
+  if (xtermReady) return xtermReady;
+  const urls = xtermAssetUrls(BASE, PAGE_REV);
+  if (!document.querySelector('link[data-xterm-css]')) {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = urls.css;
+    link.dataset.xtermCss = "1";
+    document.head.appendChild(link);
+  }
+  const loadScript = (src) =>
+    new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error(`failed to load ${src}`));
+      document.head.appendChild(s);
+    });
+  // Sequential: the fit addon references the Terminal global from xterm.js.
+  xtermReady = urls.js
+    .reduce((chain, src) => chain.then(() => loadScript(src)), Promise.resolve())
+    .catch((err) => {
+      xtermReady = null; // let a later open retry a transient failure
+      throw err;
+    });
+  return xtermReady;
+}
+// [XTERM-LAZY-END]
+
+async function openConsole() {
   closeSheets();
   // Ask the server to attach us to the GLOBAL console (spawns it on first open,
   // reattaches to the surviving tmux session after a restart). No command — the
@@ -5804,6 +5854,15 @@ function openConsole() {
 
   const screen = $("pty-screen");
   screen.textContent = "";
+  // First open on this page loads the emulator (lazy — see ensureXterm). A
+  // reopen resolves instantly. If it fails (offline mid-open), surface it and
+  // leave the overlay recoverable rather than throwing into a half-open state.
+  if (!window.Terminal || !window.FitAddon) {
+    setConsoleStatus("loading terminal…");
+    try { await ensureXterm(); }
+    catch { setConsoleStatus("couldn't load the terminal — check your connection"); return; }
+    if (!consoleOpen && $("pty-overlay").hidden) return; // closed while loading
+  }
   consoleTerm = new Terminal({
     cursorBlink: true,
     // The config-served mono font (aish-mono) if present, else system mono —
@@ -9129,6 +9188,21 @@ $("token-form").addEventListener("submit", (e) => {
   localStorage.setItem("aish-token", value);
   location.reload(); // reconnect with the new token from a clean slate
 });
+
+// [BOOTLOADER-START]
+// The first-paint spinner (index.html) is dismissed the moment the app has
+// something real to show — whichever path gets there first: the socket's hello,
+// the offline mirror's paint, or the token gate. Idempotent (each path may fire),
+// and a safety timer clears it even if boot wedges, so it can never strand the
+// user on a spinner.
+function hideBootLoader() {
+  const el = document.getElementById("boot-loader");
+  if (!el || el.classList.contains("hide")) return;
+  el.classList.add("hide");
+  setTimeout(() => el.remove(), 300); // after the fade; removes it from the tree
+}
+setTimeout(hideBootLoader, 10000); // backstop: never trap behind the spinner
+// [BOOTLOADER-END]
 
 // Paint the last chat from the mirror, then open the socket. Not awaited: an
 // IndexedDB hiccup must never delay the connection, and whichever finishes
