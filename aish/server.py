@@ -51,6 +51,7 @@ import uvicorn
 from starlette.applications import Starlette
 from starlette.datastructures import MutableHeaders
 from starlette.middleware import Middleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
@@ -4032,7 +4033,11 @@ def create_app(
             Route("/index.html", serve_index, methods=["GET"]),
             Mount("/", StaticFiles(directory=STATIC_DIR, html=True)),
         ],
-        middleware=[Middleware(SecurityHeaders)],
+        # GZip outermost: app.js alone is ~420 KB raw and the whole critical
+        # path shipped uncompressed — on a weak phone link that was the
+        # difference between a boot and an endless spinner. WebSocket scopes
+        # pass through both middlewares untouched.
+        middleware=[Middleware(GZipMiddleware, minimum_size=512), Middleware(SecurityHeaders)],
         lifespan=lifespan,
     )
     app.state.server = server

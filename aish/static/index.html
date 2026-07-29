@@ -14,10 +14,14 @@
 <link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="apple-touch-icon" href="icon-180.png">
-<link rel="stylesheet" href="style.css">
 <!-- Critical boot CSS, inlined so the loader paints on the FIRST frame — before
      style.css finishes and long before the ~500 KB of deferred JS parses. The
-     white screen it replaces was that whole download+parse window (#180). -->
+     white screen it replaces was that whole download+parse window (#180).
+     style.css itself is linked in BODY, below the loader: a pending stylesheet
+     in HEAD blocks the first paint entirely, so on a slow link even this inline
+     spinner stayed invisible until the whole sheet arrived. In-body, browsers
+     hold back only the content AFTER the link — which the opaque loader is
+     covering anyway (no CSP-hostile onload-swap tricks needed). -->
 <style>
   #boot-loader{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;
     justify-content:center;background:#000;transition:opacity .25s ease}
@@ -35,6 +39,7 @@
      content (offline mirror paint, socket hello, or token gate). A safety timer
      clears it even if boot wedges, so it can never trap the user (#180). -->
 <div id="boot-loader"><div class="spin" role="status" aria-label="Loading"></div></div>
+<link rel="stylesheet" href="style.css">
 
 <header id="topbar">
   <!-- nav row: back to sessions · session title (menu) · new chat -->
