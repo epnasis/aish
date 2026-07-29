@@ -665,7 +665,10 @@ def _status_snippet(text: str, limit: int = STATUS_SNIPPET_CHARS) -> str:
     """One human-readable line from model prose (preamble or thinking text):
     the first non-empty line, cut at its first sentence, capped at `limit`."""
     for line in (text or "").splitlines():
-        line = line.strip().lstrip("#*->• ").strip("`").strip()
+        # Strip markdown decoration from both ends — thinking summaries open
+        # with bold headings ("**Defining the Cause**"), so a leading-only
+        # strip left the closing asterisks in the header.
+        line = line.strip().lstrip("#->• ").strip("*`_ ").strip()
         if not line:
             continue
         for end in (". ", "! ", "? "):

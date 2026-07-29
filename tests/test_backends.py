@@ -7,6 +7,7 @@ import pytest
 
 from aish import backends
 from aish.backends import (
+    GEMINI_THINKING_BODY,
     AnthropicBackend,
     BackendError,
     OpenAICompatBackend,
@@ -15,6 +16,7 @@ from aish.backends import (
     convert_messages_anthropic,
     make_chat,
     parse_model,
+    split_thoughts,
 )
 
 # ---------------------------------------------------------------- routing
@@ -224,6 +226,70 @@ def test_stream_gemini_null_index_calls_stay_separate():
     assert calls[1].function.arguments == {"url": "https://b.example"}
     assert calls[0].extra_content == extra
     assert calls[1].extra_content is None
+
+
+def test_gemini_stream_splits_thoughts_from_content():
+    # Live-API shape: the thought streams first, then a delta holding BOTH the
+    # closing tag and the start of the visible answer.
+    chunks = [
+        _delta_chunk(content="<thought>**Sky**\n\nWhy blue"),
+        _delta_chunk(content="</thought>The sky is blue"),
+        _delta_chunk(content=" because of scattering."),
+    ]
+    client = FakeClient(stream_chunks=chunks)
+    backend = OpenAICompatBackend(client, "gemini")
+    out = list(backend(model="m", messages=[], stream=True))
+    thinking = "".join(c.message.thinking for c in out)
+    content = "".join(c.message.content for c in out)
+    assert thinking == "**Sky**\n\nWhy blue"
+    assert content == "The sky is blue because of scattering."
+    assert "<thought>" not in content
+    # include_thoughts was requested on the way in
+    assert client.calls[0]["extra_body"] == GEMINI_THINKING_BODY
+
+
+def test_gemini_stream_tag_split_across_deltas():
+    chunks = [
+        _delta_chunk(content="<thou"),
+        _delta_chunk(content="ght>hidden</th"),
+        _delta_chunk(content="ought>shown"),
+    ]
+    backend = OpenAICompatBackend(FakeClient(stream_chunks=chunks), "gemini")
+    out = list(backend(model="m", messages=[], stream=True))
+    assert "".join(c.message.thinking for c in out) == "hidden"
+    assert "".join(c.message.content for c in out) == "shown"
+
+
+def test_gemini_stream_flushes_heldback_text_at_end():
+    # A trailing "<" could open a tag — held back, then flushed as real text.
+    chunks = [_delta_chunk(content="a < b <")]
+    backend = OpenAICompatBackend(FakeClient(stream_chunks=chunks), "gemini")
+    out = list(backend(model="m", messages=[], stream=True))
+    assert "".join(c.message.content for c in out) == "a < b <"
+
+
+def test_gemini_non_stream_splits_thoughts():
+    backend = OpenAICompatBackend(
+        FakeClient(_completion(content="<thought>plan</thought>answer")), "gemini"
+    )
+    result = backend(model="m", messages=[{"role": "user", "content": "x"}])
+    assert result.message.thinking == "plan"
+    assert result.message.content == "answer"
+
+
+def test_openai_provider_gets_no_thinking_config_and_no_filter():
+    client = FakeClient(_completion(content="<thought>not gemini</thought>hi"))
+    backend = OpenAICompatBackend(client, "openai")
+    result = backend(model="m", messages=[{"role": "user", "content": "x"}])
+    assert "extra_body" not in client.calls[0]
+    assert result.message.content == "<thought>not gemini</thought>hi"
+    assert result.message.thinking == ""
+
+
+def test_split_thoughts_unterminated_tag_is_all_thinking():
+    thinking, visible = split_thoughts("<thought>never closed")
+    assert thinking == "never closed"
+    assert visible == ""
 
 
 def test_convert_reemits_extra_content():
