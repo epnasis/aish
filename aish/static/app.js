@@ -1379,7 +1379,11 @@ function freshPrefetch(name) {
 function onHello(event) {
   // Server code changed since this page was built (or the page predates rev
   // stamping entirely) — reload; the replay mechanism restores the view.
-  if (event.rev && event.rev !== PAGE_REV) { reloadThrottled("rev"); return; }
+  // Abandon this hello ONLY when a reload is actually coming: when the
+  // throttle refuses (update loop guard), "stay put" must mean stay USABLE —
+  // returning here anyway left the app connected but blank, with no replay
+  // ever processed, until the next reconnect repeated the same abort.
+  if (event.rev && event.rev !== PAGE_REV && reloadThrottled("rev")) return;
   // The interactive console is GLOBAL (#148 follow-up): it floats above whatever
   // chat is shown and is untouched by a session switch. A hello also means a
   // (re)connect. `#console` is a deep-link that survives a reload / server

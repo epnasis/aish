@@ -42,6 +42,12 @@ const CACHES = [SHELL_CACHE, IMG_CACHE];
 const IMG_MAX_ENTRIES = 300;
 
 const NAV_TIMEOUT_MS = 3000;
+// The last-resort wait when there is NO cached shell (e.g. right after a
+// PURGE_SHELL reload): long enough for a genuinely slow link to deliver the
+// page, but bounded — an iOS fetch on a dying connection can hang for a
+// minute+, and a standalone PWA shows nothing but its blank launch screen
+// for as long as the navigation is pending. Better the offline page than that.
+const NAV_LAST_RESORT_MS = 15000;
 
 // Everything the app needs to boot with no network. The rev'd app.js/style.css
 // aren't listed — their URLs aren't known until index.html is read, so install
@@ -159,13 +165,19 @@ async function handleNavigate(request) {
   if (fresh && fresh.ok) return fresh;
   const cached = await cache.match("./");
   if (cached) return cached;
-  const slow = await network; // nothing cached: the network is the only hope
+  // Nothing cached: the network is the only hope — but never wait on it
+  // unboundedly (a hung fetch here IS the white launch screen).
+  const lastResort = new Promise((resolve) => setTimeout(() => resolve(null), NAV_LAST_RESORT_MS));
+  const slow = await Promise.race([network, lastResort]);
   if (slow) return slow;
+  // A standalone PWA has no address bar to retry from, so the page retries
+  // itself: the moment the network comes back, a refresh boots the real app.
   return new Response(
     "<!doctype html><meta charset=utf-8><title>aish</title>" +
+      "<meta http-equiv=refresh content=10>" +
       "<body style='font:16px -apple-system,sans-serif;padding:2rem;background:#000;color:#eee'>" +
-      "<h1>aish</h1><p>Offline, and no cached copy of the app yet. " +
-      "Open aish once while connected and it will work offline from then on.</p>",
+      "<h1>aish</h1><p>Can't reach the server right now, and there is no cached " +
+      "copy of the app to fall back on. Retrying automatically…</p>",
     { status: 503, headers: { "Content-Type": "text/html; charset=utf-8" } }
   );
 }
