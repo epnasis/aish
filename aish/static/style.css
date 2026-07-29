@@ -1934,6 +1934,17 @@ body.awaiting-approval .trace.live {
 .trace-status svg { display: block; }
 .trace-headtext { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .trace-title { font-size: 16.1px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* While live, the title is the status one-liner (a search query, the model's
+   own words) — the point is to READ it, so wrap up to two lines instead of
+   cutting most of the sentence on a phone. Finished stays single-line. */
+.trace.live .trace-title {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+}
 .trace-sub { font-size: 13.8px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trace-chev { width: 16px; height: 16px; flex: none; color: var(--dim); transition: transform 0.2s; }
 .trace.open .trace-chev { transform: rotate(180deg); }
@@ -1992,7 +2003,17 @@ body.awaiting-approval .trace.live {
 .step.running .step-badge { background: var(--blue-glow); }
 .step-main { flex: 1; min-width: 0; padding-top: 1px; display: flex; flex-direction: column; }
 .step-title { font-size: 15.5px; font-weight: 600; color: var(--fg); line-height: 1.3; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.step-sub { font-size: 13.8px; color: var(--dim); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Two-line clamp, not one-line ellipsis: subs carry text worth reading (a
+   thinking gist, a denial reason) and one nowrap line cut most of it off. */
+.step-sub {
+  font-size: 13.8px; color: var(--dim); margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+}
 .step-tag { font-size: 11.5px; font-weight: 700; padding: 1px 6px; border-radius: 6px; }
 .step-tag.ok { color: var(--green); background: var(--green-glow); }
 .step-tag.bad { color: var(--red); background: var(--red-glow); }
