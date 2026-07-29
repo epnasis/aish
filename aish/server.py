@@ -595,8 +595,18 @@ class Bridge:
     snapshots and fan-out both need no locking.
     """
 
-    def __init__(self, get_loop, on_wait=None):
+    def __init__(self, get_loop, on_wait=None, session: str | None = None):
         self._get_loop = get_loop
+        # The session name stamped onto every event this bridge fans out
+        # (#182): most live events carried no session identity, so a client
+        # that switched views client-side (prefetched swipe, offline-mirror
+        # tap) kept rendering the OLD session's events into the new view until
+        # the server processed the resume. The stamp lets the client drop
+        # deliveries whose session is not the one on screen — generalizing the
+        # `session` field hello/role already carry. None (tests, or a bridge
+        # with no session yet) stamps nothing, which the client reads as
+        # "not scoped, always deliver".
+        self.session = session
         self.viewers: set = set()  # Clients currently viewing this session
         self.pending: dict[str, queue.Queue] = {}
         self.transcript: list[dict] = []
@@ -630,9 +640,18 @@ class Bridge:
                 if len(self.transcript) > TRANSCRIPT_MAX:
                     del self.transcript[: len(self.transcript) - TRANSCRIPT_KEEP]
                     self.truncated = True
-        # Fan the event out to every attached viewer. Runs on the loop thread
-        # (call_soon_threadsafe / _show), so mutating a Client's asyncio queue
-        # is safe and the viewer set can't change underfoot.
+        # Fan the event out to every attached viewer, stamped with this
+        # session's name (#182) so the client can drop deliveries for a chat
+        # no longer on screen. The stamp rides only the LIVE delivery — the
+        # recorded transcript stays unstamped, keeping it byte-identical to
+        # SessionLog.reconstruct_events (hot/cold parity), and replayed events
+        # bypass the client's firewall anyway (the replay loop feeds handle()
+        # directly). An event that already names a session (session_state)
+        # keeps its own; an unnamed bridge (tests) stamps nothing. Runs on the
+        # loop thread (call_soon_threadsafe / _show), so mutating a Client's
+        # asyncio queue is safe and the viewer set can't change underfoot.
+        if self.session is not None and "session" not in event:
+            event = {**event, "session": self.session}
         for client in self.viewers:
             client.outbox.put_nowait(event)
 
@@ -3747,7 +3766,7 @@ def create_app(
             custom_title, origin, title_auto = parsed.title, parsed.origin, parsed.title_auto
         log = SessionLog(path) if path is not None else SessionLog.new(state_dir)
         logref = LogRef(log)
-        bridge = Bridge(get_loop)
+        bridge = Bridge(get_loop, session=log.path.name)
 
         agent_holder: list = []
         session_holder: list = []

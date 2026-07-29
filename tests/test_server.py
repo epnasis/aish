@@ -351,6 +351,59 @@ class TestConnect:
             assert done["sources"] == [{"url": "https://x.example/"}]
 
 
+class TestSessionStamp:
+    """#182: every event a bridge fans out (or records for replay) names its
+    session, so the client can drop live deliveries for a chat that is no
+    longer on screen — the client-side switch window of a prefetched swipe or
+    an offline-mirror tap, where the old session's events kept arriving until
+    the server processed the resume."""
+
+    class _Viewer:
+        def __init__(self):
+            self.items: list = []
+            self.outbox = SimpleNamespace(put_nowait=self.items.append)
+
+    def test_bridge_stamps_fanout_but_not_the_transcript(self):
+        bridge = server_module.Bridge(lambda: None, session="session-x.jsonl")
+        viewer = self._Viewer()
+        bridge.viewers.add(viewer)
+        bridge.emit({"type": "token", "text": "hi"})
+        assert viewer.items[0]["session"] == "session-x.jsonl"
+        # The stamp rides only the live delivery: the recorded transcript stays
+        # byte-identical to reconstruct_events (hot/cold parity), and replayed
+        # events bypass the client's firewall anyway.
+        assert "session" not in bridge.transcript[0]
+
+    def test_stamp_never_overwrites_an_events_own_session(self):
+        # An event that names its session itself (session_state) keeps it.
+        bridge = server_module.Bridge(lambda: None, session="session-x.jsonl")
+        viewer = self._Viewer()
+        bridge.viewers.add(viewer)
+        bridge.emit({"type": "session_state", "session": "session-other.jsonl"})
+        assert viewer.items[0]["session"] == "session-other.jsonl"
+
+    def test_unnamed_bridge_stamps_nothing(self):
+        # Back-compat for bridges built without a session (tests): events pass
+        # through untouched, which the client reads as "not scoped".
+        bridge = server_module.Bridge(lambda: None)
+        viewer = self._Viewer()
+        bridge.viewers.add(viewer)
+        bridge.emit({"type": "token", "text": "hi"})
+        assert "session" not in viewer.items[0]
+
+    def test_live_task_events_carry_the_sessions_name(self, app_env):
+        client, _ = make_client(app_env, [model_says("hi there")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "say hi"})
+            for _ in range(200):
+                event = ws.receive_json()
+                assert event["session"] == hello["session"], event
+                if event["type"] == "done":
+                    break
+            else:
+                raise AssertionError("no done event")
+
+
 class TestSecurityHeaders:
     """#178 P0-2: CSP + Referrer-Policy stamped on EVERY http response class —
     index, static assets, the service worker, JSON endpoints, and errors —
@@ -854,7 +907,7 @@ class TestTerminalFraming:
         ]
         _ = marker  # keep tmp_path scoping obvious
         client, _ = make_client(app_env, responses)
-        with client, connected(client) as (ws, _, _):
+        with client, connected(client) as (ws, hello, _):
             ws.send_json({"type": "task", "text": "list it"})
             events = self._drain(ws)
             starts = [e for e in events if e["type"] == "command_start"]
@@ -862,7 +915,10 @@ class TestTerminalFraming:
             assert len(starts) == 1
             assert starts[0]["cwd"] == app_env["cwd"]
             assert starts[0]["command"] == "ls"
-            assert ends == [{"type": "command_end", "status": "exit", "exit_code": 0}]
+            # Live deliveries carry the session stamp (#182); the recorded
+            # frame (checked below via the reconnect replay) does not.
+            assert ends == [{"type": "command_end", "status": "exit",
+                             "exit_code": 0, "session": hello["session"]}]
 
         # A reconnect replays the recorded frame identically (phone lock/unlock,
         # session switch) — the block must reconstruct from the transcript.
@@ -912,7 +968,7 @@ class TestBangCommands:
 
     def test_bang_command_runs_and_streams_without_model_or_approval(self, app_env):
         client, chat = make_client(app_env, [])
-        with client, connected(client) as (ws, _, _):
+        with client, connected(client) as (ws, hello, _):
             ws.send_json({"type": "task", "text": "!echo direct-hit"})
             assert recv_until(ws, "user")["text"] == "!echo direct-hit"
             events = self._drain(ws)
@@ -927,9 +983,10 @@ class TestBangCommands:
             streamed = " ".join(e["text"] for e in events if e["type"] == "stream")
             assert "direct-hit" in streamed
             ends = [e for e in events if e["type"] == "command_end"]
-            assert ends and ends[0] == {"type": "command_end", "status": "exit", "exit_code": 0}
+            assert ends and ends[0] == {"type": "command_end", "status": "exit",
+                                        "exit_code": 0, "session": hello["session"]}
             # The output rode the terminal block; done carries no answer bubble.
-            assert events[-1] == {"type": "done", "result": ""}
+            assert events[-1] == {"type": "done", "result": "", "session": hello["session"]}
             assert chat.calls == []  # the model was never asked
 
     def test_large_bang_output_batches_stream_events(self, app_env):
