@@ -649,8 +649,34 @@ class _NoStatus:
     def add_tokens(self, count: int) -> None:
         pass
 
+    def note(self, text: str) -> None:
+        pass
+
     def stop(self) -> None:
         pass
+
+
+# The live status header shows at most one line of model prose; longer text is
+# capped so the header can never grow a paragraph.
+STATUS_SNIPPET_CHARS = 120
+
+
+def _status_snippet(text: str, limit: int = STATUS_SNIPPET_CHARS) -> str:
+    """One human-readable line from model prose (preamble or thinking text):
+    the first non-empty line, cut at its first sentence, capped at `limit`."""
+    for line in (text or "").splitlines():
+        line = line.strip().lstrip("#*->• ").strip("`").strip()
+        if not line:
+            continue
+        for end in (". ", "! ", "? "):
+            cut = line.find(end)
+            if cut != -1:
+                line = line[: cut + 1].rstrip()
+                break
+        if len(line) > limit:
+            line = line[: limit - 1].rstrip() + "…"
+        return line
+    return ""
 
 TRIM_KEEP_CHARS = 200
 TRIMMED_NOTE = "\n[trimmed: full output dropped to save context]"
@@ -1243,7 +1269,7 @@ class Agent:
             self._emit_step(kind="thinking_start")
             self.status.start("thinking")
             try:
-                content, tool_calls, usage, raw_blocks = self._chat_turn()
+                content, tool_calls, usage, raw_blocks, thinking_text = self._chat_turn()
             except TaskCancelled:
                 return self._finish_cancelled()
             finally:
@@ -1290,7 +1316,16 @@ class Agent:
             # Ollama buffers tool-call generation and streams nothing until it
             # is done, so live counts are impossible here — report per turn.
             self._note(f"✓ thought for {format_secs(turn_secs)}{_tokens_note(usage)}")
-            self._emit_step(kind="thinking", secs=turn_secs, tokens=list(usage))
+            # The model's own words ride the thinking step so the trace header
+            # can say WHY the coming tools run: `say` = preamble emitted
+            # alongside the tool calls, `gist` = first line of its reasoning.
+            # Keys are omitted when empty — old logs replay byte-identically.
+            thinking_step: dict = {"kind": "thinking", "secs": turn_secs, "tokens": list(usage)}
+            if say := _status_snippet(content):
+                thinking_step["say"] = say
+            if gist := _status_snippet(thinking_text):
+                thinking_step["gist"] = gist
+            self._emit_step(**thinking_step)
             if content and self.on_token is None:
                 self.echo(content)
 
@@ -1358,7 +1393,7 @@ class Agent:
         self._append({"role": "user", "content": note})
         self.status.start("wrapping up")
         try:
-            content, tool_calls, _usage, raw_blocks = self._chat_turn()
+            content, tool_calls, _usage, raw_blocks, _thinking = self._chat_turn()
         except TaskCancelled:
             return self._finish_cancelled()
         except ModelUnavailable:
@@ -1392,11 +1427,11 @@ class Agent:
         self.echo("✕ task stopped")
         return CANCELLED_RESULT
 
-    def _chat_turn(self) -> tuple[str, list[dict], tuple[int, int], list | None]:
+    def _chat_turn(self) -> tuple[str, list[dict], tuple[int, int], list | None, str]:
         """One model call; returns (content, normalized tool_calls, token usage,
-        provider-native raw blocks or None). Streams content through on_token
-        when set. Retries once on a transport error (a busy/overloaded local
-        Ollama commonly drops or refuses a request)."""
+        provider-native raw blocks or None, thinking text or ""). Streams
+        content through on_token when set. Retries once on a transport error (a
+        busy/overloaded local Ollama commonly drops or refuses a request)."""
         self._refresh_plugin_tools()
         kwargs = dict(
             model=self.model,
@@ -1417,8 +1452,11 @@ class Agent:
                     self.echo(f"model call failed ({exc}); retrying once…")
         raise ModelUnavailable(str(last_error)) from last_error
 
-    def _one_chat(self, kwargs: dict) -> tuple[str, list[dict], tuple[int, int], list | None]:
+    def _one_chat(
+        self, kwargs: dict
+    ) -> tuple[str, list[dict], tuple[int, int], list | None, str]:
         raw_blocks = None
+        thinking = ""
         if self.on_token is None:
             response = self.chat(**kwargs)
             message = response.message
@@ -1426,8 +1464,11 @@ class Agent:
             raw_calls = message.tool_calls or []
             usage = _usage(response)
             raw_blocks = getattr(message, "raw_blocks", None)
+            thinking = getattr(message, "thinking", None) or ""
         else:
             parts: list[str] = []
+            thinking_parts: list[str] = []
+            thinking_head = ""
             raw_calls = []
             usage = (0, 0)
             for chunk in self.chat(stream=True, **kwargs):
@@ -1439,6 +1480,16 @@ class Agent:
                 # count drives the live "↓ N tokens" readout on the ticker.
                 self.status.add_tokens(1)
                 message = chunk.message
+                if tchunk := getattr(message, "thinking", "") or "":
+                    thinking_parts.append(tchunk)
+                    # Live "Thinking: <gist>" on the web header: forward the
+                    # opening of the reasoning while it streams. Only the head
+                    # matters (the snippet is one line), so stop appending —
+                    # and stop emitting — once it's long enough.
+                    if len(thinking_head) < STATUS_SNIPPET_CHARS * 2:
+                        thinking_head += tchunk
+                        if snippet := _status_snippet(thinking_head):
+                            self.status.note(snippet)
                 if message.content:
                     if not parts:
                         self.status.stop()  # erase the live timer line first
@@ -1452,9 +1503,10 @@ class Agent:
                 if _usage(chunk) != (0, 0):  # counts arrive on the final chunk
                     usage = _usage(chunk)
             content = "".join(parts)
+            thinking = "".join(thinking_parts)
             if content:
                 self.on_token("\n")
-        return content, [self._normalize_call(c) for c in raw_calls], usage, raw_blocks
+        return content, [self._normalize_call(c) for c in raw_calls], usage, raw_blocks, thinking
 
     @staticmethod
     def _normalize_call(call: Any) -> dict:

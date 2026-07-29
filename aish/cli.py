@@ -616,6 +616,9 @@ class LiveTimer:
     def add_tokens(self, count: int) -> None:
         self._tokens += count
 
+    def note(self, text: str) -> None:
+        pass  # the CLI ticker shows phase + timer only; gists are a web thing
+
     def stop(self) -> None:
         thread = self._thread
         if thread is None:

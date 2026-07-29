@@ -45,6 +45,10 @@ class ChatMessage:
     # thinking + text + tool_use). Agent stores them; the backend echoes them
     # verbatim next turn — required for thinking/tool-use continuations.
     raw_blocks: list | None = None
+    # The model's reasoning text, when the provider exposes it (Anthropic
+    # thinking blocks; Ollama's Message.thinking). Display-only — never echoed
+    # back to the API (raw_blocks carries the canonical copy for Anthropic).
+    thinking: str = ""
 
 
 @dataclass
@@ -607,6 +611,7 @@ def _anthropic_media_blocks(message: dict) -> list[dict]:
 
 def _from_anthropic(response) -> ChatChunk:
     text_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[ToolCall] = []
     raw_blocks: list[dict] = []
     for block in response.content:
@@ -616,6 +621,8 @@ def _from_anthropic(response) -> ChatChunk:
         block_type = getattr(block, "type", None)
         if block_type == "text":
             text_parts.append(block.text)
+        elif block_type == "thinking":
+            thinking_parts.append(getattr(block, "thinking", "") or "")
         elif block_type == "tool_use":
             tool_calls.append(
                 ToolCall(ToolFunction(name=block.name, arguments=dict(block.input or {})))
@@ -636,6 +643,7 @@ def _from_anthropic(response) -> ChatChunk:
             content=content,
             tool_calls=tool_calls,
             raw_blocks=raw_blocks or None,
+            thinking="\n".join(part for part in thinking_parts if part),
         ),
         prompt_eval_count=prompt_tokens,
         eval_count=(usage.output_tokens or 0) if usage else 0,

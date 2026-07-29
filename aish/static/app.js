@@ -1569,6 +1569,10 @@ function onToken(text) {
       currentTrace.thinkingRow.titleEl.textContent = "Answering…";
       currentTrace.thinkingRow.isAnswer = true;
     }
+    if (currentTrace) {
+      currentTrace.answering = true;
+      updateTraceHead(currentTrace);
+    }
     // Entering "Answering…" collapses the open timeline to its summary (#168).
     collapseTimelineForAnswering(currentTrace);
     requestAnimationFrame(() => anchorAnswer(true));
@@ -1758,6 +1762,12 @@ function addSources(sources) {
 
 function onStatus(event) {
   if (event.state === "idle") { setStatus(null); return; }
+  // A streaming thinking gist (unrecorded, live-only): stash it on the trace
+  // so the header can say "Thinking: <gist>" while the model reasons.
+  if (event.note && currentTrace) {
+    currentTrace.liveGist = event.note;
+    updateTraceHead(currentTrace);
+  }
   let text = `${event.label || "working"}…`;
   if (event.tokens) text += ` · ↓ ${event.tokens >= 1000 ? (event.tokens / 1000).toFixed(1) + "k" : event.tokens} tokens`;
   setStatus(text);
@@ -1882,6 +1892,14 @@ function ensureTrace() {
     started: 0, secs: 0, tokensIn: 0, tokensOut: 0,
     pending: null, thinkingRow: null, startedAt: Date.now(), timer: null,
     autoCollapsed: false, // collapsed by an approval card, to be restored after
+    // Live-status DATA for the header line — strings are derived only in
+    // traceStatusLine (the choreo tests run these handlers with the header
+    // renderer stubbed out, so handlers must never build display text).
+    turnSay: null,       // model preamble alongside this turn's tool calls
+    turnGist: null,      // first line of the turn's thinking text
+    liveGist: null,      // streaming thinking gist (status channel, unrecorded)
+    running: [],         // in-flight tool_starts: {name, summary, command}
+    waitingApproval: false, answering: false, stopping: false,
   };
   // The head toggles expand freely — even while the turn runs (#65). A manual
   // toggle is the user's choice, so clear any pending auto-restore so the
@@ -1908,13 +1926,15 @@ function ensureTrace() {
 // [TRACE-OPEN-END]
 
 // The Stop button was pressed: reflect it in the header until `done` lands.
+// State, not a one-shot DOM write — the 1s ticker used to repaint "Working…"
+// right over the old direct title write.
 function markStopping(t) {
   if (!t) return;
+  t.stopping = true;
   t.el.classList.add("stopping");
-  const title = t.el.querySelector(".trace-title");
-  if (title) title.textContent = "Stopping…";
   const btn = t.el.querySelector(".trace-stop");
   if (btn) btn.disabled = true;
+  updateTraceHead(t);
 }
 
 // Fade the top/bottom edge of a scroll box when there's more content there.
@@ -1975,6 +1995,9 @@ function traceRow(t, iconHtml, title, sub) {
 function traceStep(step) {
   const t = ensureTrace();
   if (step.kind === "thinking_start") {
+    // A new model turn: the previous turn's words no longer describe it.
+    t.turnSay = t.turnGist = t.liveGist = null;
+    t.answering = false;
     // A live, highlighted "Thinking…" row — the active step on the timeline.
     if (!t.thinkingRow) {
       t.started += 1;
@@ -2005,16 +2028,33 @@ function traceStep(step) {
   if (step.kind === "thinking") {
     t.secs += step.secs || 0;
     if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
+    // The model's own words for this turn (say = preamble, gist = thinking
+    // text) — the header prefers these over the deterministic tool line.
+    t.turnSay = step.say || null;
+    t.turnGist = step.gist || null;
+    t.liveGist = null; // the persisted gist supersedes the streamed one
+    // A "thinking" step only fires when the turn ended in tool calls, so any
+    // streamed text was preamble narration — not the answer.
+    t.answering = false;
     if (t.thinkingRow) { // finalize the live row in place
       const ref = t.thinkingRow;
       clearStepTimer(t, ref);
       ref.row.classList.remove("running", "active-step");
       ref.badge.innerHTML = traceSvg("thinking", "var(--purple)");
       ref.titleEl.textContent = `Thought for ${fmtSecs(step.secs)}`;
+      // History bonus: the row keeps the thinking gist as its subtitle —
+      // must match the replay branch below or hot/cold rows diverge.
+      if (step.gist && !ref.main.querySelector(".step-sub")) {
+        const subEl = document.createElement("span");
+        subEl.className = "step-sub";
+        subEl.textContent = step.gist;
+        ref.main.appendChild(subEl);
+      }
       t.thinkingRow = null;
     } else {
       t.started += 1;
-      traceRow(t, traceSvg("thinking", "var(--purple)"), `Thought for ${fmtSecs(step.secs)}`, "");
+      traceRow(t, traceSvg("thinking", "var(--purple)"),
+        `Thought for ${fmtSecs(step.secs)}`, step.gist || "");
     }
     updateTraceHead(t);
     return;
@@ -2081,10 +2121,12 @@ function toolStart(t, step) {
   knowledgeTag(ref, step.name);
   ref.row.classList.add("running", "active-step");
   startStepTimer(t, ref);
+  t.running.push({ name: step.name, summary: step.summary || "", command: step.command || "" });
   // The command + output + exit for run_command are drawn by the terminal
   // block that command_start builds once the command is approved and runs;
   // while the approval card is up the row is just the spinner.
   t.pending = { ...ref, name: step.name };
+  updateTraceHead(t);
 }
 
 function toolFinish(t, step) {
@@ -2111,6 +2153,8 @@ function toolFinish(t, step) {
   }
   clearStepTimer(t, ref);
   t.pending = null;
+  const runIdx = t.running.findIndex((r) => r.name === step.name);
+  if (runIdx !== -1) t.running.splice(runIdx, 1);
   ref.row.classList.remove("running", "active-step");
   // finalize badge icon
   const iconName = held ? "command" : denied ? "denied" : step.name === "run_command" ? "command"
@@ -2570,13 +2614,57 @@ function mmss(sec) {
   return `${m}:${String(sec % 60).padStart(2, "0")}`;
 }
 
+// [TRACE-STATUS-START]
+// The live header's one-liner: what is happening RIGHT NOW, so a collapsed
+// trace still tells the story. Pure derivation over the data the step handlers
+// stash on `t` — all display strings are built here and nowhere else.
+const TOOL_STATUS = {
+  run_command: (r) => "Running: " + (r.command || r.summary || "a command"),
+  read_file: (r) => "Reading " + (r.summary || "a file"),
+  write_file: (r) => "Writing " + (r.summary || "a file"),
+  edit_file: (r) => "Editing " + (r.summary || "a file"),
+  read_url: (r) => "Reading " + (r.summary || "a page"),
+  web_search: (r) => "Searching the web: " + (r.summary || "…"),
+  read_docs: (r) => "Reading docs: " + (r.summary || "…"),
+  read_skill: (r) => "Reading skill: " + (r.summary || "…"),
+  recall: (r) => "Recalling: " + (r.summary || "…"),
+  remember: (r) => "Saving to memory: " + (r.summary || "…"),
+  create_tool: () => "Creating a tool",
+  import_skill: (r) => "Importing skill: " + (r.summary || "…"),
+};
+
+function toolStatusLine(r) {
+  const build = TOOL_STATUS[r.name];
+  if (build) return build(r);
+  return "Running " + r.name + (r.summary ? ": " + r.summary : "");
+}
+
+function traceStatusLine(t) {
+  if (t.stopping) return "Stopping…";
+  if (t.waitingApproval) return "Waiting for approval…";
+  if (t.answering) return "Answering…";
+  if (t.running.length) {
+    // Model words describe the whole turn; without them, name the newest
+    // in-flight tool (read-only tools run in parallel — count the rest).
+    const words = t.turnSay || t.turnGist;
+    const line = words || toolStatusLine(t.running[t.running.length - 1]);
+    const more = t.running.length - 1;
+    return more > 0 ? `${line} · +${more} more` : line;
+  }
+  if (t.liveGist) return "Thinking: " + t.liveGist;
+  if (t.thinkingRow) return "Thinking…";
+  if (t.turnSay || t.turnGist) return t.turnSay || t.turnGist;
+  return "Working…";
+}
+// [TRACE-STATUS-END]
+
 function updateTraceHead(t) {
   const title = t.el.querySelector(".trace-title");
   const sub = t.el.querySelector(".trace-sub");
   const tokens = t.el.querySelector(".trace-tokens");
   const live = t.el.classList.contains("live");
   if (live) {
-    title.textContent = "Working…";
+    title.textContent = traceStatusLine(t);
     const elapsed = Math.floor((Date.now() - t.startedAt) / 1000);
     sub.textContent = `step ${t.started} · ${mmss(elapsed)}`;
     if (t.activeStartedAt) {
@@ -4353,6 +4441,10 @@ function onApprovalRequest(event) {
     currentTrace.el.classList.remove("open");
     currentTrace.autoCollapsed = true;
   }
+  if (currentTrace) {
+    currentTrace.waitingApproval = true;
+    updateTraceHead(currentTrace);
+  }
   const card = document.createElement("div");
   card.className = "card";
   card.dataset.id = event.id;
@@ -5102,10 +5194,14 @@ function onApprovalResolved(event) {
   cards.delete(event.id);
   // Once nothing is left to decide, restore the timeline we auto-collapsed for
   // the card (#65) — but only if the user hasn't taken over its open state.
-  if (pendingCards === 0 && currentTrace && currentTrace.autoCollapsed) {
-    currentTrace.el.classList.add("open");
-    currentTrace.autoCollapsed = false;
-    pinTrace(currentTrace);
+  if (pendingCards === 0 && currentTrace) {
+    currentTrace.waitingApproval = false;
+    updateTraceHead(currentTrace);
+    if (currentTrace.autoCollapsed) {
+      currentTrace.el.classList.add("open");
+      currentTrace.autoCollapsed = false;
+      pinTrace(currentTrace);
+    }
   }
 }
 

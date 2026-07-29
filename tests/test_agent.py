@@ -18,10 +18,16 @@ def tool_call(name: str, **arguments):
     return SimpleNamespace(function=SimpleNamespace(name=name, arguments=arguments))
 
 
-def model_says(content: str = "", tool_calls: list | None = None, tokens: tuple | None = None):
-    response = SimpleNamespace(
-        message=SimpleNamespace(content=content, tool_calls=tool_calls or None)
-    )
+def model_says(
+    content: str = "",
+    tool_calls: list | None = None,
+    tokens: tuple | None = None,
+    thinking: str = "",
+):
+    message = SimpleNamespace(content=content, tool_calls=tool_calls or None)
+    if thinking:
+        message.thinking = thinking
+    response = SimpleNamespace(message=message)
     if tokens:
         response.prompt_eval_count, response.eval_count = tokens
     return response
@@ -3880,3 +3886,72 @@ class TestEgressGate:
         user_agent, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
         user_agent._recall("deploy token", None)
         assert searched == ["deploy token"]
+
+
+class TestThinkingStatus:
+    """The model's own words ride the `thinking` step (#status-header): `say` =
+    preamble alongside tool calls, `gist` = first line of its thinking text."""
+
+    def _thinking_steps(self, responses):
+        steps: list[dict] = []
+        agent, _ = make_agent(responses, step_log=steps.append)
+        agent.run_task("task")
+        return [s for s in steps if s.get("kind") == "thinking"]
+
+    def test_tool_turn_carries_say_and_gist(self):
+        steps = self._thinking_steps(
+            [
+                model_says(
+                    "Checking the config for the port setting. More detail follows.",
+                    tool_calls=[tool_call("run_command", command="true")],
+                    thinking="I should compare both files first.\nLonger musings…",
+                ),
+                model_says("done"),
+            ]
+        )
+        assert steps[0]["say"] == "Checking the config for the port setting."
+        assert steps[0]["gist"] == "I should compare both files first."
+
+    def test_silent_tool_turn_omits_the_keys(self):
+        steps = self._thinking_steps(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="true")]),
+                model_says("done"),
+            ]
+        )
+        assert "say" not in steps[0] and "gist" not in steps[0]
+
+    def test_snippets_are_capped(self):
+        import aish.agent as agent_module
+
+        long = "word " * 60  # one line, no sentence break, way past the cap
+        steps = self._thinking_steps(
+            [
+                model_says(
+                    long,
+                    tool_calls=[tool_call("run_command", command="true")],
+                    thinking=long,
+                ),
+                model_says("done"),
+            ]
+        )
+        limit = agent_module.STATUS_SNIPPET_CHARS
+        assert len(steps[0]["say"]) <= limit and steps[0]["say"].endswith("…")
+        assert len(steps[0]["gist"]) <= limit
+
+    def test_plain_answer_turn_emits_no_thinking_step(self):
+        steps = self._thinking_steps([model_says("just an answer")])
+        assert steps == []
+
+    def test_status_snippet_shapes(self):
+        import aish.agent as agent_module
+
+        snippet = agent_module._status_snippet
+        assert snippet("First sentence. Second one.") == "First sentence."
+        assert snippet("\n\n  ## A heading line\nrest") == "A heading line"
+        assert snippet("- bullet item\nmore") == "bullet item"
+        assert snippet("") == ""
+        assert snippet("   \n \n") == ""
+        one_line = "x" * 300
+        capped = snippet(one_line)
+        assert len(capped) == agent_module.STATUS_SNIPPET_CHARS and capped.endswith("…")

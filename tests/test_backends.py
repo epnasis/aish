@@ -347,6 +347,32 @@ def test_anthropic_response_normalized_with_raw_blocks():
     assert sent["max_tokens"] == AnthropicBackend.MAX_TOKENS
 
 
+def test_anthropic_thinking_blocks_populate_thinking():
+    response = SimpleNamespace(
+        content=[
+            _anthropic_block(type="thinking", thinking="Comparing the two configs.", signature="S"),
+            _anthropic_block(type="text", text="ok"),
+        ],
+        stop_reason="end_turn",
+        usage=None,
+    )
+    backend = AnthropicBackend(FakeAnthropicClient(response))
+    result = backend(model="m", messages=[{"role": "user", "content": "u"}], tools=[])
+    assert result.message.thinking == "Comparing the two configs."
+    assert result.message.content == "ok"
+
+
+def test_anthropic_response_without_thinking_has_empty_thinking():
+    response = SimpleNamespace(
+        content=[_anthropic_block(type="text", text="hi")],
+        stop_reason="end_turn",
+        usage=None,
+    )
+    backend = AnthropicBackend(FakeAnthropicClient(response))
+    result = backend(model="m", messages=[{"role": "user", "content": "u"}], tools=[])
+    assert result.message.thinking == ""
+
+
 def test_stream_yields_text_then_final_tool_calls_and_usage():
     frag1 = SimpleNamespace(
         index=0, function=SimpleNamespace(name="run_command", arguments='{"comm')
