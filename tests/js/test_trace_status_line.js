@@ -56,10 +56,10 @@ check("a live thinking row says Thinking…", () => {
   assert.strictEqual(line({ thinkingRow: {} }), "Thinking…");
 });
 
-check("streaming thinking gist wins over the bare Thinking…", () => {
+check("streaming thinking gist wins over the bare Thinking… — no label", () => {
   assert.strictEqual(
     line({ thinkingRow: {}, liveGist: "comparing the two configs" }),
-    "Thinking: comparing the two configs"
+    "comparing the two configs"
   );
 });
 
@@ -77,7 +77,7 @@ check("known tools get human phrasing from their summary", () => {
   );
   assert.strictEqual(
     line({ running: [{ name: "web_search", summary: "ollama thinking api", command: "" }] }),
-    "Searching the web: ollama thinking api"
+    "Searching: ollama thinking api"
   );
 });
 

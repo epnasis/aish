@@ -2623,7 +2623,7 @@ const TOOL_STATUS = {
   write_file: (r) => "Writing " + (r.summary || "a file"),
   edit_file: (r) => "Editing " + (r.summary || "a file"),
   read_url: (r) => "Reading " + (r.summary || "a page"),
-  web_search: (r) => "Searching the web: " + (r.summary || "…"),
+  web_search: (r) => "Searching: " + (r.summary || "…"),
   read_docs: (r) => "Reading docs: " + (r.summary || "…"),
   read_skill: (r) => "Reading skill: " + (r.summary || "…"),
   recall: (r) => "Recalling: " + (r.summary || "…"),
@@ -2650,7 +2650,9 @@ function traceStatusLine(t) {
     const more = t.running.length - 1;
     return more > 0 ? `${line} · +${more} more` : line;
   }
-  if (t.liveGist) return "Thinking: " + t.liveGist;
+  // The gist IS the status — no "Thinking:" label; the purple spinner and
+  // the timeline row already say what phase this is.
+  if (t.liveGist) return t.liveGist;
   if (t.thinkingRow) return "Thinking…";
   if (t.turnSay || t.turnGist) return t.turnSay || t.turnGist;
   return "Working…";

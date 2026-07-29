@@ -1934,15 +1934,15 @@ body.awaiting-approval .trace.live {
 .trace-status svg { display: block; }
 .trace-headtext { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .trace-title { font-size: 16.1px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* While live, the title is the status one-liner (a search query, the model's
-   own words) — the point is to READ it, so wrap up to two lines instead of
-   cutting most of the sentence on a phone. Finished stays single-line. */
+/* While live, the title is the status line (a search query, the model's
+   own words) — the point is to READ it, so wrap up to three lines instead of
+   cutting the sentence on a phone. Finished stays single-line. */
 .trace.live .trace-title {
   white-space: normal;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
-  line-clamp: 2;
+  line-clamp: 3;
   overflow-wrap: anywhere;
 }
 .trace-sub { font-size: 13.8px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
