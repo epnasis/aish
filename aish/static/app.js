@@ -941,10 +941,11 @@ let sawAnswer = false; // any tokens streamed since the task started —
 let answerStableLen = 0; // chars of answerText already in stable DOM
 let answerStableNodes = 0; // answerEl children that are stable
 let answerRenderQueued = false;
-// This turn's answer was thrown away mid-stream by a replay (see resetLiveTurn).
-// Rides with sawAnswer's turn boundaries — set only by the owner below, cleared
-// where a turn genuinely ends (`done`) or a genuinely new one starts (a LIVE
-// `user` event; a replayed one is the rebuild of the abandoned turn itself).
+// This turn's answer was thrown away mid-stream by a replay (see resetLiveTurn):
+// stale LIVE tokens for it are dropped, replayed ones re-open it. Rides with
+// sawAnswer's turn boundaries — set only by the owner below, cleared by
+// authoritative replayed content, by `done`, and by a LIVE `user` event (a
+// replayed one is the rebuild of the abandoned turn itself, not a new one).
 let answerAbandoned = false;
 const cards = new Map(); // approval id -> card element
 
@@ -970,10 +971,13 @@ function resetLiveTurn(landing) {
   // A turn was streaming when this replay landed. The bubble goes with the DOM
   // that is about to be replaced, and the tail of the stream would paint a
   // TRUNCATED answer into a fresh one — and, by setting sawAnswer, suppress the
-  // `done` render that carries the whole text. So abandon the answer outright:
-  // onToken drops the tail and `done` renders the authoritative result once.
-  // The failure mode is "no live streaming for the rest of this turn", never a
-  // duplicated or half-written answer.
+  // `done` render that carries the whole text. So abandon the answer: onToken
+  // drops the stale LIVE tail, while REPLAYED tokens (this same replay usually
+  // carries the partial answer — the server's transcript records them) are
+  // authoritative and re-open the turn, rebuilding the bubble the live tail then
+  // continues into. Worst case — a replay with no token for this turn — the
+  // failure mode is "no live streaming until `done`", never a duplicated or
+  // half-written answer.
   if (answerEl) answerAbandoned = true;
   answerEl = null;
   answerText = "";
@@ -1488,11 +1492,24 @@ function collapseTimelineForAnswering(t) {
 // [ANSWERING-COLLAPSE-END]
 
 function onToken(text) {
-  // A replay replaced the transcript while this turn was streaming, so the bubble
-  // the earlier tokens went into is gone (see resetLiveTurn). Rendering the tail
-  // alone would show a truncated answer AND suppress the `done` render that
-  // carries the whole text — drop it; the answer lands once, complete.
-  if (answerAbandoned) return;
+  // A replay replaced the transcript while this turn was streaming (see
+  // resetLiveTurn). The rule: abandon drops the STALE LIVE tail, but REPLAYED
+  // content is authoritative and re-opens the turn.
+  //
+  // The distinction is load-bearing, not a nicety. The server's hot transcript
+  // records tokens (merging consecutive ones), so the ordinary same-session
+  // reconnect — a phone unlock during a long answer — replays the partial answer
+  // as a `token` event, and the loop thread makes that snapshot contiguous with
+  // the live tail that follows. Rebuilding from it restores the bubble exactly;
+  // dropping it would blank the answer until `done`, which for a long task is
+  // minutes of missing content on the most common recovery path there is.
+  // A live token is the other case: its bubble is gone, so painting it alone
+  // would show a truncated answer AND (via sawAnswer) suppress the `done` render
+  // that carries the whole text.
+  if (answerAbandoned) {
+    if (!replaying) return;
+    answerAbandoned = false;
+  }
   sawAnswer = true;
   // [ANSWER-OPEN-START]
   if (!answerEl) {

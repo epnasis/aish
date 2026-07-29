@@ -57,7 +57,7 @@ function turnWorld() {
       highlightFences() {},
       attachAnswerTools() {},
       anchorAnswer() {},
-      renderAnswerFrame() {},
+      renderAnswerFrame() {}, // replaced below, once renderAnswerNow's stub exists
       collapseTimelineForAnswering() {},
       stopSpeaking() {},
       maybeSpeakReply() {},
@@ -102,6 +102,8 @@ function turnWorld() {
   s.renderAnswerNow = () => {
     if (s.answerEl) s.answerEl.children = [{ md: s.answerText }];
   };
+  // The real frame callback, minus the scroll anchoring.
+  s.renderAnswerFrame = () => { s.answerRenderQueued = false; s.renderAnswerNow(); };
   s.setBusy = (busy) => { s.clientBusy = Boolean(busy); };
   s.currentSession = "a.jsonl";
 
@@ -112,44 +114,83 @@ function turnWorld() {
   w.startTurn = () => w.deliver({ type: "user", text: "the question" });
   w.stream = (chunks) => { for (const c of chunks) w.deliver({ type: "token", text: c }); return w; };
   w.finish = () => w.deliver({ type: "done", result: ANSWER });
-  // A replay of the transcript as the server has it: the question, nothing else
-  // (the answer is still streaming, so it is not in the log yet).
-  w.replayEvent = () => ({ type: "replay", events: [{ type: "user", text: "the question" }] });
+  // What is actually ON SCREEN: streaming paints on the next frame, and the
+  // hostile world runs none until asked.
+  w.painted = () => { w.drainFrames(); return w.answerTexts(); };
+  // The session's transcript as the SERVER holds it mid-stream. Bridge._put
+  // records token events (merging consecutive ones), so a reconnect during a
+  // streaming answer replays the partial answer — and the loop thread makes that
+  // snapshot contiguous with the live tail that follows it.
+  w.replayEvent = (streamedSoFar = "") => ({
+    type: "replay",
+    events: [
+      { type: "user", text: "the question" },
+      ...(streamedSoFar ? [{ type: "token", text: streamedSoFar }] : []),
+    ],
+  });
   return w;
 }
 
-// ---- 1. A replay lands mid-stream, same session ---------------------------
-// The reconnect/resume case: the socket re-sends the transcript while tokens are
-// still arriving. The bubble those first tokens went into is destroyed with the
-// old DOM, so the tail must NOT be painted on its own — `done` carries the whole
-// answer and is the one that renders it.
+// ---- 1. The reconnect: a replay lands mid-stream, same session ------------
+// The phone-unlock case, and by far the most common one: the socket re-sends the
+// transcript while tokens are still arriving. That transcript CONTAINS the
+// partial answer, so the answer must be back on screen immediately — waiting for
+// `done` would blank a long answer for minutes — and the live tail must continue
+// into the same bubble rather than starting a second one.
 {
   const w = turnWorld();
+  const partial = CHUNKS.slice(0, 2).join("");
   w.startTurn();
   w.stream(CHUNKS.slice(0, 2));
   ok("a bubble is streaming before the replay", w.answers().length === 1);
 
-  w.deliver(w.replayEvent());
-  ok("the replay rebuilt the transcript (no answer bubble left)", w.answers().length === 0);
+  w.deliver(w.replayEvent(partial));
+  ok("the partial answer is back on screen at once, not held until done",
+    w.answers().length === 1 && w.painted()[0] === partial);
 
-  w.stream(CHUNKS.slice(2)); // the tail of the same answer keeps arriving
-  ok("the tail alone paints no half-written bubble", w.answers().length === 0);
+  w.stream(CHUNKS.slice(2)); // the tail is contiguous with the snapshot
+  ok("the live tail continues into the SAME bubble",
+    w.answers().length === 1 && w.painted()[0] === ANSWER);
 
   w.finish();
   ok("exactly one answer bubble for the turn", w.answers().length === 1);
-  ok("…and it holds the COMPLETE answer, not the tail",
-    w.answerTexts()[0] === ANSWER);
+  ok("…holding the complete answer, rendered once", w.answerTexts()[0] === ANSWER);
+}
+
+// ---- 1b. …and when the replay carries no token for this turn -------------
+// The honest boundary of the guarantee. If the snapshot has nothing to rebuild
+// the bubble from, the stale live tail stays dropped — painting it alone would
+// show a truncated answer AND suppress the `done` render that carries the whole
+// text. The cost is no live streaming until `done`; the content is never wrong.
+{
+  const w = turnWorld();
+  w.startTurn();
+  w.stream(CHUNKS.slice(0, 2));
+
+  w.deliver(w.replayEvent()); // a transcript with the question only
+  ok("nothing to rebuild from leaves no bubble", w.answers().length === 0);
+  w.stream(CHUNKS.slice(2));
+  ok("the stale tail alone paints no half-written bubble", w.answers().length === 0);
+
+  w.finish();
+  ok("done still lands exactly one bubble", w.answers().length === 1);
+  ok("…with the COMPLETE answer, not the tail", w.answerTexts()[0] === ANSWER);
 }
 
 // ---- 2. …and at every position in the stream ------------------------------
-// Where a reconnect falls among the tokens is the network's choice. The property
-// must hold for all of them, including "after the last token, before done".
+// Where a reconnect falls among the tokens is the network's choice, and the
+// server's transcript at that moment holds exactly the tokens sent so far. The
+// property must hold for all of them, including "after the last token, before
+// done", and the intermediate state must never be emptier than the transcript.
 {
   for (let at = 0; at <= CHUNKS.length; at += 1) {
     const w = turnWorld();
+    const sent = CHUNKS.slice(0, at).join("");
     w.startTurn();
     w.stream(CHUNKS.slice(0, at));
-    w.deliver(w.replayEvent());
+    w.deliver(w.replayEvent(sent));
+    ok(`replay after ${at} token(s): what was streamed is on screen`,
+      w.painted().join("") === sent);
     w.stream(CHUNKS.slice(at));
     w.finish();
     ok(`replay after ${at} token(s): one bubble, complete text`,
@@ -172,7 +213,7 @@ function turnWorld() {
 
   // The reconnect re-replay: same fingerprint as the paint on screen, nothing
   // arrived since (the socket dispatch, not handle(), is what marks dirty).
-  const event = w.replayEvent();
+  const event = w.replayEvent(CHUNKS.slice(0, 2).join(""));
   s.viewFp = s.replayFp(event);
   s.viewDirty = false;
   w.deliver(event);
@@ -189,8 +230,13 @@ function turnWorld() {
 
 // ---- 4. A session switch mid-stream ---------------------------------------
 // enterSession moves identity (and resets the fingerprint), then the landing
-// replay repaints. The outgoing turn's leftovers must not paint into the chat
-// you just switched to — neither its tail nor a second copy of its answer.
+// replay repaints. The incoming transcript holds none of the outgoing turn's
+// tokens, so the flag stays armed and A's tail paints nothing into B.
+//
+// That is a guarantee about THIS turn's leftovers, not a session firewall: until
+// the server processes the resume it may still be sending A's events, and most
+// live events carry no session name for the client to filter on. Closing that
+// window needs server-side session stamping (out of scope here).
 {
   const w = turnWorld();
   const s = w.sandbox;
