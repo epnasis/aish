@@ -5862,6 +5862,7 @@ async function openConsole() {
     try { await ensureXterm(); }
     catch { setConsoleStatus("couldn't load the terminal — check your connection"); return; }
     if (!consoleOpen && $("pty-overlay").hidden) return; // closed while loading
+    setConsoleStatus("attaching…"); // emulator ready; don't leave "loading" up
   }
   consoleTerm = new Terminal({
     cursorBlink: true,
