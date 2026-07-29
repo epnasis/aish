@@ -64,3 +64,34 @@ assert.ok(
 );
 
 console.log("test_xterm_lazy.js: all assertions passed");
+
+// ---- the post-load status reset may only clear ITS OWN message ------------
+// Regression: the first console open awaits the lazy xterm load, and the
+// server's console_started can land DURING that await and set the real label.
+// The reset then blindly restored "attaching…", clobbering it — and since
+// console_started fires once per open, nothing replaced it again, so a stale
+// "attaching…" sat over a fully working terminal. Only ever visible on the
+// first open of a page load (afterwards ensureXterm is memoized, so there is
+// no await and no race).
+{
+  const fs2 = require("fs");
+  const path2 = require("path");
+  const assert2 = require("assert");
+  const app = fs2.readFileSync(
+    path2.join(__dirname, "..", "..", "aish", "static", "app.js"), "utf8");
+
+  assert2(
+    /const CONSOLE_LOADING = "loading terminal…";/.test(app),
+    "the loading text must be a named constant so the reset can compare against it",
+  );
+  assert2(
+    /if \(\$\("pty-status"\)\.textContent === CONSOLE_LOADING\) setConsoleStatus\("attaching…"\);/
+      .test(app),
+    "the post-load reset must be guarded on the loading text still being shown",
+  );
+  assert2(
+    !/^\s*setConsoleStatus\("attaching…"\); \/\/ emulator ready/m.test(app),
+    "the unguarded post-load reset must not come back",
+  );
+  console.log("ok - post-load status reset only clears its own message");
+}

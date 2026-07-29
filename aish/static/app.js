@@ -5573,6 +5573,11 @@ const CATPPUCCIN_MOCHA = {
   brightCyan: "#94e2d5", brightWhite: "#a6adc8",
 };
 
+// The one-time xterm load's own status text. Named because the post-load reset
+// has to compare against it: it may only clear ITS OWN message, never one the
+// server has since replaced it with.
+const CONSOLE_LOADING = "loading terminal…";
+
 function setConsoleStatus(text, exited) {
   const el = $("pty-status");
   el.textContent = text || "";
@@ -5858,11 +5863,19 @@ async function openConsole() {
   // reopen resolves instantly. If it fails (offline mid-open), surface it and
   // leave the overlay recoverable rather than throwing into a half-open state.
   if (!window.Terminal || !window.FitAddon) {
-    setConsoleStatus("loading terminal…");
+    setConsoleStatus(CONSOLE_LOADING);
     try { await ensureXterm(); }
     catch { setConsoleStatus("couldn't load the terminal — check your connection"); return; }
     if (!consoleOpen && $("pty-overlay").hidden) return; // closed while loading
-    setConsoleStatus("attaching…"); // emulator ready; don't leave "loading" up
+    // Clear OUR loading text — but only if it is still what's on screen. The
+    // server's console_started can land during the await above and set the real
+    // label; blindly restoring "attaching…" here overwrote it, and since
+    // console_started only fires once per open, nothing ever replaced it again.
+    // The stale label then sat over a fully working terminal until the console
+    // was closed and reopened (by which point ensureXterm is memoized, there is
+    // no await, and the race cannot happen — which is why it only ever showed on
+    // the first open of a page load).
+    if ($("pty-status").textContent === CONSOLE_LOADING) setConsoleStatus("attaching…");
   }
   consoleTerm = new Terminal({
     cursorBlink: true,
