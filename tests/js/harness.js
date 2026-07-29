@@ -17,7 +17,10 @@
 //     style, because "the DOM lies" (clearing an inline transform only starts a
 //     transition, which a hidden page never runs) was itself one of the bugs;
 //   - FakeWebSocket can go zombie: readyState OPEN, delivering nothing, its
-//     close() observably doing nothing — the failure no event announces.
+//     close() observably doing nothing — the failure no event announces;
+//   - sessionWorld() layers on what session identity needs: a URL really
+//     rewritten by replaceState, a localStorage that can refuse to write
+//     (private mode), and a recorder for every collaborator a hello touches.
 //
 // It is deliberately NOT retrofitted onto the existing tests: they are pins, and
 // rewriting 30 files to share plumbing risks weakening them for zero coverage.
@@ -48,14 +51,17 @@ function extract(src, start, end) {
   return src.slice(from, to);
 }
 
-/** A vm context surfaces top-level `var` as sandbox properties, but not
- *  function declarations or const/let. Rewrite the top-level (column-zero)
- *  declarations so the extracted code is reachable from the test — the code
- *  itself is untouched, so what runs is still what ships. */
+/** A vm context surfaces top-level `var` and function declarations as sandbox
+ *  properties, but NOT const/let (they land in the context's lexical scope,
+ *  invisible to the test). Rewrite those column-zero declarations so extracted
+ *  code is reachable — the code itself is untouched, so what runs is what ships.
+ *
+ *  Function declarations are deliberately left ALONE: rewriting them to
+ *  `var f = function f` both loses hoisting and turns any `}` followed by an
+ *  IIFE into a call on the assignment (`var f = function(){}(function g(){})()`
+ *  — how loading the deck block first failed). */
 function surface(code) {
-  return code
-    .replace(/(^|\n)function (\w+)/g, "$1var $2 = function $2")
-    .replace(/(^|\n)(?:const|let) /g, "$1var ");
+  return code.replace(/(^|\n)(?:const|let) /g, "$1var ");
 }
 
 // ---- fake DOM -------------------------------------------------------------
@@ -336,6 +342,138 @@ function hostileWorld({ visible = false, width = 1100, globals = {} } = {}) {
   return world;
 }
 
+// ---- the session world ----------------------------------------------------
+
+/** A localStorage that can REFUSE to write. Private mode is not an exotic
+ *  environment — it is the one where an unguarded setItem turns a transition
+ *  into a half-finished one, so it has to be a lever, not a footnote. */
+function fakeStorage({ throws = false } = {}) {
+  const map = new Map();
+  return {
+    map,
+    throwOnSet: throws,
+    getItem(key) { return map.has(key) ? map.get(key) : null; },
+    setItem(key, value) {
+      if (this.throwOnSet) throw new Error("QuotaExceededError (private mode)");
+      map.set(key, String(value));
+    },
+    removeItem(key) { map.delete(key); },
+  };
+}
+
+/**
+ * The wider world session identity needs: a URL that really is rewritten by
+ * history.replaceState, a storage that can throw, an element per id, and a
+ * recorder for every collaborator a hello touches.
+ *
+ *   sessionWorld({ visible, storageThrows, globals })
+ *
+ * [SESSION-ENTER] is loaded for you (it is the owner under test in every
+ * scenario); load whatever else a scenario drives — onHello, commitPage,
+ * offlineFirstPaint, the deck — with `w.load(...)`, and pass real
+ * implementations through `globals` where a recorder would hide the answer.
+ * Anything loaded later shadows a recorder of the same name, which is how a
+ * scenario opts into the REAL ensureCurrentInDeck.
+ */
+function sessionWorld({ visible = true, storageThrows = false, globals = {} } = {}) {
+  const calls = [];
+  const seen = { title: undefined, replays: [], busy: null, booted: false };
+  const storage = fakeStorage({ throws: storageThrows });
+  const elements = new Map();
+  let current = new URL("https://aish.test/");
+
+  const spy = (name, fn) => (...args) => {
+    calls.push({ name, args });
+    return fn ? fn(...args) : undefined;
+  };
+  const $ = (id) => {
+    if (!elements.has(id)) elements.set(id, fakeElement("div"));
+    return elements.get(id);
+  };
+
+  const location_ = {
+    get href() { return current.href; },
+    get search() { return current.search; },
+    get hash() { return current.hash; },
+    get pathname() { return current.pathname; },
+    protocol: "https:",
+    host: "aish.test",
+  };
+  const history_ = {
+    replaceState(_state, _title, next) { current = new URL(next, current); },
+  };
+
+  const w = hostileWorld({
+    visible,
+    globals: {
+      URL,
+      URLSearchParams,
+      localStorage: storage,
+      location: location_,
+      history: history_,
+      $,
+      publicSession: (name) => (name || "").replace(/\.jsonl$/, ""),
+      storeSession: (id) => (!id || id.endsWith(".jsonl") ? id : `${id}.jsonl`),
+      // view-cache state the owner reads and writes
+      viewFp: "",
+      viewDirty: true,
+      offlineViewing: false,
+      serverPainted: false,
+      pendingCards: 0,
+      clientBusy: false,
+      renderedAnswers: 0,
+      // app state a hello walks over
+      pagerSessions: [],
+      cmdHistory: [],
+      currentLogPath: "",
+      taskErrored: false,
+      consoleOpen: false,
+      offlineMode: false,
+      swipeInFrom: 0,
+      PAGE_REV: "rev1",
+      FIRST_PAINT_GRACE_MS: 250,
+      // collaborators: recorded, so a scenario can assert that the rest of a
+      // transition still happened after the interesting step failed
+      stashCurrentView: spy("stashCurrentView"),
+      setTitle: spy("setTitle", (text) => { seen.title = text; }),
+      offlineTouch: spy("offlineTouch"),
+      refreshOfflinePinUi: spy("refreshOfflinePinUi"),
+      onReplay: spy("onReplay", (event) => { seen.replays.push(event); }),
+      hideBootLoader: spy("hideBootLoader", () => { seen.booted = true; }),
+      setBusy: spy("setBusy", (busy) => { seen.busy = busy; }),
+      setStatus: spy("setStatus"),
+      setRolePill: spy("setRolePill"),
+      updateEmptyHint: spy("updateEmptyHint"),
+      renderWorkspace: spy("renderWorkspace"),
+      schedulePeeks: spy("schedulePeeks"),
+      maybeSeedDeck: spy("maybeSeedDeck"),
+      ensureCurrentInDeck: spy("ensureCurrentInDeck"),
+      reconcileDeck: spy("reconcileDeck"),
+      openConsole: spy("openConsole"),
+      reloadThrottled: spy("reloadThrottled"),
+      showToast: spy("showToast"),
+      send: spy("send", () => true),
+      offlineLoad: spy("offlineLoad", () => Promise.resolve(null)),
+      offlineList: spy("offlineList", () => Promise.resolve([])),
+      freshPrefetch: spy("freshPrefetch", () => null),
+      ...globals,
+    },
+  });
+
+  w.load("// [SESSION-ENTER-START]", "// [SESSION-ENTER-END]");
+
+  w.calls = calls;
+  w.seen = seen;
+  w.storage = storage;
+  w.$ = $;
+  w.called = (name) => calls.filter((c) => c.name === name).length;
+  w.lastCall = (name) => [...calls].reverse().find((c) => c.name === name);
+  w.href = () => current.href;
+  w.urlSession = () => current.searchParams.get("session");
+  w.remembered = () => storage.getItem("aish-session");
+  return w;
+}
+
 // ---- reporting ------------------------------------------------------------
 
 /** The usual counter: `const { ok, report } = checks();` */
@@ -371,8 +509,10 @@ module.exports = {
   surface,
   fakeElement,
   lyingElement,
+  fakeStorage,
   FakeWebSocket,
   hostileWorld,
+  sessionWorld,
   checks,
   expectReached,
 };

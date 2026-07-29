@@ -493,6 +493,51 @@ function offlineSyncSoon(delay = 1500) {
 let offlineViewing = false; // the transcript on screen came from the mirror
 let serverPainted = false;  // an authoritative replay has landed — don't overpaint it
 
+// [SESSION-ENTER-START]
+// "The view is now chat X" has ONE owner, and this is it (#181 phase 2).
+//
+// Four paths reach that transition — a server hello, a mirror read with no
+// socket, the boot paint from IndexedDB, and the speculative paint of a
+// prefetched swipe — and each used to hand-roll its own subset of the same
+// coupled facts. The subsets DIVERGED, which is the defect this fence exists to
+// make impossible: the boot paint never reset the view fingerprint and never
+// remembered where it landed, an unguarded localStorage write mid-hello could
+// abort the whole rest of the hello in private mode (no workspace, no busy
+// state, no boot-loader hide), and during any switch there was a window where
+// the identity, the title, the URL and the DOM each named a different chat.
+//
+// So every coupled write happens HERE, in one fixed total order, on every path:
+//
+//   1. stash the outgoing view — before identity moves, since that DOM belongs
+//      to the chat being left
+//   2. reset the view fingerprint, IFF the name actually changes
+//   3. identity (currentSession)
+//   4. provenance (offlineViewing: is what we are about to paint authoritative)
+//   5. title
+//   6. persistence, GUARDED
+//   7. the URL
+//   8. the mirror's MRU stamp and the offline-pin toggle, which both follow
+//      whatever chat is on screen
+//
+// A caller can no longer FORGET one of these — it can only call the owner. What
+// legitimately differs rides in `opts`: `source` (who is painting, which is
+// what decides whether the paint is authoritative), `title` (omit to leave the
+// header alone), `stash` (only a hello leaves behind a settled view worth
+// keeping).
+//
+// The fingerprint rule is load-bearing in BOTH directions. Reset it on a real
+// change, or a cross-session fingerprint collision could keep the wrong DOM;
+// do NOT reset it when the name is unchanged, because a prefetched swipe moves
+// identity ahead of the hello ON PURPOSE — that later hello then reads as "same
+// session" and its replay lands as a no-op instead of rendering a second time.
+//
+// One deliberate behaviour change came with the consolidation: the boot paint
+// now writes `aish-session` and resets the fingerprint like everyone else. The
+// key follows what is actually on screen — which the URL already did through
+// deepLinkSession, and connect() prefers the URL anyway — so this closes a
+// divergence rather than opening one.
+let currentSession = null;
+
 // The URL always names the viewed session (shareable, and it identifies the
 // log for debugging), alongside the token and any #console hash. replaceState
 // so it doesn't spam browser history.
@@ -509,24 +554,35 @@ function deepLinkSession(name) {
   history.replaceState(null, "", url.pathname + url.search + url.hash);
 }
 
+function enterSession(name, { source = "hello", title, stash = false } = {}) {
+  if (stash) stashCurrentView();
+  // A switch must never let the outgoing chat's fingerprint "noop" the incoming
+  // replay; an unchanged name must never lose the one the prefetch just painted.
+  if (name !== currentSession) { viewFp = ""; viewDirty = true; }
+  currentSession = name;
+  // Only the mirror paints a truncated copy, and only an unstashable view may
+  // come from one — so provenance is a property of the SOURCE, not a flag each
+  // path remembers to set (the boot paint never did, so its DOM was stashable
+  // and reusable as if it had come off the socket).
+  offlineViewing = source === "mirror" || source === "boot";
+  if (title !== undefined) setTitle(title);
+  try {
+    localStorage.setItem("aish-session", name); // where a reconnect returns
+  } catch { /* private mode: the chat is entered, just not remembered */ }
+  deepLinkSession(name);
+  offlineTouch(name);    // MRU input to the mirror's eviction order
+  refreshOfflinePinUi(); // the toggle belongs to the chat now on screen
+}
+// [SESSION-ENTER-END]
+
 async function openCachedSession(name) {
   const cached = await offlineLoad(name);
   if (!cached) {
     showToast("that chat isn't available offline");
     return false;
   }
-  offlineViewing = true;
-  currentSession = name;
-  // A switch with no hello resets the fingerprint itself (same rule as the
-  // prefetch paint): the previous chat's fp must never "noop" this replay.
-  viewFp = "";
-  viewDirty = true;
-  setTitle(cached.meta.title || "aish");
-  try { localStorage.setItem("aish-session", name); } catch { /* private mode */ }
-  deepLinkSession(name); // so the reconnect lands on the chat being read
+  enterSession(name, { source: "mirror", title: cached.meta.title || "aish" });
   onReplay({ events: cached.events, truncated: false });
-  offlineTouch(name);
-  refreshOfflinePinUi();
   return true;
 }
 
@@ -568,11 +624,9 @@ async function offlineFirstPaint() {
     // which is the case the mirror exists for.
     await new Promise((resolve) => setTimeout(resolve, FIRST_PAINT_GRACE_MS));
     if (serverPainted) return;
-    currentSession = cached.meta.name;
-    setTitle(cached.meta.title || "aish");
-    refreshOfflinePinUi();
-    // Anchor the pager (and any reconnect) to what is actually on screen.
-    deepLinkSession(cached.meta.name);
+    // The owner anchors the pager, the reconnect and the mirror's bookkeeping
+    // to what is actually on screen — this path used to do only half of it.
+    enterSession(cached.meta.name, { source: "boot", title: cached.meta.title || "aish" });
     onReplay({ events: cached.events, truncated: false });
     hideBootLoader(); // the mirror painted before the socket — drop the spinner now
   } catch { /* no mirror yet — the socket will fill the page in */ }
@@ -1238,16 +1292,6 @@ function onHello(event) {
   // Server code changed since this page was built (or the page predates rev
   // stamping entirely) — reload; the replay mechanism restores the view.
   if (event.rev && event.rev !== PAGE_REV) { reloadThrottled("rev"); return; }
-  // The DOM about to be replaced belongs to the chat we are leaving — stash it
-  // (if clean) before this hello repoints currentSession/offlineViewing.
-  stashCurrentView();
-  // viewFp describes the view of the chat we are LEAVING; on a real switch it
-  // must not survive, or a (however unlikely) cross-session fingerprint match
-  // could keep the wrong DOM via the "noop" landing. A prefetched swipe set
-  // currentSession before this hello, so it reads as "same session" and keeps
-  // the fingerprint of the content it painted — exactly right.
-  if (event.session !== currentSession) { viewFp = ""; viewDirty = true; }
-  offlineViewing = false; // a live hello supersedes anything read from the mirror
   // The interactive console is GLOBAL (#148 follow-up): it floats above whatever
   // chat is shown and is untouched by a session switch. A hello also means a
   // (re)connect. `#console` is a deep-link that survives a reload / server
@@ -1256,10 +1300,17 @@ function onHello(event) {
   if (consoleOpen) send({ type: "console_open" });
   else if (location.hash === "#console") openConsole();
   $("model-name").textContent = event.model;
-  setTitle(event.title);
   pagerSessions = event.pager || [];
   cmdHistory = event.cmd_history || []; // personal command palette (#104)
-  currentSession = event.session;
+  // Identity and everything coupled to it — the stash of the view we are
+  // leaving, the fingerprint, the title, the remembered session, the URL, the
+  // mirror's bookkeeping — belong to [SESSION-ENTER]. Below this line are the
+  // things only a HELLO knows: the deck, the workspace, the busy/role state.
+  enterSession(event.session, {
+    source: "hello",
+    title: event.title || "",
+    stash: true, // the DOM on screen still belongs to the chat being left
+  });
   // Seed on CONNECT, from the pager the hello already carries. Seeding used to
   // happen only when a session_list arrived, i.e. only if you opened the Sessions
   // drawer — so a fresh launch had a deck holding nothing but the chat on screen,
@@ -1269,11 +1320,7 @@ function onHello(event) {
   maybeSeedDeck(pagerSessions);
   ensureCurrentInDeck(event); // the chat now on screen joins/stays in the working set (#169)
   reconcileDeck(); // and members deleted while this device was away are pruned
-  offlineTouch(event.session); // MRU input to the mirror's eviction order
-  refreshOfflinePinUi();       // the toggle belongs to the chat now on screen
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
-  localStorage.setItem("aish-session", event.session); // reconnects return here
-  deepLinkSession(event.session);
   renderWorkspace(event);
   taskErrored = false; // fresh connected view — clear any stale red
   setBusy(event.busy);
@@ -3880,7 +3927,7 @@ function forkChip(ordinal) {
   btn.appendChild(forkIcon());
   btn.onclick = () => {
     if (clientBusy) { showToast("can't fork while working"); return; }
-    pendingForkParent = currentSession; // the child inserts right of this parent (#169)
+    noteForkIntent(); // the child inserts right of this parent (#169)
     send({ type: "fork", after: ordinal });
   };
   return btn;
@@ -5348,7 +5395,7 @@ function handleSlash(text) {
     case "/resume": case "/delete": openSessionsSheet(arg); return true;
     case "/new": case "/clear": return send({ type: "new" });
     case "/fork": case "/branch":
-      pendingForkParent = currentSession; // child inserts right of parent (#169)
+      noteForkIntent(); // child inserts right of parent (#169)
       return send({ type: "fork" });
     case "/cd": return arg ? send({ type: "cd", path: arg }) : (openDirSheet(), true);
     case "/add-dir": case "/dir-add":
@@ -7342,7 +7389,8 @@ function toggleWrap() {
 // left to Safari's back/forward gesture, and pans starting inside
 // horizontally scrollable output stay scrolls.
 let pagerSessions = []; // [{name, title}] oldest→newest, from hello
-let currentSession = null;
+// `currentSession` lives with its owner, [SESSION-ENTER] — the pager reads it,
+// it does not define it.
 let currentLogPath = ""; // absolute JSONL log path for this session, from hello (#146)
 let swipeInFrom = 0; // set on commit; onReplay animates the new page in
 // A claim protocol in miniature. When the horizontal pager decides what a touch
@@ -7667,7 +7715,35 @@ let deckSeeded = false;
 // an empty deck is a choice and not staleness.
 let deckCurated = false;
 let lastActiveAt = Date.now();
-let pendingForkParent = null; // set when a fork is sent; the child inserts right of it
+
+// A fork is a PROMISE about a session that does not exist yet: "the next chat
+// I have never seen before is the child of this one, put it right of its
+// parent". Like every promise in this client it carries a deadline, because the
+// event it waits for may never arrive — and it must not be cancelled by an
+// event that isn't the one it is waiting for. Clearing it on EVERY hello did
+// exactly that: a reconnect (or any other chat's hello) racing the child's
+// hello silently threw the anchor away and the fork landed at the far right.
+// So it is recorded with a timestamp, consumed only by the adoption it was made
+// for, and otherwise simply expires.
+const FORK_INTENT_MS = 15 * 1000;
+let pendingForkParent = null; // {name, at} while a fork is in flight
+
+// Called at the fork send-sites: whatever chat you forked FROM is the parent.
+function noteForkIntent() {
+  pendingForkParent = { name: currentSession, at: Date.now() };
+}
+
+// The still-valid parent, or null. Expired or no-longer-a-member intents are
+// dropped here rather than by a timer — nothing needs to happen ON expiry, it
+// just stops being true.
+function forkParent(now) {
+  if (!pendingForkParent) return null;
+  if (now - pendingForkParent.at > FORK_INTENT_MS) {
+    pendingForkParent = null;
+    return null;
+  }
+  return deckIndexOf(deck, pendingForkParent.name) >= 0 ? pendingForkParent.name : null;
+}
 
 function loadDeck() {
   try {
@@ -7739,14 +7815,14 @@ function ensureCurrentInDeck(event) {
   const name = event.session;
   if (!name) return;
   if (deckIndexOf(deck, name) >= 0) {
+    // An existing member is never a fork child, so a pending intent survives
+    // this hello — it is waiting for a session it has not seen before.
     deck = touchDeck(deck, name, now);
   } else {
     const member = { name, ts: now, title: event.title || name, origin: deckOriginFor(name, event) };
-    const parent = pendingForkParent && deckIndexOf(deck, pendingForkParent) >= 0
-      ? pendingForkParent : null;
-    deck = addToDeck(deck, member, parent);
+    deck = addToDeck(deck, member, forkParent(now));
+    pendingForkParent = null; // consumed by the adoption it was recorded for
   }
-  pendingForkParent = null;
   saveDeck();
 }
 
@@ -7981,13 +8057,13 @@ function commitPage(direction, target, width) {
   if (!target.fresh) {
     const pre = freshPrefetch(target.name);
     if (pre) {
-      currentSession = target.name;
-      // A switch with no hello must reset the fingerprint itself, or the OLD
-      // chat's fp could collide with the prefetched one and "noop" the wrong
-      // DOM onto the new chat's name.
-      viewFp = "";
-      viewDirty = true;
-      if (target.title) setTitle(target.title);
+      // Identity moves BEFORE the hello here — that is the whole trick, and
+      // [SESSION-ENTER] preserves it: the hello that follows reads as "same
+      // session", so it keeps this paint's fingerprint and its replay no-ops.
+      enterSession(target.name, {
+        source: "prefetch",
+        title: target.title || undefined, // an untitled page keeps the header
+      });
       onReplay({ events: pre.events, truncated: pre.truncated });
     }
   }
