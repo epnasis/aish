@@ -1935,7 +1935,6 @@ body.awaiting-approval .trace.live {
 .trace-headtext { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .trace-title { font-size: 16.1px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trace-sub { font-size: 13.8px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.trace-tokens { font-family: var(--mono); font-size: 12.7px; color: var(--dim); flex: none; }
 .trace-chev { width: 16px; height: 16px; flex: none; color: var(--dim); transition: transform 0.2s; }
 .trace.open .trace-chev { transform: rotate(180deg); }
 .trace-body { display: none; padding: 2px 13px 12px; border-top: 0.5px solid var(--sep); }

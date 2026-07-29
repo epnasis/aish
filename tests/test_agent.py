@@ -3950,6 +3950,8 @@ class TestThinkingStatus:
         assert snippet("First sentence. Second one.") == "First sentence."
         assert snippet("\n\n  ## A heading line\nrest") == "A heading line"
         assert snippet("- bullet item\nmore") == "bullet item"
+        # Gemini thought summaries open with a bold heading — both ends strip.
+        assert snippet("**Defining the Cause**\nrest") == "Defining the Cause"
         assert snippet("") == ""
         assert snippet("   \n \n") == ""
         one_line = "x" * 300

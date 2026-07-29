@@ -1878,7 +1878,6 @@ function ensureTrace() {
     `<span class="trace-status">${SPINNER}</span>` +
     `<span class="trace-headtext"><span class="trace-title">Working…</span>` +
     `<span class="trace-sub"></span></span>` +
-    `<span class="trace-tokens"></span>` +
     `<button type="button" class="trace-stop"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>Stop</button>` +
     `<svg class="trace-chev" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const body = document.createElement("div");
@@ -2661,24 +2660,28 @@ function traceStatusLine(t) {
 function updateTraceHead(t) {
   const title = t.el.querySelector(".trace-title");
   const sub = t.el.querySelector(".trace-sub");
-  const tokens = t.el.querySelector(".trace-tokens");
   const live = t.el.classList.contains("live");
+  // Tokens ride the sub line, not a separate right-side chip — the status
+  // line needs the full header width (a web-search query ellipsizes late,
+  // not at a chip-squeezed midpoint).
+  const parts = [];
+  if (t.tokensIn) parts.push("↑" + fmtTokens(t.tokensIn));
+  if (t.tokensOut) parts.push("↓" + fmtTokens(t.tokensOut));
+  const tok = parts.join(" ");
   if (live) {
     title.textContent = traceStatusLine(t);
     const elapsed = Math.floor((Date.now() - t.startedAt) / 1000);
-    sub.textContent = `step ${t.started} · ${mmss(elapsed)}`;
+    // No step count while live — what is happening matters, not how many
+    // steps it took so far.
+    sub.textContent = mmss(elapsed) + (tok ? ` · ${tok}` : "");
     if (t.activeStartedAt) {
       const st = t.body.querySelector(".step.active-step .step-timer");
       if (st) st.textContent = `${Math.floor((Date.now() - t.activeStartedAt) / 1000)}s`;
     }
   } else {
     title.textContent = `Worked for ${fmtSecs(t.secs)}`;
-    sub.textContent = `${t.started} step${t.started === 1 ? "" : "s"}`;
+    sub.textContent = `${t.started} step${t.started === 1 ? "" : "s"}` + (tok ? ` · ${tok}` : "");
   }
-  const parts = [];
-  if (t.tokensIn) parts.push("↑" + fmtTokens(t.tokensIn));
-  if (t.tokensOut) parts.push("↓" + fmtTokens(t.tokensOut));
-  tokens.textContent = parts.join(" ");
 }
 
 // The answer streamed into this (formerly "Thinking…") row — finalize it as a

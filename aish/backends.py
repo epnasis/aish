@@ -21,6 +21,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -218,6 +219,68 @@ def _anthropic_client(provider: Provider):
     return anthropic.Anthropic()
 
 
+# Gemini's OpenAI-compat layer returns thought summaries only when asked, and
+# returns them INSIDE content, delimited by these tags (probed against the live
+# API 2026-07: streaming plain turns interleave `<thought>…</thought>` in the
+# content deltas; non-streaming responses carry the same tags; streaming
+# TOOL-CALL turns omit thoughts entirely — a compat-layer gap, so the trace
+# header falls back to its deterministic tool line there).
+GEMINI_THINKING_BODY = {
+    "extra_body": {"google": {"thinking_config": {"include_thoughts": True}}}
+}
+_THOUGHT_OPEN = "<thought>"
+_THOUGHT_CLOSE = "</thought>"
+
+
+class _ThoughtFilter:
+    """Incrementally split Gemini's tagged content stream into (thinking,
+    visible) text. Tags can split across deltas, so a trailing partial tag is
+    held back until the next feed (or flushed at end of stream)."""
+
+    def __init__(self):
+        self._in_thought = False
+        self._buf = ""
+
+    def feed(self, text: str) -> tuple[str, str]:
+        self._buf += text
+        thinking: list[str] = []
+        visible: list[str] = []
+        while self._buf:
+            tag = _THOUGHT_CLOSE if self._in_thought else _THOUGHT_OPEN
+            out = thinking if self._in_thought else visible
+            idx = self._buf.find(tag)
+            if idx != -1:
+                out.append(self._buf[: idx])
+                self._buf = self._buf[idx + len(tag):]
+                self._in_thought = not self._in_thought
+                continue
+            keep = self._partial_suffix(tag)
+            cut = len(self._buf) - keep
+            out.append(self._buf[:cut])
+            self._buf = self._buf[cut:]
+            break
+        return "".join(thinking), "".join(visible)
+
+    def _partial_suffix(self, tag: str) -> int:
+        for k in range(min(len(tag) - 1, len(self._buf)), 0, -1):
+            if self._buf.endswith(tag[:k]):
+                return k
+        return 0
+
+    def flush(self) -> tuple[str, str]:
+        """End of stream: held-back text was not a tag after all."""
+        buf, self._buf = self._buf, ""
+        return (buf, "") if self._in_thought else ("", buf)
+
+
+def split_thoughts(text: str) -> tuple[str, str]:
+    """(thinking, visible) split of a complete tagged response."""
+    f = _ThoughtFilter()
+    thinking, visible = f.feed(text)
+    tail_t, tail_v = f.flush()
+    return thinking + tail_t, visible + tail_v
+
+
 class OpenAICompatBackend:
     """Chat-completions backend for any OpenAI-compatible API (OpenAI, Gemini)."""
 
@@ -235,13 +298,23 @@ class OpenAICompatBackend:
         think: bool = False,  # Ollama-only; cloud models manage reasoning themselves
         stream: bool = False,
     ):
-        kwargs = dict(model=model, messages=convert_messages(messages))
+        kwargs: dict[str, Any] = dict(model=model, messages=convert_messages(messages))
         if tools:
             kwargs["tools"] = tools  # aish schemas are already OpenAI-format
+        if self.provider == "gemini":
+            # Surface thought summaries so the trace can show what the model
+            # is thinking; the tagged text is split out of content below and
+            # never reaches history or the rendered answer.
+            kwargs["extra_body"] = GEMINI_THINKING_BODY
         if stream:
             return self._stream(kwargs)
         response = self.client.chat.completions.create(**kwargs)
-        return _from_completion(response)
+        chunk = _from_completion(response)
+        if self.provider == "gemini" and chunk.message.content:
+            thinking, visible = split_thoughts(chunk.message.content)
+            chunk.message.content = visible
+            chunk.message.thinking = thinking
+        return chunk
 
     def _stream(self, kwargs: dict):
         try:
@@ -259,6 +332,7 @@ class OpenAICompatBackend:
         # turn merge into one garbage call ("read_urlread_url").
         pending: dict[tuple, dict] = {}
         usage = (0, 0)
+        thoughts = _ThoughtFilter() if self.provider == "gemini" else None
         for chunk in chunks:
             if getattr(chunk, "usage", None):
                 usage = (chunk.usage.prompt_tokens or 0, chunk.usage.completion_tokens or 0)
@@ -268,7 +342,14 @@ class OpenAICompatBackend:
             if delta is None:
                 continue
             if delta.content:
-                yield ChatChunk(message=ChatMessage(content=delta.content))
+                if thoughts is not None:
+                    thinking, visible = thoughts.feed(delta.content)
+                    if thinking or visible:
+                        yield ChatChunk(
+                            message=ChatMessage(content=visible, thinking=thinking)
+                        )
+                else:
+                    yield ChatChunk(message=ChatMessage(content=delta.content))
             for frag in delta.tool_calls or []:
                 index = getattr(frag, "index", None)
                 if index is not None:
@@ -291,8 +372,11 @@ class OpenAICompatBackend:
             )
             for slot in pending.values()
         ]
+        tail_thinking, tail_visible = thoughts.flush() if thoughts is not None else ("", "")
         yield ChatChunk(
-            message=ChatMessage(tool_calls=tool_calls),
+            message=ChatMessage(
+                content=tail_visible, tool_calls=tool_calls, thinking=tail_thinking
+            ),
             prompt_eval_count=usage[0],
             eval_count=usage[1],
         )
