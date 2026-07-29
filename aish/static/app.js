@@ -941,7 +941,51 @@ let sawAnswer = false; // any tokens streamed since the task started —
 let answerStableLen = 0; // chars of answerText already in stable DOM
 let answerStableNodes = 0; // answerEl children that are stable
 let answerRenderQueued = false;
+// This turn's answer was thrown away mid-stream by a replay (see resetLiveTurn).
+// Rides with sawAnswer's turn boundaries — set only by the owner below, cleared
+// where a turn genuinely ends (`done`) or a genuinely new one starts (a LIVE
+// `user` event; a replayed one is the rebuild of the abandoned turn itself).
+let answerAbandoned = false;
 const cards = new Map(); // approval id -> card element
+
+// [TURN-RESET-START]
+// The live turn's render state — the bubble tokens stream into, its stable-prefix
+// bookkeeping, the pending approval cards, and the open activity trace — is ONE
+// cluster, so it gets ONE reset. It used to be zeroed by hand inside onReplay,
+// which is reachable MID-STREAM from three paths that never asked whether a turn
+// was running (the socket's own `replay`, an offline mirror tap, and the prefetch
+// paint of a committed swipe), and that hand-rolled subset left two things out:
+// the open trace was never closed, so a live one survived into the NEXT chat and
+// collected its steps, and the half-streamed bubble was dropped while its tail
+// kept arriving.
+//
+// `landing` is replayLanding's verdict, and the first thing this owns is that a
+// "noop" landing resets NOTHING. "noop" means the DOM already IS this transcript
+// — the reconnect re-replay after every phone unlock lands there, while a turn
+// may genuinely still be running, and tearing that turn down would be the very
+// bug this function exists to fix. Only a landing that REPLACES the transcript
+// (reuse/rebuild) ends the live turn along with it.
+function resetLiveTurn(landing) {
+  if (landing === "noop") return;
+  // A turn was streaming when this replay landed. The bubble goes with the DOM
+  // that is about to be replaced, and the tail of the stream would paint a
+  // TRUNCATED answer into a fresh one — and, by setting sawAnswer, suppress the
+  // `done` render that carries the whole text. So abandon the answer outright:
+  // onToken drops the tail and `done` renders the authoritative result once.
+  // The failure mode is "no live streaming for the rest of this turn", never a
+  // duplicated or half-written answer.
+  if (answerEl) answerAbandoned = true;
+  answerEl = null;
+  answerText = "";
+  answerStableLen = 0;
+  answerStableNodes = 0;
+  sawAnswer = false;
+  cards.clear();
+  pendingCards = 0;
+  renderedAnswers = 0; // fork ordinals restart with the rebuilt transcript
+  finishTrace(); // the open trace belongs to the turn whose DOM just went away
+}
+// [TURN-RESET-END]
 
 function handle(event) {
   switch (event.type) {
@@ -958,6 +1002,11 @@ function handle(event) {
       // otherwise strip the last answer's rerun for good (survives replay too).
 
       sawAnswer = false;
+      // A LIVE user turn always streams afresh. A REPLAYED one is a
+      // reconstruction, not a new turn — and it is exactly what the replay that
+      // just abandoned a half-streamed answer rebuilds, so clearing the flag
+      // here would hand the still-arriving tail a bubble of its own (#181).
+      if (!replaying) answerAbandoned = false;
       answerFilling = false;
       userCmdBlock = null; // a new turn supersedes any dangling ! command block
       taskErrored = false; // a new turn clears the prior error's red dot
@@ -1348,6 +1397,11 @@ function setRolePill(active) {
   if (pill) pill.hidden = !active;
 }
 
+// [REPLAY-LANDING-START]
+// A replay is the ONE authoritative repaint: rendering is a pure function of the
+// event array, so this is also where the view's fingerprint is (re)stamped. It
+// owns viewFp/viewDirty together with enterSession — nothing else may claim "the
+// screen now shows this transcript".
 function onReplay(event) {
   // [VIEWCACHE] Decide the landing BEFORE touching any transform (see
   // replayLanding for the three outcomes and why each is safe).
@@ -1359,6 +1413,10 @@ function onReplay(event) {
     hasDom: messagesEl.childElementCount > 0,
     cachedFp: viewCache.get(currentSession)?.fp,
   });
+  // [TURN-RESET] A replay is reachable mid-stream; closing the live turn is not
+  // this function's to hand-roll, INCLUDING the case where the answer is that a
+  // "noop" landing closes nothing.
+  resetLiveTurn(landing);
   if (landing === "noop") {
     // The exact transcript on screen — the reconnect re-replay (every phone
     // unlock) and a prefetched swipe already painted. Keep the DOM, the
@@ -1387,14 +1445,6 @@ function onReplay(event) {
   stopSpeaking(); // the active button is about to be detached with the DOM
   messagesEl.replaceChildren();
   removeCwdChip(); // a session switch drops any stale cwd card; _show re-emits if pending (#92)
-  cards.clear();
-  pendingCards = 0;
-  answerEl = null;
-  answerText = "";
-  answerStableLen = 0;
-  answerStableNodes = 0;
-  sawAnswer = false;
-  renderedAnswers = 0; // fork ordinals restart with the rebuilt transcript
   const cached = viewCache.get(currentSession);
   viewCache.delete(currentSession); // detached nodes are single-use either way
   if (landing === "reuse") {
@@ -1418,6 +1468,7 @@ function onReplay(event) {
   // desktop, land the cursor in the composer ready to type.
   if (FINE_POINTER && $("backdrop").hidden) input.focus();
 }
+// [REPLAY-LANDING-END]
 
 let answerFilling = false; // once the answer streams, the page stays put
 
@@ -1437,7 +1488,13 @@ function collapseTimelineForAnswering(t) {
 // [ANSWERING-COLLAPSE-END]
 
 function onToken(text) {
+  // A replay replaced the transcript while this turn was streaming, so the bubble
+  // the earlier tokens went into is gone (see resetLiveTurn). Rendering the tail
+  // alone would show a truncated answer AND suppress the `done` render that
+  // carries the whole text — drop it; the answer lands once, complete.
+  if (answerAbandoned) return;
   sawAnswer = true;
+  // [ANSWER-OPEN-START]
   if (!answerEl) {
     answerEl = addMsg("answer md", "");
     answerText = "";
@@ -1460,6 +1517,7 @@ function onToken(text) {
     collapseTimelineForAnswering(currentTrace);
     requestAnimationFrame(() => anchorAnswer(true));
   }
+  // [ANSWER-OPEN-END]
   answerText += text;
   if (!answerRenderQueued) {
     answerRenderQueued = true;
@@ -1568,6 +1626,10 @@ function stableBoundary(text) {
   return boundary;
 }
 
+// [ANSWER-CLOSE-START]
+// The orderly end of a bubble: flush, decorate, release. resetLiveTurn is the
+// DISORDERLY one (the transcript is being replaced under it) — between them they
+// are the only writers of answerEl besides the token path that opens it.
 function closeAnswer() {
   // A finished answer (streaming ends, or something else interrupts the
   // block) gets its copy/read-aloud row; mid-stream re-renders would clobber it.
@@ -1579,6 +1641,7 @@ function closeAnswer() {
   answerEl = null;
   answerText = "";
 }
+// [ANSWER-CLOSE-END]
 
 function onDone(event) {
   answerTiming = turnStart ? (Date.now() - turnStart) / 1000 : 0;
@@ -1589,6 +1652,7 @@ function onDone(event) {
     attachAnswerTools(el, event.result, lastUserPrompt);
   }
   closeAnswer();
+  answerAbandoned = false; // this turn is over; the next one streams normally
   maybeSpeakReply(); // voice-in → voice-out: auto-read a reply to a dictated message (#97)
   finishTrace();
   if (event.sources && event.sources.length) addSources(event.sources);
@@ -1733,6 +1797,10 @@ const TOOL_META = {
   forget_memory: ["Forgot a memory", "knowledge", "--yellow"],
 };
 
+// [TRACE-OPEN-START]
+// The live trace comes into being HERE and nowhere else — one per turn, created
+// lazily by the first step that needs it. Its disposal is [TRACE-CLOSE]'s; a
+// third writer is how a trace from one chat ended up collecting another's steps.
 function ensureTrace() {
   if (currentTrace) return currentTrace;
   const el = document.createElement("div");
@@ -1781,6 +1849,7 @@ function ensureTrace() {
   scrollToEnd();
   return currentTrace;
 }
+// [TRACE-OPEN-END]
 
 // The Stop button was pressed: reflect it in the header until `done` lands.
 function markStopping(t) {
@@ -2479,6 +2548,11 @@ function finalizeAnswerRow(t, ref, secs) {
     typeof secs === "number" ? `Answered in ${fmtSecs(secs)}` : "Answered";
 }
 
+// [TRACE-CLOSE-START]
+// …and it ends HERE, whatever ends it: a finished turn, an error, a stop, or the
+// replay that replaced the transcript it was drawn into (resetLiveTurn calls
+// this rather than nulling the variable, so the interval timer and every
+// still-spinning row are finalized on every one of those paths).
 function finishTrace(errored) {
   if (!currentTrace) return;
   const t = currentTrace;
@@ -2524,6 +2598,7 @@ function finishTrace(errored) {
   updateTraceHead(t);
   refreshStatusline();
 }
+// [TRACE-CLOSE-END]
 
 function fmtSecs(s) {
   if (s == null) return "";
@@ -2914,7 +2989,10 @@ $("scroll-top").onclick = () => {
 };
 
 function onHistory(history) {
-  renderedAnswers = 0; // fork ordinals restart with the rebuilt transcript
+  // The legacy flat-transcript replay (a log too old to reconstruct) paints a
+  // whole conversation, so it ends the live turn for the same reason a replay
+  // does — via the owner, not by zeroing its own corner of the cluster.
+  resetLiveTurn("rebuild");
   let prevPrompt = "";
   for (const message of history) {
     const content = (message.content || "").trim();
@@ -5929,12 +6007,17 @@ async function openConsole() {
   // terminal before requesting attach closes the race at its root (the
   // consoleStartedSeen guard below is now just belt-and-suspenders). Here we only
   // CHECK the socket is live — no send yet.
-  consoleStartedSeen = false; // a new open: no real label for it yet
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     showToast("not connected — reconnecting…");
     return;
   }
   if (consoleOpen) return; // already showing (e.g. a reconnect reattach)
+  // BELOW the early returns, deliberately: the flag's invariant is "false only
+  // while an open is in progress", and a call that opens nothing starts no open.
+  // Armed above, a no-op call (already open, or no socket) disarmed the guard
+  // and never re-armed it — console_started fires once per open, so from then on
+  // any provisional write could clobber a real label permanently (#181).
+  consoleStartedSeen = false; // a new open: no real label for it yet
   if (location.hash !== "#console") history.replaceState(null, "", "#console"); // deep-link: survives reload/restart
   $("pty-overlay").hidden = false;
   // Freeze the page behind the overlay at its current scroll offset (iOS: a

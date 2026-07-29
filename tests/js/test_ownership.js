@@ -60,11 +60,38 @@ const OWNED = {
     why: "a fork's deck anchor is a promise with a deadline; a writer that clears it on an"
       + " unrelated event loses the placement it was recorded for",
   },
-  // Phase 3 (streaming/render sweep) should land viewFp/viewDirty here. Not yet
-  // honest: after phase 2 their writers are [SESSION-ENTER] + [CONNECT-WIRE]'s
-  // dirty-mark + THREE inside onReplay, which is unfenced render-cluster code
-  // this phase deliberately did not touch. Fence onReplay's landing first — the
-  // manifest must describe the file, never an intention.
+  viewFp: {
+    owners: ["SESSION-ENTER", "REPLAY-LANDING"],
+    instead: "call enterSession() (a switch) or let onReplay stamp the landing",
+    why: "the fingerprint decides whether an incoming replay repaints, reuses stashed"
+      + " nodes, or is a no-op; a stray writer either keeps the PREVIOUS chat's DOM"
+      + " or rebuilds the world on every phone unlock",
+  },
+  viewDirty: {
+    owners: ["SESSION-ENTER", "CONNECT-WIRE", "REPLAY-LANDING"],
+    instead: "let the socket dispatch mark it (VIEW_SAFE_EVENTS) and onReplay clear it",
+    why: "it is the ONLY thing standing between a live event and a stale stashed view"
+      + " being served as if it were the transcript",
+  },
+  answerEl: {
+    owners: ["TURN-RESET", "ANSWER-OPEN", "ANSWER-CLOSE"],
+    instead: "call closeAnswer() (orderly) or resetLiveTurn(landing) (the transcript is going)",
+    why: "three regions, one per lifecycle stage — opened by the token path, closed by"
+      + " closeAnswer, abandoned by a replay that lands mid-stream; a fourth writer is"
+      + " how a turn ended up with two answer bubbles (#181 phase 3)",
+  },
+  currentTrace: {
+    owners: ["TRACE-OPEN", "TRACE-CLOSE"],
+    instead: "call ensureTrace() / finishTrace()",
+    why: "a live trace left un-closed by a session switch kept receiving the NEXT chat's"
+      + " steps, and its interval timer ran forever",
+  },
+  // NOT here: answerAbandoned (the flag resetLiveTurn sets when it throws away a
+  // half-streamed bubble). Its writers are the owner plus the two turn boundaries
+  // that already reset sawAnswer — `user` and `done` — and fencing either of those
+  // whole handlers would claim an ownership the file does not have. It rides with
+  // sawAnswer by construction; the pin that matters is the behavioural one in
+  // test_choreo_midstream_replay.js.
 };
 
 // ---- the checker ---------------------------------------------------------

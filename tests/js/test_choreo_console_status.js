@@ -21,7 +21,8 @@
 // Run manually: node tests/js/test_choreo_console_status.js
 "use strict";
 
-const { hostileWorld, checks } = require("./harness");
+const assert = require("assert");
+const { appSource, extract, surface, hostileWorld, checks } = require("./harness");
 
 const { ok, report } = checks();
 
@@ -113,11 +114,6 @@ function consoleWorld() {
 // ---- 4. A fresh open shows placeholders again -----------------------------
 // The guard is per-open: re-arming it is what keeps the SECOND open from
 // starting out mute behind a stale "connected" label.
-//
-// NOTE for phase 3 (#181): openConsole re-arms this flag BEFORE its early
-// returns, so an open-while-open call disarms the guard without re-arming it on
-// any subsequent reply. That is a latent defect, not current behaviour under
-// test — it is deliberately not pinned here.
 {
   const w = consoleWorld();
   w.play(["open", "attaching", "started"]);
@@ -126,6 +122,70 @@ function consoleWorld() {
   ok("a new open may write its placeholder again", w.label.textContent === "attaching…");
   w.act("started");
   ok("…and the second open's real label lands too", w.label.textContent === REAL_LABEL);
+}
+
+// ---- 4b. Only a REAL open may disarm the guard ----------------------------
+// Scenario 4 fakes the arming; this drives openConsole's own guard sequence, the
+// half that decides WHEN the flag is armed. The flag's invariant is "false only
+// while an open is in progress", so a call that opens nothing — the overlay is
+// already showing (the ⌘\ toggle, the hash deep link, a reconnect reattach), or
+// there is no socket — must leave a landed label protected. Armed above the early
+// returns, one such call disarmed the guard for good: console_started fires once
+// per open, so from then on every provisional write clobbered the real label.
+//
+// Only the guard sequence is extracted: it is the whole decision, and the rest of
+// openConsole (an await, a real Terminal) cannot run in a fake world. The
+// assertions below prove the slice still contains both early returns.
+{
+  const guardHead = extract(appSource(),
+    "async function openConsole() {", '  if (location.hash !== "#console")');
+  assert(/if \(consoleOpen\) return;/.test(guardHead),
+    "the extracted slice lost the open-while-open early return");
+  assert(/consoleStartedSeen = false/.test(guardHead),
+    "the extracted slice lost the guard's re-arm");
+  assert(/readyState !== WebSocket.OPEN/.test(guardHead),
+    "the extracted slice lost the socket check");
+
+  // A world where a real console_started has already landed (the guard armed,
+  // the real label on screen) and openConsole is then called in the given state.
+  const openWorld = (consoleOpen, socketOpen) => {
+    const w = consoleWorld();
+    w.act("open");
+    w.act("started"); // the REAL writer of the real label, overlay showing
+    Object.assign(w.sandbox, {
+      consoleOpen, // …and only now the state the call under test happens in
+      ws: { readyState: socketOpen ? 1 : 3 },
+      closeSheets() {},
+      showToast() {},
+      history: { replaceState() {} },
+      location: { hash: "#console" },
+    });
+    // The guard sequence, closed off where the extraction stops. An async body
+    // runs synchronously until its first await, and every path under test
+    // returns before one — so the flag is settled the moment the call returns.
+    w.run(`${surface(guardHead)}\n}`);
+    return w;
+  };
+
+  const fresh = openWorld(false, true);
+  fresh.sandbox.openConsole();
+  ok("a real open arms the guard", fresh.sandbox.consoleStartedSeen === false);
+  fresh.act("attaching");
+  ok("…so it may write its own placeholder", fresh.label.textContent === "attaching…");
+
+  const already = openWorld(true, true);
+  already.sandbox.openConsole();
+  ok("an open-while-open leaves the guard armed-against-placeholders",
+    already.sandbox.consoleStartedSeen === true);
+  already.act("attaching");
+  ok("…so the working console keeps its real label", already.label.textContent === REAL_LABEL);
+
+  const offline = openWorld(false, false);
+  offline.sandbox.openConsole();
+  ok("a socket-less open disarms nothing either",
+    offline.sandbox.consoleStartedSeen === true);
+  offline.act("attaching");
+  ok("…and its toast does not cost the label", offline.label.textContent === REAL_LABEL);
 }
 
 // ---- 5. console_started before the terminal exists is dropped, not shown ---

@@ -79,6 +79,8 @@ function fakeElement(tag = "div") {
     style: {},
     scrollTop: 0,
     children: [],
+    // The real property render code branches on ("is anything on screen?").
+    get childElementCount() { return this.children.length; },
     append(...nodes) { this.children.push(...nodes); },
     appendChild(node) { this.children.push(node); return node; },
     replaceChildren(...nodes) { this.children = nodes; },
