@@ -146,9 +146,13 @@ def mark_processed(gws: Gws, msg_id: str, label_id: str) -> None:
 
 
 def trigger(base: str, token: str, prompt: str, meta: dict, title: str,
-            post: Callable[..., PostResult] = http_post) -> bool:
+            post: Callable[..., PostResult] = http_post,
+            origin: str = "email") -> bool:
+    # `origin` parameterized for other automation entry points (the curation
+    # pass posts origin="schedule", #185); the email default keeps every
+    # existing caller byte-identical.
     url = f"{base.rstrip('/')}/trigger?token={token}"
-    body = json.dumps({"prompt": prompt, "origin": "email", "meta": meta,
+    body = json.dumps({"prompt": prompt, "origin": origin, "meta": meta,
                        "title": title}).encode()
     try:
         status, headers, raw = post(url, body, 30)

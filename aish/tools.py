@@ -525,6 +525,16 @@ TOOL_SCHEMAS = [
                             "expires: 2026-08-31). Omit for durable facts."
                         ),
                     },
+                    "disabled": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true to RETIRE an existing entry without deleting "
+                            "it (reversible — false re-enables): pass its name and "
+                            "restate its description in note. Use this instead of "
+                            "forget_memory when curating stale or noisy entries; "
+                            "omit for normal saves."
+                        ),
+                    },
                     "force": {
                         "type": "boolean",
                         "description": (

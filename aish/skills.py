@@ -866,7 +866,7 @@ def _near_duplicate(identity: str, entries: list[Entry], semantic=None) -> Entry
 def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: str = "",
                 lessons_path=None, expires: str | None = None,
                 pinned: bool | None = None, force: bool = False,
-                semantic=None) -> str:
+                semantic=None, disabled: bool | None = None) -> str:
     """Create or update one structured memory entry. Constrained to writing a
     slug-named markdown file inside the memory dir — safe to auto-approve.
 
@@ -877,6 +877,11 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
 
     `pinned` marks a standing rule (always indexed, #178 P1-7); None keeps an
     updated entry's existing flag, False explicitly unpins.
+
+    `disabled` retires or revives an entry via `status: disabled` (#185) —
+    the reversible half of the curation vocabulary (deletion is
+    forget_memory, a separate deliberate act). None keeps an updated
+    entry's existing status, False explicitly re-enables.
 
     A NEW slug whose identity line lands too close to an existing memory is
     refused with that entry's name (#178 P1-8) — near-duplicates compete for
@@ -939,11 +944,15 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
                 expiry = prior.expires
             if pinned is None:
                 pinned = prior.pinned
+            if disabled is None:
+                disabled = prior.status == "disabled"
         front = [f"name: {slug}", f"description: {text}"]
         if keyword_list:
             front.append(f"keywords: {', '.join(keyword_list)}")
         if pinned:
             front.append("pinned: yes")
+        if disabled:
+            front.append("status: disabled")
         if expiry is not None:
             front.append(f"expires: {expiry.isoformat()}")
         directory.mkdir(parents=True, exist_ok=True)
@@ -953,7 +962,8 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
         )
     except OSError as exc:
         return f"ERROR: could not save memory: {exc}"
-    return f"remembered ({slug}): {text}"
+    state = " [disabled]" if disabled else ""
+    return f"remembered ({slug}){state}: {text}"
 
 
 def forget_memory(name: str, cwd: str = "") -> str:

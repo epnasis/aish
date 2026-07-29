@@ -182,7 +182,12 @@ thousands of entries without bloating the context.
   by embedding similarity — *before* the model's first turn, so it doesn't have
   to remember to look. Selection can abstain: nothing is injected unless it
   clears a strict similarity floor (naming an entry outright always works, and
-  short follow-ups are matched with recent conversation context, not alone). **Import skills from the ecosystem** with `import_skill`
+  short follow-ups are matched with recent conversation context, not alone).
+  Retrieval also **audits itself**: every injection is logged with its score,
+  and a weekly `aish-curate` pass scans those logs for entries that keep
+  getting injected but never used (or keep being reached for but never
+  surfaced) and opens an automated curation session that repairs, pins, or
+  reversibly retires them — deletions are only ever proposed to you. **Import skills from the ecosystem** with `import_skill`
   (e.g. `anthropics/skills`): a read-only clone, then one consolidated review of
   every file plus deterministic risk flags before anything installs.
 - **Plugin tools** — where a skill *teaches*, a tool *does*. A droppable
