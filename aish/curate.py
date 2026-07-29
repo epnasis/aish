@@ -209,13 +209,44 @@ def missing(ledger: Ledger) -> list[EntryStats]:
     return rows[:SUSPECTS_MAX]
 
 
-def render_report(ledger: Ledger) -> str:
+IDENTITY_CHARS = 220  # per-suspect identity line quoted in the report
+GONE_NOTE = "no longer active — already retired or deleted; SKIP it"
+
+
+def corpus_identities(cwd: str = "") -> dict[str, str]:
+    """Current identity line per ACTIVE entry — the no-shell rule's other
+    half (#185 follow-up): the session must never need to list or read
+    knowledge files, so the code composing its prompt reads them instead.
+    Runs in the aish-curate process (the owner's own launchd job), where
+    filesystem access is attended-equivalent by definition."""
+    from . import skills
+
+    identities: dict[str, str] = {}
+    for entry in skills.load_entries(cwd or str(Path.home()), None):
+        line = entry.description
+        if entry.keywords:
+            line += f" [keywords: {', '.join(entry.keywords)}]"
+        if entry.pinned:
+            line += " (pinned)"
+        identities[entry.name] = line[:IDENTITY_CHARS]
+    return identities
+
+
+def render_report(ledger: Ledger, identities: dict[str, str] | None = None) -> str:
     """The ledger as compact prompt text; empty string when there is nothing
-    actionable (the caller then skips the trigger entirely)."""
+    actionable (the caller then skips the trigger entirely). `identities`
+    (name → current description/keywords line) rides along per suspect so
+    the session judges from complete information; a suspect absent from it
+    was already retired, and saying so stops the model acting on ghosts."""
     dead = dead_weight(ledger)
     missed = missing(ledger)
     if not dead and not missed:
         return ""
+    identities = identities or {}
+
+    def identity_line(name: str) -> str:
+        return f"    now: {identities.get(name, GONE_NOTE)}"
+
     lines = [
         f"Ledger window: {ledger.tasks} tasks, {ledger.tasks_with_injection} "
         f"with injections, {ledger.lexical_tasks} on lexical fallback.",
@@ -228,6 +259,7 @@ def render_report(ledger: Ledger) -> str:
                 f"- {r.name} ({r.kind or 'entry'}): {r.injections} injections, "
                 f"{r.rails} via rail, {sim}"
             )
+            lines.append(identity_line(r.name))
             for ts, prompt, s in r.evidence:
                 tag = f" (sim {s:.2f})" if s is not None else ""
                 lines.append(f"    e.g. {ts[:16]}{tag}: {prompt!r}")
@@ -238,6 +270,7 @@ def render_report(ledger: Ledger) -> str:
                 f"- {r.name}: read {r.miss_reads}x without injection "
                 f"(injected only {r.injections}x)"
             )
+            lines.append(identity_line(r.name))
     text = "\n".join(lines)
     if len(text) > REPORT_MAX_CHARS:
         text = text[:REPORT_MAX_CHARS] + "\n…(report truncated)"
@@ -253,8 +286,10 @@ def build_prompt(report: str) -> str:
         "used.\n\n"
         f"{report}\n\n"
         "For EACH dead-weight entry, in order:\n"
-        "1. Inspect it first: recall(name=<entry>) to read its description, "
-        "keywords, and body. NEVER act on the ledger line alone.\n"
+        "1. Inspect it first. Each suspect's 'now:' line IS its current "
+        "description/keywords — call recall(name=<entry>) only when you also "
+        "need the body. An entry marked 'no longer active' is already retired: "
+        "SKIP it, never recreate it. NEVER act on the stats line alone.\n"
         "2. Then choose ONE action:\n"
         "   - REPAIR: if the entry is useful but its description/keywords are "
         "generic (that is WHY it fires on unrelated tasks), rewrite them via "
@@ -302,7 +337,7 @@ def run_curate(
     if state_dir is None:
         state_dir = Path.home() / ".local" / "state" / "aish"
     ledger = scan_ledger(state_dir, now=now)
-    report = render_report(ledger)
+    report = render_report(ledger, corpus_identities())
     if not report:
         log(f"nothing to curate ({ledger.tasks} tasks scanned)")
         return 0

@@ -6,9 +6,11 @@ import json
 from datetime import datetime
 
 from aish.curate import (
+    GONE_NOTE,
     LEDGER_DAYS,
     MIN_INJECTIONS,
     build_prompt,
+    corpus_identities,
     dead_weight,
     missing,
     render_report,
@@ -187,6 +189,34 @@ class TestCurationPass:
         rc = run_curate(post=fake_post, env={}, state_dir=tmp_path, now=NOW)
         assert rc == 2
         assert calls == []
+
+    def test_report_carries_current_identity_lines(self, tmp_path):
+        # #185 follow-up (the no-shell rule's other half): the session must
+        # never need to list/read files, so the report quotes each suspect's
+        # CURRENT description/keywords, and a retired suspect is named a
+        # ghost so the model skips it instead of recreating it.
+        self._actionable_state(tmp_path)
+        report = render_report(
+            scan_ledger(tmp_path, now=NOW),
+            {"noisy": "a noisy fact [keywords: alpha, beta] (pinned)"},
+        )
+        assert "now: a noisy fact [keywords: alpha, beta] (pinned)" in report
+        ghost = render_report(scan_ledger(tmp_path, now=NOW), {})
+        assert GONE_NOTE in ghost
+
+    def test_corpus_identities_reads_active_entries(self, tmp_path):
+        import aish.skills as skills_module
+
+        (skills_module.GLOBAL_MEMORY_DIR / "fact-a.md").write_text(
+            "---\nname: fact-a\ndescription: a fact\nkeywords: k1, k2\n"
+            "pinned: yes\n---\n"
+        )
+        (skills_module.GLOBAL_MEMORY_DIR / "gone.md").write_text(
+            "---\nname: gone\ndescription: retired\nstatus: disabled\n---\n"
+        )
+        identities = corpus_identities()
+        assert identities["fact-a"] == "a fact [keywords: k1, k2] (pinned)"
+        assert "gone" not in identities
 
     def test_report_caps_its_size(self, tmp_path):
         records = []
