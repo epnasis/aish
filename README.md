@@ -192,8 +192,11 @@ thousands of entries without bloating the context.
   Retrieval also **audits itself**: every injection is logged with its score,
   and a weekly `aish-curate` pass scans those logs for entries that keep
   getting injected but never used (or keep being reached for but never
-  surfaced) and opens an automated curation session that repairs, pins, or
-  reversibly retires them — deletions are only ever proposed to you. **Import skills from the ecosystem** with `import_skill`
+  surfaced). The pass is a scripted loop — the script orchestrates, a local
+  model answers one bounded repair/pin/disable/skip verdict per entry (plus a
+  merge-or-distinct question on embedding-detected duplicate pairs) — so it
+  works with small local models and nothing private ever leaves the machine.
+  All changes are frontmatter-only and reversible; deletion has no code path. **Import skills from the ecosystem** with `import_skill`
   (e.g. `anthropics/skills`): a read-only clone, then one consolidated review of
   every file plus deterministic risk flags before anything installs.
 - **Plugin tools** — where a skill *teaches*, a tool *does*. A droppable
