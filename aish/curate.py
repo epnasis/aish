@@ -431,6 +431,14 @@ def log_action(state_dir, record: dict) -> None:
 # Layer 3: the duplicate pass — deterministic pairing, one pairwise question.
 
 
+def _same_family(a, b) -> bool:
+    """gws-gmail vs gws-gmail-send, gws-gmail-reply vs gws-gmail-reply-all:
+    a name extending another with a dash is a FAMILY — deliberately similar
+    siblings, the near-duplicate trap the first live v2 run fell into (it
+    merged reply into reply-all). Families are never duplicate candidates."""
+    return a.name.startswith(b.name + "-") or b.name.startswith(a.name + "-")
+
+
 def dup_candidates(entries: list, scores=None) -> list[tuple]:
     """(entry_a, entry_b, similarity) pairs likely to be duplicates, best
     first. Pairing is DETERMINISTIC — identity-line embeddings when `scores`
@@ -446,7 +454,7 @@ def dup_candidates(entries: list, scores=None) -> list[tuple]:
                 break
             for other in entries[i + 1 :]:
                 sim = sims.get(id(other), 0.0)
-                if sim >= skills.DEDUP_MIN_SIM:
+                if sim >= skills.DEDUP_MIN_SIM and not _same_family(entry, other):
                     pairs.append((entry, other, sim))
     if scores is None:
         for i, entry in enumerate(entries):
@@ -455,7 +463,7 @@ def dup_candidates(entries: list, scores=None) -> list[tuple]:
                 ratio = difflib.SequenceMatcher(
                     None, text_a, entry_text(other).casefold()
                 ).ratio()
-                if ratio >= skills.DEDUP_LEXICAL_RATIO:
+                if ratio >= skills.DEDUP_LEXICAL_RATIO and not _same_family(entry, other):
                     pairs.append((entry, other, ratio))
     pairs.sort(key=lambda p: -p[2])
     return pairs[:PAIRS_MAX]
@@ -583,7 +591,10 @@ def run_curate(
         if s.name in entries and s.name not in recent
     ][:SUSPECTS_MAX]
 
-    if scores is None and not dry_run:
+    # Same scorer in dry runs as live: the first live v2 run merged pairs a
+    # dry run never showed, because dry runs fell back to difflib while live
+    # used embeddings. Fidelity beats saving a few local embed calls.
+    if scores is None:
         try:
             from .embeddings import SemanticIndex
 
@@ -626,6 +637,12 @@ def run_curate(
         if verdict is None:
             counts["unparseable"] += 1
             record = {"action": "skip", "reason": "unparseable judge reply"}
+        elif verdict.action == "disable" and entry.pinned:
+            # Envelope guard, not judge wisdom: a pinned standing rule is the
+            # owner's explicit "always apply" — the loop may repair it, never
+            # retire it (the first live v2 run disabled two pinned rules).
+            counts["skip"] += 1
+            record = {"action": "skip", "reason": "refused: pinned standing rule"}
         else:
             counts[verdict.action] += 1
             record = {"action": verdict.action, "reason": verdict.reason}
@@ -661,6 +678,18 @@ def run_curate(
         ) or ("invalid", None)
         if action == "merge" and survivor is not None:
             loser = b if survivor is a else a
+            if loser.kind == "skill" and survivor.kind == "memory":
+                # Envelope guard: a skill (a playbook with a body) may never
+                # lose a merge to a memory (a one-line fact) — the first live
+                # v2 run retired a real skill in favor of its memory echo.
+                log_action(
+                    state_dir,
+                    {"ts": now.isoformat(), "name": loser.name, "category": "duplicate",
+                     "model": model, "action": "skip",
+                     "reason": f"refused: skill may not lose to memory {survivor.name}"},
+                )
+                log(f"{loser.name}: merge refused (skill vs memory)")
+                continue
             assert loser.path is not None  # entries were filtered to file-backed
             try:
                 update_entry_meta(loser.path, disabled=True)

@@ -383,3 +383,65 @@ class TestJudgePrompt:
         assert "injected into 7 tasks" in prompt or "auto-injected" in prompt
         assert "VERDICT: <repair|pin|disable|skip>" in prompt
         assert "Example:" in prompt  # small models need MUST + example
+
+
+class TestEnvelopeGuards:
+    """Failure modes from the first live v2 run, each now refused by CODE:
+    family merges, pinned-rule disables, and a skill losing to a memory."""
+
+    def _corpus(self, monkeypatch, tmp_path):
+        import aish.skills as skills_module
+
+        gm = tmp_path / "gm"
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", gm)
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
+        return gm
+
+    def test_family_names_are_never_duplicate_candidates(self, tmp_path, monkeypatch):
+        gm = self._corpus(monkeypatch, tmp_path)
+        make_entry(gm, "gws-gmail", "gmail shared conventions")
+        make_entry(gm, "gws-gmail-send", "send a gmail message")
+        make_entry(gm, "gws-gmail-reply", "reply to a gmail thread")
+        make_entry(gm, "gws-gmail-reply-all", "reply-all to a gmail thread")
+        import aish.skills as skills_module
+
+        entries = skills_module.load_entries(str(tmp_path), None)
+        pairs = dup_candidates(entries, lambda q, e: {id(x): 0.95 for x in e})
+        family = {frozenset(("gws-gmail", "gws-gmail-send")),
+                  frozenset(("gws-gmail-reply", "gws-gmail-reply-all"))}
+        assert all(frozenset((a.name, b.name)) not in family for a, b, _ in pairs)
+
+    def test_pinned_rule_cannot_be_disabled_by_verdict(self, tmp_path, monkeypatch):
+        gm = self._corpus(monkeypatch, tmp_path)
+        path = make_entry(gm, "noisy", "always do the thing", extra="pinned: yes\n")
+        state = tmp_path / "state"
+        records = []
+        for i in range(MIN_INJECTIONS):
+            records += [
+                knowledge([{"label": "noisy", "kind": "memory", "sim": 0.29}]),
+                user(f"task {i}"),
+            ]
+        write_log(state, "session-20260728-100000-000001.jsonl", records)
+        run_curate(judge=lambda p: "VERDICT: disable\nREASON: never used",
+                   scores=lambda q, e: {}, notify_fn=lambda *a: None,
+                   env={}, state_dir=state, now=NOW)
+        text = path.read_text(encoding="utf-8")
+        assert "status: disabled" not in text
+        assert load_recent_actions(state, NOW)["noisy"] == "skip"
+
+    def test_skill_never_loses_a_merge_to_a_memory(self, tmp_path, monkeypatch):
+        gm = self._corpus(monkeypatch, tmp_path)
+        import aish.skills as skills_module
+
+        skill_dir = tmp_path / "gs"
+        skill = make_entry(skill_dir, "attachments-play", "handle chat attachments",
+                           body="full playbook here")
+        memory = make_entry(gm, "attachments-fact", "chat attachments live in uploads")
+        state = tmp_path / "state"
+        state.mkdir()
+        run_curate(judge=lambda p: ("VERDICT: merge\nKEEP: attachments-fact\n"
+                                    "REASON: same topic"),
+                   scores=lambda q, e: {id(x): 0.9 for x in e},
+                   notify_fn=lambda *a: None, env={}, state_dir=state, now=NOW)
+        assert "status: disabled" not in skill.read_text(encoding="utf-8")
+        assert "status: disabled" not in memory.read_text(encoding="utf-8")
