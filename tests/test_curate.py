@@ -431,8 +431,6 @@ class TestEnvelopeGuards:
 
     def test_skill_never_loses_a_merge_to_a_memory(self, tmp_path, monkeypatch):
         gm = self._corpus(monkeypatch, tmp_path)
-        import aish.skills as skills_module
-
         skill_dir = tmp_path / "gs"
         skill = make_entry(skill_dir, "attachments-play", "handle chat attachments",
                            body="full playbook here")
