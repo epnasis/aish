@@ -33,9 +33,10 @@ assert(
 );
 
 // Minimal DOMTokenList stand-in: a Set behind contains/add/remove.
-function fakeTrace(classes) {
+function fakeTrace(classes, userToggled) {
   const set = new Set(classes);
   return {
+    userToggled: Boolean(userToggled),
     el: {
       classList: {
         contains: (c) => set.has(c),
@@ -87,6 +88,15 @@ check("a finished (non-live) but open trace is not touched", () => {
 
 check("no trace (pure-answer turn, null) is safe", () => {
   assert.strictEqual(sandbox.collapseTimelineForAnswering(null), false);
+});
+
+check("a timeline the reader opened themselves is never slammed shut", () => {
+  // The card is collapsed by default now, so `open` on a live trace can only
+  // mean the reader tapped the header — auto-collapsing that is fighting them,
+  // not saving them space.
+  const t = fakeTrace(["trace", "live", "open"], true);
+  assert.strictEqual(sandbox.collapseTimelineForAnswering(t), false);
+  assert.ok(t.has("open"), "the reader's own expand must survive Answering");
 });
 
 if (failures) {

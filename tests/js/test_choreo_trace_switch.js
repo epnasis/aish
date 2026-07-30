@@ -64,11 +64,12 @@ function traceWorld() {
       replaying: false,
       currentTrace: null,
       turnAnchorEl: null,
-      answerFilling: false,
       lastUserPrompt: "",
       // trace collaborators that need a real browser (or are the hot path)
       updateTraceHead() {},
       updateScrollHints() {},
+      measurePinnedTrace() {},   // needs offsetHeight + ResizeObserver
+      releasePinnedTrace() {},
       refreshStatusline() {},
       scrollToEnd() {},
       scheduleStreamRender() {},

@@ -80,6 +80,7 @@ function makeSandbox() {
     updateTraceHead() {},
     updateScrollHints() {},
     refreshStatusline() {},
+    measurePinnedTrace() {}, // needs offsetHeight + ResizeObserver
     scrollToEnd() {},
     removeQueueChip() {},
     finalizeAnswerRow() {},

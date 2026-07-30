@@ -49,7 +49,6 @@ function turnWorld() {
       userCmdBlock: null,
       turnAnchorEl: null,
       lastUserPrompt: "",
-      answerFilling: false,
       currentTrace: null,
       // collaborators that would need a real browser
       renderMarkdown: (text) => ({ md: text }),
@@ -78,6 +77,7 @@ function turnWorld() {
       traceSvg: () => "",
       updateTraceHead() {},
       refreshStatusline() {},
+      releasePinnedTrace() {}, // needs offsetHeight + ResizeObserver
       finalizeAnswerRow() {},
     },
   });

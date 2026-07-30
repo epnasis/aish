@@ -1046,7 +1046,6 @@ function handle(event) {
       // just abandoned a half-streamed answer rebuilds, so clearing the flag
       // here would hand the still-arriving tail a bubble of its own (#181).
       if (!replaying) answerAbandoned = false;
-      answerFilling = false;
       userCmdBlock = null; // a new turn supersedes any dangling ! command block
       taskErrored = false; // a new turn clears the prior error's red dot
       turnStart = replaying ? 0 : Date.now(); // timing readout on the answer
@@ -1513,16 +1512,15 @@ function onReplay(event) {
 }
 // [REPLAY-LANDING-END]
 
-let answerFilling = false; // once the answer streams, the page stays put
-
 // Entering the "Answering…" phase — the model stopped calling tools and is
 // streaming its reply — collapses the still-open live timeline to its summary
 // so the answer isn't buried under a tall list of steps (#168). Fires once, at
 // the transition; a manual re-expand afterward is never fought (this doesn't
 // run again for the same answer). Mirrors the approval-card collapse idiom
-// (#65): only act on a live, open trace.
+// (#65): only act on a live, open trace — and never on one the reader opened
+// themselves, which is now the ONLY way an open live trace comes about.
 function collapseTimelineForAnswering(t) {
-  if (t && t.el.classList.contains("live") && t.el.classList.contains("open")) {
+  if (t && !t.userToggled && t.el.classList.contains("live") && t.el.classList.contains("open")) {
     t.el.classList.remove("open");
     return true;
   }
@@ -1556,11 +1554,10 @@ function onToken(text) {
     answerText = "";
     answerStableLen = 0;
     answerStableNodes = 0;
-    // Content is streaming, but it may be mid-work narration before another
-    // tool call — NOT necessarily the final answer; the trace stays expandable
-    // either way. Hold the page still so the text fills in from the top instead
-    // of the view chasing the streaming bottom.
-    answerFilling = true;
+    // The reply itself is the reading anchor: anchorAnswer scrolls only until
+    // its top reaches the top of the screen, so the view rises while the answer
+    // is still short and then locks with the answer owning the whole viewport.
+    turnAnchorEl = answerEl;
     // The live "Thinking…" step is the last row on the timeline when the reply
     // starts streaming; relabel it so it reads as the answer landing, not more
     // thinking, and mark it so finishTrace finalizes it in place ("Answered")
@@ -1589,17 +1586,24 @@ function renderAnswerFrame() {
   answerRenderQueued = false;
   if (!answerEl) return; // answer already closed (and flushed) this frame
   renderAnswerNow();
-  if (!answerFilling) anchorAnswer(); // once filling, the page holds still
+  anchorAnswer(); // rises to the anchor, then self-limits — see anchorAnswer
 }
 
-// The element that marks the START of the current turn's response — the
-// collapsed "Worked for Xs" trace, or (no trace) the user's own bubble.
+// The element that marks the START of the current turn's response — the answer
+// bubble once it exists, else the user's own bubble.
 let turnAnchorEl = null;
 
-// Once the answer is streaming, keep that anchor pinned to the TOP of the
-// viewport and let the rest of the answer flow in below the fold — so you
-// read from the beginning (incl. how long it took), instead of the view
-// jumping to the bottom and making you scroll back up.
+// Keep that anchor pinned to the TOP of the viewport and let the rest of the
+// answer flow in below the fold — so you read from the beginning instead of the
+// view jumping to the bottom and making you scroll back up.
+//
+// This is also the whole of the "scroll until it fills, then stop" rule, and it
+// is a consequence of the clamp below rather than a mode: while the turn's
+// content is shorter than a screen the target clamps to the very bottom, so the
+// view rises as text arrives; the moment the anchor can actually reach the top
+// the target stops moving, and since the anchor's own top never moves once
+// content is only appended BELOW it, nothing scrolls again for the rest of the
+// turn. No follow flag, no "stop chasing" branch.
 function anchorAnswer(force) {
   const anchor = turnAnchorEl && turnAnchorEl.isConnected ? turnAnchorEl : null;
   if (!anchor) { scrollToEnd(force); return; }
@@ -1864,6 +1868,43 @@ const TOOL_META = {
   forget_memory: ["Forgot a memory", "knowledge", "--yellow"],
 };
 
+// [TRACE-TAIL-START]
+// The live trace is the TAIL of the turn: your prompt, then what the model
+// wrote, then what it is doing right now. That ordering can't be chosen once at
+// creation — the card exists BEFORE the answer bubble does (steps arrive first),
+// and every later append (answer bubbles, terminal blocks, echoes, approval
+// cards) lands after it. So the position is re-established instead: scrollToEnd
+// is the funnel every content-adding path already calls, which is why the move
+// lives there — one enforcement point covers appends not yet written.
+function keepTraceLast() {
+  const el = currentTrace && currentTrace.el;
+  if (!el || !el.classList.contains("live")) return;
+  if (el.parentNode === messagesEl && messagesEl.lastElementChild !== el) {
+    messagesEl.appendChild(el);
+    pinTrace(currentTrace); // a re-inserted node can lose the pane's scroll offset
+  }
+}
+
+// The pinned card overlaps the floating jump-to-latest arrow (both live just
+// above the composer), so the arrow is offset by the card's measured height.
+// Its height is not a constant — the status line wraps up to three lines, and
+// expanding the timeline changes it outright — hence an observer rather than a
+// magic number. Guarded: the choreo sandboxes have no ResizeObserver, and the
+// arrow's placement is cosmetic, so absent one it simply keeps its base offset.
+function measurePinnedTrace(t) {
+  const set = () => document.body.style.setProperty("--live-trace-h", `${t.el.offsetHeight}px`);
+  set();
+  if (typeof ResizeObserver !== "function") return;
+  t.sizer = new ResizeObserver(set);
+  t.sizer.observe(t.el);
+}
+
+function releasePinnedTrace(t) {
+  if (t.sizer) { t.sizer.disconnect(); t.sizer = null; }
+  document.body.style.removeProperty("--live-trace-h");
+}
+// [TRACE-TAIL-END]
+
 // [TRACE-OPEN-START]
 // The live trace comes into being HERE and nowhere else — one per turn, created
 // lazily by the first step that needs it. Its disposal is [TRACE-CLOSE]'s; a
@@ -1871,7 +1912,10 @@ const TOOL_META = {
 function ensureTrace() {
   if (currentTrace) return currentTrace;
   const el = document.createElement("div");
-  el.className = "trace live open"; // always expanded while the turn runs
+  // Collapsed while running: the header IS the status line, and the card sits at
+  // the tail of the transcript pinned above the composer — a tall timeline there
+  // would eat the answer's reading space. Tap the header for the steps.
+  el.className = "trace live";
   const head = document.createElement("button");
   head.type = "button";
   head.className = "trace-head";
@@ -1879,7 +1923,7 @@ function ensureTrace() {
     `<span class="trace-status">${SPINNER}</span>` +
     `<span class="trace-headtext"><span class="trace-title">Working…</span>` +
     `<span class="trace-sub"></span></span>` +
-    `<button type="button" class="trace-stop"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>Stop</button>` +
+    `<button type="button" class="trace-stop" aria-label="stop" title="Stop"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg></button>` +
     `<svg class="trace-chev" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const body = document.createElement("div");
   body.className = "trace-body";
@@ -1900,6 +1944,7 @@ function ensureTrace() {
     liveGist: null,      // streaming thinking gist (status channel, unrecorded)
     running: [],         // in-flight tool_starts: {name, summary, command}
     waitingApproval: false, answering: false, stopping: false,
+    userToggled: false,  // the reader took over the open/closed state
   };
   // The head toggles expand freely — even while the turn runs (#65). A manual
   // toggle is the user's choice, so clear any pending auto-restore so the
@@ -1908,6 +1953,7 @@ function ensureTrace() {
     if (e.target.closest(".trace-stop")) return;
     el.classList.toggle("open");
     t.autoCollapsed = false;
+    t.userToggled = true;
   };
   head.querySelector(".trace-stop").onclick = (e) => {
     e.stopPropagation();
@@ -1915,11 +1961,14 @@ function ensureTrace() {
     markStopping(currentTrace); // immediate "Stopping…" feedback in the header
   };
   messagesEl.appendChild(el);
-  turnAnchorEl = el; // the "Worked for Xs" box is the response-start anchor
+  // Deliberately NOT the scroll anchor: the anchor is what gets pinned to the
+  // top of the screen, and the card now lives at the BOTTOM of the turn. The
+  // answer claims it instead ([ANSWER-OPEN]).
   currentTrace = t;
   body.addEventListener("scroll", () => updateScrollHints(body));
   currentTrace.timer = setInterval(() => updateTraceHead(currentTrace), 1000);
   refreshStatusline(); // the trace header owns Stop now; hide the bottom bar
+  measurePinnedTrace(t);
   scrollToEnd();
   return currentTrace;
 }
@@ -2707,6 +2756,7 @@ function finishTrace(errored) {
   if (!currentTrace) return;
   const t = currentTrace;
   if (t.timer) { clearInterval(t.timer); t.timer = null; }
+  releasePinnedTrace(t); // stops pinning, and gives the arrow its base offset back
   if (t.thinkingRow) {
     if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow);
     else t.thinkingRow.row.remove();
@@ -2935,6 +2985,7 @@ function nearBottom() {
 }
 
 function scrollToEnd(force) {
+  keepTraceLast(); // whatever was just appended, the live status card stays the tail
   if (force || nearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight;
   updateScrollButton();
   updateEmptyHint(); // every content-adding path funnels through here

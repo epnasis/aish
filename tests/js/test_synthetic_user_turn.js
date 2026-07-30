@@ -73,7 +73,6 @@ function makeSandbox() {
     sessionTitled: false,
     replaying: false,
     sawAnswer: true,
-    answerFilling: true,
     userCmdBlock: {},
     taskErrored: true,
     turnStart: null,
@@ -160,7 +159,6 @@ check("a synthetic turn still runs every turn-management side effect", () => {
     }
     assert(s.calls.some((c) => c.startsWith("removeQueueChip:")), "queue chip must retire");
     assert.strictEqual(s.sawAnswer, false);
-    assert.strictEqual(s.answerFilling, false);
     assert.strictEqual(s.userCmdBlock, null);
     assert.strictEqual(s.taskErrored, false);
     assert(typeof s.turnStart === "number", "the turn clock must start");
