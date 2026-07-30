@@ -385,7 +385,12 @@ run unattended, but anything that reaches the outside world (a send *or draft*
 addressed to anyone but you — recipients are strictly parsed and validated, not
 regex-matched — a delete, a share, and even a web fetch or search naming a host
 you never mentioned) **holds** — pausing indefinitely until you open
-the session and approve. Automated sessions also cannot search your past-session
+the session and approve. Writing to memory holds the same way: in your own
+chats saving a fact stays free, but a memory an automated session wants to keep
+is shown to you first, because it would otherwise persist into every future
+session — and *deleting* memory is refused outright there, with the entry named
+in the session's report instead so you retire it yourself. Automated sessions
+also cannot search your past-session
 archive (saved skills and memory stay available), so an injected instruction
 cannot chain "read everything ever discussed" into "ship it to a new host". A push notification (Pushover) tells you when a task
 needs approval or finishes, with a deep link straight to it. This is how the

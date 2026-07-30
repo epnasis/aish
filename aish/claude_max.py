@@ -65,6 +65,7 @@ class ClaudeMaxAgent:
         check_pending_messages=None,
         semantic=None,
         aliases=None,
+        origin: str = "user",
     ):
         # NO **kwargs sink here, deliberately (#178 P0-4): every capability an
         # entry point passes must be either kept on this wrapper or forwarded
@@ -111,6 +112,14 @@ class ClaudeMaxAgent:
             check_pending_messages=check_pending_messages,
             semantic=semantic,
             aliases=aliases,
+            # Every origin-scoped gate lives in the inner Agent's _dispatch,
+            # which _locked_dispatch is the single path to — so forwarding the
+            # session's origin is what makes the egress gate (#178 P0-2) and the
+            # knowledge-write gate (#196) hold on this backend too. The server
+            # has always passed origin= here; without the parameter the whole
+            # constructor raised TypeError, so no claude-max web session
+            # survived construction at all.
+            origin=origin,
         )
         self.model = model  # "" = the claude CLI's configured default
         self.echo = echo

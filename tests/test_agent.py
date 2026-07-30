@@ -3943,6 +3943,154 @@ class TestEgressGate:
         assert searched == ["deploy token"]
 
 
+class TestKnowledgeGate:
+    """#196: remember/forget_memory auto-approve because a human is watching.
+    Unattended, the text proposing the write may be injected email and a memory
+    persists into every future session — so deletion is refused outright and a
+    save holds on the approve_tool card. Attended sessions are unchanged."""
+
+    @staticmethod
+    def _remember(**args):
+        return SimpleNamespace(
+            function=SimpleNamespace(name="remember", arguments={"note": "a fact", **args})
+        )
+
+    @staticmethod
+    def _forget(slug):
+        return SimpleNamespace(
+            function=SimpleNamespace(name="forget_memory", arguments={"name": slug})
+        )
+
+    def test_forget_is_prohibited_and_never_deletes(self, tmp_path):
+        """The load-bearing proof: the entry survives. curate v1's prompt used to
+        say 'you MUST NOT call forget_memory' — enforced by nothing."""
+        from aish import skills as skills_module
+        from aish.agent import FORGET_PROHIBITED
+
+        skills_module.save_memory("stale", skills_module.GLOBAL_MEMORY_DIR, name="stale")
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self._forget("stale")]), model_says("reported it")],
+            origin="schedule",
+            cwd=str(tmp_path),
+            approve_tool=lambda *a: pytest.fail("deletion must not even ask"),
+        )
+        agent.run_task("curate the corpus")
+        assert (skills_module.GLOBAL_MEMORY_DIR / "stale.md").exists()
+        result = tool_messages(agent.messages)[0]["content"]
+        assert result == FORGET_PROHIBITED.format(slug="stale")
+        # Instructive refusal (#190 decision 2): names the slug and the real path.
+        assert "stale" in result and "report" in result
+
+    def test_remember_holds_on_the_tool_card(self, tmp_path):
+        from aish import skills as skills_module
+
+        asked = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._remember(name="from-email")]),
+                model_says("saved"),
+            ],
+            origin="email",
+            cwd=str(tmp_path),
+            approve_tool=lambda *a: (asked.append(a), True)[1],
+        )
+        agent.run_task("read my mail")
+        assert asked and asked[0][0] == "remember"
+        # The card says what the owner is being asked to accept.
+        assert "from-email" in asked[0][2] and "persists" in asked[0][2]
+        assert (skills_module.GLOBAL_MEMORY_DIR / "from-email.md").exists()
+
+    def test_denied_remember_writes_nothing(self, tmp_path):
+        from aish import skills as skills_module
+        from aish.agent import REMEMBER_DENIED
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._remember(name="injected")]),
+                model_says("ok, reporting instead"),
+            ],
+            origin="email",
+            cwd=str(tmp_path),
+            approve_tool=lambda *a: False,
+        )
+        agent.run_task("read my mail")
+        assert list(skills_module.GLOBAL_MEMORY_DIR.glob("*.md")) == []
+        assert tool_messages(agent.messages)[0]["content"] == REMEMBER_DENIED
+
+    def test_remember_with_no_approver_fails_closed(self, tmp_path):
+        from aish import skills as skills_module
+
+        agent, _ = make_agent(
+            [model_says(tool_calls=[self._remember(name="x")]), model_says("cannot")],
+            origin="webhook",
+            cwd=str(tmp_path),
+        )
+        agent.run_task("go")
+        assert list(skills_module.GLOBAL_MEMORY_DIR.glob("*.md")) == []
+        assert tool_messages(agent.messages)[0]["content"].startswith("NOT EXECUTED")
+
+    def test_deny_with_comment_stops_and_approve_with_comment_holds(self, tmp_path):
+        """Verdict semantics mirror every other gate (#81): deny+comment = STOP
+        (arms the stop gate), approve+comment = the write is HELD for rework."""
+        from aish import skills as skills_module
+        from aish.agent import Approved, Denied
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._remember(name="first")]),
+                model_says("understood"),
+            ],
+            origin="email",
+            cwd=str(tmp_path),
+            approve_tool=lambda *a: Denied("that came from the email body"),
+        )
+        agent.run_task("read my mail")
+        assert list(skills_module.GLOBAL_MEMORY_DIR.glob("*.md")) == []
+        assert "that came from the email body" in tool_messages(agent.messages)[0]["content"]
+
+        held, _ = make_agent(
+            [model_says(tool_calls=[self._remember(name="second")]), model_says("reworking")],
+            origin="email",
+            cwd=str(tmp_path),
+            approve_tool=lambda *a: Approved("name it after the sender"),
+        )
+        held.run_task("read my mail")
+        assert list(skills_module.GLOBAL_MEMORY_DIR.glob("*.md")) == []
+        assert tool_messages(held.messages)[0]["content"].startswith("NOT RUN")
+
+    def test_attended_session_is_byte_identical(self, tmp_path):
+        """The non-regression requirement: saving and pruning a fact in a chat a
+        human started costs exactly what it did before — no card, no refusal."""
+        from aish import skills as skills_module
+
+        skills_module.save_memory("old", skills_module.GLOBAL_MEMORY_DIR, name="old")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._remember(name="kept")]),
+                model_says(tool_calls=[self._forget("old")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+            approve_tool=lambda *a: pytest.fail("attended knowledge writes must not prompt"),
+        )
+        agent.run_task("learn and prune")
+        assert (skills_module.GLOBAL_MEMORY_DIR / "kept.md").exists()
+        assert not (skills_module.GLOBAL_MEMORY_DIR / "old.md").exists()
+        results = [m["content"] for m in tool_messages(agent.messages)]
+        assert results[0].startswith("remembered") and "forgot" in results[1]
+
+    def test_gate_is_not_bypassable_through_the_parallel_read_path(self, tmp_path):
+        """Knowledge writes are not READ_ONLY_TOOLS, so they can never ride the
+        concurrent thunk path that skips _dispatch (the same hole #178 P0-2 had
+        to close for egress)."""
+        from aish.agent import KNOWLEDGE_WRITE_TOOLS, READ_ONLY_TOOLS
+
+        assert not (KNOWLEDGE_WRITE_TOOLS & READ_ONLY_TOOLS)
+        agent, _ = make_agent([], origin="email", cwd=str(tmp_path))
+        for name in KNOWLEDGE_WRITE_TOOLS:
+            assert agent._knowledge_gate(name, {"name": "x", "note": "y"}) is not None
+
+
 class TestThinkingStatus:
     """The model's own words ride the `thinking` step (#status-header): `say` =
     preamble alongside tool calls, `gist` = first line of its thinking text."""

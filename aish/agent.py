@@ -629,6 +629,34 @@ EGRESS_NO_APPROVER = (
     "the owner named, or finish and report."
 )
 
+# Origin-gated knowledge writes (#196). remember/forget_memory auto-approve, and
+# that is deliberate: capturing a fact must stay frictionless. The reasoning is
+# attended-only, though — unattended, the text proposing the write can be an
+# injected email, and a memory persists into EVERY future session and is
+# retrieved by preflight, so the same capability becomes a persistence primitive
+# reachable from untrusted input. Deletion is prohibited outright; saving holds
+# on the approve_tool card so the owner sees what is being written.
+KNOWLEDGE_WRITE_TOOLS = frozenset({"remember", "forget_memory"})
+
+FORGET_PROHIBITED = (
+    "NOT EXECUTED: forget_memory is unavailable in an automated session — "
+    "deleting the owner's knowledge with nobody watching is never the right "
+    "call, whatever the entry says. Instead, name {slug} in your report/summary "
+    "with the reason it should go; the owner retires it in an attended session. "
+    "Do NOT retry this call."
+)
+
+REMEMBER_DENIED = (
+    "USER DENIED saving this memory — NOTHING was written. Do not retry it; "
+    "state the fact in your report instead and let the owner decide."
+)
+
+REMEMBER_NO_APPROVER = (
+    "NOT EXECUTED: this automated session cannot write to memory — a knowledge "
+    "write needs the owner's review and no approver is available. State the "
+    "fact in your report instead; the owner can save it."
+)
+
 
 def _hosts_in_text(text: str) -> set[str]:
     """Lowercased hostnames mentioned in owner-authored text (full URLs or
@@ -815,8 +843,8 @@ class Agent:
         # every web chat a human started; "schedule"/"email"/"webhook" for
         # triggered sessions, set by the server's open_session. A non-user
         # origin gates outbound reads (web_search/read_url to hosts the owner
-        # never mentioned — see _egress_gate) and scopes recall to knowledge
-        # entries only.
+        # never mentioned — see _egress_gate), gates knowledge writes (see
+        # _knowledge_gate, #196), and scopes recall to knowledge entries only.
         self.origin = origin
         # Hosts the OWNER introduced: extracted from user-typed / trigger-
         # prompt text (never from tool results or fetched pages) plus hosts
@@ -2164,6 +2192,42 @@ class Agent:
         self._approved_hosts.update(novel)
         return None
 
+    def _knowledge_gate(self, name: str, args: dict) -> str | None:
+        """Gate for remember/forget_memory in a triggered session (#196): None
+        = proceed, else the refusal/hold text for the model. An attended
+        session returns on the first line, so saving a fact there is
+        byte-identical to before — no new prompt, no new path.
+
+        Deletion is refused STRUCTURALLY rather than held on a card: there is
+        no unattended case where autonomously deleting the owner's knowledge is
+        the answer, so a card would only park the worker on a question already
+        decided (the curate pass's intended path is proposing retirement in its
+        summary). Saving holds, because a triggered session does legitimately
+        learn things and the owner should see what lands in the corpus. Verdict
+        semantics mirror _egress_gate / _dispatch_plugin_tool (#81) exactly."""
+        if self.origin == "user" or name not in KNOWLEDGE_WRITE_TOOLS:
+            return None
+        slug = str(args.get("name", "") or "").strip() or "(unnamed)"
+        if name == "forget_memory":
+            self._note(f"✋ forget_memory refused in a {self.origin} session: {slug}")
+            return FORGET_PROHIBITED.format(slug=slug)
+        if self.approve_tool is None:
+            return REMEMBER_NO_APPROVER
+        preview = (
+            f"automated session ({self.origin}) wants to save the memory "
+            f"{slug} — a memory persists into every future session and is "
+            "retrieved automatically"
+        )
+        decision = self.approve_tool(name, args, preview)
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            return _with_feedback(REMEMBER_DENIED, decision.comment)
+        if isinstance(decision, Approved):
+            return TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment)
+        if decision is None or decision is False:
+            return REMEMBER_DENIED
+        return None
+
     def note_owner_hosts(self, text: str) -> None:
         """Fold hosts from owner-authored text into egress provenance. Called
         only for text the OWNER supplied (task prompts, mid-task steering,
@@ -2286,6 +2350,12 @@ class Agent:
             finally:
                 self.status.stop()
 
+        # Knowledge writes auto-approve only while a human is watching (#196):
+        # unattended, deletion is refused and a save holds for review.
+        refusal = self._knowledge_gate(name, args)
+        if refusal is not None:
+            return refusal
+
         if name == "remember":
             note = str(args.get("note", ""))
             pinned = args.get("pinned")
@@ -2307,10 +2377,11 @@ class Agent:
             return result
 
         if name == "forget_memory":
-            # Auto-approved like remember: strictly confined to the model's own
-            # memory files (slug-validated, one fact each) and recoverable from
-            # the knowledge git backup, so the create/update inverse stays
-            # frictionless rather than inventing a new approval channel.
+            # Auto-approved like remember in an ATTENDED session: strictly
+            # confined to the model's own memory files (slug-validated, one fact
+            # each) and recoverable from the knowledge git backup, so the
+            # create/update inverse stays frictionless rather than inventing a
+            # new approval channel. Unattended it never gets here (#196).
             result = skills.forget_memory(str(args.get("name", "") or ""), cwd=self.cwd)
             self._note(f"→ {result}")
             return result

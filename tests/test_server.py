@@ -4709,6 +4709,18 @@ class TestTriggeredCapabilityPolicy:
         approve_tool("gmail_trash", {"message_id": "m1"})
         assert len(bridge.asked) == 1  # trash always prompts, even when triggered
 
+    def test_remember_is_never_triggered_safe(self):
+        """#196 routes a triggered session's memory write through this same
+        channel, so the capability policy must not shortcut it: a memory
+        persists into every future session, which is exactly what the owner
+        needs to see. (Deletion never reaches here — it is refused outright.)"""
+        assert not server_module._triggered_safe("remember", {"note": "a fact"})
+        approve_tool, bridge, _ = self._approver("email")
+        approve_tool("remember", {"note": "a fact", "name": "from-mail"}, "preview text")
+        assert len(bridge.asked) == 1
+        assert bridge.asked[0]["tool"] == "remember"
+        assert bridge.asked[0]["preview"] == "preview text"
+
     def test_user_session_always_prompts_even_for_safe_tools(self):
         # The policy is scoped to NON-user origins; a human-driven session gates
         # every mutation as before (no silent auto-run).

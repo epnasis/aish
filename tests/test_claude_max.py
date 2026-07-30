@@ -259,6 +259,23 @@ class TestConstructorWiring:
         assert [c["kind"] for c in commands] == ["cmd_start", "cmd_end"]
         assert commands[0]["command"] == "echo traced"
 
+    def test_origin_reaches_inner_agent_and_gates_knowledge_writes(
+        self, monkeypatch, tmp_path
+    ):
+        """The server has always passed origin= in `common`, but the wrapper had
+        no such parameter — so every claude-max web session died with a
+        TypeError, and once constructible the origin-scoped gates (#178 P0-2
+        egress, #196 knowledge writes) would have been dead on this backend
+        because they all live in the inner Agent's _dispatch."""
+        agent, fake = make_max_agent(monkeypatch, tmp_path, origin="email")
+        assert agent.inner.origin == "email"
+        out = asyncio.run(fake.call("forget_memory", {"name": "stale"}))
+        assert out.startswith("NOT EXECUTED")
+        # ...and an attended claude-max session still writes without a card.
+        attended, fake2 = make_max_agent(monkeypatch, tmp_path)
+        assert attended.inner.origin == "user"
+        assert "remembered" in asyncio.run(fake2.call("remember", {"note": "a fact"}))
+
     def test_mutating_plugin_tool_hidden_without_tool_approver(
         self, monkeypatch, tmp_path, project_scope
     ):
