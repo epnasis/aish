@@ -3,9 +3,11 @@ no network. One opt-in live test (AISH_LIVE_WEB=1) exercises the real backend.
 """
 
 import os
+import ssl
 import sys
 import types
 import urllib.error
+import urllib.request
 
 import pytest
 
@@ -287,6 +289,53 @@ class TestSsrfGuard:
         assert "run_command" in result
 
 
+class TestTrustStore:
+    """One TLS trust store for every outbound fetch (#189).
+
+    Python's default on macOS is Apple's legacy /etc/ssl/cert.pem, not the
+    system trust store — years stale and missing newer roots, so fetches to
+    whole swathes of the web failed with "unable to get local issuer
+    certificate" while other hosts worked. It looked like a broken site rather
+    than a broken client, and it silently affected read_url too, not only the
+    image fetch that surfaced it."""
+
+    def test_uses_the_current_root_set_not_the_platform_default(self):
+        import certifi
+
+        context = web._trust_store()
+        loaded = {cert["subject"] for cert in context.get_ca_certs()}
+        expected = {
+            cert["subject"]
+            for cert in ssl.create_default_context(cafile=certifi.where()).get_ca_certs()
+        }
+        assert loaded == expected
+        assert loaded, "an empty trust store would refuse the whole web"
+
+    def test_every_fetch_goes_through_it(self):
+        """The store is useless if the opener does not carry it — and BOTH the
+        text fetch (read_url) and the binary one (show_image) use this opener,
+        which is why the fix belongs here rather than at either call site."""
+        handlers = [
+            h for h in web._opener.handlers
+            if isinstance(h, urllib.request.HTTPSHandler)
+        ]
+        assert handlers, "no HTTPSHandler on the shared opener"
+        contexts = [getattr(h, "_context", None) for h in handlers]
+        assert any(c is not None for c in contexts)
+        for context in contexts:
+            if context is None:
+                continue
+            assert context.verify_mode == ssl.CERT_REQUIRED
+            assert context.check_hostname is True
+
+    def test_the_redirect_guard_is_still_wired(self):
+        """Adding the HTTPS handler must not displace the SSRF re-check —
+        verifying certificates on a fetch aimed at cloud metadata is no win."""
+        assert any(
+            isinstance(h, web._PublicOnlyRedirects) for h in web._opener.handlers
+        )
+
+
 @pytest.mark.skipif(
     not os.environ.get("AISH_LIVE_WEB"), reason="set AISH_LIVE_WEB=1 to hit the network"
 )
@@ -296,3 +345,12 @@ class TestLive:
         assert "1. " in result and "http" in result
         page = web.read_url("https://example.com")
         assert "Example Domain" in page
+
+    def test_live_fetch_of_a_modern_root_host(self):
+        """The regression itself: this host chains to GlobalSign Root R46, which
+        Apple's legacy bundle lacks. It failed before #189 and must not again."""
+        data, content_type = web.fetch_binary(
+            "https://images.unsplash.com/photo-1502680390469-be75c86b636f?w=200", 5_000_000
+        )
+        assert content_type.startswith("image/") and len(data) > 1000
+

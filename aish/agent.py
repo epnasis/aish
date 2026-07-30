@@ -612,6 +612,12 @@ _HOST_TOKEN_RE = re.compile(
     r"(?i)(?:https?://([^\s/\"'<>]+)|\b((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})\b)"
 )
 
+SHOW_IMAGE_NO_CURL = (
+    "Do NOT fall back to curl or wget — a file fetched that way cannot be "
+    "displayed. Try show_image with a different source, or tell the user you "
+    "could not find a usable picture."
+)
+
 EGRESS_DENIED = (
     "USER DENIED this outbound call — it was NOT executed. "
     "Do not retry it; change approach or ask the user."
@@ -1808,6 +1814,8 @@ class Agent:
             return str(a.get("query", ""))
         if name == "read_url":
             return str(a.get("url", ""))
+        if name == "show_image":
+            return str(a.get("source", ""))
         if name == "recall":
             return str(a.get("query") or a.get("name") or "")
         if name in ("read_file", "write_file", "edit_file"):
@@ -1983,7 +1991,11 @@ class Agent:
         else:
             data, problem = self._read_local_image(source)
         if problem is not None:
-            return f"ERROR: {problem}"
+            # The no-curl reminder rides the FAILURE, not just the system
+            # prompt: observed behaviour is that a failed show_image is exactly
+            # when the model reaches for `curl -o`, which produces a file no
+            # renderer serves and costs the user an approval prompt for nothing.
+            return f"ERROR: {problem} {SHOW_IMAGE_NO_CURL}"
         try:
             path = media.store(data, self.media_dir, caption or source.rsplit("/", 1)[-1])
         except ValueError:
