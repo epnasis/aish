@@ -404,6 +404,73 @@ class TestSessionStamp:
                 raise AssertionError("no done event")
 
 
+class TestTurnOrigin:
+    """Every live `user` event carries when its turn began (epoch seconds).
+
+    The live trace card is built by the turn's FIRST step and rebuilt by every
+    replay, so a browser landing mid-turn — a reconnect, or a swipe to another
+    chat and back — has to be told the origin. Without it the client can only
+    re-derive one by summing the steps it replays, which measures the WORK and
+    misses everything between it (the step still in flight, an approval waiting,
+    the answer streaming), so the clock came back short every time."""
+
+    def _user_events(self, session):
+        return [e for e in session.bridge.transcript if e["type"] == "user"]
+
+    def test_a_typed_turn_carries_its_start(self, app_env):
+        client, _ = make_client(app_env, [model_says("hi")], token="secret")
+        with client, connected(client, "/ws?token=secret") as (ws, hello, _):
+            before = int(time.time())
+            ws.send_json({"type": "task", "text": "say hi"})
+            recv_until(ws, "done")
+            session = client.app.state.server.sessions[hello["session"]]
+            (event,) = self._user_events(session)
+            assert before <= event["ts"] <= int(time.time())
+
+    def test_a_bang_command_turn_carries_its_start(self, app_env):
+        client, _ = make_client(app_env, [], token="secret")
+        with client, connected(client, "/ws?token=secret") as (ws, hello, _):
+            before = int(time.time())
+            ws.send_json({"type": "task", "text": "!echo hi"})
+            recv_until(ws, "done")
+            session = client.app.state.server.sessions[hello["session"]]
+            (event,) = self._user_events(session)
+            assert before <= event["ts"] <= int(time.time())
+
+    def test_a_triggered_turn_carries_its_start(self, app_env):
+        # The unattended case is where a mid-turn landing is the NORM: the owner
+        # opens the automated chat while it is still working.
+        client, _ = make_client(app_env, [model_says("triaged")], token="secret")
+        with client:
+            before = int(time.time())
+            r = client.post("/trigger?token=secret",
+                            json={"prompt": "new mail", "origin": "email"})
+            name = r.json()["session"]
+            session = client.app.state.server.sessions[name]
+            for _ in range(100):
+                if self._user_events(session):
+                    break
+                time.sleep(0.02)
+            (event,) = self._user_events(session)
+            assert event["synthetic"] == "trigger"
+            assert before <= event["ts"] <= int(time.time())
+
+    def test_a_cold_replay_needs_no_origin(self, app_env):
+        # Deliberately live-only: reconstruct_events closes every turn it replays
+        # (a cut-off one becomes an `error`), so a cold transcript can never land
+        # a reader inside a running turn — and stamping it would rewrite every
+        # mirrored session's offline prefix for nothing.
+        client, _ = make_client(app_env, [model_says("hi")], token="secret")
+        with client, connected(client, "/ws?token=secret") as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "say hi"})
+            recv_until(ws, "done")
+            path = client.app.state.server.state_dir / hello["session"]
+        cold = SessionLog.reconstruct_events(path)
+        assert [e["text"] for e in cold if e["type"] == "user"] == ["say hi"]
+        assert all("ts" not in e for e in cold if e["type"] == "user")
+        assert cold[-1]["type"] == "done"
+
+
 class TestSecurityHeaders:
     """#178 P0-2: CSP + Referrer-Policy stamped on EVERY http response class —
     index, static assets, the service worker, JSON endpoints, and errors —

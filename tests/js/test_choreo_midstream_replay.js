@@ -87,6 +87,10 @@ function turnWorld() {
   w.load("// [VIEWCACHE-START]", "// [VIEWCACHE-END]");
   w.load("let answerEl = null;", "function handle(event) {");
   w.load("function handle(event) {", "function onSessionRenamed(event) {");
+  // A replayed `user` turn reads its origin off the event (the live trace
+  // clock's; see test_trace_clock.js) — real, so a replay here can't silently
+  // stop exercising it.
+  w.load("function replayedTurnStart(event) {", "function traceStep(step) {");
   w.load("// [REPLAY-LANDING-START]", "// [REPLAY-LANDING-END]");
   w.load("function onToken(text) {", "function renderAnswerFrame");
   w.load("// [ANSWER-CLOSE-START]", "// [ANSWER-CLOSE-END]");

@@ -1023,6 +1023,11 @@ function resetLiveTurn(landing) {
   pendingCards = 0;
   renderedAnswers = 0; // fork ordinals restart with the rebuilt transcript
   finishTrace(); // the open trace belongs to the turn whose DOM just went away
+  // The clock goes with the turn. The replay about to run re-derives it from the
+  // transcript it paints, so leaving the old value would let one chat's origin
+  // date another chat's card — the case where the replayed transcript is trimmed
+  // past its own opening user event and sets nothing at all.
+  turnStart = 0;
 }
 // [TURN-RESET-END]
 
@@ -1048,7 +1053,10 @@ function handle(event) {
       if (!replaying) answerAbandoned = false;
       userCmdBlock = null; // a new turn supersedes any dangling ! command block
       taskErrored = false; // a new turn clears the prior error's red dot
-      turnStart = replaying ? 0 : Date.now(); // timing readout on the answer
+      // The turn's origin, for the answer's timing readout and the live trace
+      // card's clock. A live turn starts now; a replayed one carries its real
+      // start from the server (replayedTurnStart).
+      turnStart = replaying ? replayedTurnStart(event) : Date.now();
       setBusy(true);
       // A synthetic turn is aish's own text (a resume note, an automation's
       // trigger prompt), so it must not seed the chat title or the composer's
@@ -1796,7 +1804,11 @@ function closeAnswer() {
 // [ANSWER-CLOSE-END]
 
 function onDone(event) {
-  answerTiming = turnStart ? (Date.now() - turnStart) / 1000 : 0;
+  // How long THIS answer took, for the readout under it — a wall-clock measure,
+  // so it is meaningful only for a turn we watched run. A replayed turn now
+  // carries a real origin (it is what the live clock counts from), and the time
+  // since then is the age of the transcript, not the length of the turn.
+  answerTiming = !replaying && turnStart ? (Date.now() - turnStart) / 1000 : 0;
   if (!sawAnswer && event.result) {
     const el = addMsg("answer md", "");
     el.replaceChildren(renderMarkdown(event.result));
@@ -2034,7 +2046,13 @@ function ensureTrace() {
     // a replayed or stray step can't inherit a finished turn's clock); a replay
     // rebuilding a running turn arrives with no origin at all and back-dates this
     // from the steps it replays — see accountStepTime.
-    startedAt: turnStart || Date.now(), timer: null,
+    startedAt: turnStart || Date.now(),
+    // Whether that origin is the turn's real start or a guess starting now. A
+    // replay reconstructs the guess from the steps; a known origin must not be
+    // back-dated on top of that (it is already correct, and the sum would push
+    // it into the past twice).
+    originKnown: !!turnStart,
+    timer: null,
     autoCollapsed: false, // collapsed by an approval card, to be restored after
     // Live-status DATA for the header line — strings are derived only in
     // traceStatusLine (the choreo tests run these handlers with the header
@@ -2157,7 +2175,26 @@ function traceRow(t, iconHtml, title, sub) {
 function accountStepTime(t, secs) {
   if (!secs) return;
   t.secs += secs;
-  if (replaying) t.startedAt -= secs * 1000;
+  if (replaying && !t.originKnown) t.startedAt -= secs * 1000;
+}
+
+// The turn's real start, off a REPLAYED `user` event (epoch seconds, stamped by
+// the server when the turn began).
+//
+// This is the origin the live clock needs and the step-sum back-date above can
+// only approximate: summing steps measures the WORK, and a turn is work plus
+// everything between it — the step still in flight, an approval sitting unanswered,
+// the answer streaming out — so the reconstruction always came back SHORT. That is
+// why swiping to another chat and back wound the clock backwards by a minute
+// instead of to zero: it was never a reset, it was a re-derivation from less.
+//
+// 0 means "unusable" — a transcript trimmed past the turn's own user event, a log
+// written before the stamp existed, or a client clock behind the server's (a start
+// in the future would count DOWN) — and that keeps the step-sum as the fallback.
+function replayedTurnStart(event) {
+  const ms = Number(event.ts) * 1000;
+  if (!Number.isFinite(ms) || ms <= 0 || ms > Date.now()) return 0;
+  return ms;
 }
 
 function traceStep(step) {

@@ -93,7 +93,10 @@ function makeSandbox() {
     "\n" +
     extract("function addMsg(kind, text) {", "// The prompt that started") +
     "\n" +
-    extract("function handle(event) {", "function onSessionRenamed");
+    extract("function handle(event) {", "function onSessionRenamed") +
+    "\n" +
+    // The `user` case reads a replayed turn's origin off the event.
+    extract("function replayedTurnStart(event) {", "function traceStep(step) {");
   vm.runInContext(snippet, sandbox);
   return sandbox;
 }

@@ -129,6 +129,7 @@ function makeSandbox() {
   vm.runInContext(fnSource("fmtSecs"), sandbox);
   vm.runInContext(fnSource("fmtTokens"), sandbox);
   vm.runInContext(fnSource("onDone"), sandbox);
+  vm.runInContext(fnSource("replayedTurnStart"), sandbox);
   assert(typeof sandbox.accountStepTime === "function", "accountStepTime not extracted");
   sandbox.advance = (ms) => { state.clock += ms; };
   sandbox.at = () => state.clock;
@@ -199,6 +200,75 @@ check("live steps never book their time twice", () => {
   s.traceStep({ kind: "tool", name: "read_file", secs: 2, ok: true, summary: "a.py" });
   s.traceStep({ kind: "tool", name: "read_file", secs: 2, ok: true, summary: "b.py" });
   assert.strictEqual(s.elapsedText(), "0:12");
+});
+
+// The swipe case: the replayed transcript carries the turn's real start, so the
+// rebuilt card must count from THERE — not from the sum of the steps, which is
+// the work alone and always less than the turn (the in-flight step, the approval
+// wait, the answer streaming). That shortfall is why swiping away and back used
+// to wind the clock backwards instead of resetting it.
+check("a stamped replay counts the whole turn, not just the work in it", () => {
+  const s = makeSandbox();
+  const began = s.at() - 10 * MINUTE;
+  s.replaying = true;
+  s.turnStart = s.replayedTurnStart({ type: "user", text: "hi", ts: began / 1000 });
+  s.traceStep({ kind: "thinking_start" });
+  s.traceStep({ kind: "thinking", secs: 230 });
+  s.traceStep({ kind: "tool_start", name: "run_command", summary: "make" });
+  s.traceStep({ kind: "tool", name: "run_command", secs: 40, ok: true, summary: "make" });
+  s.traceStep({ kind: "thinking_start" }); // still running: unbooked, and so are the gaps
+  s.replaying = false;
+  assert.strictEqual(s.elapsedText(), "10:00", "the turn's own start, not 270s of steps");
+  s.advance(30000);
+  assert.strictEqual(s.elapsedText(), "10:30", "and the live tail carries on from it");
+});
+
+check("the same replay landing twice does not double-count", () => {
+  const s = makeSandbox();
+  const began = s.at() - 5 * MINUTE;
+  const replay = () => {
+    s.currentTrace = null; // the rebuild drops the card with the DOM
+    s.replaying = true;
+    s.turnStart = s.replayedTurnStart({ type: "user", text: "hi", ts: began / 1000 });
+    s.traceStep({ kind: "thinking_start" });
+    s.traceStep({ kind: "thinking", secs: 120 });
+    s.replaying = false;
+  };
+  replay();
+  assert.strictEqual(s.elapsedText(), "5:00");
+  replay(); // swipe away, swipe back
+  assert.strictEqual(s.elapsedText(), "5:00", "the clock is where it was, not 7:00");
+});
+
+check("an unusable stamp falls back to reconstructing from the steps", () => {
+  const s = makeSandbox();
+  const ev = (ts) => s.replayedTurnStart({ type: "user", text: "hi", ts });
+  assert.strictEqual(ev(undefined), 0, "a log written before the stamp existed");
+  assert.strictEqual(ev(s.at() / 1000 + 3600), 0, "a start in the future would count down");
+  assert.strictEqual(ev(0), 0);
+  assert.strictEqual(ev("nonsense"), 0);
+  // …and with no origin the old reconstruction still runs.
+  s.replaying = true;
+  s.traceStep({ kind: "thinking_start" });
+  s.traceStep({ kind: "thinking", secs: 95 });
+  s.replaying = false;
+  assert.strictEqual(s.elapsedText(), "1:35");
+});
+
+check("a replayed done reports no answer timing", () => {
+  const s = makeSandbox();
+  s.replaying = true;
+  s.turnStart = s.replayedTurnStart({ type: "user", text: "hi", ts: (s.at() - MINUTE) / 1000 });
+  s.onDone({ result: "an answer from an hour ago" });
+  s.replaying = false;
+  assert.strictEqual(s.answerTiming, 0, "transcript age is not how long the turn took");
+});
+
+check("the user handler is wired to the stamp", () => {
+  assert(
+    src.includes("turnStart = replaying ? replayedTurnStart(event) : Date.now();"),
+    "the `user` case must take a replayed turn's origin from the event"
+  );
 });
 
 check("a finished turn releases the clock, so the next card cannot inherit it", () => {

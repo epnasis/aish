@@ -479,14 +479,32 @@ def _prefix_sig(events: list[dict], count: int) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
+def _turn_event(text: str) -> dict[str, Any]:
+    """The `user` transcript event for text the HUMAN typed — never classified as
+    synthetic, because what you type is yours (#171). See `_user_event` for what
+    `ts` is for; it is the one thing both flavours share."""
+    return {"type": "user", "text": text, "ts": int(time.time())}
+
+
 def _user_event(text: str, synthetic: str = "") -> dict[str, Any]:
     """The `user` transcript event, tagged when aish — not the human — wrote
     the turn (#171). It is still a real turn (it starts a task, so the frontend
     runs the whole turn-management path); only the rendering differs. `synthetic`
     is passed explicitly only where the text carries no marker to classify by —
     a trigger's prompt is arbitrary — and everything else is classified by the
-    same function `reconstruct_events` uses on replay, so the two agree."""
-    event: dict[str, Any] = {"type": "user", "text": text}
+    same function `reconstruct_events` uses on replay, so the two agree.
+
+    `ts` (epoch seconds) is when the turn began, and it is the ONLY authoritative
+    record of that: the live trace card is built by the turn's first STEP and is
+    rebuilt from the transcript by every replay, so without it a browser landing
+    mid-turn — a reconnect, or a swipe away and back — can only guess the origin
+    by summing the steps it replays, which counts the work and misses every gap
+    between it (the in-flight step, an approval wait, the answer streaming) and
+    therefore always guesses SHORT. Only live-emitted events carry it, which is
+    the whole population that needs it: `reconstruct_events` closes every turn it
+    replays (a cut-off one becomes an `error`), so a cold transcript never lands
+    a reader inside a running turn."""
+    event: dict[str, Any] = _turn_event(text)
     synthetic = synthetic or synthetic_kind(text)
     if synthetic:
         event["synthetic"] = synthetic
@@ -2269,7 +2287,7 @@ class WebServer:
         # stays the /cd alias and is dispatched below inside _run_user_command.
         if text.startswith("!"):
             session.busy = True
-            session.bridge.emit({"type": "user", "text": text})
+            session.bridge.emit(_turn_event(text))
             session.runner = asyncio.ensure_future(
                 self._run_user_command(session, text[1:].strip())
             )
@@ -2280,7 +2298,7 @@ class WebServer:
         if notes:
             text = f"{text}\n\n" + "\n".join(notes) if text else "\n".join(notes)
         session.busy = True
-        session.bridge.emit({"type": "user", "text": text})
+        session.bridge.emit(_turn_event(text))
         if text.startswith("/"):
             # /learn and /feedback are the task-expanding slash commands on web:
             # the transcript shows what the user typed, the model gets the
@@ -2635,7 +2653,7 @@ class WebServer:
         session.pending_issue = None  # consumed; a re-tap can't double-file
         session.feedback_block = False  # filed — the adjust window is over (#130)
         session.busy = True
-        session.bridge.emit({"type": "user", "text": "Create the issue"})
+        session.bridge.emit(_turn_event("Create the issue"))
         session.runner = asyncio.ensure_future(self._file_issue(session, command))
 
     async def _file_issue(self, session: Session, command: str) -> None:
