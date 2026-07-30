@@ -1298,6 +1298,84 @@ function replayLanding(state) {
   return "rebuild";
 }
 
+// [SCROLLPOS-START]
+// Where you were reading survives a rebuild: a reload after the phone put the
+// app to sleep, the app-revision reload, a session switch and back. The "noop"
+// landing already keeps the scroll by keeping the DOM; this is the other two
+// landings, which throw the DOM away and used to always come back at the tail.
+//
+// A raw scrollTop would be a lie the moment any height differs, so what's stored
+// is the SAME anchor the wrap toggle reflows around (`topVisibleAnchor`): the
+// index of the child at the top of the viewport plus its on-screen offset. That
+// index only means something if the rebuilt DOM is the one it was measured
+// against, so it is stored with `transcriptFp()` — a fingerprint of the
+// TRANSCRIPT ON SCREEN, deliberately not `viewFp`. viewFp is stamped by the last
+// replay, and the flow this whole thing exists for (ask something, scroll up to
+// read the answer, come back later) leaves it stale by definition — a live turn
+// appends to the DOM without ever replaying, so keying on it would reject the
+// restore in exactly the case that matters. Comparing rendered DOM to rendered
+// DOM asks the right question: "is this the screen I left?"
+//
+// A mismatch deliberately falls through to the tail: something arrived while you
+// were away, and the newest of it is what you came back for.
+const SCROLL_KEY = "aish-scroll";
+const SCROLL_MAX_KEPT = 24; // a handful of chats deep; the rest fall off oldest-first
+
+// Cheap and stable across live-vs-replay rendering, which is the same hot/cold
+// parity `reconstruct_events` already guarantees: same events → same children.
+function transcriptFp() {
+  const last = messagesEl.lastElementChild;
+  return [
+    messagesEl.childElementCount,
+    last ? last.className : "",
+    last ? last.textContent.length : 0,
+  ].join(":");
+}
+
+function readScrollMemory() {
+  try {
+    return JSON.parse(localStorage.getItem(SCROLL_KEY) || "{}") || {};
+  } catch {
+    return {}; // unparseable or storage-denied (private mode) — just forget
+  }
+}
+
+function rememberScrollPos() {
+  if (!currentSession) return;
+  const anchor = topVisibleAnchor();
+  if (!anchor) return;
+  const index = [...messagesEl.children].indexOf(anchor.el);
+  if (index < 0) return;
+  const mem = readScrollMemory();
+  mem[currentSession] = {
+    fp: transcriptFp(), index, offset: Math.round(anchor.offset), at: Date.now(),
+  };
+  const names = Object.keys(mem);
+  if (names.length > SCROLL_MAX_KEPT) {
+    names
+      .sort((a, b) => (mem[a].at || 0) - (mem[b].at || 0))
+      .slice(0, names.length - SCROLL_MAX_KEPT)
+      .forEach((name) => delete mem[name]);
+  }
+  try {
+    localStorage.setItem(SCROLL_KEY, JSON.stringify(mem));
+  } catch {
+    // storage full or denied: the position is a nicety, never a failure
+  }
+}
+
+// True when the remembered position was applied — the caller falls back to the
+// tail otherwise. Call this with the transcript fully built.
+function restoreScrollPos() {
+  const saved = readScrollMemory()[currentSession];
+  if (!saved || saved.fp !== transcriptFp()) return false;
+  const el = messagesEl.children[saved.index];
+  if (!el) return false;
+  restoreAnchor({ el, offset: saved.offset });
+  return true;
+}
+// [SCROLLPOS-END]
+
 function stashCurrentView() {
   const stashable = viewStashable({
     name: currentSession,
@@ -1503,7 +1581,9 @@ function onReplay(event) {
   }
   viewFp = fp;
   viewDirty = false;
-  scrollToEnd(true);
+  // The reading position if this is the same transcript you left (a reload, a
+  // switch and back); the tail if anything changed while you were away.
+  if (!restoreScrollPos()) scrollToEnd(true);
   snapViewportSoon(); // session switches race keyboard dismissal with this rebuild (#8)
   setTimeout(() => reportViewport("after-replay"), 1200);
   // Every replay marks a fresh view (new chat, resume, reconnect) — on
@@ -1572,7 +1652,14 @@ function onToken(text) {
     }
     // Entering "Answering…" collapses the open timeline to its summary (#168).
     collapseTimelineForAnswering(currentTrace);
-    requestAnimationFrame(() => anchorAnswer(true));
+    // Bring a LIVE reply on screen — the one you just asked for. A REPLAYED
+    // token is a reconstruction of a turn you have already seen, and forcing
+    // this would override the resting position onReplay is about to choose
+    // (the reading position it restores, or the tail): a reload would land you
+    // at the top of the last answer no matter where you had been reading. The
+    // flag is read at SCHEDULE time — inside the callback the replay loop has
+    // long since reset it.
+    if (!replaying) requestAnimationFrame(() => anchorAnswer(true));
   }
   // [ANSWER-OPEN-END]
   answerText += text;
@@ -3187,7 +3274,22 @@ function updateScrollButton() {
   }
 }
 
-messagesEl.addEventListener("scroll", updateScrollButton, { passive: true });
+// [SCROLLPOS] Remembering the reading position walks the transcript's children,
+// so it is debounced well clear of the scroll itself — the position that matters
+// is where the scrolling STOPPED. pagehide/hidden catch a page torn down inside
+// the debounce window, which on a phone is the common case (the reload after the
+// app was put away is exactly that).
+const SCROLL_POS_SAVE_MS = 300;
+let scrollPosTimer = null;
+messagesEl.addEventListener("scroll", () => {
+  updateScrollButton();
+  if (scrollPosTimer) clearTimeout(scrollPosTimer);
+  scrollPosTimer = setTimeout(rememberScrollPos, SCROLL_POS_SAVE_MS);
+}, { passive: true });
+addEventListener("pagehide", rememberScrollPos);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) rememberScrollPos(); // iOS PWAs hide far more reliably than they pagehide
+});
 // The composer's focus/blur listeners (arrows hide the instant it takes focus,
 // #115) are attached in attachInputListeners together with keydown/input, since
 // terminal mode swaps the #input node for a fresh one (#156) and every listener
