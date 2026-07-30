@@ -84,6 +84,12 @@ JUDGE_BODY_CHARS = 2500  # entry body quoted to the judge (identity is short)
 JUDGE_NUM_CTX = 8192  # one bounded decision needs no more
 ACTION_COOLDOWN_DAYS = 10  # judged (incl. skipped) entries rest between passes
 PAIRS_MAX = 6  # duplicate pairs judged per pass
+# Embedding floor for MERGE candidates — deliberately stricter than
+# save_memory's DEDUP_MIN_SIM (0.55): on the live corpus every true
+# duplicate scored >= 0.77 while every related-but-distinct trap (read vs
+# triage, home address vs home city) sat at 0.63-0.66. The judge only sees
+# pairs a human would also call "probably the same thing".
+MERGE_MIN_SIM = 0.72
 ACTIONS_FILE = "curation-actions.jsonl"
 
 VERDICTS = ("repair", "pin", "disable", "skip")
@@ -454,7 +460,7 @@ def dup_candidates(entries: list, scores=None) -> list[tuple]:
                 break
             for other in entries[i + 1 :]:
                 sim = sims.get(id(other), 0.0)
-                if sim >= skills.DEDUP_MIN_SIM and not _same_family(entry, other):
+                if sim >= MERGE_MIN_SIM and not _same_family(entry, other):
                     pairs.append((entry, other, sim))
     if scores is None:
         for i, entry in enumerate(entries):
