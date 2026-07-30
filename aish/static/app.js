@@ -1098,6 +1098,7 @@ function handle(event) {
       if (event.code === "no_such_session") { onSessionGone(event.name || ""); break; }
       closeAnswer();
       finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
+      turnStart = 0;
       addErrorMsg(event.text);
       // A live error means the current task failed → red dot. A REPLAYED error
       // (a past interrupted turn on a freshly-loaded session) must not: the
@@ -1806,6 +1807,7 @@ function onDone(event) {
   answerAbandoned = false; // this turn is over; the next one streams normally
   maybeSpeakReply(); // voice-in → voice-out: auto-read a reply to a dictated message (#97)
   finishTrace();
+  turnStart = 0; // no turn is running; the next card must not inherit this clock
   if (event.sources && event.sources.length) addSources(event.sources);
   setBusy(false);
   setStatus(null);
@@ -1823,6 +1825,7 @@ function onDone(event) {
 function onStopped() {
   closeAnswer();
   finishTrace();
+  turnStart = 0;
   setBusy(false);
   setStatus(null);
 }
@@ -2024,7 +2027,14 @@ function ensureTrace() {
   const t = {
     el, head, body, inner: body.querySelector(".trace-inner"),
     started: 0, secs: 0, tokensIn: 0, tokensOut: 0,
-    pending: null, thinkingRow: null, startedAt: Date.now(), timer: null,
+    pending: null, thinkingRow: null,
+    // The live header counts the TURN, not this card: the card is created by the
+    // turn's first step, which on a slow local model lands minutes after you hit
+    // send. `turnStart` is that turn's origin (0 when no live turn is running, so
+    // a replayed or stray step can't inherit a finished turn's clock); a replay
+    // rebuilding a running turn arrives with no origin at all and back-dates this
+    // from the steps it replays — see accountStepTime.
+    startedAt: turnStart || Date.now(), timer: null,
     autoCollapsed: false, // collapsed by an approval card, to be restored after
     // Live-status DATA for the header line — strings are derived only in
     // traceStatusLine (the choreo tests run these handlers with the header
@@ -2131,6 +2141,25 @@ function traceRow(t, iconHtml, title, sub) {
   return { row, badge, main, titleEl };
 }
 
+// One step's duration, booked against the turn's two clocks: `secs` is the work
+// the finished header reports, `startedAt` the wall-clock origin the live header
+// counts from.
+//
+// The back-date is what makes a mid-turn REPLAY continue the clock instead of
+// restarting it. A replay rebuilds the running turn's steps out of the log (every
+// reconnect — each phone unlock — does this), and the log carries no origin for
+// the turn: the replayed `user` event deliberately sets none, so the rebuilt card
+// would count from the reconnect and read 0:03 on a turn ten minutes old. Each
+// replayed step therefore pushes the origin back by its own duration,
+// reconstructing where the turn actually began. Live steps never back-date —
+// `startedAt` is already the real turn start, and parallel read-only tools would
+// otherwise book their overlap twice.
+function accountStepTime(t, secs) {
+  if (!secs) return;
+  t.secs += secs;
+  if (replaying) t.startedAt -= secs * 1000;
+}
+
 function traceStep(step) {
   const t = ensureTrace();
   if (step.kind === "thinking_start") {
@@ -2165,7 +2194,7 @@ function traceStep(step) {
     return;
   }
   if (step.kind === "thinking") {
-    t.secs += step.secs || 0;
+    accountStepTime(t, step.secs);
     if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
     // The model's own words for this turn (say = preamble, gist = thinking
     // text) — the header prefers these over the deterministic tool line.
@@ -2269,7 +2298,7 @@ function toolStart(t, step) {
 }
 
 function toolFinish(t, step) {
-  t.secs += step.secs || 0;
+  accountStepTime(t, step.secs);
   const meta = TOOL_META[step.name] || [step.name, "dot", "--dim"];
   const denied = step.decision === "denied" || step.decision === "blocked" || step.decision === "rejected";
   // Approve + comment holds the action for adjustment (#81): it did not run,
@@ -4376,6 +4405,11 @@ function forkChip(ordinal) {
 
 // Footer row under a finished answer: copy-as-markdown chip, plus the
 // read-aloud player where speech synthesis exists.
+// When the live turn began, and 0 whenever no live turn is running — the live
+// trace card reads it as its clock's origin, so a stale value would date a fresh
+// card from a turn that already ended. Set on a live `user` event, cleared at
+// every way a turn ends (done / stopped / error). A replayed turn deliberately
+// sets none: its origin is reconstructed from the steps (accountStepTime).
 let turnStart = 0;
 let answerTiming = 0;
 
