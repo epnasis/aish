@@ -11,6 +11,7 @@ and on every redirect (SSRF guard, see _require_public).
 
 import ipaddress
 import socket
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -245,7 +246,31 @@ class _PublicOnlyRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_opener = urllib.request.build_opener(_PublicOnlyRedirects())
+def _trust_store() -> ssl.SSLContext:
+    """ONE TLS trust store for every outbound fetch aish makes.
+
+    Python's default on macOS is `/etc/ssl/cert.pem` — a legacy bundle Apple
+    ships for OpenSSL clients, NOT the system trust store the Keychain holds.
+    It is years stale and missing newer roots (GlobalSign Root R46 among them),
+    so fetches failed with "unable to get local issuer certificate" for whole
+    swathes of the web while other hosts worked fine — a failure that looks
+    like a broken site rather than a broken client. certifi ships the current
+    Mozilla root set and is already in the dependency tree.
+
+    Falls back to the default context if certifi is somehow absent: a stale
+    trust store still verifies most of the web, and refusing to fetch anything
+    would be the worse failure.
+    """
+    try:
+        import certifi
+    except ImportError:  # pragma: no cover — declared dependency
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+_opener = urllib.request.build_opener(
+    _PublicOnlyRedirects(), urllib.request.HTTPSHandler(context=_trust_store())
+)
 
 
 def _fetch(url: str) -> tuple[str, str]:

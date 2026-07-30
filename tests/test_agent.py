@@ -4220,6 +4220,27 @@ class TestShowImage:
         assert asked == []
         assert "![c](" in tool_messages(agent.messages)[-1]["content"]
 
+    def test_a_failure_forbids_the_curl_fallback(self, tmp_path, monkeypatch):
+        """Observed in the wild: a failed show_image is exactly when the model
+        reaches for `curl -o`, producing a file no renderer serves and costing
+        the user an approval prompt for nothing. The reminder rides the FAILURE,
+        not only the system prompt."""
+        import urllib.error
+
+        error = urllib.error.HTTPError("https://ex.com/a.jpg", 404, "Not Found", {}, None)
+        _, result, _ = self._run(tmp_path, monkeypatch, error)
+        assert "Do NOT fall back to curl" in result
+
+    def test_the_trace_names_the_source_it_tried(self, tmp_path, monkeypatch):
+        """A step whose subtitle is blank is unreadable in the timeline — the
+        first live failure showed `show_image` with no argument at all, so there
+        was no way to see which URL had been attempted."""
+        import aish.agent as agent_module
+
+        assert agent_module.Agent._arg_summary(
+            "show_image", {"source": "https://ex.com/a.jpg", "caption": "c"}
+        ) == "https://ex.com/a.jpg"
+
     def test_empty_source_is_a_message_not_a_crash(self, tmp_path):
         agent, _ = self._agent(
             [

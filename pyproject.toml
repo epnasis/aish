@@ -6,6 +6,11 @@ license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.60",
+    # The current Mozilla root set. Python's default trust store on macOS is
+    # Apple's legacy /etc/ssl/cert.pem, which is missing newer roots — see
+    # web._trust_store. Already present transitively; declared because we
+    # import it.
+    "certifi",
     "claude-agent-sdk>=0.2.121",
     "ddgs>=9.14.4",
     "markdown>=3.5",

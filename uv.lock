@@ -17,6 +17,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "certifi" },
     { name = "claude-agent-sdk" },
     { name = "ddgs" },
     { name = "markdown" },
@@ -39,6 +40,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.60" },
+    { name = "certifi" },
     { name = "claude-agent-sdk", specifier = ">=0.2.121" },
     { name = "ddgs", specifier = ">=9.14.4" },
     { name = "markdown", specifier = ">=3.5" },
