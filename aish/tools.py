@@ -698,6 +698,48 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "show_image",
+            "description": (
+                "Display a picture to the user. Call this WHENEVER the answer should "
+                "include an image — the user asks what something looks like, asks for "
+                "a photo/picture/diagram, or you are recommending a product worth "
+                "seeing. It fetches the image, verifies it really is one, stores it "
+                "where the UI can display it, and returns the exact markdown line to "
+                "put in your answer.\n"
+                "You MUST use this tool for every image you show. NEVER write an "
+                "![alt](https://…) markdown image yourself — the UI refuses to load "
+                "remote images and it renders as a dead link. NEVER download an image "
+                "with curl/wget: files outside this store are not displayable, and it "
+                "costs the user an approval prompt. To find a picture, web_search for "
+                "the subject, read_url a promising page, then pass an image URL from "
+                "that page here."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": (
+                            "Full http(s) URL of the image file itself (ending .jpg/"
+                            ".png/.gif/.webp, not the page it appears on), OR an "
+                            "absolute path to an image already on this machine."
+                        ),
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": (
+                            "Short description of what the picture shows — becomes the "
+                            "alt text, so write it for someone who cannot see it."
+                        ),
+                    },
+                },
+                "required": ["source", "caption"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "recall",
             "description": (
                 "Search everything you know: saved skills (how-to playbooks), "

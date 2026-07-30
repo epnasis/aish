@@ -289,12 +289,20 @@ this UI. Highlights:
   staged there (correctable, with the last 10 sends recallable) and only reaches
   the terminal when you tap Send — and an unsent line survives an app update or
   relaunch, so a restart mid-sentence doesn't cost you the sentence.
-- **Export to PDF, copy anything, inline images.** Per-answer or whole-session
-  PDF export (rendered locally), copy chips on every code block / table / answer,
-  and markdown images rendered right in the chat (local files, plus a small
-  whitelist of remote hosts — YouTube thumbnails, Google static maps; other
-  remote images are blocked by the page's Content-Security-Policy, which
-  closes a zero-click data-exfiltration channel). A single-answer
+- **Pictures in answers.** Ask what something looks like and aish shows you.
+  Behind it is one tool, `show_image`: the picture is fetched *by the server*,
+  verified to actually be an image (by its bytes, not its file extension — a
+  block page served as `.jpg` is caught, not displayed as a broken glyph),
+  stored where the chat can render it, and handed back as a ready markdown line.
+  Fetching server-side is what makes arbitrary image sources work while the page
+  itself still loads nothing remote: the browser only ever sees same-origin
+  bytes, so the zero-click exfiltration channel a remote `<img>` would open
+  stays closed. When something *does* fail to render, the browser says so and
+  the model is told — so it tries another source instead of leaving you looking
+  at a broken picture.
+- **Export to PDF, copy anything.** Per-answer or whole-session
+  PDF export (rendered locally), copy chips on every code block / table / answer.
+  A single-answer
   PDF is titled and filed after what the answer is *about* — the model that wrote
   it writes the title — not after the prompt that asked for it.
 - **Native vision.** On vision-capable backends (Gemini, OpenAI, Claude, Ollama

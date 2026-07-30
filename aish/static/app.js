@@ -1853,6 +1853,7 @@ const TOOL_META = {
   run_command: ["run_command", "command", "--green"],
   web_search: ["Searched the web", "web", "--blue"],
   read_url: ["Read a page", "web", "--blue"],
+  show_image: ["Fetched a picture", "web", "--blue"],
   recall: ["Recalled from memory", "knowledge", "--yellow"],
   read_docs: ["Read docs", "doc", "--dim"],
   read_file: ["read_file", "doc", "--dim"],
@@ -3516,6 +3517,45 @@ function imageFetchAllowed(src) {
 }
 // [INLINEIMG-END]
 
+// [RENDERERR-START]
+// The browser is the only place that knows an image did not render, and until
+// #188 it kept that to itself: the fallback below wrote a small "unavailable"
+// note into the DOM and told nobody, so the model's only feedback channel was
+// the user typing "images don't show". These failures are reported back — logged
+// as a trace step, and (for a live turn) handed to the model as a note on its
+// next one, so it retries a different source instead of re-pasting a dead link.
+//
+// Debounced and batched: one answer with four broken pictures is ONE report and
+// one note, not four. What is reported is the ORIGINAL target the model wrote,
+// never the rewritten /file?…&token= URL — that would put the access token in
+// the session log. Nothing is queued when the socket is down: a diagnostic that
+// arrives after the conversation moved on is worse than none.
+const RENDER_ERROR_DEBOUNCE_MS = 1200;
+const RENDER_ERROR_BATCH_MAX = 6;
+const renderErrorBuffer = new Map(); // original target → was it a live turn
+let renderErrorTimer = null;
+
+function noteRenderError(target, live) {
+  // The offline mirror legitimately serves transcripts whose images were never
+  // synced; reporting that would blame the model for the network.
+  if (offlineViewing) return;
+  if (renderErrorBuffer.size >= RENDER_ERROR_BATCH_MAX && !renderErrorBuffer.has(target)) return;
+  renderErrorBuffer.set(target, !!live || !!renderErrorBuffer.get(target));
+  if (renderErrorTimer) clearTimeout(renderErrorTimer);
+  renderErrorTimer = setTimeout(flushRenderErrors, RENDER_ERROR_DEBOUNCE_MS);
+}
+
+function flushRenderErrors() {
+  renderErrorTimer = null;
+  const items = [...renderErrorBuffer.keys()];
+  const live = [...renderErrorBuffer.values()].some(Boolean);
+  renderErrorBuffer.clear();
+  if (!items.length) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "render_error", what: "image", items, live }));
+}
+// [RENDERERR-END]
+
 // Images (#9): ![alt](https://…) embeds a whitelisted web image (see
 // IMG_FETCH_HOSTS above — any other remote host renders as a link, never a
 // fetch); ![alt](/abs/path.png) is rewritten to the token-gated /file
@@ -3524,10 +3564,16 @@ function imageFetchAllowed(src) {
 // full-size image in a new tab.
 function inlineImage(alt, target) {
   let src;
+  // Whether this render is the live turn, captured now: onerror fires later, by
+  // which time `replaying` says nothing about where this image came from.
+  const live = !replaying && !offlineViewing;
   if (/^https?:\/\//.test(target)) {
     if (!imageFetchAllowed(target)) {
       // Same visual as the broken-image note; the anchor keeps the URL
       // reachable by an explicit user tap — only the zero-click fetch is out.
+      // Reported too (#188): a hand-written remote image link means the model
+      // skipped show_image, and this is how it finds out.
+      noteRenderError(target, live);
       const link = externalAnchor(target);
       link.className = "img-link img-broken";
       link.textContent = `🖼 ${alt || target} (not embedded)`;
@@ -3552,6 +3598,7 @@ function inlineImage(alt, target) {
   img.onerror = () => {
     link.textContent = `🖼 ${alt || target} (unavailable)`;
     link.classList.add("img-broken");
+    noteRenderError(target, live);
   };
   img.src = src;
   link.appendChild(img);
