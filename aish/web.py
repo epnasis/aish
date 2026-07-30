@@ -257,3 +257,19 @@ def _fetch(url: str) -> tuple[str, str]:
         charset = response.headers.get_content_charset() or "utf-8"
         raw = response.read(FETCH_MAX_BYTES)
     return raw.decode(charset, errors="replace"), content_type
+
+
+def fetch_binary(url: str, max_bytes: int) -> tuple[bytes, str]:
+    """Raw body bytes and content type, through the SAME SSRF guard and
+    redirect-rechecking opener as every other fetch here (#188: show_image
+    fetches server-side so the browser never loads a model-chosen remote URL).
+
+    Reads one byte past the cap so the caller can tell "at the limit" from
+    "over it". Raises BlockedURLError / urllib.error.* / OSError — the caller
+    turns those into a message the model can act on."""
+    _require_public(url)
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with _opener.open(request, timeout=FETCH_TIMEOUT) as response:
+        content_type = response.headers.get_content_type()
+        data = response.read(max_bytes + 1)
+    return data, content_type

@@ -685,7 +685,9 @@ def print_answer_images(agent, answer: str) -> None:
     protocol = term_image.supports_images()
     if not protocol:
         return
-    for path in term_image.local_image_paths(answer, agent.roots):
+    # image_roots, not roots: show_image stores pictures in aish's own media
+    # dir, which is renderable but deliberately not an auto-approval root (#188).
+    for path in term_image.local_image_paths(answer, agent.image_roots()):
         term_image.emit(path, protocol)
 
 

@@ -571,6 +571,23 @@ IMAGE_TYPES = {
     ".webp": "image/webp",
 }
 MEDIA_MAX_BYTES = 20 * 1024 * 1024  # inline base64 limit; larger files fall back to a path
+
+# Render-error reports (#188 layer 2). Until this existed, every way an image
+# could fail to display failed IN THE BROWSER after the turn was over: the
+# renderer wrote a small "unavailable" note into the DOM and told nobody, so the
+# model's only feedback channel was the user typing "images don't show". The
+# browser now reports what it could not render; the report is logged as a trace
+# step (so the retrieval/curate ledger can count it like any other step) and,
+# when the failure was in a LIVE turn, handed to the model as a note on its next
+# one. Bounded and control-stripped because the strings come off a socket.
+RENDER_ERROR_MAX = 6  # failures one report may name
+RENDER_ERROR_SRC_CHARS = 200
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+RENDER_NOTE = (
+    "[aish: {count} {noun} in your last answer did not display for the user: "
+    "{items}. Never paste an image link straight into an answer — call "
+    "show_image and use the markdown line it returns.]"
+)
 MAX_QUEUE = 5  # messages waiting behind a busy session
 RENAME_MAX = 200  # custom chat-title length cap (a title, not a message)
 DECK_CHECK_MAX = 100  # names a single deck_check will stat (a deck is far smaller)
@@ -2032,6 +2049,9 @@ class WebServer:
             if viewed is not None:
                 viewed.pending_cwd = None
                 viewed.bridge.emit({"type": "cwd_dequeued"}, record=False)
+        elif kind == "render_error":
+            # VIEW message: the browser reporting what it could not render.
+            self._render_error(client, message)
         elif kind == "client_debug":
             # Device-side diagnostics (viewport state on iOS, etc.) — printed
             # to the server log because the phone has no reachable console.
@@ -2040,6 +2060,50 @@ class WebServer:
             await client.ws.send_json(
                 {"type": "error", "text": f"unknown message type {kind!r}"}
             )
+
+    def _render_error(self, client: Client, message: dict) -> None:
+        """The browser reporting transcript content it could not render (#188).
+
+        Two destinations, deliberately different. The trace record is written
+        ALWAYS — it is the durable evidence, and the curate ledger reads exactly
+        this shape. It renders NOWHERE: nothing is emitted live and
+        reconstruct_events skips it on replay, so hot and cold agree, and the
+        user's signal is the broken-picture note already sitting in the answer.
+        The model-facing note is only for a failure in a LIVE turn: merely
+        OPENING an old chat whose images were long since evicted must not inject
+        a note into it — that would be an unread conversation growing turns.
+
+        The reported strings come off a socket, so they are capped and stripped
+        of control characters. They are not treated as owner-authored: the note
+        goes through add_system_note, never add_user_context, so a host in an
+        src the MODEL chose can never launder itself into egress provenance.
+        """
+        session = client.viewing
+        if session is None:
+            return
+        raw = message.get("items")
+        if not isinstance(raw, list):
+            return
+        items = []
+        for entry in raw[:RENDER_ERROR_MAX]:
+            if not isinstance(entry, str):
+                continue
+            cleaned = _CONTROL_RE.sub(" ", entry).strip()[:RENDER_ERROR_SRC_CHARS]
+            if cleaned:
+                items.append(cleaned)
+        if not items:
+            return
+        what = "image" if str(message.get("what", "image")) == "image" else "embed"
+        live = bool(message.get("live"))
+        session.logref.step({"kind": "render_error", "what": what, "items": items})
+        if not live:
+            return
+        noun = f"{what}s" if len(items) > 1 else what
+        note = RENDER_NOTE.format(
+            count=len(items), noun=noun, items=", ".join(items)
+        )
+        with contextlib.suppress(Exception):  # a note must never break a session
+            session.agent.add_system_note(note)
 
     async def _reject_busy(self, client: Client, session: Session) -> bool:
         if session.busy:
@@ -3371,12 +3435,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         if media_type is None:
             return JSONResponse({"error": "unsupported file type"}, status_code=415)
         path = path.resolve()
-        roots = {
-            Path(r).resolve()
-            for session in self.sessions.values()
-            for r in session.agent.roots
-        }
-        if not any(path.is_relative_to(r) for r in roots):
+        if not any(path.is_relative_to(r) for r in self._image_roots()):
             return JSONResponse({"error": "outside session roots"}, status_code=403)
         if not path.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
@@ -3397,15 +3456,23 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         )
 
     def _image_roots(self) -> list[Path]:
-        """The trusted directories the exporter may inline local images from:
-        every open session's roots (which already include the uploads dir) plus
-        their scratch workspaces — the same union-of-roots boundary /file
-        serves under. Local `![](path)` images outside this set render as link
-        cards, never read (issue #133)."""
+        """The ONE boundary a local image may be displayed from — used by both
+        /file (the chat) and the PDF exporter (issue #133). Each open session's
+        own definition (`Agent.image_roots`: its roots, its media store, its
+        scratch workspace) plus the uploads dir.
+
+        These two callers disagreed until #188: the exporter trusted the scratch
+        workspace and /file did not, so an image the model wrote where it is
+        told to write throwaway files printed fine in a PDF and 403'd in the
+        chat. One method, no drift.
+
+        The union across sessions is deliberate: /file is plain HTTP with no
+        socket context, so with several viewers it must accept a path in scope
+        for whichever session produced it. Outside this set, a local
+        `![](path)` renders as a link card and is never read."""
         roots = [self.uploads_dir.resolve()]
         for session in self.sessions.values():
-            roots.extend(Path(r).resolve() for r in session.agent.roots)
-            roots.append(Path(session.agent.scratch_dir).resolve())
+            roots.extend(Path(r).resolve() for r in session.agent.image_roots())
         return roots
 
     def _model_title(self, session: Session, markdown_text: str) -> str | None:

@@ -514,6 +514,14 @@ class SessionLog:
                     running_steps += 1
                 elif sk in ("thinking", "thinking_cancel", "tool"):
                     running_steps = max(0, running_steps - 1)
+                if sk == "render_error":
+                    # Diagnostic evidence, not transcript content (#188): the
+                    # browser telling the server it could not display something.
+                    # Live it renders nothing at all — the user's signal is the
+                    # broken-picture note already in the answer — so skipping it
+                    # here IS the hot/cold parity, exactly as for aish's own
+                    # `[aish: …]` notes below.
+                    continue
                 if sk == "tool" and step.get("name") == "run_command":
                     emit_command(step)
                 else:

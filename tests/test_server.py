@@ -3119,6 +3119,174 @@ class TestFileEndpoint:
             assert ok.status_code == 200
 
 
+class TestImageRootsAgreement:
+    """#188: /file and the PDF exporter must serve from the SAME set. They did
+    not — the exporter trusted the session's scratch workspace and /file did
+    not, so an image the model wrote where it is TOLD to write throwaway files
+    printed fine in a PDF and 403'd in the chat, with nothing anywhere saying
+    why. One method now answers for both."""
+
+    def _session(self, app):
+        return app.state.server.active
+
+    def test_serves_from_the_scratch_workspace(self, app_env, tmp_path):
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client):
+                agent = client.app.state.server.active.agent
+                shot = Path(agent.scratch_dir) / "shot.png"
+                shot.write_bytes(b"\x89PNG-scratch")
+                response = client.get("/file", params={"path": str(shot)})
+                assert response.status_code == 200
+                assert response.content == b"\x89PNG-scratch"
+
+    def test_serves_from_the_media_store(self, app_env, tmp_path):
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client):
+                agent = client.app.state.server.active.agent
+                agent.media_dir.mkdir(parents=True, exist_ok=True)
+                pic = agent.media_dir / "abc123-phone.jpg"
+                pic.write_bytes(b"\xff\xd8\xff-media")
+                assert client.get("/file", params={"path": str(pic)}).status_code == 200
+
+    def test_both_consumers_read_one_definition(self, app_env, tmp_path):
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client):
+                server = client.app.state.server
+                agent = server.active.agent
+                roots = server._image_roots()
+                for own in (agent.media_dir, agent.scratch_dir):
+                    assert any(Path(own).resolve().is_relative_to(r) for r in roots)
+
+    def test_still_refuses_everything_else(self, app_env, tmp_path_factory):
+        """Widening to aish's OWN directories must not widen to anyone else's."""
+        outside = tmp_path_factory.mktemp("outside") / "private.png"
+        outside.write_bytes(b"\x89PNG-private")
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client):
+                assert client.get("/file", params={"path": str(outside)}).status_code == 403
+
+
+class TestRenderErrorReports:
+    """#188 layer 2: the browser is the only place that knows an image did not
+    render, and it used to keep that to itself — the model's only feedback
+    channel was the user typing "images don't show"."""
+
+    def _log_steps(self, app_env):
+        state = Path(app_env["state_dir"])
+        steps = []
+        for path in state.glob("session-*.jsonl"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                record = json.loads(line)
+                if record.get("kind") == "trace":
+                    steps.append(record["step"])
+        return steps
+
+    def test_a_live_failure_is_logged_and_told_to_the_model(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client) as (ws, _, _):
+                ws.send_json({
+                    "type": "render_error", "what": "image", "live": True,
+                    "items": ["https://images.example.com/phone.jpg"],
+                })
+                ws.send_json({"type": "jobs"})  # round-trip: the report was processed
+                recv_until(ws, "job_list")
+                agent = client.app.state.server.active.agent
+        notes = [
+            m for m in agent.messages
+            if m.get("role") == "user" and "did not display" in (m.get("content") or "")
+        ]
+        assert len(notes) == 1
+        assert "images.example.com/phone.jpg" in notes[0]["content"]
+        assert "show_image" in notes[0]["content"]
+        logged = [s for s in self._log_steps(app_env) if s.get("kind") == "render_error"]
+        assert logged and logged[0]["items"] == ["https://images.example.com/phone.jpg"]
+
+    def test_the_note_is_a_synthetic_annotation_not_a_transcript_turn(self, app_env):
+        """It must not show as a blue user bubble on replay, and it must not
+        become the chat's title (#171 classifies by text)."""
+        from aish.session import synthetic_kind
+
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client) as (ws, _, _):
+                ws.send_json({
+                    "type": "render_error", "live": True, "items": ["/tmp/x.png"],
+                })
+                ws.send_json({"type": "jobs"})
+                recv_until(ws, "job_list")
+                agent = client.app.state.server.active.agent
+        note = [m for m in agent.messages if "did not display" in (m.get("content") or "")][0]
+        assert synthetic_kind(note["content"]) == "note"
+
+    def test_a_replayed_failure_is_logged_but_injects_nothing(self, app_env):
+        """Opening an old chat whose pictures were evicted must not grow it a
+        turn — that is an unread conversation talking to itself."""
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client) as (ws, _, _):
+                ws.send_json({
+                    "type": "render_error", "live": False, "items": ["/gone/old.png"],
+                })
+                ws.send_json({"type": "jobs"})
+                recv_until(ws, "job_list")
+                agent = client.app.state.server.active.agent
+        assert not [m for m in agent.messages if "did not display" in (m.get("content") or "")]
+        logged = [s for s in self._log_steps(app_env) if s.get("kind") == "render_error"]
+        assert logged and logged[0]["items"] == ["/gone/old.png"]
+
+    def test_the_report_never_widens_egress_provenance(self, app_env):
+        """The src is a string the MODEL chose, echoed by the browser. Feeding it
+        through the owner-authored path would let an injected image URL vouch for
+        its own host on a later egress card (#178 P0-2)."""
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client) as (ws, _, _):
+                ws.send_json({
+                    "type": "render_error", "live": True,
+                    "items": ["https://attacker.example/x.png"],
+                })
+                ws.send_json({"type": "jobs"})
+                recv_until(ws, "job_list")
+                agent = client.app.state.server.active.agent
+        assert "attacker.example" not in agent._owner_hosts
+
+    def test_bounded_and_control_stripped(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client) as (ws, _, _):
+                ws.send_json({
+                    "type": "render_error", "live": True,
+                    "items": [f"/a{i}.png" for i in range(50)] + ["x\n\rY" + "z" * 500, 7, ""],
+                })
+                ws.send_json({"type": "jobs"})
+                recv_until(ws, "job_list")
+        logged = [s for s in self._log_steps(app_env) if s.get("kind") == "render_error"][0]
+        assert len(logged["items"]) <= server_module.RENDER_ERROR_MAX
+        for item in logged["items"]:
+            assert len(item) <= server_module.RENDER_ERROR_SRC_CHARS
+            assert "\n" not in item and "\r" not in item
+
+    def test_a_junk_report_is_ignored(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client) as (ws, _, _):
+                for message in (
+                    {"type": "render_error"},
+                    {"type": "render_error", "items": "not-a-list"},
+                    {"type": "render_error", "items": []},
+                    {"type": "render_error", "items": ["   "]},
+                ):
+                    ws.send_json(message)
+                ws.send_json({"type": "jobs"})
+                recv_until(ws, "job_list")
+        assert not [s for s in self._log_steps(app_env) if s.get("kind") == "render_error"]
+
+
 class TestDirListing:
     def make_tree(self, tmp_path):
         base = tmp_path / "tree"
