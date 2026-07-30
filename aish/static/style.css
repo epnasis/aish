@@ -1945,7 +1945,11 @@ body.awaiting-approval .trace.live {
   background: var(--green-glow);
 }
 .trace-status svg { display: block; }
-.trace-headtext { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* Shrink-only, not grow: the text block hugs its content so the chevron sits
+   right beside the label it opens instead of drifting to the far edge next to
+   Stop. A long status line still shrinks it to the full available width, so
+   nothing is lost when there is a lot to read. */
+.trace-headtext { flex: 0 1 auto; min-width: 0; display: flex; flex-direction: column; }
 .trace-title { font-size: 16.1px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* While live, the title is the status line (a search query, the model's
    own words) — the point is to READ it, so wrap up to three lines instead of
@@ -1959,7 +1963,13 @@ body.awaiting-approval .trace.live {
   overflow-wrap: anywhere;
 }
 .trace-sub { font-size: 13.8px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.trace-chev { width: 16px; height: 16px; flex: none; color: var(--dim); transition: transform 0.2s; }
+/* margin-right: auto takes all the slack AFTER the chevron, which is what puts
+   Stop alone on the trailing edge — and leaves the disclosure pair reading as
+   one unit: "Thinking… ⌄". */
+.trace-chev {
+  width: 16px; height: 16px; flex: none; margin-right: auto;
+  color: var(--dim); transition: transform 0.2s;
+}
 .trace.open .trace-chev { transform: rotate(180deg); }
 .trace-body { display: none; padding: 2px 13px 12px; border-top: 0.5px solid var(--sep); }
 .trace.open .trace-body { display: block; }
@@ -1989,12 +1999,16 @@ body.awaiting-approval .trace.live {
 }
 .trace-body.more-above::before { opacity: 1; }
 .trace-body.more-below::after { opacity: 1; }
-/* Stop while live; chevron only once finished. Icon only, no caption: this row
-   is pinned above the composer for the whole turn, so the status line gets the
-   width and the square reads as "stop" on its own. */
+/* Only while live (the rule below hides it when the turn is done). Icon only, no
+   caption: this row is pinned above the composer for the whole turn, so the
+   status line gets the width and the square reads as "stop" on its own. The
+   extra left margin is a floor on the gap to the chevron — the whole header is
+   the expand target, so the two must never be a mis-tap apart even when a long
+   status line has eaten all the slack. */
 .trace-stop {
   flex: none; display: inline-flex; align-items: center; justify-content: center;
-  width: 28px; height: 28px; padding: 0; border: none; border-radius: 999px;
+  width: 28px; height: 28px; margin-left: 10px; padding: 0;
+  border: none; border-radius: 999px;
   background: var(--red-glow); color: var(--red);
 }
 .trace-stop svg { width: 13px; height: 13px; }

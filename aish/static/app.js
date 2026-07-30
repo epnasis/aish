@@ -1919,12 +1919,15 @@ function ensureTrace() {
   const head = document.createElement("button");
   head.type = "button";
   head.className = "trace-head";
+  // Order matters: the chevron follows the TEXT it discloses, and Stop owns the
+  // trailing edge on its own. Two affordances at the same edge made the expand
+  // tap land on Stop.
   head.innerHTML =
     `<span class="trace-status">${SPINNER}</span>` +
     `<span class="trace-headtext"><span class="trace-title">Working…</span>` +
     `<span class="trace-sub"></span></span>` +
-    `<button type="button" class="trace-stop" aria-label="stop" title="Stop"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg></button>` +
-    `<svg class="trace-chev" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    `<svg class="trace-chev" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>` +
+    `<button type="button" class="trace-stop" aria-label="stop" title="Stop"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg></button>`;
   const body = document.createElement("div");
   body.className = "trace-body";
   // Steps live in an inner content div so the timeline rail spans the FULL
