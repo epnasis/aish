@@ -8141,13 +8141,20 @@ function seedWorkingSet(sessions, now) {
 }
 
 function partitionRecent(members, sessions) {
-  // Drawer split: RECENT = working-set members in deck order; HISTORY = every
-  // other session, left in the caller's MRU/date order. A session is in exactly
-  // one section (no duplication).
+  // Drawer split: RECENT = working-set members, HISTORY = every other session,
+  // left in the caller's MRU/date order. A session is in exactly one section
+  // (no duplication).
+  //
+  // RECENT is the deck REVERSED: the pager's right-hand (newest) end at the top.
+  // The vertical axis of this screen means one thing everywhere — newest at the
+  // top — and the date buckets below already read that way, so rendering the
+  // deck left-to-right put the newest open chat in the MIDDLE of the drawer and
+  // silently flipped the sort halfway down. Only the DISPLAY reverses; the deck
+  // itself stays in shelf order, which is what the swipe pager reads.
   const byName = new Map(sessions.map((s) => [s.name, s]));
   const inDeck = new Set(members.map((m) => m.name));
   return {
-    recent: members.map((m) => byName.get(m.name)).filter(Boolean),
+    recent: members.map((m) => byName.get(m.name)).filter(Boolean).reverse(),
     history: sessions.filter((s) => !inDeck.has(s.name)),
   };
 }

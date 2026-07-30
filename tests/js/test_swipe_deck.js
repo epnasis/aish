@@ -138,14 +138,26 @@ check("seed adopts the WHOLE source oldest-active first, however old", () => {
 
 // ---- drawer split: RECENT (working set) vs HISTORY (MRU rest) --------------
 
-check("partitionRecent puts deck members in RECENT (deck order), rest in HISTORY", () => {
+check("partitionRecent puts deck members in RECENT (deck reversed), rest in HISTORY", () => {
   const deck = [member("b"), member("a")];          // deliberately not MRU order
   const sessions = [                                // server MRU (newest first)
     { name: "c", ts: 3 }, { name: "a", ts: 2 }, { name: "b", ts: 1 }, { name: "d", ts: 0 },
   ];
   const { recent, history } = partitionRecent(deck, sessions);
-  eq(names(recent), ["b", "a"]);                    // RECENT follows the deck, not MRU
+  eq(names(recent), ["a", "b"]);                    // deck order b,a → shown newest-end first
   eq(names(history), ["c", "d"]);                   // HISTORY keeps the server's MRU order
+});
+
+check("RECENT shows the pager's right-hand end at the top, and never mutates the deck", () => {
+  // The whole drawer reads newest-at-top: the deck's far-right page (the newest
+  // chat, and the one a "new chat" swipe lands on) is the first Open row.
+  const deck = [member("oldest"), member("middle"), member("newest")];
+  const sessions = [
+    { name: "newest", ts: 3 }, { name: "middle", ts: 2 }, { name: "oldest", ts: 1 },
+  ];
+  const { recent } = partitionRecent(deck, sessions);
+  eq(names(recent), ["newest", "middle", "oldest"]);
+  eq(names(deck), ["oldest", "middle", "newest"]); // the pager still reads shelf order
 });
 
 check("no duplication: a session is in exactly one of RECENT / HISTORY", () => {
