@@ -67,6 +67,14 @@ The same classifier keeps aish's own notes out of `_derive_title` and `_derive_s
 
 `SessionInfo.activity` carries it, falling back to mtime for logs with no usable stamps, because nothing may lose its place in the list. Every consumer of "when did this chat last do something" reads it: the session-list row, the title peek, and `/offline/session`'s `ts`. `_by_recency` deliberately stays on `stat()` — it is the cheap newest-first pre-filter and a superset — and so does the offline ETag, which genuinely IS about the bytes on disk. `TestActivityIsNotAFileTouch`.
 
+## Output (#203) — the second stamp, and why it is second
+
+Activity answers "did anything happen in this chat", which is the right question to ORDER by: a chat mid-turn is the most recent thing there is. **Unread is a different question and had been reading the same number** — so every thinking step a chat took moved its stamp past the device's last look and the row marked itself unread with nothing new behind it. Three consumer-side patches went in before the fact itself got split; see `[ATTENTION]` in `docs/web-frontend.md` for that history.
+
+`_is_output` is read OFF `reconstruct_events` rather than invented beside it: **output is exactly what that function turns into transcript content** — a `user` bubble, or the assistant text that becomes a turn's `done`. So a `message` with role `user` (minus aish's own `[aish: …]` notes, which never reached the transcript live) or role `assistant` with non-empty text. Everything else `reconstruct_events` emits is a trace step, a workspace marker or command framing, and everything it ignores — `model`, `title`, `origin`, the audit `command` line, `task_start`/`task_end` — was never on screen at all.
+
+Consequences, each a false unread that is now gone: renaming or redacting a turn from another device, a turn CANCELLED with no answer, and a chat that is simply thinking. `SessionInfo.output` reports **0.0** rather than falling back to mtime — "we could not tell when this chat last spoke" must not become "it spoke just now", and every reader treats zero as "use the activity stamp", so old logs behave exactly as they did before the split. Known gap: a background turn that FAILS logs no message record (errors reach the browser as live events only), so a client that was not connected learns of it by opening the chat rather than by a dot; logging errors would close it. `TestOutputStamp`.
+
 ---
 
 ## Search and history

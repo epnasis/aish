@@ -203,6 +203,7 @@ async function offlineSave(name, payload, events) {
     title: payload.title || "",
     snippet: payload.snippet || "",
     ts: payload.ts || Date.now() / 1000,
+    out: payload.out || 0, // last OUTPUT; 0 = fall back to `ts` (#203)
     origin: payload.origin || "user",
     pinned: Boolean(payload.pinned),
     openedAt: payload.openedAt || 0,
@@ -3440,6 +3441,13 @@ function addPendingSend(text) {
   tools.appendChild(status);
   messagesEl.appendChild(tools);
   pendingSends.push({ el, tools, status, text });
+  // SENDING IS SEEING. Your own message is output (it is a message in the
+  // chat), so the seen stamp has to move past it or the chat you just typed
+  // into flags itself unread the moment you leave — for a sentence you wrote
+  // (#203). `markSeen` already runs on entering a chat and at `done`; this is
+  // the third moment the log outruns the stamp, and it is the one that shows
+  // while the turn is still running.
+  markSeen(currentSession);
   armPendingSendWatch();
   scrollToEnd(true);
 }
@@ -8953,9 +8961,18 @@ function forgetSeen(name) {
 // never be unread, however much activity it produces while you watch it.
 function sessionUnread(info, state) {
   if (!info || !info.name || info.name === state.current) return false;
-  const activity = (Number(info.ts) || 0) * 1000; // rows stamp epoch SECONDS
-  if (!activity) return false;
-  return activity > Math.max(state.seen[info.name] || 0, state.since);
+  // OUTPUT, not activity (#203). `ts` answers "when did anything happen here",
+  // which is the right stamp to ORDER by — a chat mid-turn really is the most
+  // recent thing there is — and the wrong one to call unread by: every
+  // thinking step a chat took moved it past this device's last look, so a chat
+  // that was quietly working marked itself unread with nothing new to show.
+  // `out` is the last thing that went into the CONVERSATION (`_is_output`).
+  // Absent means the server or the mirror row predates the split, and then the
+  // old stamp is still the best answer there is — never zero, which would read
+  // as "nothing here is ever new".
+  const at = (Number(info.out) || Number(info.ts) || 0) * 1000; // epoch SECONDS
+  if (!at) return false;
+  return at > Math.max(state.seen[info.name] || 0, state.since);
 }
 // [SEEN-END]
 
@@ -8976,19 +8993,22 @@ function sessionUnread(info, state) {
 // attention badge counts with it, so a chat can never sit in "Needs you"
 // without being counted, or be counted without appearing there ([ATTENTION]).
 //
-// LIVENESS OUTRANKS THE STAMP, and that is the whole subtlety. "Unread" is
-// derived from the chat's last ACTIVITY, and a running turn is activity: every
-// tool step it takes moves the stamp, so a chat that was merely WORKING kept
-// re-crossing the unread line and landing here — which is why the count could
-// say a chat wanted you when opening it showed a turn quietly getting on with
-// it. Steps are not output. A running chat is `Active now` until it produces
-// something (a finished turn) or stops for you (an approval), and both of those
-// are states this predicate can already see (#203). It keeps its unread DOT if
-// an EARLIER turn's output is genuinely unread — the row still says so, it just
-// does not inflate the count while the chat is mid-turn.
+// LIVENESS OUTRANKS THE STAMP. A chat that is WORKING is not asking for
+// anything — it is `Active now`, and it will say so itself when it finishes or
+// stops for you, both of which this predicate can already see. So a running
+// chat is never `Needs you`, even when an EARLIER turn's output is genuinely
+// unread: the row keeps its dot and says so, it just does not send you
+// somewhere that has nothing for you yet.
+//
+// It used to have a second job. "Unread" was derived from last ACTIVITY, and a
+// running turn is activity — every tool step moved the stamp — so a chat that
+// was merely thinking kept re-crossing the unread line and landing here. That
+// is fixed where it belonged, in `sessionUnread`, which now reads the last
+// OUTPUT (#203). The guard below is no longer load-bearing against steps; it
+// stands on its own meaning.
 function needsYou(info, state) {
   if (info.state === "waiting") return true;   // stopped; it cannot go on without you
-  if (info.state === "running") return false;  // working; steps are not output
+  if (info.state === "running") return false;  // working; not asking for anything
   return sessionUnread(info, state);
 }
 
@@ -9058,13 +9078,21 @@ function setAttentionRows(rows) {
 // device has never listed is still renderable when the count names it.
 function noteAttention(name, state, title) {
   if (!name) return;
+  const now = Date.now() / 1000;
+  // A push announcing a chat has STOPPED — finished, or holding — is announcing
+  // that something landed in it, so it moves the OUTPUT stamp too. Without
+  // that, unread would go on comparing against whatever the last list said and
+  // a background turn's answer would show no dot until the next one arrived
+  // (#203). A `running` push says only that work started: `ts` moves, `out`
+  // does not — the same distinction the stamps exist to draw.
+  const stamps = state === "running" ? { ts: now } : { ts: now, out: now };
   const row = attentionRows.find((info) => info.name === name);
   if (row) {
-    row.ts = Date.now() / 1000;
+    Object.assign(row, stamps);
     row.state = state || "";
     if (title) row.title = title;
   } else {
-    attentionRows.push({ name, title: title || "", ts: Date.now() / 1000, state: state || "" });
+    attentionRows.push({ name, title: title || "", state: state || "", ...stamps });
   }
   refreshBadge();
 }
@@ -9103,6 +9131,7 @@ function railRows(cached, searching) {
       ...row,
       state: known.state || "",
       ts: Math.max(Number(known.ts) || 0, Number(row.ts) || 0),
+      out: Math.max(Number(known.out) || 0, Number(row.out) || 0),
       title: row.title || known.title || "",
     };
   });
@@ -9154,6 +9183,7 @@ async function renderOfflineSessions(query) {
     title: meta.title,
     snippet: meta.snippet,
     ts: meta.ts,
+    out: meta.out || 0, // last output as of the last sync (#203)
     state: "", // liveness is a server fact; a mirror can only lie about it
     cwd: "",
     origin: meta.origin,

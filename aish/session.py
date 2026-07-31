@@ -164,6 +164,7 @@ class ParsedLog(NamedTuple):
     title_auto: bool
     user_cmds: list[str]  # successful user-direct ! commands, in file order
     activity_ts: int | None  # epoch seconds of the last record that IS activity
+    output_ts: int | None  # …and of the last that is OUTPUT (see _is_output)
 
 
 # Stat-keyed caches for the read-only listing paths (drawer, pager, offline
@@ -258,6 +259,11 @@ class SessionInfo:
     # and a row stamped with that reads as new activity to every consumer —
     # unread most of all. Falls back to mtime for logs with no usable stamps.
     activity: float = 0.0
+    # When the chat last put something in the CONVERSATION (#203). Ordering
+    # reads `activity` (a chat mid-turn is the most recent thing there is);
+    # UNREAD reads this, or a chat that was merely thinking marks itself unread
+    # with nothing new to show. 0.0 when the chat has no output at all.
+    output: float = 0.0
     origin: str = "user"  # who started it: user | schedule | email | webhook (#160)
     cwd: str = ""  # last logged working directory; "" when the chat never moved
 
@@ -329,6 +335,7 @@ class SessionLog:
         cwd = ""
         user_cmds: list[str] = []
         activity_ts: int | None = None
+        output_ts: int | None = None
         pending_cmd: str | None = None  # a user ! command awaiting its exit status
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
@@ -344,6 +351,10 @@ class SessionLog:
                 stamp = record_epoch(record)
                 if stamp and (activity_ts is None or stamp > activity_ts):
                     activity_ts = stamp
+            if SessionLog._is_output(record):
+                stamp = record_epoch(record)
+                if stamp and (output_ts is None or stamp > output_ts):
+                    output_ts = stamp
             if kind == "model":
                 model = record.get("model") or model
             elif kind == "title":
@@ -374,8 +385,50 @@ class SessionLog:
                 messages.append({k: v for k, v in record.items() if k in keys})
         return ParsedLog(
             messages, model, custom_title, origin, cwd, title_auto, user_cmds,
-            activity_ts,
+            activity_ts, output_ts,
         )
+
+    @staticmethod
+    def _is_output(record: dict) -> bool:
+        """Did this record put something in the CONVERSATION — something a
+        person would read?
+
+        `_is_activity` below answers a different question ("did anything happen
+        in this chat"), and one stamp was doing both jobs. Ordering wants the
+        first: a chat working right now IS the most recent thing there is.
+        UNREAD wants the second, and got the first — so every thinking step a
+        chat took moved its stamp past your last look and the row went unread
+        with nothing new behind it. Splitting the fact is what stops the next
+        consumer inheriting the same lie (#203).
+
+        The rule is READ OFF `reconstruct_events`, not invented beside it:
+        output is exactly what that function turns into transcript content —
+        a `user` bubble or the assistant text that becomes a turn's `done`.
+        Everything else it emits is a trace step, a workspace marker or
+        framing, and everything it ignores (model, title, origin, the audit
+        `command` line, task_start/task_end) was never on screen at all.
+
+        Consequences worth knowing, each a false unread that is now gone: a
+        rename or a redaction from another device, a turn CANCELLED with no
+        answer, and a chat that is simply thinking. And one gap: a background
+        turn that FAILS logs no message record — errors reach the browser as
+        live events only — so a client that was not connected learns about it
+        by opening the chat, not by a dot. Logging errors would close it."""
+        if record.get("kind") != "message":
+            return False
+        role = record.get("role")
+        content = record.get("content") or ""
+        if role == "assistant":
+            # An intermediate tool-calling turn carries no visible text, and
+            # reconstruct_events keeps only the last NON-EMPTY answer.
+            return bool(content.strip())
+        if role != "user":
+            return False  # tool results and system prompts render nowhere
+        # aish's own `[aish: …]` annotations never reached the transcript live
+        # and are skipped on replay (#171), so they are not output either. A
+        # trigger's prompt IS a user message and counts — the chat really does
+        # have something in it you have not read.
+        return synthetic_kind(content) != "note"
 
     @staticmethod
     def _is_activity(record: dict) -> bool:
@@ -1018,7 +1071,7 @@ class SessionLog:
         return title
 
     @staticmethod
-    def _peek(path: Path) -> tuple[str | None, str, int | None]:
+    def _peek(path: Path) -> tuple[str | None, str, int | None, int | None]:
         """(title, origin, activity_ts) per session for the drawer/pager. A
         custom title (latest `kind:"title"` record) wins; else the first user
         message. A None title = no user input yet and never renamed (an empty
@@ -1028,7 +1081,7 @@ class SessionLog:
         try:
             parsed = SessionLog._cached_parse(path)
         except OSError:
-            return None, "user", None
+            return None, "user", None, None
         title = parsed.title
         if title is None:
             derived = SessionLog._derive_title(parsed.messages)
@@ -1037,6 +1090,7 @@ class SessionLog:
             SessionLog._truncate_title(title) if title is not None else None,
             parsed.origin,
             parsed.activity_ts,
+            parsed.output_ts,
         )
 
     @staticmethod
@@ -1068,7 +1122,9 @@ class SessionLog:
         return paths
 
     @staticmethod
-    def pager_titles(state_dir: Path, limit: int = 30) -> list[tuple[str, str, str, float]]:
+    def pager_titles(
+        state_dir: Path, limit: int = 30
+    ) -> list[tuple[str, str, str, float, float]]:
         """(name, title, origin, ts) pages for the web UI's swipe pager: the
         `limit` most recent chats that have a title, same recency ordering as the
         rail, flipped oldest→newest. Chats with no user input yet are not rows —
@@ -1079,16 +1135,20 @@ class SessionLog:
         switch is most likely to land on without first opening the rail. `ts` is
         the last ACTIVITY, the same stamp `list_sessions` reports (#201) — the
         deck ages its members on it, and a chat must not look freshly used
-        because someone glanced at it."""
+        because someone glanced at it. `out` is the last OUTPUT (#203), which is
+        what unread compares against; 0.0 when there is none to report."""
         pages = []
         for path in SessionLog._by_recency(state_dir):
-            title, origin, activity_ts = SessionLog._peek(path)
+            title, origin, activity_ts, output_ts = SessionLog._peek(path)
             if title is not None:
                 try:
                     ts = float(activity_ts) if activity_ts else path.stat().st_mtime
                 except OSError:  # vanished between the scan and here
                     continue
-                pages.append((path.name, title, origin, ts))
+                pages.append((
+                    path.name, title, origin, ts,
+                    float(output_ts) if output_ts else 0.0,
+                ))
                 if len(pages) == limit:
                     break
         pages.reverse()
@@ -1111,6 +1171,7 @@ class SessionLog:
         origin: str = "user",
         cwd: str = "",
         activity_ts: int | None = None,
+        output_ts: int | None = None,
     ) -> SessionInfo:
         title = custom_title if custom_title else SessionLog._derive_title(messages)
         title = SessionLog._truncate_title(title)
@@ -1131,6 +1192,13 @@ class SessionLog:
             # but renderless ones, still has to sort somewhere: mtime is the
             # old answer and remains the honest fallback.
             activity=float(activity_ts) if activity_ts else mtime,
+            # NO mtime fallback, deliberately: "we could not tell when this
+            # chat last spoke" must not become "it spoke just now", which is
+            # what an mtime would claim on every log the process touches. A
+            # zero here reads downstream as "fall back to the activity stamp",
+            # so a log too old to carry usable stamps behaves exactly as it
+            # did before this split existed.
+            output=float(output_ts) if output_ts else 0.0,
             origin=origin,
             cwd=cwd,
         )
@@ -1143,7 +1211,7 @@ class SessionLog:
             return None
         return SessionLog._info_from(
             path, parsed.messages, parsed.model, parsed.title, parsed.origin,
-            parsed.cwd, parsed.activity_ts,
+            parsed.cwd, parsed.activity_ts, parsed.output_ts,
         )
 
     @staticmethod
@@ -1193,7 +1261,7 @@ class SessionLog:
             entry = SessionEntry(
                 info=SessionLog._info_from(
                     path, messages, model, parsed.title, parsed.origin,
-                    parsed.cwd, parsed.activity_ts,
+                    parsed.cwd, parsed.activity_ts, parsed.output_ts,
                 ),
                 title_cf=title_cf,
                 content_cf=content_cf,
