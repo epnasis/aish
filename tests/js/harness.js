@@ -424,6 +424,13 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       pendingCards: 0,
       clientBusy: false,
       renderedAnswers: 0,
+      // Un-acknowledged send bubbles ([PENDING-SEND]): the view-cache decisions
+      // read the count, and the replay paths reconcile them. Stubbed here —
+      // test_pending_send.js drives the real block.
+      pendingSends: [],
+      resolvePendingSend() {},
+      clearPendingSends() {},
+      paintLanded() {},
       // app state a hello walks over
       recentSessions: [],
       cmdHistory: [],
@@ -439,6 +446,7 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       setTitle: spy("setTitle", (text) => { seen.title = text; }),
       offlineTouch: spy("offlineTouch"),
       refreshOfflinePinUi: spy("refreshOfflinePinUi"),
+      refreshRailCurrent: spy("refreshRailCurrent"),
       onReplay: spy("onReplay", (event) => { seen.replays.push(event); }),
       hideBootLoader: spy("hideBootLoader", () => { seen.booted = true; }),
       setBusy: spy("setBusy", (busy) => { seen.busy = busy; }),

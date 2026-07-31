@@ -573,6 +573,7 @@ function enterSession(name, { source = "hello", title, stash = false } = {}) {
   markSeen(name);        // "the view is now X" IS "this device has seen X" ([SEEN])
   offlineTouch(name);    // MRU input to the mirror's eviction order
   refreshOfflinePinUi(); // the toggle belongs to the chat now on screen
+  refreshRailCurrent();  // and so does the rail's "you are here" mark
 }
 // [SESSION-ENTER-END]
 
@@ -588,6 +589,16 @@ async function openCachedSession(name) {
 }
 
 // Switching chats: the socket when there is one, the mirror when there isn't.
+//
+// LEAVING IS A LOCAL ACT, and that is the whole rule here. This used to send
+// "switch me" and then, on anything but a warm-peek hit, do NOTHING until the
+// server answered — no transcript, no title, no URL. The rail would slide away
+// over the chat you had just left and leave it sitting there for the whole
+// round trip, which on a slow link is indistinguishable from a tap that never
+// registered: you tap again, or you start typing into a chat you believe you
+// have already left. So every path below leaves immediately and paints the best
+// copy this device can reach; the server's replay is a CORRECTION, never the
+// first sign that the tap was heard.
 function resumeSession(name) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     if (!send({ type: "resume", path: name })) return;
@@ -600,11 +611,112 @@ function resumeSession(name) {
     if (pre) {
       enterSession(name, { source: "prefetch", title: knownTitle(name) });
       onReplay({ events: pre.events, truncated: pre.truncated });
+      return;
     }
+    // Nothing warm in memory — only the two most recent chats are ever pre-warmed,
+    // so this is the COMMON case for anything further down the rail. Leave the
+    // outgoing chat anyway and let [PENDING-VIEW] find something to paint.
+    enterSession(name, { source: "pending", title: knownTitle(name) });
+    awaitPaint(name);
     return;
   }
   openCachedSession(name);
 }
+
+// [PENDING-VIEW-START]
+// The transcript is BETWEEN chats: the tap has been honoured (identity, title
+// and URL already name the chat you asked for) and nothing has painted it yet.
+//
+// Three things end that state, and the order is the point. The offline mirror
+// this device already holds is tried FIRST — it holds nearly every chat, and
+// until now it was consulted only when the socket was down, so on the one
+// connection where it would help most (up, but slow) it sat unused. Then the
+// server's authoritative replay, which lands through onReplay like any other
+// and corrects whatever the mirror showed. Failing both, a placeholder that
+// says what is happening — because the honest answer "still fetching this" is
+// worth far more to a reader than the previous conversation left on screen
+// pretending to be the new one.
+const PENDING_VIEW_SLOW_MS = 6000;
+let awaitingPaint = null; // name of the chat whose FIRST paint we are waiting for
+let awaitingTimer = null;
+
+function awaitPaint(name) {
+  awaitingPaint = name;
+  clearTimeout(awaitingTimer);
+  renderLoadingTranscript();
+  paintFromMirror(name);
+  // A socket can report OPEN long after it died; the send then vanishes and no
+  // event ever arrives to end the wait. Say so, and offer the one control that
+  // fixes it, rather than spinning forever.
+  awaitingTimer = setTimeout(() => {
+    if (awaitingPaint === name) markPendingViewStalled();
+  }, PENDING_VIEW_SLOW_MS);
+}
+
+// Any paint of the transcript ends the wait, whoever made it. Called from
+// onReplay so no future painter has to remember to.
+function paintLanded() {
+  awaitingPaint = null;
+  clearTimeout(awaitingTimer);
+  awaitingTimer = null;
+}
+
+function renderLoadingTranscript() {
+  // The outgoing chat's DOM is going away, so its live turn goes with it — the
+  // same reasoning (and the same owner) as a replay that rebuilds.
+  resetLiveTurn("rebuild");
+  clearPendingSends();
+  stopSpeaking();
+  messagesEl.replaceChildren();
+  removeCwdChip();
+  const row = document.createElement("div");
+  row.className = "msg notice loading-view";
+  const spin = document.createElement("span");
+  spin.className = "spin";
+  const text = document.createElement("span");
+  text.className = "loading-view-text";
+  text.textContent = "Loading this chat…";
+  row.append(spin, text);
+  messagesEl.appendChild(row);
+  scrollToEnd(true);
+}
+
+function markPendingViewStalled() {
+  const row = messagesEl.querySelector(".loading-view");
+  if (!row) return;
+  row.querySelector(".spin")?.remove();
+  row.querySelector(".loading-view-text").textContent =
+    "Still loading — the connection may have stalled.";
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "loading-view-retry";
+  retry.textContent = "Reconnect";
+  retry.onclick = () => { retry.remove(); reconnect(); };
+  row.appendChild(retry);
+}
+
+// The mirror read is async, so the server can win the race while IndexedDB is
+// still reading — and a cached copy must never overpaint an authoritative one.
+// `awaitingPaint` IS that guard: onReplay clears it, so a paint that already
+// happened silently cancels this one.
+async function paintFromMirror(name) {
+  const cached = await offlineLoad(name);
+  if (!cached || awaitingPaint !== name) return;
+  // Re-enter as `mirror` so the paint claims no fingerprint (#202): these events
+  // came out of IndexedDB, capped and possibly in an older event shape, so the
+  // replay that follows must rebuild over them rather than land "noop".
+  enterSession(name, { source: "mirror", title: cached.meta.title || knownTitle(name) });
+  onReplay({ events: cached.events, truncated: false });
+}
+
+// The chat we were waiting for cannot be painted at all. Leaving the spinner up
+// would promise a transcript that is never coming.
+function abandonPendingView(reason) {
+  paintLanded();
+  messagesEl.replaceChildren();
+  addMsg("notice", reason);
+}
+// [PENDING-VIEW-END]
 
 // The best title we already hold for a chat we are about to enter, so a warm
 // paint doesn't flash the wrong name in the header. `undefined` leaves the
@@ -838,6 +950,12 @@ function connect() {
     handle(event);
   };
   ws.onclose = (event) => {
+    // The socket that carried them is gone, so nothing will ever come back to
+    // say whether they arrived. [PENDING-SEND] hands the text back to the
+    // composer rather than leave a bubble claiming to be "Sending…" over a dead
+    // connection. (A deliberate replacement nulls this handler in retireSocket,
+    // so a reconnect we CHOSE never triggers it.)
+    clearPendingSends();
     if (event.code === 4000) {
       connOk = false;
       updateDot();
@@ -1043,6 +1161,10 @@ function handle(event) {
       closeAnswer();
       finishTrace(); // close any trace from a prior turn before the new one
       removeQueueChip(event.text); // a queued message that just started running
+      // The server's own version of this turn supersedes the bubble we drew on
+      // send ([PENDING-SEND]) — it carries the stamp, the turn id and any
+      // attachment notes, so it replaces rather than merely confirms.
+      if (!replaying) resolvePendingSend(event.text);
       retireQuickReplies();
       // The rerun button belongs to the last ANSWER: attachAnswerTools retires
       // it when the next answer lands. Don't retire it here on the user turn —
@@ -1084,6 +1206,9 @@ function handle(event) {
       if (!replaying) scrollToEnd(true);
       break;
     case "queued":
+      // The agent was busy, so this message waits its turn as a chip instead of
+      // a transcript bubble — the other way a send is accounted for.
+      resolvePendingSend(event.text);
       addQueueChip(event.text);
       break;
     case "cwd_queued": addCwdChip(event.path); break;
@@ -1289,12 +1414,13 @@ function replayFp(event) {
 
 // A view is only worth stashing when its DOM is a pure function of the replay
 // it was built from: nothing arrived since (dirty), nothing is mid-flight
-// (busy / pending approval cards), and it wasn't painted from the mirror's
-// truncated copy (offlineViewing).
+// (busy / pending approval cards / an un-acknowledged send bubble the server
+// has never confirmed), and it wasn't painted from the mirror's truncated copy
+// (offlineViewing).
 function viewStashable(state) {
   return Boolean(
     state.name && state.fp && !state.dirty && !state.pendingCards &&
-    !state.busy && !state.offlineViewing
+    !state.busy && !state.offlineViewing && !state.pendingSends
   );
 }
 
@@ -1307,8 +1433,14 @@ function viewStashable(state) {
 //   "rebuild" — anything else: render from the events. Always correct.
 // The dirty gate protects every edge at once: any live event since the last
 // paint (a card, a stream line, an injected turn) forces the rebuild path.
+// An un-acknowledged send bubble ([PENDING-SEND]) fails "noop" for the same
+// reason from the other side: the DOM holds a message the server has never
+// confirmed, so it is NOT this replay's transcript however well the fingerprint
+// matches — and a fingerprint cannot see it, because nothing about it came off
+// the socket.
 function replayLanding(state) {
-  if (state.fp && state.fp === state.viewFp && !state.viewDirty && state.hasDom) {
+  if (state.fp && state.fp === state.viewFp && !state.viewDirty && state.hasDom &&
+      !state.pendingSends) {
     return "noop";
   }
   if (state.cachedFp && state.cachedFp === state.fp) return "reuse";
@@ -1401,6 +1533,7 @@ function stashCurrentView() {
     pendingCards,
     busy: clientBusy,
     offlineViewing,
+    pendingSends: pendingSends.length,
   });
   if (!stashable) return;
   viewCache.delete(currentSession); // re-insert = move to MRU end
@@ -1544,6 +1677,9 @@ function setRolePill(active) {
 // owns viewFp/viewDirty together with enterSession — nothing else may claim "the
 // screen now shows this transcript".
 function onReplay(event) {
+  // Whatever this replay decides below, the transcript is no longer waiting to
+  // be painted for the first time ([PENDING-VIEW]).
+  paintLanded();
   // A repaint the server flags `seen` follows an edit made from a viewer's own
   // hands (removing an exchange, #202) and reaches only clients VIEWING this
   // chat, so what they are being handed is its current state. Without it the
@@ -1560,6 +1696,7 @@ function onReplay(event) {
     viewDirty,
     hasDom: messagesEl.childElementCount > 0,
     cachedFp: viewCache.get(currentSession)?.fp,
+    pendingSends: pendingSends.length,
   });
   // [TURN-RESET] A replay is reachable mid-stream; closing the live turn is not
   // this function's to hand-roll, INCLUDING the case where the answer is that a
@@ -1574,6 +1711,9 @@ function onReplay(event) {
     return;
   }
   stopSpeaking(); // the active button is about to be detached with the DOM
+  // Any un-acknowledged message bubble goes with the DOM it lives in — and its
+  // text comes back to the composer rather than vanishing with it.
+  clearPendingSends();
   messagesEl.replaceChildren();
   removeCwdChip(); // a session switch drops any stale cwd card; _show re-emits if pending (#92)
   const cached = viewCache.get(currentSession);
@@ -3229,6 +3369,109 @@ function addUserMsg(text, at, turn) {
   messagesEl.appendChild(tools);
   return el;
 }
+
+// [PENDING-SEND-START]
+// A message you have sent is on screen BEFORE the server says so.
+//
+// The composer clears the instant the text is handed to the socket, but the
+// blue bubble used to be drawn only when the server ECHOED the turn back. On a
+// fast link those are the same moment and the distinction is invisible; on a
+// slow one the message exists nowhere the user can see for seconds — the
+// composer empty, the transcript unchanged — and a long message reads as simply
+// lost. That is exactly how it was reported, and the reader was right to
+// believe it: nothing on screen said otherwise.
+//
+// So the bubble is drawn on SEND, in a pending state, and RECONCILED when the
+// server's own version arrives. The server's version wins, always: it carries
+// the timestamp, the turn id the delete chip needs, and any attachment notes
+// the server appended, none of which the client can know. A message the agent
+// is too busy to start comes back as a `queued` event instead — same
+// reconciliation, different resolution (the queue chip takes over).
+//
+// If the bubble's DOM is destroyed while still un-acknowledged — a reconnect
+// rebuild, a chat switch, a socket that died — the TEXT goes back to the
+// composer. Deliberately not an automatic resend: the send may well have
+// arrived, and a duplicated instruction to an agent that runs shell commands is
+// a worse outcome than a message you have to send again by hand.
+const pendingSends = []; // oldest first — {el, tools, status, text}
+
+function addPendingSend(text) {
+  const el = addMsg("user", text);
+  el.classList.add("pending");
+  const tools = document.createElement("div");
+  tools.className = "user-tools pending-send";
+  const status = document.createElement("span");
+  status.className = "pending-send-status";
+  status.textContent = "Sending…";
+  tools.appendChild(status);
+  messagesEl.appendChild(tools);
+  pendingSends.push({ el, tools, status, text });
+  armPendingSendWatch();
+  scrollToEnd(true);
+}
+
+// The server has accounted for one of our sends. Matched by TEXT where it can
+// be (two messages fired inside one round trip resolve in whatever order the
+// server actually took them), falling back to the oldest — the server appends
+// attachment notes, so an exact match is not always available.
+function resolvePendingSend(text) {
+  const bare = stripAttachmentNotes(text || "");
+  let index = pendingSends.findIndex((item) => item.text === bare);
+  if (index < 0) index = pendingSends.length ? 0 : -1;
+  if (index < 0) return;
+  const [item] = pendingSends.splice(index, 1);
+  item.el.remove();
+  item.tools.remove();
+  if (!pendingSends.length) { clearTimeout(pendingSendTimer); pendingSendTimer = null; }
+}
+
+// Their DOM is going away while they are still un-acknowledged: hand the text
+// back so the one thing that must never happen — losing what you typed —
+// cannot. Prepended, so it is the next thing you would send.
+function clearPendingSends() {
+  if (!pendingSends.length) return;
+  clearTimeout(pendingSendTimer);
+  pendingSendTimer = null;
+  const lost = pendingSends.splice(0).map((item) => {
+    item.el.remove();
+    item.tools.remove();
+    return item.text;
+  }).filter((text) => text && !input.value.includes(text));
+  if (!lost.length) return;
+  input.value = [...lost, input.value].filter(Boolean).join("\n\n");
+  saveDraft();
+  resizeInput();
+  showToast(lost.length > 1 ? "messages not confirmed — back in the composer"
+                            : "message not confirmed — back in the composer");
+}
+
+// A socket that reports OPEN and is not: nothing will ever come back to resolve
+// these, so say so rather than spinning "Sending…" indefinitely.
+const PENDING_SEND_SLOW_MS = 8000;
+let pendingSendTimer = null;
+
+function armPendingSendWatch() {
+  clearTimeout(pendingSendTimer);
+  pendingSendTimer = setTimeout(() => {
+    pendingSendTimer = null;
+    if (pendingSends.length) markPendingSendsStalled();
+  }, PENDING_SEND_SLOW_MS);
+}
+
+function markPendingSendsStalled() {
+  for (const item of pendingSends) {
+    if (item.status.dataset.stalled) continue;
+    item.status.dataset.stalled = "1";
+    item.status.textContent = "Still sending — ";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "pending-send-retry";
+    retry.textContent = "reconnect";
+    retry.onclick = () => reconnect();
+    item.status.appendChild(retry);
+  }
+}
+// [PENDING-SEND-END]
 
 function addAnsiMsg(kind, text) {
   const el = document.createElement("div");
@@ -6163,6 +6406,11 @@ function submitInput() {
   // The server decides per-backend whether attachments go to the model
   // natively (vision) or as path notes for the gated tools.
   if (send({ type: "task", text, attachments: attachments.map((a) => a.path) })) {
+    // [PENDING-SEND] The bubble is drawn NOW, not when the server echoes the
+    // turn back — the gap between the two is the whole defect. A `!` command is
+    // deliberately exempt: its terminal block already carries the command, and
+    // a bubble would be the duplicate #154 removed.
+    if (!text.startsWith("!")) addPendingSend(text);
     if (pendingSpeak) { speakNextReply = true; pendingSpeak = false; } // dictated → speak reply
     maybeRequestNotifyPermission();
     input.value = "";
@@ -8381,6 +8629,9 @@ function forgetSession(name) {
 function onSessionGone(name) {
   forgetSession(name);
   showToast("that chat no longer exists");
+  // We had already left for it ([PENDING-VIEW]) — don't leave the spinner
+  // promising a transcript the server has just said does not exist.
+  if (awaitingPaint === name) abandonPendingView("that chat no longer exists");
 }
 
 function onSessionDeleted(event) {
@@ -9084,11 +9335,24 @@ const PIN_SVG =
 // ambiguous gesture. Deleting lives in the chat menu, which is where a rare,
 // irreversible action belongs — and where it already was.
 function railRow(row, info) {
+  row.dataset.name = info.name; // so the "you are here" mark can move in place
   row.onclick = () => {
     resumeSession(info.name); // the socket if there is one, else the mirror
     closeSessionRail();
   };
   return row;
+}
+
+// Which chat you are in is a LOCAL fact — the client moves on the tap and the
+// server's `current` only catches up a round trip later. On a docked rail that
+// showed as the row you just tapped staying plain while the row you LEFT went
+// on claiming to be current, which is the same "your tap wasn't heard" the
+// transcript used to say. Repainted in place rather than by re-rendering the
+// list: the list's CONTENT is still the server's to supply.
+function refreshRailCurrent() {
+  for (const row of document.querySelectorAll("#sessions-list .session-row")) {
+    row.classList.toggle("current", row.dataset.name === currentSession);
+  }
 }
 
 // ---- rendering the list --------------------------------------------------
@@ -9113,13 +9377,18 @@ function renderSessions(event) {
   }
   const list = $("sessions-list");
   list.replaceChildren();
-  const unreadState = { seen: seenAt, since: seenSince, current: event.current };
+  // "Which chat am I in" is the CLIENT's fact: it moves on the tap, while the
+  // server's `current` reflects the last resume it has processed. Preferring
+  // the server's here would undo refreshRailCurrent on the very next list that
+  // arrives — and a list arrives right after every switch.
+  const current = currentSession || event.current;
+  const unreadState = { seen: seenAt, since: seenSince, current };
   // Ranked search results are ordered by relevance, so date/band grouping would
   // lie about why a row is where it is. Render a flat list.
   if ($("sessions-search").value.trim()) {
     if (!event.sessions.length) { list.textContent = "no matching sessions"; return; }
     for (const info of event.sessions) {
-      list.appendChild(sessionRow(info, event.current, { unread: sessionUnread(info, unreadState) }));
+      list.appendChild(sessionRow(info, current, { unread: sessionUnread(info, unreadState) }));
     }
     return;
   }
@@ -9136,9 +9405,9 @@ function renderSessions(event) {
   attentionSessions.clear();
   for (const info of bands.needsYou) attentionSessions.add(info.name);
   refreshBadge();
-  railSection("Needs you", bands.needsYou, event.current, unreadState);
-  railSection("Active now", bands.active, event.current, unreadState);
-  railSection("Pinned", bands.pinned, event.current, unreadState);
+  railSection("Needs you", bands.needsYou, current, unreadState);
+  railSection("Active now", bands.active, current, unreadState);
+  railSection("Pinned", bands.pinned, current, unreadState);
   let lastGroup = null;
   for (const info of bands.rest) {
     const group = sessionGroup(info.ts);
@@ -9146,7 +9415,7 @@ function renderSessions(event) {
       list.appendChild(sectionLabel(group));
       lastGroup = group;
     }
-    list.appendChild(sessionRow(info, event.current, { unread: false }));
+    list.appendChild(sessionRow(info, current, { unread: false }));
   }
 }
 
