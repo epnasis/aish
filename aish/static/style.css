@@ -564,6 +564,9 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.system-note .sysnote-ico svg { width: 16px; height: 16px; }
 .msg.system-note .sysnote-label { font-weight: 600; color: var(--fg); }
 .msg.system-note .sysnote-text { color: var(--dim); font-size: 13.8px; white-space: pre-wrap; }
+/* What is left where a removed exchange was (#202). Deliberately quiet: it marks
+   a gap so the answer above it isn't a reply to nothing — it is not itself news. */
+.msg.system-note.redacted-note .sysnote-label { font-weight: 500; color: var(--dim); }
 
 /* ---- ANSI colors in command output ---- */
 .a-b { font-weight: 700; }
@@ -774,6 +777,9 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .copy-chip svg { width: 17px; height: 17px; }
 .copy-chip:active { opacity: 0.5; }
+/* half-committed removal (#202): armed reads as dangerous, so the second tap is
+   never mistaken for another ordinary chip tap */
+.copy-chip.redact-chip.armed { color: var(--red); }
 /* copy → checkmark flash */
 .copy-chip .i-check { display: none; }
 .copy-chip.ok .i-copy { display: none; }

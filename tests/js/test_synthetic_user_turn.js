@@ -65,6 +65,7 @@ function makeSandbox() {
     stripAttachmentNotes: (t) => t,
     // --- the genuine-bubble path, kept real down to addMsg ---
     reuseChip: () => fakeElement("button"),
+    redactChip: () => fakeElement("button"),
     copyChip: () => fakeElement("button"),
     // --- icons the system row draws ---
     traceSvg: () => "<svg></svg>",
@@ -96,7 +97,7 @@ function makeSandbox() {
     "\n" +
     extract("// [MSG-STAMP-START]", "// [MSG-STAMP-END]").replace(/\bconst\b/g, "var") +
     "\n" +
-    extract("function addUserMsg(text, at) {", "function addAnsiMsg") +
+    extract("function addUserMsg(text, at, turn) {", "function addAnsiMsg") +
     "\n" +
     extract("function addMsg(kind, text) {", "// The prompt that started") +
     "\n" +

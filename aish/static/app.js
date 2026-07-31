@@ -1079,7 +1079,7 @@ function handle(event) {
         ? null
         : event.synthetic
           ? addSystemMsg(event.synthetic, event.text)
-          : addUserMsg(event.text, event.at);
+          : addUserMsg(event.text, event.at, event.turn);
       // Your own message always comes into view, even if you were scrolled up.
       if (!replaying) scrollToEnd(true);
       break;
@@ -1102,6 +1102,7 @@ function handle(event) {
     case "command_end": onCommandEnd(event); break;
     case "step": traceStep(event); break;
     case "workspace": addWorkspaceNote(event.change, event.path); break;
+    case "redacted": addRedactedMsg(event.at); break;
     case "error":
       // A by-name action (resume/delete/rename) answered "session is gone" is a
       // navigation failure, not a task failure: prune the phantom and restore
@@ -1543,6 +1544,13 @@ function setRolePill(active) {
 // owns viewFp/viewDirty together with enterSession — nothing else may claim "the
 // screen now shows this transcript".
 function onReplay(event) {
+  // A repaint the server flags `seen` follows an edit made from a viewer's own
+  // hands (removing an exchange, #202) and reaches only clients VIEWING this
+  // chat, so what they are being handed is its current state. Without it the
+  // removal — which counts as activity, so that every device's offline mirror
+  // refetches the corrected transcript — would come back as an unread dot for
+  // the person who just made it.
+  if (event.seen) markSeen(currentSession);
   // [VIEWCACHE] Decide the landing BEFORE touching any transform (see
   // replayLanding for the three outcomes and why each is safe).
   const fp = replayFp(event);
@@ -3123,11 +3131,102 @@ function stampTurn(tools, at) {
 }
 // [MSG-STAMP-END]
 
-function addUserMsg(text, at) {
+// [REDACT-START]
+// Removing an exchange (#202). A chat had no eraser at all: the log is
+// append-only and replayed whole, so a probe fired at the wrong chat, a message
+// half-typed and sent by an autocorrect Return, or a secret pasted into the
+// composer stayed there forever — the only tools were deleting the entire chat
+// or hand-editing JSONL with the server stopped.
+//
+// The control lives on the PROMPT because the prompt is what a turn is named by,
+// and it removes the whole exchange: an answer repeats what it was asked, so
+// taking away half of one is not a removal.
+//
+// Two taps, never one, exactly like deleting a chat ([DELARM]) — this is just as
+// irreversible, and it sits in a row whose other chips (copy, reuse) are things
+// people tap constantly and without thinking. For the same reason it is placed
+// at the START of the row: the familiar chips keep the trailing edge they have
+// always had, and the destructive one is not where a thumb lands by habit.
+const REDACT_ARM_MS = 4000;
+const REDACT_LABEL = "remove this exchange";
+let redactArmed = null;   // the chip waiting for its confirming tap
+let redactTimer = null;
+
+function disarmRedact() {
+  if (redactTimer) { clearTimeout(redactTimer); redactTimer = null; }
+  if (redactArmed) {
+    redactArmed.classList.remove("armed");
+    redactArmed.title = REDACT_LABEL;
+    redactArmed.setAttribute("aria-label", REDACT_LABEL);
+    redactArmed = null;
+  }
+}
+
+function armRedact(btn, turn) {
+  if (redactArmed === btn) {
+    disarmRedact();
+    send({ type: "redact", turn });
+    return;
+  }
+  disarmRedact(); // only one chip is ever half-committed
+  redactArmed = btn;
+  btn.classList.add("armed");
+  btn.title = "tap again to remove";
+  btn.setAttribute("aria-label", "tap again to remove this exchange");
+  redactTimer = setTimeout(disarmRedact, REDACT_ARM_MS);
+}
+
+function redactChip(turn) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "copy-chip redact-chip";
+  btn.title = REDACT_LABEL;
+  btn.setAttribute("aria-label", REDACT_LABEL);
+  btn.append(trashIcon());
+  btn.onclick = () => armRedact(btn, turn);
+  return btn;
+}
+
+// What is left where the exchange was. A chat must not silently lose a turn:
+// the answer above it would read as a reply to nothing, and a removal you can't
+// see is indistinguishable from data quietly going missing. The row carries the
+// removed turn's OWN time, so it stays in the transcript's timeline instead of
+// looking like something that just happened.
+function addRedactedMsg(at) {
+  const el = document.createElement("div");
+  el.className = "msg system-note redacted-note";
+  const ico = document.createElement("span");
+  ico.className = "sysnote-ico";
+  ico.append(trashIcon());
+  const body = document.createElement("div");
+  body.className = "sysnote-body";
+  const label = document.createElement("div");
+  label.className = "sysnote-label";
+  label.textContent = "Message removed";
+  body.appendChild(label);
+  const stamp = messageStamp(at);
+  if (stamp) {
+    const detail = document.createElement("div");
+    detail.className = "sysnote-text";
+    detail.textContent = stamp;
+    body.appendChild(detail);
+  }
+  el.append(ico, body);
+  messagesEl.appendChild(el);
+  scrollToEnd();
+  return el;
+}
+// [REDACT-END]
+
+function addUserMsg(text, at, turn) {
   const el = addMsg("user", text);
   const tools = document.createElement("div");
   tools.className = "user-tools";
   const getText = () => stripAttachmentNotes(el.textContent);
+  // A turn id exists only for a turn the server has logged, so a live turn gets
+  // its remove control on the next replay rather than a control that would name
+  // nothing.
+  if (turn) tools.append(redactChip(turn));
   tools.append(reuseChip(getText), copyChip(getText, "copy prompt"));
   stampTurn(tools, at);
   messagesEl.appendChild(tools);
@@ -4239,6 +4338,18 @@ function speakerIcon() {
     }));
     g.appendChild(make("path", { d: "M15 9.3a4 4 0 0 1 0 5.4" }));
     g.appendChild(make("path", { d: "M17.6 6.8a7.6 7.6 0 0 1 0 10.4" }));
+    svg.appendChild(g);
+  });
+}
+
+function trashIcon() {
+  return svgIcon("i-trash", (make, svg) => {
+    const g = make("g", { fill: "none", stroke: "currentColor", "stroke-width": "1.7",
+      "stroke-linecap": "round", "stroke-linejoin": "round" });
+    g.appendChild(make("path", { d: "M4.5 6.5h15" }));
+    g.appendChild(make("path", { d: "M9.5 6.5V5a1.5 1.5 0 0 1 1.5-1.5h2A1.5 1.5 0 0 1 14.5 5v1.5" }));
+    g.appendChild(make("path", { d: "M6.5 6.5 7.4 19a1.5 1.5 0 0 0 1.5 1.4h6.2a1.5 1.5 0 0 0 1.5-1.4l.9-12.5" }));
+    g.appendChild(make("path", { d: "M10.5 10v6.5M13.5 10v6.5" }));
     svg.appendChild(g);
   });
 }

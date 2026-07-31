@@ -227,8 +227,17 @@ class LogRef:
 
     def __init__(self, log: SessionLog):
         self.log = log
+        # The id the NEXT logged user message should carry (#202). The web server
+        # mints it when it emits the turn's `user` event, so the live transcript
+        # and the log name the same turn and a message can be removed the moment
+        # it is sent — the case the feature exists for. Unset elsewhere (the CLI,
+        # a resumed history), where SessionLog.message mints its own.
+        self.pending_turn: str | None = None
 
     def message(self, message: dict) -> None:
+        if message.get("role") == "user" and self.pending_turn:
+            message = {**message, "turn": self.pending_turn}
+            self.pending_turn = None
         self.log.message(message)
 
     def command(self, command: str, decision: str) -> None:
@@ -260,6 +269,9 @@ class LogRef:
 
     def rewind_last_turn(self) -> bool:
         return self.log.rewind_last_turn()
+
+    def redact_turn(self, turn: str):
+        return self.log.redact_turn(turn)
 
 
 def load_config(path: Path) -> dict:

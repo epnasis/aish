@@ -466,6 +466,16 @@ navigate by shouldn't keep changing). A fork gets its own name at its first new
 turn, so branching a tangent doesn't leave two rows with the same label. Rename
 one yourself and that's final — the automatic naming stands down for good.
 
+**A chat has an eraser.** The trash chip under a prompt in the web UI removes
+that exchange — the prompt, everything it made the model do, and the answer.
+Two taps, because it is irreversible: the text is deleted from the session log,
+dropped from the model's context (so it stops being quoted), and gone from every
+device's offline copy at the next sync. What stays is a dated "Message removed"
+marker where the exchange was, so the removal itself is on the record. For a
+message sent to the wrong chat, a half-typed one an autocorrect Return sent, or
+a secret pasted into the composer — previously the only options were deleting
+the whole chat or editing JSONL by hand.
+
 **Resuming always switches, never merges.** `aish --resume`, `/resume` in the
 terminal and the web session drawer all mean the same thing: the chosen session
 becomes the current one — its conversation, its log file, the model it last used
