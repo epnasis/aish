@@ -138,7 +138,52 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
     Math.abs(stamp - Date.now()) < SEC);
 }
 
-// ---- 5. wiring: what may claim the count ---------------------------------
+// ---- 5. the count's rows are always renderable ---------------------------
+// The complaint that made this section exist: the badge said 1, the rail was
+// opened to answer it, and there was nothing there — plus a chat that was
+// actively working did not appear at all. Both are one cause: the rail paints
+// from the offline mirror first, and a mirror row cannot carry liveness or a
+// stamp newer than the last sync. So the count and the list disagreed for as
+// long as the socket took to come back — which on a phone is exactly when you
+// look.
+{
+  const w = badgeWorld();
+  const s = w.sandbox;
+  s.setAttentionRows([
+    { name: "held.jsonl", title: "overnight job", ts: (Date.now() - 30 * SEC) / SEC, state: "waiting" },
+    { name: "busy.jsonl", title: "long task", ts: (Date.now() - 10 * SEC) / SEC, state: "running" },
+    { name: "old.jsonl", title: "yesterday", ts: (Date.now() - 7200 * SEC) / SEC, state: "" },
+  ]);
+  // What the mirror holds: it has never synced the held chat at all, and its
+  // copy of the running one predates the turn now in flight.
+  const cached = [
+    { name: "busy.jsonl", title: "long task", snippet: "you: go", ts: (Date.now() - 3600 * SEC) / SEC, state: "", cwd: "", origin: "user", pinned: false },
+    { name: "old.jsonl", title: "yesterday", snippet: "…", ts: (Date.now() - 7200 * SEC) / SEC, state: "", cwd: "", origin: "user", pinned: true },
+  ];
+  const rows = s.railRows(cached, false);
+  const byName = new Map(rows.map((r) => [r.name, r]));
+
+  ok("a counted chat the mirror never synced is still rendered",
+    byName.has("held.jsonl") && byName.get("held.jsonl").title === "overnight job");
+  ok("EVERY counted chat is renderable — the count can never name an empty list",
+    counted(w).every((name) => byName.has(name)));
+  ok("liveness the mirror cannot hold is laid over it",
+    byName.get("busy.jsonl").state === "running");
+  ok("…so the working chat lands in Active now instead of nowhere",
+    s.partitionSessions(rows, { seen: s.seenAt, since: s.seenSince, current: null })
+      .bands.active.map((r) => r.name).join() === "busy.jsonl");
+  ok("the mirror keeps what the server row has no opinion about",
+    byName.get("busy.jsonl").snippet === "you: go" && byName.get("old.jsonl").pinned === true);
+  ok("rows descend by stamp, or the date buckets below stop being buckets",
+    rows.every((r, i) => i === 0 || Number(rows[i - 1].ts) >= Number(r.ts)));
+
+  // Searching asks a question; a row that does not match it is not an omission.
+  const found = s.railRows(cached, true);
+  ok("a search result is overlaid but never padded",
+    found.length === cached.length && found[0].state === "running");
+}
+
+// ---- 6. wiring: what may claim the count ---------------------------------
 // renderSessions paints from the offline mirror FIRST and from the server
 // second. The mirror's rows carry a lagging ts and cannot see liveness at all
 // (`state: ""`), and a search result is a RANKED SUBSET of the chats there are
@@ -160,6 +205,13 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
   const helloBody = src.slice(hello, src.indexOf("\n// Multi-connection (#102)", hello));
   ok("every hello re-derives the count from the rows it already carries",
     /setAttentionRows\(event\.pager \|\| \[\]\)/.test(helloBody));
+
+  const mirror = src.indexOf("async function renderOfflineSessions");
+  const mirrorBody = src.slice(mirror, src.indexOf("\nfunction requestSessions", mirror));
+  ok("the cached paint goes through railRows, never straight to the renderer",
+    /railRows\(cached,/.test(mirrorBody) && !/sessions: offlineRank/.test(mirrorBody));
+  ok("an empty mirror no longer aborts the paint — the count's rows are still rows",
+    !/if \(!metas\.length\) return false;/.test(mirrorBody));
 }
 
 report("test_attention_badge.js");
