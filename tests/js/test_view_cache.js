@@ -34,6 +34,7 @@ const sandbox = {
   currentSession: "",
   pendingCards: 0,
   clientBusy: false,
+  pendingSends: [], // un-acknowledged send bubbles ([PENDING-SEND])
   offlineViewing: false,
   renderedAnswers: 0,
   messagesEl: { children: [] },
@@ -109,6 +110,10 @@ check("only a clean idle view is stashable", () => {
   assert(!viewStashable({ ...clean, pendingCards: 1 }));    // card mid-decision
   assert(!viewStashable({ ...clean, busy: true }));         // task running
   assert(!viewStashable({ ...clean, offlineViewing: true })); // mirror truncates
+  // An un-acknowledged send bubble ([PENDING-SEND]) is DOM the server never
+  // sent — filing it under a server fingerprint would cache a message that may
+  // never have arrived as though it were transcript.
+  assert(!viewStashable({ ...clean, pendingSends: 1 }));
 });
 
 check("stash stores the live nodes and the cache stays bounded, MRU first out", () => {
@@ -161,6 +166,10 @@ check("replayLanding: identical clean transcript no-ops (the reconnect case)", (
   assert.strictEqual(replayLanding({ ...base, fp: "f2", cachedFp: "f2" }), "reuse");
   // A stash with a stale fingerprint is never reused.
   assert.strictEqual(replayLanding({ ...base, fp: "f2", cachedFp: "f1" }), "rebuild");
+  // A bubble the server has never confirmed ([PENDING-SEND]) means the DOM is
+  // NOT this replay's transcript however well the fingerprint matches — and the
+  // fingerprint cannot see it, because nothing about it came off the socket.
+  assert.strictEqual(replayLanding({ ...base, pendingSends: 1 }), "rebuild");
   // No fingerprint at all (empty replay edge) always rebuilds.
   assert.strictEqual(
     replayLanding({ fp: "", viewFp: "", viewDirty: false, hasDom: true }), "rebuild"

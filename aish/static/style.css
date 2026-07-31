@@ -536,6 +536,46 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   white-space: pre-wrap;
 }
 .msg.notice { color: var(--dim); font-size: 13.8px; text-align: center; }
+
+/* A message drawn on SEND, before the server has confirmed it ([PENDING-SEND]).
+   Held back rather than styled as a different thing: it IS your message, and it
+   is about to become the real bubble in place — a distinct colour would make the
+   confirmation look like the message changed. */
+.msg.user.pending { opacity: 0.55; }
+.user-tools.pending-send { justify-content: flex-end; }
+.pending-send-status {
+  color: var(--dim);
+  font-size: 12.5px;
+  padding: 2px 2px 0;
+}
+.pending-send-retry {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--blue);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* The transcript between chats ([PENDING-VIEW]): the tap has been honoured and
+   nothing has painted the new chat yet. */
+.msg.notice.loading-view {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 28px 0;
+}
+.msg.notice.loading-view .spin { width: 13px; height: 13px; border-width: 1.6px; }
+.loading-view-retry {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--blue);
+  font: inherit;
+  font-size: 13.8px;
+  cursor: pointer;
+}
 /* Workspace-change audit marker (issue #94): a quiet system-note row. */
 .msg.workspace-note {
   display: flex;
