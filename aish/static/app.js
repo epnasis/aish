@@ -1754,6 +1754,7 @@ function onReplay(event) {
 }
 // [REPLAY-LANDING-END]
 
+// [ANSWERING-COLLAPSE-START]
 // Entering the "Answering…" phase — the model stopped calling tools and is
 // streaming its reply — collapses the still-open live timeline to its summary
 // so the answer isn't buried under a tall list of steps (#168). Fires once, at
@@ -8239,6 +8240,7 @@ $("sessions-new").onclick = () => { send({ type: "new" }); closeSessionRail(); }
 // find without being told. Same action, two discovery paths.
 $("new-chip").onclick = () => requestNewChat();
 
+// [ACTIVE-APPROVAL-CARD-START]
 // Single-key shortcuts for approval-card actions, one row per distinct button.
 // Keys MUST be unique (a card never binds one key to two actions) — enforced by
 // tests/js/test_approval_shortcut.js, which also checks every primary verdict
