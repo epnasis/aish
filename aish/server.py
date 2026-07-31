@@ -666,6 +666,13 @@ class Bridge:
         # session). Wrapped in try/except so a notify failure never blocks the
         # gate. None = no notification wiring (CLI, tests).
         self.on_wait = on_wait
+        # Fired on the LOOP thread when this session starts holding on an
+        # approval (#203), so the server can tell the clients that are NOT
+        # viewing it. The mirror image of the idle notice `_finish_turn`
+        # already sends: without it a background chat could stop and wait
+        # indefinitely while every other tab's attention count said nothing.
+        # None = no wiring (CLI, tests).
+        self.on_hold: Callable[[], Any] | None = None
 
     def emit(self, event: dict, record: bool = True) -> None:
         loop = self._get_loop()
@@ -713,6 +720,13 @@ class Bridge:
         slot: queue.Queue = queue.Queue(maxsize=1)
         self.pending[uid] = slot
         self.emit(event)
+        # Announce the hold to non-viewers. Hops to the loop thread like emit()
+        # does — this runs on the agent worker — and is registered in `pending`
+        # above, so state() already reads "waiting" by the time it lands.
+        if self.on_hold is not None:
+            loop = self._get_loop()
+            if loop is not None:
+                loop.call_soon_threadsafe(self.on_hold)
         if self.on_wait is not None:
             # has_viewers snapshot: the set is mutated on the loop thread, but a
             # benign race (notify a moment after a viewer appears, or skip as
@@ -1694,6 +1708,12 @@ class WebServer:
         landing spot. The old `default=True` let handle_trigger silently
         re-point the default at an overnight automated session."""
         self.sessions[session.name] = session
+        # The ONE funnel every session-creation path goes through (new, cold
+        # open, /trigger, the server's first session), which is why the hold
+        # announcer is wired here rather than four times over (#203).
+        session.bridge.on_hold = lambda: asyncio.ensure_future(
+            self._announce_hold(session)
+        )
         if default:
             self._default = session
 
@@ -1826,8 +1846,20 @@ class WebServer:
         # carries its origin so the client pages within one lane (Recent vs
         # Automated, #160). The current session is always a page even before its
         # first message (a fresh chat is the newest thing by definition).
+        # Each page also carries the chat's liveness, from the same in-memory
+        # source `_send_sessions` reports (a chat not open is ""). That is what
+        # lets the client's attention badge re-derive itself on every hello —
+        # boot, reconnect, switch — instead of only when the rail is opened
+        # (#203).
+        open_states = {name: s.state() for name, s in self.sessions.items()}
         pages = [
-            {"name": name, "title": title, "origin": origin, "ts": ts}
+            {
+                "name": name,
+                "title": title,
+                "origin": origin,
+                "ts": ts,
+                "state": open_states.get(name, ""),
+            }
             for name, title, origin, ts in pager or []
         ]
         if all(page["name"] != session.name for page in pages):
@@ -1839,6 +1871,7 @@ class WebServer:
                     # Newest thing there is, by definition — stamped like every
                     # other row so the client can order it.
                     "ts": time.time(),
+                    "state": session.state(),
                 }
             )
         return {
@@ -2863,13 +2896,33 @@ class WebServer:
             self._launch(session, text, attachments)
             return
         # A background session returned to idle: nudge every client NOT viewing
-        # it (a viewer already saw the `done`). The drawer badge is the durable
-        # signal; this toast is a heads-up.
+        # it (a viewer already saw the `done`).
+        await self._announce_state(session)
+
+    async def _announce_hold(self, session: Session) -> None:
+        """A chat stopped on an approval. Announce it only when NOBODY is
+        viewing it: a hold someone is already looking at is a card on their
+        screen, not a chat that wants a user who is somewhere else — and
+        announcing every approval would nudge the phone in your pocket once per
+        command you approve on the laptop. Runs on the loop thread, so this
+        reads the viewer set without the benign race `on_wait` documents."""
+        if session.viewers:
+            return
+        await self._announce_state(session)
+
+    async def _announce_state(self, session: Session) -> None:
+        """Tell every client NOT viewing `session` what it is doing now.
+
+        Sent when a background chat returns to idle and when it stops on an
+        approval (#203) — the two moments a chat starts wanting a user who is
+        looking somewhere else. The attention count on the rail button is the
+        durable signal; the client's toast is the heads-up. State is READ, never
+        passed in, so the notice cannot disagree with the session it names."""
         notice = {
             "type": "session_state",
             "session": session.name,
             "title": self._title(session),
-            "state": "idle",
+            "state": session.state(),
         }
         for client in list(self.clients):
             if client.viewing is session:
