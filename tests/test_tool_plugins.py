@@ -669,6 +669,31 @@ class TestContinuation:
         assert counter.read_text().count("x") == 1, "the wrapper re-ran for a later page"
         assert len("".join(pages)) == out.meta["bytes"]
 
+    def test_paging_resumes_where_the_shown_result_stopped(self, tmp_path):
+        """No silent hole. The truncated result shows text[:head] then jumps to
+        the LAST `tail` chars, so page 2 must resume at `head` — anchoring it on
+        head+tail instead skips `tail` characters the model never saw, while it
+        was told it could page through to the end."""
+        head, tail = 600, 200
+        text = "".join(chr(97 + (i // 50) % 26) for i in range(5000))
+        store = tmp_path / "store"
+        out = tp.envelope("t", text, 0, caps=(head, tail), store_dir=store)
+        key = out.meta["truncation"]["continuation"]
+
+        page2 = tp.read_continuation(key, store, 2, head, tail)
+        assert text.startswith(text[:head])
+        assert page2 == text[head : head + head + tail], "page 2 skipped the gap"
+
+        seen = text[:head]  # what the truncated result actually showed
+        page = 2
+        while True:
+            chunk = tp.read_continuation(key, store, page, head, tail)
+            if not chunk:
+                break
+            seen += chunk
+            page += 1
+        assert seen == text, "paging to the end did not reconstruct the output"
+
     def test_an_unknown_key_is_not_a_crash(self, tmp_path):
         assert tp.read_continuation("deadbeef", tmp_path / "nope", 2, 600, 200) is None
         assert tp.read_continuation("../etc/passwd", tmp_path, 2, 600, 200) is None
