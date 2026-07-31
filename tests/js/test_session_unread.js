@@ -102,6 +102,19 @@ ok("a row with no timestamp at all is not unread (nothing to compare)",
     counts.waiting === 2 && counts.running === 1 && counts.unread === 1);
 }
 
+// Steps are not output. A running turn writes to the log constantly, so a chat
+// that is merely WORKING keeps re-crossing the unread line — and used to land in
+// Needs you for it, which is why the count could claim a chat wanted you when
+// opening it showed a turn quietly getting on with it.
+{
+  const { bands, counts } = partitionAll([
+    { name: "mid-turn", ts: at(0), state: "running", origin: "user" },
+  ]);
+  ok("a chat mid-turn is Active now, however much its stamp moves",
+    bands.active.length === 1 && bands.needsYou.length === 0);
+  ok("…and the row still knows it is unread, for its own dot", counts.unread === 1);
+}
+
 // A held approval outranks a pin: the pin says "keep this reachable", the hold
 // says "I am blocked on you".
 {

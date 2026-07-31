@@ -8962,7 +8962,7 @@ function sessionUnread(info, state) {
 // SESSIONS_PARTITION_START
 // One list, four bands, in the order you act on them:
 //
-//   Needs you  — held for approval, or activity you haven't seen. The only
+//   Needs you  — held for approval, or OUTPUT you haven't seen. The only
 //                band that is about you rather than about the chat, and the
 //                reason the tabs are gone: it cuts ACROSS provenance.
 //   Active now — running. Worth seeing, but it isn't asking for anything.
@@ -8975,8 +8975,21 @@ function sessionUnread(info, state) {
 // The ONE "does this chat want me" predicate. The rail bands with it and the
 // attention badge counts with it, so a chat can never sit in "Needs you"
 // without being counted, or be counted without appearing there ([ATTENTION]).
+//
+// LIVENESS OUTRANKS THE STAMP, and that is the whole subtlety. "Unread" is
+// derived from the chat's last ACTIVITY, and a running turn is activity: every
+// tool step it takes moves the stamp, so a chat that was merely WORKING kept
+// re-crossing the unread line and landing here — which is why the count could
+// say a chat wanted you when opening it showed a turn quietly getting on with
+// it. Steps are not output. A running chat is `Active now` until it produces
+// something (a finished turn) or stops for you (an approval), and both of those
+// are states this predicate can already see (#203). It keeps its unread DOT if
+// an EARLIER turn's output is genuinely unread — the row still says so, it just
+// does not inflate the count while the chat is mid-turn.
 function needsYou(info, state) {
-  return info.state === "waiting" || sessionUnread(info, state);
+  if (info.state === "waiting") return true;   // stopped; it cannot go on without you
+  if (info.state === "running") return false;  // working; steps are not output
+  return sessionUnread(info, state);
 }
 
 function partitionSessions(sessions, state) {

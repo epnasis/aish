@@ -59,7 +59,8 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
     row("held.jsonl", { state: "waiting" }),      // stopped, cannot go on without you
     row("moved.jsonl"),                           // activity since this device looked
     row("read.jsonl", { ago: 7200 * SEC }),       // older than the floor
-    row("busy.jsonl", { ago: 7200 * SEC, state: "running" }),
+    // Mid-turn, and its steps have just moved its stamp: activity, not output.
+    row("busy.jsonl", { ago: 0, state: "running" }),
     row("onscreen.jsonl", { state: "waiting" }),  // the chat you are looking at
   ];
   s.setAttentionRows(rows);
@@ -73,7 +74,7 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
     band.filter((name) => name !== s.currentSession).sort().join() === counted(w).join());
   ok("the chat on screen is banded but never counted — its card is in front of you",
     band.includes("onscreen.jsonl") && !counted(w).includes("onscreen.jsonl"));
-  ok("a running chat is not attention: it is not asking for anything",
+  ok("a chat mid-turn is not attention, however fresh its stamp — steps are not output",
     !counted(w).includes("busy.jsonl"));
   ok("the badge paints the count", badge(w).textContent === "2" && badge(w).hidden === false);
 }
