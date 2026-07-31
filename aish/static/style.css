@@ -1793,9 +1793,14 @@ body.offline #composer { opacity: 0.55; }
 .session-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; padding-top: 1px; }
 .stamp-line { display: flex; align-items: center; gap: 6px; }
 .session-right .stamp { color: var(--dim); font-size: 15px; }
+/* Dim, NOT blue. On a rail row blue is the attention vocabulary — it is what
+   the unread dot is — and a pin is a standing property of a chat, not something
+   asking for you. Painted in the accent it read as "this one is new", which is
+   the one thing it never means. It shares --dim with the timestamp directly
+   above it, which is what it belongs with: the row's quiet trailing column. */
 .session-row .row-pin {
   flex: none;
-  color: var(--blue);
+  color: var(--dim);
   line-height: 0;
 }
 .session-row .row-pin svg { width: 15px; height: 15px; }
