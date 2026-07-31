@@ -1590,7 +1590,18 @@ function onReplay(event) {
       replaying = false;
     }
   }
-  viewFp = fp;
+  // A fingerprint is a CLAIM that this DOM equals a server replay — which is
+  // what lets a later replay land "noop" and keep it. A mirror paint has no such
+  // claim: its events came from IndexedDB, are capped by `offline_events`, and
+  // are only re-synced when the chat's activity stamp MOVES, so a chat nobody
+  // has touched keeps whatever the mirror stored — from an older app, in an
+  // older event SHAPE. That is not hypothetical: the delete chip rides a `turn`
+  // field added to `user` events (#202), and `replayFp` (count + last event)
+  // could not see the difference — the authoritative replay no-op'd and the
+  // chip-less mirror DOM stayed on screen. Claiming nothing here forces the
+  // rebuild that puts the server's version up. (`prefetch` is server data and
+  // keeps its claim: that no-op is the point of the warm peek.)
+  viewFp = offlineViewing ? "" : fp;
   viewDirty = false;
   // The reading position if this is the same transcript you left (a reload, a
   // switch and back); the tail if anything changed while you were away.
@@ -3155,11 +3166,13 @@ const REDACT_LABEL = "delete this exchange";
 function askDeleteTurn(turn) {
   askConfirm({
     title: "Delete this exchange?",
+    // Concretely what goes, in the words the UI itself uses for them —
+      // "everything it started" was true and told nobody anything.
     body:
-      "Your message, everything it started, and the answer are deleted — from " +
-      "this chat, from what the model remembers of it, and from the offline " +
-      "copies on your devices. A dated \u201cMessage deleted\u201d marker stays in its " +
-      "place. This cannot be undone.",
+      "Deletes your message, the thinking steps and commands it ran, and the " +
+      "answer. Gone from this chat, from what the model remembers, and from " +
+      "the offline copies on your devices. A dated \u201cMessage deleted\u201d marker " +
+      "stays in its place. This cannot be undone.",
     verb: "Delete",
     action: () => send({ type: "redact", turn }),
   });

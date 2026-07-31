@@ -276,4 +276,49 @@ function turnWorld() {
   ok("and A's tail added nothing to them", w.el.children.length === 1);
 }
 
+// ---- A paint from the offline mirror is never authoritative --------------
+// The mirror's events come from IndexedDB: capped by `offline_events`, and only
+// re-synced when a chat's ACTIVITY stamp moves — so a chat nobody has touched
+// keeps whatever was stored, written by whatever app version stored it. A
+// fingerprint is a claim that the DOM on screen equals a SERVER replay, and a
+// mirror paint cannot make that claim.
+//
+// The bug this pins was invisible to `replayFp` by construction: #202 added a
+// `turn` field to `user` events (what the delete chip names), which changes
+// neither the event COUNT nor the LAST event — so the authoritative replay
+// no-op'd, the chip-less mirror DOM stayed, and the delete control was simply
+// missing from every chat that had not been used since the deploy.
+{
+  const w = turnWorld();
+  const s = w.sandbox;
+  // A finished turn, as both sources hold it. The only difference is the field
+  // added to the `user` event — which is neither the count nor the last event,
+  // so `replayFp` cannot see it. That is the point.
+  const stale = {
+    type: "replay",
+    events: [{ type: "user", text: "the question" }, { type: "done", result: ANSWER }],
+  };
+  const fresh = {
+    type: "replay",
+    events: [
+      { type: "user", text: "the question", turn: "abc123" },
+      { type: "done", result: ANSWER },
+    ],
+  };
+
+  s.offlineViewing = true;
+  w.deliver(stale);
+  ok("the mirror painted", w.el.children.length > 0);
+  ok("…and claimed no fingerprint", s.viewFp === "");
+  ok("the two replays are indistinguishable to the fingerprint",
+    s.replayFp(stale) === s.replayFp(fresh));
+
+  const painted = w.el.children[0];
+  s.offlineViewing = false; // the socket's hello lands, then its replay
+  w.deliver(fresh);
+  ok("the authoritative replay repainted over it",
+    !w.el.children.includes(painted) && w.el.children.length > 0);
+  ok("…and it is the one that claims the fingerprint", s.viewFp === s.replayFp(fresh));
+}
+
 report("test_choreo_midstream_replay.js");
