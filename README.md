@@ -232,6 +232,22 @@ thousands of entries without bloating the context.
   retires an entry without deleting it. Saving a near-duplicate of an
   existing memory is refused with the existing entry's name, so the corpus
   consolidates instead of accumulating variants.
+- **Rules** — the one artifact class that is **binding**. A skill *may* be
+  consulted, a memory *may* be recalled, a tool *may* be invoked; a rule is
+  enforced by aish itself, whatever the model concludes. One markdown file per
+  rule in `~/.config/aish/rules/`, same frontmatter family (`status: disabled`
+  and `expires:` work identically), written by you — never by the model, never
+  silently. A rule declares a **trigger** (today: the shape of your message, or
+  the session's origin) and **obligations**: `route` this answer through a named
+  tool, `prohibit` these tools, `disclose` a named failure instead of quietly
+  patching over it. When a trigger matches, the rule is explained to the model
+  *and* enforced: a call that violates it is refused before it runs, with a
+  message naming the rule and what to do instead. Refusals are bounded — if the
+  model insists, you get an approval card, because there may be a legitimate
+  exception and only you can grant it. Rules only ever **restrict**: there is no
+  "auto-approve this" verb, deliberately, so a bad rule can annoy you and can
+  never widen what runs without asking. Two worked examples ship in
+  `examples/rules/`.
 - **`./AISH.md`** — durable context you write (host facts, preferences), always
   loaded in full.
 - **`/learn [hint]`** — distill the current conversation into skills/memory: it

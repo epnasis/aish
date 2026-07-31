@@ -6,6 +6,7 @@ approval gate with no model, no network, and full determinism.
 """
 
 import datetime
+import importlib
 import re
 import stat
 from pathlib import Path
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from aish import agent as agent_module
+from aish import rules as rules_module
 from aish import session as session_module
 from aish import skills as skills_module
 from aish import tool_plugins
@@ -5037,3 +5039,462 @@ class TestRedactTurn:
         ]
         agent.redact_turn("hello")
         assert agent.messages == [{"role": "system", "content": "you are aish"}]
+
+
+# --------------------------------------------------------------- rules (#191)
+
+RULE_ROUTE = """---
+name: docs-first
+description: A bare 'docs:' message means answer from read_docs, nothing else.
+tier: 0
+fail: open
+trigger: message_shape
+match: ^\\s*docs:\\S+\\s*$
+route: read_docs
+prohibit: web_search, read_url
+unless: disclosed
+disclose: docs_unavailable
+disclosure_terms: docs
+---
+
+Answer from the manual page, not from the web.
+"""
+
+RULE_SESSION = """---
+name: no-forget-when-triggered
+description: An unattended session never deletes the owner's knowledge.
+tier: 0
+fail: open
+trigger: session_context
+field: origin
+is_not: user
+prohibit: forget_memory
+---
+"""
+
+
+def write_rule(directory, name, text):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{name}.md").write_text(text)
+
+
+def rules_agent(tmp_path, responses, rule_texts=(RULE_ROUTE,), **kwargs):
+    """An Agent whose rule corpus is exactly `rule_texts`.
+
+    `read_docs` stands in for the canonical rule's `youtube_analyze`: it is the
+    only native read-only tool with no side effects that a test can make return
+    an #192 envelope of its choosing.
+    """
+    directory = tmp_path / "rules"
+    for i, text in enumerate(rule_texts):
+        write_rule(directory, f"r{i}", text)
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(rules_module, "GLOBAL_RULES_DIR", directory)
+    agent, chat = make_agent(responses, **kwargs)
+    agent._rules_monkeypatch = monkey  # kept alive for the test's duration
+    return agent, chat
+
+
+def _seeded_reminders(agent):
+    """The per-task reminder carrying the rules block. messages[0] is excluded:
+    the system prompt QUOTES the header (it tells the model what a rules block
+    means), so matching on text alone would find it every turn."""
+    return [
+        m for m in agent.messages[1:]
+        if m.get("role") == "system" and "RULES IN FORCE" in str(m.get("content"))
+    ]
+
+
+def records(logged, kind):
+    return [r for r in logged if r.get("kind") == kind]
+
+
+class TestRuleSeeding:
+    """Seed is the *prose explains* half: the model must never be ambushed by a
+    gate, and the harness must record whether the explanation actually landed."""
+
+    def test_rule_eval_is_emitted_even_when_no_rule_exists(self, tmp_path):
+        """Contract fork 8. 'No rule was evaluated for this turn' and 'a rule
+        was evaluated and abstained' are different answers with different
+        repairs, so the empty corpus states itself instead of being inferred."""
+        logged = []
+        agent, _ = rules_agent(
+            tmp_path, [model_says("done")], rule_texts=(), step_log=logged.append
+        )
+        agent.run_task("hello")
+        [record] = records(logged, "rule_eval")
+        assert record["corpus"] == {"total": 0, "active": 0, "skipped": []}
+        assert record["evaluated"] == [] and record["at"] == "seed"
+        assert not records(logged, "binding")
+
+    def test_an_abstention_records_the_evidence_it_abstained_on(self, tmp_path):
+        logged = []
+        agent, _ = rules_agent(tmp_path, [model_says("done")], step_log=logged.append)
+        agent.run_task("what is the weather")
+        [record] = records(logged, "rule_eval")
+        [row] = record["evaluated"]
+        assert row["verdict"] == "abstain" and row["rule"] == "docs-first"
+        assert row["trigger"] == "message_shape" and row["tier"] == 0
+        assert row["evidence"]["matched"] is False and row["evidence"]["pattern"]
+        assert "ms" in row and "binding" not in row
+
+    def test_a_bind_seeds_the_prose_and_records_that_it_landed(self, tmp_path):
+        logged = []
+        agent, chat = rules_agent(tmp_path, [model_says("done")], step_log=logged.append)
+        agent.run_task("docs:tar")
+        seeded = _seeded_reminders(agent)
+        assert seeded, "the binding never reached the model's context"
+        assert "MUST NOT call web_search" in seeded[0]["content"]
+        [binding] = records(logged, "binding")
+        assert binding["rule"] == "docs-first" and binding["seeded"] is True
+        assert binding["obligations"][0] == {
+            "verb": "route", "to": "read_docs", "of": "deliverable"
+        }
+        assert binding["satisfiable"] is True and binding["unsatisfiable"] == []
+        [row] = records(logged, "rule_eval")[0]["evaluated"]
+        assert row["verdict"] == "bind" and row["binding"] == binding["id"]
+
+    def test_the_seeded_block_does_not_survive_into_the_next_turn(self, tmp_path):
+        """A rule that bound three turns ago must not still claim to govern
+        this one — the reminder is replaced per task, not appended to."""
+        agent, _ = rules_agent(tmp_path, [model_says("a"), model_says("b")])
+        agent.run_task("docs:tar")
+        agent.run_task("what is the weather")
+        assert not _seeded_reminders(agent)
+
+    def test_a_rule_routing_to_a_missing_tool_is_unsatisfiable_at_bind_time(self, tmp_path):
+        logged = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says("done")],
+            rule_texts=(RULE_ROUTE.replace("route: read_docs", "route: youtube_analyze"),),
+            step_log=logged.append,
+        )
+        agent.run_task("docs:tar")
+        [binding] = records(logged, "binding")
+        assert binding["satisfiable"] is False
+        assert binding["unsatisfiable"] == ["youtube_analyze"]
+
+    def test_every_rules_record_carries_the_turn_that_emitted_it(self, tmp_path):
+        logged = []
+        agent, _ = rules_agent(
+            tmp_path, [model_says("a"), model_says("b")], step_log=logged.append
+        )
+        agent.run_task("docs:tar")
+        agent.run_task("docs:grep")
+        for turn, group in ((1, logged[: len(logged) // 2]), (2, logged[len(logged) // 2 :])):
+            for record in group:
+                if record.get("kind") in ("rule_eval", "binding"):
+                    assert record["turn"] == turn
+
+
+class TestRuleGate:
+    """Membership against this turn's bindings. The engine slots in ALONGSIDE
+    the existing gates: it can only ever add a restriction."""
+
+    def test_a_prohibited_tool_is_refused_with_a_message_naming_the_rule(self, tmp_path):
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("web_search", query="tar flags")]),
+                model_says("ok"),
+            ],
+        )
+        agent.run_task("docs:tar")
+        [result] = tool_messages(agent.messages)
+        assert result["content"].startswith("NOT EXECUTED")
+        assert "docs-first" in result["content"]
+        assert "Call read_docs now" in result["content"]
+
+    def test_the_refused_call_never_runs(self, tmp_path):
+        """The property, not a consequence of it: the prohibited tool's
+        implementation must never be entered."""
+        calls = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("web_search", query="tar flags")]),
+                model_says("ok"),
+            ],
+        )
+        agent_module.web.web_search = lambda *a, **k: calls.append(a) or "results"
+        try:
+            agent.run_task("docs:tar")
+        finally:
+            importlib.reload(agent_module.web)
+        assert calls == []
+
+    def test_a_rule_refusal_is_never_a_green_step(self, tmp_path):
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("web_search", query="tar flags")]),
+                model_says("ok"),
+            ],
+            step_log=steps.append,
+        )
+        agent.run_task("docs:tar")
+        [tool_step] = [s for s in steps if s.get("kind") == "tool"]
+        assert tool_step["ok"] is False
+        assert tool_step["status"] == "failed" and tool_step["verdict_by"] == "gate"
+
+    def test_the_gate_record_joins_to_the_call_it_governed(self, tmp_path):
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("web_search", query="tar flags")]),
+                model_says("ok"),
+            ],
+            step_log=steps.append,
+        )
+        agent.run_task("docs:tar")
+        [gate] = records(steps, "gate")
+        [tool_step] = [s for s in steps if s.get("kind") == "tool"]
+        assert gate["call"] == tool_step["call"] and gate["call"] > 0
+        assert gate["verdict"] == "refused" and gate["at"] == "gate"
+        assert gate["gate"] == "rule.prohibit" and gate["rule"] == "docs-first"
+        assert gate["tool"] == "web_search"
+        assert gate["action"] == {"query": "tar flags"}
+        assert gate["round"] == 1 and gate["max_rounds"] == rules_module.RULE_MAX_REFUSALS
+        assert gate["escalated"] is False and gate["message"].startswith("NOT EXECUTED")
+        assert gate["evidence"]["route_used"] is False
+
+    def test_an_armed_gate_that_allowed_the_call_says_so(self, tmp_path):
+        """Contract §5: otherwise an armed gate is indistinguishable from a
+        disarmed one, and 'why didn't it refuse?' has no answer."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="tar")]),
+                model_says("ok"),
+            ],
+            step_log=steps.append,
+        )
+        agent.run_task("docs:tar")
+        [gate] = records(steps, "gate")
+        assert gate["verdict"] == "allowed" and gate["tool"] == "read_docs"
+
+    def test_no_gate_record_when_no_rule_bound(self, tmp_path):
+        """The absence of a record means the gate was DISARMED, and that fact
+        is recoverable from the rule_eval corpus row — so silence is an answer
+        rather than a hole."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="tar")]),
+                model_says("ok"),
+            ],
+            step_log=steps.append,
+        )
+        agent.run_task("how do I use tar")
+        assert not records(steps, "gate")
+        assert records(steps, "rule_eval")[0]["evaluated"][0]["verdict"] == "abstain"
+
+    def test_a_rule_never_lifts_an_existing_gate(self, tmp_path):
+        """A rule-engine bug may OVER-restrict, never under-restrict. A rule
+        that says nothing about run_command cannot make a denial approve."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo hi")]),
+                model_says("ok"),
+            ],
+            approve=lambda _cmd: False,
+        )
+        agent.run_task("docs:tar")
+        assert tool_messages(agent.messages)[0]["content"] == DENIED_RESULT
+
+    def test_the_session_context_rule_is_added_by_editing_a_file(self, tmp_path):
+        """The second trigger kind, and the acceptance criterion it proves: a
+        rule arrives as a FILE, with no code change and no model in the loop."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="forget_memory", arguments={"name": "some-fact"}
+                            )
+                        )
+                    ]
+                ),
+                model_says("ok"),
+            ],
+            rule_texts=(RULE_SESSION,),
+            origin="schedule",
+        )
+        agent.run_task("tidy the corpus")
+        assert "no-forget-when-triggered" in tool_messages(agent.messages)[0]["content"]
+
+    def test_bindings_force_dispatch_off_the_parallel_path(self, tmp_path):
+        """The parallel read-only fan-out bypasses _dispatch entirely, and
+        web_search/read_url — the tools the canonical rule prohibits — are
+        exactly what it fans out. A rule that only holds for serial turns is
+        not a rule."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("web_search", query="one"),
+                        tool_call("read_url", url="https://example.com"),
+                    ]
+                ),
+                model_says("ok"),
+            ],
+        )
+        agent.run_task("docs:tar")
+        assert all("NOT EXECUTED" in m["content"] for m in tool_messages(agent.messages))
+
+
+class TestDiscloseBeforeSubstituting:
+    """#190's actual incident: the transcript came back empty, six web searches
+    followed, and the answer was presented as the video's content. The gate
+    cannot judge the answer — Verify will — but it can make the substitution
+    impossible to perform SILENTLY."""
+
+    def _agent(self, tmp_path, responses, status="incomplete", **kwargs):
+        agent, chat = rules_agent(tmp_path, responses, **kwargs)
+        agent_module.tools.read_docs = lambda *a, **k: agent_module.tools.ToolOutcome(
+            "no manual entry", status=status, verdict_by="empty_output", exit_code=0
+        )
+        return agent, chat
+
+    def test_substitution_is_refused_until_the_failure_is_stated(self, tmp_path):
+        agent, _ = self._agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="tar")]),
+                model_says(
+                    "Let me look at this from another angle.",
+                    tool_calls=[tool_call("web_search", query="tar flags")],
+                ),
+                model_says("ok"),
+            ],
+        )
+        try:
+            agent.run_task("docs:tar")
+        finally:
+            importlib.reload(agent_module.tools)
+        refusal = tool_messages(agent.messages)[1]["content"]
+        assert "WITHOUT SAYING SO" in refusal
+
+    def test_stating_the_failure_lifts_the_prohibition(self, tmp_path):
+        searched = []
+        agent, _ = self._agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="tar")]),
+                model_says(
+                    "The docs came back empty, so I could not read the manual page.",
+                    tool_calls=[tool_call("web_search", query="tar flags")],
+                ),
+                model_says("ok"),
+            ],
+        )
+        agent_module.web.web_search = lambda *a, **k: searched.append(a) or "results"
+        try:
+            agent.run_task("docs:tar")
+        finally:
+            importlib.reload(agent_module.tools)
+            importlib.reload(agent_module.web)
+        assert searched, "a disclosed failure must let the model move on"
+
+    def test_a_SUCCESSFUL_route_does_not_license_a_second_source(self, tmp_path):
+        agent, _ = self._agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="tar")]),
+                model_says(
+                    "The docs are fine, let me also check the web.",
+                    tool_calls=[tool_call("web_search", query="tar flags")],
+                ),
+                model_says("ok"),
+            ],
+            status="ok",
+        )
+        try:
+            agent.run_task("docs:tar")
+        finally:
+            importlib.reload(agent_module.tools)
+        assert "second source" in tool_messages(agent.messages)[1]["content"]
+
+
+class TestBoundedRefusalAndEscalation:
+    """A gate that refuses forever wedges a small model into a stall-out, so
+    refusals are bounded — and the model's insistence IS its appeal."""
+
+    def _responses(self, rounds):
+        out = []
+        for i in range(rounds):
+            out.append(model_says(tool_calls=[tool_call("web_search", query=f"try {i}")]))
+        out.append(model_says("ok"))
+        return out
+
+    def test_the_owner_is_asked_only_after_the_bounded_refusals(self, tmp_path):
+        asked = []
+        agent, _ = rules_agent(tmp_path, self._responses(3))
+        agent.approve_tool = lambda name, args, preview: asked.append(preview) or False
+        agent.run_task("docs:tar")
+        assert len(asked) == 1, "the owner must not be interrupted before the model insists"
+        assert "docs-first" in asked[0] and "insisted" in asked[0]
+
+    def test_an_owner_override_lets_the_call_through_for_the_rest_of_the_turn(self, tmp_path):
+        searched = []
+        agent, _ = rules_agent(tmp_path, self._responses(4))
+        agent.approve_tool = lambda name, args, preview: True
+        agent_module.web.web_search = lambda *a, **k: searched.append(a) or "results"
+        try:
+            agent.run_task("docs:tar")
+        finally:
+            importlib.reload(agent_module.web)
+        assert len(searched) == 2, "the exception holds for the turn, not for one call"
+
+    def test_an_owner_denial_is_final_and_arms_the_stop_gate(self, tmp_path):
+        """A denial carrying a comment means STOP, exactly as it does on every
+        other card — so the tool call the model tries NEXT is refused too."""
+        responses = self._responses(3)
+        responses.insert(3, model_says(tool_calls=[tool_call("read_docs", command="tar")]))
+        agent, _ = rules_agent(tmp_path, responses)
+        agent.approve_tool = lambda name, args, preview: Denied("stop searching")
+        agent.run_task("docs:tar")
+        results = [m["content"] for m in tool_messages(agent.messages)]
+        assert "USER DENIED" in results[2] and "stop searching" in results[2]
+        assert results[3] == agent_module.STOP_GATE_REFUSAL
+
+    def test_with_no_approver_the_refusal_becomes_final_instead_of_looping(self, tmp_path):
+        """Unattended there is nobody to grant an exception, so the model is
+        told to stop and report rather than being refused into the stall cap."""
+        steps = []
+        agent, _ = rules_agent(tmp_path, self._responses(3), step_log=steps.append)
+        agent.approve_tool = None
+        agent.run_task("docs:tar")
+        last = tool_messages(agent.messages)[-1]["content"]
+        assert "STOP retrying" in last
+        assert records(steps, "gate")[-1]["escalated"] is True
+
+    def test_the_escalation_records_the_round_it_escalated_on(self, tmp_path):
+        steps = []
+        agent, _ = rules_agent(tmp_path, self._responses(3), step_log=steps.append)
+        agent.approve_tool = lambda name, args, preview: False
+        agent.run_task("docs:tar")
+        gates = records(steps, "gate")
+        assert [g["round"] for g in gates] == [1, 2, 3]
+        assert [g["escalated"] for g in gates] == [False, False, True]
+
+    def test_one_call_leaves_exactly_one_verdict_per_binding(self, tmp_path):
+        """A per-gate tally must not count one allowance twice: the override
+        re-pass re-evaluates the SAME call, and the escalation has already
+        written that binding's verdict for it."""
+        steps = []
+        agent, _ = rules_agent(tmp_path, self._responses(3), step_log=steps.append)
+        agent.approve_tool = lambda name, args, preview: True
+        agent.run_task("docs:tar")
+        for call in {g["call"] for g in records(steps, "gate")}:
+            rows = [g for g in records(steps, "gate") if g["call"] == call]
+            assert len({(g["call"], g["binding"]) for g in rows}) == len(rows)

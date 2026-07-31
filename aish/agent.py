@@ -32,7 +32,7 @@ from typing import Any
 import ollama
 
 from . import aliases as alias_map
-from . import backends, files, media, skill_import, skills, tool_plugins, tools, web
+from . import backends, files, media, rules, skill_import, skills, tool_plugins, tools, web
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
 from .session import SessionLog
 
@@ -105,6 +105,21 @@ Rules:
    git repo or local path, use import_skill — it is untrusted content, so
    aish shows the user every file for approval before anything lands; after
    staging, summarize what the skill and its scripts do so they can review.
+2d. RULES are not advice. A message headed "RULES IN FORCE FOR THIS TURN"
+   lists constraints aish ENFORCES: a call that violates one is refused
+   before it runs, whatever you conclude about it. When you get a refusal
+   naming a rule, you MUST do what it says instead — never retry the same
+   call or a variant of it. If a rule routes the answer through a tool and
+   that tool fails, you MUST say so in plain text before using any other
+   source; substituting silently is the one thing rules exist to stop, and
+   the gate will keep refusing until you have said it. If you genuinely
+   believe the rule should not apply here, say why in text and propose the
+   call again — the user is asked after two refusals and can allow it.
+   Rules live in ~/.config/aish/rules/ and only the USER writes them: when
+   they state a standing rule that must be ENFORCED rather than merely
+   remembered ("if I paste only a link, analyse THAT and nothing else"),
+   tell them a rule file is where it belongs and offer to draft one for
+   their approval — do not save it as a memory and hope.
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. A COMMENT
    the user attaches to a decision changes what you do next, and approve vs
@@ -436,14 +451,25 @@ PRELOAD_REMINDER = (
 )
 
 
-def task_reminder(index: str, preload_text: str = "") -> str:
+# The seeded half of "prose explains, gate enforces" (#191). It rides the SAME
+# per-task system message as the time note and preloaded knowledge, so it is
+# replaced every turn by the strip-previous logic instead of accumulating — a rule
+# that bound three turns ago must not still be claiming to govern this one.
+RULES_REMINDER = "<system-reminder>{rules}</system-reminder>"
+
+
+def task_reminder(index: str, preload_text: str = "", rules_text: str = "") -> str:
     """The per-task system reminder: always the current local time (issue #36
     — it lives here, not in the system prompt, so messages[0] stays
     byte-stable for prompt caching and the time is fresh every task), plus
     the preloaded knowledge when pre-flight retrieval found any (issue #40),
-    else the skills nudge whenever any skills/memory are advertised."""
+    else the skills nudge whenever any skills/memory are advertised — and the
+    rules in force for this turn (#191), which are not knowledge to consult but
+    constraints the harness will enforce whatever the model concludes."""
     now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     time_note = f"{TASK_REMINDER_MARK}Current local time: {now}</system-reminder>"
+    if rules_text:
+        time_note += "\n" + RULES_REMINDER.format(rules=rules_text)
     if preload_text:
         return f"{time_note}\n{PRELOAD_REMINDER.format(knowledge=preload_text)}"
     return f"{time_note}\n{TASK_REMINDER}" if index else time_note
@@ -996,6 +1022,19 @@ class Agent:
         # _reset_task_state. `turn` starts at 0 so the first task is turn 1.
         self._turn = 0
         self._call_seq = itertools.count(1)
+        # The call id currently being dispatched, so a `gate` verdict joins to
+        # the `tool` step for the action it governed (§2). Thread-local rather
+        # than a plain attribute: _call_result runs on the main thread for the
+        # sequential path and on the SDK's worker threads under claude-max, and
+        # a shared attribute would be one refactor away from joining a verdict
+        # to the wrong call — the same reasoning that keeps `call` a local in
+        # _call_result on the parallel read-only path.
+        self._call_ids = threading.local()
+        # Rule bindings in force for this turn (#191) — the runtime objects the
+        # gate queries. Empty for a turn no rule matched, which is the common
+        # case and costs one set-membership test per dispatch.
+        self._bindings: list[rules.Binding] = []
+        self._binding_seq = itertools.count(1)
         # Plugin tools (TOOL.md), rebuilt only when the tool dirs' signature
         # moves — a mid-task manifest edit is picked up on the next step.
         # Read-only tools are always exposed; mutating ones only when a tool
@@ -1342,6 +1381,11 @@ class Agent:
         # positional guessing curate._windows apologises for.
         self._turn += 1
         self._call_seq = itertools.count(1)
+        # Bindings are TURN-scoped by definition — a rule binds a turn, not a
+        # session — so they are dropped here rather than in run_task, which
+        # claude-max never enters. Both entry points re-seed immediately after.
+        self._bindings = []
+        self._binding_seq = itertools.count(1)
         # Skill-read gates belong to the task that armed them; run_task re-arms
         # from its own preflight right after this reset.
         self._pending_skill_reads = {}
@@ -1442,9 +1486,15 @@ class Agent:
                 f"({self.semantic.error[:80]}); falling back to word matching"
             )
         self._pending_skill_reads = {n: GATE_MAX_REFUSALS for n in preload.unread}
+        # Seed (#191): evaluate the rule corpus against this turn and create the
+        # bindings, at the same position `knowledge` is emitted from — before
+        # the user message, so nothing this turn dispatches can outrun the gate.
+        rules_text = self.seed_rules(task)
         self.messages.append(
-            {"role": "system", "content": task_reminder(index, preload.text)}
+            {"role": "system", "content": task_reminder(index, preload.text, rules_text)}
         )
+        if rules_text:
+            self.mark_rules_seeded()  # the prose reached context — record it
         if preload.names:
             self._note("⚑ preloaded knowledge: " + ", ".join(preload.names))
             # sim/rail/score diagnostics persist to the session log via the
@@ -1502,6 +1552,13 @@ class Agent:
                 # request instead of reconstructing the turn.
                 entry["raw_blocks"] = raw_blocks
             self._append(entry)
+            # A `disclose` obligation lifts on the model's own words, and those
+            # words must land BEFORE this turn's tool calls are dispatched —
+            # the whole point is that the substitution is announced, not
+            # explained afterwards. Only `content` counts: it is what the user
+            # sees, unlike the thinking channel (#191).
+            if content:
+                self.note_model_text(content)
 
             # Deny means STOP: only a TEXT-ONLY turn clears the stop gate.
             # Clearing on any content would be defeated by chatty preamble (or
@@ -1963,10 +2020,19 @@ class Agent:
             if (name in READ_ONLY_TOOLS or self._is_readonly_plugin(name))
             and not self._read_needs_prompt(name, args)
         ]
-        # While either gate is armed, everything goes through _dispatch
+        # While ANY gate is armed, everything goes through _dispatch
         # sequentially — the parallel thunks below would bypass the gate (and
-        # the skill-counter dict is not thread-safe).
-        if len(concurrent) < 2 or self._pending_skill_reads or self._pending_comment_response:
+        # neither the skill-counter dict nor a binding's refusal rounds are
+        # thread-safe). `_bindings` belongs in this condition for exactly the
+        # reason the other two do: a rule that only holds for serial turns is
+        # not a rule, and web_search/read_url — the tools the canonical rule
+        # prohibits — are the readonly set this branch fans out.
+        if (
+            len(concurrent) < 2
+            or self._pending_skill_reads
+            or self._pending_comment_response
+            or self._bindings
+        ):
             return [
                 self._call_result(
                     name, partial(self._timed, partial(self._dispatch, name, args)), args=args
@@ -2049,6 +2115,10 @@ class Agent:
         # would hand two concurrent calls the same id — which is exactly the
         # by-name ambiguity §2 exists to remove.
         call_no = next(self._call_seq)
+        # Also published thread-locally so a gate verdict emitted deep inside
+        # _dispatch joins to THIS call's `tool` step (§2). The local above stays
+        # the source of truth for the step itself.
+        self._call_ids.current = call_no
         self._emit_step(
             kind="tool_start",
             name=name,
@@ -2096,6 +2166,10 @@ class Agent:
             return result
         self._note(f"{mark} {name} {format_secs(elapsed)}")
         self._emit_tool_step(name, args, result, elapsed, call_no)
+        # The single funnel every tool call passes through, parallel path
+        # included — so a binding's view of "was the routed tool tried, and did
+        # it work?" cannot miss a call that took another branch (#191).
+        self._observe_for_rules(name, result)
         return result
 
     def _emit_tool_step(
@@ -2592,6 +2666,258 @@ class Agent:
         DEDUP_MIN_SIM stays "provisional until measured" forever."""
         self._emit_record(kind="admission", target="memory", **record)
 
+    # ------------------------------------------------------------ rules (#191)
+
+    def seed_rules(self, task: str) -> str:
+        """Evaluate the rule corpus against this turn and create the bindings.
+
+        The ONE seed point, called by both entry points (run_task, and
+        ClaudeMaxAgent.run_task whose SDK owns its own loop) so a rule governs a
+        claude-max turn exactly as it governs a local one. Returns the prose the
+        model is shown; the caller decides where to put it, and tells us whether
+        it landed via `mark_rules_seeded`.
+
+        Emits `rule_eval` unconditionally — including for an empty corpus. That
+        looks like noise and is not: "no rule was evaluated for this turn" is a
+        different answer from "a rule was evaluated and abstained", and the two
+        route to different repairs (contract §3.1, fork 8).
+        """
+        corpus = rules.load_rules()
+        active, skipped = rules.partition(corpus)
+        known = self._known_tool_names()
+        rows: list[dict] = []
+        for rule in active:
+            started = time.perf_counter()
+            try:
+                verdict, evidence = rules.evaluate(rule, self._turn_context(task))
+            except Exception as exc:  # noqa: BLE001 — a broken evaluator must not kill the turn
+                verdict, evidence = rules.VERDICT_UNEVALUABLE, {"error": repr(exc)[:200]}
+            row: dict = {
+                "rule": rule.name,
+                "trigger": rule.trigger,
+                "tier": rule.tier,
+                "verdict": verdict,
+                "evidence": evidence,
+                "ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+            binding = None
+            if verdict == rules.VERDICT_BIND:
+                binding = rules.bind(rule, evidence, f"b{next(self._binding_seq)}", known)
+            elif verdict == rules.VERDICT_UNEVALUABLE:
+                # Failure direction is per enforcement point AND declared per
+                # rule. `open` = do not bind (the owner is watching); `hold` =
+                # bind conservatively AND send the first violation straight to
+                # the owner, since the harness could not confirm the trigger and
+                # must not decide the exception itself. Restriction is the safe
+                # direction: a rule-engine bug may OVER-restrict (loud), never
+                # under-restrict (silent).
+                row["fail"] = rule.fail
+                if rule.fail == rules.FAIL_HOLD:
+                    binding = rules.bind(
+                        rule, evidence, f"b{next(self._binding_seq)}", known, max_rounds=0
+                    )
+            if binding is not None:
+                row["binding"] = binding.id
+                self._bindings.append(binding)
+            rows.append(row)
+        self._emit_record(**rules.eval_record(active, skipped, rows))
+        if not self._bindings:
+            return ""
+        for binding in self._bindings:
+            self._note(f"⚖ rule in force: {binding.name}")
+        return rules.seed_text(self._bindings)
+
+    def mark_rules_seeded(self) -> None:
+        """The binding record is written only once the PROSE has reached the
+        model's context. `seeded` is what makes "refused by a gate it was never
+        told about" — an enforcement-point bug — detectable in the log rather
+        than only in a diff (contract §3.2)."""
+        for binding in self._bindings:
+            binding.seeded = True
+            self._emit_record(**rules.binding_record(binding))
+
+    def _turn_context(self, task: str) -> rules.TurnContext:
+        """The facts Tier-0 triggers read. Gathered by the HARNESS — never the
+        acting model's summary of its own turn (contract corollary 3)."""
+        return rules.TurnContext(task=task, origin=self.origin)
+
+    def _known_tool_names(self) -> set[str]:
+        """Everything the model can call this turn, for the bind-time
+        unsatisfiability check: a route to a tool that no longer exists must
+        surface when it fires, not months later."""
+        self._refresh_plugin_tools()
+        names = set()
+        for schema in [*tools.TOOL_SCHEMAS, *self._plugin_defs]:
+            function: dict = schema["function"]
+            names.add(str(function["name"]))
+        return names
+
+    def _observe_for_rules(self, name: str, result: str) -> None:
+        """Feed a completed tool call back into the bindings.
+
+        The routed tool's #192 envelope status is what makes `disclose`
+        reachable: an `incomplete` route is the failure the owner must be told
+        about before another source may be used. A REFUSED call never counts —
+        the action did not happen, so it cannot satisfy a route.
+        """
+        if not self._bindings:
+            return
+        meta = getattr(result, "meta", None) or {}
+        if meta.get("decision") in REFUSED_DECISIONS:
+            return
+        status = meta.get("status")
+        if status is None:
+            status = (
+                tools.STATUS_FAILED
+                if result.startswith(("ERROR", "NOT EXECUTED"))
+                else tools.STATUS_OK
+            )
+        for binding in self._bindings:
+            binding.note_tool_result(name, status)
+
+    def note_model_text(self, text: str) -> None:
+        """Assistant prose emitted ALONGSIDE tool calls — the only place a
+        mid-task disclosure can live, since a text-only turn ends the task."""
+        for binding in self._bindings:
+            binding.note_assistant_text(text)
+
+    def _rule_gate(self, name: str, args: dict) -> str | None:
+        """Membership against this turn's bindings: None = proceed, else the
+        refusal text. Runs AFTER the stop and skill gates and never in place of
+        anything — the engine slots in ALONGSIDE the existing gates, so a rule
+        can only ever add a restriction, never lift one.
+
+        Bounded refuse-first: compliance with route/prohibit is within the
+        model's power, so it is refused rather than escalated — but only
+        RULE_MAX_REFUSALS times, because a gate that refuses forever wedges a
+        small model into a stall-out. The next violation is the model's
+        insistence, and insistence is its appeal: it goes to the owner.
+        """
+        if not self._bindings:
+            return None
+        recorded: set[str] = set()
+        # One pass per binding at most: an escalation either refuses (returns)
+        # or marks that binding overridden, so it can never escalate twice. The
+        # re-pass matters — an owner exception to ONE rule must not silently
+        # release a call a SECOND rule also forbids (union of restrictions).
+        for _ in range(len(self._bindings) + 1):
+            refusal: str | None = None
+            stopped = False
+            for verdict in rules.gate(self._bindings, name):
+                if verdict.verdict == "allowed":
+                    if verdict.binding.id not in recorded:
+                        recorded.add(verdict.binding.id)
+                        self._record_gate(verdict, name, args, "allowed")
+                    continue
+                stopped = True
+                if verdict.verdict == "refused":
+                    self._note(f"⚖ {verdict.binding.name}: {name} refused")
+                    self._record_gate(verdict, name, args, "refused")
+                    refusal = _gate_outcome(verdict.message, decision="blocked")
+                else:
+                    refusal = self._escalate_rule(verdict, name, args)
+                    # The escalation already wrote this binding's verdict for
+                    # this call. Without this the re-pass writes a SECOND
+                    # `allowed` row for the same (call, binding) and a per-gate
+                    # tally counts one allowance twice.
+                    recorded.add(verdict.binding.id)
+            if refusal is not None:
+                if name == "run_command":  # so the trace shows why, not a bare row
+                    self._run_meta = {
+                        "command": str(args.get("command", "")),
+                        "decision": "blocked",
+                        "output": str(refusal),
+                    }
+                return refusal
+            if not stopped:
+                return None
+        return None
+
+    def _escalate_rule(
+        self, verdict: "rules.GateVerdict", name: str, args: dict
+    ) -> str | None:
+        """Tier 3 — the owner. Reached only after the bounded refusals, so the
+        card carries a model that has insisted rather than one that mistyped.
+        There may be legitimate exceptions; only the owner can grant one, and
+        an override is per-TURN and recorded, because a rule overridden every
+        time it fires is a wrong rule (#191's lifecycle signal).
+
+        Returns the refusal text, or None when the owner granted the exception.
+        """
+        binding = verdict.binding
+        if self.approve_tool is None:
+            # Unattended: no one to grant the exception, so the refusal becomes
+            # final and says so. Fails to RESTRICTION, and the model is told to
+            # stop retrying and report — never left looping into the stall cap.
+            message = rules.ESCALATION_REFUSAL.format(rule=binding.name, tool=name)
+            self._record_gate(verdict, name, args, "refused", escalated=True, message=message)
+            return _gate_outcome(message, decision="blocked")
+        preview = (
+            f"the rule '{binding.name}' forbids {name} for this turn "
+            f"({binding.rule.description}) — the model has insisted after "
+            f"{binding.rounds - 1} refusals"
+        )
+        decision = self.approve_tool(name, args, preview)
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            message = _with_feedback(
+                rules.OWNER_DENIED.format(rule=binding.name, tool=name), decision.comment
+            )
+            self._record_gate(verdict, name, args, "refused", escalated=True, message=message)
+            return _gate_outcome(message, decision="denied")
+        if isinstance(decision, Approved):
+            message = TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment)
+            self._record_gate(verdict, name, args, "held", escalated=True, message=message)
+            return _gate_outcome(message, decision="held")
+        if decision is None or decision is False:
+            message = rules.OWNER_DENIED.format(rule=binding.name, tool=name)
+            self._record_gate(verdict, name, args, "refused", escalated=True, message=message)
+            return _gate_outcome(message, decision="denied")
+        binding.overridden = True
+        self._record_gate(
+            verdict, name, args, "allowed", escalated=True, message="owner allowed the exception"
+        )
+        return None
+
+    def _record_gate(
+        self,
+        verdict: "rules.GateVerdict",
+        name: str,
+        args: dict,
+        outcome: str,
+        escalated: bool = False,
+        message: str | None = None,
+    ) -> None:
+        """The §3.3 `gate` record — ONE shape for every gate in the system, so
+        #197 and the ledger have one reader. Emitted whenever the gate is ARMED
+        (a binding is active), including for the calls it ALLOWED: an armed gate
+        that stayed silent is indistinguishable from a disarmed one otherwise,
+        and abstentions are decisions (§5)."""
+        binding = verdict.binding
+        record = {
+            "kind": "gate",
+            "call": self._current_call(),
+            "at": "gate",
+            "gate": "rule.prohibit" if verdict.evidence.get("obligation") else "rule",
+            "binding": binding.id,
+            "rule": binding.name,
+            "tool": name,
+            "action": rules.cap_action(args),
+            "verdict": outcome,
+            "tier": binding.rule.tier,
+            "evidence": verdict.evidence,
+            "round": verdict.round,
+            "max_rounds": binding.max_rounds,
+            "escalated": escalated,
+        }
+        text = verdict.message if message is None else message
+        if text:
+            record["message"] = text[: rules.GATE_MESSAGE_CHARS]
+        self._emit_record(**record)
+
+    def _current_call(self) -> int:
+        return getattr(self._call_ids, "current", 0)
+
     def _arm_stop_gate(self, comment: str) -> None:
         """A DENY carried a concern — stop: hold every further tool call until
         the model addresses it in plain text (issue #81). No-op for a bare
@@ -2660,6 +2986,14 @@ class Agent:
                     "decision": "blocked",
                     "output": "Held until the required skill is read.",
                 }
+            return refusal
+
+        # This turn's rule bindings (#191). ALONGSIDE the gates above and the
+        # ones below, never instead of them: a rule can only add a restriction,
+        # so a rule-engine bug over-restricts (loud, visible) and can never
+        # under-restrict (silent, dangerous).
+        refusal = self._rule_gate(name, args)
+        if refusal is not None:
             return refusal
 
         if name == "read_file":

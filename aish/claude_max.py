@@ -312,6 +312,14 @@ class ClaudeMaxAgent:
         if self._pending_notes:
             prompt = "\n\n".join([*self._pending_notes, task])
             self._pending_notes.clear()
+        # Seed this turn's rule bindings (#191). The SDK owns the loop, so the
+        # prose rides the prompt rather than a system reminder — but the gate is
+        # the SAME one, because every SDK tool call routes back through
+        # inner._dispatch. A rule that governed only local turns would be a rule
+        # the model can escape by being asked on a different backend.
+        if rules_text := self.inner.seed_rules(task):
+            prompt = f"{rules_text}\n\n{prompt}"
+            self.inner.mark_rules_seeded()
         self._record({"role": "user", "content": task})
         try:
             result = asyncio.run(self._run(prompt))
@@ -380,6 +388,12 @@ class ClaudeMaxAgent:
                     for block in message.content:
                         if isinstance(block, sdk.TextBlock) and block.text:
                             final = block.text
+                            # A `disclose` obligation lifts on the model's own
+                            # words (#191). The SDK delivers this block before
+                            # the tool_use blocks beside it reach the handler,
+                            # so the ordering the local loop gets by placing the
+                            # call after _append holds here too.
+                            self.inner.note_model_text(block.text)
                             if self.on_token is None:
                                 self.echo(block.text)
                 elif isinstance(message, sdk.ResultMessage):

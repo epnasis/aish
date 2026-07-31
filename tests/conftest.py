@@ -6,6 +6,7 @@ developer's real phone."""
 import pytest
 
 from aish import notify as notify_module
+from aish import rules as rules_module
 from aish import skills as skills_module
 from aish import tool_plugins as tool_plugins_module
 
@@ -20,6 +21,12 @@ def isolated_global_dirs(tmp_path_factory, monkeypatch):
     )
     monkeypatch.setattr(
         tool_plugins_module, "GLOBAL_TOOLS_DIR", tmp_path_factory.mktemp("global-tools")
+    )
+    # Rules (#191) are evaluated at the top of EVERY task, so the developer's
+    # own corpus would otherwise start governing the suite the day they write
+    # their first rule — a test failing because of a file outside the repo.
+    monkeypatch.setattr(
+        rules_module, "GLOBAL_RULES_DIR", tmp_path_factory.mktemp("global-rules")
     )
 
 

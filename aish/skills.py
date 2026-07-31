@@ -216,7 +216,7 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
                 elif key == "status":
                     status = value.strip().casefold()
                 elif key == "expires":
-                    expires = _parse_expiry(value.strip(), path)
+                    expires = parse_expiry(value.strip(), path)
                 elif key in ("pinned", "kind"):  # `kind: policy` = alias for pinned
                     pinned = pinned or value.strip().casefold() in (
                         "yes", "true", "1", "on", "policy",
@@ -246,7 +246,7 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
     )
 
 
-def _parse_expiry(value: str, path: Path) -> date | None:
+def parse_expiry(value: str, path: Path) -> date | None:
     """Tolerant, dependency-free: a malformed date means no expiry (the entry
     stays live — failing OPEN keeps knowledge available), with a warning so
     the typo gets noticed."""
@@ -262,19 +262,28 @@ def _parse_expiry(value: str, path: Path) -> date | None:
         return None
 
 
-def entry_active(entry: Entry, today: date | None = None) -> bool:
-    """The retire primitives (#178 P1-8): `status: disabled` frontmatter, or a
-    past `expires: YYYY-MM-DD` date (an entry stays valid through its expiry
-    day). Inactive entries are excluded from load_entries — and with it the
-    index, preflight, recall, and save_memory's duplicate checks — while
-    load_skill names the reason instead of claiming the entry is missing.
+def lifecycle_active(status: str, expires: date | None, today: date | None = None) -> bool:
+    """The retire primitives (#178 P1-8), as a predicate over the two frontmatter
+    fields alone: `status: disabled`, or a past `expires: YYYY-MM-DD` date (an
+    entry stays valid through its expiry day). Split out from `entry_active` so
+    the rules corpus (#191) inherits the SAME lifecycle rather than growing a
+    parallel one that drifts — rules are a fourth artifact class in the same
+    md+frontmatter family, differing in binding semantics, not in how they retire.
     Expiry is evaluated at read time, never baked in at parse time, so a
     long-running process crosses the boundary without an mtime change."""
-    if entry.status == "disabled":
+    if status == "disabled":
         return False
-    if entry.expires is not None and (today or date.today()) > entry.expires:
+    if expires is not None and (today or date.today()) > expires:
         return False
     return True
+
+
+def entry_active(entry: Entry, today: date | None = None) -> bool:
+    """Lifecycle for a knowledge entry. Inactive entries are excluded from
+    load_entries — and with it the index, preflight, recall, and save_memory's
+    duplicate checks — while load_skill names the reason instead of claiming the
+    entry is missing."""
+    return lifecycle_active(entry.status, entry.expires, today)
 
 
 # Parsed entries keyed by path; re-parse only when the file's mtime moved.
