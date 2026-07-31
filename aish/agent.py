@@ -8,6 +8,7 @@ the command to run (possibly edited by the user).
 
 import datetime
 import getpass
+import itertools
 import json
 import os
 import platform
@@ -31,7 +32,7 @@ from typing import Any
 import ollama
 
 from . import aliases as alias_map
-from . import files, media, skill_import, skills, tool_plugins, tools, web
+from . import backends, files, media, skill_import, skills, tool_plugins, tools, web
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
 from .session import SessionLog
 
@@ -148,7 +149,17 @@ Rules:
    it costs an approval prompt). To find one: web_search the subject, read_url
    a promising page, then pass an image URL from it to show_image. If
    show_image reports a problem, try another source — do not paste the URL
-   into your answer anyway.{scratch_note}
+   into your answer anyway.
+7c. TOOL RESULTS THAT FAILED OR WERE CUT: a result may carry an
+   "[aish: … reported status=…]" note. That means the tool did NOT produce
+   what it was asked for, even if it looks like it returned something. You
+   MUST tell the user the tool failed BEFORE using any other source, and you
+   MUST NOT present material from a substitute source as if it came from the
+   one the user named. If a result was truncated it carries a continuation
+   key: call read_tool_output(continuation="<key>", page=2) to read the rest.
+   That is served from a cache and does NOT re-run the tool. Page through what
+   you need, or say plainly what you could not read — never guess at the
+   omitted part.{scratch_note}
 """
 
 # Per-session scratch workspace (issue #70). Injected only when a path is
@@ -337,6 +348,28 @@ TOOL_HELD_FOR_ADJUSTMENT = (
 
 def _with_feedback(base: str, comment: str) -> str:
     return base + FEEDBACK_NOTE.format(comment=comment) if comment else base
+
+
+def _gate_outcome(text: str, decision: str) -> tools.ToolOutcome:
+    """A refusal, carrying its own verdict (#192, contract §6.13).
+
+    Five refusal constants used to be logged by prefix sniff alone —
+    `USER DENIED`, `NOT RUN` and `BLOCKED` all start with none of the sniffed
+    prefixes, so a denied, held or blocked call logged **ok: true** with no
+    decision at all, while the write path logged `held` / `ok: false`
+    correctly. The two halves of the same #81 semantics disagreed in the log,
+    and any audit of it — the #185 curation ledger included — counted a held
+    mutation as a completed one.
+
+    Built LAST, after any `_with_feedback` concatenation: ToolOutcome is a str
+    subclass, so string operations return a plain str and silently drop it.
+    """
+    return tools.ToolOutcome(
+        text,
+        status=tools.STATUS_FAILED,
+        verdict_by=tools.VERDICT_GATE,
+        decision=decision,
+    )
 
 
 def _display_path(path: Path) -> str:
@@ -591,6 +624,10 @@ READ_ONLY_TOOLS = frozenset(
         "read_file",
         "recall",
         "show_image",
+        # Reads aish's OWN content-addressed output cache — no host, no user
+        # state, no wrapper re-run (#192). Read-only by the same argument as
+        # show_image's write into the media store.
+        "read_tool_output",
     }
 )
 
@@ -637,6 +674,18 @@ EGRESS_NO_APPROVER = (
 # reachable from untrusted input. Deletion is prohibited outright; saving holds
 # on the approve_tool card so the owner sees what is being written.
 KNOWLEDGE_WRITE_TOOLS = frozenset({"remember", "forget_memory"})
+
+# Rendered steps that carry turn identity (docs/trace-contract.md §2, design
+# fork 1 = option b): the smallest set that makes a governance join complete —
+# an answer always needs the tool steps and the knowledge step alongside the
+# gate records. `thinking` is deliberately left out: it is the high-volume kind
+# and buys nothing #197 asks for. Renderless kinds are stamped by _emit_record.
+TURN_STAMPED_STEPS = frozenset({"tool_start", "tool", "knowledge"})
+
+# Decisions meaning THE ACTION DID NOT HAPPEN. A step carrying one is never
+# green, whichever path set it — see _emit_tool_step for why this is one rule
+# rather than a fix at each of the (now ten) refusal sites.
+REFUSED_DECISIONS = frozenset({"denied", "held", "blocked", "rejected"})
 
 FORGET_PROHIBITED = (
     "NOT EXECUTED: forget_memory is unavailable in an automated session — "
@@ -943,6 +992,10 @@ class Agent:
         self.check_pending_messages = check_pending_messages
         self._run_meta: dict | None = None
         self._cancel = threading.Event()
+        # Turn/call identity (docs/trace-contract.md §2), advanced by
+        # _reset_task_state. `turn` starts at 0 so the first task is turn 1.
+        self._turn = 0
+        self._call_seq = itertools.count(1)
         # Plugin tools (TOOL.md), rebuilt only when the tool dirs' signature
         # moves — a mid-task manifest edit is picked up on the next step.
         # Read-only tools are always exposed; mutating ones only when a tool
@@ -981,6 +1034,15 @@ class Agent:
         # there is no state dir at all, where nothing is durable anyway.
         self.media_dir = (
             Path(state_dir) / "media" if state_dir is not None else self.scratch_dir / "media"
+        )
+        # Full, untruncated plugin-tool outputs, content-addressed (#192). Same
+        # reasoning as the media store for the location: a continuation must
+        # outlive the scratch dir, because a result truncated in one turn is
+        # paged in a later one. Self-pruning LRU.
+        self.tool_output_dir = (
+            Path(state_dir) / "tool-output"
+            if state_dir is not None
+            else self.scratch_dir / "tool-output"
         )
         content = compose_system_content(
             context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir
@@ -1054,6 +1116,8 @@ class Agent:
         (so any UI can reconstruct the trace later) and hand it to the rich
         renderer if one is attached. Kept separate from on_step so the two
         concerns — durable logging vs live rendering — stay independent."""
+        if step.get("kind") in TURN_STAMPED_STEPS:
+            self._turn_stamp(step)
         if self.step_log is not None:
             self.step_log(step)
         if self.on_step is not None:
@@ -1079,6 +1143,29 @@ class Agent:
 
     def _emit_step(self, **step: Any) -> None:
         self._sink_step(step)
+
+    def _emit_record(self, **fields: Any) -> None:
+        """Durable governance evidence (docs/trace-contract.md §1.2).
+
+        LOG-ONLY: never handed to `on_step`, so it reaches no renderer and
+        cannot open a live trace card. That is not stylistic — `app.js`'s
+        `traceStep` calls `ensureTrace()` BEFORE dispatching on `step.kind`, so
+        a kind with no renderer opens an EMPTY live card with a running ticker
+        rather than doing nothing.
+
+        This is one of the two required halves; `session.RENDERLESS_STEPS` (the
+        replay skip) is the other, and either alone still produces the card.
+        Every kind emitted here must be in that set — asserted by test.
+        """
+        self._turn_stamp(fields)
+        if self.step_log is not None:
+            self.step_log(fields)
+
+    def _turn_stamp(self, step: dict) -> dict:
+        """Stamp turn identity on a record (§2, design fork 1 = option b: new
+        kinds plus tool_start/tool/knowledge; `thinking` is left alone)."""
+        step.setdefault("turn", self._turn)
+        return step
 
     def _emit_workspace(self, change: str, path: str) -> None:
         """Persist a user-driven workspace change (cwd move / dir trust) and
@@ -1209,6 +1296,14 @@ class Agent:
         self.task_sources = []
         self._run_meta = None  # stale run_command detail must not tag a new task's first step
         self._cancel.clear()  # a stale stop must not kill the new task
+        # Turn/call identity (docs/trace-contract.md §2). `turn` is the join key
+        # for "what governed this turn"; it lives here rather than in run_task
+        # precisely so claude-max — whose loop never enters run_task — counts
+        # turns too. `call` restarts per turn and is assigned at dispatch, so a
+        # gate verdict and the tool step it governed are joinable without the
+        # positional guessing curate._windows apologises for.
+        self._turn += 1
+        self._call_seq = itertools.count(1)
         # Skill-read gates belong to the task that armed them; run_task re-arms
         # from its own preflight right after this reset.
         self._pending_skill_reads = {}
@@ -1250,8 +1345,7 @@ class Agent:
             # oldest-first trim only if the context genuinely doesn't fit.
             self._trim_history_to_budget()
         else:
-            for message in self.messages[1:task_start]:
-                self._trim_tool_message(message)
+            self._trim_eagerly(task_start)
 
         # Task text is owner-authored (a typed message or the trigger prompt),
         # so its hosts enter egress provenance (#178 P0-2).
@@ -1608,16 +1702,54 @@ class Agent:
         message["content"] = content[:TRIM_KEEP_CHARS] + TRIMMED_NOTE
         return True
 
+    def _trim_eagerly(self, task_start: int) -> None:
+        """The eager per-task trim: every prior tool output down to a 200-char
+        stub, unconditionally — NOT budget-gated (only the resume path is), so
+        a 27 KB result is destroyed at turn 2 regardless of available room.
+
+        This is the truncator with the largest blast radius and, until #192,
+        the one that recorded NOTHING at all — which is why Session B, asked
+        why its output was truncated, grepped aish's source, found a different
+        truncator's marker and confidently blamed the wrong thing."""
+        before = self._total_chars()
+        affected = sum(
+            1 for message in self.messages[1:task_start] if self._trim_tool_message(message)
+        )
+        self._record_trim("eager_stub", affected, before, budget=None)
+
     def _trim_history_to_budget(self) -> None:
         """Shrink restored tool outputs oldest-first, but only as far as the
         character budget actually demands (#164). The counterpart to the eager
         per-task trim: on a resume the newest results are the ones the model
         needs verbatim to continue, so they are the last to go."""
         budget = self.num_ctx * CHARS_PER_TOKEN_BUDGET
+        before = self._total_chars()
+        affected = 0
         for message in self.messages[1:]:
             if self._total_chars() <= budget:
-                return
-            self._trim_tool_message(message)
+                break
+            affected += bool(self._trim_tool_message(message))
+        self._record_trim("budget_oldest_first", affected, before, budget=budget)
+
+    def _record_trim(self, policy: str, affected: int, before: int, budget: int | None) -> None:
+        """The `trim` record (contract §3.5). Renderless — it edits history
+        rather than describing a call, so it cannot ride the `tool` step.
+        `budget: null` states the fact #192 says is wrong and which no record
+        stated before: the trim was unconditional."""
+        if not affected:
+            return
+        _, cap_source = backends.context_window(self.provider, self.num_ctx)
+        self._emit_record(
+            kind="trim",
+            policy=policy,
+            affected=affected,
+            bytes_before=before,
+            bytes_after=self._total_chars(),
+            keep_chars=TRIM_KEEP_CHARS,
+            budget=budget,
+            cap_source=("constant:TRIM_KEEP_CHARS" if budget is None else cap_source),
+            oldest_first=policy == "budget_oldest_first",
+        )
 
     def _total_chars(self) -> int:
         return sum(len(message.get("content") or "") for message in self.messages)
@@ -1862,9 +1994,15 @@ class Agent:
     ) -> str:
         args = args or {}
         self._run_meta = None
+        # Assigned per call and carried as a LOCAL, never read back off the
+        # agent: read-only tools run in parallel, so an instance attribute
+        # would hand two concurrent calls the same id — which is exactly the
+        # by-name ambiguity §2 exists to remove.
+        call_no = next(self._call_seq)
         self._emit_step(
             kind="tool_start",
             name=name,
+            call=call_no,
             summary=self._arg_summary(name, args),
             command=str(args.get("command", "")) if name == "run_command" else "",
         )
@@ -1881,27 +2019,65 @@ class Agent:
                 "git+https://github.com/epnasis/aish.git) and restart."
             )
             self.echo(result)
-            self._emit_step(kind="tool", name=name, secs=0.0, ok=False, summary="unavailable")
+            self._emit_step(
+                kind="tool",
+                name=name,
+                call=call_no,
+                secs=0.0,
+                ok=False,
+                status=tools.STATUS_FAILED,
+                verdict_by=tools.VERDICT_EXCEPTION,
+                summary="unavailable",
+            )
             return result
         except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
             result = f"ERROR: tool '{name}' failed internally: {exc!r}"
             self.echo(result)
-            self._emit_step(kind="tool", name=name, secs=0.0, ok=False, summary="failed")
+            self._emit_step(
+                kind="tool",
+                name=name,
+                call=call_no,
+                secs=0.0,
+                ok=False,
+                status=tools.STATUS_FAILED,
+                verdict_by=tools.VERDICT_EXCEPTION,
+                summary="failed",
+            )
             return result
         self._note(f"{mark} {name} {format_secs(elapsed)}")
-        self._emit_tool_step(name, args, result, elapsed)
+        self._emit_tool_step(name, args, result, elapsed, call_no)
         return result
 
-    def _emit_tool_step(self, name: str, args: dict, result: str, secs: float) -> None:
+    def _emit_tool_step(
+        self, name: str, args: dict, result: str, secs: float, call_no: int = 0
+    ) -> None:
         if self.on_step is None and self.step_log is None:
             return
-        ok = not (result.startswith("ERROR") or result.startswith("NOT EXECUTED"))
+        # The envelope (#192) — the runtime's own verdict, travelling WITH the
+        # result rather than sniffed off its first token. `ok` is kept, defined
+        # as status == "ok", so the frontend needs no change and old logs read
+        # the same (contract §3.4).
+        envelope = getattr(result, "meta", None) or {}
+        status = envelope.get("status")
+        if status is None:
+            # No envelope: the legacy prefix sniff is still the floor for native
+            # tools. Recorded EXPLICITLY as verdict_by:"prefix" rather than left
+            # absent — absence must never be the evidence (contract corollary 2)
+            # — and counting these is the honest measure of conversion debt.
+            sniffed_ok = not (
+                result.startswith("ERROR") or result.startswith("NOT EXECUTED")
+            )
+            status = tools.STATUS_OK if sniffed_ok else tools.STATUS_FAILED
+            envelope = {"status": status, "verdict_by": tools.VERDICT_PREFIX}
+        ok = status == tools.STATUS_OK
         step: dict[str, Any] = {
             "kind": "tool",
             "name": name,
             "secs": secs,
             "ok": ok,
             "summary": self._arg_summary(name, args),
+            "call": call_no,
+            **envelope,
         }
         if not ok and self._run_meta is None:
             # Non-run_command failure (a read_url/web_search error, a gate
@@ -1913,6 +2089,19 @@ class Agent:
             output = step.get("output") or ""
             if len(output) > STEP_OUTPUT_CAP:  # the trace shows a preview, not the full log
                 step["output"] = output[:STEP_OUTPUT_CAP] + "\n… (truncated)"
+        # ONE rule, applied last, over every path that can refuse: if the
+        # action did not happen, the step is not green. This is wider than the
+        # five plugin constants the contract enumerates (§6.13) — `run_command`
+        # sets `decision` in _run_meta but no `ok`, and DENIED_RESULT ("USER
+        # DENIED…"), HELD_FOR_ADJUSTMENT ("NOT RUN…") and BLOCKED_RESULT
+        # ("BLOCKED…") start with none of the sniffed prefixes either, so a
+        # denied shell command logged ok:true as well. Deriving both fields
+        # from the decision also keeps them COHERENT: `ok` is defined as
+        # status == "ok", and two sources used to be able to disagree.
+        if step.get("decision") in REFUSED_DECISIONS:
+            step["ok"] = False
+            step["status"] = tools.STATUS_FAILED
+            step["verdict_by"] = tools.VERDICT_GATE
         self._sink_step(step)
 
     def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
@@ -1947,6 +2136,12 @@ class Agent:
                 f" (name: {entry})" if entry else ""
             )
             return label, partial(self._recall, query, entry)
+        if name == "read_tool_output":
+            key = str(args.get("continuation", "") or "")
+            page = args.get("page", 2)
+            return f"→ read_tool_output: {key} page {page}", partial(
+                self._read_tool_output, args
+            )
         tool = self._plugin_tools.get(name)
         if tool is not None:  # read-only plugin tool (mutating ones never reach here)
             shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
@@ -1960,8 +2155,80 @@ class Agent:
     def _run_readonly_plugin(self, tool: "tool_plugins.Tool", args: dict) -> str:
         problem = tool_plugins.validate_args(tool, args)
         if problem is not None:
-            return problem
-        return tool_plugins.execute(tool, args, cwd=self.cwd)
+            return tools.ToolOutcome(
+                problem,
+                status=tools.STATUS_FAILED,
+                verdict_by=tools.VERDICT_EXCEPTION,
+                error="invalid_args",
+            )
+        return self._execute_plugin(tool, args)
+
+    def _execute_plugin(self, tool: "tool_plugins.Tool", args: dict) -> str:
+        """The single plugin execution point, so truncation is sized from the
+        real backend and cached for paging on BOTH the parallel read-only path
+        and the gated mutating one — a cap that applies on one path only is the
+        kind of divergence #192 exists to remove."""
+        caps, cap_source = self._output_caps()
+        return tool_plugins.execute(
+            tool,
+            args,
+            cwd=self.cwd,
+            caps=caps,
+            cap_source=cap_source,
+            store_dir=self.tool_output_dir,
+        )
+
+    def _output_caps(self) -> tuple[tuple[int, int], str]:
+        """(head, tail) and the provenance of that size. `num_ctx` is an
+        OLLAMA-ONLY option every cloud backend accepts and discards, so sizing
+        a cap from it on Gemini-1M produced a number describing no real
+        constraint (#192)."""
+        window, source = backends.context_window(self.provider, self.num_ctx)
+        return tool_plugins.output_caps(window), source
+
+    def _read_tool_output(self, args: dict) -> str:
+        """Page a cached tool output (#192). Served from the content-addressed
+        store, so THE WRAPPER NEVER RE-RUNS — for a nondeterministic or
+        mutating tool a re-run is a different result or a second side effect,
+        not merely slower."""
+        key = str(args.get("continuation", "") or "").strip()
+        try:
+            page = int(args.get("page", 2) or 2)
+        except (TypeError, ValueError):
+            page = 2
+        (head, tail), _ = self._output_caps()
+        text = tool_plugins.read_continuation(key, self.tool_output_dir, page, head, tail)
+        if text is None:
+            return tools.ToolOutcome(
+                f"ERROR: no cached output for continuation={key!r}. It may have "
+                "been evicted from the cache. Re-run the tool that produced it "
+                "if you still need the rest — and do NOT substitute another "
+                "source without saying so.",
+                status=tools.STATUS_FAILED,
+                verdict_by=tools.VERDICT_EXCEPTION,
+                error="unknown_continuation",
+            )
+        if text == "":
+            return tools.ToolOutcome(
+                f"[aish: page {page} is past the end of this output — you have "
+                "read all of it.]",
+                status=tools.STATUS_OK,
+                verdict_by=tools.VERDICT_EXIT_CODE,
+                page=page,
+                source="cache",
+            )
+        more = (
+            f"\n\n[aish: continue with read_tool_output(continuation=\"{key}\", "
+            f"page={page + 1}) if you have not reached the end.]"
+        )
+        return tools.ToolOutcome(
+            text + more,
+            status=tools.STATUS_OK,
+            verdict_by=tools.VERDICT_EXIT_CODE,
+            page=page,
+            source="cache",
+            bytes=len(text),
+        )
 
     def _recall(self, query: str, name: str | None) -> str:
         # Embedding similarity reaches the deliberate-search path too (#178
@@ -2174,7 +2441,7 @@ class Agent:
             return None
         shown = ", ".join(novel)
         if self.approve_tool is None:
-            return EGRESS_NO_APPROVER.format(host=shown)
+            return _gate_outcome(EGRESS_NO_APPROVER.format(host=shown), decision="blocked")
         preview = (
             f"automated session wants to reach {shown} — a host not "
             "mentioned by the owner in this conversation"
@@ -2182,11 +2449,16 @@ class Agent:
         decision = self.approve_tool(name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
-            return _with_feedback(EGRESS_DENIED, decision.comment)
+            return _gate_outcome(
+                _with_feedback(EGRESS_DENIED, decision.comment), decision="denied"
+            )
         if isinstance(decision, Approved):
-            return TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment)
+            return _gate_outcome(
+                TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
+                decision="held",
+            )
         if decision is None or decision is False:
-            return EGRESS_DENIED
+            return _gate_outcome(EGRESS_DENIED, decision="denied")
         # Plain approve: the owner vouched for these hosts for the rest of
         # this session, so the same host does not re-prompt every step.
         self._approved_hosts.update(novel)
@@ -2210,9 +2482,9 @@ class Agent:
         slug = str(args.get("name", "") or "").strip() or "(unnamed)"
         if name == "forget_memory":
             self._note(f"✋ forget_memory refused in a {self.origin} session: {slug}")
-            return FORGET_PROHIBITED.format(slug=slug)
+            return _gate_outcome(FORGET_PROHIBITED.format(slug=slug), decision="blocked")
         if self.approve_tool is None:
-            return REMEMBER_NO_APPROVER
+            return _gate_outcome(REMEMBER_NO_APPROVER, decision="blocked")
         preview = (
             f"automated session ({self.origin}) wants to save the memory "
             f"{slug} — a memory persists into every future session and is "
@@ -2221,11 +2493,16 @@ class Agent:
         decision = self.approve_tool(name, args, preview)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
-            return _with_feedback(REMEMBER_DENIED, decision.comment)
+            return _gate_outcome(
+                _with_feedback(REMEMBER_DENIED, decision.comment), decision="denied"
+            )
         if isinstance(decision, Approved):
-            return TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment)
+            return _gate_outcome(
+                TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
+                decision="held",
+            )
         if decision is None or decision is False:
-            return REMEMBER_DENIED
+            return _gate_outcome(REMEMBER_DENIED, decision="denied")
         return None
 
     def note_owner_hosts(self, text: str) -> None:
@@ -2256,6 +2533,14 @@ class Agent:
         limit = self._int_arg(args, "limit", files.READ_MAX_LINES)
         label = f"→ read_file: {path}" + (f" (from line {offset})" if offset > 1 else "")
         return label, partial(files.read_file, path, self.cwd, offset=offset, limit=limit)
+
+    def _record_admission(self, record: dict) -> None:
+        """The `admission` record (contract §3.7) for the near-duplicate gate.
+        Renderless. #194 will add the fact-vs-behaviour classification to the
+        same kind; this phase contributes the half that already exists and was
+        deciding silently — including the SCORE and the FLOOR, without which
+        DEDUP_MIN_SIM stays "provisional until measured" forever."""
+        self._emit_record(kind="admission", target="memory", **record)
 
     def _arm_stop_gate(self, comment: str) -> None:
         """A DENY carried a concern — stop: hold every further tool call until
@@ -2333,7 +2618,7 @@ class Agent:
             self._note(label)
             reason = self._read_prompt_reason(path)
             if reason is not None and not self.approve_read(path, reason):
-                return READ_DENIED
+                return _gate_outcome(READ_DENIED, decision="denied")
             return thunk()
 
         if name in READ_ONLY_TOOLS:
@@ -2372,8 +2657,15 @@ class Agent:
                 force=bool(args.get("force", False)),
                 semantic=self.semantic.scores if self.semantic is not None else None,
                 disabled=None if disabled is None else bool(disabled),
+                on_admission=self._record_admission,
             )
             self._note(f"→ {result}")
+            if result.startswith("NOT saved"):
+                # The near-duplicate gate refusing (#178 P1-8). Its message
+                # starts with "NOT saved", which the legacy prefix sniff read as
+                # a SUCCESS — a refusal logged green, in the one gate #190's
+                # evidence shows actually working (contract §6.7).
+                return _gate_outcome(result, decision="rejected")
             return result
 
         if name == "forget_memory":
@@ -2545,15 +2837,21 @@ class Agent:
         problem = tool_plugins.validate_args(tool, args)
         if problem is not None:
             self._note(f"→ {tool.name}: {problem}")
-            return problem
+            return tools.ToolOutcome(
+                problem,
+                status=tools.STATUS_FAILED,
+                verdict_by=tools.VERDICT_EXCEPTION,
+                error="invalid_args",
+            )
 
         if tool.mutating:
             if self.approve_tool is None:
                 # Not exposed without an approver, so this only fires on a stale
                 # tool_call — fail closed rather than run a mutation ungated.
-                return (
+                return _gate_outcome(
                     f"ERROR: tool {tool.name!r} is mutating and no tool approver "
-                    "is available; it cannot run."
+                    "is available; it cannot run.",
+                    decision="blocked",
                 )
             # Resolve args to a human sentence for the card BEFORE gating (#157);
             # None when the tool declares no preview or resolution fails (raw-args
@@ -2563,21 +2861,26 @@ class Agent:
             if isinstance(decision, Denied):
                 # Deny + comment = STOP (issue #81): address the concern, then halt.
                 self._arm_stop_gate(decision.comment)
-                return _with_feedback(DENIED_RESULT, decision.comment)
+                return _gate_outcome(
+                    _with_feedback(DENIED_RESULT, decision.comment), decision="denied"
+                )
             if isinstance(decision, Approved):
                 # Approve + comment = CONTINUE but adjust: the original args are
                 # HELD, the model reworks them and re-proposes (re-approved).
-                return TOOL_HELD_FOR_ADJUSTMENT.format(
-                    name=tool.name, comment=decision.comment
+                return _gate_outcome(
+                    TOOL_HELD_FOR_ADJUSTMENT.format(
+                        name=tool.name, comment=decision.comment
+                    ),
+                    decision="held",
                 )
             if decision is None or decision is False:
-                return DENIED_RESULT
+                return _gate_outcome(DENIED_RESULT, decision="denied")
 
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
         self._note(f"→ {tool.name}({shown})")
         self.status.start(tool.name)
         try:
-            return tool_plugins.execute(tool, args, cwd=self.cwd)
+            return self._execute_plugin(tool, args)
         finally:
             self.status.stop()
 

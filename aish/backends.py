@@ -101,6 +101,41 @@ class BackendError(RuntimeError):
     """Backend cannot be constructed (unknown provider, missing API key)."""
 
 
+# Real input context per provider, in TOKENS (#192). This exists because every
+# cap in aish derived from `num_ctx`, which is an OLLAMA-ONLY option the cloud
+# backends accept and DISCARD — so on a Gemini-1M session both the history
+# budget and the plugin output cap were fiction, sized for a context window
+# that was not the one in use.
+#
+# Deliberately per-PROVIDER, not per-model, and deliberately conservative:
+# being wrong-low costs some truncation headroom, being wrong-high silently
+# overruns a real request. A provider absent from the table falls back to the
+# floor rather than to optimism.
+CONTEXT_WINDOWS = {
+    "gemini": 1_048_576,
+    "claude": 200_000,
+    "claude-max": 200_000,  # the SDK/CLI login path (claude_max.py), same models
+    "openai": 128_000,  # conservative floor for the GPT-5 line, not a measurement
+}
+DEFAULT_CONTEXT_WINDOW = 128_000
+
+
+def context_window(provider_name: str, num_ctx: int = 0) -> tuple[int, str]:
+    """(tokens, provenance) for the context window actually in force.
+
+    Provenance is recorded alongside the number wherever a cap is logged
+    (contract §3.4 `truncation.cap_source`): a log that records a cap but not
+    where it came from cannot show whether #192's "size it from the real
+    backend" claim actually landed.
+    """
+    if provider_name == "ollama":
+        # For Ollama num_ctx IS the real window — it is the option the server
+        # is launched with, not a number we hope applies.
+        return num_ctx, f"num_ctx:{num_ctx}"
+    window = CONTEXT_WINDOWS.get(provider_name, DEFAULT_CONTEXT_WINDOW)
+    return window, f"backend:{provider_name}:{window}"
+
+
 # What each provider's API accepts as native user-message media. Ollama is
 # best-effort: the images key only helps on vision models (llava, qwen-vl,
 # gemma3, …) — text-only models ignore it. Gemini's OpenAI-compat layer

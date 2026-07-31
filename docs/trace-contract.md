@@ -1,6 +1,6 @@
 # The trace contract
 
-**Status:** specification. No code in this document has been implemented.
+**Status:** specification, partially built. **#192 (2026-07-31) implemented §1.2, §1.3, §2, §3.4, §3.5, and the §3.7 near-duplicate half**, closing §6.7 and §6.13. Everything else is still unbuilt. Two `verdict_by` values were added during that build and are marked inline in §3.4.
 **Scope:** what #191, #192, #193, #194 and #196 must write to the session log so that #197 can answer *"what governed this turn, what fired, what didn't, and why?"* from the log alone.
 **Gate:** phase 1 of #190's build order. A binding that ships without logging its evidence, or a gate that ships without logging which tier decided, makes that question unanswerable forever for everything built before someone notices. Retrofitting it is how #183's calibration problem ended up costing a 481-call audit.
 
@@ -268,8 +268,8 @@ The `tool` step already carries `name`, `secs`, `ok`, `summary`, `error`, and (f
 | field | why #197 needs it |
 |---|---|
 | `status` | `ok` \| `incomplete` \| `failed` — the honest verdict. `ok` is **kept** as `status == "ok"` so the frontend needs no change and old logs are unaffected. |
-| `verdict_by` | Which deterministic rule produced the status: `exit_code` \| `required_fields` \| `empty_output` \| `gate` \| `exception`. Without it, "why is this red?" is a guess. |
-| `decision` | `approved` \| `denied` \| `held` \| `blocked` \| `auto` \| `rejected`. **Today this is set only for `run_command` and writes.** A held or denied *plugin tool* logs no decision and `ok: true` — see §6.13. Any audit of these logs, the #185 ledger included, counts a held mutation as a completed one. |
+| `verdict_by` | Which deterministic rule produced the status: `exit_code` \| `required_fields` \| `empty_output` \| `error_field` \| `gate` \| `exception` \| `prefix`. Without it, "why is this red?" is a guess. **`error_field` and `prefix` were added when #192 was built** (2026-07-31), each for a reason the spec had not foreseen. `error_field`: the canonical `youtube_analyze` shape is a 575-char JSON payload with `transcript: ""` beside a populated `error_log` and exit 0 — `empty_output` cannot see it (the payload is not empty, only the field that mattered was) and `required_fields` needs #193's contract, which does not exist yet, so without a third floor the phase would not have fixed its own motivating case. It reads a NAMED channel the wrapper author chose (`error`/`error_log`/`errors`), never prose. `prefix`: the legacy `startswith()` sniff still decides for native tools not yet enveloped, and it is recorded EXPLICITLY rather than left absent — absence must never be the evidence (corollary 2), and counting these rows is the honest measure of how much of the tool surface remains un-enveloped. |
+| `decision` | `approved` \| `denied` \| `held` \| `blocked` \| `auto` \| `rejected`. **Was set only for `run_command` and writes.** A held or denied *plugin tool* logged no decision and `ok: true` — see §6.13. Any audit of these logs, the #185 ledger included, counted a held mutation as a completed one. **Built in #192 as ONE rule rather than a fix per site:** a `decision` in `{denied, held, blocked, rejected}` means the action did not happen, so `_emit_tool_step` forces `ok: false` / `status: "failed"` / `verdict_by: "gate"` last, whichever path set it. That was necessary because the defect is wider than §6.13's table — `run_command` sets `decision` in `_run_meta` but no `ok`, and `DENIED_RESULT` ("USER DENIED…"), `HELD_FOR_ADJUSTMENT` ("NOT RUN…") and `BLOCKED_RESULT` ("BLOCKED…") sniff as SUCCESS, so a denied *shell command* logged green too. Deriving both fields from one source also keeps them coherent: `ok` is defined as `status == "ok"`, and the envelope and `_run_meta` could previously disagree. |
 | `required.declared` / `missing` / `empty` | The evidence behind `incomplete`. The declared list comes from #193's tool contract, which is a file that will be edited — so it is snapshotted here rather than read back later (corollary 1). |
 | `bytes` | Real payload size before truncation. Makes truncation ratio measurable across the corpus, which is what turns "truncation manufactures improvisation" from a hypothesis into a counted signal. |
 | `truncation.truncator` | `tools` \| `tool_plugins` \| `history_trim`. **This single field is what Session B got wrong.** Three truncators with three markers is unguessable; naming the one that cut is the entire diagnosis. |
@@ -525,13 +525,13 @@ The other approval outcomes are recorded but as **prose decision strings** on a 
 
 *Must log:* `gate{gate:"loop"|"stall"|"ceiling", at:"loop", verdict:"advised"|"stopped", evidence:{repeats:5, tool:"read_url", args_sha:"…", stall:8, step:34, ceiling:60}}`. The step budget's progress-gating (#108) is invisible for the same reason: a task that ran to 47 steps and one that stalled at 12 leave logs that differ only in length.
 
-### 6.7 · Near-duplicate memory gate (#178 P1-8) · ✕
+### 6.7 · Near-duplicate memory gate (#178 P1-8) · ✓ *(closed by #192)*
 
-The one gate that demonstrably **worked** in the #190 sessions — and it is invisible.
+The one gate that demonstrably **worked** in the #190 sessions — and it was invisible.
 
-*Today:* a prose refusal in the tool result. The similarity score and the floor are not returned, not logged, and therefore never measured; `DEDUP_MIN_SIM = 0.55` is documented in source as "provisional until measured on the live corpus" and nothing measures it. Worse, the refusal string begins `"NOT saved — …"`, so `_emit_tool_step`'s prefix sniff records **`ok: true`** — a refusal logged as a success.
+*Was:* a prose refusal in the tool result. The similarity score and the floor were not returned, not logged, and therefore never measured; `DEDUP_MIN_SIM = 0.55` is documented in source as "provisional until measured on the live corpus" and nothing measured it. Worse, the refusal string begins `"NOT saved — …"`, so `_emit_tool_step`'s prefix sniff recorded **`ok: true`** — a refusal logged as a success.
 
-*Must log:* the `admission` record of §3.7 with `verdict:"refused_duplicate"` and Tier-1 evidence.
+*Now:* `_near_duplicate` returns `(entry, score, floor, mode)` and `save_memory` takes an `on_admission` callback — a callback rather than a changed return type deliberately, since the string return is what `cli.py`, `curate.py` and every test read. `Agent._record_admission` emits the §3.7 `admission` record with Tier-1 evidence (`mode`/`sim`/`floor`/`against`) on BOTH verdicts, and the refusal now carries `decision: "rejected"`, so it is red. `DEDUP_MIN_SIM` becomes measurable from the logs on the next corpus pass.
 
 ### 6.8 · Preflight injection (#183) · ~
 
@@ -559,9 +559,9 @@ Covered in §3.8. Records the winners with good diagnostics; records neither the
 
 Same record and same gap as 6.11; `evidence:{safe_list:"TRIGGERED_SAFE_TOOLS", hit:"gmail_send", origin:"email"}`.
 
-### 6.13 · Plugin-tool verdicts (#141) — the green-lie corollary · ✕
+### 6.13 · Plugin-tool verdicts (#141) — the green-lie corollary · ✓ *(closed by #192)*
 
-`_dispatch_plugin_tool` sets **no** `_run_meta`, so a denied, held or blocked plugin call is logged by prefix sniff alone. Measured against the actual strings:
+`_dispatch_plugin_tool` set **no** `_run_meta`, so a denied, held or blocked plugin call was logged by prefix sniff alone. Measured against the actual strings:
 
 | result constant | first token | logged `ok` |
 |---|---|---|
@@ -571,7 +571,9 @@ Same record and same gap as 6.11; `evidence:{safe_list:"TRIGGERED_SAFE_TOOLS", h
 | `EGRESS_DENIED` | `USER DENIED` | **true** |
 | `READ_DENIED` | `USER DENIED` | **true** |
 
-Five refusal paths log green. The write path logs `decision:"held", ok:false` correctly, so the two halves of the same #81 semantics disagree in the log. §3.4's `status` + `decision` fix all five at once, because they are computed by the runtime rather than sniffed.
+Five refusal paths logged green. The write path logs `decision:"held", ok:false` correctly, so the two halves of the same #81 semantics disagreed in the log. §3.4's `status` + `decision` fix all five at once, because they are computed by the runtime rather than sniffed.
+
+**Wider than this table, as built.** `run_command`'s own refusals have the same defect by a different route: it sets `decision` in `_run_meta` but never `ok`, so the sniff decided there too — and `DENIED_RESULT`, `HELD_FOR_ADJUSTMENT` and `BLOCKED_RESULT` are shared with the shell path. A denied shell command therefore also logged `ok: true`. #192 fixes all ten sites with one rule in `_emit_tool_step` (see §3.4's `decision` row) rather than ten edits that the eleventh refusal site would not inherit.
 
 ### 6.14 · Origin gate on `remember` / `forget_memory` (#196) · new
 
