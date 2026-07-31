@@ -3783,29 +3783,43 @@ function imageFetchAllowed(src) {
 // never the rewritten /file?…&token= URL — that would put the access token in
 // the session log. Nothing is queued when the socket is down: a diagnostic that
 // arrives after the conversation moved on is worse than none.
+//
+// LIVE ONLY (#201). A failure to render is a fact about the turn that WROTE the
+// image, and that is the only turn anyone can act on it in: the model is handed
+// the note solely on a live failure, so a replayed one was never anything but
+// ledger noise. Reporting it on every render made it noise that compounded —
+// re-reading an old chat re-reported the same dead links, each report appending
+// to the log, which then read as fresh activity and marked the chat unread. One
+// chat had accumulated 53 identical records, up to four per open, and could not
+// be marked read by any amount of reading. A property of the transcript is not
+// an event; only its arrival was.
 const RENDER_ERROR_DEBOUNCE_MS = 1200;
 const RENDER_ERROR_BATCH_MAX = 6;
-const renderErrorBuffer = new Map(); // original target → was it a live turn
+const renderErrorBuffer = new Set(); // original targets awaiting one batched report
 let renderErrorTimer = null;
 
+// The `live` gate is HERE rather than at each call site so no future one can
+// forget it — every path into a render failure funnels through this function.
 function noteRenderError(target, live) {
   // The offline mirror legitimately serves transcripts whose images were never
   // synced; reporting that would blame the model for the network.
   if (offlineViewing) return;
+  if (!live) return; // a replay re-reports what the live turn already said (#201)
   if (renderErrorBuffer.size >= RENDER_ERROR_BATCH_MAX && !renderErrorBuffer.has(target)) return;
-  renderErrorBuffer.set(target, !!live || !!renderErrorBuffer.get(target));
+  renderErrorBuffer.add(target);
   if (renderErrorTimer) clearTimeout(renderErrorTimer);
   renderErrorTimer = setTimeout(flushRenderErrors, RENDER_ERROR_DEBOUNCE_MS);
 }
 
 function flushRenderErrors() {
   renderErrorTimer = null;
-  const items = [...renderErrorBuffer.keys()];
-  const live = [...renderErrorBuffer.values()].some(Boolean);
+  const items = [...renderErrorBuffer];
   renderErrorBuffer.clear();
   if (!items.length) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "render_error", what: "image", items, live }));
+  // `live` stays on the wire — the server reads it to decide whether the model
+  // gets a note — but nothing unlive reaches here any more.
+  ws.send(JSON.stringify({ type: "render_error", what: "image", items, live: true }));
 }
 // [RENDERERR-END]
 
@@ -3824,8 +3838,10 @@ function inlineImage(alt, target) {
     if (!imageFetchAllowed(target)) {
       // Same visual as the broken-image note; the anchor keeps the URL
       // reachable by an explicit user tap — only the zero-click fetch is out.
-      // Reported too (#188): a hand-written remote image link means the model
-      // skipped show_image, and this is how it finds out.
+      // Reported on the LIVE turn (#188/#201): a hand-written remote image link
+      // means the model skipped show_image, and that turn is the only one that
+      // can still act on it. Re-reporting it on every later read of the chat
+      // taught nobody and marked the chat unread — see [RENDERERR].
       noteRenderError(target, live);
       const link = externalAnchor(target);
       link.className = "img-link img-broken";

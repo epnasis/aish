@@ -3224,6 +3224,63 @@ class TestRenderErrorReports:
         logged = [s for s in self._log_steps(app_env) if s.get("kind") == "render_error"]
         assert logged and logged[0]["items"] == ["/gone/old.png"]
 
+    def test_a_repeat_of_the_same_failure_is_recorded_once(self, app_env):
+        """The ledger wants to know THAT an image did not render, not that it
+        still hasn't on the tenth look (#201). Every duplicate was a log write,
+        and a log write is what made merely reading a chat mark it unread."""
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client) as (ws, _, _):
+                for _ in range(5):
+                    ws.send_json({
+                        "type": "render_error", "live": False,
+                        "items": ["https://m.example.com/product.jpg"],
+                    })
+                ws.send_json({"type": "jobs"})
+                recv_until(ws, "job_list")
+        logged = [s for s in self._log_steps(app_env) if s.get("kind") == "render_error"]
+        assert len(logged) == 1
+
+    def test_a_genuinely_new_failure_after_a_repeat_is_recorded(self, app_env):
+        """Deduping must not silence the next real thing — only the repeat."""
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client) as (ws, _, _):
+                for items in (["/a.png"], ["/a.png"], ["/b.png"], ["/a.png"]):
+                    ws.send_json({"type": "render_error", "live": False, "items": items})
+                ws.send_json({"type": "jobs"})
+                recv_until(ws, "job_list")
+        logged = [s for s in self._log_steps(app_env) if s.get("kind") == "render_error"]
+        assert [s["items"] for s in logged] == [["/a.png"], ["/b.png"], ["/a.png"]]
+
+    def test_a_report_does_not_make_the_chat_look_newly_active(self, app_env):
+        """The whole point (#201). The row's `ts` is what the client compares
+        against its own "seen" stamp, so if reporting a dead image moves it, a
+        chat holding one is unread forever and reading it is what re-arms it."""
+        client, _ = make_client(app_env, [model_says("here are three mugs")])
+        with client, connected(client) as (ws, hello, _):
+            here = hello["session"]
+            ws.send_json({"type": "task", "text": "find me a mug"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "sessions", "query": ""})
+            before = {s["name"]: s["ts"] for s in recv_until(ws, "session_list")["sessions"]}
+
+            time.sleep(1.1)  # log stamps are whole seconds
+            ws.send_json({
+                "type": "render_error", "live": False,
+                "items": ["https://m.example.com/product.jpg"],
+            })
+            ws.send_json({"type": "jobs"})
+            recv_until(ws, "job_list")
+
+            ws.send_json({"type": "sessions", "query": ""})
+            after = {s["name"]: s["ts"] for s in recv_until(ws, "session_list")["sessions"]}
+
+        assert before[here] == after[here], "a glance must not read as new activity"
+        state = Path(app_env["state_dir"])
+        path = next(p for p in state.glob("session-*.jsonl") if p.name == here)
+        assert path.stat().st_mtime > after[here], "the FILE did change — only the row must not"
+
     def test_the_report_never_widens_egress_provenance(self, app_env):
         """The src is a string the MODEL chose, echoed by the browser. Feeding it
         through the owner-authored path would let an injected image URL vouch for

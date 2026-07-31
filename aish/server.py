@@ -1457,6 +1457,12 @@ class Session:
         # action. Observers viewing this session see a "another tab is active"
         # hint; acting claims control. Never persisted — replay re-derives it.
         self.controller: Client | None = None
+        # The last render failure recorded here (#201). The ledger wants to know
+        # THAT an image did not render, not that it still hasn't on the tenth
+        # look — and every duplicate record is a log write, which is what made
+        # merely reading a chat mark it unread. The client gate is the primary
+        # fix; this is the backstop no client can route around.
+        self.last_render_error: tuple | None = None
 
     @property
     def viewers(self) -> set:
@@ -2081,14 +2087,21 @@ class WebServer:
     def _render_error(self, client: Client, message: dict) -> None:
         """The browser reporting transcript content it could not render (#188).
 
-        Two destinations, deliberately different. The trace record is written
-        ALWAYS — it is the durable evidence, and the curate ledger reads exactly
-        this shape. It renders NOWHERE: nothing is emitted live and
-        reconstruct_events skips it on replay, so hot and cold agree, and the
-        user's signal is the broken-picture note already sitting in the answer.
-        The model-facing note is only for a failure in a LIVE turn: merely
-        OPENING an old chat whose images were long since evicted must not inject
-        a note into it — that would be an unread conversation growing turns.
+        Two destinations, deliberately different. The trace record is the durable
+        evidence, in the shape the curate ledger reads. It renders NOWHERE:
+        nothing is emitted live and reconstruct_events skips it on replay, so hot
+        and cold agree, and the user's signal is the broken-picture note already
+        sitting in the answer. The model-facing note is only for a failure in a
+        LIVE turn: merely OPENING an old chat whose images were long since
+        evicted must not inject a note into it — that would be an unread
+        conversation growing turns.
+
+        The record used to be written ALWAYS, and that was wrong for the same
+        reason (#201): a replay re-reported every dead image, so reading a chat
+        appended to it, and the append made it look like new activity — the chat
+        came back unread the moment you left it, forever. The client now reports
+        only live failures; a repeat of the last recorded failure is dropped here
+        so no other path can reintroduce the spam.
 
         The reported strings come off a socket, so they are capped and stripped
         of control characters. They are not treated as owner-authored: the note
@@ -2112,7 +2125,10 @@ class WebServer:
             return
         what = "image" if str(message.get("what", "image")) == "image" else "embed"
         live = bool(message.get("live"))
-        session.logref.step({"kind": "render_error", "what": what, "items": items})
+        signature = (what, tuple(items))
+        if signature != session.last_render_error:
+            session.last_render_error = signature
+            session.logref.step({"kind": "render_error", "what": what, "items": items})
         if not live:
             return
         noun = f"{what}s" if len(items) > 1 else what
@@ -2750,7 +2766,11 @@ class WebServer:
                         "name": info.path.name,
                         "title": info.title,
                         "snippet": info.snippet,
-                        "ts": info.mtime,
+                        # The chat's last ACTIVITY, not its file's mtime (#201):
+                        # this row is what `sessionUnread` compares against the
+                        # device's "seen" stamp, and a log touched by merely
+                        # LOOKING at the chat must not read as new activity.
+                        "ts": info.activity,
                         "state": open_states.get(info.path.name, ""),
                         "cwd": self._row_cwd(
                             open_cwds.get(info.path.name) or info.cwd
@@ -3690,7 +3710,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
                         "name": info.path.name,
                         "title": info.title,
                         "snippet": info.snippet,
-                        "ts": info.mtime,
+                        "ts": info.activity,  # last activity, not file mtime (#201)
                         "origin": info.origin,
                     }
                     for info in infos
@@ -3732,7 +3752,10 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
 
         def build() -> dict:
             events = offline_events(path)
-            messages, _, custom_title, origin, *_ = SessionLog._parse(path)
+            parsed = SessionLog._parse(path)
+            messages, custom_title, origin = (
+                parsed.messages, parsed.title, parsed.origin
+            )
             title = SessionLog._truncate_title(
                 custom_title or SessionLog._derive_title(messages)
             )
@@ -3745,7 +3768,11 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
                 "title": title,
                 "snippet": SessionLog._derive_snippet(messages),
                 "origin": origin,
-                "ts": stat.st_mtime,
+                # Last activity, not the file's mtime (#201): the mirror ages
+                # its cache on this, and a glance must not refresh a chat's
+                # standing. The ETag above stays mtime-based — that one IS
+                # about the bytes on disk.
+                "ts": float(parsed.activity_ts or stat.st_mtime),
                 "base": base,       # index the returned events start at
                 "total": total,     # events the client should hold afterwards
                 "sig": _prefix_sig(events, total),

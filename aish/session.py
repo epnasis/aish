@@ -106,6 +106,7 @@ class ParsedLog(NamedTuple):
     cwd: str
     title_auto: bool
     user_cmds: list[str]  # successful user-direct ! commands, in file order
+    activity_ts: int | None  # epoch seconds of the last record that IS activity
 
 
 # Stat-keyed caches for the read-only listing paths (drawer, pager, offline
@@ -194,7 +195,12 @@ class SessionInfo:
     title: str
     model: str = ""  # last model used; "" for sessions logged before model records
     snippet: str = ""  # last visible message — the drawer's preview line
-    mtime: float = 0.0  # last interaction (epoch seconds), the recency sort key
+    mtime: float = 0.0  # when the FILE last changed — the cheap recency pre-sort
+    # When the CHAT last did something (#201). Distinct from mtime because
+    # merely LOOKING at a chat can append to its log (a renderless render_error),
+    # and a row stamped with that reads as new activity to every consumer —
+    # unread most of all. Falls back to mtime for logs with no usable stamps.
+    activity: float = 0.0
     origin: str = "user"  # who started it: user | schedule | email | webhook (#160)
     cwd: str = ""  # last logged working directory; "" when the chat never moved
 
@@ -255,7 +261,9 @@ class SessionLog:
         with their provenance intact, #160), and the latest working directory
         ("" when the chat never moved). The `kind:"title"`/`"origin"`/`"cwd"`
         records are metadata — they never enter `messages`, so they can't leak
-        into a resumed conversation."""
+        into a resumed conversation.
+
+        It also carries the chat's last ACTIVITY (#201) — see `_is_activity`."""
         messages: list[dict] = []
         model = ""
         custom_title: str | None = None
@@ -263,6 +271,7 @@ class SessionLog:
         origin = "user"
         cwd = ""
         user_cmds: list[str] = []
+        activity_ts: int | None = None
         pending_cmd: str | None = None  # a user ! command awaiting its exit status
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
@@ -270,6 +279,8 @@ class SessionLog:
             except ValueError:
                 continue
             kind = record.get("kind")
+            if SessionLog._is_activity(record):
+                activity_ts = record_epoch(record) or activity_ts
             if kind == "model":
                 model = record.get("model") or model
             elif kind == "title":
@@ -299,8 +310,38 @@ class SessionLog:
                 keys = ("role", "content", "tool_name", "images", "documents")
                 messages.append({k: v for k, v in record.items() if k in keys})
         return ParsedLog(
-            messages, model, custom_title, origin, cwd, title_auto, user_cmds
+            messages, model, custom_title, origin, cwd, title_auto, user_cmds,
+            activity_ts,
         )
+
+    @staticmethod
+    def _is_activity(record: dict) -> bool:
+        """Did this record happen BECAUSE something happened in the chat, or
+        merely because someone looked at it? (#201)
+
+        "Last interaction" used to be the file's mtime, which cannot tell those
+        apart — every append moved it. So a chat holding an image that fails to
+        render (a remote host off the fetch whitelist, an evicted media file)
+        wrote a `render_error` record on every replay, a second or so AFTER the
+        client had already stamped "seen", and came back unread the moment you
+        left it. Opening a chat marked it unread, permanently, and no amount of
+        reading could clear it.
+
+        The rule, reusing a distinction this module already draws: **a record
+        that renders nowhere is not activity.** `RENDERLESS_STEPS` is the one
+        registry of those kinds, so a future governance record inherits this by
+        construction instead of re-teaching it. `model` is excluded for the
+        reason it is written lazily in the first place (see `model()`): it says
+        which model a chat runs, never that it ran.
+        """
+        kind = record.get("kind")
+        if kind == "model":
+            return False
+        if kind == "trace":
+            step = record.get("step")
+            step_kind = step.get("kind") if isinstance(step, dict) else None
+            return step_kind not in RENDERLESS_STEPS
+        return True
 
     @staticmethod
     def _cached_parse(path: Path) -> ParsedLog:
@@ -744,15 +785,17 @@ class SessionLog:
         return title
 
     @staticmethod
-    def _peek(path: Path) -> tuple[str | None, str]:
-        """(title, origin) per session for the drawer/pager. A custom title
-        (latest `kind:"title"` record) wins; else the first user message. A
-        None title = no user input yet and never renamed (an empty chat).
-        Served from the parse cache, so an unchanged log costs one stat."""
+    def _peek(path: Path) -> tuple[str | None, str, int | None]:
+        """(title, origin, activity_ts) per session for the drawer/pager. A
+        custom title (latest `kind:"title"` record) wins; else the first user
+        message. A None title = no user input yet and never renamed (an empty
+        chat). Served from the parse cache, so an unchanged log costs one stat —
+        which is why the activity stamp rides along here rather than being
+        stat'd separately: it is already parsed."""
         try:
             parsed = SessionLog._cached_parse(path)
         except OSError:
-            return None, "user"
+            return None, "user", None
         title = parsed.title
         if title is None:
             derived = SessionLog._derive_title(parsed.messages)
@@ -760,6 +803,7 @@ class SessionLog:
         return (
             SessionLog._truncate_title(title) if title is not None else None,
             parsed.origin,
+            parsed.activity_ts,
         )
 
     @staticmethod
@@ -800,13 +844,15 @@ class SessionLog:
 
         Carried on every hello, which is what lets the client warm the chats a
         switch is most likely to land on without first opening the rail. `ts` is
-        the last-interaction mtime, the same stamp `list_sessions` reports."""
+        the last ACTIVITY, the same stamp `list_sessions` reports (#201) — the
+        deck ages its members on it, and a chat must not look freshly used
+        because someone glanced at it."""
         pages = []
         for path in SessionLog._by_recency(state_dir):
-            title, origin = SessionLog._peek(path)
+            title, origin, activity_ts = SessionLog._peek(path)
             if title is not None:
                 try:
-                    ts = path.stat().st_mtime
+                    ts = float(activity_ts) if activity_ts else path.stat().st_mtime
                 except OSError:  # vanished between the scan and here
                     continue
                 pages.append((path.name, title, origin, ts))
@@ -831,6 +877,7 @@ class SessionLog:
         custom_title: str | None = None,
         origin: str = "user",
         cwd: str = "",
+        activity_ts: int | None = None,
     ) -> SessionInfo:
         title = custom_title if custom_title else SessionLog._derive_title(messages)
         title = SessionLog._truncate_title(title)
@@ -847,6 +894,10 @@ class SessionLog:
             model=model,
             snippet=SessionLog._derive_snippet(messages),
             mtime=mtime,
+            # A log whose records all predate timestamps, or that holds nothing
+            # but renderless ones, still has to sort somewhere: mtime is the
+            # old answer and remains the honest fallback.
+            activity=float(activity_ts) if activity_ts else mtime,
             origin=origin,
             cwd=cwd,
         )
@@ -858,7 +909,8 @@ class SessionLog:
         if not parsed.messages:
             return None
         return SessionLog._info_from(
-            path, parsed.messages, parsed.model, parsed.title, parsed.origin, parsed.cwd
+            path, parsed.messages, parsed.model, parsed.title, parsed.origin,
+            parsed.cwd, parsed.activity_ts,
         )
 
     @staticmethod
@@ -907,7 +959,8 @@ class SessionLog:
             title_cf = (parsed.title or SessionLog._derive_title(messages)).casefold()
             entry = SessionEntry(
                 info=SessionLog._info_from(
-                    path, messages, model, parsed.title, parsed.origin, parsed.cwd
+                    path, messages, model, parsed.title, parsed.origin,
+                    parsed.cwd, parsed.activity_ts,
                 ),
                 title_cf=title_cf,
                 content_cf=content_cf,
