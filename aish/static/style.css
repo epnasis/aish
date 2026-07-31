@@ -381,8 +381,6 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .menu-item.danger { color: var(--red); }
 .menu-item.danger svg { color: var(--red); }
 .menu-item.sep { margin-top: 5px; border-top: 0.5px solid var(--sep); padding-top: 13px; }
-.menu-item.danger.armed { background: var(--red-glow); }
-.menu-item.danger.armed .menu-label { font-weight: 600; }
 @keyframes sheet-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* inline rename popover (current chat) */
@@ -777,9 +775,6 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .copy-chip svg { width: 17px; height: 17px; }
 .copy-chip:active { opacity: 0.5; }
-/* half-committed removal (#202): armed reads as dangerous, so the second tap is
-   never mistaken for another ordinary chip tap */
-.copy-chip.redact-chip.armed { color: var(--red); }
 /* copy → checkmark flash */
 .copy-chip .i-check { display: none; }
 .copy-chip.ok .i-copy { display: none; }
@@ -1647,6 +1642,50 @@ body.offline #composer { opacity: 0.55; }
   z-index: 20;
 }
 .sheet[hidden] { display: none; }
+
+/* ---- confirmation modal (#202) ----
+   Centered, not a bottom sheet: a sheet is a picker you browse, this is a
+   question you answer, and it must be able to appear OVER a sheet or menu that
+   raised it. Its own dim layer for the same reason — the shared #backdrop
+   belongs to the sheets. Cancel is the resting choice (plain, first); the
+   destructive one is red and apart from wherever the finger that opened it
+   was. */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+.modal[hidden] { display: none; }
+.modal-card {
+  width: 100%;
+  max-width: 330px;
+  background: var(--bg-elev);
+  border-radius: 20px;
+  padding: 20px 20px 14px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+.modal-title { font-size: 19.6px; font-weight: 700; margin: 0 0 8px; }
+.modal-body { font-size: 15.5px; line-height: 1.45; color: var(--dim); margin: 0 0 18px; }
+.modal-actions { display: flex; gap: 10px; }
+.modal-btn {
+  flex: 1;
+  border: none;
+  border-radius: 999px;
+  padding: 12px 14px;
+  font-size: 17.3px;
+  font-weight: 600;
+  background: var(--bg-elev2);
+  color: var(--fg);
+}
+.modal-btn.danger { color: var(--red); }
+.modal-btn:active { opacity: 0.6; }
 /* On wide screens a full-width bottom sheet reads as a bug, not a pattern:
    cap and center it so it presents as a bottom-docked dialog. */
 @media (min-width: 700px) {

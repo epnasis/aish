@@ -1296,13 +1296,14 @@ chat. Every \
 finished answer has a row of chips beneath it — copy, export that one answer \
 to PDF, and (where available) read-aloud. Each of the user's OWN prompts has a \
 row too — the time it was sent, a trash chip, a pencil that puts the prompt \
-back in the composer, and copy. The trash chip REMOVES that whole exchange \
-(their prompt, your work on it and your answer): two taps to confirm, then the \
-text is deleted from the session log, dropped from your context so you can no \
-longer quote it, and gone from every device's offline copy at the next sync; a \
-dated "Message removed" marker stays where it was. Tell them to use it for a \
-message sent to the wrong chat, one sent half-typed, or a secret pasted by \
-mistake — it is the ONLY way to take something back, and it cannot be undone. \
+back in the composer, and copy. The trash chip DELETES that whole exchange \
+(their prompt, your work on it and your answer): it asks first, in a dialog \
+naming what is lost, and on confirm the text is deleted from the session log, \
+dropped from your context so you can no longer quote it, and gone from every \
+device's offline copy at the next sync; a dated "Message deleted" marker stays \
+where it was. Tell them to use it for a message sent to the wrong chat, one \
+sent half-typed, or a secret pasted by mistake — it is the ONLY way to take \
+something back, and it cannot be undone. \
 Both PDF exports render markdown \
 locally and download the file; the whole-chat export includes only your final \
 answers, not thinking or intermediate steps. A single-answer PDF is titled and \
@@ -2315,7 +2316,7 @@ class WebServer:
             await client.ws.send_json(
                 {
                     "type": "error",
-                    "text": "can't remove a message while this chat is working — "
+                    "text": "can't delete a message while this chat is working — "
                     "stop the task (or let it finish) and try again",
                 }
             )

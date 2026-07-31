@@ -3132,48 +3132,37 @@ function stampTurn(tools, at) {
 // [MSG-STAMP-END]
 
 // [REDACT-START]
-// Removing an exchange (#202). A chat had no eraser at all: the log is
+// Deleting an exchange (#202). A chat had no eraser at all: the log is
 // append-only and replayed whole, so a probe fired at the wrong chat, a message
 // half-typed and sent by an autocorrect Return, or a secret pasted into the
 // composer stayed there forever — the only tools were deleting the entire chat
 // or hand-editing JSONL with the server stopped.
 //
 // The control lives on the PROMPT because the prompt is what a turn is named by,
-// and it removes the whole exchange: an answer repeats what it was asked, so
-// taking away half of one is not a removal.
+// and it deletes the whole exchange: an answer repeats what it was asked, so
+// taking away half of one is not a deletion.
 //
-// Two taps, never one, exactly like deleting a chat ([DELARM]) — this is just as
-// irreversible, and it sits in a row whose other chips (copy, reuse) are things
-// people tap constantly and without thinking. For the same reason it is placed
-// at the START of the row: the familiar chips keep the trailing edge they have
-// always had, and the destructive one is not where a thumb lands by habit.
-const REDACT_ARM_MS = 4000;
-const REDACT_LABEL = "remove this exchange";
-let redactArmed = null;   // the chip waiting for its confirming tap
-let redactTimer = null;
+// It asks BEFORE it deletes, in the shared confirmation modal ([CONFIRM]) —
+// which is also where the reasoning lives for why an arm-then-confirm chip was
+// not enough. The word is DELETE, not "remove": remove reads as "taken off this
+// screen", and what happens here is that the text stops existing.
+//
+// The chip sits at the START of the row rather than its trailing edge: copy and
+// reuse are tapped constantly and without thinking, so they keep the edge a
+// thumb lands on by habit, and the destructive one does not.
+const REDACT_LABEL = "delete this exchange";
 
-function disarmRedact() {
-  if (redactTimer) { clearTimeout(redactTimer); redactTimer = null; }
-  if (redactArmed) {
-    redactArmed.classList.remove("armed");
-    redactArmed.title = REDACT_LABEL;
-    redactArmed.setAttribute("aria-label", REDACT_LABEL);
-    redactArmed = null;
-  }
-}
-
-function armRedact(btn, turn) {
-  if (redactArmed === btn) {
-    disarmRedact();
-    send({ type: "redact", turn });
-    return;
-  }
-  disarmRedact(); // only one chip is ever half-committed
-  redactArmed = btn;
-  btn.classList.add("armed");
-  btn.title = "tap again to remove";
-  btn.setAttribute("aria-label", "tap again to remove this exchange");
-  redactTimer = setTimeout(disarmRedact, REDACT_ARM_MS);
+function askDeleteTurn(turn) {
+  askConfirm({
+    title: "Delete this exchange?",
+    body:
+      "Your message, everything it started, and the answer are deleted — from " +
+      "this chat, from what the model remembers of it, and from the offline " +
+      "copies on your devices. A dated \u201cMessage deleted\u201d marker stays in its " +
+      "place. This cannot be undone.",
+    verb: "Delete",
+    action: () => send({ type: "redact", turn }),
+  });
 }
 
 function redactChip(turn) {
@@ -3183,7 +3172,7 @@ function redactChip(turn) {
   btn.title = REDACT_LABEL;
   btn.setAttribute("aria-label", REDACT_LABEL);
   btn.append(trashIcon());
-  btn.onclick = () => armRedact(btn, turn);
+  btn.onclick = () => askDeleteTurn(turn);
   return btn;
 }
 
@@ -3202,7 +3191,7 @@ function addRedactedMsg(at) {
   body.className = "sysnote-body";
   const label = document.createElement("div");
   label.className = "sysnote-label";
-  label.textContent = "Message removed";
+  label.textContent = "Message deleted";
   body.appendChild(label);
   const stamp = messageStamp(at);
   if (stamp) {
@@ -8022,6 +8011,10 @@ function activeApprovalCard() {
 // [ACTIVE-APPROVAL-CARD-END]
 
 document.addEventListener("keydown", (e) => {
+  // A confirmation modal is asking a question and owns Escape while it is up —
+  // ahead of everything, since it can be raised over any of them, and Escape
+  // must always answer "no" rather than dismiss something behind it (#202).
+  if (e.key === "Escape" && confirmIsOpen()) { e.preventDefault(); closeConfirm(); return; }
   // Esc leaves terminal mode / the PTY overlay first (#143); only if neither is
   // active does it fall through to dismissing an open sheet.
   if (e.key === "Escape" && escapeExit()) { e.preventDefault(); return; }
@@ -8426,13 +8419,87 @@ $("offlinebar").onclick = () => reconnect(); // same affordance, one bar (#165)
 $("composer-slot").onclick = () => pasteIntoComposer();
 $("input-clear").onclick = () => clearComposer();
 
+// [CONFIRM-START]
+// ONE modal for every irreversible action (#202). It replaced the two-tap
+// arm-then-confirm guard everywhere it existed, for two reasons.
+//
+// An armed control communicates by CHANGING ITSELF, and on a phone that change
+// happens under the finger covering it. The chat menu's version got away with
+// it by rewriting its LABEL ("Delete chat" → "Confirm delete"); the
+// transcript's delete chip is an icon, so "armed" was a 17px glyph turning red
+// beneath a thumb — you tap, nothing seems to happen, you tap again, and it is
+// gone. Functionally one tap.
+//
+// And the confirming tap landed on the SAME PIXEL as the arming one, so a
+// double-tap habit or a "did that register?" retap committed the action.
+//
+// The modal fixes both, and adds what neither guard had: it says WHAT HAPPENS.
+// A verb and a red button tell you what you are doing, never what it costs —
+// that the log is unlinked, that the offline copies go too, that nothing brings
+// it back. Consequences belong in the question, not in the user's memory.
+//
+// Shared on purpose: a second bespoke confirmation is how two dialogs end up
+// disagreeing about how serious the same action is.
+let confirmAction = null; // what the open modal does if confirmed
+
+function askConfirm({ title, body, verb, action }) {
+  confirmAction = action;
+  $("confirm-title").textContent = title;
+  $("confirm-body").textContent = body;
+  $("confirm-ok").textContent = verb || "Delete";
+  $("confirm-modal").hidden = false;
+  $("confirm-cancel").focus(); // the resting choice takes the keyboard, never the destructive one
+}
+
+function closeConfirm() {
+  // Dismissing DROPS the pending action. An irreversible thing left
+  // half-committed behind a closed dialog is exactly what this replaced.
+  confirmAction = null;
+  $("confirm-modal").hidden = true;
+}
+
+function runConfirmed() {
+  const action = confirmAction;
+  closeConfirm();
+  if (action) action();
+}
+
+function confirmIsOpen() {
+  return !$("confirm-modal").hidden;
+}
+
+$("confirm-ok").onclick = runConfirmed;
+$("confirm-cancel").onclick = closeConfirm;
+// Tapping the dim area outside the card cancels — the same as Cancel, never the
+// action: a dismissal is not an answer.
+$("confirm-modal").onclick = (e) => {
+  if (e.target === $("confirm-modal")) closeConfirm();
+};
+
+// Deleting a chat is IRREVERSIBLE: the log file is unlinked, and the offline
+// mirror drops server-deleted sessions on its next sync, so no copy survives.
+// The name is captured when the question is ASKED, so an answer can never land
+// on a chat the view moved to in between.
+function askDeleteChat() {
+  const name = currentSession;
+  if (!name) return;
+  askConfirm({
+    title: "Delete this chat?",
+    body:
+      "The whole conversation goes — every message in it, and its log file on " +
+      "the server. The copy mirrored to your devices is dropped at the next " +
+      "sync. This cannot be undone.",
+    verb: "Delete",
+    action: () => send({ type: "delete_session", name }),
+  });
+}
+// [CONFIRM-END]
+
 // ---- session title menu -------------------------------------------------
 // The tappable title opens a small menu of session actions (iOS Messages
 // convention: settings live behind the title, not a floating overflow chip).
 function openSessionMenu() {
   const menu = $("session-menu");
-  const del = menu.querySelector('[data-act="delete"]');
-  if (del) resetDeleteChat(del); // never open still armed from a prior dismissal
   $("wrap-state").textContent = document.body.classList.contains("wrap") ? "On" : "Off";
   refreshOfflinePinUi(); // async — the row shows "…" until the store answers
   // Measure while shown-but-invisible so width is known before centering.
@@ -8484,10 +8551,10 @@ $("rename-cancel").onclick = () => closeSheets();
 $("session-menu").addEventListener("click", (e) => {
   const item = e.target.closest(".menu-item");
   if (!item) return;
-  // Deleting the current chat is destructive and unrecoverable, so it arms
-  // in place (first tap → red "Confirm delete", second tap sends it) instead
-  // of closing the menu — the same two-tap guard as the drawer trash icon.
-  if (item.dataset.act === "delete") { armDeleteChat(item); return; }
+  // Deleting the current chat is unrecoverable, so it asks in the shared
+  // confirmation modal ([CONFIRM]) — which also states what "delete" costs
+  // here, something a red menu row never did.
+  if (item.dataset.act === "delete") { closeSheets(); askDeleteChat(); return; }
   // Rename swaps the menu for an inline title field (keeps the backdrop) —
   // no blocking window.prompt, which would also trap automation.
   if (item.dataset.act === "rename") { openRenameBox(); return; }
@@ -8504,37 +8571,6 @@ $("session-menu").addEventListener("click", (e) => {
     case "reconnect": reconnect(); break;
   }
 });
-
-// The current-chat delete item's two-step confirm. The server refuses a
-// running session and lands the client on a fresh chat when the active one is
-// deleted, so no client-side special cases are needed here (see server
-// _delete_session).
-// [DELARM-START]
-// Deleting a chat is IRREVERSIBLE — the log is unlinked, and the offline mirror
-// drops server-deleted sessions on its next sync, so there is no copy to come
-// back to. It takes TWO taps, never one, and a half-committed control disarms
-// itself so the second tap cannot become the accidental one either. This is the
-// only delete path now: the rail rows lost their swipe-to-delete, because
-// leftward on that panel means "push it back off screen".
-let deleteChatTimer = null;
-function resetDeleteChat(item) {
-  clearTimeout(deleteChatTimer);
-  deleteChatTimer = null;
-  item.classList.remove("armed");
-  item.querySelector(".menu-label").textContent = "Delete chat";
-}
-function armDeleteChat(item) {
-  if (deleteChatTimer) {
-    resetDeleteChat(item);
-    closeSheets();
-    if (currentSession) send({ type: "delete_session", name: currentSession });
-    return;
-  }
-  item.classList.add("armed");
-  item.querySelector(".menu-label").textContent = "Confirm delete";
-  deleteChatTimer = setTimeout(() => resetDeleteChat(item), 4000);
-}
-// [DELARM-END]
 
 // ---- unread: has this chat moved since I last looked at it? --------------
 // [SEEN-START]

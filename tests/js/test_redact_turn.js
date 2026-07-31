@@ -1,15 +1,18 @@
-// Node-only, dependency-free check: removing an exchange (#202) takes TWO taps,
-// names the right turn, and leaves a visible gap where the turn was.
+// Node-only, dependency-free check: the transcript's delete chip asks before it
+// deletes, names the right turn, and leaves a visible gap where the turn was.
 //
 // Why each of those matters:
-//   - Two taps, because the removal is irreversible — the text leaves the log
+//   - It asks, because the deletion is irreversible — the text leaves the log
 //     file — and the chip sits in a row whose other controls (copy, reuse) are
-//     tapped constantly and without thinking. Same standard as deleting a chat
-//     (test_delete_confirm.js).
+//     tapped constantly and without thinking. The asking itself is pinned in
+//     test_confirm_modal.js; what matters here is that the chip cannot bypass
+//     it. This chip's first shipped guard was an arm-then-confirm that turned a
+//     17px glyph red UNDER the thumb covering it, which is why the bar is now
+//     "a modal, from the chip, every time".
 //   - The right turn, because the id is the ONLY thing naming what goes; a chip
-//     that sent the wrong one would remove someone else's exchange.
+//     that sent the wrong one would delete someone else's exchange.
 //   - A visible gap, because a chat that silently loses a turn leaves the answer
-//     above it reading as a reply to nothing, and a removal you cannot see is
+//     above it reading as a reply to nothing, and a deletion you cannot see is
 //     indistinguishable from data quietly going missing.
 //
 // Runs the REAL block from app.js (extracted by marker) against a minimal fake
@@ -61,7 +64,7 @@ function fakeElement(tag) {
 
 function world() {
   const sent = [];
-  const timers = [];
+  const asked = [];
   const messagesEl = fakeElement("div");
   const sandbox = {
     document: { createElement: fakeElement },
@@ -70,8 +73,9 @@ function world() {
     scrollToEnd() {},
     trashIcon: () => fakeElement("svg"),
     messageStamp: (at) => (at ? "14:32" : ""),
-    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
-    clearTimeout: (id) => { if (id) timers[id - 1] = null; },
+    // The shared modal is pinned by test_confirm_modal.js; here it is a spy, so
+    // this test can prove the chip never routes AROUND it.
+    askConfirm: (opts) => { asked.push(opts); },
   };
   vm.createContext(sandbox);
   // vm contexts don't expose top-level const/let, so the extracted declarations
@@ -80,59 +84,51 @@ function world() {
     extract("// [REDACT-START]", "// [REDACT-END]").replace(/\bconst\b/g, "var"),
     sandbox,
   );
-  return { sandbox, sent, timers, messagesEl };
+  return { sandbox, sent, asked, messagesEl };
 }
 
-// 1. THE REGRESSION SHAPE: one tap must not remove anything.
+// 1. THE REGRESSION SHAPE: tapping the chip must not delete anything.
 {
   const w = world();
   const chip = w.sandbox.redactChip("turn-abc");
   chip.onclick();
-  ok("first tap sends nothing", w.sent.length === 0);
-  ok("first tap arms the chip visibly", chip.classList.contains("armed"));
-  ok("…and says what the next tap does", /again/.test(chip.title));
+  ok("tapping the chip sends nothing", w.sent.length === 0);
+  ok("it asks first", w.asked.length === 1);
 }
 
-// 2. The second tap commits, naming the turn the chip was built for.
+// 2. The question says what is lost — a verb and a red button never do.
 {
   const w = world();
-  const chip = w.sandbox.redactChip("turn-abc");
-  chip.onclick();
-  chip.onclick();
-  ok("second tap removes", w.sent.length === 1);
+  w.sandbox.redactChip("turn-abc").onclick();
+  const { title, body, verb } = w.asked[0];
+  ok("the title names the unit: the whole exchange", /exchange/i.test(title));
+  ok("the body says the model forgets it too", /model/i.test(body));
+  ok("…and that the offline copies go", /offline/i.test(body));
+  ok("…and that it is final", /cannot be undone/i.test(body));
+  ok("the button says DELETE, not something softer", verb === "Delete");
+}
+
+// 3. Confirming deletes the turn the chip was built for.
+{
+  const w = world();
+  w.sandbox.redactChip("turn-abc").onclick();
+  w.asked[0].action();
+  ok("confirming deletes", w.sent.length === 1);
   ok("it names the right turn",
     w.sent[0].type === "redact" && w.sent[0].turn === "turn-abc");
-  ok("committing disarms the chip", !chip.classList.contains("armed"));
-  ok("committing clears the pending disarm", w.timers.filter(Boolean).length === 0);
 }
 
-// 3. A half-committed destructive control must not sit there indefinitely,
-//    or the SECOND tap becomes the accidental one.
-{
-  const w = world();
-  const chip = w.sandbox.redactChip("turn-abc");
-  chip.onclick();
-  const armed = w.timers.filter(Boolean);
-  ok("arming schedules a disarm", armed.length === 1);
-  ok("the disarm window is bounded", armed[0].ms > 0 && armed[0].ms <= 10000);
-  armed[0].fn();
-  ok("it disarms itself", !chip.classList.contains("armed"));
-  chip.onclick();
-  ok("after disarming, a tap only re-arms", w.sent.length === 0);
-}
-
-// 4. Arming a second chip disarms the first: two half-committed controls on
-//    screen at once means a stray tap on either is destructive.
+// 4. Each chip carries its OWN turn — a shared modal must not blur which one
+//    asked. Two chips, and the second one's answer must not delete the first.
 {
   const w = world();
   const first = w.sandbox.redactChip("turn-one");
   const second = w.sandbox.redactChip("turn-two");
   first.onclick();
   second.onclick();
-  ok("only one chip is ever armed", !first.classList.contains("armed"));
-  ok("…and nothing was sent by the switch", w.sent.length === 0);
-  second.onclick();
-  ok("the armed one commits its own turn", w.sent[0].turn === "turn-two");
+  w.asked[1].action();
+  ok("the answer belongs to the chip that asked last", w.sent[0].turn === "turn-two");
+  ok("…and only that one was deleted", w.sent.length === 1);
 }
 
 // 5. The gap is visible, and carries the removed turn's OWN time — not now, or
@@ -142,17 +138,18 @@ function world() {
   const row = w.sandbox.addRedactedMsg(1785400000);
   ok("a row is added where the turn was", w.messagesEl.children.length === 1);
   const labels = row.children.flatMap((c) => c.children || []).map((c) => c.textContent);
-  ok("it says what happened", labels.includes("Message removed"));
+  ok("it says what happened", labels.includes("Message deleted"));
   ok("it carries the turn's own time", labels.includes("14:32"));
 }
 
-// 6. Exactly ONE place can send a removal, and it is behind the arming. A
+// 6. Exactly ONE place can send a deletion, and it is behind the modal. A
 //    second, unconfirmed sender anywhere would defeat all of the above.
 {
   const senders = src.match(/send\(\{ type: "redact"/g) || [];
   ok("only one code path sends redact", senders.length === 1);
-  ok("…and it is inside the arming block",
-    extract("// [REDACT-START]", "// [REDACT-END]").includes('send({ type: "redact"'));
+  const block = extract("// [REDACT-START]", "// [REDACT-END]");
+  ok("…and it is inside the confirmation's action", block.includes('send({ type: "redact"'));
+  ok("the chip only ever asks", /btn\.onclick = \(\) => askDeleteTurn\(turn\)/.test(block));
 }
 
 // 7. The control is only offered for a turn the server can name. A chip built

@@ -473,6 +473,22 @@
   </div>
 </div>
 
+<!-- One modal for every irreversible action (#202). It ASKS, and it says what
+     will happen — a verb and a red button tell you what you are doing, never
+     what it costs. Shared, because a second bespoke confirmation is how two
+     dialogs end up disagreeing about how serious the same action is. -->
+<div id="confirm-modal" class="modal" hidden role="dialog" aria-modal="true"
+     aria-labelledby="confirm-title" aria-describedby="confirm-body">
+  <div class="modal-card">
+    <h2 id="confirm-title" class="modal-title"></h2>
+    <p id="confirm-body" class="modal-body"></p>
+    <div class="modal-actions">
+      <button type="button" id="confirm-cancel" class="modal-btn">Cancel</button>
+      <button type="button" id="confirm-ok" class="modal-btn danger"></button>
+    </div>
+  </div>
+</div>
+
 <!-- Only two scripts on the critical path now, both deferred so HTML parsing and
      the boot loader paint without waiting on them. xterm (~285 KB) is NOT here —
      it's lazy-loaded by ensureXterm() the first time the console opens, since it
