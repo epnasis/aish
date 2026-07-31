@@ -1974,10 +1974,26 @@ class WebServer:
         await client.ws.send_json(
             {"type": "replay", "events": snapshot, "truncated": bridge.truncated}
         )
-        # The queued-cwd card is backend-authoritative (single pending_cwd), so
-        # it's reconstructed on attach rather than replayed from the transcript
-        # (#92) — this survives reconnects and session switches. Sent after the
-        # replay so it lands on top of the freshly-rebuilt queue list.
+        # The queue area is backend-authoritative and reconstructed on attach
+        # rather than replayed from the transcript — this is what makes it
+        # survive a reconnect or a session switch.
+        #
+        # Waiting MESSAGES used to be the exception, and that was the bug: a
+        # `queued` chip was sent only to the client that typed it ("its own
+        # composer echo"), which holds right up until that client looks at a
+        # different chat. The chip lives outside the transcript, so nothing
+        # cleared it, and it followed the viewer into whatever chat they landed
+        # on — where its Remove button dequeues from the session now on screen.
+        # The message it named went on running in the chat it was queued in.
+        # Re-sending the real queue here (and clearing on the client at every
+        # repaint) makes the chips say what the SERVER is holding, which also
+        # means a second device viewing the chat finally sees them at all.
+        for position, (text, _attachments) in enumerate(session.queue, start=1):
+            await client.ws.send_json(
+                {"type": "queued", "position": position, "text": text}
+            )
+        # Sent after those so it lands on top of the freshly-rebuilt queue list
+        # (#92) — a pending cd applies before any waiting message.
         if session.pending_cwd:
             await client.ws.send_json({"type": "cwd_queued", "path": session.pending_cwd})
         client.sender = asyncio.ensure_future(self._send_loop(client))
@@ -2110,9 +2126,7 @@ class WebServer:
             # to the server log because the phone has no reachable console.
             print(f"CLIENT_DEBUG: {message.get('text', '')}", flush=True)
         else:
-            await client.ws.send_json(
-                {"type": "error", "text": f"unknown message type {kind!r}"}
-            )
+            await self._refuse(client, f"unknown message type {kind!r}")
 
     def _render_error(self, client: Client, message: dict) -> None:
         """The browser reporting transcript content it could not render (#188).
@@ -2168,14 +2182,35 @@ class WebServer:
         with contextlib.suppress(Exception):  # a note must never break a session
             session.agent.add_system_note(note)
 
+    async def _refuse(self, client: Client, text: str) -> None:
+        """Tell ONE client that the request it just made will not happen.
+
+        An `error` event meant two unrelated things, and the client could only
+        assume the worse one. "Your TURN failed" (the model died, the tool
+        blew up) ends the turn: the live trace closes, busy clears, Retry
+        appears. "I will not do THAT" (delete-while-busy, empty title, queue
+        full) changes nothing about the turn — but it arrived in the same
+        shape, so refusing to delete a message while the chat was working tore
+        down the running turn's card and took Stop and Retry with it, leaving a
+        task running with no way to reach it. The refusal was correct; the
+        collateral was total.
+
+        The split was already visible in the code and simply not carried across
+        the wire: a turn failure goes through `session.bridge.emit` (recorded,
+        fanned out to every viewer, part of the transcript), while a refusal
+        goes down the ONE socket that asked and is never recorded. `refused`
+        makes that legible to the client, which renders it as a toast and
+        touches no turn state. Every direct-to-client error is one of these —
+        stamp it here, at the site that knows, never guessed at the far end.
+        """
+        await client.ws.send_json({"type": "error", "code": "refused", "text": text})
+
     async def _reject_busy(self, client: Client, session: Session) -> bool:
         if session.busy:
-            await client.ws.send_json(
-                {
-                    "type": "error",
-                    "text": "this session is busy — wait, or start a new "
-                    "session (＋) and work there in parallel",
-                }
+            await self._refuse(
+                client,
+                "this session is busy — wait, or start a new "
+                "session (＋) and work there in parallel",
             )
             return True
         return False
@@ -2229,9 +2264,7 @@ class WebServer:
             await client.ws.send_json({"type": "stopped"})
             return
         if not hasattr(session.agent, "cancel"):
-            await client.ws.send_json(
-                {"type": "error", "text": "stop is not supported on this backend"}
-            )
+            await self._refuse(client, "stop is not supported on this backend")
             return
         session.agent.cancel()
         # A worker parked on an approval card must be unblocked to notice.
@@ -2313,13 +2346,10 @@ class WebServer:
         if session is None or not turn:
             return
         if session.busy:
-            await client.ws.send_json(
-                {
-                    "type": "error",
-                    "text": "can't delete a message while this chat is working — "
+            await self._refuse(
+                client, "can't delete a message while this chat is working — "
                     "stop the task (or let it finish) and try again",
-                }
-            )
+                )
             return
         path = session.logref.log.path
         removed = await asyncio.to_thread(session.logref.redact_turn, turn)
@@ -2327,9 +2357,7 @@ class WebServer:
             # The id named nothing: already removed (from another tab), or a
             # stale line-index id from a log written before turn ids. Both are
             # "there is nothing here to remove", which is the outcome asked for.
-            await client.ws.send_json(
-                {"type": "error", "text": "that message is already gone"}
-            )
+            await self._refuse(client, "that message is already gone")
             return
         session.agent.redact_turn(removed.text, removed.occurrence)
         events = await asyncio.to_thread(SessionLog.reconstruct_events, path)
@@ -2372,13 +2400,20 @@ class WebServer:
 
     def _dequeue(self, client: Client, text: str) -> None:
         """Drop the first still-waiting message matching `text` (the client's
-        queued-chip remove button). A running task is never affected."""
+        queued-chip remove button). A running task is never affected.
+
+        The removal is announced through the bridge, mirroring `cwd_dequeued`:
+        the chip is a view of what the SERVER is holding, so cancelling on the
+        phone has to take it off the laptop too."""
         session = client.viewing
         if session is None:
             return
         for i, (queued, _attachments) in enumerate(session.queue):
             if queued == text:
                 del session.queue[i]
+                session.bridge.emit(
+                    {"type": "dequeued", "text": text}, record=False
+                )
                 return
 
     async def _start_task(
@@ -2391,15 +2426,22 @@ class WebServer:
             return
         if session.busy:
             if len(session.queue) >= MAX_QUEUE:
-                await client.ws.send_json(
-                    {"type": "error", "text": f"queue full ({MAX_QUEUE} waiting)"}
-                )
+                await self._refuse(client, f"queue full ({MAX_QUEUE} waiting)")
                 return
             session.queue.append((text, attachments or []))
-            # The queued chip is the requesting client's own composer echo — the
-            # message hasn't run yet, so only that client needs it.
-            await client.ws.send_json(
-                {"type": "queued", "position": len(session.queue), "text": text}
+            # Through the BRIDGE, not this client's socket. It used to be "the
+            # requesting client's own composer echo", and that reasoning is what
+            # let the chip outlive the view it was drawn in: an unstamped event
+            # sent straight down one socket is invisible to the session firewall
+            # (#182), so nothing could tell it apart from an event about the
+            # chat now on screen. Through the bridge it carries the session name
+            # — dropped on arrival if the viewer has moved on — and every viewer
+            # of this chat sees the queue, not just the device that typed it.
+            # record=False: a waiting message is live state, not transcript, and
+            # reconstruct_events emits no `queued` (hot/cold parity).
+            session.bridge.emit(
+                {"type": "queued", "position": len(session.queue), "text": text},
+                record=False,
             )
             return
         self._launch(session, text, attachments or [])
@@ -2765,9 +2807,7 @@ class WebServer:
             return
         issue = session.pending_issue
         if issue is None:
-            await client.ws.send_json(
-                {"type": "error", "text": "no issue draft to file — start with /feedback"}
-            )
+            await self._refuse(client, "no issue draft to file — start with /feedback")
             return
         if await self._reject_busy(client, session):
             return
@@ -3031,26 +3071,20 @@ class WebServer:
         if source is None:
             return
         if source.busy:
-            await client.ws.send_json(
-                {
-                    "type": "error",
-                    "text": "can't fork while this session is working — wait for "
+            await self._refuse(
+                client, "can't fork while this session is working — wait for "
                     "the current task to finish, then fork",
-                }
-            )
+                )
             return
         src_path = source.logref.log.path
         has_history = any(
             m.get("role") in ("user", "assistant") for m in source.agent.messages[1:]
         )
         if not has_history or not src_path.is_file():
-            await client.ws.send_json(
-                {
-                    "type": "error",
-                    "text": "nothing to fork yet — send a message first, then fork "
+            await self._refuse(
+                client, "nothing to fork yet — send a message first, then fork "
                     "to branch the conversation into a new session",
-                }
-            )
+                )
             return
 
         def copy_log() -> Path | None:
@@ -3072,13 +3106,11 @@ class WebServer:
 
         new_path = await asyncio.to_thread(copy_log)
         if new_path is None:
-            await client.ws.send_json(
-                {"type": "error", "text": "can't fork from there — that answer is out of range"}
-            )
+            await self._refuse(client, "can't fork from there — that answer is out of range")
             return
         session = await self._open_by_name(new_path.name)
         if session is None:  # pragma: no cover — we just wrote a valid session file
-            await client.ws.send_json({"type": "error", "text": "fork failed"})
+            await self._refuse(client, "fork failed")
             return
         # Continue in the fork with the source's LIVE model/backend (it may have
         # switched model since the last logged record); mirrors _new_session.
@@ -3116,9 +3148,10 @@ class WebServer:
             return
         if session is not None and session.state() != "idle":
             # Never kill work as a side effect of a delete.
-            await client.ws.send_json(
-                {"type": "error", "text": "task still running in that session — "
-                 "stop it (or let it finish) before deleting"}
+            await self._refuse(
+                client,
+                "task still running in that session — "
+                "stop it (or let it finish) before deleting",
             )
             return
         if session is not None:
@@ -3144,9 +3177,7 @@ class WebServer:
         reflect the new name at once."""
         title = title.strip()[:RENAME_MAX]
         if not title:
-            await client.ws.send_json(
-                {"type": "error", "text": "a chat title can't be empty"}
-            )
+            await self._refuse(client, "a chat title can't be empty")
             return
         session = self.sessions.get(name)
         safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
@@ -3205,18 +3236,15 @@ class WebServer:
             getattr(session.agent, "provider", "ollama") == "claude-max"
         )
         if crossing_max:
-            await client.ws.send_json(
-                {
-                    "type": "error",
-                    "text": "claude-max runs a different agent loop — restart with "
+            await self._refuse(
+                client, "claude-max runs a different agent loop — restart with "
                     f"`aish-web --model {spec}` to switch",
-                }
-            )
+                )
             return
         try:
             chat, provider, name = await asyncio.to_thread(backends.make_chat, spec)
         except backends.BackendError as exc:
-            await client.ws.send_json({"type": "error", "text": str(exc)})
+            await self._refuse(client, str(exc))
             return
         session.agent.chat = chat
         session.agent.model = name
@@ -3225,13 +3253,11 @@ class WebServer:
         saved = False
         if message.get("save"):
             if self.config_path is None:
-                await client.ws.send_json(
-                    {"type": "error", "text": "no config path available — cannot save"}
-                )
+                await self._refuse(client, "no config path available — cannot save")
             else:
                 error = save_default_model(self.config_path, spec)
                 if error:
-                    await client.ws.send_json({"type": "error", "text": error})
+                    await self._refuse(client, error)
                 else:
                     saved = True
         session.bridge.emit({"type": "echo", "text": f"model switched to {spec}"})
@@ -3256,7 +3282,7 @@ class WebServer:
             return
         result = await asyncio.to_thread(session.agent.rebase, path)
         if result.startswith("ERROR"):
-            await client.ws.send_json({"type": "error", "text": result})
+            await self._refuse(client, result)
             return
         # rebase fired on_state → the top-bar chip + queue-card refresh; no
         # manual _cwd_event needed (issue #95 unified that path).
@@ -3267,7 +3293,7 @@ class WebServer:
             return
         result = await asyncio.to_thread(session.agent.add_root, path)
         if result.startswith("ERROR"):
-            await client.ws.send_json({"type": "error", "text": result})
+            await self._refuse(client, result)
             return
         session.bridge.emit({"type": "echo", "text": result})
         await client.ws.send_json(self._cwd_event(session))

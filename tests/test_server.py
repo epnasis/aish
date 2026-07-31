@@ -214,7 +214,7 @@ def find_tool_step(events, name):
 # (or vice versa) fails the guard until it is handled on both paths.
 _EPHEMERAL_EVENTS = {
     "token", "echo", "status", "error", "hello", "replay", "history",
-    "queued", "cwd_queued", "cwd_dequeued", "approval_request",
+    "queued", "dequeued", "cwd_queued", "cwd_dequeued", "approval_request",
     "approval_resolved", "cwd_changed",
     "model_changed", "session_state", "file_list", "job_list",
     "model_list", "session_list", "session_deleted", "session_renamed",
@@ -5955,3 +5955,157 @@ class TestRedactTurn:
             assert "hunter2" not in (
                 app_env["state_dir"] / name
             ).read_text(encoding="utf-8")
+
+
+class TestRefusalIsNotAFailure:
+    """An `error` event says one of two unrelated things, and until #202's
+    follow-up the client could only assume the worse one.
+
+    A TURN FAILURE (the model died, a tool blew up) ends the turn: the live
+    trace closes, busy clears, Retry appears. A REFUSAL of the request you just
+    made says nothing about the turn at all — but it arrived in the same shape,
+    so asking to delete a message while the chat was working tore down the
+    RUNNING turn's card and took Stop and Retry with it. The refusal was right;
+    the collateral was total.
+
+    The split already existed in the code and simply was not carried across the
+    wire: a turn failure goes through the BRIDGE (recorded, every viewer), a
+    refusal goes down the ONE socket that asked. `code: "refused"` is that fact
+    made legible, stamped at the site that knows."""
+
+    def pending_responses(self, tmp_path):
+        return [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+            model_says("finished"),
+        ]
+
+    def test_delete_while_working_is_refused_without_ending_the_turn(
+        self, app_env, tmp_path
+    ):
+        """The exact report: the refusal arrived, and the running turn's card
+        went with it. The turn must still be there to stop or let finish."""
+        client, _ = make_client(app_env, self.pending_responses(tmp_path))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")
+            server = client.app.state.server
+            assert server.active.busy
+            ws.send_json({"type": "redact", "turn": "1"})
+            refusal = ws.receive_json()
+            assert refusal["type"] == "error"
+            assert refusal["code"] == "refused", (
+                "without this the client ends the turn — closing the live trace, "
+                "clearing busy, and stranding a task with no Stop and no Retry"
+            )
+            assert "working" in refusal["text"]
+            # The turn is untouched and still answerable.
+            assert server.active.busy
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+
+    def test_every_refusal_is_coded_and_no_turn_failure_is(self, app_env, tmp_path):
+        """The rule, not one instance of it: refusals carry the code, the
+        errors that really do end a turn must never carry it (they would be
+        downgraded to a toast and the turn would hang busy forever)."""
+        client, chat = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            refusals = [
+                {"type": "rename", "name": "x", "title": "   "},
+                {"type": "create_issue"},
+                {"type": "banana"},
+            ]
+            for message in refusals:
+                ws.send_json(message)
+                event = recv_until(ws, "error")
+                assert event.get("code") == "refused", f"uncoded refusal: {message}"
+        source = (Path(server_module.__file__)).read_text(encoding="utf-8")
+        # A turn failure is emitted through the bridge; grepping for the pairing
+        # is what stops a future error site picking the wrong channel silently.
+        for line in source.splitlines():
+            if '"type": "error"' in line and "bridge.emit" in line:
+                assert '"code"' not in line, (
+                    f"a turn failure must not be coded as a refusal: {line.strip()}"
+                )
+
+
+class TestQueueIsBackendAuthoritative:
+    """A queued-message chip names a message ONE chat's agent is holding, and
+    its Remove button dequeues from whatever session the client is viewing.
+
+    It used to be sent only to the client that typed it — "its own composer
+    echo" — which holds right until that client looks at a different chat. The
+    chip lives outside the transcript, so nothing cleared it: it followed the
+    viewer into the next chat, where Remove dequeued from the WRONG session
+    (silently failing to cancel anything) while the real message went on
+    running. Reconstructed on attach now, like the pending-cd card beside it."""
+
+    def busy_responses(self, tmp_path):
+        return [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+            model_says("finished"),
+        ]
+
+    def test_the_queue_is_re_sent_on_attach(self, app_env, tmp_path):
+        client, _ = make_client(app_env, self.busy_responses(tmp_path))
+        with client:
+            with connected(client) as (ws, hello, _):
+                ws.send_json({"type": "task", "text": "run it"})
+                request = recv_until(ws, "approval_request")
+                ws.send_json({"type": "task", "text": "and then this"})
+                queued = recv_until(ws, "queued")
+                assert queued["text"] == "and then this"
+                name = hello["session"]
+            # A second device — or the same one coming back — must be told what
+            # is waiting, instead of showing an empty queue over a real one.
+            with client.websocket_connect(
+                f"/ws?token={TEST_TOKEN}&session={name}"
+            ) as ws2:
+                ws2.receive_json()  # hello
+                ws2.receive_json()  # replay
+                requeued = ws2.receive_json()
+                assert requeued["type"] == "queued"
+                assert requeued["text"] == "and then this"
+                assert requeued["position"] == 1
+                ws2.send_json(
+                    {"type": "approval", "id": request["id"], "action": "approve"}
+                )
+                recv_until(ws2, "done")
+
+    def test_a_queued_chip_never_reaches_a_viewer_of_another_chat(
+        self, app_env, tmp_path
+    ):
+        """The session firewall (#182) can only drop what it can identify, and
+        an event sent straight down one socket carries no session name. Through
+        the bridge it does — which is the half of the fix the client cannot
+        do for itself."""
+        client, _ = make_client(app_env, self.busy_responses(tmp_path))
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "task", "text": "waiting message"})
+            queued = recv_until(ws, "queued")
+            assert queued["session"] == hello["session"], (
+                "unstamped, the client cannot tell this chip from one belonging "
+                "to the chat now on screen"
+            )
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+
+    def test_cancelling_a_queued_message_reaches_every_viewer(
+        self, app_env, tmp_path
+    ):
+        """The chip is a view of what the server is holding, so cancelling on
+        one device has to take it off the others."""
+        client, _ = make_client(app_env, self.busy_responses(tmp_path))
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "task", "text": "never mind"})
+            recv_until(ws, "queued")
+            ws.send_json({"type": "dequeue", "text": "never mind"})
+            gone = recv_until(ws, "dequeued")
+            assert gone["text"] == "never mind"
+            server = client.app.state.server
+            assert server.active.queue == []
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")

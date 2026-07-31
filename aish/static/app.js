@@ -668,7 +668,7 @@ function renderLoadingTranscript() {
   clearPendingSends();
   stopSpeaking();
   messagesEl.replaceChildren();
-  removeCwdChip();
+  clearQueueChips();
   const row = document.createElement("div");
   row.className = "msg notice loading-view";
   const spin = document.createElement("span");
@@ -1211,6 +1211,7 @@ function handle(event) {
       resolvePendingSend(event.text);
       addQueueChip(event.text);
       break;
+    case "dequeued": removeQueueChip(event.text); break;
     case "cwd_queued": addCwdChip(event.path); break;
     case "cwd_dequeued": removeCwdChip(); break;
     case "token": onToken(event.text); break;
@@ -1229,11 +1230,28 @@ function handle(event) {
     case "workspace": addWorkspaceNote(event.change, event.path); break;
     case "redacted": addRedactedMsg(); break;
     case "error":
-      // A by-name action (resume/delete/rename) answered "session is gone" is a
-      // navigation failure, not a task failure: prune the phantom and restore
-      // the view quietly instead of painting a red error over a chat that is
-      // fine. Matched by the machine-readable code, never the prose text.
+      // [ERROR-KIND-START]
+      // An `error` says one of two unrelated things, and everything below the
+      // guards is written for exactly one of them: YOUR TURN FAILED. That ends
+      // the turn — close the answer, close the live trace, clear busy, offer
+      // Retry, push a notification.
+      //
+      // The other kind is a REFUSAL of the request you just made, and it says
+      // nothing whatsoever about the turn. Running them through the same path
+      // is what made refusing to delete a message while the chat was working
+      // tear down the RUNNING turn's card — taking Stop and Retry with it, and
+      // stranding a task with no way to reach it. The refusal was right; it
+      // just also destroyed the thing it was protecting.
+      //
+      // Told apart by the machine-readable code, never the prose: the server
+      // stamps `refused` at the site that knows (WebServer._refuse), because a
+      // turn failure goes through the bridge and a refusal goes down one
+      // socket — a distinction the far end cannot re-derive. A refusal is a
+      // toast: transient feedback about an action, like every other refused
+      // action in this app.
       if (event.code === "no_such_session") { onSessionGone(event.name || ""); break; }
+      if (event.code) { showToast(event.text); break; }
+      // [ERROR-KIND-END]
       closeAnswer();
       finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
       turnStart = 0;
@@ -1715,7 +1733,7 @@ function onReplay(event) {
   // text comes back to the composer rather than vanishing with it.
   clearPendingSends();
   messagesEl.replaceChildren();
-  removeCwdChip(); // a session switch drops any stale cwd card; _show re-emits if pending (#92)
+  clearQueueChips(); // the whole queue area belongs to the chat being replaced; _show re-sends the new one's
   const cached = viewCache.get(currentSession);
   viewCache.delete(currentSession); // detached nodes are single-use either way
   if (landing === "reuse") {
@@ -7610,6 +7628,24 @@ function removeQueueChip(text) {
   const chip = [...list.children].find((c) => c.dataset.text === text);
   if (chip) chip.remove();
   if (!list.children.length) list.hidden = true;
+}
+
+// Every chip in the queue area belongs to ONE chat: it names a message that
+// chat's agent is holding, and its Remove button dequeues from whatever session
+// this client is viewing. So the whole area goes with the transcript.
+//
+// It used not to, and only for the message chips — the cwd card was already
+// dropped here. A chip drawn while chat A was on screen therefore SURVIVED the
+// switch to B and sat above B's composer, where "Remove" dequeued from B (a
+// no-op) while A's message went on to run, and "Edit" pulled the text into B's
+// composer while A still held its copy — one send away from running it twice,
+// in two different chats. The server now re-sends the real queue on attach, so
+// clearing here loses nothing: what comes back is the queue of the chat you
+// actually landed in.
+function clearQueueChips() {
+  const list = $("queue-list");
+  list.replaceChildren();
+  list.hidden = true;
 }
 
 // A pending working-directory change (#92) shows as a single card pinned to the
