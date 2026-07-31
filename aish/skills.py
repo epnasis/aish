@@ -837,18 +837,27 @@ def recall_text(
     return "\n".join(lines)
 
 
-def _near_duplicate(identity: str, entries: list[Entry], semantic=None) -> Entry | None:
-    """The nearest existing memory entry when it is close enough to be the
-    same fact (#178 P1-8). `semantic` is `SemanticIndex.scores` (or None):
-    embedding similarity between identity lines when available; when it is
-    absent or fails, a conservative difflib ratio on the identity lines is the
-    floor — embeddings.py discipline, an upgrade never a dependency."""
+def _near_duplicate(identity: str, entries: list[Entry], semantic=None) -> tuple:
+    """(entry-or-None, score, floor, mode) for the nearest existing memory when
+    it is close enough to be the same fact (#178 P1-8). `semantic` is
+    `SemanticIndex.scores` (or None): embedding similarity between identity
+    lines when available; when it is absent or fails, a conservative difflib
+    ratio on the identity lines is the floor — embeddings.py discipline, an
+    upgrade never a dependency.
+
+    Returns the SCORE and the FLOOR, not just the verdict (#192): this gate is
+    the one that demonstrably worked in #190's evidence and it recorded
+    nothing, which is why `DEDUP_MIN_SIM` is still documented as "provisional
+    until measured on the live corpus" — nothing measured it. A verdict without
+    its inputs cannot be recalibrated (contract §4)."""
     if not entries:
-        return None
+        return None, 0.0, DEDUP_MIN_SIM, "none"
     sims = semantic(identity, entries) if semantic is not None else None
     if sims is not None:
         best = max(entries, key=lambda e: sims.get(id(e), 0.0))
-        return best if sims.get(id(best), 0.0) >= DEDUP_MIN_SIM else None
+        score = sims.get(id(best), 0.0)
+        hit = best if score >= DEDUP_MIN_SIM else None
+        return hit, score, DEDUP_MIN_SIM, "semantic"
     from .embeddings import entry_text
 
     closest: Entry | None = None
@@ -860,13 +869,15 @@ def _near_duplicate(identity: str, entries: list[Entry], semantic=None) -> Entry
         ).ratio()
         if ratio > best_ratio:
             closest, best_ratio = entry, ratio
-    return closest if best_ratio >= DEDUP_LEXICAL_RATIO else None
+    hit = closest if best_ratio >= DEDUP_LEXICAL_RATIO else None
+    return hit, best_ratio, DEDUP_LEXICAL_RATIO, "lexical"
 
 
 def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: str = "",
                 lessons_path=None, expires: str | None = None,
                 pinned: bool | None = None, force: bool = False,
-                semantic=None, disabled: bool | None = None) -> str:
+                semantic=None, disabled: bool | None = None,
+                on_admission=None) -> str:
     """Create or update one structured memory entry. Constrained to writing a
     slug-named markdown file inside the memory dir — safe to auto-approve.
 
@@ -887,7 +898,13 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
     refused with that entry's name (#178 P1-8) — near-duplicates compete for
     index and preflight slots, so the model must update or forget the
     existing entry instead, or pass `force` for a genuinely different fact.
-    Updates to an existing slug are never gated."""
+    Updates to an existing slug are never gated.
+
+    `on_admission` receives the gate's decision AND its inputs (score, floor,
+    mode) so the caller can record them (#192, contract §3.7). A CALLBACK
+    rather than a changed return type deliberately: the string return is what
+    cli.py, curate.py and every test read, and this gate's evidence is worth
+    recording without a ripple through all of them."""
     text = " ".join(fact.split()).strip()
     if not text:
         return "ERROR: empty fact"
@@ -924,9 +941,23 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
         identity = f"{slug}: {text}"
         if keyword_list:
             identity += f" (keywords: {', '.join(keyword_list)})"
-        similar = _near_duplicate(
+        similar, score, floor, mode = _near_duplicate(
             identity, [e for e in existing if e.kind == "memory"], semantic
         )
+        if on_admission is not None:
+            on_admission(
+                {
+                    "name": slug,
+                    "verdict": "refused_duplicate" if similar else "admitted",
+                    "tier": 1,
+                    "evidence": {
+                        "mode": mode,
+                        "sim": round(score, 4),
+                        "floor": floor,
+                        "against": similar.name if similar else None,
+                    },
+                }
+            )
         if similar is not None:
             return (
                 f"NOT saved — a similar memory already exists — {similar.name}: "

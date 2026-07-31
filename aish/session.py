@@ -121,6 +121,31 @@ _PARSE_CACHE: dict[str, tuple[tuple[int, int], "ParsedLog"]] = {}
 _ENTRY_CACHE: dict[str, tuple[tuple[int, int], "SessionEntry | None"]] = {}
 
 
+# Trace kinds that are durable governance evidence and render NOWHERE
+# (docs/trace-contract.md §1.3). Both halves are required and neither is
+# sufficient alone: the agent emits these through `Agent._emit_record`, which
+# never reaches `on_step`, and `reconstruct_events` skips them here — so they
+# are absent live AND absent cold, which is what makes hot/cold parity hold
+# (the argument is #171's for `[aish: …]` notes and #188's for render_error).
+#
+# The reason this must be a registry rather than a habit: `app.js`'s
+# `traceStep` calls `ensureTrace()` BEFORE it dispatches on `step.kind`, so a
+# kind with no renderer does not degrade to "renders nothing" — it opens an
+# empty live trace card with a running ticker. A new kind reaching the
+# frontend is a visible bug, not a no-op.
+RENDERLESS_STEPS = frozenset(
+    {
+        "render_error",  # #188
+        "rule_eval",  # #191
+        "binding",  # #191
+        "gate",  # #191
+        "trim",  # #192
+        "tool_check",  # #193
+        "admission",  # #194
+    }
+)
+
+
 def _content_words(text: str) -> set[str]:
     stripped = (word.strip(_PUNCT).casefold() for word in (text or "").split())
     return {word for word in stripped if len(word) >= DRIFT_MIN_WORD}
@@ -535,13 +560,17 @@ class SessionLog:
                     running_steps += 1
                 elif sk in ("thinking", "thinking_cancel", "tool"):
                     running_steps = max(0, running_steps - 1)
-                if sk == "render_error":
-                    # Diagnostic evidence, not transcript content (#188): the
-                    # browser telling the server it could not display something.
-                    # Live it renders nothing at all — the user's signal is the
-                    # broken-picture note already in the answer — so skipping it
-                    # here IS the hot/cold parity, exactly as for aish's own
-                    # `[aish: …]` notes below.
+                if sk in RENDERLESS_STEPS:
+                    # Diagnostic / governance evidence, not transcript content:
+                    # the browser telling the server it could not display
+                    # something (#188), or a gate recording why it refused
+                    # (#191-#194). Live these render nothing at all — they are
+                    # emitted through _emit_record, which never reaches on_step
+                    # — so skipping them here IS the hot/cold parity, exactly as
+                    # for aish's own `[aish: …]` notes below. `has_trace` is
+                    # already set above, so a log holding ONLY governance
+                    # records still reconstructs rather than falling back to a
+                    # flat history blob.
                     continue
                 if sk == "tool" and step.get("name") == "run_command":
                     emit_command(step)

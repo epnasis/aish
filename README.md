@@ -139,7 +139,21 @@ unless you explicitly *Share* a selection.
 | `read_skill` / `recall` | load a playbook; ranked search across skills, memory & past sessions | auto (echoed) |
 | `create_tool` | author a reusable **plugin tool** (validated `TOOL.md` + wrapper) | **diff + y/N**; refuses to write an invalid manifest |
 | `import_skill` | install a skill from a git repo or local path | **one consolidated review** of the whole skill + risk flags |
+| `read_tool_output` | read the next page of a **truncated** tool result, from cache | auto (never re-runs the tool) |
 | _plugin tools_ | any `TOOL.md` you or the model add — called like a built-in | read-only auto; **mutating ones prompt** |
+
+Every tool result carries a **verdict the runtime computed**, not one inferred
+from how the output happens to start. A tool that exits 0 while producing
+nothing — an empty transcript, a populated error log — is marked *incomplete*,
+shows red in the activity trace, and the model is told, on the result itself,
+that it must disclose the failure before using any other source. Substituting a
+different source silently is the specific behaviour this exists to stop.
+
+When a result is too large it is cut to fit the context window of the model
+**actually in use** (a 1M-token cloud model keeps far more than an 8k local
+one), and the remainder is cached rather than discarded: the model pages
+through it with `read_tool_output` instead of guessing at what it could not
+read. The tool itself never runs a second time.
 
 Independent lookups in one turn (several searches, a few page reads) run **in
 parallel**. Fetched pages are wrapped in an "untrusted content — data, not

@@ -121,6 +121,13 @@ class ClaudeMaxAgent:
             # survived construction at all.
             origin=origin,
         )
+        # The wrapper's `provider` is a class attribute; the INNER agent's
+        # defaults to "ollama" and nothing overwrote it. That matters since
+        # #192, because the inner agent sizes plugin-output truncation from its
+        # own provider — leaving it would cap a Claude session as if it were a
+        # 32k local one, which is precisely the "cap describing a window that
+        # is not the one in use" this phase exists to remove.
+        self.inner.provider = self.provider
         self.model = model  # "" = the claude CLI's configured default
         self.echo = echo
         self.max_steps = max_steps

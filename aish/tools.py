@@ -8,6 +8,7 @@ name, validated and resolved against PATH before anything is executed.
 
 import contextlib
 import datetime
+import json
 import os
 import re
 import select
@@ -45,6 +46,117 @@ def truncate(text: str, head: int = HEAD_CHARS, tail: int = TAIL_CHARS) -> str:
     omitted = len(text) - head - tail
     tail_text = text[-tail:] if tail else ""  # text[-0:] is the WHOLE string
     return f"{text[:head]}\n[... {omitted} characters omitted ...]\n{tail_text}"
+
+
+# --- the tool result envelope (#192, docs/trace-contract.md §3.4) -----------
+
+STATUS_OK = "ok"
+STATUS_INCOMPLETE = "incomplete"
+STATUS_FAILED = "failed"
+
+# How the status was decided. Closed vocabulary; the first five are the
+# contract's, the last two are additions this phase had to make and which are
+# recorded in §3.4:
+#   error_field — a JSON payload with a populated error channel and exit 0.
+#     This is the youtube_analyze shape exactly (`transcript: ""` beside a
+#     non-empty `error_log`, exit 0). Without #193's declared required-fields
+#     contract, `empty_output` cannot see it: the payload as a whole is 575
+#     chars, so it is not empty — only the field that mattered was.
+#   prefix — no envelope; the legacy startswith() sniff decided. Recorded
+#     EXPLICITLY rather than left absent, because "absence must never be the
+#     evidence" (contract corollary 2) — and because counting these is the
+#     honest measure of how much of the tool surface is still un-enveloped.
+VERDICT_EXIT_CODE = "exit_code"
+VERDICT_REQUIRED_FIELDS = "required_fields"
+VERDICT_EMPTY_OUTPUT = "empty_output"
+VERDICT_ERROR_FIELD = "error_field"
+VERDICT_GATE = "gate"
+VERDICT_EXCEPTION = "exception"
+VERDICT_PREFIX = "prefix"
+
+# Field names a wrapper conventionally reports failure through. Deterministic
+# and declared — this is not the runtime guessing at prose, it is reading a
+# named channel whose presence the wrapper author chose.
+ERROR_FIELDS = ("error", "error_log", "errors")
+
+
+class ToolOutcome(str):
+    """A tool result string carrying the runtime's verdict alongside it.
+
+    Deliberately a `str` SUBCLASS. Every existing caller — the model-facing
+    result, `_with_feedback`, the tests — keeps treating it as the result text,
+    so the envelope adds information with no ripple through ~30 dispatch
+    branches. More importantly the metadata travels WITH the value instead of
+    living in instance state (`_run_meta`), which is what makes it correct on
+    the parallel read-only path where several calls are in flight at once and a
+    shared attribute would be a race.
+
+    Caveat, and the reason construction is always the LAST step: string
+    operations return a plain `str`, so slicing or concatenating a ToolOutcome
+    silently drops the envelope. Build it after any text manipulation, never
+    before.
+    """
+
+    __slots__ = ("meta",)
+
+    meta: dict
+
+    def __new__(cls, text: str, **meta) -> "ToolOutcome":
+        outcome = super().__new__(cls, text)
+        outcome.meta = meta
+        return outcome
+
+
+def classify_output(text: str, exit_code: int, required: list[str] | None = None) -> tuple:
+    """(status, verdict_by, evidence) for a tool's raw output — the whole point
+    of #192: the runtime owes the model a verdict it did not have to infer from
+    a string prefix.
+
+    Deterministic, in escalating order of specificity. `required` is the
+    declared required-field list from #193's tool contract; until that ships it
+    is empty everywhere, and exit code + emptiness + a populated error channel
+    are the floor.
+    """
+    evidence: dict = {}
+    if exit_code != 0:
+        return STATUS_FAILED, VERDICT_EXIT_CODE, evidence
+    if not text.strip():
+        return STATUS_INCOMPLETE, VERDICT_EMPTY_OUTPUT, evidence
+
+    payload = _json_object(text)
+    if payload is None:
+        return STATUS_OK, VERDICT_EXIT_CODE, evidence
+
+    if required:
+        missing = [f for f in required if f not in payload]
+        empty = [f for f in required if f in payload and not payload[f]]
+        evidence = {"declared": list(required), "missing": missing, "empty": empty}
+        if missing or empty:
+            return STATUS_INCOMPLETE, VERDICT_REQUIRED_FIELDS, evidence
+
+    reported = [f for f in ERROR_FIELDS if payload.get(f)]
+    if reported:
+        evidence = {**evidence, "error_fields": reported}
+        return STATUS_INCOMPLETE, VERDICT_ERROR_FIELD, evidence
+
+    if required is not None:
+        evidence.setdefault("declared", list(required))
+    return STATUS_OK, VERDICT_EXIT_CODE, evidence
+
+
+def _json_object(text: str) -> dict | None:
+    """The payload as a JSON object, or None. Tolerant of a wrapper that prints
+    a banner line before its JSON, which is common enough that being strict
+    here would silently disable the whole error-channel check."""
+    stripped = text.strip()
+    start = stripped.find("{")
+    if start == -1:
+        return None
+    try:
+        value = json.loads(stripped[start:])
+    except (ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _decode(data: bytes | None) -> str:
@@ -771,6 +883,41 @@ TOOL_SCHEMAS = [
                     },
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_tool_output",
+            "description": (
+                "Read the next part of a tool result that was TRUNCATED. When a "
+                "tool's output is too large it is cut, and the note on that "
+                "result gives you a 'continuation' key — pass it here with the "
+                "next page number to read the rest. The full output is served "
+                "from a cache, so this does NOT re-run the tool and costs "
+                "nothing. Use this instead of guessing at the omitted part, and "
+                "NEVER substitute a different source for content you could not "
+                "read without telling the user you did so."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "continuation": {
+                        "type": "string",
+                        "description": (
+                            "The continuation key printed on the truncated result."
+                        ),
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": (
+                            "Which page to read; the truncated result showed "
+                            "page 1, so start at 2 and increment."
+                        ),
+                    },
+                },
+                "required": ["continuation"],
             },
         },
     },

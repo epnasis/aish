@@ -5671,3 +5671,96 @@ class TestTurnTimestamps:
         assert session_module.record_epoch({}) is None
         assert session_module.record_epoch({"ts": ""}) is None
         assert session_module.record_epoch({"ts": "2026-07-31T09:53:27"}) > 0
+class TestNoGhostTraceCards:
+    """#192's release blocker, verified where the artefact would actually
+    appear: at a real client, LIVE and on COLD REPLAY.
+
+    `app.js`'s `traceStep` calls `ensureTrace()` before dispatching on
+    `step.kind`, so any renderless record that reaches the frontend opens an
+    empty live trace card with a running ticker. The unit halves are pinned in
+    test_agent.py; this pins the wiring end to end, because the two mechanisms
+    only matter if the server honours both.
+    """
+
+    def _renderless_kinds(self):
+        return sorted(session_module.RENDERLESS_STEPS)
+
+    def test_no_renderless_step_reaches_a_live_client(self, app_env):
+        """The eager trim emits a real `trim` record on the second task — a
+        genuine producer, not a synthetic probe."""
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo " + "y" * 400)]),
+                model_says("first"),
+                model_says("second"),
+            ],
+        )
+        seen: list[dict] = []
+        with connected(client) as (ws, _hello, _replay):
+            ws.send_json({"type": "task", "text": "make a big result"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "trim it"})
+            for _ in range(200):
+                event = ws.receive_json()
+                seen.append(event)
+                if event["type"] == "done":
+                    break
+
+        steps = [e for e in seen if e.get("type") == "step"]
+        assert steps, "sanity: the turn produced trace steps"
+        leaked = [s for s in steps if s.get("kind") in session_module.RENDERLESS_STEPS]
+        assert not leaked, f"renderless records reached a live client: {leaked}"
+
+    def test_no_renderless_step_survives_cold_replay(self, app_env, tmp_path):
+        """The other path to the same empty card: a session reopened from its
+        log, reconstructed into the replay event stream."""
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo " + "y" * 400)]),
+                model_says("first"),
+                model_says("second"),
+            ],
+        )
+        with connected(client) as (ws, hello, _replay):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "make a big result"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "trim it"})
+            recv_until(ws, "done")
+
+        # Reopen cold, from the log alone.
+        with client.websocket_connect(f"/ws?session={name}") as ws2:
+            hello2 = ws2.receive_json()
+            replay = ws2.receive_json()
+            assert hello2["type"] == "hello" and replay["type"] == "replay"
+
+        steps = [e for e in replay["events"] if e.get("type") == "step"]
+        assert steps, "sanity: the cold session reconstructed its trace"
+        leaked = [s for s in steps if s.get("kind") in session_module.RENDERLESS_STEPS]
+        assert not leaked, f"renderless records survived cold replay: {leaked}"
+
+    def test_the_record_really_was_written(self, app_env, tmp_path):
+        """The negative tests above would also pass if nothing were emitted at
+        all. This proves the evidence IS on disk — durable, and invisible."""
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo " + "y" * 400)]),
+                model_says("first"),
+                model_says("second"),
+            ],
+        )
+        with connected(client) as (ws, hello, _replay):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "make a big result"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "trim it"})
+            recv_until(ws, "done")
+
+        log_path = next(Path(app_env["state_dir"]).glob(f"{name}*.jsonl"), None) or (
+            Path(app_env["state_dir"]) / name
+        )
+        raw = log_path.read_text()
+        assert '"kind": "trim"' in raw, "the trim record was never written"

@@ -536,3 +536,164 @@ def test_suite_never_scans_real_global_tools_dir():
     from pathlib import Path
 
     assert tp.GLOBAL_TOOLS_DIR != Path.home() / ".config" / "aish" / "tools"
+
+
+class TestResultEnvelope:
+    """#192: the runtime owes the model a verdict it did not have to infer
+    from a string prefix. Sniffing `startswith("ERROR")` is what recorded
+    `youtube_analyze` — empty transcript, populated error_log, exit 0 — as a
+    green ✓ while the model silently substituted six web searches for the
+    source the user actually named."""
+
+    def test_the_green_lie_the_issue_was_filed_for(self, tmp_path):
+        """The exact Session B shape: exit 0, JSON, the field that mattered
+        empty, the error channel populated. Nothing about it is an ERROR
+        prefix, so the old sniff called it a success."""
+        script = (
+            "#!/bin/sh\n"
+            'printf \'{"transcript": "", "error_log": ["No module named '
+            "'youtube_transcript_api'\\\"]}'\n"
+        )
+        tool, _ = _parse_tool(
+            write_tool(tmp_path / "yt", VALID.replace("echoer", "yt"), script=script)
+        )
+        out = execute(tool, {}, cwd=str(tmp_path))
+        assert out.meta["status"] == "incomplete"
+        assert out.meta["verdict_by"] == "error_field"
+        assert out.meta["exit_code"] == 0
+        assert "error_log" in out.meta["required"]["error_fields"]
+        # …and the model is told, imperatively, on the result itself.
+        assert "status=incomplete" in out
+        assert "MUST NOT present substituted material" in out
+
+    def test_nonzero_exit_is_failed(self, tmp_path):
+        tool, _ = _parse_tool(
+            write_tool(tmp_path / "boom", VALID, script="#!/bin/sh\necho bad\nexit 3\n")
+        )
+        out = execute(tool, {}, cwd=str(tmp_path))
+        assert out.meta["status"] == "failed"
+        assert out.meta["verdict_by"] == "exit_code"
+        assert out.meta["exit_code"] == 3
+
+    def test_empty_output_with_exit_zero_is_incomplete(self, tmp_path):
+        tool, _ = _parse_tool(
+            write_tool(tmp_path / "quiet", VALID, script="#!/bin/sh\nexit 0\n")
+        )
+        out = execute(tool, {}, cwd=str(tmp_path))
+        assert out.meta["status"] == "incomplete"
+        assert out.meta["verdict_by"] == "empty_output"
+
+    def test_ordinary_success_stays_ok_and_unannotated(self, tmp_path):
+        tool, _ = _parse_tool(write_tool(tmp_path / "fine", VALID))
+        out = execute(tool, {"text": "hello"}, cwd=str(tmp_path))
+        assert out.meta["status"] == "ok"
+        assert "[aish:" not in out  # no note on a healthy result
+
+    def test_outcome_is_a_string_everywhere_it_used_to_be(self, tmp_path):
+        """The envelope must add information without a ripple: every existing
+        caller keeps treating the result as the text."""
+        tool, _ = _parse_tool(write_tool(tmp_path / "fine", VALID))
+        out = execute(tool, {"text": "hello"}, cwd=str(tmp_path))
+        assert isinstance(out, str)
+        assert "hello" in out  # the wrapper cats its JSON args back
+        assert out.startswith('{"text": "hello"}')
+        # A str operation drops the envelope by construction — which is why
+        # ToolOutcome is always built LAST, after any concatenation.
+        assert not hasattr(out + "!", "meta")
+
+
+class TestBackendSizedTruncation:
+    """The plugin cap was hardcoded 6000+2000 and consulted nothing, while the
+    history budget derived from num_ctx — an Ollama-only option every cloud
+    backend accepts and discards. On Gemini-1M both numbers were fiction."""
+
+    def test_a_small_local_window_never_regresses(self):
+        assert tp.output_caps(8192) == (tp._OUT_HEAD, tp._OUT_TAIL)
+
+    def test_gemini_and_ollama_are_visibly_different(self):
+        """#192's own acceptance criterion."""
+        small = sum(tp.output_caps(8192))
+        big = sum(tp.output_caps(1_048_576))
+        assert big > small * 10
+
+    def test_a_huge_window_is_still_ceilinged(self):
+        assert sum(tp.output_caps(100_000_000)) == tp._OUT_CEILING
+
+
+class TestContinuation:
+    """A truncated plugin result used to be a dead end whose only escape was
+    improvisation — the harness manufacturing exactly the ad-hoc behaviour the
+    tools layer exists to eliminate."""
+
+    def _big_tool(self, tmp_path, chars=40000):
+        script = f"#!/bin/sh\nyes abcdefghij | head -c {chars}\n"
+        return _parse_tool(
+            write_tool(tmp_path / "big", VALID.replace("echoer", "big"), script=script)
+        )[0]
+
+    def test_truncated_result_offers_a_continuation(self, tmp_path):
+        tool = self._big_tool(tmp_path)
+        store = tmp_path / "store"
+        out = execute(tool, {}, cwd=str(tmp_path), caps=(600, 200), store_dir=store)
+        trunc = out.meta["truncation"]
+        assert trunc["truncator"] == "tool_plugins"
+        assert trunc["offered"] is True
+        assert trunc["omitted"] > 0
+        assert trunc["continuation"]
+        assert "read_tool_output" in out
+
+    def test_paging_reconstructs_the_original_without_rerunning(self, tmp_path):
+        """The wrapper must never re-run for page 2: for a nondeterministic or
+        mutating tool a re-run is a different result or a second side effect."""
+        counter = tmp_path / "runs"
+        script = (
+            f"#!/bin/sh\necho x >> {counter}\nyes abcdefghij | head -c 5000\n"
+        )
+        tool, _ = _parse_tool(
+            write_tool(tmp_path / "counted", VALID.replace("echoer", "counted"), script=script)
+        )
+        store = tmp_path / "store"
+        caps = (600, 200)
+        out = execute(tool, {}, cwd=str(tmp_path), caps=caps, store_dir=store)
+        key = out.meta["truncation"]["continuation"]
+        assert counter.read_text().count("x") == 1
+
+        pages = []
+        page = 1
+        while True:
+            chunk = tp.read_continuation(key, store, page, *caps)
+            if not chunk:
+                break
+            pages.append(chunk)
+            page += 1
+        assert counter.read_text().count("x") == 1, "the wrapper re-ran for a later page"
+        assert len("".join(pages)) == out.meta["bytes"]
+
+    def test_paging_resumes_where_the_shown_result_stopped(self, tmp_path):
+        """No silent hole. The truncated result shows text[:head] then jumps to
+        the LAST `tail` chars, so page 2 must resume at `head` — anchoring it on
+        head+tail instead skips `tail` characters the model never saw, while it
+        was told it could page through to the end."""
+        head, tail = 600, 200
+        text = "".join(chr(97 + (i // 50) % 26) for i in range(5000))
+        store = tmp_path / "store"
+        out = tp.envelope("t", text, 0, caps=(head, tail), store_dir=store)
+        key = out.meta["truncation"]["continuation"]
+
+        page2 = tp.read_continuation(key, store, 2, head, tail)
+        assert text.startswith(text[:head])
+        assert page2 == text[head : head + head + tail], "page 2 skipped the gap"
+
+        seen = text[:head]  # what the truncated result actually showed
+        page = 2
+        while True:
+            chunk = tp.read_continuation(key, store, page, head, tail)
+            if not chunk:
+                break
+            seen += chunk
+            page += 1
+        assert seen == text, "paging to the end did not reconstruct the output"
+
+    def test_an_unknown_key_is_not_a_crash(self, tmp_path):
+        assert tp.read_continuation("deadbeef", tmp_path / "nope", 2, 600, 200) is None
+        assert tp.read_continuation("../etc/passwd", tmp_path, 2, 600, 200) is None
