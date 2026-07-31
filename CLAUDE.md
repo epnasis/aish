@@ -45,6 +45,7 @@ Merge back to main after tests pass, then remove the worktree. Trivial fixes on 
 | Touching… | Read first |
 |---|---|
 | `agent.py`, `claude_max.py`, `approval.py`, `tools.py`, `files.py`, `web.py`, `backends.py` | `docs/agent-core.md` |
+| `cli.py`, `prompt.py`, `aliases.py`, `dir_ignore.py`, `notify.py` | `docs/cli.md` |
 | `media.py`, `show_image`, anything that renders an image | `docs/media-and-images.md` |
 | anything that emits or replays a trace record | `docs/trace-contract.md` (binding schema) + `docs/trace-records.md` (rationale) |
 | `session.py` | `docs/session-log.md` |
@@ -75,7 +76,10 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`web.py`** — `web_search`/`read_url`/`fetch_binary`: auto-approved, but their inputs leave the machine, so every call is echoed and fetched content is wrapped in an untrusted-content banner. http/https only, one SSRF guard, one TLS trust store. → `docs/agent-core.md`
 - **`media.py`** — the content-addressed, bounded-LRU media store behind `show_image`. → `docs/media-and-images.md`
 - **`session.py`** — append-only JSONL per session in `~/.local/state/aish/`: conversation, audit trail, trace records, and the replay that makes a cold session render identically to a live one. → `docs/session-log.md`
-- **`prompt.py`** — the boxed input UI, built as a small prompt_toolkit `Application` (not `PromptSession`) because the footer-under-input layout requires it.
+- **`cli.py`** — the terminal client: REPL, argv, slash commands, model picker, rendering. Gates identically to the web; a terminal session dies with its terminal and is never resurrected. → `docs/cli.md`
+- **`prompt.py`** — the boxed input UI, a small prompt_toolkit `Application` (not `PromptSession`) because the footer-under-input layout requires it. → `docs/cli.md`
+- **`aliases.py`** — user aliases expanded BEFORE the approval gate, so the gate parses the real command and not an opaque name. → `docs/cli.md`
+- **`notify.py`** — Pushover sending; unconfigured or failing is a silent no-op that never raises into the approval path. → `docs/cli.md`
 - **`server.py`** — `aish-web`: the same Agent behind a Starlette WebSocket instead of a TTY. The approval gate is unchanged; only the transport differs. → `docs/web-server.md`
 - **`aish/static/`** — the vanilla-JS frontend (no build step, iOS-styled). → `docs/web-frontend.md`
 - **`pty_session.py`** — the PTY behind the one global interactive console. The model has NO write path to it, by construction. → `docs/web-server.md`
@@ -87,7 +91,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`tool_plugins.py`** — droppable `TOOL.md` plugin tools, indistinguishable from native ones to the model and gated by the same `_dispatch`. → `docs/tools-layer.md`
 - **`secrets.py`** — local secret store backed by the macOS login Keychain; structurally un-committable. → `docs/tools-layer.md`
 - **`export.py`** — local Markdown → PDF for the web UI; the text never leaves the machine. → `docs/export-pdf.md`
-- **`dir_ignore.py`** — the configurable gitignore-style ignore list shared by the web folder browser and @-file completion (#87), user-editable via config.toml `[directory_picker] ignore` (defaults written back so they're visible, mirroring aliases.py; malformed config degrades to defaults, never an empty picker). Matching is deliberately name-level `fnmatch` on basenames (trailing `/` = dirs only) — a pure in-memory filter that must never add a per-subfolder stat (that caused the #86 freeze).
+- **`dir_ignore.py`** — the configurable gitignore-style ignore list shared by the web folder browser and @-file completion. Name-level `fnmatch` on basenames only — it must never add a per-subfolder stat. → `docs/cli.md`
 
 Startup safety: launching either entry point from `$HOME` re-anchors the session to `~/aish` (`cli.default_workspace`, also used by `create_app`) so the home tree never becomes the auto-approval root; explicit `cwd` overrides are respected.
 
