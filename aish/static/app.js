@@ -1327,7 +1327,7 @@ function onSessionState(event) {
     showToast(`${label}: task finished — swipe from the left edge to switch back`);
     notify("aish — background task finished", event.title || event.session);
   }
-  noteAttention(event.session, event.state);
+  noteAttention(event.session, event.state, event.title);
   if (railIsOpen()) send({ type: "sessions", query: $("sessions-search").value });
 }
 
@@ -9038,36 +9038,81 @@ function partitionSessions(sessions, state) {
 // The MIRROR is deliberately not a source (L4): its rows carry a lagging `ts`
 // and cannot see liveness at all (`state: ""`), so a cached list painting the
 // rail must leave the badge alone rather than briefly claim a count it is not
-// entitled to.
+// entitled to. The traffic runs the OTHER way instead — see `railRows`.
 const attentionSessions = new Set();
 let attentionRows = []; // last AUTHORITATIVE rows; the mirror's never land here
 
 // Rows from the server, wholesale (a session_list, or a hello's recency list).
-// Only the three fields the decision reads are kept — this is a ledger for the
-// badge, not a second copy of the rail's model.
+// Kept WHOLE, not reduced to the three fields the count reads: these are the
+// best rows this device holds, and `railRows` renders them when the mirror
+// cannot.
 function setAttentionRows(rows) {
-  attentionRows = (rows || []).map((info) => ({
-    name: info.name,
-    ts: info.ts,
-    state: info.state || "",
-  }));
+  attentionRows = (rows || []).filter((info) => info && info.name).map((info) => ({ ...info }));
   refreshBadge();
 }
 
 // One chat's state, pushed while you are elsewhere. Stamped with THIS device's
 // clock deliberately: `sessionUnread` compares it against the seen map, which
 // is this device's clock too, so a push cannot be read as already-seen by a
-// server whose clock runs behind.
-function noteAttention(name, state) {
+// server whose clock runs behind. The push carries a title, so a chat this
+// device has never listed is still renderable when the count names it.
+function noteAttention(name, state, title) {
   if (!name) return;
   const row = attentionRows.find((info) => info.name === name);
   if (row) {
     row.ts = Date.now() / 1000;
     row.state = state || "";
+    if (title) row.title = title;
   } else {
-    attentionRows.push({ name, ts: Date.now() / 1000, state: state || "" });
+    attentionRows.push({ name, title: title || "", ts: Date.now() / 1000, state: state || "" });
   }
   refreshBadge();
+}
+
+// THE COUNT'S OWN ROWS ARE ALWAYS RENDERABLE. This is the other half of the
+// fix above, and without it the first half reads as a worse bug than the one it
+// replaced (#203 follow-up).
+//
+// The rail paints from the offline mirror FIRST — that is what makes a swipe
+// instant and what makes it work with no socket at all. But a mirror row cannot
+// carry liveness (`state: ""`, by its own admission) and its `ts` is as old as
+// the last sync. So a rail painted from the mirror alone has NO `Active now`
+// band — it structurally cannot know a chat is running — and can miss the very
+// chat the count is counting, whose stamp moved after the last sync. Once the
+// count became authoritative and the list did not, the two visibly disagreed:
+// the badge said 1 and the list you opened to answer it was empty.
+//
+// It is not a race you can win by waiting. On a phone the socket is usually
+// still reconnecting when the rail opens, and `requestSessions` deliberately
+// does not even ASK while it is down — so the mismatch lasts as long as the
+// reconnect does.
+//
+// So the authoritative rows are laid OVER the cached ones for the two facts
+// that decide a band, and any the mirror has never synced are appended rather
+// than dropped: the count can never name a chat that is nowhere on screen. The
+// mirror keeps everything the server row has no opinion about (snippet, cwd,
+// pin). Search is exempt from the APPEND half only — ranked results are an
+// answer to a question, and a row that does not match it is not an omission.
+function railRows(cached, searching) {
+  const live = new Map(attentionRows.map((info) => [info.name, info]));
+  const merged = (cached || []).map((row) => {
+    const known = live.get(row.name);
+    if (!known) return row;
+    live.delete(row.name);
+    return {
+      ...row,
+      state: known.state || "",
+      ts: Math.max(Number(known.ts) || 0, Number(row.ts) || 0),
+      title: row.title || known.title || "",
+    };
+  });
+  if (searching) return merged;
+  for (const known of live.values()) merged.push({ ...known, snippet: "", cwd: "" });
+  // The bands below `Needs you` are date buckets, which only read as buckets
+  // while the rows descend — an appended row would otherwise land under
+  // whatever heading happened to be open when it was pushed on.
+  merged.sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
+  return merged;
 }
 
 function refreshBadge() {
@@ -9098,23 +9143,31 @@ let lastSessionEvent = null; // last session_list, so re-renders work offline
 // instead of after a round trip; offline it is the only source, and search
 // keeps working because the ranking is a port of the server's own tiers
 // (offlineRank) rather than a different, weaker matcher.
+//
+// What it paints is the mirror UNDER the best rows this device holds
+// (`railRows`) — a mirror row cannot see liveness, so on its own it renders a
+// rail with no `Active now` band and no sign of whatever the count is counting.
 async function renderOfflineSessions(query) {
   const metas = await offlineList();
-  if (!metas.length) return false;
+  const cached = offlineRank(metas || [], query || "").map((meta) => ({
+    name: meta.name,
+    title: meta.title,
+    snippet: meta.snippet,
+    ts: meta.ts,
+    state: "", // liveness is a server fact; a mirror can only lie about it
+    cwd: "",
+    origin: meta.origin,
+    pinned: meta.pinned,
+  }));
+  // Not `metas.length`: a device that has connected but never finished a sync
+  // still has rows worth painting, and they are the ones the count names.
+  const sessions = railRows(cached, Boolean((query || "").trim()));
+  if (!sessions.length) return false;
   renderSessions({
     type: "session_list",
     current: currentSession,
     fromCache: true,
-    sessions: offlineRank(metas, query || "").map((meta) => ({
-      name: meta.name,
-      title: meta.title,
-      snippet: meta.snippet,
-      ts: meta.ts,
-      state: "", // liveness is a server fact; a mirror can only lie about it
-      cwd: "",
-      origin: meta.origin,
-      pinned: meta.pinned,
-    })),
+    sessions,
   });
   return true;
 }
