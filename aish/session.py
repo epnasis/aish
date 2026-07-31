@@ -43,6 +43,27 @@ _NOTE_MARKERS = (
 )
 
 
+def record_epoch(record: dict) -> int | None:
+    """A log record's own timestamp as epoch SECONDS, for the `at` a replayed
+    transcript renders (#200).
+
+    Every record has carried an ISO stamp since the first version of this file,
+    so a chat written years ago gets its timestamps back with no migration —
+    which is what made this cheap. Sent as epoch rather than the ISO string
+    because that string has no timezone: a browser would read it as ITS OWN
+    local time, so a phone away from the server's timezone would silently
+    display the wrong hour. Unparseable stamps return None and simply render
+    nothing, never a wrong time.
+    """
+    raw = record.get("ts")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return int(datetime.datetime.fromisoformat(raw).timestamp())
+    except ValueError:
+        return None
+
+
 def synthetic_kind(content: str) -> str:
     """Classify a user message aish wrote itself: `"resume"` for a synthetic
     turn that really did start a task (rendered as a system row, never as a
@@ -557,6 +578,14 @@ class SessionLog:
                     event = {"type": "user", "text": content}
                     if synthetic:
                         event["synthetic"] = synthetic
+                    # WHEN this turn happened (#200), deliberately under `at`
+                    # and not `ts`: on a live event `ts` means "this turn is
+                    # starting now" and drives the trace card's clock, and cold
+                    # replay must never look like a running turn. Two names,
+                    # two meanings, no entanglement.
+                    at = record_epoch(record)
+                    if at:
+                        event["at"] = at
                     events.append(event)
                     open_turn = True
             elif kind == "message" and record.get("role") == "assistant":

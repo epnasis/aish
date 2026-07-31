@@ -1079,7 +1079,7 @@ function handle(event) {
         ? null
         : event.synthetic
           ? addSystemMsg(event.synthetic, event.text)
-          : addUserMsg(event.text);
+          : addUserMsg(event.text, event.at);
       // Your own message always comes into view, even if you were scrolled up.
       if (!replaying) scrollToEnd(true);
       break;
@@ -3087,12 +3087,49 @@ function addSystemMsg(kind, text) {
 }
 // [SYNTHETIC-END]
 
-function addUserMsg(text) {
+// [MSG-STAMP-START]
+// When a turn happened (#200). Absolute, never relative: a rail row is
+// re-rendered every time you open the list, so "2m" there stays true, but a
+// transcript line is written once and read minutes or months later — "2m" would
+// become a lie the moment you looked away. The date appears only when it is not
+// today, which is the chat-app convention and keeps the common case to four
+// characters.
+function messageStamp(atSeconds) {
+  const ms = (Number(atSeconds) || 0) * 1000;
+  if (!ms) return "";
+  const date = new Date(ms);
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  const today = dayStart(Date.now());
+  const day = dayStart(ms);
+  if (day >= today) return time;
+  if (day >= today - 6 * DAY_MS) return `${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  return `${date.toLocaleDateString([], { day: "numeric", month: "short" })} ${time}`;
+}
+
+// It goes on the turn's OPENING message, once — not on both halves. A turn's
+// two messages are seconds apart, so stamping the answer as well would print
+// the same time twice for one exchange; and the answer's row already carries
+// how LONG it took, which composes into a whole story: asked at 14:32, took 12s.
+function stampTurn(tools, at) {
+  const text = messageStamp(at);
+  if (!text) return;
+  const stamp = document.createElement("span");
+  stamp.className = "msg-stamp";
+  stamp.textContent = text;
+  // PREPENDED, so the chips keep the trailing edge they have always had: the
+  // row is right-packed, and appending would have shoved every familiar control
+  // leftwards to make room for something you only read occasionally.
+  tools.prepend(stamp);
+}
+// [MSG-STAMP-END]
+
+function addUserMsg(text, at) {
   const el = addMsg("user", text);
   const tools = document.createElement("div");
   tools.className = "user-tools";
   const getText = () => stripAttachmentNotes(el.textContent);
   tools.append(reuseChip(getText), copyChip(getText, "copy prompt"));
+  stampTurn(tools, at);
   messagesEl.appendChild(tools);
   return el;
 }
@@ -4455,6 +4492,32 @@ function scrollToAnswerTop(el) {
   messagesEl.scrollTo({ top, behavior: "smooth" });
 }
 
+// The chip is worth showing only when the answer is TALLER than the transcript
+// viewport. If it fits, then whenever you can see its tool row you can already
+// see its first line — so the button would scroll nowhere, which reads as
+// broken rather than as "nothing to do". Height-vs-viewport is the whole test:
+// scroll position never enters it, because a fitting answer whose bottom you
+// are looking at necessarily has its top on screen too.
+//
+// Watched rather than measured once: images, fonts and the reading-size stepper
+// all change an answer's height after it is built. Guarded because the
+// choreography sandboxes have no ResizeObserver.
+const answerFitWatcher = typeof ResizeObserver === "function"
+  ? new ResizeObserver((entries) => { for (const e of entries) syncAnswerTopChip(e.target); })
+  : null;
+
+function syncAnswerTopChip(answerEl) {
+  const chip = answerEl.querySelector(".answer-top");
+  if (!chip) return;
+  // Compared against the bare viewport height: an answer exactly as tall as the
+  // viewport HAS its first line on screen when you can see its last, so there is
+  // nothing to jump to. ANSWER_TOP_GAP is breathing room for the scroll target,
+  // not part of "does this fit" — folding it in here would keep the chip on a
+  // fitting answer just to scroll it eight pixels, which is the "feels like it
+  // didn't work" this exists to remove.
+  chip.hidden = answerEl.offsetHeight <= messagesEl.clientHeight;
+}
+
 function answerTopChip(el) {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -4516,18 +4579,30 @@ function attachAnswerTools(el, source, prompt) {
     lastRegenBtn = regen;
   }
   tools.appendChild(copyChip(() => source, "copy answer"));
-  // Last of the buttons, and `margin-left: auto` puts it (and the timing
-  // readout that follows) at the right edge — apart from the cluster that acts
-  // ON the answer, because this one navigates. See [ANSWER-TOP].
-  tools.appendChild(answerTopChip(el));
+  // The trailing group: readouts first, then jump-to-top LAST, hard against the
+  // right edge. Grouped rather than letting each element claim its own auto
+  // margin — two auto margins split the slack and would park the readout
+  // mid-row — and, more importantly, because the chip must sit in the SAME
+  // place on every answer. A control you reach for constantly cannot shift
+  // left and right depending on whether that particular answer happened to
+  // record a duration. See [ANSWER-TOP].
+  const end = document.createElement("span");
+  end.className = "tools-end";
   if (answerTiming) {
     const timing = document.createElement("span");
     timing.className = "answer-timing";
     timing.textContent = fmtSecs(answerTiming);
-    tools.appendChild(timing);
+    end.appendChild(timing);
     answerTiming = 0; // one readout per answer
   }
+  end.appendChild(answerTopChip(el));
+  tools.appendChild(end);
   el.appendChild(tools);
+  // Measured only once the row is IN the answer: run before that and the height
+  // read back is the answer without its own tool row — and, for a fresh element,
+  // often no layout at all, so a short answer kept a chip that did nothing.
+  syncAnswerTopChip(el);
+  if (answerFitWatcher) answerFitWatcher.observe(el); // …and again as it grows
 }
 
 function buildTtsBox(el) {

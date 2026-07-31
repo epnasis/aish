@@ -277,7 +277,9 @@ this UI. Highlights:
   travels with whichever button you press — *approve + comment* means "rework it
   this way and re-propose", *deny + comment* means "stop and explain".
 - **Nothing lost on a locked phone.** Reconnecting replays the transcript,
-  including any approval still waiting. Survives server restarts too.
+  including any approval still waiting. Survives server restarts too. Every turn
+  carries the time it happened — including chats from long before the feature
+  existed, since the logs always recorded it.
 - **Parallel sessions.** Several chats open at once, each with its own agent,
   model, directory, and running task; live badges for running / needs-approval,
   a toast when a background task finishes. Chats live in a **session rail** —

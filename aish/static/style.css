@@ -840,9 +840,24 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .msg-tools > .copy-chip { width: 40px; height: 40px; border-radius: 10px; }
 /* Jump-to-start sits at the far right, apart from the cluster of things that
-   act ON the answer — it navigates instead. `margin-left: auto` claims the
-   slack, so it stays pinned to the edge however many chips precede it. */
-.msg-tools > .answer-top { margin-left: auto; }
+   act ON the answer — it navigates instead.
+   The trailing group: readouts, then jump-to-top pinned to the right edge. One
+   auto margin on the GROUP, so the chip's position never depends on whether
+   this particular answer recorded a duration. */
+.tools-end { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+/* `hidden` alone loses to the chip's own display rule, so say it explicitly. */
+.tools-end > .answer-top[hidden] { display: none; }
+/* When the turn happened (#200). Dim, small, and pushed to the trailing edge of
+   the prompt's own tool row — present when you look for it, silent when you are
+   reading. The user row is right-aligned already, so `margin-left: auto` keeps
+   it hard against the bubble's edge whatever chips precede it. */
+.msg-stamp {
+  padding-right: 8px;
+  color: var(--dim);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .msg-tools > .copy-chip svg { width: 19px; height: 19px; }
 .regen-chip {
   display: flex;
@@ -863,6 +878,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 /* copy chip under your own prompt bubble, right-aligned with it */
 .user-tools {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   margin: -8px -8px 12px 0; /* optical: pull up to the bubble, align to its edge */
 }
@@ -2309,7 +2325,20 @@ body.kb-open .rail-searchbar { padding-bottom: 7px; }
 }
 #sessions-new svg { width: 24px; height: 24px; }
 #sessions-new:active { opacity: 0.5; }
-#session-rail .sheet-list { flex: 1; padding: 0 6px; }
+#session-rail .sheet-list {
+  flex: 1;
+  padding: 0 6px;
+  /* The drag that opens or closes the rail is horizontal, but a thumb pivots
+     from a fixed knuckle, so it arcs — and the list underneath was happily
+     scrolling along that arc while the panel slid sideways. `pan-y` makes the
+     BROWSER refuse to scroll a gesture it judged horizontal at its start, which
+     is the only reliable place to decide it: once a scroll is handed to the
+     compositor no amount of preventDefault takes it back (and this listener is
+     passive by design — a blocking touchmove on a scroller is the phone's
+     biggest jank source). Vertical-started gestures still scroll; our own
+     handler stands down for those. Same mechanism #messages uses. */
+  touch-action: pan-y;
+}
 
 /* Docked: the panel stops being a mode — it is simply always there, and the app
    shell is inset to make room.

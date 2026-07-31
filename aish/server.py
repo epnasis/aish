@@ -483,7 +483,12 @@ def _turn_event(text: str) -> dict[str, Any]:
     """The `user` transcript event for text the HUMAN typed — never classified as
     synthetic, because what you type is yours (#171). See `_user_event` for what
     `ts` is for; it is the one thing both flavours share."""
-    return {"type": "user", "text": text, "ts": int(time.time())}
+    now = int(time.time())
+    # `ts` is the turn's clock origin (see _user_event); `at` is when it
+    # happened, which the transcript renders. Same number here, different
+    # meanings — and `at` is the one cold replay also carries (#200), which is
+    # why they are not one field.
+    return {"type": "user", "text": text, "ts": now, "at": now}
 
 
 def _user_event(text: str, synthetic: str = "") -> dict[str, Any]:

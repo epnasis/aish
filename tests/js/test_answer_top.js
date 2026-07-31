@@ -92,4 +92,41 @@ function world({ scrollTop, answerTop }) {
   ok("an answer below the fold scrolls down to it", w.scrolls[0].top === 992);
 }
 
+// ---- when the chip should exist at all ------------------------------------
+// A button that visibly does nothing reads as broken, not as "nothing to do".
+{
+  function fitWorld({ answerHeight, viewportHeight }) {
+    const chip = { className: "answer-top", hidden: false };
+    const answerEl = {
+      offsetHeight: answerHeight,
+      querySelector: (sel) => (sel === ".answer-top" ? chip : null),
+    };
+    const sandbox = {
+      messagesEl: {
+        clientHeight: viewportHeight,
+        scrollTop: 0,
+        getBoundingClientRect: () => ({ top: 0 }),
+        scrollTo() {},
+      },
+      Math,
+      ResizeObserver: undefined,
+      document: { createElement: () => ({ appendChild() {}, setAttribute() {} }) },
+      svgIcon: () => ({}),
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(extract("// [ANSWER-TOP-START]", "// [ANSWER-TOP-END]"), sandbox);
+    sandbox.syncAnswerTopChip(answerEl);
+    return chip;
+  }
+
+  ok("an answer taller than the viewport keeps the chip",
+    fitWorld({ answerHeight: 4000, viewportHeight: 700 }).hidden === false);
+  ok("an answer that fits on screen hides it — its first line is already visible",
+    fitWorld({ answerHeight: 300, viewportHeight: 700 }).hidden === true);
+  ok("…and one exactly the viewport's height hides it too (nowhere to scroll)",
+    fitWorld({ answerHeight: 700, viewportHeight: 700 }).hidden === true);
+  ok("a hair taller than the viewport shows it again",
+    fitWorld({ answerHeight: 760, viewportHeight: 700 }).hidden === false);
+}
+
 console.log(`test_answer_top.js: ${passed} ok — all checks passed`);

@@ -80,6 +80,11 @@ function makeSandbox() {
     lastUserPrompt: "",
     currentTrace: null,
     document: { createElement: fakeElement },
+    // The turn's timestamp (#200) rides the prompt's tool row.
+    dayStart: (ms) => ms,
+    DAY_MS: 86400000,
+    Date,
+    Number,
     offlineSyncSoon: () => {},
   };
   vm.createContext(sandbox);
@@ -89,7 +94,9 @@ function makeSandbox() {
   const snippet =
     extract("// [SYNTHETIC-START]", "// [SYNTHETIC-END]").replace(/\bconst\b/g, "var") +
     "\n" +
-    extract("function addUserMsg(text) {", "function addAnsiMsg") +
+    extract("// [MSG-STAMP-START]", "// [MSG-STAMP-END]").replace(/\bconst\b/g, "var") +
+    "\n" +
+    extract("function addUserMsg(text, at) {", "function addAnsiMsg") +
     "\n" +
     extract("function addMsg(kind, text) {", "// The prompt that started") +
     "\n" +

@@ -20,6 +20,7 @@ from starlette.testclient import TestClient
 
 import aish.notify as notify_module
 import aish.server as server_module
+import aish.session as session_module
 from aish.agent import DENIED_RESULT, WRITE_DENIED
 from aish.server import SESSION_TITLE_PROMPT, TITLE_PROMPT, create_app
 from aish.session import SessionLog, synthetic_kind
@@ -5584,7 +5585,11 @@ class TestOfflineMirror:
             stale = client.get(f"{url}&since={first['total']}&sig=deadbeef").json()
 
         assert delta["base"] == first["total"]
-        assert delta["events"][0] == {"type": "user", "text": "second"}
+        opening = delta["events"][0]
+        assert opening["type"] == "user" and opening["text"] == "second"
+        # Replayed turns carry WHEN they happened (#200), rebuilt from the log
+        # record's own stamp — which is why old chats get timestamps too.
+        assert opening["at"] > 0
         assert delta["events"][-1]["result"] == "answer two"
         assert delta["total"] == first["total"] + len(delta["events"])
 
@@ -5623,3 +5628,46 @@ class TestOfflineMirror:
         events = server_module.offline_events(path)
         assert [e["type"] for e in events] == ["history"]
         assert events[0]["messages"][0]["content"] == "old question"
+
+
+class TestTurnTimestamps:
+    """When a turn happened (#200), on BOTH paths.
+
+    The data was always on disk — `_write_line` has stamped every record with an
+    ISO timestamp since the first version of session.py — so this is a read, not
+    a migration, and chats written long before the feature get their times back.
+
+    It rides `at`, deliberately NOT `ts`: on a live event `ts` means "this turn
+    is starting now" and drives the trace card's clock, and cold replay must
+    never look like a running turn (see `_user_event`). Two names, two meanings.
+    """
+
+    def test_a_live_turn_says_when_it_happened(self, app_env):
+        client, _ = make_client(app_env, [model_says("done")])
+        with client, connected(client) as (ws, _hello, _):
+            before = int(time.time())
+            ws.send_json({"type": "task", "text": "what time is it"})
+            user = recv_until(ws, "user")
+            recv_until(ws, "done")
+        assert user["at"] >= before
+        # …and the clock origin is still its own field, untouched.
+        assert user["ts"] >= before
+
+    def test_a_replayed_turn_says_when_it_happened(self, app_env):
+        client, _ = make_client(app_env, [model_says("done")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "what time is it"})
+            recv_until(ws, "done")
+            name = hello["session"]
+        events = SessionLog.reconstruct_events(app_env["state_dir"] / name)
+        user = next(e for e in events if e["type"] == "user")
+        assert user["at"] > 0
+        # A cold transcript must never look like a turn in flight: `ts` is the
+        # live clock's origin and replay does not carry it.
+        assert "ts" not in user
+
+    def test_an_unparseable_stamp_renders_nothing_rather_than_a_wrong_time(self):
+        assert session_module.record_epoch({"ts": "not a date"}) is None
+        assert session_module.record_epoch({}) is None
+        assert session_module.record_epoch({"ts": ""}) is None
+        assert session_module.record_epoch({"ts": "2026-07-31T09:53:27"}) > 0
