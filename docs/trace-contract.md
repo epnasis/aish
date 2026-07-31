@@ -1,6 +1,6 @@
 # The trace contract
 
-**Status:** specification, partially built. **#192 (2026-07-31) implemented §1.2, §1.3, §2, §3.4, §3.5, and the §3.7 near-duplicate half**, closing §6.7 and §6.13. Everything else is still unbuilt. Two `verdict_by` values were added during that build and are marked inline in §3.4.
+**Status:** specification, partially built. **#192 (2026-07-31) implemented §1.2, §1.3, §2, §3.4, §3.5, and the §3.7 near-duplicate half**, closing §6.7 and §6.13. Two `verdict_by` values were added during that build and are marked inline in §3.4. **#191 (2026-07-31) implemented §3.1, §3.2 and the rule half of §3.3** — the `rule.*` gate ids only; the twelve hardcoded gates in §6 still log what they logged before, since extracting them is deferred (see `docs/rules-engine.md`). Its verdicts are Tier 0 throughout, so §7's counters are not yet due — the records are shaped so the scan is a pure function over the log when the first scored trigger arrives. Everything else is still unbuilt.
 **Scope:** what #191, #192, #193, #194 and #196 must write to the session log so that #197 can answer *"what governed this turn, what fired, what didn't, and why?"* from the log alone.
 **Gate:** phase 1 of #190's build order. A binding that ships without logging its evidence, or a gate that ships without logging which tier decided, makes that question unanswerable forever for everything built before someone notices. Retrofitting it is how #183's calibration problem ended up costing a 481-call audit.
 
