@@ -736,17 +736,13 @@ class SessionLog:
     def pager_titles(state_dir: Path, limit: int = 30) -> list[tuple[str, str, str, float]]:
         """(name, title, origin, ts) pages for the web UI's swipe pager: the
         `limit` most recent chats that have a title, same recency ordering as the
-        drawer, flipped oldest→newest so back = older. Chats with no user input
-        yet are not pages — the cap applies after skipping them, so blank files
-        can never crowd real chats out of the pager. The origin rides along so
-        the pager can page within the Recent/Automated lane the chat belongs to
-        (#160), matching the Sessions screen's tabs.
+        rail, flipped oldest→newest. Chats with no user input yet are not rows —
+        the cap applies after skipping them, so blank files can never crowd real
+        chats out. The origin rides along so a row can show its provenance.
 
-        `ts` is the last-interaction mtime, the same stamp `list_sessions` reports.
-        The client's working-set deck seeds from whichever list it has, and it
-        filters candidates by age — with no stamp here every pager page read as
-        undated and was discarded, so a launch that never opened the Sessions
-        drawer seeded nothing and left the swipe pager with a single page."""
+        Carried on every hello, which is what lets the client warm the chats a
+        switch is most likely to land on without first opening the rail. `ts` is
+        the last-interaction mtime, the same stamp `list_sessions` reports."""
         pages = []
         for path in SessionLog._by_recency(state_dir):
             title, origin = SessionLog._peek(path)

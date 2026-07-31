@@ -31,21 +31,10 @@ const { ok, report } = checks();
 // array:   also flag in-place mutation (push/splice/…), which assignment
 //          detection alone would miss.
 const OWNED = {
-  swipeInFrom: {
-    owners: ["UNPARK"],
-    instead: "call parkTranscript() / reconcilePager()",
-    why: "the parked transcript is the pager's one invariant: an idle transcript is on screen",
-  },
   ws: {
     owners: ["CONNECT-WIRE", "RETIRE"],
     instead: "call connect() (and let retireSocket() dispose the predecessor)",
     why: "a socket assigned without disposing the one it replaces double-feeds the dispatcher (#179)",
-  },
-  deck: {
-    owners: ["DECK-STATE", "DECK-GONE"],
-    array: true,
-    instead: "call ensureCurrentInDeck() / removeFromWorkingSet() / dropGoneSessions()",
-    why: "the working set decides which chats a swipe can reach; a stray writer strands or resurrects pages",
   },
   currentSession: {
     owners: ["SESSION-ENTER"],
@@ -54,11 +43,11 @@ const OWNED = {
       + " (fingerprint, title, remembered session, URL, mirror bookkeeping), so a switch left the"
       + " screen and the state naming different chats",
   },
-  pendingForkParent: {
-    owners: ["DECK-STATE"],
-    instead: "call noteForkIntent() / forkParent()",
-    why: "a fork's deck anchor is a promise with a deadline; a writer that clears it on an"
-      + " unrelated event loses the placement it was recorded for",
+  seenAt: {
+    owners: ["SEEN"],
+    instead: "call markSeen(name) / forgetSeen(name)",
+    why: "the seen map is what makes a chat unread, which is what puts it in the rail's"
+      + " attention band; a stray writer either hides activity or flags read chats forever",
   },
   viewFp: {
     owners: ["SESSION-ENTER", "REPLAY-LANDING"],

@@ -46,7 +46,7 @@
   <div id="nav-row">
     <button id="back-chip" class="nav-back" title="sessions" aria-label="sessions">
       <span class="back-ico">
-        <svg viewBox="0 0 24 24"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg viewBox="0 0 24 24"><path d="M4.5 7h15M4.5 12h15M4.5 17h9" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/></svg>
         <span id="back-badge" hidden></span>
       </span>
       <span class="back-label">Sessions</span>
@@ -137,10 +137,6 @@
     <svg viewBox="0 0 24 24"><path d="M9 9h9v11H9zM6 15H4V4h9v2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
     Copy log path
   </button>
-  <button class="menu-item" data-act="unrecent">
-    <svg viewBox="0 0 24 24"><path d="M12 21a9 9 0 1 0-9-9m0 0V6.5M3 12h5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    Remove from working set
-  </button>
   <button class="menu-item" data-act="reconnect">
     <svg viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 0 1 12.8-5.3M19.5 12a7.5 7.5 0 0 1-12.8 5.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.6 4.3v3.7H14M6.4 19.7V16H10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
     Reconnect
@@ -174,12 +170,6 @@
     <div class="welcome-logo" aria-hidden="true"><span class="wl-a">a</span><span class="wl-gt">&gt;</span></div>
     <h1 class="welcome-title">How can I help?</h1>
   </div>
-</div>
-
-<div id="swipe-hint" hidden>
-  <svg class="chev-left" viewBox="0 0 24 24"><path d="M14.5 6 9 12l5.5 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-  <span id="swipe-hint-title"></span>
-  <svg class="chev-right" viewBox="0 0 24 24"><path d="M9.5 6 15 12l-5.5 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
 </div>
 
 <button id="scroll-down" hidden aria-label="scroll to bottom">
@@ -330,26 +320,17 @@
 </div>
 
 <!-- sessions drawer -->
-<div id="sessions-sheet" class="screen" hidden>
-  <div class="screen-head">
-    <div class="screen-title-row">
-      <div class="screen-title">Sessions</div>
+<!-- Session rail (the left slide-over). Not a ".screen": a full-page list
+     would be a second navigation model, and this same panel docks open as a
+     permanent sidebar at a wide viewport. The scrim is the dismiss target and
+     the thing that says "you are still in that chat". -->
+<div id="rail-scrim"></div>
+<aside id="session-rail" aria-label="sessions">
+  <div class="rail-head">
+    <div class="rail-title-row">
+      <div class="rail-title">Chats</div>
       <button id="sessions-new" class="bar-btn icon" title="new chat" aria-label="new chat">
         <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
-      </button>
-    </div>
-    <!-- tabs under the title: a segmented control switching between your chats
-         and automated (triggered) sessions, each carrying live running /
-         needs-approval counters so attention is visible at a glance. Hidden
-         while searching (ranked results are a flat list). -->
-    <div id="sessions-tabs" class="seg-tabs" role="tablist">
-      <button id="tab-recent" class="seg-tab" role="tab" data-tab="recent" aria-selected="true">
-        <span class="seg-label">Chats</span>
-        <span class="seg-counts" id="tab-recent-counts"></span>
-      </button>
-      <button id="tab-automated" class="seg-tab" role="tab" data-tab="automated" aria-selected="false">
-        <span class="seg-label">Automation</span>
-        <span class="seg-counts" id="tab-automated-counts"></span>
       </button>
     </div>
   </div>
@@ -357,13 +338,13 @@
   <!-- search docked at the bottom, within thumb reach (iOS 15+ Safari model).
        body.kb-open shrinks the fixed body to the visual viewport, so this bar
        rides above the keyboard instead of hiding behind it. -->
-  <div class="screen-searchbar">
-    <div class="screen-search">
+  <div class="rail-searchbar">
+    <div class="rail-search">
       <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-      <input id="sessions-search" type="search" placeholder="Search sessions">
+      <input id="sessions-search" type="search" placeholder="Search chats">
     </div>
   </div>
-</div>
+</aside>
 
 <!-- model sheet -->
 <div id="model-sheet" class="sheet" hidden>

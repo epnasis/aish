@@ -59,7 +59,7 @@ function extract(src, start, end) {
  *  Function declarations are deliberately left ALONE: rewriting them to
  *  `var f = function f` both loses hoisting and turns any `}` followed by an
  *  IIFE into a call on the assignment (`var f = function(){}(function g(){})()`
- *  — how loading the deck block first failed). */
+ *  — how loading a state block before its owner failed). */
 function surface(code) {
   return code.replace(/(^|\n)(?:const|let) /g, "$1var ");
 }
@@ -372,7 +372,7 @@ function fakeStorage({ throws = false } = {}) {
  *
  * [SESSION-ENTER] is loaded for you (it is the owner under test in every
  * scenario); load whatever else a scenario drives — onHello, commitPage,
- * offlineFirstPaint, the deck — with `w.load(...)`, and pass real
+ * offlineFirstPaint — with `w.load(...)`, and pass real
  * implementations through `globals` where a recorder would hide the answer.
  * Anything loaded later shadows a recorder of the same name, which is how a
  * scenario opts into the REAL ensureCurrentInDeck.
@@ -425,13 +425,12 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       clientBusy: false,
       renderedAnswers: 0,
       // app state a hello walks over
-      pagerSessions: [],
+      recentSessions: [],
       cmdHistory: [],
       currentLogPath: "",
       taskErrored: false,
       consoleOpen: false,
       offlineMode: false,
-      swipeInFrom: 0,
       PAGE_REV: "rev1",
       FIRST_PAINT_GRACE_MS: 250,
       // collaborators: recorded, so a scenario can assert that the rest of a
@@ -448,9 +447,9 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       updateEmptyHint: spy("updateEmptyHint"),
       renderWorkspace: spy("renderWorkspace"),
       schedulePeeks: spy("schedulePeeks"),
-      maybeSeedDeck: spy("maybeSeedDeck"),
-      ensureCurrentInDeck: spy("ensureCurrentInDeck"),
-      reconcileDeck: spy("reconcileDeck"),
+      markSeen: spy("markSeen"),
+      requestSessions: spy("requestSessions"),
+      railIsOpen: spy("railIsOpen", () => false),
       openConsole: spy("openConsole"),
       reloadThrottled: spy("reloadThrottled"),
       showToast: spy("showToast"),

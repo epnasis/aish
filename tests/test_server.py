@@ -1978,13 +1978,10 @@ class TestSessions:
             assert [p["name"] for p in hello["pager"]] == [first]
 
     def test_every_pager_page_carries_a_usable_timestamp(self, app_env):
-        # The client's working-set deck seeds from the pager and filters seed
-        # candidates by age, so an undated page is silently discarded. With no
-        # `ts` here, a launch that never opened the Sessions drawer seeded
-        # NOTHING and the swipe pager was left with a single page — swiping
-        # between chats did nothing at all. Every page must carry a real stamp,
-        # including the current chat's synthesized page (the one with no file
-        # activity behind it yet).
+        # The hello's recency list is what the client orders rows and warms
+        # prefetches from, so an undated row is unusable. Every row must carry a
+        # real stamp, including the current chat's synthesized one (which has no
+        # file activity behind it yet).
         client, _ = make_client(app_env, [model_says("ok")])
         with client, connected(client) as (ws, hello, _):
             first = hello["session"]
@@ -2410,86 +2407,6 @@ class TestSessions:
                 error = ws.receive_json()
                 assert error["type"] == "error"
                 assert "no such session" in error["text"]
-
-
-class TestDeckCheck:
-    """The client's swipe deck is per-device localStorage, so it outlives
-    sessions deleted elsewhere — a "phantom page" that used to swallow the
-    swipe aimed at it. `deck_check` answers with ground truth from stat(), so
-    the deck heals WITHOUT ever treating absence from a capped or filtered
-    listing as deletion (the state dir can hold 15x more sessions than the
-    30-page pager window), and the by-name miss error is machine-readable so
-    the client prunes on the code, never on prose."""
-
-    @staticmethod
-    def _write_session(state_dir, stamp, content="a topic"):
-        state_dir.mkdir(parents=True, exist_ok=True)
-        path = state_dir / f"session-20200101-{stamp:06d}-000000.jsonl"
-        path.write_text(
-            json.dumps({"kind": "message", "role": "user", "content": content}) + "\n",
-            encoding="utf-8",
-        )
-        os.utime(path, (1577836800 + stamp, 1577836800 + stamp))
-        return path.name
-
-    def test_missing_and_unsafe_names_reported_gone_alive_files_never(self, app_env):
-        state_dir = app_env["state_dir"]
-        # 33 real chats: more than the pager window lists, so the oldest are
-        # invisible to every capped listing yet must never be called gone —
-        # pruning on that absence would delete most of a long-lived working set.
-        names = [self._write_session(state_dir, i) for i in range(33)]
-        client, _ = make_client(app_env, [])
-        with client, connected(client) as (ws, hello, _):
-            pager_names = {p["name"] for p in hello["pager"]}
-            assert [n for n in names if n not in pager_names], "cap not exceeded"
-            asked = names + ["session-19990101-000000-000000.jsonl", "../../etc/passwd"]
-            ws.send_json({"type": "deck_check", "names": asked})
-            verdict = recv_until(ws, "deck_gone")
-            assert set(verdict["names"]) == {
-                "session-19990101-000000-000000.jsonl",  # deleted: file is gone
-                "../../etc/passwd",  # unresolvable: can never be resumed
-            }
-
-    def test_open_unwritten_session_is_alive(self, app_env):
-        # A brand-new chat records nothing until first use, so it has NO file
-        # yet — but it is open in memory, and the deck member for the chat on
-        # screen must never be pruned out from under the user.
-        client, _ = make_client(app_env, [])
-        with client, connected(client) as (ws, hello, _):
-            current = hello["session"]
-            assert not (app_env["state_dir"] / current).exists()
-            ws.send_json(
-                {
-                    "type": "deck_check",
-                    "names": [current, "session-19990101-000000-000000.jsonl"],
-                }
-            )
-            verdict = recv_until(ws, "deck_gone")
-            assert verdict["names"] == ["session-19990101-000000-000000.jsonl"]
-
-    def test_all_alive_answers_nothing(self, app_env):
-        name = self._write_session(app_env["state_dir"], 1)
-        client, _ = make_client(app_env, [])
-        with client, connected(client) as (ws, _, _):
-            ws.send_json({"type": "deck_check", "names": [name]})
-            ws.send_json({"type": "sessions", "query": ""})
-            event = ws.receive_json()
-            # No deck_gone was queued ahead of the listing: silence means alive.
-            assert event["type"] == "session_list"
-
-    def test_resume_of_missing_session_is_machine_readable(self, app_env):
-        # The frontend prunes the phantom on this code + name; the prose text
-        # is for humans and is not a contract.
-        client, _ = make_client(app_env, [])
-        with client, connected(client) as (ws, _, _):
-            ws.send_json(
-                {"type": "resume", "path": "session-19990101-000000-000000.jsonl"}
-            )
-            error = ws.receive_json()
-            assert error["type"] == "error"
-            assert error["code"] == "no_such_session"
-            assert error["name"] == "session-19990101-000000-000000.jsonl"
-            assert "no such session" in error["text"]
 
 
 class TestPeek:

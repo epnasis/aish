@@ -49,14 +49,12 @@ function socketWorld() {
       viewDirty: false,
       currentSession: null, // read by the real [SESSION-FIREWALL] fence (#182)
       VIEW_SAFE_EVENTS: new Set(["role"]),
-      swipeInFrom: 0,
       updateDot() {},
       setOfflineMode() {},
       offlineSyncSoon() {},
       checkAppVersion() {},
       showToast() {},
       hideBootLoader() {},
-      reconcilePager() { seen.push("reconcilePager"); },
       handle(event) { seen.push(event); },
     },
   });

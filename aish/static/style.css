@@ -20,6 +20,9 @@
      so text gets bigger and REFLOWS within the same width (no horizontal scroll
      like pinch-zoom). Chrome (bars, icons, labels) stays fixed. */
   --fs: 1;
+  /* The session rail's width, in ONE place: the panel is sized by it, and when
+     docked the app shell is inset by it and the rail pulled back by it. */
+  --rail-w: min(86vw, 380px);
   --bg: #000000;
   --bg-elev: #1c1c1e;
   --bg-elev2: #2c2c2e;
@@ -492,37 +495,6 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   color: transparent;
 }
 
-/* ---- swipe pager hint (target session while dragging sideways) ---- */
-#swipe-hint {
-  position: fixed;
-  top: calc(64px + env(safe-area-inset-top));
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 76vw;
-  padding: 8px 14px;
-  border-radius: 999px;
-  background: var(--bg-elev2);
-  color: var(--fg);
-  font-size: 16.1px;
-  font-weight: 500;
-  pointer-events: none;
-  transition: background 0.15s;
-}
-/* display:flex would silently defeat the hidden attribute's display:none */
-#swipe-hint[hidden] { display: none; }
-#swipe-hint svg { width: 16px; height: 16px; flex-shrink: 0; }
-#swipe-hint span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-#swipe-hint.prev .chev-right { display: none; }
-#swipe-hint:not(.prev) .chev-left { display: none; }
-#swipe-hint.commit { background: var(--blue); }
 
 .msg.user {
   background: var(--blue);
@@ -1712,6 +1684,9 @@ body.offline #composer { opacity: 0.55; }
   white-space: nowrap;
 }
 .session-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; padding-top: 1px; }
+/* The stamp shares its line with the pin and the unread dot: stacked in the
+   column above, they crowded the delete control underneath them. */
+.stamp-line { display: flex; align-items: center; gap: 6px; }
 .session-right .stamp { color: var(--dim); font-size: 15px; }
 .session-row .row-delete {
   flex: none;
@@ -1721,19 +1696,20 @@ body.offline #composer { opacity: 0.55; }
   line-height: 0;
 }
 .session-row .row-delete svg { width: 15px; height: 15px; }
-.session-row .row-unrecent {
+.session-row .row-pin {
   flex: none;
-  color: var(--dim);
-  font-size: 18px;
-  line-height: 1;
-  padding: 9px 11px;
-  margin: -7px -9px -7px 0;
-  border-radius: 9px;
+  color: var(--blue);
+  line-height: 0;
 }
-.session-row .row-unrecent:hover { color: var(--fg); }
-.session-row .row-unrecent:active { background: rgba(128, 128, 128, 0.22); }
-/* Marks where the working set (Open) ends and date-grouped history begins (#169). */
-.session-list-divider { height: 0.5px; background: var(--sep); margin: 9px 12px; }
+.session-row .row-pin svg { width: 13px; height: 13px; }
+/* Unread: a dot, the chat-app convention — and the title gains weight, because
+   a colour-only signal is invisible to a chunk of readers. */
+.session-row .unread-dot {
+  flex: none;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--blue);
+}
+.session-row.unread .title { font-weight: 700; }
 .session-row .row-delete.armed {
   color: var(--red);
   font-size: 13.8px;
@@ -1759,10 +1735,8 @@ body.offline #composer { opacity: 0.55; }
 }
 .badge.st-running { color: var(--green); background: var(--green-glow); }
 .badge.st-waiting { color: #fff; background: var(--orange); }
-.badge.origin { color: var(--blue); background: var(--blue-glow); text-transform: uppercase; }
 /* Pinned for offline (#165) — deliberately quiet: it marks a durability
    promise, not something needing attention. */
-.badge.offline-pin { color: var(--dim); background: var(--chip-bg); text-transform: uppercase; }
 .save-toggle { font-size: 15px; color: var(--dim); margin: 0 4px 8px; display: block; }
 
 /* workspace */
@@ -2187,30 +2161,65 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 .queue-chip.cwd .queue-ico { color: var(--blue); }
 
 /* ---- full-page Sessions screen (design Screen 1) ---- */
-.screen {
-  position: fixed; inset: 0; z-index: 30;
-  display: flex; flex-direction: column;
-  background: var(--bg); color: var(--fg);
-  animation: screen-in 0.22s ease-out;
+/* ---- the session rail (left slide-over / docked sidebar) ----------------
+   ONE panel, two widths. Below the dock breakpoint it slides over the chat and
+   the scrim dismisses it; at or above it, it is simply always there and the app
+   shell is inset to make room. A full-screen list would have been a second
+   navigation model — this is the same object either way, which is what makes
+   the desktop layout a media query rather than a rewrite. */
+#session-rail {
+  position: fixed;
+  top: 0; bottom: 0; left: 0;
+  z-index: 30;
+  width: var(--rail-w);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  border-right: 0.5px solid var(--sep);
+  transform: translateX(-100%);
+  transition: transform 0.26s cubic-bezier(0.32, 0.72, 0, 1);
+  /* Closed, it must be unreachable — not merely off-screen — or a stray tap or
+     a Tab key lands inside a panel nobody can see. */
+  visibility: hidden;
+  pointer-events: none;
 }
-.screen[hidden] { display: none; }
-@keyframes screen-in { from { transform: translateX(12%); opacity: 0.4; } to { transform: none; opacity: 1; } }
-.screen-head {
+body.rail-open #session-rail,
+body.rail-dragging #session-rail { visibility: visible; pointer-events: auto; }
+body.rail-open #session-rail { transform: none; }
+/* While a finger drives it, JS owns the transform outright. */
+body.rail-dragging #session-rail { transition: none; }
+
+#rail-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+  background: rgba(0, 0, 0, 0.42);
+  opacity: 0;
+  transition: opacity 0.26s ease;
+  visibility: hidden;
+  pointer-events: none;
+}
+body.rail-open #rail-scrim,
+body.rail-dragging #rail-scrim { visibility: visible; pointer-events: auto; }
+body.rail-open #rail-scrim { opacity: 1; }
+body.rail-dragging #rail-scrim { transition: none; }
+
+.rail-head {
   flex: none;
-  padding: calc(6px + env(safe-area-inset-top)) 20px 10px;
+  padding: calc(6px + env(safe-area-inset-top)) 18px 10px;
   background: var(--bar-bg);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   border-bottom: 0.5px solid var(--sep);
 }
-.screen-title-row { display: flex; align-items: flex-end; justify-content: space-between; }
-.screen-title { font-size: 36.8px; font-weight: 700; letter-spacing: -0.5px; color: var(--fg); }
-/* Search is docked at the BOTTOM of the screen, following the iOS 15+ Safari
-   model: the field lives where the thumb already is, and the list above it
-   stays the whole screen. */
-.screen-searchbar {
+.rail-title-row { display: flex; align-items: flex-end; justify-content: space-between; }
+.rail-title { font-size: 30px; font-weight: 700; letter-spacing: -0.4px; color: var(--fg); }
+/* Search docked at the BOTTOM, following the iOS 15+ Safari model: the field
+   lives where the thumb already is, and the list above it stays the whole rail. */
+.rail-searchbar {
   flex: none;
-  padding: 7px 14px calc(7px + env(safe-area-inset-bottom));
+  padding: 7px 12px calc(7px + env(safe-area-inset-bottom));
   background: var(--bar-bg);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
@@ -2218,46 +2227,40 @@ body.wrap .step-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
 /* The keyboard covers the home-indicator inset, so keeping it would render as
    a dead strip between the field and the keyboard (mirrors #composer). */
-body.kb-open .screen-searchbar { padding-bottom: 7px; }
-.screen-search {
+body.kb-open .rail-searchbar { padding-bottom: 7px; }
+.rail-search {
   display: flex; align-items: center; gap: 7px;
   background: var(--input-bg2); border-radius: 11px; padding: 6px 11px;
 }
-.screen-search svg { width: 16px; height: 16px; flex: none; color: var(--dim); }
-.screen-search input {
+.rail-search svg { width: 16px; height: 16px; flex: none; color: var(--dim); }
+.rail-search input {
   flex: 1; min-width: 0; background: none; border: none; outline: none;
-  color: var(--fg); font-size: 18.4px;
+  color: var(--fg); font-size: 17px;
 }
-.screen-search input::placeholder { color: var(--dim); }
-.screen .sheet-list { flex: 1; padding: 0 6px; }
+.rail-search input::placeholder { color: var(--dim); }
+#session-rail .sheet-list { flex: 1; padding: 0 6px; }
 
-/* ---- Sessions tabs (Recent / Automated) ---------------------------------
-   An iOS segmented control under the screen title; horizontal swipe on the
-   list switches between the same two tabs. */
-.seg-tabs {
-  display: flex; gap: 2px; margin-top: 10px;
-  padding: 2px; border-radius: 10px; background: var(--row-sel-bg);
+/* Docked: the panel stops being a mode — it is simply always there, and the app
+   shell is inset to make room.
+
+   The inset goes on body's padding, the same lever the landscape safe-area
+   inset uses, and the rail needs NO counter-offset: body carries
+   `transform: translateZ(0)` so it IS the containing block for its fixed
+   descendants, but a fixed child resolves its offsets against the containing
+   block's PADDING BOX — whose left edge is body's border edge, i.e. 0. Padding
+   moves the flex children (topbar, transcript, composer) and leaves `left: 0`
+   exactly where it was. Measured, not assumed: pulling the rail back by
+   --rail-w "to compensate" put it entirely off-screen. */
+@media (min-width: 900px) {
+  body { padding-left: calc(env(safe-area-inset-left) + var(--rail-w)); }
+  #session-rail {
+    transform: none;
+    visibility: visible;
+    pointer-events: auto;
+    transition: none;
+  }
+  #rail-scrim { display: none; }
 }
-.seg-tabs[hidden] { display: none; }
-.seg-tab {
-  flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px;
-  padding: 6px 10px; border: none; border-radius: 8px;
-  background: transparent; color: var(--dim);
-  font-size: 15.5px; font-weight: 600; cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.seg-tab[aria-selected="true"] {
-  background: var(--sep2); color: var(--fg);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.32);
-}
-.seg-tab:active { background: var(--bg-elev2); }
-.seg-counts { display: flex; align-items: center; gap: 4px; }
-.seg-count {
-  min-width: 18px; padding: 0 5px; height: 18px; border-radius: 9px;
-  font-size: 12px; font-weight: 700; line-height: 18px; text-align: center;
-}
-.seg-count.running { color: var(--green); background: var(--green-glow); }
-.seg-count.waiting { color: #fff; background: var(--orange); }
 
 /* per-session working directory line */
 .session-dir { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 13.8px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
