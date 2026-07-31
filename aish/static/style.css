@@ -839,6 +839,10 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   margin: 6px 0 0 -8px; /* optical: align icons with the answer's text edge */
 }
 .msg-tools > .copy-chip { width: 40px; height: 40px; border-radius: 10px; }
+/* Jump-to-start sits at the far right, apart from the cluster of things that
+   act ON the answer — it navigates instead. `margin-left: auto` claims the
+   slack, so it stays pinned to the edge however many chips precede it. */
+.msg-tools > .answer-top { margin-left: auto; }
 .msg-tools > .copy-chip svg { width: 19px; height: 19px; }
 .regen-chip {
   display: flex;

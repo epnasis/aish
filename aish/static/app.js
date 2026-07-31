@@ -4433,6 +4433,47 @@ function forkChip(ordinal) {
   return btn;
 }
 
+// [ANSWER-TOP-START]
+// Jump to the START of this answer. A long reply runs off the top of the screen
+// while you read it, and finding where it began means scrolling back past its
+// own body — hunting for a boundary that looks like all the other text. The
+// control belongs ON the answer because "this answer" is what it means; it sits
+// at the FAR RIGHT of the tool row, apart from the left-hand cluster, because
+// it is navigation rather than something done to the answer.
+//
+// The target is measured against the SCROLLER, not the window: #messages is a
+// sibling below #topbar, not underneath it, so an element sitting at the
+// scroller's own top is already clear of the header. Subtracting the bar's
+// height on top of that (which reads plausibly, and was the first version)
+// overshoots by exactly the header and lands you above the answer.
+const ANSWER_TOP_GAP = 8; // breathing room above the first line
+function scrollToAnswerTop(el) {
+  const delta = el.getBoundingClientRect().top - messagesEl.getBoundingClientRect().top;
+  const top = Math.max(0, messagesEl.scrollTop + delta - ANSWER_TOP_GAP);
+  // Smooth where the platform honours it; `scrollTo` falls back to a jump when
+  // it does not, so the button can never be a no-op.
+  messagesEl.scrollTo({ top, behavior: "smooth" });
+}
+
+function answerTopChip(el) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "copy-chip answer-top";
+  btn.title = "jump to the start of this answer";
+  btn.setAttribute("aria-label", "jump to the start of this answer");
+  btn.appendChild(svgIcon("i-top", (make, svg) => {
+    const g = make("g", { fill: "none", stroke: "currentColor", "stroke-width": "1.8",
+      "stroke-linecap": "round", "stroke-linejoin": "round" });
+    g.appendChild(make("path", { d: "M5 4.5h14" }));       // the line it goes to
+    g.appendChild(make("path", { d: "M12 20V8.6" }));
+    g.appendChild(make("path", { d: "M7.6 13 12 8.6l4.4 4.4" }));
+    svg.appendChild(g);
+  }));
+  btn.onclick = () => scrollToAnswerTop(el);
+  return btn;
+}
+// [ANSWER-TOP-END]
+
 // Footer row under a finished answer: copy-as-markdown chip, plus the
 // read-aloud player where speech synthesis exists.
 // When the live turn began, and 0 whenever no live turn is running — the live
@@ -4475,6 +4516,10 @@ function attachAnswerTools(el, source, prompt) {
     lastRegenBtn = regen;
   }
   tools.appendChild(copyChip(() => source, "copy answer"));
+  // Last of the buttons, and `margin-left: auto` puts it (and the timing
+  // readout that follows) at the right edge — apart from the cluster that acts
+  // ON the answer, because this one navigates. See [ANSWER-TOP].
+  tools.appendChild(answerTopChip(el));
   if (answerTiming) {
     const timing = document.createElement("span");
     timing.className = "answer-timing";
