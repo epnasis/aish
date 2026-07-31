@@ -669,26 +669,27 @@ async function offlineIsPinned(name) {
 }
 // [OFFLINE-PIN-STATE-END]
 
-// The top-bar toggle's appearance, always from a real read. It stays dimmed
-// ("unknown") until the store answers, because a toggle that shows the wrong
-// state invites a tap that does the opposite of what the user wanted — that is
-// exactly how pinned chats were getting silently unpinned.
+// The chat menu's Pin row, always from a real read. It shows "…" until the
+// store answers, because a toggle that states the wrong value invites a tap
+// that does the opposite of what you wanted — which is exactly how pinned chats
+// were getting silently unpinned.
+//
+// It lives in the menu rather than the title bar: pinning is a per-chat setting
+// you touch rarely, and the title row is the scarcest space in the app.
 async function refreshOfflinePinUi() {
-  const button = $("offline-btn");
-  if (!button) return;
+  const state = $("pin-state");
+  if (!state) return;
   const name = currentSession;
-  button.classList.add("unknown");
+  state.textContent = "…";
   let pinned;
   try {
     pinned = await offlineIsPinned(name);
   } catch {
-    return; // stays dimmed: we genuinely don't know
+    return; // stays "…": we genuinely don't know
   }
   if (name !== currentSession) return; // switched chats mid-read
-  button.classList.remove("unknown");
-  button.classList.toggle("on", pinned);
-  button.setAttribute("aria-pressed", pinned ? "true" : "false");
-  button.title = pinned ? "pinned — tap to unpin" : "pin this chat";
+  state.textContent = pinned ? "On" : "Off";
+  $("menu-pin").classList.toggle("on", Boolean(pinned)); // the glyph is the signal
 }
 
 async function toggleOfflinePin() {
@@ -5515,12 +5516,25 @@ function rememberPrompt(text) {
   historyIndex = null;
 }
 
+// How many lines the composer is actually rendering. Measured rather than
+// compared against a pixel constant, because the reading-size stepper (#118)
+// scales this font — a fixed threshold means "two lines" at one setting and
+// "three" at another. Used to decide when the field takes a row of its own.
+function composerLines() {
+  const cs = getComputedStyle(input);
+  const line = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.35 || 24;
+  const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  return Math.max(1, Math.round((input.scrollHeight - pad) / line));
+}
+
 function resizeInput() {
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, innerHeight * 0.24)}px`;
-  // Once the text grows past a couple of lines, let it take the full composer
+  // The MOMENT it wraps to a second line, let the field take the full composer
   // width with the buttons tucked onto a row below (#97) — a narrow multi-line
-  // box beside the buttons wastes the screen. Not in terminal mode.
+  // box beside the buttons wastes the screen, and the in-field clear button had
+  // nowhere sensible to sit in a two-line box that was still sharing its row.
+  // Not in terminal mode.
   //
   // Sticky (#114): going full-width makes the box wider, so the SAME text wraps
   // to fewer lines and scrollHeight drops back under the threshold — a bare
@@ -5529,37 +5543,42 @@ function resizeInput() {
   // over), so it only collapses back when you've emptied it.
   const composer = $("composer");
   const stayTall = composer.classList.contains("tall") && input.value !== "";
-  composer.classList.toggle("tall", !cmdMode && (input.scrollHeight > 72 || stayTall));
-  // Which of the slot's two faces is showing rides on the same signal, so it
-  // can never disagree with what is actually in the box.
+  composer.classList.toggle("tall", !cmdMode && (composerLines() > 1 || stayTall));
+  // The in-field clear button (and the padding that keeps it off the text)
+  // rides on the same signal, so it can never disagree with the box.
   composer.classList.toggle("has-text", input.value !== "");
-  syncComposerSlot();
   updateEmptyHint(); // draft state gates the empty-chat hint (#132)
 }
 
 // [COMPOSER-SLOT-START]
-// One button, two mutually exclusive jobs. Empty composer → paste (the phone's
-// tap-hold-Paste is a chore for something done this often, and reading the
-// clipboard on an explicit tap is a user gesture, which is what the permission
-// model wants anyway). Non-empty → clear. They can share a slot precisely
-// because they can never both apply, and that is the only reason the composer
-// has room for either.
-function syncComposerSlot() {
-  const slot = $("composer-slot");
-  if (!slot) return;
-  const hasText = input.value !== "";
-  slot.setAttribute("aria-label", hasText ? "clear" : "paste");
-  slot.title = hasText ? "clear the composer" : "paste";
+// Two composer affordances, split by WHAT THEY ACT ON — the principle worth
+// keeping when the next one is added:
+//
+//   the FIELD owns its own content  → clearing is a control inside the field
+//                                     (the platform's clear button, where
+//                                     everyone already looks), shown only when
+//                                     there is something to clear
+//   the ROW owns actions on the message → pasting is a button beside attach,
+//                                     dictate and send, and is ALWAYS there
+//
+// They were one shared slot first (paste when empty, clear when not) and that
+// read as clever until it met the actual flow: you type a few words and THEN
+// paste — "review this: <url>", "what is this?" + the text — and a shared slot
+// hides paste at precisely that moment. Mutually exclusive in the UI is not the
+// same as mutually exclusive in use.
+//
+// Reading the clipboard on an explicit tap is also the user gesture the
+// permission model wants, which is why this is a button and not something
+// automatic.
+function clearComposer() {
+  if (input.value === "") return;
+  input.value = "";
+  saveDraft();
+  resizeInput();
+  input.focus();
 }
 
-async function composerSlotAction() {
-  if (input.value !== "") {
-    input.value = "";
-    saveDraft();
-    resizeInput();
-    input.focus();
-    return;
-  }
+async function pasteIntoComposer() {
   // navigator.clipboard is unavailable on insecure origins and can be refused;
   // say so rather than appearing to do nothing. The keyboard shortcut and the
   // tap-hold menu both still work, so this is a convenience, never the only way.
@@ -7723,6 +7742,10 @@ for (const b of document.querySelectorAll("[data-close]")) {
 $("backdrop").onclick = closeSheets;
 
 $("sessions-new").onclick = () => { send({ type: "new" }); closeSessionRail(); };
+// New chat is in TWO places on purpose: the rail's copy is in thumb reach but
+// unreachable until you know the rail exists, and the header's is the one you
+// find without being told. Same action, two discovery paths.
+$("new-chip").onclick = () => requestNewChat();
 
 // Single-key shortcuts for approval-card actions, one row per distinct button.
 // Keys MUST be unique (a card never binds one key to two actions) — enforced by
@@ -8149,13 +8172,12 @@ function railSwipeOpens(g) {
 // sessions
 $("back-chip").onclick = () => toggleSessionRail();
 $("session-chip").onclick = () => openSessionMenu();
-$("new-chip").onclick = () => requestNewChat();
 $("console-btn").onclick = () => toggleConsole(); // global Quake console (#148)
 
 $("connbar").onclick = () => reconnect();
 $("offlinebar").onclick = () => reconnect(); // same affordance, one bar (#165)
-$("offline-btn").onclick = () => toggleOfflinePin();
-$("composer-slot").onclick = () => composerSlotAction();
+$("composer-slot").onclick = () => pasteIntoComposer();
+$("input-clear").onclick = () => clearComposer();
 
 // ---- session title menu -------------------------------------------------
 // The tappable title opens a small menu of session actions (iOS Messages
@@ -8165,6 +8187,7 @@ function openSessionMenu() {
   const del = menu.querySelector('[data-act="delete"]');
   if (del) resetDeleteChat(del); // never open still armed from a prior dismissal
   $("wrap-state").textContent = document.body.classList.contains("wrap") ? "On" : "Off";
+  refreshOfflinePinUi(); // async — the row shows "…" until the store answers
   // Measure while shown-but-invisible so width is known before centering.
   menu.style.visibility = "hidden";
   menu.hidden = false;
@@ -8226,6 +8249,7 @@ $("session-menu").addEventListener("click", (e) => {
     case "new": requestNewChat(); break;
     case "model": openModelSheet(""); break;
     case "cd": openDirSheet(); break;
+    case "pin": toggleOfflinePin(); break;
     case "wrap": toggleWrap(); break;
     case "export": exportSessionPdf(); break;
     case "workspace": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
@@ -8238,6 +8262,13 @@ $("session-menu").addEventListener("click", (e) => {
 // running session and lands the client on a fresh chat when the active one is
 // deleted, so no client-side special cases are needed here (see server
 // _delete_session).
+// [DELARM-START]
+// Deleting a chat is IRREVERSIBLE — the log is unlinked, and the offline mirror
+// drops server-deleted sessions on its next sync, so there is no copy to come
+// back to. It takes TWO taps, never one, and a half-committed control disarms
+// itself so the second tap cannot become the accidental one either. This is the
+// only delete path now: the rail rows lost their swipe-to-delete, because
+// leftward on that panel means "push it back off screen".
 let deleteChatTimer = null;
 function resetDeleteChat(item) {
   clearTimeout(deleteChatTimer);
@@ -8256,6 +8287,7 @@ function armDeleteChat(item) {
   item.querySelector(".menu-label").textContent = "Confirm delete";
   deleteChatTimer = setTimeout(() => resetDeleteChat(item), 4000);
 }
+// [DELARM-END]
 
 // ---- unread: has this chat moved since I last looked at it? --------------
 // [SEEN-START]
@@ -8516,9 +8548,56 @@ function endRailDrag(open) {
   else closeSessionRail();
 }
 
-// The scrim IS the dismiss target — the sliver of chat you can still see is
-// what says the rail is temporary, and tapping it is what makes that true.
+// The scrim IS a dismiss target — the sliver of chat you can still see is what
+// says the rail is temporary, and tapping it is what makes that true.
 $("rail-scrim").onclick = () => closeSessionRail();
+
+// …and so is a leftward drag on the panel itself: the exact inverse of the
+// gesture that opened it, which is the first thing a hand reaches for to push
+// something back off the screen. It is available because rows no longer own a
+// horizontal gesture — the swipe-to-delete they used to carry meant this very
+// drag deleted a chat instead, which is both surprising and the destructive
+// reading of an ambiguous gesture.
+(function attachRailCloseSwipe() {
+  const rail = $("session-rail");
+  let sx = 0, sy = 0, tracking = false, claimed = false;
+  rail.addEventListener("touchstart", (event) => {
+    tracking = false;
+    if (event.touches.length !== 1 || railDocked() || !railIsOpen()) return;
+    sx = event.touches[0].clientX;
+    sy = event.touches[0].clientY;
+    tracking = true;
+    claimed = false;
+  }, { passive: true });
+
+  rail.addEventListener("touchmove", (event) => {
+    if (!tracking) return;
+    const dx = event.touches[0].clientX - sx;
+    const dy = event.touches[0].clientY - sy;
+    if (!claimed) {
+      if (Math.abs(dx) < RAIL_AXIS_AT && Math.abs(dy) < RAIL_AXIS_AT) return;
+      // The list scrolls vertically; a scroll must never drag the panel.
+      if (dx >= 0 || Math.abs(dx) < Math.abs(dy) * 1.4) { tracking = false; return; }
+      claimed = true;
+      document.body.classList.add("rail-dragging");
+    }
+    // Dragging TOWARD closed: progress runs 1 → 0.
+    dragRailTo(Math.max(0, Math.min(1, 1 + dx / railWidth())));
+  }, { passive: true });
+
+  const finish = (event) => {
+    if (!tracking) return;
+    tracking = false;
+    if (!claimed) return;
+    claimed = false;
+    const touch = event.changedTouches[0];
+    const dx = touch ? touch.clientX - sx : 0;
+    // Past a third of the way back, let go of it; otherwise settle open again.
+    endRailDrag(dx > -railWidth() * RAIL_COMMIT_AT);
+  };
+  rail.addEventListener("touchend", finish);
+  rail.addEventListener("touchcancel", finish);
+})();
 
 // Docking is a viewport fact, so it is re-read on resize. Both directions
 // matter: growing past the breakpoint must not leave a docked layout inset for
@@ -8666,115 +8745,59 @@ function sessionRow(info, current, opts = {}) {
   right.className = "session-right";
   const stampLine = document.createElement("span");
   stampLine.className = "stamp-line";
+  const stamp = document.createElement("span");
+  stamp.className = "stamp";
+  stamp.textContent = sessionStamp(info.ts);
+  stampLine.append(stamp);
   // Pinned is ONE concept (#165's offline pin absorbed it): a pinned chat sits
   // in its own band at the top AND is never evicted from the offline mirror.
-  // Two toggles for "I care about this chat" was one too many.
+  // It goes BELOW the stamp, in the space the row's trash control used to take,
+  // rather than beside it — stacked in the corner, the two of them were eating
+  // the title's width for a mark that is decoration next to the title itself.
+  right.append(stampLine);
   if (info.pinned) {
     const pin = document.createElement("span");
     pin.className = "row-pin";
     pin.title = "pinned — kept at the top and available offline";
     pin.innerHTML = PIN_SVG;
-    stampLine.append(pin);
+    right.append(pin);
   }
-  const stamp = document.createElement("span");
-  stamp.className = "stamp";
-  stamp.textContent = sessionStamp(info.ts);
-  stampLine.append(stamp);
-  right.append(stampLine);
-  // Unread reads on the LEADING edge, the mail-app convention — a dot tucked in
-  // beside the timestamp was competing with it for the same corner and lost.
-  // The slot is always present so titles stay aligned down the column.
-  const lead = document.createElement("span");
-  lead.className = "unread-lead";
+  // Unread is a BADGE on the status icon, not a column of its own. A leading
+  // slot is the mail convention, but mail rows are wide and these are not: an
+  // always-reserved 12px gutter on a phone-width panel spent real title space
+  // on a state most rows do not have. Cornering it on the icon costs nothing,
+  // is the notification-dot convention, and still reads at a glance.
+  const icon = sessionIcon(info);
   if (opts.unread) {
-    lead.classList.add("on");
-    lead.setAttribute("aria-label", "unread");
+    const dot = document.createElement("span");
+    dot.className = "unread-dot";
+    dot.setAttribute("aria-label", "unread");
+    icon.appendChild(dot);
   }
-  // No trash control: deleting is the row's left-swipe (and the chat menu), and
-  // a permanently visible destructive icon on every row overstated how often
-  // anyone deletes a chat.
-  row.append(lead, sessionIcon(info), body, right);
-  return wrapSwipeDelete(row, info);
+  row.append(icon, body, right);
+  return railRow(row, info);
 }
 
+// A pushpin standing UPRIGHT and solid — pinned. The tilted, hollow version of
+// the same shape means "not pinned" and only appears in the chat menu, where
+// both states exist; a row only ever shows the pinned one. Upright-vs-tilted is
+// the distinction to keep: a pin lying at an angle reads as one not pushed in,
+// which is why the first version (tilted AND blue) read backwards.
 const PIN_SVG =
-  '<svg viewBox="0 0 24 24"><path d="M9.5 3.5h5l-.7 5.2 3.2 3.1H6l3.2-3.1z" fill="currentColor"/>' +
-  '<path d="M12 11.8V20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  '<svg viewBox="0 0 24 24"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2z" fill="currentColor"/></svg>';
 
-// iOS swipe-left-to-delete. The row rides over a red Delete button; a tap on
-// an open row snaps it shut, a tap on a closed row resumes the session.
-function wrapSwipeDelete(row, info) {
-  const wrap = document.createElement("div");
-  wrap.className = "swipe-wrap";
-  const del = document.createElement("button");
-  del.type = "button";
-  del.className = "swipe-del";
-  del.textContent = "Delete";
-  // [DELARM-START]
-  // Deleting a chat is IRREVERSIBLE — the log is unlinked, and the offline
-  // mirror drops server-deleted sessions on its next sync, so there is no copy
-  // to come back to. It used to happen on a single unconfirmed tap on a button
-  // a swipe had just slid under your thumb. The CLI's /delete has always asked
-  // [y/N]; this is the same action and gets the same standard. Two taps, not a
-  // modal: a dialog here would fight the swipe gesture and the PWA's keyboard
-  // handling.
-  let armed = false;
-  let armTimer = null;
-  const disarm = () => {
-    clearTimeout(armTimer);
-    armTimer = null;
-    if (!armed) return;
-    armed = false;
-    del.textContent = "Delete";
-    del.classList.remove("armed");
-  };
-  del.onclick = (e) => {
-    e.stopPropagation();
-    if (!armed) {
-      armed = true;
-      del.textContent = "Confirm";
-      del.classList.add("armed");
-      // Disarm on its own: a half-committed destructive control left sitting
-      // there is how the SECOND tap becomes accidental too.
-      armTimer = setTimeout(disarm, 4000);
-      return;
-    }
-    disarm();
-    send({ type: "delete_session", name: info.name });
-  };
-  // [DELARM-END]
-  wrap.append(del, row);
-  let startX = null, dx = 0, open = false;
-  const set = (x) => { row.style.transform = x ? `translateX(${x}px)` : ""; };
-  row.addEventListener("pointerdown", (e) => {
-    if (e.pointerType === "mouse" && e.button !== 0) return;
-    startX = e.clientX; dx = 0;
-  });
-  row.addEventListener("pointermove", (e) => {
-    if (startX === null) return;
-    dx = e.clientX - startX;
-    if (Math.abs(dx) > 6) row.classList.add("dragging");
-    set(Math.min(0, Math.max(-100, (open ? -88 : 0) + dx)));
-  });
-  const finish = () => {
-    if (startX === null) return;
-    const moved = Math.abs(dx) > 6;
-    open = (open ? -88 : 0) + dx < -44;
-    if (!open) disarm(); // the row closed — the destructive control resets with it
-    row.classList.remove("dragging");
-    set(open ? -88 : 0);
-    startX = null;
-    if (moved) { row.dataset.swiped = "1"; requestAnimationFrame(() => delete row.dataset.swiped); }
-  };
-  row.addEventListener("pointerup", finish);
-  row.addEventListener("pointercancel", finish);
+// A rail row is just a row now. It used to ride over a red Delete button on a
+// left-swipe, and that gesture had to go: leftward on this panel is the natural
+// way to push it back off screen, and having the same drag mean "delete this
+// chat" instead was both surprising and the more destructive reading of an
+// ambiguous gesture. Deleting lives in the chat menu, which is where a rare,
+// irreversible action belongs — and where it already was.
+function railRow(row, info) {
   row.onclick = () => {
-    if (row.dataset.swiped) return;      // this "click" was really a swipe
-    if (open) { open = false; disarm(); set(0); return; } // tap an open row → close it
     resumeSession(info.name); // the socket if there is one, else the mirror
     closeSessionRail();
   };
-  return wrap;
+  return row;
 }
 
 // ---- rendering the list --------------------------------------------------

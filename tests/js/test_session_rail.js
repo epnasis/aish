@@ -79,7 +79,11 @@ ok("the commit distance scales with the screen, not a fixed pixel count",
 // transform survives the gesture.
 function railWorld({ width = 420 } = {}) { // phone by default
   const classes = new Set();
-  const rail = { style: {}, offsetWidth: 320 };
+  const listeners = {};
+  const rail = {
+    style: {}, offsetWidth: 320,
+    addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
+  };
   const scrim = { style: {} };
   const search = { value: "", focus() {}, closest: () => null };
   const calls = [];
@@ -112,7 +116,7 @@ function railWorld({ width = 420 } = {}) { // phone by default
   };
   vm.createContext(sandbox);
   vm.runInContext(extract("// [RAIL-START]", "// [RAIL-END]"), sandbox);
-  return { s: sandbox, classes, rail, scrim, calls };
+  return { s: sandbox, classes, rail, scrim, calls, listeners };
 }
 
 // A drag that is released past the threshold leaves the rail OPEN and, crucially,
@@ -170,6 +174,19 @@ function railWorld({ width = 420 } = {}) { // phone by default
   narrow.s.openSessionRail("");
   narrow.s.closeSessionRail();
   ok("…and there it really closes", !narrow.classes.has("rail-open"));
+}
+
+// ---- 3b. leftward on the panel closes it ---------------------------------
+// The inverse of the gesture that opened it, on the surface it opened onto.
+// This is only available because rows gave up their horizontal gesture: while
+// they carried swipe-to-delete, this very drag deleted a chat — the destructive
+// reading of an ambiguous gesture, which is the wrong way round.
+{
+  const w = railWorld();
+  ok("the panel listens for its own close gesture",
+    (w.listeners.touchstart || []).length === 1
+    && (w.listeners.touchmove || []).length === 1
+    && (w.listeners.touchend || []).length === 1);
 }
 
 // ---- 4. the wiring's guards ----------------------------------------------

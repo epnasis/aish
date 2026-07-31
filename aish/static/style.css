@@ -162,7 +162,8 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   min-height: 44px;
 }
 /* generic bar icon button (compose) */
-.bar-btn { background: none; border: none; color: var(--blue); padding: 6px; border-radius: 8px; }
+.bar-btn { background: none; border: none; color: var(--blue); padding: 6px; border-radius: 8px;
+  min-width: 40px; min-height: 40px; display: inline-flex; align-items: center; justify-content: center; }
 .bar-btn.icon { flex: none; }
 .bar-btn.icon svg { width: 24px; height: 24px; display: block; }
 .bar-btn:active { opacity: 0.5; }
@@ -170,23 +171,26 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 /* Offline pin toggle (#165). Three states, and the third one matters: until
    the store has actually been read we must not claim either answer, or the
    user acts on a wrong icon — the bug that silently unpinned chats. */
-#offline-btn .pin-on { display: none; }
-#offline-btn.on .pin-off { display: none; }
-#offline-btn.on .pin-on { display: block; }
-#offline-btn { color: var(--dim); }        /* off: present but not shouting */
-#offline-btn.on { color: var(--blue); }    /* kept offline: filled, accented */
-#offline-btn.unknown { opacity: 0.35; }    /* state not read yet */
 
 /* back to the sessions list, with an attention badge */
+/* The rail button. It is the most-tapped control in the app and it sits next to
+   the session-title menu, which is `flex: 1` and therefore enormous — so a
+   near-miss did not just fail, it opened the wrong thing. Apple's 44pt minimum,
+   enforced on BOTH axes (the icon-only "crowded" layout was 34x34), plus real
+   separation from the title so the two targets cannot be confused. */
 .nav-back {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 1px;
   background: none;
   border: none;
   color: var(--blue);
   font-size: 18.4px;
-  padding: 6px 4px;
+  padding: 6px 8px;
+  min-width: 44px;
+  min-height: 44px;
+  margin-right: 6px;
   flex: none;
 }
 .nav-back:active { opacity: 0.5; }
@@ -1384,7 +1388,7 @@ body.offline #composer { opacity: 0.55; }
    +/mic/send buttons wrap onto the row below — better use of width than a
    narrow multi-line box beside the buttons. */
 #composer.tall { flex-wrap: wrap; }
-#composer.tall #input { order: -1; flex-basis: 100%; }
+#composer.tall .input-wrap { order: -1; flex-basis: 100%; }
 #composer.tall #composer-slot { margin-left: auto; } /* push the trailing buttons right on the button row */
 
 /* Active read-aloud (#106): same wrap mechanics as tall — the input takes its
@@ -1392,7 +1396,7 @@ body.offline #composer { opacity: 0.55; }
    margin-right:auto on the dock shoves mic+send to the right edge regardless of
    whether the (conditionally shown) mic is present. */
 #composer.tts-on { flex-wrap: wrap; }
-#composer.tts-on #input { order: -1; flex-basis: 100%; }
+#composer.tts-on .input-wrap { order: -1; flex-basis: 100%; }
 #composer.tts-on #tts-dock { margin-right: auto; }
 #tts-dock {
   display: inline-flex;
@@ -1435,6 +1439,34 @@ body.offline #composer { opacity: 0.55; }
 #tts-dock.paused .i-play { display: block; }
 
 /* Transparent — the surrounding #composer capsule is the visible pill (#122). */
+/* The field and its own clear button. The wrapper is what flexes in the
+   composer row now; #input flexes inside it. */
+.input-wrap { flex: 1; min-width: 0; position: relative; display: flex; }
+#input-clear {
+  position: absolute;
+  /* Single-line (the field shares its row): centred, the way every platform's
+     clear button sits in a one-line field. Once the field takes a row of its
+     own it is multi-line, and a centred button would land in the middle of the
+     text — so it moves to the top corner. */
+  top: 50%; right: 2px;
+  transform: translateY(-50%);
+  width: 22px; height: 22px;
+  display: none; align-items: center; justify-content: center;
+  padding: 0; border: none; background: none; color: var(--dim);
+}
+/* Only when there is something to clear — an always-present clear button on an
+   empty field is noise, and its absence is how you know the field is empty. */
+#composer.has-text #input-clear { display: flex; }
+#composer.tall #input-clear, #composer.tts-on #input-clear {
+  top: 6px;
+  transform: none;
+}
+#input-clear svg { width: 20px; height: 20px; }
+#input-clear:active { opacity: 0.6; }
+/* Reserve the room rather than letting the button sit on top of the text: an
+   overlapping control that hides the character you just typed is worse than no
+   control. Only while it is showing, so an empty field keeps its full width. */
+#composer.has-text #input { padding-right: 26px; }
 #input {
   flex: 1;
   min-width: 0;
@@ -1473,7 +1505,9 @@ body.offline #composer { opacity: 0.55; }
 /* One button: mic icon with a tiny language label stacked under it (tap to
    dictate, hold to switch language) — the stacked label keeps the composer
    width tight instead of a separate chip. */
-/* The composer's dual-purpose slot: paste when empty, clear when not. */
+/* Paste: always available, because the flow it exists for is "type a few
+   words, then paste" — a control that vanishes as soon as you type is useless
+   for exactly the case it was added for. */
 #composer-slot {
   background: none; border: none; color: var(--dim);
   width: 30px; flex-shrink: 0; padding: 0;
@@ -1481,11 +1515,6 @@ body.offline #composer { opacity: 0.55; }
 }
 #composer-slot svg { width: 21px; height: 21px; }
 #composer-slot:active { opacity: 0.5; }
-#composer-slot .i-clear { display: none; }
-#composer.has-text #composer-slot .i-paste { display: none; }
-#composer.has-text #composer-slot .i-clear { display: block; }
-/* In terminal mode the composer is a shell prompt; pasting still helps, but the
-   slot must not sit between the prompt and its text. It keeps its place. */
 #dictate {
   background: none; border: none; color: var(--dim);
   width: 34px; flex-shrink: 0; padding: 0;
@@ -1704,16 +1733,28 @@ body.offline #composer { opacity: 0.55; }
   color: var(--blue);
   line-height: 0;
 }
-.session-row .row-pin svg { width: 16px; height: 16px; }
-/* Unread on the LEADING edge, the mail-app convention. The slot is always in
-   the row (transparent when read) so every title starts at the same x. */
-.session-row .unread-lead {
-  flex: none;
-  width: 9px; height: 9px; border-radius: 50%;
-  margin-right: 3px;
-  background: transparent;
+.session-row .row-pin svg { width: 15px; height: 15px; }
+/* The chat menu's pin row: the glyph carries the state, the word only confirms
+   it. Tilted + hollow = not pinned; upright + solid = pinned. Same object. */
+#menu-pin .pin-on { display: none; }
+#menu-pin .pin-off { transform: rotate(45deg); }
+#menu-pin.on .pin-off { display: none; }
+#menu-pin.on .pin-on { display: block; color: var(--blue); }
+/* Unread is a BADGE cornered on the status icon — the notification-dot
+   convention. A leading column would be the mail convention, but mail rows are
+   wide and this panel is phone-width: an always-reserved gutter spent real
+   title space on a state most rows do not have. The ring in --bg is what keeps
+   it legible over any of the tinted icon backgrounds. */
+.row-icon { position: relative; }
+.session-row .unread-dot {
+  position: absolute;
+  top: -3px; right: -3px;
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  background: var(--blue);
+  border: 2px solid var(--bg);
 }
-.session-row .unread-lead.on { background: var(--blue); }
+.session-row.current .unread-dot { border-color: #0b1016; } /* the current row's tint */
 /* Read titles step DOWN in weight so unread ones stand out — everything was
    600 before, which made the bold-when-unread rule invisible. Colour alone
    would not carry it either. */
@@ -2251,17 +2292,19 @@ body.kb-open .rail-searchbar { padding-bottom: 7px; }
 }
 .rail-search input::placeholder { color: var(--dim); }
 .rail-search { flex: 1; min-width: 0; }
-/* New chat, sized as a real thumb target (44pt) and tinted so it reads as the
-   primary action in this bar rather than a second search affordance. */
+/* New chat. The SAME control as the header's, so it looks the same: one action
+   should not present as two things depending on where you found it. Sized as a
+   real thumb target, but no filled tint — that made the rail's copy read as a
+   different, more important button. */
 #sessions-new {
   flex: none;
-  width: 44px; height: 40px;
+  width: 44px; height: 44px;
   display: flex; align-items: center; justify-content: center;
   border: none; border-radius: 11px;
-  background: var(--blue); color: #fff;
+  background: none; color: var(--blue);
 }
-#sessions-new svg { width: 22px; height: 22px; }
-#sessions-new:active { filter: brightness(0.9); }
+#sessions-new svg { width: 24px; height: 24px; }
+#sessions-new:active { opacity: 0.5; }
 #session-rail .sheet-list { flex: 1; padding: 0 6px; }
 
 /* Docked: the panel stops being a mode — it is simply always there, and the app
@@ -2290,16 +2333,9 @@ body.kb-open .rail-searchbar { padding-bottom: 7px; }
 .session-dir { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 13.8px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-dir svg { width: 11px; height: 11px; flex: none; }
 
-/* ---- swipe-to-delete on session rows ---- */
-.swipe-wrap { position: relative; overflow: hidden; }
-.swipe-del {
-  position: absolute; top: 0; right: 0; bottom: 0; width: 88px; border: none;
-  background: var(--red); color: #fff; font-size: 17.3px; font-weight: 600;
-}
-.swipe-del:active { opacity: 0.8; }
-.swipe-wrap .session-row { position: relative; background: var(--bg); transition: transform 0.18s ease-out; touch-action: pan-y; }
-.swipe-wrap .session-row.current { background: #0b1016; }
-.swipe-wrap .session-row.dragging { transition: none; }
+/* Rail rows: no swipe layer any more (leftward on the panel closes it). The
+   current chat keeps its tint, which is what says "you are here". */
+.session-row.current { background: #0b1016; }
 
 /* ---- directory picker: step 1 (recents) vs step 2 (browse) ---- */
 #dir-sheet:not(.browsing) #dir-crumb,
@@ -2571,4 +2607,3 @@ body.console-open {
 /* An armed swipe-to-delete (second tap commits). Deleting a chat is
    irreversible — there is no undo and the offline mirror drops it on the next
    sync — so the control states plainly that it is now live. */
-.swipe-del.armed { background: var(--red); font-weight: 700; }

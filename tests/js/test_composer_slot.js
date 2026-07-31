@@ -1,13 +1,15 @@
 // Node-only, dependency-free check for the composer's dual-purpose slot.
 //
-// One button, two mutually exclusive jobs: with an EMPTY composer it pastes,
-// with text in it it clears. That is the whole reason it exists — the composer
-// already carries +, mic and send, and there is no room for two more buttons;
-// there is room for one, because you can never want both at once.
+// Two affordances split by WHAT THEY ACT ON: the FIELD owns its content, so
+// clearing is a control inside the field, shown only when there is something to
+// clear; the ROW owns actions on the message, so pasting is a button beside
+// attach/dictate/send and is ALWAYS there.
 //
-// What this pins is that the two can't drift apart: the action taken must match
-// the face being shown, and the face is derived from the same value the action
-// reads. A slot that clears when it shows a clipboard is worse than no slot.
+// They were one shared slot first (paste when empty, clear when not), and this
+// file exists mostly to stop that coming back: the commonest flow is to type a
+// few words AND THEN paste — "review this: <url>" — so a slot that swaps paste
+// out the instant you type hides it exactly when it is wanted. Mutually
+// exclusive on screen is not the same as mutually exclusive in use.
 //
 // Run manually: node tests/js/test_composer_slot.js
 "use strict";
@@ -58,35 +60,49 @@ function world({ clipboard = "pasted text", clipboardFails = false } = {}) {
 }
 
 (async () => {
-  // Empty → paste, and the label says so.
+  // Paste works on an EMPTY composer…
   {
     const w = world();
-    w.s.syncComposerSlot();
-    ok("an empty composer offers paste", w.slot.attrs["aria-label"] === "paste");
-    await w.s.composerSlotAction();
-    ok("…and tapping it pastes", w.calls.includes("insert:pasted text"));
-    ok("…without touching the draft", !w.calls.includes("saveDraft"));
+    await w.s.pasteIntoComposer();
+    ok("pasting into an empty composer inserts the clipboard",
+      w.calls.includes("insert:pasted text"));
   }
 
-  // Non-empty → clear, and the label says so.
+  // …and, the whole point, on one that already has text in it.
+  {
+    const w = world();
+    w.s.input.value = "review this: ";
+    await w.s.pasteIntoComposer();
+    ok("pasting still works once you have started typing — the flow this exists for",
+      w.calls.includes("insert:pasted text"));
+    ok("…and it inserts rather than replacing", w.s.input.value === "review this: ");
+  }
+
+  // Clear empties the field and everything that mirrors it.
   {
     const w = world();
     w.s.input.value = "half a message I no longer want";
-    w.s.syncComposerSlot();
-    ok("a composer with text offers clear", w.slot.attrs["aria-label"] === "clear");
-    await w.s.composerSlotAction();
-    ok("…and tapping it empties the box", w.s.input.value === "");
+    w.s.clearComposer();
+    ok("clearing empties the box", w.s.input.value === "");
     ok("…persists that (or a reload would resurrect it)", w.calls.includes("saveDraft"));
     ok("…re-measures the box, which may have been multi-line",
       w.calls.includes("resizeInput"));
     ok("…and never reads the clipboard", !w.calls.some((c) => c.startsWith("insert:")));
   }
 
+  // Clearing an already-empty composer does nothing at all — no draft write,
+  // no focus grab on a control that is not even shown.
+  {
+    const w = world();
+    w.s.clearComposer();
+    ok("clearing an empty composer is a no-op", w.calls.length === 0);
+  }
+
   // The failure that must not look like a no-op: clipboard read refused
   // (insecure origin, permission denied). Tap-and-hold still works, so say so.
   {
     const w = world({ clipboardFails: true });
-    await w.s.composerSlotAction();
+    await w.s.pasteIntoComposer();
     ok("a refused clipboard read explains itself",
       w.calls.some((c) => c.startsWith("toast:") && c.includes("tap-and-hold")));
     ok("…and inserts nothing", !w.calls.some((c) => c.startsWith("insert:")));
@@ -95,7 +111,7 @@ function world({ clipboard = "pasted text", clipboardFails = false } = {}) {
   // An empty clipboard is not an error, but it is not silence either.
   {
     const w = world({ clipboard: "" });
-    await w.s.composerSlotAction();
+    await w.s.pasteIntoComposer();
     ok("an empty clipboard says so rather than doing nothing",
       w.calls.some((c) => c === "toast:clipboard is empty"));
   }

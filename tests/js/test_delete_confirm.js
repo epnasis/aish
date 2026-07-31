@@ -1,12 +1,14 @@
 // Node-only, dependency-free check: deleting a chat from the sessions list takes
 // TWO taps, never one.
 //
-// Why this exists: swipe-to-delete sent `delete_session` on a single unconfirmed
-// tap. The action is irreversible — the log is unlinked, and the offline mirror
-// drops server-deleted sessions on its next sync, so no copy survives — and the
-// button sits one row away from the ✕ that merely moves a chat to HISTORY. A
-// real chat was lost to it. The CLI's /delete has always required [y/N]; this
-// pins the web path to the same standard.
+// Why this exists: an earlier swipe-to-delete sent `delete_session` on a single
+// unconfirmed tap, on a button a swipe had just slid under your thumb, and a
+// real chat was lost to it. The action is irreversible — the log is unlinked,
+// and the offline mirror drops server-deleted sessions on its next sync, so no
+// copy survives. The CLI's /delete has always required [y/N]; this pins the web
+// path to the same standard. The gesture is gone (leftward on the rail closes
+// it now) and the chat menu is the only delete path, so this follows it there —
+// the invariant belongs to the ACTION, not to whichever control offers it.
 //
 // Runs the REAL arming block from app.js (extracted by marker) against a minimal
 // fake button, so it tests the shipped branching rather than a copy.
@@ -36,26 +38,27 @@ function ok(label, cond) { assert(cond, label); checks += 1; }
 function world() {
   const sent = [];
   const timers = [];
+  const label = { textContent: "Delete chat" };
   const del = {
-    textContent: "Delete",
     _classes: new Set(),
     classList: {
       add(c) { del._classes.add(c); },
       remove(c) { del._classes.delete(c); },
       contains(c) { return del._classes.has(c); },
     },
-    onclick: null,
+    querySelector: () => label,
+    get textContent() { return label.textContent; },
   };
   const sandbox = {
-    del,
-    info: { name: "session-20260725-205310-414476.jsonl" },
+    currentSession: "session-20260725-205310-414476.jsonl",
     send: (m) => { sent.push(m); return true; },
+    closeSheets() {},
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     clearTimeout: (id) => { if (id) timers[id - 1] = null; },
   };
   vm.createContext(sandbox);
-  vm.runInContext(extract("  // [DELARM-START]", "  // [DELARM-END]"), sandbox);
-  return { del, sent, timers, sandbox, tap: () => del.onclick({ stopPropagation() {} }) };
+  vm.runInContext(extract("// [DELARM-START]", "// [DELARM-END]"), sandbox);
+  return { del, sent, timers, sandbox, tap: () => sandbox.armDeleteChat(del) };
 }
 
 // 1. THE REGRESSION: one tap must not delete anything.
@@ -63,7 +66,7 @@ function world() {
   const w = world();
   w.tap();
   ok("first tap sends nothing", w.sent.length === 0);
-  ok("first tap arms the control visibly", w.del.textContent === "Confirm");
+  ok("first tap arms the control visibly", w.del.textContent === "Confirm delete");
   ok("first tap marks the control armed", w.del.classList.contains("armed"));
 }
 
@@ -76,7 +79,7 @@ function world() {
   ok("it deletes the right chat",
     w.sent[0].type === "delete_session"
     && w.sent[0].name === "session-20260725-205310-414476.jsonl");
-  ok("committing resets the label", w.del.textContent === "Delete");
+  ok("committing resets the label", w.del.textContent === "Delete chat");
   ok("committing clears the armed style", !w.del.classList.contains("armed"));
 }
 
@@ -89,7 +92,7 @@ function world() {
   ok("arming schedules a disarm", armed.length === 1);
   ok("the disarm window is bounded", armed[0].ms > 0 && armed[0].ms <= 10000);
   armed[0].fn();
-  ok("it disarms itself", w.del.textContent === "Delete");
+  ok("it disarms itself", w.del.textContent === "Delete chat");
   ok("and stays disarmed visually", !w.del.classList.contains("armed"));
   w.tap();
   ok("after disarming, a tap only re-arms — it does not delete", w.sent.length === 0);
@@ -103,22 +106,22 @@ function world() {
   ok("commit clears the disarm timer", w.timers.filter(Boolean).length === 0);
 }
 
-// 5. The row-close path disarms too — an armed control surviving the row
-//    snapping shut would make the next swipe's first tap destructive.
+// 5. Reopening the menu must never find it still armed — a half-committed
+//    destructive control surviving a dismissal makes the NEXT visit's first tap
+//    the destructive one.
 {
-  const closers = [
-    /if \(open\) \{ open = false; disarm\(\); set\(0\); return; \}/,
-    /if \(!open\) disarm\(\);/,
-  ];
-  for (const re of closers) {
-    ok(`closing the row disarms (${re.source.slice(0, 28)}…)`, re.test(src));
-  }
+  ok("opening the chat menu resets the delete row",
+    /openSessionMenu\(\)[\s\S]{0,400}?resetDeleteChat\(del\)/.test(src));
 }
 
-// 6. And the single-tap form must never come back.
+// 6. There is exactly ONE place that can send a delete, and it is behind the
+//    arming. A second, unconfirmed sender anywhere would defeat all of the above.
 {
-  ok("no unconfirmed delete_session send survives in the swipe control",
-    !/del\.onclick = \(e\) => \{ e\.stopPropagation\(\); send\(\{ type: "delete_session"/.test(src));
+  const senders = src.match(/send\(\{ type: "delete_session"/g) || [];
+  ok("only one code path sends delete_session", senders.length === 1);
+  const armed = extract("// [DELARM-START]", "// [DELARM-END]");
+  ok("…and it is inside the arming block",
+    armed.includes('send({ type: "delete_session"'));
 }
 
 console.log(`${checks} ok — all checks passed`);

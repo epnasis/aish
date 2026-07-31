@@ -99,25 +99,31 @@ function makeSandbox(store) {
       "the pin toggle must not read offlineMeta — read the store via offlineIsPinned"
     );
     assert.ok(/offlineIsPinned/.test(ui), "the pin toggle must go through offlineIsPinned");
-    // Until the store answers, the icon must claim NEITHER state: an "off"
-    // looking toggle on a pinned chat is what made a tap unpin it.
-    assert.ok(/unknown/.test(ui), "the toggle must have an unread/unknown state");
+    // Until the store answers, the row must claim NEITHER state: an "Off"
+    // reading on a pinned chat is what made a tap unpin it.
+    assert.ok(/"…"/.test(ui), "the row must show an unknown state until the store answers");
   });
 
-  await check("the toggle is one tap, from the header", async () => {
-    // The whole point of the icon (#165 follow-up): reachable without opening
-    // a menu, and the old menu item is gone rather than a second source.
+  await check("pinning lives in the chat menu, in one place", async () => {
+    // It moved out of the title bar (#rail follow-up): a per-chat setting used
+    // rarely, competing for the scarcest space in the app. What must hold is
+    // that there is exactly ONE control, wherever it lives.
     const html = fs.readFileSync(
       path.join(__dirname, "..", "..", "aish", "static", "index.html"), "utf8"
     );
-    assert.ok(/id="offline-btn"/.test(html), "header toggle missing from index.html");
+    assert.ok(/data-act="pin"/.test(html), "the chat-menu pin row is missing");
+    assert.ok(/id="pin-state"/.test(html), "the pin row must show its state");
     assert.ok(
-      !/data-act="offline"/.test(html),
-      "the session-menu item should be gone — the icon replaces it"
+      !/id="offline-btn"/.test(html),
+      "the header toggle should be gone — the menu row replaces it"
     );
     assert.ok(
-      /\$\("offline-btn"\)\.onclick\s*=\s*\(\)\s*=>\s*toggleOfflinePin\(\)/.test(src),
-      "the header toggle must be wired straight to toggleOfflinePin"
+      /case "pin": toggleOfflinePin\(\); break;/.test(src),
+      "the menu row must be wired straight to toggleOfflinePin"
+    );
+    assert.ok(
+      (src.match(/toggleOfflinePin\(\)/g) || []).length === 2,
+      "exactly one caller (plus the definition) — two pin controls can disagree"
     );
     // There is no bulk "clear offline copies" action: the mirror manages its
     // own size, and the old one also dropped the cached app shell, breaking
