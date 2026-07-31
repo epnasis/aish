@@ -341,14 +341,21 @@ class TestRecordShapes:
         assert len(capped["query"]) == rules.ACTION_ARGS_CHARS
         assert capped["n"] == "3"
 
-    def test_a_gate_message_is_capped_and_says_it_was(self, tmp_path):
+    def test_the_gate_message_is_capped_at_the_RECORD_not_at_the_model(self, tmp_path):
+        """§8.5's caps are write-time. Capping the same text on the way to the
+        MODEL truncated the canonical rule's disclose refusal mid-clause — see
+        TestShippedExamples. The verdict carries the whole instruction; the
+        record is what gets cut, and it is cut where it is written."""
         rule = load_one(
             tmp_path, CANONICAL.replace("A bare YouTube URL means analyse that video.", "x" * 900)
         )
         binding = rules.bind(rule, {}, "b1", {"youtube_analyze"})
         [verdict] = rules.gate([binding], "web_search")
-        assert len(verdict.message) == rules.GATE_MESSAGE_CHARS
-        assert verdict.message.endswith("…")
+        assert len(verdict.message) > rules.GATE_MESSAGE_CHARS
+        assert not verdict.message.endswith("…")
+        assert verdict.message.rstrip().endswith(".")
+        # What `Agent._record_gate` writes is the capped form.
+        assert len(verdict.message[: rules.GATE_MESSAGE_CHARS]) == rules.GATE_MESSAGE_CHARS
 
 
 class TestShippedExamples:
@@ -362,6 +369,33 @@ class TestShippedExamples:
         loaded = rules.load_rules([self.EXAMPLES])
         assert len(loaded) == 2
         assert not [r.name for r in loaded if r.error]
+
+    def test_the_refusal_the_model_reads_is_never_truncated(self):
+        """The write-time cap (§8.5) belongs at the record, never on the text
+        handed to the model. It was applied in both places, and the canonical
+        rule's disclose refusal landed at EXACTLY the cap — losing its closing
+        clause, the one sentence the engine exists to deliver. A refusal cut
+        mid-instruction is the uninstructive refusal `_refusal_text` forbids."""
+        rule = next(r for r in rules.load_rules([self.EXAMPLES]) if r.trigger == "message_shape")
+        known = {"youtube_analyze", "web_search", "read_url"}
+
+        def refusal(prepare) -> str:
+            binding = rules.bind(rule, {}, "b1", known)
+            prepare(binding)
+            return rules.gate([binding], "web_search")[0].message
+
+        before_route = refusal(lambda b: None)
+        succeeded = refusal(lambda b: b.note_tool_result("youtube_analyze", "ok"))
+        failed = refusal(lambda b: b.note_tool_result("youtube_analyze", "incomplete"))
+
+        for message in (before_route, succeeded, failed):
+            assert not message.endswith("…"), f"refusal was truncated: {message!r}"
+            assert message.rstrip().endswith((".", "!")), (
+                f"refusal does not end on a complete sentence: {message!r}"
+            )
+        # The clause the cap ate, verbatim: substituted material must not be
+        # passed off as the routed tool's output.
+        assert "as if it came from youtube_analyze" in failed
 
     def test_the_canonical_rule_binds_on_a_bare_url_only(self):
         rule = next(r for r in rules.load_rules([self.EXAMPLES]) if r.trigger == "message_shape")

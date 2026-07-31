@@ -565,7 +565,15 @@ def _refusal_text(binding: Binding, obligation: dict, tool: str) -> str:
     """Every refusal is INSTRUCTIVE (#190 decision 2): it names the rule, says
     why, and says what to do instead. A refusal the model cannot act on is a
     wedge, and an uninstructive one is a different incident class from an
-    ignored one — which is why the text is recorded, not just sent."""
+    ignored one — which is why the text is recorded, not just sent.
+
+    Returned UNCAPPED. `GATE_MESSAGE_CHARS` is a WRITE-time cap (§8.5) and
+    belongs where the record is written, never here: applying it to the text
+    handed to the model truncated the canonical rule's disclose refusal at
+    exactly 400 chars, losing its second half — "do not present another
+    source's material as if it came from <route>", which is the one sentence
+    the whole engine exists to deliver. An instruction cut mid-clause is the
+    uninstructive refusal this docstring forbids."""
     rule = binding.rule
     common = {
         "rule": rule.name,
@@ -575,32 +583,26 @@ def _refusal_text(binding: Binding, obligation: dict, tool: str) -> str:
     }
     if rule.routed_tool and binding.unsatisfiable:
         advice = UNSATISFIABLE_NOTE.format(route=rule.routed_tool).strip()
-        return _cap(PROHIBITED.format(advice=advice, **common))
+        return PROHIBITED.format(advice=advice, **common)
     if rule.routed_tool and obligation.get("unless") == "disclosed":
         if binding.route_calls == 0:
-            return _cap(ROUTE_FIRST.format(**common))
+            return ROUTE_FIRST.format(**common)
         if binding.route_status == "ok":
-            return _cap(ROUTE_SUCCEEDED.format(**common))
+            return ROUTE_SUCCEEDED.format(**common)
         state = ""
         for candidate in binding.obligations:
             if candidate["verb"] == VERB_DISCLOSE:
                 state = str(candidate["state"])
-        return _cap(
-            DISCLOSE_FIRST.format(
-                status=binding.route_status or "empty-handed",
-                state=state,
-                state_words=state.replace("_", " ").replace("-", " "),
-                **common,
-            )
+        return DISCLOSE_FIRST.format(
+            status=binding.route_status or "empty-handed",
+            state=state,
+            state_words=state.replace("_", " ").replace("-", " "),
+            **common,
         )
     advice = (
         f"Use {rule.routed_tool} instead." if rule.routed_tool else "Choose another approach."
     )
-    return _cap(PROHIBITED.format(advice=advice, **common))
-
-
-def _cap(text: str) -> str:
-    return text if len(text) <= GATE_MESSAGE_CHARS else text[: GATE_MESSAGE_CHARS - 1] + "…"
+    return PROHIBITED.format(advice=advice, **common)
 
 
 # -------------------------------------------------------------------- seed
