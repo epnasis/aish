@@ -243,6 +243,10 @@ INTERRUPTED_TASK = (
     "This task was interrupted before it finished (the server restarted or the "
     "task was cut off), so its result is unknown. Retry to run it again."
 )
+# A recorded failure's text, capped like every other free-text field. Long
+# enough for a repr of a backend exception, short enough that a crash loop
+# cannot grow the log without bound.
+TASK_ERROR_CAP = 500
 
 
 @dataclass
@@ -411,9 +415,15 @@ class SessionLog:
         Consequences worth knowing, each a false unread that is now gone: a
         rename or a redaction from another device, a turn CANCELLED with no
         answer, and a chat that is simply thinking. And one gap: a background
-        turn that FAILS logs no message record — errors reach the browser as
-        live events only — so a client that was not connected learns about it
-        by opening the chat, not by a dot. Logging errors would close it."""
+        turn that FAILS produces no assistant message, so it is caught by its
+        `task_end` instead — see below."""
+        if record.get("kind") == "task_end":
+            # A turn that died has something to tell you and no message to tell
+            # it with: the failure text goes out as a live `error` event, which
+            # a client that was not connected never sees. This is what makes an
+            # overnight job's death raise a dot rather than waiting to be found.
+            # A record with no `status` predates the field and stays silent.
+            return record.get("status") not in (None, "ok")
         if record.get("kind") != "message":
             return False
         role = record.get("role")
@@ -608,13 +618,22 @@ class SessionLog:
         pending_start: dict | None = None
         pending_end: dict | None = None
         origin = "user"
+        failure = ""  # a recorded task failure, replayed as the turn's `error`
         first_user = True  # the opening turn of a triggered session is its trigger
 
         def flush() -> None:
-            nonlocal steps, answer, open_turn, running_steps
+            nonlocal steps, answer, open_turn, running_steps, failure
             if not open_turn:
                 return
             events.extend(steps)
+            if failure:
+                # The turn's own recorded failure, replayed as the `error` event
+                # a live viewer saw (#203). It outranks the inference below: the
+                # log knows WHY, and "cut off mid-step" was only ever a guess
+                # made from the fact that steps were left unfinished.
+                events.append({"type": "error", "text": failure})
+                steps, answer, open_turn, running_steps, failure = [], "", False, 0, ""
+                return
             if running_steps > 0 and not answer:
                 # A step was still running and no final answer was reached — the
                 # process was killed mid-turn (e.g. a deploy during a web search).
@@ -718,6 +737,11 @@ class SessionLog:
                 (steps if open_turn else events).append(ev)
             elif kind == "origin":
                 origin = record.get("origin") or origin
+            elif kind == "task_end" and record.get("status") not in (None, "ok"):
+                # How the turn ended (#203). Held until `flush`, which is where
+                # a turn's closing event is decided — a task_end arrives after
+                # the steps it closes, and before the next turn opens.
+                failure = record.get("error") or INTERRUPTED_TASK
             elif kind == "cmd_start":
                 pending_start = {k: v for k, v in record.items() if k not in ("kind", "ts")}
             elif kind == "cmd_end":
@@ -1557,10 +1581,25 @@ class SessionLog:
         and must never be resurrected by an unrelated aish-web start."""
         self._record("task_start", prompt=prompt)
 
-    def task_end(self) -> None:
+    def task_end(self, status: str = "ok", error: str = "") -> None:
         """The task reached its end — answered, errored, or cancelled. All three
-        are 'no longer in flight'; only a killed process leaves this unwritten."""
-        self._record("task_end")
+        are 'no longer in flight'; only a killed process leaves this unwritten.
+
+        `status` records WHICH of those it was (#203). Until it existed, a turn
+        that failed left nothing durable at all: the failure text went out as a
+        live `error` event and was never written, so "why did last night's job
+        fail?" was unanswerable from the log, and cold replay could only
+        synthesize a generic "cut off mid-step" from the fact that steps were
+        left unfinished. It is also what makes a failed turn count as OUTPUT —
+        a background job that died is exactly the thing that should be waiting
+        for you, and it produces no assistant message to notice.
+
+        Additive: a record written before this carries no `status`, which every
+        reader treats as "we do not know", i.e. exactly the old behaviour."""
+        if status == "ok":
+            self._record("task_end", status=status)
+        else:
+            self._record("task_end", status=status, error=error[:TASK_ERROR_CAP])
 
     def step(self, step: dict) -> None:
         """Persist one structured activity-trace step so the trace is

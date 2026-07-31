@@ -2338,6 +2338,40 @@ class TestSessions:
                         break
             assert states == ["idle"]
 
+    def test_a_failed_turn_is_recorded_and_flags_the_chat(self, app_env, tmp_path):
+        # A turn that dies used to leave nothing durable: the failure text went
+        # out as a live event and was never written, so "why did last night's
+        # job fail?" was unanswerable and the chat raised no unread mark for a
+        # client that had not been connected (#203).
+        class Exploding:
+            def __call__(self, **kwargs):
+                raise RuntimeError("no route to host")
+
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            client.app.state.server.sessions[name].agent.chat = Exploding()
+            ws.send_json({"type": "task", "text": "run the nightly job"})
+            error = recv_until(ws, "error")
+            assert "no route to host" in error["text"]
+
+        records = [
+            json.loads(line)
+            for line in (app_env["state_dir"] / name).read_text().splitlines()
+        ]
+        ends = [r for r in records if r.get("kind") == "task_end"]
+        assert ends and ends[-1]["status"] == "failed"
+        assert "no route to host" in ends[-1]["error"]
+
+        # …and it is OUTPUT, so the chat has something to flag.
+        info = SessionLog.info(app_env["state_dir"] / name)
+        assert info.output == info.activity, "the failure IS the last thing that happened"
+
+        # Reopened cold, the chat says what happened rather than guessing.
+        events = SessionLog.reconstruct_events(app_env["state_dir"] / name)
+        errors = [e for e in events if e["type"] == "error"]
+        assert errors and "no route to host" in errors[-1]["text"]
+
     def test_rows_carry_the_output_stamp_apart_from_activity(self, app_env, tmp_path):
         # Unread is decided by OUTPUT, ordering by activity (#203), so a row has
         # to carry both — otherwise the client is back to one number doing two
