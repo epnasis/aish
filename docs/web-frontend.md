@@ -1,6 +1,6 @@
 # Web frontend — `aish/static/`
 
-`app.js` is ~10k lines with 46 **fenced regions** (`// [NAME-START] … // [NAME-END]`). A fence means: this code holds an invariant that is not visible from reading it, and breaking it produced a bug someone reported.
+`app.js` is ~10k lines organised around **fenced regions** (`// [NAME-START] … // [NAME-END]`). A fence means: this code holds an invariant that is not visible from reading it, and breaking it produced a bug someone reported. (No count here on purpose — a number in prose rots the next time someone adds a fence; `tests/test_frontend_docs.py` knows the real one.)
 
 **How to use this file.** Find the fence you are about to touch, read its entry, then read the law it cites. The entry says what the region owns and what breaks; the law says why the shape is what it is, so you do not have to re-derive it. A new fence gets an entry here — `tests/test_frontend_docs.py` fails otherwise.
 
