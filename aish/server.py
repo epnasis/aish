@@ -483,7 +483,12 @@ def _turn_event(text: str) -> dict[str, Any]:
     """The `user` transcript event for text the HUMAN typed — never classified as
     synthetic, because what you type is yours (#171). See `_user_event` for what
     `ts` is for; it is the one thing both flavours share."""
-    return {"type": "user", "text": text, "ts": int(time.time())}
+    now = int(time.time())
+    # `ts` is the turn's clock origin (see _user_event); `at` is when it
+    # happened, which the transcript renders. Same number here, different
+    # meanings — and `at` is the one cold replay also carries (#200), which is
+    # why they are not one field.
+    return {"type": "user", "text": text, "ts": now, "at": now}
 
 
 def _user_event(text: str, synthetic: str = "") -> dict[str, Any]:
@@ -608,7 +613,6 @@ RENDER_NOTE = (
 )
 MAX_QUEUE = 5  # messages waiting behind a busy session
 RENAME_MAX = 200  # custom chat-title length cap (a title, not a message)
-DECK_CHECK_MAX = 100  # names a single deck_check will stat (a deck is far smaller)
 
 CLOSE_REPLACED = 4000  # another device connected; this socket is superseded
 CLOSE_BAD_TOKEN = 4403
@@ -1799,9 +1803,8 @@ class WebServer:
                     "name": session.name,
                     "title": self._title(session),
                     "origin": session.origin,
-                    # Newest thing there is, by definition — and it must carry a
-                    # stamp like every other page or the client's deck would
-                    # discard it as undated.
+                    # Newest thing there is, by definition — stamped like every
+                    # other row so the client can order it.
                     "ts": time.time(),
                 }
             )
@@ -1988,12 +1991,8 @@ class WebServer:
         elif kind == "resume":
             await self._resume(client, str(message.get("path", "")))
         elif kind == "peek":
-            # VIEW message: prefetching a swipe neighbor claims nothing.
+            # VIEW message: warming a recent chat claims nothing.
             await self._peek(client, str(message.get("path", "")))
-        elif kind == "deck_check":
-            # VIEW message: reconciling the client's swipe deck against disk
-            # never claims control of anything.
-            await self._deck_check(client, message.get("names"))
         elif kind == "new":
             await self._new_session(client)
         elif kind == "fork":
@@ -2821,48 +2820,16 @@ class WebServer:
     @staticmethod
     def _gone_error(name: str) -> dict:
         """The one shape every by-name miss answers with. The `code` + `name`
-        are the machine-readable half of the contract: the client's swipe deck
-        outlives sessions deleted elsewhere, and a failed resume is its proof
-        that a member is a phantom — matching on the prose text was never a
-        contract, and an uncorrelated error left the swallowed gesture looking
-        like the swipe simply didn't work."""
+        are the machine-readable half of the contract: a client holding a
+        cached transcript or a stale row needs to know the chat is gone rather
+        than that some request failed, and matching on the prose text was never
+        a contract."""
         return {
             "type": "error",
             "code": "no_such_session",
             "name": name,
             "text": f"no such session: {name}",
         }
-
-    async def _deck_check(self, client: Client, names: object) -> None:
-        """Which of `names` no longer exist AT ALL — ground truth for the
-        client's working-set deck. The deck is per-device state, so a session
-        deleted from another device (or another day) stays a member until
-        something says otherwise; this stats the actual files, because absence
-        from the capped pager list (or the blank-chat-filtered session list) is
-        NOT evidence of deletion. An open in-memory session is real even before
-        its first record creates the file — a brand-new empty chat must never
-        be reported gone. Names failing the path-safety checks can never be
-        resumed, so they count as gone."""
-        if not isinstance(names, list):
-            return
-        gone: list[str] = []
-        on_disk: list[str] = []
-        for raw in names[:DECK_CHECK_MAX]:
-            name = str(raw)
-            if name in self.sessions:
-                continue
-            safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
-            if not safe or ".." in name:
-                gone.append(name)
-                continue
-            on_disk.append(name)
-        if on_disk:
-            state_dir = self.state_dir
-            gone += await asyncio.to_thread(
-                lambda: [n for n in on_disk if not (state_dir / n).is_file()]
-            )
-        if gone:
-            await client.ws.send_json({"type": "deck_gone", "names": gone})
 
     async def _resume(self, client: Client, name: str) -> None:
         if client.viewing is not None and name == client.viewing.name:
@@ -2876,13 +2843,12 @@ class WebServer:
 
     async def _peek(self, client: Client, name: str) -> None:
         """VIEW message: a session's transcript snapshot WITHOUT switching to
-        it — the client prefetches its swipe neighbors so a committed swipe
-        paints instantly instead of showing a blank page for a round trip.
-        No claim, no hello, no viewer-set change, nothing recorded; the answer
-        goes only to the asking client. A miss answers `gone` on the peek
-        itself — NOT the resume path's error event, whose toast would blame
-        the user for a request they never made — so the deck still self-heals
-        silently."""
+        it — the client warms the chats a tap is most likely to land on, so a
+        switch paints instantly instead of showing the old chat for a round
+        trip. No claim, no hello, no viewer-set change, nothing recorded; the
+        answer goes only to the asking client. A miss answers `gone` on the peek
+        itself — NOT the resume path's error event, whose toast would blame the
+        user for a request they never made."""
         session = await self._open_by_name(name)
         if session is None:
             await client.ws.send_json({"type": "peek", "name": name, "gone": True})

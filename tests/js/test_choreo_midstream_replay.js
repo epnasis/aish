@@ -72,8 +72,6 @@ function turnWorld() {
       rememberPrompt() {},
       addQueueChip() {},
       offlineSyncSoon() {},
-      unparkTranscript() {},
-      reconcilePager() {},
       traceSvg: () => "",
       updateTraceHead() {},
       refreshStatusline() {},

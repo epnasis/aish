@@ -570,6 +570,7 @@ function enterSession(name, { source = "hello", title, stash = false } = {}) {
     localStorage.setItem("aish-session", name); // where a reconnect returns
   } catch { /* private mode: the chat is entered, just not remembered */ }
   deepLinkSession(name);
+  markSeen(name);        // "the view is now X" IS "this device has seen X" ([SEEN])
   offlineTouch(name);    // MRU input to the mirror's eviction order
   refreshOfflinePinUi(); // the toggle belongs to the chat now on screen
 }
@@ -589,10 +590,30 @@ async function openCachedSession(name) {
 // Switching chats: the socket when there is one, the mirror when there isn't.
 function resumeSession(name) {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    send({ type: "resume", path: name });
+    if (!send({ type: "resume", path: name })) return;
+    // A warm peek paints the landing NOW instead of leaving the chat you are
+    // leaving on screen for the whole round trip. Identity moves BEFORE the
+    // hello on purpose — [SESSION-ENTER] preserves that — so the hello reads as
+    // "same session" and its authoritative replay no-ops on the matching
+    // fingerprint; a stale peek just misses and rebuilds.
+    const pre = freshPrefetch(name);
+    if (pre) {
+      enterSession(name, { source: "prefetch", title: knownTitle(name) });
+      onReplay({ events: pre.events, truncated: pre.truncated });
+    }
     return;
   }
   openCachedSession(name);
+}
+
+// The best title we already hold for a chat we are about to enter, so a warm
+// paint doesn't flash the wrong name in the header. `undefined` leaves the
+// header alone, which is what enterSession expects when nothing is known.
+function knownTitle(name) {
+  const known = recentSessions.find((s) => s.name === name);
+  if (known && known.title) return known.title;
+  const meta = offlineMeta.get(name);
+  return (meta && meta.title) || undefined;
 }
 
 // First paint. Runs before connect() so the last chat is on screen while the
@@ -648,26 +669,27 @@ async function offlineIsPinned(name) {
 }
 // [OFFLINE-PIN-STATE-END]
 
-// The top-bar toggle's appearance, always from a real read. It stays dimmed
-// ("unknown") until the store answers, because a toggle that shows the wrong
-// state invites a tap that does the opposite of what the user wanted — that is
-// exactly how pinned chats were getting silently unpinned.
+// The chat menu's Pin row, always from a real read. It shows "…" until the
+// store answers, because a toggle that states the wrong value invites a tap
+// that does the opposite of what you wanted — which is exactly how pinned chats
+// were getting silently unpinned.
+//
+// It lives in the menu rather than the title bar: pinning is a per-chat setting
+// you touch rarely, and the title row is the scarcest space in the app.
 async function refreshOfflinePinUi() {
-  const button = $("offline-btn");
-  if (!button) return;
+  const state = $("pin-state");
+  if (!state) return;
   const name = currentSession;
-  button.classList.add("unknown");
+  state.textContent = "…";
   let pinned;
   try {
     pinned = await offlineIsPinned(name);
   } catch {
-    return; // stays dimmed: we genuinely don't know
+    return; // stays "…": we genuinely don't know
   }
   if (name !== currentSession) return; // switched chats mid-read
-  button.classList.remove("unknown");
-  button.classList.toggle("on", pinned);
-  button.setAttribute("aria-pressed", pinned ? "true" : "false");
-  button.title = pinned ? "kept available offline — tap to stop" : "keep available offline";
+  state.textContent = pinned ? "On" : "Off";
+  $("menu-pin").classList.toggle("on", Boolean(pinned)); // the glyph is the signal
 }
 
 async function toggleOfflinePin() {
@@ -689,7 +711,7 @@ async function toggleOfflinePin() {
   await idbPut("meta", current);
   offlineMeta.set(currentSession, current);
   refreshOfflinePinUi(); // reflect the new state on the toggle immediately
-  showToast(current.pinned ? "kept available offline" : "no longer kept offline");
+  showToast(current.pinned ? "pinned — kept at the top and offline" : "unpinned");
 }
 
 // There is deliberately no "clear offline copies" action. The mirror manages
@@ -742,7 +764,7 @@ function retireSocket(sock) {
 // used to render a bubble into the NEW chat's view. phase 3's answerAbandoned
 // only covers one turn's leftovers; this gates every delivery.
 //
-// Unstamped events (client-direct messages: session_list, peek, deck_gone,
+// Unstamped events (client-direct messages: session_list, peek,
 // errors, console_*) always pass — no `session` field means "not scoped".
 // Two stamped-or-self-named types are cross-session BY DESIGN and exempt:
 //   hello         — the switch mechanism itself; it MOVES currentSession
@@ -816,12 +838,6 @@ function connect() {
     handle(event);
   };
   ws.onclose = (event) => {
-    // A committed swipe parks the transcript off-screen and waits for the
-    // landing replay to bring the next page in. If the socket dies in that gap
-    // the replay never comes, and the chat is left blank behind a red dot with
-    // no gesture that can recover it. Un-park it: the page you were on is still
-    // the page you are on.
-    if (swipeInFrom) reconcilePager();
     if (event.code === 4000) {
       connOk = false;
       updateDot();
@@ -922,16 +938,14 @@ function send(message) {
     return false;
   }
   ws.send(JSON.stringify(message));
-  noteActivity(); // any outbound action counts as use, staving off the cold-start sweep
   return true;
 }
 
 // [WAKE-START]
 // Waking the app is the single most defect-dense moment in the client: the
-// phone has been asleep, so deferred work never ran, the socket may be dead
-// without ever having said so, and a swipe committed before the lock is still
-// waiting on a landing that is not coming. Three unrelated subsystems are
-// reconciled here, which is why this is a NAMED function registered by name
+// phone has been asleep, so deferred work never ran, and the socket may be dead
+// without ever having said so. Two subsystems are reconciled here — the offline
+// mirror and the connection — which is why this is a NAMED function registered
 // rather than an anonymous listener: tests/js/test_choreo_wake.js drives it
 // directly, and a listener you cannot call is a listener you cannot test.
 // (The two other visibilitychange listeners in this file are unrelated — the
@@ -948,16 +962,6 @@ function onPageWake() {
     offlineSyncOnce();
     return;
   }
-  // Safety net for the pager: a hidden page runs no transitions, so a slide
-  // that was starting as the phone locked can be sitting at its start value —
-  // i.e. the transcript parked off screen, which looks like an empty chat. If
-  // we are back in view with no swipe still expecting a landing replay, the
-  // transcript belongs at zero, so put it there outright.
-  if (!swipeInFrom && transcriptDisplaced()) unparkTranscript();
-  // Cold start (b): returning after a long absence prunes the working set once,
-  // BEFORE we note activity (which would reset the gap). See the deck lifecycle.
-  if (Date.now() - lastActiveAt > COLD_START_GAP_MS) coldStartRecompute();
-  noteActivity();
   // Phone unlock: reconnect immediately instead of waiting out the backoff.
   if (!ws || ws.readyState === WebSocket.CLOSED) connect();
 }
@@ -1075,7 +1079,7 @@ function handle(event) {
         ? null
         : event.synthetic
           ? addSystemMsg(event.synthetic, event.text)
-          : addUserMsg(event.text);
+          : addUserMsg(event.text, event.at);
       // Your own message always comes into view, even if you were scrolled up.
       if (!replaying) scrollToEnd(true);
       break;
@@ -1122,6 +1126,12 @@ function handle(event) {
     case "approval_resolved": onApprovalResolved(event); break;
     case "done":
       onDone(event);
+      // A turn that finished while you were WATCHING it is read. Entering a
+      // chat stamps the seen map ([SEEN]), but the turn keeps writing to the
+      // log after that, so its last-activity ends up newer than the stamp and
+      // every chat you had just used came back marked unread the moment you
+      // left it — which would have made the attention band the whole list.
+      if (!replaying) markSeen(currentSession);
       // A finished turn is what the mirror is missing — but syncing right
       // away competed with the user's next action for the main thread and the
       // server (the chat on screen re-parses on every pass, its mtime always
@@ -1139,7 +1149,6 @@ function handle(event) {
     case "session_state": onSessionState(event); break;
     case "session_deleted": onSessionDeleted(event); break;
     case "peek": onPeek(event); break;
-    case "deck_gone": dropGoneSessions(event.names || []); break;
     case "session_renamed": onSessionRenamed(event); break;
     case "role": onRole(event); break;
     case "console_started": onConsoleStarted(event); break;
@@ -1154,21 +1163,19 @@ function onSessionRenamed(event) {
   // The header follows only when the renamed chat is the one on screen; the
   // drawer refreshes via the session_list the server sends right after.
   if (event.name === currentSession) setTitle(event.title);
-  const page = pagerSessions.find((s) => s.name === event.name);
-  if (page) page.title = event.title; // keep the swipe pager label in sync
+  const known = recentSessions.find((s) => s.name === event.name);
+  if (known) known.title = event.title;
 }
 
 function onSessionState(event) {
   const label = event.title
     ? `“${event.title.slice(0, 40)}”`
     : event.session.replace(/^session-|\.jsonl$/g, "").replace(/-\d{6}$/, "");
-  showToast(`${label}: task finished — tap ‹ Sessions to switch back`);
+  showToast(`${label}: task finished — swipe from the left edge to switch back`);
   notify("aish — background task finished", event.title || event.session);
   attentionSessions.add(event.session);
   refreshBadge();
-  if (!$("sessions-sheet").hidden) {
-    send({ type: "sessions", query: $("sessions-search").value });
-  }
+  if (railIsOpen()) send({ type: "sessions", query: $("sessions-search").value });
 }
 
 let sessionTitled = false;
@@ -1264,7 +1271,7 @@ let viewDirty = true; // events arrived since that replay → a stash would be s
 // Event types that never touch the transcript DOM. Anything NOT listed marks
 // the view dirty — over-dirtying only costs a rebuild, never a stale screen.
 const VIEW_SAFE_EVENTS = new Set([
-  "hello", "replay", "session_list", "model_list", "role", "deck_gone",
+  "hello", "replay", "session_list", "model_list", "role",
   "session_renamed", "session_deleted", "cmd_history", "jobs", "files", "dirs",
   "console_started", "console_out", "console_exit", "console_error",
   "console_shared", "peek",
@@ -1422,25 +1429,37 @@ let peekTimer = null;
 
 function schedulePeeks() {
   clearTimeout(peekTimer);
-  peekTimer = setTimeout(requestNeighborPeeks, 900);
+  peekTimer = setTimeout(requestWarmPeeks, 900);
 }
 
-function requestNeighborPeeks() {
+// WHICH chats are worth warming. The pager used to answer this with "the two
+// pages either side of this one"; with the rail, the answer is simply the most
+// recently used chats that aren't this one — which is exactly where a tap is
+// most likely to land. Under recency ordering the chat you were just in sits at
+// position one permanently, so bouncing between two chats stays instant, which
+// is the case the old carousel was genuinely good at.
+const PREFETCH_TARGETS = 2;
+
+function prefetchTargets() {
+  return recentSessions
+    .filter((s) => s && s.name && s.name !== currentSession)
+    .slice(-PREFETCH_TARGETS)          // hello.pager is oldest→newest
+    .map((s) => s.name);
+}
+
+function requestWarmPeeks() {
   if (offlineMode || !ws || ws.readyState !== WebSocket.OPEN) return;
-  for (const direction of [-1, 1]) {
-    const target = sessionNeighbor(direction);
-    if (target && target.name && !prefetched.has(target.name)) {
-      send({ type: "peek", path: target.name });
-    }
+  for (const name of prefetchTargets()) {
+    if (!prefetched.has(name)) send({ type: "peek", path: name });
   }
 }
 
 function onPeek(event) {
   if (!event.name) return;
   if (event.gone) {
-    // A phantom neighbor: heal the deck quietly — no toast for a request
-    // the user never made.
-    dropGoneSessions([event.name]);
+    // Warming a chat the server no longer has: drop what we cached for it and
+    // stay silent — no toast for a request the user never made.
+    forgetSession(event.name);
     return;
   }
   prefetched.set(event.name, {
@@ -1478,26 +1497,18 @@ function onHello(event) {
   if (consoleOpen) send({ type: "console_open" });
   else if (location.hash === "#console") openConsole();
   $("model-name").textContent = event.model;
-  pagerSessions = event.pager || [];
+  recentSessions = event.pager || [];
   cmdHistory = event.cmd_history || []; // personal command palette (#104)
   // Identity and everything coupled to it — the stash of the view we are
   // leaving, the fingerprint, the title, the remembered session, the URL, the
   // mirror's bookkeeping — belong to [SESSION-ENTER]. Below this line are the
-  // things only a HELLO knows: the deck, the workspace, the busy/role state.
+  // things only a HELLO knows: the workspace, the busy/role state.
   enterSession(event.session, {
     source: "hello",
     title: event.title || "",
     stash: true, // the DOM on screen still belongs to the chat being left
   });
-  // Seed on CONNECT, from the pager the hello already carries. Seeding used to
-  // happen only when a session_list arrived, i.e. only if you opened the Sessions
-  // drawer — so a fresh launch had a deck holding nothing but the chat on screen,
-  // and swiping between chats did nothing at all until you happened to open the
-  // drawer once. The pager is the same recency-ordered list, so it is a proper
-  // seed source (it carries `ts` for exactly this).
-  maybeSeedDeck(pagerSessions);
-  ensureCurrentInDeck(event); // the chat now on screen joins/stays in the working set (#169)
-  reconcileDeck(); // and members deleted while this device was away are pruned
+  if (railIsOpen()) requestSessions($("sessions-search").value || ""); // docked: stay current
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
   renderWorkspace(event);
   taskErrored = false; // fresh connected view — clear any stale red
@@ -1548,28 +1559,11 @@ function onReplay(event) {
   resetLiveTurn(landing);
   if (landing === "noop") {
     // The exact transcript on screen — the reconnect re-replay (every phone
-    // unlock) and a prefetched swipe already painted. Keep the DOM, the
+    // unlock) and the warm paint a rail tap already made. Keep the DOM, the
     // reading position, and even a read-aloud in progress: rebuilding here is
     // what made every app-open jump to the bottom and re-render the world.
-    // Deliberately NO unpark: after a prefetched swipe this replay arrives
-    // MID entry animation, and unparking would jump-cut it — the reconciler's
-    // settle owns the resting position.
-    if (swipeInFrom) reconcilePager(swipeInFrom);
     viewFp = fp;
     return;
-  }
-  if (swipeInFrom) {
-    // This replay is the landing half of a committed swipe: enter from the
-    // side the old transcript left toward, completing the pager illusion.
-    //
-    // reconcilePager owns the resting position and the deadline it clears — see
-    // its comment for why nothing here may depend on the animation running.
-    // It STAGES the entry (static, off to one side) and starts the slide next
-    // frame, so everything below — content build, scrollTop — runs on an
-    // element that is not transitioning.
-    reconcilePager(swipeInFrom);
-  } else {
-    unparkTranscript();
   }
   stopSpeaking(); // the active button is about to be detached with the DOM
   messagesEl.replaceChildren();
@@ -3093,12 +3087,49 @@ function addSystemMsg(kind, text) {
 }
 // [SYNTHETIC-END]
 
-function addUserMsg(text) {
+// [MSG-STAMP-START]
+// When a turn happened (#200). Absolute, never relative: a rail row is
+// re-rendered every time you open the list, so "2m" there stays true, but a
+// transcript line is written once and read minutes or months later — "2m" would
+// become a lie the moment you looked away. The date appears only when it is not
+// today, which is the chat-app convention and keeps the common case to four
+// characters.
+function messageStamp(atSeconds) {
+  const ms = (Number(atSeconds) || 0) * 1000;
+  if (!ms) return "";
+  const date = new Date(ms);
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  const today = dayStart(Date.now());
+  const day = dayStart(ms);
+  if (day >= today) return time;
+  if (day >= today - 6 * DAY_MS) return `${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  return `${date.toLocaleDateString([], { day: "numeric", month: "short" })} ${time}`;
+}
+
+// It goes on the turn's OPENING message, once — not on both halves. A turn's
+// two messages are seconds apart, so stamping the answer as well would print
+// the same time twice for one exchange; and the answer's row already carries
+// how LONG it took, which composes into a whole story: asked at 14:32, took 12s.
+function stampTurn(tools, at) {
+  const text = messageStamp(at);
+  if (!text) return;
+  const stamp = document.createElement("span");
+  stamp.className = "msg-stamp";
+  stamp.textContent = text;
+  // PREPENDED, so the chips keep the trailing edge they have always had: the
+  // row is right-packed, and appending would have shoved every familiar control
+  // leftwards to make room for something you only read occasionally.
+  tools.prepend(stamp);
+}
+// [MSG-STAMP-END]
+
+function addUserMsg(text, at) {
   const el = addMsg("user", text);
   const tools = document.createElement("div");
   tools.className = "user-tools";
   const getText = () => stripAttachmentNotes(el.textContent);
   tools.append(reuseChip(getText), copyChip(getText, "copy prompt"));
+  stampTurn(tools, at);
   messagesEl.appendChild(tools);
   return el;
 }
@@ -4434,11 +4465,77 @@ function forkChip(ordinal) {
   btn.appendChild(forkIcon());
   btn.onclick = () => {
     if (clientBusy) { showToast("can't fork while working"); return; }
-    noteForkIntent(); // the child inserts right of this parent (#169)
     send({ type: "fork", after: ordinal });
   };
   return btn;
 }
+
+// [ANSWER-TOP-START]
+// Jump to the START of this answer. A long reply runs off the top of the screen
+// while you read it, and finding where it began means scrolling back past its
+// own body — hunting for a boundary that looks like all the other text. The
+// control belongs ON the answer because "this answer" is what it means; it sits
+// at the FAR RIGHT of the tool row, apart from the left-hand cluster, because
+// it is navigation rather than something done to the answer.
+//
+// The target is measured against the SCROLLER, not the window: #messages is a
+// sibling below #topbar, not underneath it, so an element sitting at the
+// scroller's own top is already clear of the header. Subtracting the bar's
+// height on top of that (which reads plausibly, and was the first version)
+// overshoots by exactly the header and lands you above the answer.
+const ANSWER_TOP_GAP = 8; // breathing room above the first line
+function scrollToAnswerTop(el) {
+  const delta = el.getBoundingClientRect().top - messagesEl.getBoundingClientRect().top;
+  const top = Math.max(0, messagesEl.scrollTop + delta - ANSWER_TOP_GAP);
+  // Smooth where the platform honours it; `scrollTo` falls back to a jump when
+  // it does not, so the button can never be a no-op.
+  messagesEl.scrollTo({ top, behavior: "smooth" });
+}
+
+// The chip is worth showing only when the answer is TALLER than the transcript
+// viewport. If it fits, then whenever you can see its tool row you can already
+// see its first line — so the button would scroll nowhere, which reads as
+// broken rather than as "nothing to do". Height-vs-viewport is the whole test:
+// scroll position never enters it, because a fitting answer whose bottom you
+// are looking at necessarily has its top on screen too.
+//
+// Watched rather than measured once: images, fonts and the reading-size stepper
+// all change an answer's height after it is built. Guarded because the
+// choreography sandboxes have no ResizeObserver.
+const answerFitWatcher = typeof ResizeObserver === "function"
+  ? new ResizeObserver((entries) => { for (const e of entries) syncAnswerTopChip(e.target); })
+  : null;
+
+function syncAnswerTopChip(answerEl) {
+  const chip = answerEl.querySelector(".answer-top");
+  if (!chip) return;
+  // Compared against the bare viewport height: an answer exactly as tall as the
+  // viewport HAS its first line on screen when you can see its last, so there is
+  // nothing to jump to. ANSWER_TOP_GAP is breathing room for the scroll target,
+  // not part of "does this fit" — folding it in here would keep the chip on a
+  // fitting answer just to scroll it eight pixels, which is the "feels like it
+  // didn't work" this exists to remove.
+  chip.hidden = answerEl.offsetHeight <= messagesEl.clientHeight;
+}
+
+function answerTopChip(el) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "copy-chip answer-top";
+  btn.title = "jump to the start of this answer";
+  btn.setAttribute("aria-label", "jump to the start of this answer");
+  btn.appendChild(svgIcon("i-top", (make, svg) => {
+    const g = make("g", { fill: "none", stroke: "currentColor", "stroke-width": "1.8",
+      "stroke-linecap": "round", "stroke-linejoin": "round" });
+    g.appendChild(make("path", { d: "M5 4.5h14" }));       // the line it goes to
+    g.appendChild(make("path", { d: "M12 20V8.6" }));
+    g.appendChild(make("path", { d: "M7.6 13 12 8.6l4.4 4.4" }));
+    svg.appendChild(g);
+  }));
+  btn.onclick = () => scrollToAnswerTop(el);
+  return btn;
+}
+// [ANSWER-TOP-END]
 
 // Footer row under a finished answer: copy-as-markdown chip, plus the
 // read-aloud player where speech synthesis exists.
@@ -4482,14 +4579,30 @@ function attachAnswerTools(el, source, prompt) {
     lastRegenBtn = regen;
   }
   tools.appendChild(copyChip(() => source, "copy answer"));
+  // The trailing group: readouts first, then jump-to-top LAST, hard against the
+  // right edge. Grouped rather than letting each element claim its own auto
+  // margin — two auto margins split the slack and would park the readout
+  // mid-row — and, more importantly, because the chip must sit in the SAME
+  // place on every answer. A control you reach for constantly cannot shift
+  // left and right depending on whether that particular answer happened to
+  // record a duration. See [ANSWER-TOP].
+  const end = document.createElement("span");
+  end.className = "tools-end";
   if (answerTiming) {
     const timing = document.createElement("span");
     timing.className = "answer-timing";
     timing.textContent = fmtSecs(answerTiming);
-    tools.appendChild(timing);
+    end.appendChild(timing);
     answerTiming = 0; // one readout per answer
   }
+  end.appendChild(answerTopChip(el));
+  tools.appendChild(end);
   el.appendChild(tools);
+  // Measured only once the row is IN the answer: run before that and the height
+  // read back is the answer without its own tool row — and, for a fresh element,
+  // often no layout at all, so a short answer kept a chip that did nothing.
+  syncAnswerTopChip(el);
+  if (answerFitWatcher) answerFitWatcher.observe(el); // …and again as it grows
 }
 
 function buildTtsBox(el) {
@@ -5523,12 +5636,25 @@ function rememberPrompt(text) {
   historyIndex = null;
 }
 
+// How many lines the composer is actually rendering. Measured rather than
+// compared against a pixel constant, because the reading-size stepper (#118)
+// scales this font — a fixed threshold means "two lines" at one setting and
+// "three" at another. Used to decide when the field takes a row of its own.
+function composerLines() {
+  const cs = getComputedStyle(input);
+  const line = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.35 || 24;
+  const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  return Math.max(1, Math.round((input.scrollHeight - pad) / line));
+}
+
 function resizeInput() {
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, innerHeight * 0.24)}px`;
-  // Once the text grows past a couple of lines, let it take the full composer
+  // The MOMENT it wraps to a second line, let the field take the full composer
   // width with the buttons tucked onto a row below (#97) — a narrow multi-line
-  // box beside the buttons wastes the screen. Not in terminal mode.
+  // box beside the buttons wastes the screen, and the in-field clear button had
+  // nowhere sensible to sit in a two-line box that was still sharing its row.
+  // Not in terminal mode.
   //
   // Sticky (#114): going full-width makes the box wider, so the SAME text wraps
   // to fewer lines and scrollHeight drops back under the threshold — a bare
@@ -5537,9 +5663,54 @@ function resizeInput() {
   // over), so it only collapses back when you've emptied it.
   const composer = $("composer");
   const stayTall = composer.classList.contains("tall") && input.value !== "";
-  composer.classList.toggle("tall", !cmdMode && (input.scrollHeight > 72 || stayTall));
+  composer.classList.toggle("tall", !cmdMode && (composerLines() > 1 || stayTall));
+  // The in-field clear button (and the padding that keeps it off the text)
+  // rides on the same signal, so it can never disagree with the box.
+  composer.classList.toggle("has-text", input.value !== "");
   updateEmptyHint(); // draft state gates the empty-chat hint (#132)
 }
+
+// [COMPOSER-SLOT-START]
+// Two composer affordances, split by WHAT THEY ACT ON — the principle worth
+// keeping when the next one is added:
+//
+//   the FIELD owns its own content  → clearing is a control inside the field
+//                                     (the platform's clear button, where
+//                                     everyone already looks), shown only when
+//                                     there is something to clear
+//   the ROW owns actions on the message → pasting is a button beside attach,
+//                                     dictate and send, and is ALWAYS there
+//
+// They were one shared slot first (paste when empty, clear when not) and that
+// read as clever until it met the actual flow: you type a few words and THEN
+// paste — "review this: <url>", "what is this?" + the text — and a shared slot
+// hides paste at precisely that moment. Mutually exclusive in the UI is not the
+// same as mutually exclusive in use.
+//
+// Reading the clipboard on an explicit tap is also the user gesture the
+// permission model wants, which is why this is a button and not something
+// automatic.
+function clearComposer() {
+  if (input.value === "") return;
+  input.value = "";
+  saveDraft();
+  resizeInput();
+  input.focus();
+}
+
+async function pasteIntoComposer() {
+  // navigator.clipboard is unavailable on insecure origins and can be refused;
+  // say so rather than appearing to do nothing. The keyboard shortcut and the
+  // tap-hold menu both still work, so this is a convenience, never the only way.
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text) { showToast("clipboard is empty"); return; }
+    composerInsert(text); // same insertion path the @/slash triggers use
+  } catch {
+    showToast("can't read the clipboard here — use tap-and-hold to paste");
+  }
+}
+// [COMPOSER-SLOT-END]
 
 // Put a previous prompt's text back in the composer. An EXPLICIT action (the
 // reuse chip on the message), not a click on the whole bubble — the big bubble
@@ -5912,11 +6083,9 @@ function handleSlash(text) {
   // unknown, so submitInput preserves the typed text instead of losing it.
   switch (command) {
     case "/model": openModelSheet(arg); return true;
-    case "/resume": case "/delete": openSessionsSheet(arg); return true;
+    case "/resume": case "/delete": openSessionRail(arg); return true;
     case "/new": case "/clear": return send({ type: "new" });
-    case "/fork": case "/branch":
-      noteForkIntent(); // child inserts right of parent (#169)
-      return send({ type: "fork" });
+    case "/fork": case "/branch": return send({ type: "fork" });
     case "/cd": return arg ? send({ type: "cd", path: arg }) : (openDirSheet(), true);
     case "/add-dir": case "/dir-add":
       return arg ? send({ type: "add_dir", path: arg }) : (openSheet("workspace-sheet"), true);
@@ -7678,12 +7847,12 @@ function closeSheets() {
   // dismiss the keyboard on its own schedule, and the layout-viewport pan it
   // caused can then settle without any visualViewport event (#8).
   const active = document.activeElement;
-  if (active && active.closest(".sheet, .screen")) active.blur();
+  if (active && active.closest(".sheet, #session-rail")) active.blur();
   if (micListening) stopMic(); // don't leave the mic live after closing /mic
   stopComposerMenuTracking(); // drop the #103 viewport listeners with the menu
   for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
   for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
-  $("sessions-sheet").hidden = true; // the full-page Sessions view
+  closeSessionRail(); // the sessions rail is not a sheet, but Escape/backdrop close both
   $("backdrop").hidden = true;
   snapViewportSoon();
 }
@@ -7692,7 +7861,11 @@ for (const b of document.querySelectorAll("[data-close]")) {
 }
 $("backdrop").onclick = closeSheets;
 
-$("sessions-new").onclick = () => { send({ type: "new" }); closeSheets(); };
+$("sessions-new").onclick = () => { send({ type: "new" }); closeSessionRail(); };
+// New chat is in TWO places on purpose: the rail's copy is in thumb reach but
+// unreachable until you know the rail exists, and the header's is the one you
+// find without being told. Same action, two discovery paths.
+$("new-chip").onclick = () => requestNewChat();
 
 // Single-key shortcuts for approval-card actions, one row per distinct button.
 // Keys MUST be unique (a card never binds one key to two actions) — enforced by
@@ -7725,7 +7898,7 @@ document.addEventListener("keydown", (e) => {
   // Esc leaves terminal mode / the PTY overlay first (#143); only if neither is
   // active does it fall through to dismissing an open sheet.
   if (e.key === "Escape" && escapeExit()) { e.preventDefault(); return; }
-  if (e.key === "Escape" && (!$("backdrop").hidden || !$("sessions-sheet").hidden)) closeSheets();
+  if (e.key === "Escape" && (!$("backdrop").hidden || railIsOpen())) closeSheets();
 
   // Approval-card single-key actions (TUI convention): A = approve, D = deny,
   // T = trust dir, E = edit. Only while a card is pending and the user isn't
@@ -7758,7 +7931,7 @@ document.addEventListener("keydown", (e) => {
     }
     if (key === "o" || (e.shiftKey && key === "p")) {
       e.preventDefault();
-      openSessionsSheet("");
+      toggleSessionRail();
       return;
     }
     if (!e.shiftKey && key === "p") {
@@ -7902,603 +8075,33 @@ function toggleWrap() {
   showToast(on ? "wrap on" : "wrap off");
 }
 
-// ---- swipe pager between open sessions -----------------------------------
-// Horizontal pager gesture (the iOS Weather-app model): drag the transcript
-// sideways and it follows the finger; a pill names the target chat and
-// turns blue once release would switch. Pages are the recent chats —
-// open or not, resume loads cold ones from disk — ordered oldest→newest
-// by last interaction (hello.pager) and confined to the current chat's
-// lane (Recent vs Automated, see pagerLane), with Safari's semantics:
-// swipe right = back = older chat, swipe left = forward = newer — or a
-// brand-new chat once past the newest. Touches near the screen edges are
-// left to Safari's back/forward gesture, and pans starting inside
-// horizontally scrollable output stay scrolls.
-let pagerSessions = []; // [{name, title}] oldest→newest, from hello
-// `currentSession` lives with its owner, [SESSION-ENTER] — the pager reads it,
-// it does not define it.
+// ---- the transcript's touch behaviour ------------------------------------
+// The transcript owns NO horizontal gesture any more. Chats used to be switched
+// by paging the transcript sideways through a stable per-device "working set"
+// (#169); both are gone. The deck bet on spatial memory in a surface that never
+// showed a map — you were asked to remember an order you could not see, a wrong
+// guess cost a full page transition, and nothing ever taught you the right one —
+// and the deck itself was a second, per-device source of truth about which chats
+// matter, which had to be reconciled against the server's real session list
+// forever (seeding, idle eviction, phantom pruning, fork anchoring). Switching
+// now goes through the session rail: recency-ordered, server-derived, and
+// visible while you choose. See [RAILSWIPE] below and the rail's own section.
+//
+// What survives here was never about paging: handing focus back so a long-press
+// can select transcript text, and freezing viewport settling while it does.
+// `currentSession` lives with its owner, [SESSION-ENTER].
 let currentLogPath = ""; // absolute JSONL log path for this session, from hello (#146)
-let swipeInFrom = 0; // set on commit; onReplay animates the new page in
-// A claim protocol in miniature. When the horizontal pager decides what a touch
-// IS — a vertical scroll it stands down for, or a page-drag it takes over — it
-// says so here; otherwise the window-level swipe-up recognizer, which only sees
-// geometry, treats the same finger as an open-the-drawer gesture. The bottom
-// zone it watches overlaps the transcript, so a flick-scroll started low on a
-// scrolled-up chat both scrolled AND opened the drawer — and a diagonal flick
-// the pager claimed as a page-drag both switched chats AND opened the drawer
-// over the switch (with a phantom page, the visible half of that double-fire
-// was a "no such session" error apparently caused by the drawer). Two
-// recognizers on one surface need one of them to yield explicitly; geometry
-// alone cannot decide it.
-let touchConsumedByTranscript = false;
+// The server's own recency list, oldest→newest, delivered on every hello. It
+// used to be the pager's pages; it survives as the cheapest answer to "which
+// chats are worth warming" (see prefetchTargets) and as the title source for a
+// rename landing on a chat that isn't on screen.
+let recentSessions = [];
 
-// [UNPARK-START]
-// ---- the pager's parked state has ONE owner ------------------------------
-// A committed swipe slides the transcript off-screen on the promise that a
-// landing replay will bring the next page in. That promise has three ways to go
-// unkept — a dead socket, a hidden page that runs no animation, a server that
-// never answers — and the cost of any of them is a chat with NO VISIBLE CONTENT,
-// which reads as a broken app rather than a stalled animation.
-//
-// So the park is owned here rather than maintained by whichever callback happens
-// to fire. It carries a DEADLINE, because the worst case is the one no event
-// announces: a zombie socket (readyState OPEN, dead underneath — the failure
-// `reconnect()` exists for) accepts the send and answers nothing, so no close
-// event ever arrives to trigger recovery.
-//
-// The design rule, and the reason this is a reconciler rather than one more
-// cleanup call site: **every failure path degrades to "no animation", never to
-// "no content".** The slide is an effect layered on top; losing it costs nothing.
-const PARK_DEADLINE_MS = 4000; // a landing replay is late past this — recover
-let parkWatchdog = null;
-
-function parkTranscript(direction, width) {
-  swipeInFrom = direction;
-  messagesEl.style.transform = `translateX(${-direction * width}px)`;
-  clearTimeout(parkWatchdog);
-  parkWatchdog = setTimeout(() => reconcilePager(), PARK_DEADLINE_MS);
-}
-
-// The ONLY writer of the transcript's resting position. `landingFrom` is the side
-// a page is arriving from on a successful landing; omit it to simply put the
-// transcript back where it belongs.
-function reconcilePager(landingFrom = 0) {
-  swipeInFrom = 0;
-  clearTimeout(parkWatchdog);
-  parkWatchdog = null;
-  if (landingFrom && document.visibilityState === "visible") {
-    // STAGE the arrival now — static at the entry side, no transition — and
-    // start the slide only on the NEXT frame. The caller (onReplay) builds
-    // the landing content and sets scrollTop between these two moments, and
-    // that ordering is load-bearing: moving scrollTop while a transform
-    // transition runs left iOS WebKit compositing stale tiles — a fully
-    // black page (header and composer fine) until a finger-scroll forced a
-    // repaint. A page hidden before the frame fires stays staged; the
-    // visibilitychange safety net unparks any displaced transcript with no
-    // swipe in flight, same as every other stalled-animation path.
-    messagesEl.style.transition = "none";
-    messagesEl.style.transform = `translateX(${landingFrom * messagesEl.clientWidth}px)`;
-    requestAnimationFrame(() => {
-      messagesEl.style.transition = "transform 0.18s ease-out";
-      messagesEl.style.transform = "";
-    });
-    // Whatever became of the animation, the resting state is owned HERE: the
-    // settle unparks (idempotent after a clean slide) and nudges the scroll
-    // so WebKit rasterizes any tiles the landing left blank.
-    setTimeout(settlePagerLanding, SETTLE_AFTER_MS);
-    return;
-  }
-  unparkTranscript();
-}
-
-const SETTLE_AFTER_MS = 260; // entry slide is 180ms; settle just after it
-
-function settlePagerLanding() {
-  if (swipeInFrom) return; // a newer committed swipe owns the transform now
-  unparkTranscript();
-  // Repaint nudge: a same-value write is optimized away, so step off by one
-  // and back. Invisible, and it forces the compositor to refresh the tiles.
-  const top = messagesEl.scrollTop || 0;
-  messagesEl.scrollTop = top > 0 ? top - 1 : top + 1;
-  messagesEl.scrollTop = top;
-}
-
-// Put the transcript back on screen, with no animation.
-function unparkTranscript() {
-  messagesEl.style.transition = "none";
-  messagesEl.style.transform = "";
-}
-
-// Is the transcript actually off its resting position? Read the COMPUTED value,
-// not the inline style: clearing the inline transform only starts a transition,
-// and a transition that cannot run leaves the element sitting where it was while
-// the inline style already reads empty. That gap is exactly the bug.
-function transcriptDisplaced() {
-  const t = getComputedStyle(messagesEl).transform;
-  return !!t && t !== "none" && !/^matrix\(1,\s*0,\s*0,\s*1,\s*0,\s*0\)$/.test(t);
-}
-// [UNPARK-END]
-
-const EDGE_GUARD = 28; // px — Safari's back/forward gesture zone
-const DECIDE_AT = 12; // px of travel before the gesture picks an axis
-const COMMIT_AT = 0.3; // fraction of width that arms release-to-switch
-const DECIDE_WITHIN = 350; // ms — slower starts are long-press/selection
-
-// Text selection must win over paging: dragging selection handles (or the
-// drag right after a long-press) produces the same touch stream as a swipe.
+// Text selection must win over every other gesture: dragging selection handles
+// (or the drag right after a long-press) produces the same touch stream.
 function selectionActive() {
   const selection = document.getSelection();
   return Boolean(selection && !selection.isCollapsed);
-}
-
-const swipe = {
-  tracking: false, horizontal: false, blocked: false,
-  startX: 0, startY: 0, dx: 0, width: 1, startTime: 0,
-};
-
-// PAGER_LANE_START
-// The pager pages within ONE lane, matching the Sessions screen's Recent /
-// Automated tabs (#160): swiping through chats you started must never land on
-// a triggered session, or the reverse. Lane = the origin bucket, same rule as
-// partitionSessions. A page the client doesn't know (a brand-new chat not yet
-// on disk) is a Recent chat — new chats are always yours.
-function pagerLane(page) {
-  return page && page.origin && page.origin !== "user" ? "automated" : "recent";
-}
-
-function laneNeighbor(pages, current, direction) {
-  const lane = pagerLane(pages.find((s) => s.name === current));
-  const inLane = pages.filter((s) => pagerLane(s) === lane);
-  const index = inLane.findIndex((s) => s.name === current);
-  return index < 0 ? null : inLane[index + direction] || null;
-}
-// PAGER_LANE_END
-
-// [PAGER-SOURCE-START]
-// Where the pager's pages come from. Normally `hello.pager` — but that only
-// exists once a hello has landed, so a cold OFFLINE launch had no pages at all
-// and every swipe just rubber-banded (#165 follow-up). The mirror already holds
-// name/title/origin/ts for every cached chat, which is exactly what a page is,
-// so derive the list from it whenever the server's own list can't be trusted:
-// offline (where it is absent or stale), or before the first hello.
-//
-// Server parity: `pager_titles` returns the 30 most recent, oldest→newest.
-const PAGER_LIMIT = 30;
-
-function offlinePagerPages() {
-  return [...offlineMeta.values()]
-    .sort((a, b) => (a.ts || 0) - (b.ts || 0))
-    .slice(-PAGER_LIMIT)
-    .map((meta) => ({ name: meta.name, title: meta.title, origin: meta.origin }));
-}
-
-function pagerSource() {
-  if (!offlineMode && pagerSessions.length) return pagerSessions;
-  const cached = offlinePagerPages();
-  // Offline with an empty mirror (nothing synced yet): fall back rather than
-  // returning nothing, so behaviour is never worse than before.
-  return cached.length ? cached : pagerSessions;
-}
-// [PAGER-SOURCE-END]
-
-// [DECK-START]
-// The "working-set deck" (#169): a STABLE, explicit ordered set of chats the
-// swipe carousel navigates and the drawer's RECENT section lists — decoupled
-// from the server's MRU ordering. The whole point is that the deck NEVER
-// reshuffles under the user while working: replying to an open chat leaves its
-// slot untouched (spatial memory holds), and stale-chat pruning happens ONLY at
-// cold start, never dynamically. Members are added by explicit user actions
-// (new chat, fork, open-from-history), evicted only by the >48h cold-start
-// sweep or an explicit ✕. These functions are PURE — all app state (the live
-// `deck`, localStorage, currentSession) lives below the marker so the ordering
-// logic is unit-testable in isolation.
-const DECK_MAX_IDLE_MS = 48 * 60 * 60 * 1000; // cold-start eviction window
-
-function deckIndexOf(members, name) {
-  return members.findIndex((m) => m.name === name);
-}
-
-function addToDeck(members, member, afterName) {
-  // Already in the deck → never move it (opening an in-deck chat just navigates
-  // to its existing slot). Fork → immediately right of its parent. Everything
-  // else (new chat, open-from-history) → far right, the browser-tab model.
-  if (deckIndexOf(members, member.name) >= 0) return members;
-  const next = members.slice();
-  const at = afterName == null ? -1 : deckIndexOf(next, afterName);
-  if (at >= 0) next.splice(at + 1, 0, member);
-  else next.push(member);
-  return next;
-}
-
-function removeFromDeck(members, name) {
-  return members.filter((m) => m.name !== name);
-}
-
-function touchDeck(members, name, now) {
-  // Bump a member's last-active stamp (feeds the >48h sweep) WITHOUT reordering.
-  return members.map((m) => (m.name === name ? { ...m, ts: now } : m));
-}
-
-function recomputeWorkingSet(members, now) {
-  // Cold start ONLY: evict members idle past the window, keep the rest in place.
-  // Never adds — this is the sole pruning point, so the deck can't churn mid-use.
-  return members.filter((m) => now - (m.ts || 0) <= DECK_MAX_IDLE_MS);
-}
-
-function sweepWorkingSet(members, now, seeded, curated) {
-  // The cold-start sweep, plus the one case that must re-open seeding: when it
-  // empties the deck, every chat aged out together (you were away longer than
-  // the window) and the working set is stale. Leaving `seeded` set there strands
-  // the user — `maybeSeedDeck` returns early forever, so the deck only ever
-  // holds the chats they happen to open and swiping between chats does nothing.
-  // Clearing it lets the next list refill the deck.
-  //
-  // `curated` is the exception, and it is READ, not inferred. An earlier version
-  // guessed intent from the emptiness transition ("was non-empty, now empty") to
-  // avoid re-seeding a deck someone had emptied on purpose. That guess is
-  // unsound in both directions, so the ✕ control records the fact instead.
-  const swept = recomputeWorkingSet(members, now);
-  return { members: swept, seeded: seeded && (curated || swept.length > 0) };
-}
-
-// THE deck-member constructor. Every producer of a candidate goes through here,
-// because "a session" arrives in three shapes: a server pager page and a
-// session_list row both stamp `ts` in epoch SECONDS, a deck member works in ms
-// (Date.now), and the offline mirror's pages carry no stamp at all. Converting
-// at each call site is what produced the v1 seconds-vs-ms mis-seed (see
-// DECK_VERSION) and, later, a seed source whose every page was discarded as
-// undated. One conversion, one place.
-function deckCandidate(raw, now) {
-  if (!raw || !raw.name) return null;
-  // Adoption is a FRESH LEASE, deliberately NOT the session's own age: this
-  // stamp drives the idle sweep, and dating a member by when the chat was last
-  // used would evict it before it had been part of a working set at all. It is
-  // also what makes seeding source-agnostic — a page with no `ts` seeds fine.
-  return { name: raw.name, ts: now, title: raw.title, origin: raw.origin };
-}
-
-// A source row's own last-activity stamp in ms — ORDERING only, never a member
-// stamp. Pager pages and session_list rows both report epoch seconds.
-function sourceMs(raw) {
-  return (Number(raw && raw.ts) || 0) * 1000;
-}
-
-function seedWorkingSet(sessions, now) {
-  // First run / empty saved deck / new device: adopt the WHOLE source, oldest
-  // first (matching the pager's oldest→newest so the most recent lands far
-  // right). Deliberately UNFILTERED: an empty deck already falls back to the
-  // full source in deckToPages, so any filter here can only REMOVE pages the
-  // user could otherwise reach. Seeding exists to give the swipe order
-  // stability, not to gatekeep reachability — the idle sweep is the policy that
-  // shrinks the deck, and it runs on the lease this stamps.
-  return sessions
-    .filter((s) => s && s.name)
-    .slice()
-    .sort((a, b) => sourceMs(a) - sourceMs(b))
-    .map((s) => deckCandidate(s, now));
-}
-
-function partitionRecent(members, sessions) {
-  // Drawer split: RECENT = working-set members, HISTORY = every other session,
-  // left in the caller's MRU/date order. A session is in exactly one section
-  // (no duplication).
-  //
-  // RECENT is the deck REVERSED: the pager's right-hand (newest) end at the top.
-  // The vertical axis of this screen means one thing everywhere — newest at the
-  // top — and the date buckets below already read that way, so rendering the
-  // deck left-to-right put the newest open chat in the MIDDLE of the drawer and
-  // silently flipped the sort halfway down. Only the DISPLAY reverses; the deck
-  // itself stays in shelf order, which is what the swipe pager reads.
-  const byName = new Map(sessions.map((s) => [s.name, s]));
-  const inDeck = new Set(members.map((m) => m.name));
-  return {
-    recent: members.map((m) => byName.get(m.name)).filter(Boolean).reverse(),
-    history: sessions.filter((s) => !inDeck.has(s.name)),
-  };
-}
-
-function pruneDeck(members, goneNames, current) {
-  // Remove members whose session no longer EXISTS — and only those. `goneNames`
-  // must be server ground truth (a stat of the actual files: deck_check's
-  // answer, or a resume that failed with code "no_such_session"), never an
-  // absence heuristic: the pager list is capped at 30 while the deck can hold
-  // chats far past it, so "not in some list" must never delete a member. The
-  // chat on screen is never pruned — offline (or mid-race) it may be served
-  // from the local mirror the server knows nothing about.
-  const gone = new Set(goneNames);
-  gone.delete(current);
-  return members.filter((m) => !gone.has(m.name));
-}
-
-function deckToPages(members, source) {
-  // The swipe order = deck order, with display metadata refreshed from the live
-  // source (and the member's own cached title/origin as a fallback for chats
-  // beyond the 30-item pager window). An unseeded/empty deck shows the raw
-  // source, so a fresh or offline launch is never worse than before.
-  if (!members.length) return source;
-  const byName = new Map(source.map((p) => [p.name, p]));
-  return members.map((m) => {
-    const live = byName.get(m.name);
-    return live
-      ? { name: live.name, title: live.title, origin: live.origin }
-      : { name: m.name, title: m.title, origin: m.origin };
-  });
-}
-// [DECK-END]
-
-// ---- working-set deck: live state, persistence, lifecycle (#169) ----------
-// Persisted client-side (per device, no cross-device sync). Schema:
-//   { v, seeded, lastActiveAt, members: [{name, ts, title, origin}] }
-const DECK_KEY = "aish-deck";
-// v2 discards v1 decks mis-seeded by a seconds-vs-ms bug (they held only the one
-// open chat); dropping them forces a correct re-seed from the last-48h window.
-const DECK_VERSION = 2;
-const COLD_START_GAP_MS = 45 * 60 * 1000; // hidden longer than this → treat as cold start
-// [DECK-STATE-START]
-// Every writer of the live `deck` array lives between here and [DECK-STATE-END],
-// with the sole exception of the phantom pruner in [DECK-GONE] below — those two
-// blocks are the deck's owners and test_ownership.js enforces it. The pure
-// ordering logic above ([DECK-START]…[DECK-END]) never touches this variable: it
-// takes members in and returns members out, which is what lets a new writer be a
-// call to one of these functions rather than another `deck = …` somewhere else.
-let deck = [];
-let deckSeeded = false;
-// The user has deliberately shaped the working set (✕-removed at least one
-// chat). Recorded rather than inferred: it is the one fact that tells the sweep
-// an empty deck is a choice and not staleness.
-let deckCurated = false;
-let lastActiveAt = Date.now();
-
-// A fork is a PROMISE about a session that does not exist yet: "the next chat
-// I have never seen before is the child of this one, put it right of its
-// parent". Like every promise in this client it carries a deadline, because the
-// event it waits for may never arrive — and it must not be cancelled by an
-// event that isn't the one it is waiting for. Clearing it on EVERY hello did
-// exactly that: a reconnect (or any other chat's hello) racing the child's
-// hello silently threw the anchor away and the fork landed at the far right.
-// So it is recorded with a timestamp, consumed only by the adoption it was made
-// for, and otherwise simply expires.
-const FORK_INTENT_MS = 15 * 1000;
-let pendingForkParent = null; // {name, at} while a fork is in flight
-
-// Called at the fork send-sites: whatever chat you forked FROM is the parent.
-function noteForkIntent() {
-  pendingForkParent = { name: currentSession, at: Date.now() };
-}
-
-// The still-valid parent, or null. Expired or no-longer-a-member intents are
-// dropped here rather than by a timer — nothing needs to happen ON expiry, it
-// just stops being true.
-function forkParent(now) {
-  if (!pendingForkParent) return null;
-  if (now - pendingForkParent.at > FORK_INTENT_MS) {
-    pendingForkParent = null;
-    return null;
-  }
-  return deckIndexOf(deck, pendingForkParent.name) >= 0 ? pendingForkParent.name : null;
-}
-
-function loadDeck() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(DECK_KEY));
-    if (raw && raw.v === DECK_VERSION && Array.isArray(raw.members)) {
-      return {
-        members: raw.members.filter((m) => m && m.name),
-        seeded: Boolean(raw.seeded),
-        curated: Boolean(raw.curated),
-        lastActiveAt: raw.lastActiveAt || Date.now(),
-      };
-    }
-  } catch { /* private mode / corrupt — fall through to a fresh deck */ }
-  return null;
-}
-
-function saveDeck() {
-  try {
-    localStorage.setItem(DECK_KEY, JSON.stringify(
-      { v: DECK_VERSION, seeded: deckSeeded, curated: deckCurated,
-        lastActiveAt, members: deck }
-    ));
-  } catch { /* private mode: the deck degrades to in-memory only */ }
-}
-
-(function initDeck() {
-  const stored = loadDeck();
-  if (stored) {
-    deck = stored.members;
-    deckSeeded = stored.seeded;
-    deckCurated = stored.curated;
-    lastActiveAt = stored.lastActiveAt;
-  }
-  // Cold start (a): a fresh document load evicts anything idle past the window.
-  ({ members: deck, seeded: deckSeeded } =
-    sweepWorkingSet(deck, Date.now(), deckSeeded, deckCurated));
-  saveDeck();
-})();
-
-function noteActivity() { lastActiveAt = Date.now(); }
-
-// Persist the deck (with a fresh lastActiveAt) as the tab is backgrounded, so a
-// PWA relaunch has an accurate gap to measure the cold-start sweep against.
-addEventListener("pagehide", () => { noteActivity(); saveDeck(); });
-
-// Cold start (b): returning to the foreground after a long hiddenness. Evict
-// stale members, never add — same discipline as a fresh load.
-function coldStartRecompute() {
-  ({ members: deck, seeded: deckSeeded } =
-    sweepWorkingSet(deck, Date.now(), deckSeeded, deckCurated));
-  saveDeck();
-  if (!$("sessions-sheet").hidden && lastSessionEvent) renderSessions(lastSessionEvent);
-}
-
-function deckOriginFor(name, event) {
-  if (event && event.origin) return event.origin;
-  const p = pagerSessions.find((s) => s.name === name);
-  if (p && p.origin) return p.origin;
-  const meta = offlineMeta.get(name);
-  return (meta && meta.origin) || "user";
-}
-
-// Called on every hello: the session now on screen must be in the working set.
-// Existing members are touched (bumped, not moved); a newcomer inserts right of
-// a just-forked parent, else far right.
-function ensureCurrentInDeck(event) {
-  const now = Date.now();
-  noteActivity();
-  const name = event.session;
-  if (!name) return;
-  if (deckIndexOf(deck, name) >= 0) {
-    // An existing member is never a fork child, so a pending intent survives
-    // this hello — it is waiting for a session it has not seen before.
-    deck = touchDeck(deck, name, now);
-  } else {
-    const member = { name, ts: now, title: event.title || name, origin: deckOriginFor(name, event) };
-    deck = addToDeck(deck, member, forkParent(now));
-    pendingForkParent = null; // consumed by the adoption it was recorded for
-  }
-  saveDeck();
-}
-
-// First run only: adopt the sessions active within the window. Keeps the chat
-// currently on screen (esp. a brand-new empty one the server doesn't list yet).
-function maybeSeedDeck(sessions) {
-  if (deckSeeded || !sessions || !sessions.length) return;
-  const now = Date.now();
-  let seed = seedWorkingSet(sessions, now);
-  // Adopting NOTHING must not count as seeded. It used to: the flag was set
-  // unconditionally, so a source that yielded no candidates left the deck
-  // holding only the chat on screen — and a ONE-member deck is worse than an
-  // empty one, because deckToPages falls back to the full source only when the
-  // deck is empty. That pinned the pager to a single page permanently and
-  // swiping between chats did nothing. Staying unseeded lets a later list do it.
-  if (!seed.length) return;
-  if (currentSession && deckIndexOf(seed, currentSession) < 0) {
-    const existing = deck.find((m) => m.name === currentSession)
-      || deckCandidate({ name: currentSession, title: currentSession, origin: "user" }, now);
-    seed = addToDeck(seed, existing, null);
-  }
-  deck = seed;
-  deckSeeded = true;
-  saveDeck();
-}
-
-// The ✕ on a RECENT row / the ⋯ menu item: move a chat to HISTORY (it is NOT
-// deleted — still on disk, reopenable). Removing the chat on screen navigates to
-// its left neighbour, else the new right edge, else a fresh chat.
-function removeFromWorkingSet(name) {
-  const idx = deckIndexOf(deck, name);
-  if (idx < 0) return;
-  const wasCurrent = name === currentSession;
-  const leftNeighbor = idx > 0 ? deck[idx - 1] : null;
-  deck = removeFromDeck(deck, name);
-  deckCurated = true; // shaping the working set is a choice the sweep must respect
-  saveDeck();
-  if (wasCurrent) {
-    const target = leftNeighbor || deck[deck.length - 1] || null;
-    if (target) resumeSession(target.name);
-    else requestNewChat();
-  }
-  if (!$("sessions-sheet").hidden && lastSessionEvent) renderSessions(lastSessionEvent);
-}
-// [DECK-STATE-END]
-
-// [DECK-GONE-START]
-// ---- deck vs reality: phantom pages ---------------------------------------
-// The deck is per-device localStorage, so it can outlive the sessions it names:
-// a chat deleted from the drawer — or from another device entirely — stays a
-// member. Such a phantom page made a swipe commit a resume that could only
-// error: no replay ever landed, the watchdog restored the view, and the gesture
-// looked simply ignored. Two ground-truth signals prune phantoms, and ONLY
-// these two (see pruneDeck for why no listing may be used as a third):
-//   - the server's `deck_gone` reply to the deck_check sent on every hello,
-//     which is what heals a stale deck with no user action; and
-//   - a by-name action failing with code "no_such_session".
-// Offline, nothing prunes: the mirror legitimately serves chats the server no
-// longer has, and no offline signal can tell "deleted" from "never synced".
-function dropGoneSessions(names) {
-  const next = pruneDeck(deck, names, currentSession);
-  if (next.length === deck.length) return;
-  deck = next;
-  // Pruning is not curation: deckCurated records the ✕'s deliberate shaping of
-  // the working set, and a deletion (often from another device) is neither.
-  saveDeck();
-  if (!$("sessions-sheet").hidden && lastSessionEvent) renderSessions(lastSessionEvent);
-}
-
-// A by-name action (resume, delete, rename) hit a session that is gone. For a
-// swiped resume this is the phantom-page case: the landing replay is never
-// coming, so hand the view back to the pager's owner NOW rather than leaving
-// the transcript parked until the watchdog fires — and prune the phantom so it
-// cannot eat the next swipe too.
-function onSessionGone(name) {
-  dropGoneSessions(name ? [name] : []);
-  if (swipeInFrom) reconcilePager();
-  showToast("that chat no longer exists");
-}
-
-function onSessionDeleted(event) {
-  // The deck must not outlive the file — a deleted chat left in the working
-  // set is how phantoms are born on the deleting device itself.
-  dropGoneSessions(event.name ? [event.name] : []);
-  if (event.name) viewCache.delete(event.name); // stashed DOM goes with it
-  showToast("session deleted");
-}
-
-// Every hello: ask the server which deck members still exist. Cheap (one stat
-// per name, off-loop, capped server-side) and self-healing: a deck that went
-// stale while this device was away — the common way phantoms accumulate —
-// repairs itself on the next connect with no user action. Runs only after the
-// hello's rev check passed, so it never speaks to a server that predates it.
-function reconcileDeck() {
-  const names = deck.map((m) => m.name).filter((n) => n !== currentSession);
-  if (names.length) send({ type: "deck_check", names });
-}
-// [DECK-GONE-END]
-
-function pagerPages() {
-  return deckToPages(deck, pagerSource());
-}
-
-function sessionNeighbor(direction) {
-  return laneNeighbor(pagerPages(), currentSession, direction);
-}
-
-// Safari semantics: back (swipe right, -1) = older chat, forward (swipe
-// left, +1) = newer — and one page past the newest is a fresh chat, gated
-// on the current one having content so empties never stack up.
-const NEW_CHAT_TARGET = { fresh: true, title: "New chat" };
-
-function swipeTarget(direction) {
-  const neighbor = sessionNeighbor(direction);
-  if (neighbor) return neighbor;
-  // A new chat is always a Recent chat, so it only exists past the newest page
-  // of the Recent lane — the Automated lane simply ends (you can't hand-start
-  // a triggered session).
-  // Starting a new chat needs the server. Offering that page offline would
-  // slide the transcript away and snap straight back, which reads as a broken
-  // gesture — end the lane instead.
-  if (offlineMode) return null;
-  const lane = pagerLane(pagerPages().find((s) => s.name === currentSession));
-  return direction === 1 && sessionTitled && lane === "recent" ? NEW_CHAT_TARGET : null;
-}
-
-function scrollsHorizontally(node) {
-  for (; node && node !== messagesEl; node = node.parentElement) {
-    if (node.scrollWidth > node.clientWidth + 1) {
-      const overflow = getComputedStyle(node).overflowX;
-      if (overflow === "auto" || overflow === "scroll") return true;
-    }
-  }
-  return false;
-}
-
-function updateSwipeHint(target, dx, commitPx) {
-  const hint = $("swipe-hint");
-  if (!target) { hint.hidden = true; return; }
-  hint.hidden = false;
-  hint.classList.toggle("prev", dx > 0);
-  hint.classList.toggle("commit", Math.abs(dx) > commitPx);
-  $("swipe-hint-title").textContent = target.title || "New chat";
-  hint.style.opacity = Math.min(Math.abs(dx) / 60, 1);
 }
 
 // [TOUCH-FREEZE-START]
@@ -8510,8 +8113,8 @@ function updateSwipeHint(target, dx, commitPx) {
 // that dismissal triggers is FROZEN until the finger lifts: syncKeyboardInset's
 // reflow, snapViewportHome's window scroll, and scrollToEnd would each move the
 // text under the still-held finger, which cancels iOS's long-press gesture —
-// the very selection the blur just made possible. endSwipe runs the deferred
-// settle at touchend/touchcancel, when the gesture can no longer be disturbed.
+// the very selection the blur just made possible. The settle is run at
+// touchend/touchcancel, when the gesture can no longer be disturbed.
 let transcriptTouchDown = false;
 
 function beginTranscriptTouch(activeEl, target) {
@@ -8547,352 +8150,154 @@ function trackViewportPan() {
 }
 // [TOUCH-FREEZE-END]
 
+// Some transcript children scroll sideways on their own (unwrapped command
+// output, code blocks, tables). A pan that STARTS inside one is theirs — this
+// is the same test the old pager used, and it is why swiping the whole
+// transcript is safe: the only gesture it ever stole was inside these, and
+// there it stands down. They also opt into `touch-action: pan-x pan-y`, so the
+// browser scrolls them natively while we do nothing.
+function scrollsHorizontally(node) {
+  for (; node && node !== messagesEl; node = node.parentElement) {
+    if (node.scrollWidth > node.clientWidth + 1) {
+      const overflow = getComputedStyle(node).overflowX;
+      if (overflow === "auto" || overflow === "scroll") return true;
+    }
+  }
+  return false;
+}
+
+const railSwipe = {
+  tracking: false, claimed: false, decided: false,
+  startX: 0, startY: 0, startTime: 0, dx: 0, dy: 0, width: 1,
+};
+
 messagesEl.addEventListener("touchstart", (event) => {
+  railSwipe.tracking = false;
+  railSwipe.claimed = false;
+  railSwipe.decided = false;
+  if (event.touches.length !== 1) return;
   beginTranscriptTouch(document.activeElement, event.target);
-  if (event.touches.length !== 1) { swipe.tracking = false; return; }
+  // The rail's opening gesture lives on the WHOLE transcript, not a 24px edge.
+  // An edge-only drawer is the platform default, but this app is navigated by
+  // it constantly and the edge is a fiddly target one-handed; the transcript is
+  // the whole screen. What made the edge tempting — horizontally scrolling
+  // children — is handled by standing down inside them, exactly as the old
+  // pager did on this same surface for the same reason.
+  if (railIsOpen() || !$("backdrop").hidden || consoleOpen) return;
+  if (document.body.classList.contains("kb-open")) return;
+  if (selectionActive() || scrollsHorizontally(event.target)) return;
   const touch = event.touches[0];
-  swipe.tracking =
-    touch.clientX > EDGE_GUARD &&
-    touch.clientX < innerWidth - EDGE_GUARD &&
-    !selectionActive() &&
-    !scrollsHorizontally(event.target);
-  swipe.horizontal = false;
-  swipe.blocked = false;
-  swipe.dx = 0;
-  swipe.startX = touch.clientX;
-  swipe.startY = touch.clientY;
-  swipe.startTime = event.timeStamp;
-  swipe.width = messagesEl.clientWidth;
+  railSwipe.tracking = true;
+  railSwipe.startX = touch.clientX;
+  railSwipe.startY = touch.clientY;
+  railSwipe.startTime = event.timeStamp;
+  railSwipe.dx = 0;
+  railSwipe.dy = 0;
+  railSwipe.width = messagesEl.clientWidth || innerWidth;
 }, { passive: true });
 
 messagesEl.addEventListener("touchmove", (event) => {
-  if (!swipe.tracking || swipe.blocked) return;
+  if (!railSwipe.tracking || railSwipe.decided) return;
   const touch = event.touches[0];
-  const dx = touch.clientX - swipe.startX;
-  const dy = touch.clientY - swipe.startY;
-  if (!swipe.horizontal) {
-    // A selection appearing mid-touch (long-press) or a slow start means
-    // the finger is selecting text, not paging — stand down for this touch.
-    if (selectionActive() || event.timeStamp - swipe.startTime > DECIDE_WITHIN) {
-      swipe.blocked = true;
-      return;
-    }
-    if (Math.abs(dx) < DECIDE_AT && Math.abs(dy) < DECIDE_AT) return;
-    // Mostly-vertical (or diagonal) start: it's a scroll, stand down for the
-    // rest of this touch — a late preventDefault can't stop iOS anyway.
-    if (Math.abs(dx) < Math.abs(dy) * 1.4) {
-      swipe.blocked = true;
-      touchConsumedByTranscript = true; // claimed as a scroll — see the flag's comment
-      return;
-    }
-    swipe.horizontal = true;
-    // Claimed as a page-drag: the same finger must not ALSO read as a swipe-up
-    // at touchend, or one diagonal flick switches chats AND opens the drawer.
-    touchConsumedByTranscript = true;
+  const dx = touch.clientX - railSwipe.startX;
+  const dy = touch.clientY - railSwipe.startY;
+  if (!railSwipe.claimed) {
+    if (Math.abs(dx) < RAIL_AXIS_AT && Math.abs(dy) < RAIL_AXIS_AT) return;
+    // Vertical-dominant, or a leftward drag (there is nothing to the left of
+    // this view any more): stand down for the whole gesture rather than
+    // half-tracking it.
+    if (dx <= 0 || Math.abs(dx) < Math.abs(dy) * 1.4) { railSwipe.decided = true; return; }
+    railSwipe.claimed = true;
+    beginRailDrag();
   }
-  // No preventDefault, and the listener is PASSIVE: a non-passive touchmove on
-  // the transcript scroller forced every scrolled frame to wait on the main
-  // thread — the single biggest scroll-jank source on the phone. #messages
-  // carries `touch-action: pan-y`, so the browser itself refuses to scroll a
-  // horizontally-started gesture (it decides at gesture start, same as the
-  // claim above) — the preventDefault had nothing left to prevent.
-  const target = swipeTarget(dx < 0 ? 1 : -1);
-  swipe.dx = target ? dx : dx / 3; // rubber-band where no page exists
-  messagesEl.style.transition = "none";
-  messagesEl.style.transform = `translateX(${swipe.dx}px)`;
-  updateSwipeHint(target, dx, swipe.width * COMMIT_AT);
+  railSwipe.dx = dx;
+  railSwipe.dy = dy;
+  // Passive, no preventDefault: `#messages` carries `touch-action: pan-y`, so
+  // the browser already refuses to scroll a horizontally-started gesture. A
+  // non-passive listener here would make every scrolled frame wait on the main
+  // thread — the phone's biggest scroll-jank source.
+  dragRailTo(Math.max(0, Math.min(dx, railSwipe.width)) / railSwipe.width);
 }, { passive: true });
 
-function commitPage(direction, target, width) {
-  // Ask the server before sliding the page away: the off-screen state is
-  // only safe while a replay is coming to bring the next page in. On a dead
-  // socket (server restart mid-deploy, tab detached by another device)
-  // send() fails — snap home instead of leaving the app blank.
-  // Offline, the mirror can bring an existing page in — so paging through past
-  // chats keeps working, which is the gesture this app is navigated by. A NEW
-  // chat still needs the server, so that page snaps back.
-  if (!target.fresh && offlineMode) {
-    parkTranscript(direction, width); // read by the onReplay openCachedSession triggers
-    openCachedSession(target.name).then((ok) => {
-      if (!ok) reconcilePager();
-    });
-    return;
-  }
-  const requested = target.fresh
-    ? send({ type: "new" })
-    : send({ type: "resume", path: target.name });
-  if (!requested) {
-    reconcilePager();
-    return;
-  }
-  // A send that SUCCEEDS is not a landing that will happen: a zombie socket
-  // accepts it and answers nothing, so the park carries a deadline.
-  parkTranscript(direction, width);
-  // [PREFETCH] A warm peek paints the landing NOW instead of leaving the page
-  // blank for the round trip. currentSession moves first (the same order
-  // openCachedSession uses) so the hello reads as "same session" and the
-  // authoritative replay no-ops on the matching fingerprint; if the neighbor
-  // moved since the peek, the fingerprint misses and the replay rebuilds.
-  if (!target.fresh) {
-    const pre = freshPrefetch(target.name);
-    if (pre) {
-      // Identity moves BEFORE the hello here — that is the whole trick, and
-      // [SESSION-ENTER] preserves it: the hello that follows reads as "same
-      // session", so it keeps this paint's fingerprint and its replay no-ops.
-      enterSession(target.name, {
-        source: "prefetch",
-        title: target.title || undefined, // an untitled page keeps the header
-      });
-      onReplay({ events: pre.events, truncated: pre.truncated });
-    }
-  }
-}
-
-function snapBack(direction, target, dx) {
-  messagesEl.style.transform = "";
-  if (!target && direction === -1 && Math.abs(dx) > 60) {
-    showToast("no older chats — tap the title to search all sessions");
-  }
-}
-
-function endSwipe(event) {
-  // Deferred viewport settle (see [TOUCH-FREEZE]). scrollToEnd is deliberately
-  // NOT part of it: yanking to the bottom now would scroll a just-made
-  // selection out of view.
+function endTranscriptGesture(event) {
+  // scrollToEnd is deliberately NOT part of the deferred settle: yanking to the
+  // bottom now would scroll a just-made selection out of view.
   endTranscriptTouch(() => { syncKeyboardInset(); snapViewportSoon(); });
-  const wasHorizontal = swipe.horizontal;
-  swipe.tracking = false;
-  swipe.horizontal = false;
-  if (!wasHorizontal) return;
-  $("swipe-hint").hidden = true;
-  const dx = swipe.dx;
-  const direction = dx < 0 ? 1 : -1;
-  const target = swipeTarget(direction);
-  const flick =
-    Math.abs(dx) > 48 && event.timeStamp - swipe.startTime < 250;
-  messagesEl.style.transition = "transform 0.18s ease-out";
-  if (target && (Math.abs(dx) > swipe.width * COMMIT_AT || flick)) {
-    commitPage(direction, target, swipe.width);
-  } else {
-    snapBack(direction, target, dx);
-  }
+  if (!railSwipe.tracking) return;
+  railSwipe.tracking = false;
+  if (!railSwipe.claimed) return;
+  railSwipe.claimed = false;
+  endRailDrag(railSwipeOpens({
+    dx: railSwipe.dx,
+    dy: railSwipe.dy,
+    width: railSwipe.width,
+    ms: (event ? event.timeStamp : railSwipe.startTime) - railSwipe.startTime,
+    keyboardUp: false,
+  }));
 }
-messagesEl.addEventListener("touchend", endSwipe);
-messagesEl.addEventListener("touchcancel", endSwipe);
+messagesEl.addEventListener("touchend", (event) => endTranscriptGesture(event));
+messagesEl.addEventListener("touchcancel", (event) => endTranscriptGesture(event));
 
-// ---- swipe-UP to reveal the Sessions drawer (#169) -----------------------
-// A safe, discoverable shortcut: a dominant-vertical upward swipe that STARTS in
-// the bottom/composer safe zone opens the ‹ Sessions screen. Kept strictly out
-// of the horizontal pager's way (different axis) and the scroll's way (only when
-// the transcript is already at the bottom, so an up-swipe can't be a scroll) —
-// and never while the keyboard is up. The DECISION is a pure function so it can
-// be unit-tested without a DOM; the wiring below only feeds it live geometry.
-// [SWIPEUP-START]
-const SWIPE_UP_ZONE = 130; // px from the bottom edge where an up-swipe is armed
-const SWIPE_UP_MIN = 55;   // px of upward travel required to commit
-function swipeUpOpensDrawer(g) {
-  // g: { startY, endY, dx, viewportH, keyboardUp }
-  // The disambiguator is WHERE the swipe starts — the bottom zone is over the
-  // composer bar, which does not scroll — so transcript scroll position is
-  // irrelevant (an earlier `atBottom` gate made this fire only at the very
-  // bottom, which is the whole complaint). Start-zone + upward travel + a
-  // vertical-dominant path is enough.
-  if (g.keyboardUp) return false;                            // composer owns vertical gestures
-  if (g.viewportH - g.startY > SWIPE_UP_ZONE) return false;  // must start in the bottom (composer) zone
-  const up = g.startY - g.endY;                              // upward travel
-  if (up < SWIPE_UP_MIN) return false;                       // too short: a tap or micro-scroll
-  return Math.abs(g.dx) <= up * 0.8;                         // dominant vertical only
-}
-// [SWIPEUP-END]
-
-// [SEARCHDISMISS-START]
-const SEARCH_DISMISS_MIN = 45; // px of upward travel on the search bar to dismiss
-function searchbarSwipeDismisses(g) {
-  // g: { startY, endY, dx } — an up-swipe on the bottom search bar (a fixed,
-  // non-scrolling zone, so unlike the list an up-swipe here is unambiguous)
-  // closes the Sessions view and returns to the active chat (#169).
-  const up = g.startY - g.endY;
-  if (up < SEARCH_DISMISS_MIN) return false;
-  return Math.abs(g.dx) <= up * 0.8; // vertical-dominant
-}
-// [SEARCHDISMISS-END]
-
-(function attachSearchbarSwipeDismiss() {
-  const bar = document.querySelector("#sessions-sheet .screen-searchbar");
-  if (!bar) return;
-  let sx = 0, sy = null, claimed = false;
-  bar.addEventListener("touchstart", (e) => {
-    if (e.touches.length !== 1) { sy = null; return; }
-    sx = e.touches[0].clientX; sy = e.touches[0].clientY; claimed = false;
-  }, { passive: true });
-  bar.addEventListener("touchmove", (e) => {
-    if (sy === null) return;
-    const up = sy - e.touches[0].clientY;
-    // Once it's clearly an upward drag, claim it (preventDefault) so the search
-    // input doesn't take focus and flash the keyboard on the way out.
-    if (up > 12) claimed = true;
-    if (claimed) e.preventDefault();
-  }, { passive: false });
-  bar.addEventListener("touchend", (e) => {
-    if (sy === null) return;
-    const t = e.changedTouches[0];
-    const go = t && searchbarSwipeDismisses({ startY: sy, endY: t.clientY, dx: t.clientX - sx });
-    sy = null;
-    if (go) { $("sessions-search").blur(); closeSheets(); }
-  });
-})();
-
-// [SWIPEUPWIRE-START]
-(function attachSwipeUpToDrawer() {
-  let sx = 0, sy = 0, active = false;
-  addEventListener("touchstart", (e) => {
-    touchConsumedByTranscript = false; // a fresh gesture: nobody has claimed it yet
-    active = e.touches.length === 1
-      // Whether an overlay owns the screen is decided HERE, at the start of the
-      // gesture, not at touchend: this listener is on the window, so it runs
-      // LAST, after any element-level touchend has already reacted. The search
-      // bar's up-swipe dismiss (#169) closes the Sessions view in its own
-      // touchend, and re-reading the state afterwards saw a hidden sheet and
-      // reopened it on the very swipe that dismissed it — the sheet appeared
-      // not to close at all. Desktop hid the bug because the sheet auto-focuses
-      // its search field there, so `keyboardUp` suppressed the reopen; on a
-      // phone nothing takes focus and it fired every time.
-      && $("sessions-sheet").hidden && $("backdrop").hidden && !consoleOpen;
-    if (active) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }
-  }, { passive: true });
-  addEventListener("touchend", (e) => {
-    if (!active) return;
-    active = false;
-    if (touchConsumedByTranscript) return; // the transcript already used this finger
-    const t = e.changedTouches[0];
-    if (!t) return;
-    if (swipeUpOpensDrawer({
-      startY: sy, endY: t.clientY, dx: t.clientX - sx,
-      viewportH: (window.visualViewport && visualViewport.height) || innerHeight,
-      keyboardUp: editingNow(),
-    })) openSessionsSheet("");
-  }, { passive: true });
-})();
-// [SWIPEUPWIRE-END]
-
-// ---- trackpad pager (macOS Safari) ---------------------------------------
-// A two-finger horizontal swipe arrives as a wheel-event stream, not
-// touches. There is no lift-off signal, so the gesture ends when the
-// stream goes quiet — or immediately, once the drag crosses the commit
-// threshold (waiting out the momentum tail would feel sluggish). The
-// first horizontal-dominant event decides the stream's fate: cancelled
-// from event one it stays ours; uncancelled, Safari starts its own
-// back/forward navigation and no later preventDefault can stop it.
-const WHEEL_GAP = 120; // ms of silence = stream over (fingers up, no momentum)
-const WHEEL_DRAW_AT = 4; // px of claimed travel before the drag is drawn
-// Full COMMIT_AT on a wide desktop window is a lot of trackpad travel; cap it.
-const WHEEL_COMMIT_MAX = 200; // px
-
-const wheel = {
-  active: false, blocked: false, committed: false,
-  dx: 0, pendX: 0, width: 1, endTimer: 0,
-};
-
-function wheelStreamOver() {
-  const wasActive = wheel.active;
-  const dx = wheel.dx;
-  wheel.active = false;
-  wheel.blocked = false;
-  wheel.committed = false;
-  wheel.pendX = 0;
-  if (!wasActive) return;
-  $("swipe-hint").hidden = true;
-  messagesEl.style.transition = "transform 0.18s ease-out";
-  const direction = dx < 0 ? 1 : -1;
-  snapBack(direction, swipeTarget(direction), dx);
+// ---- a chat that no longer exists ----------------------------------------
+// With the deck gone there is no per-device membership left to repair: the
+// list is derived from the server's own session files, so a deleted chat simply
+// stops being listed. What remains is dropping anything this device had cached
+// FOR that chat (a warm peek, a stashed DOM) and saying why nothing happened.
+function forgetSession(name) {
+  if (!name) return;
+  prefetched.delete(name);
+  viewCache.delete(name);
+  forgetSeen(name);
 }
 
-messagesEl.addEventListener("wheel", (event) => {
-  clearTimeout(wheel.endTimer);
-  wheel.endTimer = setTimeout(wheelStreamOver, WHEEL_GAP);
-  if (wheel.committed) {
-    // A page was already committed on this gesture: swallow the momentum
-    // tail until the stream goes quiet. A fixed cooldown is not enough —
-    // a brisk swipe coasts for well over a second, and the leftovers would
-    // restart the pager and commit a second page nobody asked for.
-    event.preventDefault();
-    return;
-  }
-  if (wheel.blocked) return; // vertical scroll or opted out — native until quiet
-  if (!wheel.active) {
-    if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) {
-      // Vertical-dominant start: a scroll. Stand down for the whole stream,
-      // matching the touch pager's axis lock.
-      if (event.deltaY !== 0) wheel.blocked = true;
-      return;
-    }
-    if (selectionActive() || scrollsHorizontally(event.target)) {
-      wheel.blocked = true;
-      return;
-    }
-    // Horizontal-dominant, however faint: claim it from this very event —
-    // one uncancelled 1px event is all Safari needs to start its own
-    // history swipe (the tab "goes back"). The drag isn't drawn until the
-    // claimed travel adds up; a vertical-dominant event arriving while
-    // still pending hands the stream back to native scrolling above.
-    event.preventDefault();
-    wheel.pendX -= event.deltaX;
-    if (Math.abs(wheel.pendX) < WHEEL_DRAW_AT) return;
-    wheel.active = true;
-    wheel.dx = wheel.pendX;
-    wheel.pendX = 0;
-    wheel.width = messagesEl.clientWidth;
-  } else {
-    event.preventDefault(); // ours now — keeps Safari's history swipe out
-    // Scrolling right (deltaX > 0) drags the page left, like a leftward touch.
-    wheel.dx -= event.deltaX;
-  }
-  const dx = wheel.dx;
-  const direction = dx < 0 ? 1 : -1;
-  const target = swipeTarget(direction);
-  wheel.dx = target ? dx : dx / 3; // rubber-band where no page exists
-  messagesEl.style.transition = "none";
-  messagesEl.style.transform = `translateX(${wheel.dx}px)`;
-  const commitPx = Math.min(wheel.width * COMMIT_AT, WHEEL_COMMIT_MAX);
-  updateSwipeHint(target, dx, commitPx);
-  if (target && Math.abs(wheel.dx) > commitPx) {
-    wheel.active = false;
-    wheel.committed = true; // endTimer stays armed: quiet ends the gesture
-    $("swipe-hint").hidden = true;
-    messagesEl.style.transition = "transform 0.18s ease-out";
-    commitPage(direction, target, wheel.width);
-  }
-}, { passive: false });
+function onSessionGone(name) {
+  forgetSession(name);
+  showToast("that chat no longer exists");
+}
 
-// ---- keyboard pager ------------------------------------------------------
-// Ctrl+H / Ctrl+L (vim: h = left, l = right) page like the swipe: H = back
-// = older chat, L = forward = newer, past the newest = fresh chat. Ctrl,
-// not Cmd — Cmd+H hides the window and Cmd+L is the address bar. This
-// shadows the text field's emacs-style Ctrl+H (delete backward); Backspace
-// still deletes.
-document.addEventListener("keydown", (event) => {
-  if (!event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
-  if (event.key !== "h" && event.key !== "l") return;
-  event.preventDefault(); // even at the pager's edge, never delete-backward
-  // One page per deliberate press: no key-repeat runs, and the previous
-  // switch must land (its replay resets swipeInFrom) before the next.
-  if (event.repeat || swipeInFrom || !$("backdrop").hidden) return;
-  const direction = event.key === "l" ? 1 : -1;
-  const target = swipeTarget(direction);
-  if (!target) return;
-  messagesEl.style.transition = "transform 0.18s ease-out";
-  commitPage(direction, target, messagesEl.clientWidth);
-});
+function onSessionDeleted(event) {
+  forgetSession(event.name);
+  showToast("session deleted");
+}
+
+// ---- opening the session rail by swiping the transcript ------------------
+// The gesture lives on the WHOLE transcript, not a left edge. An edge-only
+// drawer is the platform default and it is what this shipped as first, but this
+// app is navigated between chats constantly and a 24px strip is a fiddly
+// one-handed target — the complaint was immediate and correct. The thing that
+// made the edge tempting is transcript children that scroll sideways
+// (unwrapped command output, code blocks, tables), and the fix for those is
+// the one the old swipe pager already used on this exact surface: stand down
+// when the pan STARTS inside one. That is a solved problem, not a reason to
+// shrink the target.
+//
+// The DECISION is a pure function so it can be unit-tested without a DOM; the
+// wiring above only feeds it live geometry.
+// [RAILSWIPE-START]
+const RAIL_AXIS_AT = 12;      // px of travel before the gesture picks an axis
+const RAIL_COMMIT_AT = 0.28;  // fraction of the transcript width that commits
+const RAIL_FLICK_PX = 48;     // a short, fast drag commits on speed instead
+const RAIL_FLICK_MS = 260;
+
+function railSwipeOpens(g) {
+  // g: { dx, dy, width, ms, keyboardUp }
+  if (g.keyboardUp) return false;             // the composer owns gestures then
+  if (g.dx <= 0) return false;                // leftward opens nothing
+  if (Math.abs(g.dy) > g.dx * 0.8) return false;  // dominant horizontal only
+  if (g.dx > (g.width || 0) * RAIL_COMMIT_AT) return true;
+  return g.dx >= RAIL_FLICK_PX && g.ms <= RAIL_FLICK_MS; // flick
+}
+// [RAILSWIPE-END]
 
 // sessions
-$("back-chip").onclick = () => openSessionsSheet("");
+$("back-chip").onclick = () => toggleSessionRail();
 $("session-chip").onclick = () => openSessionMenu();
-$("new-chip").onclick = () => requestNewChat();
 $("console-btn").onclick = () => toggleConsole(); // global Quake console (#148)
 
 $("connbar").onclick = () => reconnect();
 $("offlinebar").onclick = () => reconnect(); // same affordance, one bar (#165)
-$("offline-btn").onclick = () => toggleOfflinePin();
+$("composer-slot").onclick = () => pasteIntoComposer();
+$("input-clear").onclick = () => clearComposer();
 
 // ---- session title menu -------------------------------------------------
 // The tappable title opens a small menu of session actions (iOS Messages
@@ -8902,6 +8307,7 @@ function openSessionMenu() {
   const del = menu.querySelector('[data-act="delete"]');
   if (del) resetDeleteChat(del); // never open still armed from a prior dismissal
   $("wrap-state").textContent = document.body.classList.contains("wrap") ? "On" : "Off";
+  refreshOfflinePinUi(); // async — the row shows "…" until the store answers
   // Measure while shown-but-invisible so width is known before centering.
   menu.style.visibility = "hidden";
   menu.hidden = false;
@@ -8963,11 +8369,11 @@ $("session-menu").addEventListener("click", (e) => {
     case "new": requestNewChat(); break;
     case "model": openModelSheet(""); break;
     case "cd": openDirSheet(); break;
+    case "pin": toggleOfflinePin(); break;
     case "wrap": toggleWrap(); break;
     case "export": exportSessionPdf(); break;
     case "workspace": openSheet("workspace-sheet"); send({ type: "jobs" }); break;
     case "copylog": copyLogPath(); break;
-    case "unrecent": if (currentSession) removeFromWorkingSet(currentSession); break;
     case "reconnect": reconnect(); break;
   }
 });
@@ -8976,6 +8382,13 @@ $("session-menu").addEventListener("click", (e) => {
 // running session and lands the client on a fresh chat when the active one is
 // deleted, so no client-side special cases are needed here (see server
 // _delete_session).
+// [DELARM-START]
+// Deleting a chat is IRREVERSIBLE — the log is unlinked, and the offline mirror
+// drops server-deleted sessions on its next sync, so there is no copy to come
+// back to. It takes TWO taps, never one, and a half-committed control disarms
+// itself so the second tap cannot become the accidental one either. This is the
+// only delete path now: the rail rows lost their swipe-to-delete, because
+// leftward on that panel means "push it back off screen".
 let deleteChatTimer = null;
 function resetDeleteChat(item) {
   clearTimeout(deleteChatTimer);
@@ -8994,41 +8407,118 @@ function armDeleteChat(item) {
   item.querySelector(".menu-label").textContent = "Confirm delete";
   deleteChatTimer = setTimeout(() => resetDeleteChat(item), 4000);
 }
+// [DELARM-END]
 
-// ---- attention badge ----------------------------------------------------
-// A background session that finished (or needs you) sets the durable badge on
-// the ‹ Sessions button; opening the list clears it.
-// ---- Sessions tabs (Recent / Automated) ----------------------------------
-const SESSION_TAB_KEY = "aish-session-tab";
-let sessionTab = (() => {
-  try { return localStorage.getItem(SESSION_TAB_KEY) === "automated" ? "automated" : "recent"; }
-  catch { return "recent"; }
+// ---- unread: has this chat moved since I last looked at it? --------------
+// [SEEN-START]
+// The list is organised by ATTENTION, not by provenance. Chats used to be split
+// into Recent / Automated tabs — a partition by who STARTED the chat — and the
+// design kept arguing with itself about it: attention counters had to be
+// computed for BOTH tabs so the hidden one could still flag things, and search
+// collapsed the split entirely because it lies about relevance. Both are the
+// same complaint. Provenance is a property worth SEEING (it is a row glyph now),
+// but it is not how anyone navigates: what you want to know is whether a chat
+// wants you. An email-triggered session holding an approval wants you exactly as
+// much as your own chat that finished a long task while you were away, and a
+// three-week-old triggered chat about a receipt is just an old chat.
+//
+// "Unread" is per-DEVICE, because "I looked at it" is a fact about a screen, not
+// about the server: the same chat can be read here and unread on the phone, and
+// that is correct. The floor (`since`) is what keeps day one sane — without it
+// the entire archive would arrive unread on a new device and the attention band,
+// whose whole value is being short, would BE the list.
+const SEEN_KEY = "aish-seen";
+const SEEN_MAX = 300; // names kept; oldest views dropped first
+let seenAt = {};      // name → ms this device last viewed it
+let seenSince = 0;    // this device started tracking here; older activity is read
+
+function saveSeen() {
+  try { localStorage.setItem(SEEN_KEY, JSON.stringify({ at: seenAt, since: seenSince })); }
+  catch { /* private mode: unread degrades to in-memory only */ }
+}
+
+(function loadSeen() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SEEN_KEY));
+    if (raw && raw.at && raw.since) {
+      seenAt = raw.at;
+      seenSince = raw.since;
+      return;
+    }
+  } catch { /* private mode / corrupt — fall through to a fresh floor */ }
+  seenSince = Date.now();
+  saveSeen();
 })();
-let lastSessionEvent = null; // last session_list, so tab switches re-render offline
+
+// The ONLY writer of the seen map. Called from [SESSION-ENTER], because "the
+// view is now chat X" and "this device has looked at chat X" are the same event
+// — putting it there is what keeps a socket hello, a mirror read and the boot
+// paint from each having to remember it separately.
+function markSeen(name) {
+  if (!name) return;
+  seenAt[name] = Date.now();
+  const names = Object.keys(seenAt);
+  if (names.length > SEEN_MAX) {
+    names.sort((a, b) => seenAt[b] - seenAt[a]);
+    for (const stale of names.slice(SEEN_MAX)) delete seenAt[stale];
+  }
+  saveSeen();
+}
+
+function forgetSeen(name) {
+  if (!name || !(name in seenAt)) return;
+  delete seenAt[name];
+  saveSeen();
+}
+
+// PURE: the whole unread decision, testable with no DOM and no clock. `current`
+// is part of it rather than a caller's afterthought — the chat on screen can
+// never be unread, however much activity it produces while you watch it.
+function sessionUnread(info, state) {
+  if (!info || !info.name || info.name === state.current) return false;
+  const activity = (Number(info.ts) || 0) * 1000; // rows stamp epoch SECONDS
+  if (!activity) return false;
+  return activity > Math.max(state.seen[info.name] || 0, state.since);
+}
+// [SEEN-END]
 
 // SESSIONS_PARTITION_START
-// Split sessions into the two tabs and tally each tab's attention counters.
-// Automated = a triggered origin (schedule/email/webhook, #160); everything
-// else is a user chat. Counts are computed for BOTH tabs regardless of which
-// is showing, so the inactive tab's badge still flags things needing you.
-function partitionSessions(sessions) {
-  const isActive = (s) => s.state === "running" || s.state === "waiting";
-  const isAuto = (s) => Boolean(s.origin && s.origin !== "user");
-  const groups = { recent: [], automated: [] };
-  const counts = {
-    recent: { running: 0, waiting: 0 },
-    automated: { running: 0, waiting: 0 },
-  };
-  for (const s of sessions) {
-    const key = isAuto(s) ? "automated" : "recent";
-    groups[key].push(s);
-    if (s.state === "running") counts[key].running++;
-    else if (s.state === "waiting") counts[key].waiting++;
+// One list, four bands, in the order you act on them:
+//
+//   Needs you  — held for approval, or activity you haven't seen. The only
+//                band that is about you rather than about the chat, and the
+//                reason the tabs are gone: it cuts ACROSS provenance.
+//   Active now — running. Worth seeing, but it isn't asking for anything.
+//   Pinned     — chats you said you care about, which recency would sink.
+//   (rest)     — everything else, in date buckets.
+//
+// A session appears in exactly one band. Everything below is pure: it takes
+// rows in and returns rows out, so the sectioning is unit-testable.
+function partitionSessions(sessions, state) {
+  const bands = { needsYou: [], active: [], pinned: [], rest: [] };
+  const counts = { waiting: 0, running: 0, unread: 0 };
+  for (const info of sessions) {
+    const unread = sessionUnread(info, state);
+    if (info.state === "waiting") counts.waiting++;
+    if (info.state === "running") counts.running++;
+    if (unread) counts.unread++;
+    if (info.state === "waiting" || unread) bands.needsYou.push(info);
+    else if (info.state === "running") bands.active.push(info);
+    else if (info.pinned) bands.pinned.push(info);
+    else bands.rest.push(info);
   }
-  return { groups, counts, isActive };
+  return { bands, counts };
 }
 // SESSIONS_PARTITION_END
 
+// ---- attention badge ----------------------------------------------------
+// The durable count on the top-bar rail button. Two sources, deliberately: a
+// `session_state` event names a chat that just finished while you were
+// elsewhere (it arrives with no list attached), and every session_list
+// recomputes the truth from the rows themselves. The set is REPLACED by the
+// latter, so the badge is self-clearing — reading a chat clears it, no dismiss
+// action required. Opening the list no longer clears it: looking at an index of
+// unread things is not reading them.
 const attentionSessions = new Set();
 function refreshBadge() {
   const badge = $("back-badge");
@@ -9039,8 +8529,11 @@ function refreshBadge() {
     badge.hidden = true;
   }
 }
+
+let lastSessionEvent = null; // last session_list, so re-renders work offline
+
 // The list is rendered from the local mirror FIRST and replaced by the server's
-// answer when it arrives. Online that just means the sheet paints instantly
+// answer when it arrives. Online that just means the rail paints instantly
 // instead of after a round trip; offline it is the only source, and search
 // keeps working because the ranking is a port of the server's own tiers
 // (offlineRank) rather than a different, weaker matcher.
@@ -9068,7 +8561,7 @@ async function renderOfflineSessions(query) {
 function requestSessions(query) {
   // The server's rows are decorated with pin state from the in-memory mirror,
   // so make sure it is current before the response lands — otherwise the
-  // "offline" badge silently goes missing in the window after a reload.
+  // pinned band silently empties in the window after a reload.
   offlineRefreshMetaMap();
   renderOfflineSessions(query);
   // Don't call send() while offline: its toast would fire on every keystroke
@@ -9081,26 +8574,48 @@ $("sessions-search").addEventListener(
   debounce(() => requestSessions($("sessions-search").value), 150)
 );
 
-function openSessionsSheet(query) {
-  // A full-page screen, not a bottom sheet — dismiss any open sheet/menu first,
-  // no backdrop (it covers the whole chat).
+// ---- the session rail ----------------------------------------------------
+// [RAIL-START]
+// The sessions list is a LEFT SLIDE-OVER, not a full screen — and that is
+// structural, not cosmetic. At a wide viewport the very same panel docks open
+// as a permanent sidebar, so phone and desktop run ONE navigation model at two
+// widths; a full-screen list would be a separate SCREEN, i.e. a second model
+// that would have to be reconciled with the first later. The sliver of chat
+// left visible behind it does three jobs a full screen cannot: it says "this is
+// temporary, you are still in that chat", it gives a tap-to-dismiss target that
+// isn't a back button, and it makes obvious that the transcript underneath is
+// untouched.
+//
+// There is deliberately no drag-to-CLOSE on the list: a leftward drag on a row
+// is already swipe-to-delete, and two recognizers on one surface is exactly the
+// collision that cost #169 its per-row delete. Closing is the scrim, the button,
+// or Escape.
+const RAIL_DOCK_MIN = 900; // px of viewport width at which the rail docks open
+
+function railDocked() { return innerWidth >= RAIL_DOCK_MIN; }
+function railIsOpen() { return document.body.classList.contains("rail-open"); }
+function railWidth() {
+  return $("session-rail").offsetWidth || Math.min(innerWidth * 0.86, 380);
+}
+
+function openSessionRail(query = "") {
+  // Whatever else owns the screen stands down first — the rail is not a sheet
+  // and does not stack with one.
   for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
   for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
   $("backdrop").hidden = true;
-  $("sessions-sheet").hidden = false;
-  attentionSessions.clear();
-  refreshBadge();
+  document.body.classList.remove("rail-dragging");
+  document.body.classList.add("rail-open");
+  clearRailDragStyles();
   $("sessions-search").value = query;
   // Auto-focus only where a hardware keyboard is likely: on touch devices
-  // focusing would throw the on-screen keyboard over the list before the
-  // user has even seen it — there, browsing is the common case and a tap
-  // on the field opts into searching.
+  // focusing would throw the on-screen keyboard over the list before the user
+  // has even seen it — there, browsing is the common case and a tap on the
+  // field opts into searching.
   if (FINE_POINTER) {
-    // Focus only after the sheet's layout settles: focusing synchronously lets
-    // iOS measure the input at its pre-layout position and pan the whole
-    // layout absurdly far to "reveal" it — the sheet then opens scrolled away
-    // and stuck until the keyboard closes (#24). preventScroll stops the
-    // browser's own reveal-scroll; the input is already visible.
+    // Focus only after layout settles: focusing synchronously lets iOS measure
+    // the input at its pre-layout position and pan the whole layout absurdly
+    // far to "reveal" it (#24). preventScroll stops the browser's own reveal.
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
         $("sessions-search").focus({ preventScroll: true });
@@ -9110,6 +8625,121 @@ function openSessionsSheet(query) {
   }
   requestSessions(query);
 }
+
+function closeSessionRail() {
+  if (railDocked()) return; // docked open is its resting state, not a mode
+  const active = document.activeElement;
+  if (active && active.closest("#session-rail")) active.blur();
+  document.body.classList.remove("rail-open", "rail-dragging");
+  clearRailDragStyles();
+  snapViewportSoon();
+}
+
+function toggleSessionRail() {
+  if (railIsOpen()) closeSessionRail();
+  else openSessionRail("");
+}
+
+function clearRailDragStyles() {
+  $("session-rail").style.transform = "";
+  $("rail-scrim").style.opacity = "";
+}
+
+// The finger-following half of the edge gesture (see [RAILSWIPE]). The panel is
+// laid out off-screen by CSS and dragged in with an inline transform; the class
+// takes over again the moment the finger lifts, so no drag can leave the rail
+// resting somewhere the stylesheet doesn't know about.
+function beginRailDrag() {
+  if (railDocked()) return;
+  document.body.classList.add("rail-dragging");
+  requestSessions($("sessions-search").value || "");
+}
+
+function dragRailTo(progress) {
+  if (!document.body.classList.contains("rail-dragging")) return;
+  $("session-rail").style.transform = `translateX(${-(1 - progress) * railWidth()}px)`;
+  $("rail-scrim").style.opacity = String(progress);
+}
+
+function endRailDrag(open) {
+  document.body.classList.remove("rail-dragging");
+  clearRailDragStyles();
+  if (open) openSessionRail("");
+  else closeSessionRail();
+}
+
+// The scrim IS a dismiss target — the sliver of chat you can still see is what
+// says the rail is temporary, and tapping it is what makes that true.
+$("rail-scrim").onclick = () => closeSessionRail();
+
+// …and so is a leftward drag on the panel itself: the exact inverse of the
+// gesture that opened it, which is the first thing a hand reaches for to push
+// something back off the screen. It is available because rows no longer own a
+// horizontal gesture — the swipe-to-delete they used to carry meant this very
+// drag deleted a chat instead, which is both surprising and the destructive
+// reading of an ambiguous gesture.
+(function attachRailCloseSwipe() {
+  const rail = $("session-rail");
+  let sx = 0, sy = 0, tracking = false, claimed = false;
+  rail.addEventListener("touchstart", (event) => {
+    tracking = false;
+    if (event.touches.length !== 1 || railDocked() || !railIsOpen()) return;
+    sx = event.touches[0].clientX;
+    sy = event.touches[0].clientY;
+    tracking = true;
+    claimed = false;
+  }, { passive: true });
+
+  rail.addEventListener("touchmove", (event) => {
+    if (!tracking) return;
+    const dx = event.touches[0].clientX - sx;
+    const dy = event.touches[0].clientY - sy;
+    if (!claimed) {
+      if (Math.abs(dx) < RAIL_AXIS_AT && Math.abs(dy) < RAIL_AXIS_AT) return;
+      // The list scrolls vertically; a scroll must never drag the panel.
+      if (dx >= 0 || Math.abs(dx) < Math.abs(dy) * 1.4) { tracking = false; return; }
+      claimed = true;
+      document.body.classList.add("rail-dragging");
+    }
+    // Dragging TOWARD closed: progress runs 1 → 0.
+    dragRailTo(Math.max(0, Math.min(1, 1 + dx / railWidth())));
+  }, { passive: true });
+
+  const finish = (event) => {
+    if (!tracking) return;
+    tracking = false;
+    if (!claimed) return;
+    claimed = false;
+    const touch = event.changedTouches[0];
+    const dx = touch ? touch.clientX - sx : 0;
+    // Past a third of the way back, let go of it; otherwise settle open again.
+    endRailDrag(dx > -railWidth() * RAIL_COMMIT_AT);
+  };
+  rail.addEventListener("touchend", finish);
+  rail.addEventListener("touchcancel", finish);
+})();
+
+// Docking is a viewport fact, so it is re-read on resize. Both directions
+// matter: growing past the breakpoint must not leave a docked layout inset for
+// a panel that isn't shown, and shrinking below it must not strand a rail that
+// was never deliberately opened sitting over the chat.
+addEventListener("resize", () => {
+  if (railDocked()) {
+    if (!railIsOpen()) {
+      document.body.classList.add("rail-open");
+      requestSessions($("sessions-search").value || "");
+    }
+    return;
+  }
+  document.body.classList.remove("rail-open", "rail-dragging");
+  clearRailDragStyles();
+});
+
+// At a docked width the rail is open from the start. Only the CLASS is set
+// here — filling it is left to the first hello, because this runs at module
+// load, before the offline layer the list paints from is ready.
+if (railDocked()) document.body.classList.add("rail-open");
+// [RAIL-END]
 
 // Only the states the user can act on. "idle but open in server memory" is
 // an implementation detail — resume behaves identically either way.
@@ -9157,27 +8787,42 @@ function sessionStamp(ts) {
   return `${date.toLocaleDateString([], { day: "numeric", month: "short" })}, ${time}`;
 }
 
+// The row icon answers ONE question: what is the state of this chat? It used to
+// answer two badly — a blue tick for "this is the chat you're in" (which the
+// row's own highlight already says, and which read as "done"), and a provenance
+// glyph only when nothing else was showing, so a screen of ordinary chats was a
+// screen of identical grey icons. Now: attention states win, then provenance,
+// then a plain chat mark — and "current" is not an icon at all.
 const SESSION_ICONS = {
   waiting: `<svg viewBox="0 0 24 24"><path d="M12 3.5 21 19H3z" fill="none" stroke="var(--orange)" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v3.6M12 16.4v.1" stroke="var(--orange)" stroke-width="1.9" stroke-linecap="round"/></svg>`,
-  current: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="var(--blue)" stroke-width="1.8"/><path d="M8.5 12.5l2.3 2.3 4.7-5" stroke="var(--blue)" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-  idle: `<svg viewBox="0 0 24 24"><path d="M5 6h13M5 12h14M5 18h9" stroke="var(--dim)" stroke-width="1.9" stroke-linecap="round"/></svg>`,
+  chat: `<svg viewBox="0 0 24 24"><path d="M4 6.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-4 3.2V16.5a2 2 0 0 1-1-1.7z" fill="none" stroke="var(--dim)" stroke-width="1.7" stroke-linejoin="round"/></svg>`,
+  schedule: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="var(--purple, #a78bfa)" stroke-width="1.8"/><path d="M12 7.4V12l3 1.8" fill="none" stroke="var(--purple, #a78bfa)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  email: `<svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5" fill="none" stroke="var(--purple, #a78bfa)" stroke-width="1.8"/><path d="M4.5 8l7.5 5 7.5-5" fill="none" stroke="var(--purple, #a78bfa)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  webhook: `<svg viewBox="0 0 24 24"><path d="M13 4.5 6.5 13H12l-1 6.5L17.5 11H12z" fill="none" stroke="var(--purple, #a78bfa)" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
 };
 
-function sessionIcon(info, isCurrent) {
+const ORIGIN_LABELS = { email: "started by email", schedule: "scheduled", webhook: "started by a webhook" };
+
+function sessionIcon(info) {
   const wrap = document.createElement("span");
   wrap.className = "row-icon";
+  const auto = info.origin && info.origin !== "user" ? info.origin : "";
   if (info.state === "running") {
-    wrap.style.background = "var(--green-glow)";
+    wrap.className += " ic-running";
     wrap.innerHTML = '<span class="spin"></span>';
+    wrap.title = "working";
   } else if (info.state === "waiting") {
-    wrap.style.background = "var(--orange-glow)";
+    wrap.className += " ic-waiting";
     wrap.innerHTML = SESSION_ICONS.waiting;
-  } else if (isCurrent) {
-    wrap.style.background = "var(--blue-glow)";
-    wrap.innerHTML = SESSION_ICONS.current;
+    wrap.title = "needs your approval";
+  } else if (auto) {
+    // An unrecognised origin still reads as automation rather than as a chat.
+    wrap.className += " ic-auto";
+    wrap.innerHTML = SESSION_ICONS[auto] || SESSION_ICONS.webhook;
+    wrap.title = ORIGIN_LABELS[auto] || `started by ${auto}`;
   } else {
-    wrap.style.background = "var(--chip-bg)";
-    wrap.innerHTML = SESSION_ICONS.idle;
+    wrap.className += " ic-chat";
+    wrap.innerHTML = SESSION_ICONS.chat;
   }
   return wrap;
 }
@@ -9186,6 +8831,7 @@ function sessionRow(info, current, opts = {}) {
   const isCurrent = info.name === current;
   const row = document.createElement("button");
   row.className = "row session-row" + (isCurrent ? " current" : "");
+  if (opts.unread) row.classList.add("unread");
   const body = document.createElement("span");
   body.className = "session-body";
   const head = document.createElement("span");
@@ -9200,24 +8846,6 @@ function sessionRow(info, current, opts = {}) {
     badge.className = `badge ${badgeSpec[1]}`;
     badge.textContent = badgeSpec[0];
     head.appendChild(badge);
-  }
-  // Provenance tag for triggered sessions (#160) so an automated chat is
-  // legible even in the flat "Active now" / search views, not only under its
-  // "Automated" section.
-  if (info.origin && info.origin !== "user") {
-    const tag = document.createElement("span");
-    tag.className = "badge origin";
-    tag.textContent = info.origin;
-    head.appendChild(tag);
-  }
-  // Kept offline on purpose (#165): this chat survives the eviction sweep, so
-  // it is here whether or not the server is.
-  if (info.pinned) {
-    const pin = document.createElement("span");
-    pin.className = "badge offline-pin";
-    pin.title = "kept available offline";
-    pin.textContent = "offline";
-    head.appendChild(pin);
   }
   body.appendChild(head);
   if (info.cwd) {
@@ -9235,175 +8863,77 @@ function sessionRow(info, current, opts = {}) {
   }
   const right = document.createElement("span");
   right.className = "session-right";
+  const stampLine = document.createElement("span");
+  stampLine.className = "stamp-line";
   const stamp = document.createElement("span");
   stamp.className = "stamp";
   stamp.textContent = sessionStamp(info.ts);
-  right.append(stamp);
-  // An OPEN (working-set) row shows only the ✕ = remove-from-working-set: one
-  // clear tap target, no destructive trash crammed beside a safe action (#169).
-  // Delete is still reachable by swiping the row left (wrapSwipeDelete). HISTORY
-  // rows keep the inline trash, where it sits alone and uncramped.
-  if (opts.recent) right.append(sessionRemoveControl(info));
-  else right.append(sessionDeleteControl(info));
-  row.append(sessionIcon(info, isCurrent), body, right);
-  return wrapSwipeDelete(row, info);
+  stampLine.append(stamp);
+  // Pinned is ONE concept (#165's offline pin absorbed it): a pinned chat sits
+  // in its own band at the top AND is never evicted from the offline mirror.
+  // It goes BELOW the stamp, in the space the row's trash control used to take,
+  // rather than beside it — stacked in the corner, the two of them were eating
+  // the title's width for a mark that is decoration next to the title itself.
+  right.append(stampLine);
+  if (info.pinned) {
+    const pin = document.createElement("span");
+    pin.className = "row-pin";
+    pin.title = "pinned — kept at the top and available offline";
+    pin.innerHTML = PIN_SVG;
+    right.append(pin);
+  }
+  // Unread is a BADGE on the status icon, not a column of its own. A leading
+  // slot is the mail convention, but mail rows are wide and these are not: an
+  // always-reserved 12px gutter on a phone-width panel spent real title space
+  // on a state most rows do not have. Cornering it on the icon costs nothing,
+  // is the notification-dot convention, and still reads at a glance.
+  const icon = sessionIcon(info);
+  if (opts.unread) {
+    const dot = document.createElement("span");
+    dot.className = "unread-dot";
+    dot.setAttribute("aria-label", "unread");
+    icon.appendChild(dot);
+  }
+  row.append(icon, body, right);
+  return railRow(row, info);
 }
 
-// The ✕ on a RECENT row: a NON-destructive "remove from working set" (moves the
-// chat to HISTORY — it is not deleted). One tap, no arming, since it is fully
-// reversible by reopening the chat.
-function sessionRemoveControl(info) {
-  const x = document.createElement("span");
-  x.className = "row-unrecent";
-  x.setAttribute("role", "button");
-  x.setAttribute("aria-label", `remove ${info.title || info.name} from working set`);
-  x.title = "remove from working set (keeps the chat)";
-  x.textContent = "✕";
-  x.onclick = (event) => { event.stopPropagation(); removeFromWorkingSet(info.name); };
-  return x;
-}
+// A pushpin standing UPRIGHT and solid — pinned. The tilted, hollow version of
+// the same shape means "not pinned" and only appears in the chat menu, where
+// both states exist; a row only ever shows the pinned one. Upright-vs-tilted is
+// the distinction to keep: a pin lying at an angle reads as one not pushed in,
+// which is why the first version (tilted AND blue) read backwards.
+const PIN_SVG =
+  '<svg viewBox="0 0 24 24"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2z" fill="currentColor"/></svg>';
 
-// iOS swipe-left-to-delete. The row rides over a red Delete button; a tap on
-// an open row snaps it shut, a tap on a closed row resumes the session.
-function wrapSwipeDelete(row, info) {
-  const wrap = document.createElement("div");
-  wrap.className = "swipe-wrap";
-  const del = document.createElement("button");
-  del.type = "button";
-  del.className = "swipe-del";
-  del.textContent = "Delete";
-  // [DELARM-START]
-  // Deleting a chat is IRREVERSIBLE — the log is unlinked, and the offline
-  // mirror drops server-deleted sessions on its next sync, so there is no copy
-  // to come back to. It used to happen on a single unconfirmed tap on a button
-  // a swipe had just slid under your thumb, one row away from the ✕ that merely
-  // moves a chat to HISTORY. The CLI's /delete has always asked [y/N]; this is
-  // the same action and gets the same standard. Two taps, not a modal: a dialog
-  // here would fight the swipe gesture and the PWA's keyboard handling.
-  let armed = false;
-  let armTimer = null;
-  const disarm = () => {
-    clearTimeout(armTimer);
-    armTimer = null;
-    if (!armed) return;
-    armed = false;
-    del.textContent = "Delete";
-    del.classList.remove("armed");
-  };
-  del.onclick = (e) => {
-    e.stopPropagation();
-    if (!armed) {
-      armed = true;
-      del.textContent = "Confirm";
-      del.classList.add("armed");
-      // Disarm on its own: a half-committed destructive control left sitting
-      // there is how the SECOND tap becomes accidental too.
-      armTimer = setTimeout(disarm, 4000);
-      return;
-    }
-    disarm();
-    send({ type: "delete_session", name: info.name });
-  };
-  // [DELARM-END]
-  wrap.append(del, row);
-  let startX = null, dx = 0, open = false;
-  const set = (x) => { row.style.transform = x ? `translateX(${x}px)` : ""; };
-  row.addEventListener("pointerdown", (e) => {
-    if (e.pointerType === "mouse" && e.button !== 0) return;
-    startX = e.clientX; dx = 0;
-  });
-  row.addEventListener("pointermove", (e) => {
-    if (startX === null) return;
-    dx = e.clientX - startX;
-    if (Math.abs(dx) > 6) row.classList.add("dragging");
-    set(Math.min(0, Math.max(-100, (open ? -88 : 0) + dx)));
-  });
-  const finish = () => {
-    if (startX === null) return;
-    const moved = Math.abs(dx) > 6;
-    open = (open ? -88 : 0) + dx < -44;
-    if (!open) disarm(); // the row closed — the destructive control resets with it
-    row.classList.remove("dragging");
-    set(open ? -88 : 0);
-    startX = null;
-    if (moved) { row.dataset.swiped = "1"; requestAnimationFrame(() => delete row.dataset.swiped); }
-  };
-  row.addEventListener("pointerup", finish);
-  row.addEventListener("pointercancel", finish);
+// A rail row is just a row now. It used to ride over a red Delete button on a
+// left-swipe, and that gesture had to go: leftward on this panel is the natural
+// way to push it back off screen, and having the same drag mean "delete this
+// chat" instead was both surprising and the more destructive reading of an
+// ambiguous gesture. Deleting lives in the chat menu, which is where a rare,
+// irreversible action belongs — and where it already was.
+function railRow(row, info) {
   row.onclick = () => {
-    if (row.dataset.swiped) return;      // this "click" was really a swipe
-    if (open) { open = false; disarm(); set(0); return; } // tap an open row → close it
     resumeSession(info.name); // the socket if there is one, else the mirror
-    closeSheets();
+    closeSessionRail();
   };
-  return wrap;
+  return row;
 }
 
-function renderTabCounts(id, c) {
-  const el = $(id);
-  el.replaceChildren();
-  const pill = (cls, n, label) => {
-    const p = document.createElement("span");
-    p.className = `seg-count ${cls}`;
-    p.textContent = String(n);
-    p.title = `${n} ${label}`;
-    el.appendChild(p);
-  };
-  if (c.running) pill("running", c.running, "running");
-  if (c.waiting) pill("waiting", c.waiting, "need approval");
-}
-
-function syncTabSelection() {
-  for (const id of ["tab-recent", "tab-automated"]) {
-    const btn = $(id);
-    btn.setAttribute("aria-selected", btn.dataset.tab === sessionTab ? "true" : "false");
-  }
-}
-
-function setSessionTab(tab) {
-  if ((tab !== "recent" && tab !== "automated") || tab === sessionTab) return;
-  sessionTab = tab;
-  try { localStorage.setItem(SESSION_TAB_KEY, tab); } catch { /* private mode */ }
-  if (lastSessionEvent) renderSessions(lastSessionEvent);
-}
-
-$("tab-recent").onclick = () => setSessionTab("recent");
-$("tab-automated").onclick = () => setSessionTab("automated");
-
-// Active (running / needs-approval) sessions float to the top under their own
-// header; the rest keep the date grouping. Shared by both tabs.
-function renderSessionList(sessions, current, isActive, opts = {}) {
+// ---- rendering the list --------------------------------------------------
+function railSection(label, sessions, current, unreadState) {
+  if (!sessions.length) return;
   const list = $("sessions-list");
-  if (!sessions.length) {
-    if (opts.skipEmpty) return; // the caller already handled the empty case (recent tab)
-    const empty = document.createElement("div");
-    empty.className = "section-label";
-    empty.textContent = sessionTab === "automated"
-      ? "No automated sessions" : "No chats yet";
-    list.appendChild(empty);
-    return;
-  }
-  const active = sessions.filter(isActive);
-  const rest = sessions.filter((s) => !isActive(s));
-  if (active.length) {
-    list.appendChild(sectionLabel("Active now"));
-    for (const info of active) list.appendChild(sessionRow(info, current));
-  }
-  let lastGroup = null;
-  for (const info of rest) {
-    const group = sessionGroup(info.ts);
-    if (group !== lastGroup) {
-      list.appendChild(sectionLabel(group));
-      lastGroup = group;
-    }
-    list.appendChild(sessionRow(info, current));
+  list.appendChild(sectionLabel(label));
+  for (const info of sessions) {
+    list.appendChild(sessionRow(info, current, { unread: sessionUnread(info, unreadState) }));
   }
 }
 
 function renderSessions(event) {
   lastSessionEvent = event;
-  // Carry the mirror's own facts onto server-supplied rows, so "kept offline"
-  // shows in the authoritative list too, not only in the cached one.
+  // Carry the mirror's own facts onto server-supplied rows: the pin lives on
+  // this device, so the authoritative list only learns it from here.
   if (!event.fromCache) {
     for (const info of event.sessions) {
       const meta = offlineMeta.get(info.name);
@@ -9412,96 +8942,41 @@ function renderSessions(event) {
   }
   const list = $("sessions-list");
   list.replaceChildren();
-  // Ranked search results are ordered by relevance, so date/status grouping —
-  // and the tab split — would lie. Hide the tabs and render a flat list.
+  const unreadState = { seen: seenAt, since: seenSince, current: event.current };
+  // Ranked search results are ordered by relevance, so date/band grouping would
+  // lie about why a row is where it is. Render a flat list.
   if ($("sessions-search").value.trim()) {
-    $("sessions-tabs").hidden = true;
     if (!event.sessions.length) { list.textContent = "no matching sessions"; return; }
-    for (const info of event.sessions) list.appendChild(sessionRow(info, event.current));
+    for (const info of event.sessions) {
+      list.appendChild(sessionRow(info, event.current, { unread: sessionUnread(info, unreadState) }));
+    }
     return;
   }
-  $("sessions-tabs").hidden = false;
-  maybeSeedDeck(event.sessions); // first run: adopt the recently-active chats (#169)
-  const { groups, counts, isActive } = partitionSessions(event.sessions);
-  renderTabCounts("tab-recent-counts", counts.recent);
-  renderTabCounts("tab-automated-counts", counts.automated);
-  syncTabSelection();
-  if (sessionTab === "recent") renderRecentTab(groups.recent, event.current, isActive);
-  else renderSessionList(groups.automated, event.current, isActive);
-}
-
-// The Recent tab is split (#169): an OPEN section = the working-set deck in its
-// stable order (each row carries a ✕ that moves the chat to HISTORY), then
-// HISTORY = every other chat, keeping the Active-now float + date grouping. The
-// header is "Open" (not "Recent") so it can't collide with the History date
-// bucket also named "Recent".
-function renderRecentTab(sessions, current, isActive) {
-  const list = $("sessions-list");
-  const { recent, history } = partitionRecent(deck, sessions);
-  if (recent.length) {
-    list.appendChild(sectionLabel("Open"));
-    for (const info of recent) list.appendChild(sessionRow(info, current, { recent: true }));
-  }
-  if (!recent.length && !history.length) {
+  if (!event.sessions.length) {
     const empty = document.createElement("div");
     empty.className = "section-label";
     empty.textContent = "No chats yet";
     list.appendChild(empty);
     return;
   }
-  if (history.length) {
-    // No "History" label — OPEN vs the date buckets (Recent/Today/…) already read
-    // as distinct. A hairline just marks where the working set ends (#169).
-    if (recent.length) {
-      const divider = document.createElement("div");
-      divider.className = "session-list-divider";
-      list.appendChild(divider);
+  const { bands } = partitionSessions(event.sessions, unreadState);
+  // The badge is recomputed from ground truth on every list, so it clears
+  // itself as chats are read rather than needing a dismiss.
+  attentionSessions.clear();
+  for (const info of bands.needsYou) attentionSessions.add(info.name);
+  refreshBadge();
+  railSection("Needs you", bands.needsYou, event.current, unreadState);
+  railSection("Active now", bands.active, event.current, unreadState);
+  railSection("Pinned", bands.pinned, event.current, unreadState);
+  let lastGroup = null;
+  for (const info of bands.rest) {
+    const group = sessionGroup(info.ts);
+    if (group !== lastGroup) {
+      list.appendChild(sectionLabel(group));
+      lastGroup = group;
     }
-    renderSessionList(history, current, isActive, { skipEmpty: true });
+    list.appendChild(sessionRow(info, event.current, { unread: false }));
   }
-}
-
-// No horizontal tab-swipe on the sessions list: it sat on the same rows as the
-// per-row swipe-to-delete and always preempted it, so a row could never be
-// swiped away (#169). The Recent/Automated segmented buttons switch tabs; the
-// horizontal swipe surface belongs to swipe-to-delete alone.
-
-const TRASH_SVG =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
-  'stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 7V5a1 1 0 0 1 ' +
-  '1-1h2a1 1 0 0 1 1 1v2m-8 0l1 13h8l1-13M10 11v6m4-6v6"/></svg>';
-
-function sessionDeleteControl(info) {
-  // A span, not a nested <button> (the row itself is one). Deleting is
-  // destructive and unrecoverable, so it takes two taps: the first arms the
-  // control (turns into a red "Delete?"), the second sends the delete; it
-  // disarms on timeout so a stray tap can't linger. The server refuses
-  // running sessions and lands the client on a fresh chat when the current
-  // one is deleted — no client-side special cases needed.
-  const del = document.createElement("span");
-  del.className = "row-delete";
-  del.setAttribute("role", "button");
-  del.setAttribute("aria-label", `delete session ${info.title || info.name}`);
-  del.innerHTML = TRASH_SVG;
-  let armed = false;
-  let timer = null;
-  del.onclick = (event) => {
-    event.stopPropagation();
-    if (armed) {
-      clearTimeout(timer);
-      send({ type: "delete_session", name: info.name });
-      return;
-    }
-    armed = true;
-    del.classList.add("armed");
-    del.textContent = "Delete?";
-    timer = setTimeout(() => {
-      armed = false;
-      del.classList.remove("armed");
-      del.innerHTML = TRASH_SVG;
-    }, 4000);
-  };
-  return del;
 }
 
 // models

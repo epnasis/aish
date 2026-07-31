@@ -1979,13 +1979,10 @@ class TestSessions:
             assert [p["name"] for p in hello["pager"]] == [first]
 
     def test_every_pager_page_carries_a_usable_timestamp(self, app_env):
-        # The client's working-set deck seeds from the pager and filters seed
-        # candidates by age, so an undated page is silently discarded. With no
-        # `ts` here, a launch that never opened the Sessions drawer seeded
-        # NOTHING and the swipe pager was left with a single page — swiping
-        # between chats did nothing at all. Every page must carry a real stamp,
-        # including the current chat's synthesized page (the one with no file
-        # activity behind it yet).
+        # The hello's recency list is what the client orders rows and warms
+        # prefetches from, so an undated row is unusable. Every row must carry a
+        # real stamp, including the current chat's synthesized one (which has no
+        # file activity behind it yet).
         client, _ = make_client(app_env, [model_says("ok")])
         with client, connected(client) as (ws, hello, _):
             first = hello["session"]
@@ -2411,86 +2408,6 @@ class TestSessions:
                 error = ws.receive_json()
                 assert error["type"] == "error"
                 assert "no such session" in error["text"]
-
-
-class TestDeckCheck:
-    """The client's swipe deck is per-device localStorage, so it outlives
-    sessions deleted elsewhere — a "phantom page" that used to swallow the
-    swipe aimed at it. `deck_check` answers with ground truth from stat(), so
-    the deck heals WITHOUT ever treating absence from a capped or filtered
-    listing as deletion (the state dir can hold 15x more sessions than the
-    30-page pager window), and the by-name miss error is machine-readable so
-    the client prunes on the code, never on prose."""
-
-    @staticmethod
-    def _write_session(state_dir, stamp, content="a topic"):
-        state_dir.mkdir(parents=True, exist_ok=True)
-        path = state_dir / f"session-20200101-{stamp:06d}-000000.jsonl"
-        path.write_text(
-            json.dumps({"kind": "message", "role": "user", "content": content}) + "\n",
-            encoding="utf-8",
-        )
-        os.utime(path, (1577836800 + stamp, 1577836800 + stamp))
-        return path.name
-
-    def test_missing_and_unsafe_names_reported_gone_alive_files_never(self, app_env):
-        state_dir = app_env["state_dir"]
-        # 33 real chats: more than the pager window lists, so the oldest are
-        # invisible to every capped listing yet must never be called gone —
-        # pruning on that absence would delete most of a long-lived working set.
-        names = [self._write_session(state_dir, i) for i in range(33)]
-        client, _ = make_client(app_env, [])
-        with client, connected(client) as (ws, hello, _):
-            pager_names = {p["name"] for p in hello["pager"]}
-            assert [n for n in names if n not in pager_names], "cap not exceeded"
-            asked = names + ["session-19990101-000000-000000.jsonl", "../../etc/passwd"]
-            ws.send_json({"type": "deck_check", "names": asked})
-            verdict = recv_until(ws, "deck_gone")
-            assert set(verdict["names"]) == {
-                "session-19990101-000000-000000.jsonl",  # deleted: file is gone
-                "../../etc/passwd",  # unresolvable: can never be resumed
-            }
-
-    def test_open_unwritten_session_is_alive(self, app_env):
-        # A brand-new chat records nothing until first use, so it has NO file
-        # yet — but it is open in memory, and the deck member for the chat on
-        # screen must never be pruned out from under the user.
-        client, _ = make_client(app_env, [])
-        with client, connected(client) as (ws, hello, _):
-            current = hello["session"]
-            assert not (app_env["state_dir"] / current).exists()
-            ws.send_json(
-                {
-                    "type": "deck_check",
-                    "names": [current, "session-19990101-000000-000000.jsonl"],
-                }
-            )
-            verdict = recv_until(ws, "deck_gone")
-            assert verdict["names"] == ["session-19990101-000000-000000.jsonl"]
-
-    def test_all_alive_answers_nothing(self, app_env):
-        name = self._write_session(app_env["state_dir"], 1)
-        client, _ = make_client(app_env, [])
-        with client, connected(client) as (ws, _, _):
-            ws.send_json({"type": "deck_check", "names": [name]})
-            ws.send_json({"type": "sessions", "query": ""})
-            event = ws.receive_json()
-            # No deck_gone was queued ahead of the listing: silence means alive.
-            assert event["type"] == "session_list"
-
-    def test_resume_of_missing_session_is_machine_readable(self, app_env):
-        # The frontend prunes the phantom on this code + name; the prose text
-        # is for humans and is not a contract.
-        client, _ = make_client(app_env, [])
-        with client, connected(client) as (ws, _, _):
-            ws.send_json(
-                {"type": "resume", "path": "session-19990101-000000-000000.jsonl"}
-            )
-            error = ws.receive_json()
-            assert error["type"] == "error"
-            assert error["code"] == "no_such_session"
-            assert error["name"] == "session-19990101-000000-000000.jsonl"
-            assert "no such session" in error["text"]
 
 
 class TestPeek:
@@ -5668,7 +5585,11 @@ class TestOfflineMirror:
             stale = client.get(f"{url}&since={first['total']}&sig=deadbeef").json()
 
         assert delta["base"] == first["total"]
-        assert delta["events"][0] == {"type": "user", "text": "second"}
+        opening = delta["events"][0]
+        assert opening["type"] == "user" and opening["text"] == "second"
+        # Replayed turns carry WHEN they happened (#200), rebuilt from the log
+        # record's own stamp — which is why old chats get timestamps too.
+        assert opening["at"] > 0
         assert delta["events"][-1]["result"] == "answer two"
         assert delta["total"] == first["total"] + len(delta["events"])
 
@@ -5709,6 +5630,47 @@ class TestOfflineMirror:
         assert events[0]["messages"][0]["content"] == "old question"
 
 
+class TestTurnTimestamps:
+    """When a turn happened (#200), on BOTH paths.
+
+    The data was always on disk — `_write_line` has stamped every record with an
+    ISO timestamp since the first version of session.py — so this is a read, not
+    a migration, and chats written long before the feature get their times back.
+
+    It rides `at`, deliberately NOT `ts`: on a live event `ts` means "this turn
+    is starting now" and drives the trace card's clock, and cold replay must
+    never look like a running turn (see `_user_event`). Two names, two meanings.
+    """
+
+    def test_a_live_turn_says_when_it_happened(self, app_env):
+        client, _ = make_client(app_env, [model_says("done")])
+        with client, connected(client) as (ws, _hello, _):
+            before = int(time.time())
+            ws.send_json({"type": "task", "text": "what time is it"})
+            user = recv_until(ws, "user")
+            recv_until(ws, "done")
+        assert user["at"] >= before
+        # …and the clock origin is still its own field, untouched.
+        assert user["ts"] >= before
+
+    def test_a_replayed_turn_says_when_it_happened(self, app_env):
+        client, _ = make_client(app_env, [model_says("done")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "what time is it"})
+            recv_until(ws, "done")
+            name = hello["session"]
+        events = SessionLog.reconstruct_events(app_env["state_dir"] / name)
+        user = next(e for e in events if e["type"] == "user")
+        assert user["at"] > 0
+        # A cold transcript must never look like a turn in flight: `ts` is the
+        # live clock's origin and replay does not carry it.
+        assert "ts" not in user
+
+    def test_an_unparseable_stamp_renders_nothing_rather_than_a_wrong_time(self):
+        assert session_module.record_epoch({"ts": "not a date"}) is None
+        assert session_module.record_epoch({}) is None
+        assert session_module.record_epoch({"ts": ""}) is None
+        assert session_module.record_epoch({"ts": "2026-07-31T09:53:27"}) > 0
 class TestNoGhostTraceCards:
     """#192's release blocker, verified where the artefact would actually
     appear: at a real client, LIVE and on COLD REPLAY.

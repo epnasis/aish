@@ -45,7 +45,6 @@ function firewallWorld() {
       setOfflineMode() {},
       offlineSyncSoon() {},
       checkAppVersion() {},
-      reconcilePager() {},
       handle(event) { seen.push(event); },
     },
   });

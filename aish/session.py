@@ -43,6 +43,27 @@ _NOTE_MARKERS = (
 )
 
 
+def record_epoch(record: dict) -> int | None:
+    """A log record's own timestamp as epoch SECONDS, for the `at` a replayed
+    transcript renders (#200).
+
+    Every record has carried an ISO stamp since the first version of this file,
+    so a chat written years ago gets its timestamps back with no migration —
+    which is what made this cheap. Sent as epoch rather than the ISO string
+    because that string has no timezone: a browser would read it as ITS OWN
+    local time, so a phone away from the server's timezone would silently
+    display the wrong hour. Unparseable stamps return None and simply render
+    nothing, never a wrong time.
+    """
+    raw = record.get("ts")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return int(datetime.datetime.fromisoformat(raw).timestamp())
+    except ValueError:
+        return None
+
+
 def synthetic_kind(content: str) -> str:
     """Classify a user message aish wrote itself: `"resume"` for a synthetic
     turn that really did start a task (rendered as a system row, never as a
@@ -586,6 +607,14 @@ class SessionLog:
                     event = {"type": "user", "text": content}
                     if synthetic:
                         event["synthetic"] = synthetic
+                    # WHEN this turn happened (#200), deliberately under `at`
+                    # and not `ts`: on a live event `ts` means "this turn is
+                    # starting now" and drives the trace card's clock, and cold
+                    # replay must never look like a running turn. Two names,
+                    # two meanings, no entanglement.
+                    at = record_epoch(record)
+                    if at:
+                        event["at"] = at
                     events.append(event)
                     open_turn = True
             elif kind == "message" and record.get("role") == "assistant":
@@ -765,17 +794,13 @@ class SessionLog:
     def pager_titles(state_dir: Path, limit: int = 30) -> list[tuple[str, str, str, float]]:
         """(name, title, origin, ts) pages for the web UI's swipe pager: the
         `limit` most recent chats that have a title, same recency ordering as the
-        drawer, flipped oldest→newest so back = older. Chats with no user input
-        yet are not pages — the cap applies after skipping them, so blank files
-        can never crowd real chats out of the pager. The origin rides along so
-        the pager can page within the Recent/Automated lane the chat belongs to
-        (#160), matching the Sessions screen's tabs.
+        rail, flipped oldest→newest. Chats with no user input yet are not rows —
+        the cap applies after skipping them, so blank files can never crowd real
+        chats out. The origin rides along so a row can show its provenance.
 
-        `ts` is the last-interaction mtime, the same stamp `list_sessions` reports.
-        The client's working-set deck seeds from whichever list it has, and it
-        filters candidates by age — with no stamp here every pager page read as
-        undated and was discarded, so a launch that never opened the Sessions
-        drawer seeded nothing and left the swipe pager with a single page."""
+        Carried on every hello, which is what lets the client warm the chats a
+        switch is most likely to land on without first opening the rail. `ts` is
+        the last-interaction mtime, the same stamp `list_sessions` reports."""
         pages = []
         for path in SessionLog._by_recency(state_dir):
             title, origin = SessionLog._peek(path)

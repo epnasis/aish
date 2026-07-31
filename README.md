@@ -291,17 +291,24 @@ this UI. Highlights:
   travels with whichever button you press — *approve + comment* means "rework it
   this way and re-propose", *deny + comment* means "stop and explain".
 - **Nothing lost on a locked phone.** Reconnecting replays the transcript,
-  including any approval still waiting. Survives server restarts too.
+  including any approval still waiting. Survives server restarts too. Every turn
+  carries the time it happened — including chats from long before the feature
+  existed, since the logs always recorded it.
 - **Parallel sessions.** Several chats open at once, each with its own agent,
   model, directory, and running task; live badges for running / needs-approval,
-  a toast when a background task finishes. Swipe sideways to page between chats
-  in a **stable working set** whose order doesn't shuffle as you reply — chats
-  idle past 48h drop out of the swipe deck (only when you next open the app,
-  never mid-work) and stay reachable in the drawer's history; a new chat or an
-  opened-from-history one joins the deck, a fork lands next to its parent, and
-  the drawer's ✕ removes a chat from the deck without deleting it. Swipe up to
-  open the session drawer, which lists the working set (Open) then everything
-  else in most-recently-used order.
+  a toast when a background task finishes. Chats live in a **session rail** —
+  swipe right anywhere on the conversation (or tap the button) and it slides
+  over the chat; on a wide screen it simply stays docked as a sidebar. New chat
+  sits in the rail's bottom bar, in thumb reach. One list, most-recently-
+  used, where "used" means a turn happened: reading a chat never reshuffles it,
+  so looking for something can't move what you're looking for. The top band is
+  **Needs you** — anything holding an approval, plus anything that has moved
+  since you last looked at it *on this device* — and it cuts across who started
+  the chat, so an overnight email-triggered session and your own long-running
+  task queue up together. Automation is a glyph on the row, not a separate tab.
+  Rows show state, not decoration: a spinner while it works, an alert when it
+  needs approving, a glyph when a schedule or an email started it. Pin a chat to
+  keep it above the fold and permanently on the device.
 - **Global interactive console.** The real TTY shell described above, openable
   from any chat (`⌘/Ctrl+\`), `tmux`-backed for restart survival.
 - **Voice.** Mic dictation into the composer and hands-free read-aloud of

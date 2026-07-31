@@ -38,23 +38,28 @@ const hello = (session, extra = {}) => ({
   ...extra,
 });
 
-// onHello and commitPage are extracted by their own source markers: what runs
-// here is the shipped function, not a paraphrase of it.
+// onHello and the switch path are extracted by their own source markers: what
+// runs here is the shipped function, not a paraphrase of it.
 const ON_HELLO = ["function onHello(event) {", "\n// Multi-connection (#102)"];
-const COMMIT_PAGE = ["function commitPage(direction, target, width) {", "\nfunction snapBack"];
+const SWITCH = ["async function openCachedSession(name) {", "\n// First paint."];
 const FIRST_PAINT = ["async function offlineFirstPaint() {", "\n// ---- offline: pinning"];
 
-// ---- (a) prefetch, then the hello that must not undo it -------------------
+// ---- (a) the warm paint, then the hello that must not undo it ------------
 // The prefetched paint is the whole reason identity moves early: the
 // authoritative replay then lands on the SAME fingerprint and no-ops, so a
-// swipe renders once instead of twice. That is a property of two functions
+// switch renders once instead of twice. That is a property of two functions
 // agreeing, which is exactly the kind of thing a unit test cannot see.
 {
-  const w = sessionWorld();
+  const w = sessionWorld({ globals: {
+    offlineMeta: new Map(),
+    // An OPEN socket, so the switch takes the server path (the mirror
+    // fallback has its own scenario in test_pager_offline's successor).
+    ws: { readyState: 1 },
+    WebSocket: { OPEN: 1 },
+  } });
   w.load("// [VIEWCACHE-START]", "// [VIEWCACHE-END]"); // real replayFp/replayLanding
-  w.load("// [UNPARK-START]", "// [UNPARK-END]");
   w.load("// [PREFETCH-START]", "// [PREFETCH-END]");
-  w.load(...COMMIT_PAGE);
+  w.load(...SWITCH);
   w.load(...ON_HELLO);
   const s = w.sandbox;
 
@@ -64,11 +69,14 @@ const FIRST_PAINT = ["async function offlineFirstPaint() {", "\n// ---- offline:
   s.viewFp = s.replayFp({ events, truncated: false }); // A's replay landed
   s.viewDirty = false;
 
-  // The neighbor is warm, and the swipe commits.
+  // B is warm, and a rail tap switches to it. It is in the hello's recency
+  // list, which is both where the warm peek was aimed and where the header
+  // title for the speculative paint comes from — the two agree by construction.
+  s.recentSessions = [{ name: "B", title: "B" }];
   s.onPeek({ name: "B", events, truncated: false });
-  s.commitPage(1, { name: "B", title: "B" }, 1100);
+  s.resumeSession("B");
 
-  ok("the swipe asked the server for the page",
+  ok("the switch asked the server for the session",
     JSON.stringify(w.lastCall("send").args[0]) === JSON.stringify({ type: "resume", path: "B" }));
   ok("identity moved before the hello — the point of the prefetch",
     s.currentSession === "B");
@@ -113,54 +121,8 @@ const FIRST_PAINT = ["async function offlineFirstPaint() {", "\n// ---- offline:
   ok("only the remembered session is lost", w.remembered() === null);
   ok("the rest of the hello still ran: busy state", w.seen.busy === true);
   ok("…the workspace", w.called("renderWorkspace") === 1);
-  ok("…the deck", w.called("ensureCurrentInDeck") === 1);
+  ok("…the seen-map stamp", w.called("markSeen") === 1);
   ok("…and the boot loader is gone", w.seen.booted === true);
-}
-
-// ---- (d) a fork's deck anchor is a bounded promise ------------------------
-// The intent used to be cleared by EVERY hello. A reconnect racing the child's
-// hello therefore threw the anchor away silently and the fork landed at the far
-// right, next to nothing.
-{
-  const w = sessionWorld({
-    globals: { offlineMeta: new Map(), lastSessionEvent: null, renderSessions() {} },
-  });
-  w.load("// [DECK-START]", "// [DECK-END]");   // pure ordering
-  w.load("// [DECK-STATE-START]", "// [DECK-STATE-END]"); // the live deck + the intent
-  w.load(...ON_HELLO);
-  const s = w.sandbox;
-  const names = () => s.deck.map((m) => m.name).join(",");
-
-  s.deck = [
-    { name: "A", ts: Date.now(), title: "A", origin: "user" },
-    { name: "Z", ts: Date.now(), title: "Z", origin: "user" },
-  ];
-  s.deckSeeded = true;
-  s.onHello(hello("A"));
-  ok("the chat on screen is an existing member", names() === "A,Z");
-
-  // Fork from A. A reconnect for the SAME chat beats the child's hello.
-  s.noteForkIntent();
-  ok("the intent names the parent", s.pendingForkParent.name === "A");
-  s.onHello(hello("A"));
-  ok("an unrelated hello no longer clears the fork intent", s.pendingForkParent !== null);
-  ok("…and did not reorder the deck", names() === "A,Z");
-
-  // Now the child.
-  s.onHello(hello("A-fork"));
-  ok("the child lands right of its parent", names() === "A,A-fork,Z");
-  ok("the intent is consumed by the adoption it was made for",
-    s.pendingForkParent === null);
-
-  // A fork whose child never comes: the promise expires, it is not inherited by
-  // whatever chat is adopted next. (Rewinding the stamp IS letting the window
-  // pass — the deadline is checked when read, not by a timer.)
-  s.noteForkIntent();
-  s.pendingForkParent.at -= s.FORK_INTENT_MS + 1000;
-  s.onHello(hello("N"));
-  ok("an expired intent anchors nothing — the newcomer goes far right",
-    names() === "A,A-fork,Z,N");
-  ok("…and the expired intent is gone", s.pendingForkParent === null);
 }
 
 // ---- (b) the boot race: mirror paint vs. the socket ------------------------

@@ -81,8 +81,6 @@ function traceWorld() {
       removeCwdChip() {},
       snapViewportSoon() {},
       reportViewport() {},
-      unparkTranscript() {},
-      reconcilePager() {},
       handle() {}, // the rebuild loop is not what this scenario is about
       renderMarkdown: (text) => ({ md: text }),
       highlightFences() {},

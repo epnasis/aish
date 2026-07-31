@@ -2,19 +2,19 @@
 //
 // Waking the app is where the client's assumptions are weakest: the phone slept,
 // so every deferred step the code was counting on simply never ran, and the
-// socket may have died without emitting a single event. Three unrelated
-// subsystems are reconciled in one listener — the offline mirror, the pager's
-// parked transcript, and the connection — and each of the four #181 incidents
-// touched at least one of them.
+// socket may have died without emitting a single event. Two subsystems are
+// reconciled in one listener — the offline mirror and the connection.
+//
+// (A third used to live here: the swipe pager's parked transcript. The pager is
+// gone with the working-set deck — switching chats goes through the session rail
+// now — and with it the whole class of "the transcript is off screen waiting for
+// a landing that never came" failures this handler was the last defence against.
+// Nothing replaced it because nothing needs to: the transcript never leaves.)
 //
 // This drives the REAL [WAKE] block, registered the way it ships (by name,
 // through document.addEventListener — the test dispatches the event rather than
-// calling the function, so a broken registration fails too), over the REAL
-// [UNPARK] block, in the hostile world: no frame ever fires, no transition ever
-// settles, and every timer is data. The invariant being pinned is the pager's:
-// **an idle transcript is on screen** — and waking up is the last line of
-// defence for it, because a swipe committed just before the lock has no other
-// path back.
+// calling the function, so a broken registration fails too), in the hostile
+// world: no frame ever fires, no transition ever settles, every timer is data.
 //
 // Run manually: node tests/js/test_choreo_wake.js
 "use strict";
@@ -23,22 +23,16 @@ const { hostileWorld, checks } = require("./harness");
 
 const { ok, report } = checks();
 
-function wakeWorld({ visible = true, ws = null, idleMs = 0 } = {}) {
+function wakeWorld({ visible = true, ws = null } = {}) {
   const log = [];
   const w = hostileWorld({
     visible,
     globals: {
-      swipeInFrom: 0,
-      lastActiveAt: Date.now() - idleMs,
-      COLD_START_GAP_MS: 45 * 60 * 1000,
       ws,
       offlineSyncOnce() { log.push("offlineSyncOnce"); },
-      coldStartRecompute() { log.push("coldStartRecompute"); },
-      noteActivity() { log.push("noteActivity"); },
       connect() { log.push("connect"); },
     },
   });
-  w.load("// [UNPARK-START]", "// [UNPARK-END]");
   w.load("// [WAKE-START]", "// [WAKE-END]");
   w.log = log;
   w.count = (what) => log.filter((c) => c === what).length;
@@ -71,7 +65,6 @@ const socketIn = (w, state) => {
   w.wake();
   ok("hiding syncs the mirror once", w.count("offlineSyncOnce") === 1);
   ok("hiding connects nothing", w.count("connect") === 0);
-  ok("hiding does not count as activity", w.count("noteActivity") === 0);
 }
 
 // ---- 2. The connection: reconnect only when it is provably dead -----------
@@ -99,78 +92,6 @@ const socketIn = (w, state) => {
   open.sandbox.ws = socketIn(open, open.WebSocket.OPEN);
   open.wake();
   ok("an OPEN socket is left alone", open.count("connect") === 0);
-}
-
-// ---- 3. The parked transcript: the incident, end to end -------------------
-// Swipe commits (transcript off-screen) → the landing replay arrives and STAGES
-// the entry at the far side → the phone locks before the frame that starts the
-// slide, so nothing ever moves. swipeInFrom is already 0: no further replay is
-// coming, and without this handler the chat stays blank forever.
-{
-  const w = wakeWorld({ visible: true });
-  w.sandbox.parkTranscript(-1, 1100);
-  ok("committed: transcript parked off screen", w.sandbox.transcriptDisplaced());
-
-  w.sandbox.reconcilePager(-1); // the landing
-  ok("the landing staged the entry side", w.sandbox.transcriptDisplaced());
-  ok("no frame fired — the slide never started", w.frames.length === 1);
-  ok("no swipe is in flight any more", w.sandbox.swipeInFrom === 0);
-
-  w.setVisible(false);
-  w.wake();                                    // phone locks
-  w.setVisible(true);
-  w.wake();                                    // …and comes back
-  ok("waking puts the transcript back on screen", !w.sandbox.transcriptDisplaced());
-  ok("recovery does not depend on a frame ever running", w.frames.length === 1);
-}
-
-// ---- 3b. A swipe still in flight is NOT yanked ----------------------------
-// The landing may yet arrive; unparking here would jump-cut a legitimate
-// animation. The park's own deadline owns this case (see test_pager_unpark).
-{
-  const w = wakeWorld({ visible: true });
-  w.sandbox.parkTranscript(1, 1100);
-  w.wake();
-  ok("a wake mid-swipe leaves the committed park alone",
-    w.sandbox.transcriptDisplaced() && w.sandbox.swipeInFrom === 1);
-  // …and the deadline armed at park time still recovers it, unaided.
-  w.fireOne((t) => t.ms >= 1000);
-  ok("the park deadline is still the backstop", !w.sandbox.transcriptDisplaced());
-}
-
-// ---- 3c. A transcript already at rest is not touched ----------------------
-{
-  const w = wakeWorld({ visible: true });
-  w.wake();
-  ok("an at-rest transcript stays at rest", !w.sandbox.transcriptDisplaced());
-}
-
-// ---- 4. Cold start is measured BEFORE activity is noted ------------------
-// noteActivity resets the very gap the sweep measures, so the order here is
-// load-bearing: reversed, the working set could never be swept on a wake.
-{
-  const stale = wakeWorld({ idleMs: 60 * 60 * 1000 });
-  stale.wake();
-  ok("returning after a long absence sweeps the working set",
-    stale.count("coldStartRecompute") === 1);
-  ok("the sweep runs before activity is noted",
-    stale.log.indexOf("coldStartRecompute") < stale.log.indexOf("noteActivity"));
-
-  const fresh = wakeWorld({ idleMs: 1000 });
-  fresh.wake();
-  ok("a brief glance away sweeps nothing", fresh.count("coldStartRecompute") === 0);
-  ok("…but still counts as activity", fresh.count("noteActivity") === 1);
-}
-
-// ---- 5. The hostile default really is hostile ----------------------------
-// If a harness change ever starts firing frames or settling transitions by
-// itself, scenario 3 would pass for the wrong reason. Prove the world withholds
-// them: a staged landing that is never woken stays displaced.
-{
-  const w = wakeWorld({ visible: true });
-  w.sandbox.parkTranscript(-1, 1100);
-  w.sandbox.reconcilePager(-1);
-  ok("nothing recovers a staged landing on its own", w.sandbox.transcriptDisplaced());
 }
 
 report("test_choreo_wake.js");
