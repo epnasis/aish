@@ -2574,6 +2574,7 @@ class WebServer:
         # `finally`. The ! command path deliberately writes no marker: re-running
         # the user's own shell command unattended is not a recovery, it's a risk.
         session.logref.task_start(text)
+        failure = ""  # set by either except arm; recorded on the way out
         try:
             if resume and isinstance(session.agent, Agent):
                 # Keep the interrupted task's own tool output verbatim (#164):
@@ -2614,16 +2615,20 @@ class WebServer:
             if result != CANCELLED_RESULT:  # a stopped turn named nothing
                 await self._maybe_retitle(session)  # name it for its subject (#175)
         except ModelUnavailable as exc:
-            session.bridge.emit(
-                {
-                    "type": "error",
-                    "text": f"model unavailable: {exc}{_backend_hint(session.agent)}",
-                }
-            )
+            failure = f"model unavailable: {exc}{_backend_hint(session.agent)}"
+            session.bridge.emit({"type": "error", "text": failure})
         except Exception as exc:  # noqa: BLE001 — a task bug must not kill the server
-            session.bridge.emit({"type": "error", "text": f"task failed: {exc!r}"})
+            failure = f"task failed: {exc!r}"
+            session.bridge.emit({"type": "error", "text": failure})
         finally:
-            session.logref.task_end()
+            # HOW it ended, not just that it did (#203). The failure text was
+            # live-only until now: a client that was not connected when a
+            # background job died learned nothing, and cold replay could only
+            # guess "cut off mid-step" from unfinished steps.
+            if failure:
+                session.logref.task_end("failed", failure)
+            else:
+                session.logref.task_end()
             await self._finish_turn(session)
 
     async def _run_user_command(self, session: Session, command: str) -> None:

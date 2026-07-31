@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 import threading
@@ -170,6 +171,44 @@ def test_reconstruct_events_interrupted_turn_becomes_error(tmp_path):
     assert "done" not in types
     errors = [e for e in events if e["type"] == "error"]
     assert errors and errors[0]["text"] == INTERRUPTED_TASK
+
+
+def test_reconstruct_events_replays_the_recorded_failure(tmp_path):
+    # A turn that FAILED knows why (#203). The generic "cut off mid-step" above
+    # is an inference from unfinished steps; a recorded failure outranks it, so
+    # reopening the chat says what a live viewer was told at the time instead of
+    # guessing. Without the record, the reason existed only in that live event.
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "run the nightly job"})
+    log.step({"kind": "tool_start", "name": "run_command"})
+    log.task_end("failed", "task failed: BackendError('no route to host')")
+
+    events = SessionLog.reconstruct_events(log.path)
+    errors = [e for e in events if e["type"] == "error"]
+    assert errors and "no route to host" in errors[0]["text"]
+    assert "done" not in [e["type"] for e in events]
+
+
+def test_reconstruct_events_old_logs_are_byte_identical(tmp_path):
+    # The additive rule: a task_end written before `status` existed carries no
+    # opinion, so every branch reading it must be inert on old logs.
+    path = tmp_path / "session-20260101-000000-000000.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(r) for r in [
+                {"kind": "message", "role": "user", "content": "hi",
+                 "at": "2026-01-01T00:00:00"},
+                {"kind": "trace", "step": {"kind": "tool", "name": "read_file", "ok": True}},
+                {"kind": "message", "role": "assistant", "content": "hello",
+                 "at": "2026-01-01T00:00:01"},
+                {"kind": "task_end"},
+            ]
+        ) + "\n",
+        encoding="utf-8",
+    )
+    events = SessionLog.reconstruct_events(path)
+    assert [e["type"] for e in events] == ["user", "step", "done"]
+    assert events[-1]["result"] == "hello"
 
 
 def test_reconstruct_events_finished_tool_is_not_interrupted(tmp_path):
@@ -1318,6 +1357,48 @@ class TestOutputStamp:
         )
         info = SessionLog.info(path)
         assert info.output == 0.0 and info.activity == info.mtime
+
+    def test_a_failed_turn_is_output(self, tmp_path):
+        """A turn that dies produces no assistant message, and its failure text
+        went out as a live event only — so a background job that died at 3am
+        had nothing in the log to raise a dot with."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "run the nightly job"})
+        _, asked = self._stamps(log)
+        time.sleep(1.1)
+        log.task_start("run the nightly job")
+        log.step({"kind": "tool_start", "name": "run_command"})
+        log.task_end("failed", "task failed: BackendError('no route to host')")
+        log.close()
+        assert self._stamps(log)[1] > asked
+
+    def test_a_turn_that_ended_fine_is_not_output_by_itself(self, tmp_path):
+        """Its ANSWER is the output; the marker must not double as one, or
+        every completed turn would stamp twice for the same event."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "go"})
+        log.message({"role": "assistant", "content": "done"})
+        _, answered = self._stamps(log)
+        time.sleep(1.1)
+        log.task_end()
+        log.close()
+        assert self._stamps(log)[1] == answered
+
+    def test_a_task_end_with_no_status_predates_the_field(self, tmp_path):
+        """Old logs say nothing about how their turns ended, and silence must
+        stay silence rather than becoming a retroactive failure."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hi"})
+        log.close()
+        _, spoke = self._stamps(log)
+        time.sleep(1.1)
+        # A task_end in the shape written before `status` existed.
+        stamp = datetime.datetime.now().isoformat(timespec="seconds")
+        with log.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"ts": stamp, "kind": "task_end"}) + "\n")
+        activity, output = self._stamps(log)
+        assert activity > spoke, "it is still something that happened"
+        assert output == spoke, "…but says nothing about how the turn ended"
 
     def test_the_pager_carries_both_stamps(self, tmp_path):
         log = SessionLog.new(tmp_path)

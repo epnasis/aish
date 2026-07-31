@@ -258,8 +258,8 @@ class LogRef:
     def task_start(self, prompt: str) -> None:
         self.log.task_start(prompt)
 
-    def task_end(self) -> None:
-        self.log.task_end()
+    def task_end(self, status: str = "ok", error: str = "") -> None:
+        self.log.task_end(status, error)
 
     def command_event(self, event: dict) -> None:
         self.log.command_event(event)
