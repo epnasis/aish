@@ -430,6 +430,7 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       pendingSends: [],
       resolvePendingSend() {},
       clearPendingSends() {},
+      clearQueueChips() {},
       paintLanded() {},
       // app state a hello walks over
       recentSessions: [],

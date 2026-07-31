@@ -94,6 +94,7 @@ function switchWorld({ cached = null, prefetch = null, loadPromise = null } = {}
       knownTitle: () => undefined,
       resetLiveTurn() {},
       clearPendingSends() {},
+      clearQueueChips() {},
       stopSpeaking() {},
       removeCwdChip() {},
       scrollToEnd() {},

@@ -79,6 +79,7 @@ function traceWorld() {
       // replay collaborators
       stopSpeaking() {},
       removeCwdChip() {},
+      clearQueueChips() {},
       snapViewportSoon() {},
       reportViewport() {},
       handle() {}, // the rebuild loop is not what this scenario is about

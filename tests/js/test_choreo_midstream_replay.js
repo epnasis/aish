@@ -67,6 +67,7 @@ function turnWorld() {
       reportViewport() {},
       updateScrollButton() {},
       removeCwdChip() {},
+      clearQueueChips() {},
       removeQueueChip() {},
       retireQuickReplies() {},
       rememberPrompt() {},
