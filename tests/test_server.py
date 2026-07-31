@@ -2275,6 +2275,90 @@ class TestSessions:
             assert notice["session"] == session_a
             assert notice["state"] == "idle"
 
+    def test_background_hold_sends_waiting_notice(self, app_env, tmp_path):
+        # The mirror image of the idle notice (#203). A chat that STOPS on an
+        # approval while you are looking elsewhere is the most literal thing
+        # there is that "needs you", and it waits indefinitely — so it cannot be
+        # left for the next time the rail happens to be opened.
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/y")]),
+            model_says("both done"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, hello_a, _):
+            session_a = hello_a["session"]
+            ws.send_json({"type": "task", "text": "run them"})
+            first = recv_until(ws, "approval_request")
+            ws.send_json({"type": "new"})
+            recv_until(ws, "hello")
+            recv_until(ws, "replay")
+            # Approving from B lets A run on and stop at its SECOND approval,
+            # now with nobody viewing it.
+            ws.send_json({"type": "approval", "id": first["id"], "action": "approve"})
+            notice = recv_until(ws, "session_state")
+            assert notice["session"] == session_a
+            assert notice["state"] == "waiting"
+
+    def test_a_hold_someone_is_watching_is_not_announced(self, app_env, tmp_path):
+        # Scoped deliberately: a held card on a screen someone is already
+        # looking at is not a chat that wants a user who is somewhere else.
+        # Without this, every command approved on the laptop would nudge the
+        # phone in your pocket — approvals are the most frequent event there is.
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+            model_says("done"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (phone, hello_a, _):
+            session_a = hello_a["session"]
+            phone.send_json({"type": "new"})  # the phone moves to a second chat
+            recv_until(phone, "hello")
+            recv_until(phone, "replay")
+            # A bare connect lands on the DEFAULT session — still A, since a new
+            # chat never becomes the default.
+            with client.websocket_connect("/ws") as laptop:
+                assert laptop.receive_json()["session"] == session_a
+                laptop.receive_json()  # replay
+                laptop.send_json({"type": "task", "text": "run it"})
+                request = recv_until(laptop, "approval_request")
+                laptop.send_json(
+                    {"type": "approval", "id": request["id"], "action": "approve"}
+                )
+                recv_until(laptop, "done")
+            # A finishing DOES reach the phone (that notice is unconditional),
+            # so this drain is bounded — and what it must not contain is a
+            # heads-up for the hold the laptop was looking at all along.
+            states = []
+            for _ in range(200):
+                event = phone.receive_json()
+                if event["type"] == "session_state":
+                    states.append(event["state"])
+                    if event["state"] == "idle":
+                        break
+            assert states == ["idle"]
+
+    def test_hello_pager_rows_carry_liveness(self, app_env, tmp_path):
+        # The client's attention count re-derives from the rows every hello
+        # already carries, so those rows have to say which chats are holding
+        # (#203) — otherwise a reload starts the count empty however many chats
+        # are waiting, and only opening the rail fixes it.
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+            model_says("done"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, hello_a, _):
+            session_a = hello_a["session"]
+            assert hello_a["pager"][0]["state"] == "idle"  # its own, doing nothing yet
+            ws.send_json({"type": "task", "text": "run it"})
+            recv_until(ws, "approval_request")
+            ws.send_json({"type": "new"})
+            hello_b = recv_until(ws, "hello")
+            states = {p["name"]: p["state"] for p in hello_b["pager"]}
+            assert states[session_a] == "waiting"
+            assert states[hello_b["session"]] == "idle"
+
     def test_resume_from_disk_restores_recorded_model(self, app_env, monkeypatch):
         switched = FakeChat([model_says("hi from gemini"), model_says("still gemini")])
         monkeypatch.setattr(

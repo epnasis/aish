@@ -30,6 +30,8 @@ const { ok, report } = checks();
 //          it must tell you where to go, not merely that you are wrong.
 // array:   also flag in-place mutation (push/splice/…), which assignment
 //          detection alone would miss.
+// set:     the same for a Set (add/delete/clear) — a `const` Set is never
+//          reassigned, so mutation is the ONLY way to write it.
 const OWNED = {
   ws: {
     owners: ["CONNECT-WIRE", "RETIRE"],
@@ -68,6 +70,24 @@ const OWNED = {
     why: "three regions, one per lifecycle stage — opened by the token path, closed by"
       + " closeAnswer, abandoned by a replay that lands mid-stream; a fourth writer is"
       + " how a turn ended up with two answer bubbles (#181 phase 3)",
+  },
+  attentionRows: {
+    owners: ["ATTENTION"],
+    instead: "call setAttentionRows(rows) for a server list, or noteAttention(name, state)"
+      + " for one pushed row",
+    why: "the badge is a pure function of these rows plus the seen map; a writer that"
+      + " files the offline mirror's rows here would claim a count from data that cannot"
+      + " see liveness and carries a lagging timestamp",
+    array: true,
+  },
+  attentionSessions: {
+    owners: ["ATTENTION"],
+    instead: "call refreshBadge() — the set is DERIVED from attentionRows, never edited",
+    why: "the count had two writers on different clocks (a pushed add, a rail-open"
+      + " replace), so it disagreed with the 'Needs you' band it summarises in BOTH"
+      + " directions: it counted chats already read and missed chats holding an approval"
+      + " (#203)",
+    set: true,
   },
   currentTrace: {
     owners: ["TRACE-OPEN", "TRACE-CLOSE"],
@@ -118,6 +138,7 @@ function patterns(name, spec) {
   const destructured = String.raw`\{[^}]*(?<![.\w$])${name}\b[^}]*\}\s*=(?![=>])`;
   const list = [new RegExp(bare), new RegExp(destructured)];
   if (spec.array) list.push(new RegExp(String.raw`(?<![.\w$])${name}\.(?:push|pop|shift|unshift|splice|sort|reverse|fill|length\s*=)\s*\(?`));
+  if (spec.set) list.push(new RegExp(String.raw`(?<![.\w$])${name}\.(?:add|delete|clear)\s*\(`));
   return list;
 }
 

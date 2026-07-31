@@ -1311,14 +1311,23 @@ function onSessionRenamed(event) {
   if (known) known.title = event.title;
 }
 
+// A chat you are NOT viewing changed state. Two kinds arrive here, and they are
+// not the same news: `waiting` means it has stopped and cannot go on without
+// you, `idle` that it finished on its own. Both belong in the count; only the
+// second is worth a system notification, because an unattended hold already has
+// its own push (`notify_hold`, server-side) and a hold you are around for is
+// what the count and the toast are for.
 function onSessionState(event) {
   const label = event.title
     ? `“${event.title.slice(0, 40)}”`
     : event.session.replace(/^session-|\.jsonl$/g, "").replace(/-\d{6}$/, "");
-  showToast(`${label}: task finished — swipe from the left edge to switch back`);
-  notify("aish — background task finished", event.title || event.session);
-  attentionSessions.add(event.session);
-  refreshBadge();
+  if (event.state === "waiting") {
+    showToast(`${label}: waiting for your approval — swipe from the left edge to switch`);
+  } else {
+    showToast(`${label}: task finished — swipe from the left edge to switch back`);
+    notify("aish — background task finished", event.title || event.session);
+  }
+  noteAttention(event.session, event.state);
   if (railIsOpen()) send({ type: "sessions", query: $("sessions-search").value });
 }
 
@@ -1660,6 +1669,12 @@ function onHello(event) {
     title: event.title || "",
     stash: true, // the DOM on screen still belongs to the chat being left
   });
+  // Every hello already carries the recency rows (they warm the swipe peeks),
+  // and they now carry each chat's liveness too — so a boot, a reconnect and
+  // every switch re-derive the attention count for free. Without this the badge
+  // was whatever the last rail open computed, and after a reload it was EMPTY
+  // until you opened the rail ([ATTENTION]).
+  setAttentionRows(event.pager || []);
   if (railIsOpen()) requestSessions($("sessions-search").value || ""); // docked: stay current
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
   renderWorkspace(event);
@@ -8923,12 +8938,14 @@ function markSeen(name) {
     for (const stale of names.slice(SEEN_MAX)) delete seenAt[stale];
   }
   saveSeen();
+  refreshBadge(); // reading a chat drops it from the count HERE, not a round trip later
 }
 
 function forgetSeen(name) {
   if (!name || !(name in seenAt)) return;
   delete seenAt[name];
   saveSeen();
+  refreshBadge();
 }
 
 // PURE: the whole unread decision, testable with no DOM and no clock. `current`
@@ -8954,6 +8971,14 @@ function sessionUnread(info, state) {
 //
 // A session appears in exactly one band. Everything below is pure: it takes
 // rows in and returns rows out, so the sectioning is unit-testable.
+
+// The ONE "does this chat want me" predicate. The rail bands with it and the
+// attention badge counts with it, so a chat can never sit in "Needs you"
+// without being counted, or be counted without appearing there ([ATTENTION]).
+function needsYou(info, state) {
+  return info.state === "waiting" || sessionUnread(info, state);
+}
+
 function partitionSessions(sessions, state) {
   const bands = { needsYou: [], active: [], pinned: [], rest: [] };
   const counts = { waiting: 0, running: 0, unread: 0 };
@@ -8962,7 +8987,7 @@ function partitionSessions(sessions, state) {
     if (info.state === "waiting") counts.waiting++;
     if (info.state === "running") counts.running++;
     if (unread) counts.unread++;
-    if (info.state === "waiting" || unread) bands.needsYou.push(info);
+    if (needsYou(info, state)) bands.needsYou.push(info);
     else if (info.state === "running") bands.active.push(info);
     else if (info.pinned) bands.pinned.push(info);
     else bands.rest.push(info);
@@ -8972,15 +8997,77 @@ function partitionSessions(sessions, state) {
 // SESSIONS_PARTITION_END
 
 // ---- attention badge ----------------------------------------------------
-// The durable count on the top-bar rail button. Two sources, deliberately: a
-// `session_state` event names a chat that just finished while you were
-// elsewhere (it arrives with no list attached), and every session_list
-// recomputes the truth from the rows themselves. The set is REPLACED by the
-// latter, so the badge is self-clearing — reading a chat clears it, no dismiss
-// action required. Opening the list no longer clears it: looking at an index of
-// unread things is not reading them.
+// [ATTENTION-START]
+// The durable count on the top-bar rail button: how many chats OTHER than the
+// one on screen want you. It is the same question the rail's "Needs you" band
+// answers, and that is exactly why it must not be answered twice.
+//
+// It used to be. The badge was written in two places — a `session_state` push
+// ADDED a name, a `session_list` REPLACED the whole set — and a session_list is
+// only ever requested when the rail is opened. So the badge's ground truth was
+// refreshed by the act of opening the very list that would have shown you the
+// answer, and between rail opens it drifted in both directions: reading a chat
+// never decremented it (it counted chats you had already read), a background
+// chat stopping for approval never incremented it (it missed the one thing that
+// most literally needs you), and a reload started it EMPTY however many chats
+// were waiting. Whichever way it was wrong, opening the rail refreshed it — so
+// the number you acted on and the list you checked it against could never be
+// caught disagreeing (#203).
+//
+// The shape that fixes it: the badge is a PURE FUNCTION of (rows, seen map,
+// chat on screen), recomputed by its single owner whenever any of the three
+// moves. Rows arrive from the server three ways — the session_list the rail
+// requests, the recency rows every hello already carries (so a boot, a
+// reconnect and a switch all re-derive it for free), and a pushed
+// `session_state` for one chat. The seen map moves when you read a chat, which
+// decrements the badge on the tap, with no round trip (L7).
+//
+// The MIRROR is deliberately not a source (L4): its rows carry a lagging `ts`
+// and cannot see liveness at all (`state: ""`), so a cached list painting the
+// rail must leave the badge alone rather than briefly claim a count it is not
+// entitled to.
 const attentionSessions = new Set();
+let attentionRows = []; // last AUTHORITATIVE rows; the mirror's never land here
+
+// Rows from the server, wholesale (a session_list, or a hello's recency list).
+// Only the three fields the decision reads are kept — this is a ledger for the
+// badge, not a second copy of the rail's model.
+function setAttentionRows(rows) {
+  attentionRows = (rows || []).map((info) => ({
+    name: info.name,
+    ts: info.ts,
+    state: info.state || "",
+  }));
+  refreshBadge();
+}
+
+// One chat's state, pushed while you are elsewhere. Stamped with THIS device's
+// clock deliberately: `sessionUnread` compares it against the seen map, which
+// is this device's clock too, so a push cannot be read as already-seen by a
+// server whose clock runs behind.
+function noteAttention(name, state) {
+  if (!name) return;
+  const row = attentionRows.find((info) => info.name === name);
+  if (row) {
+    row.ts = Date.now() / 1000;
+    row.state = state || "";
+  } else {
+    attentionRows.push({ name, ts: Date.now() / 1000, state: state || "" });
+  }
+  refreshBadge();
+}
+
 function refreshBadge() {
+  const state = { seen: seenAt, since: seenSince, current: currentSession };
+  attentionSessions.clear();
+  for (const info of attentionRows) {
+    // The chat on screen is never counted, whatever its state: an approval it
+    // is holding is a card in front of you, not somewhere else to go. This is
+    // the same rule `sessionUnread` already applies, extended to liveness.
+    if (info.name !== currentSession && needsYou(info, state)) {
+      attentionSessions.add(info.name);
+    }
+  }
   const badge = $("back-badge");
   if (attentionSessions.size) {
     badge.textContent = String(attentionSessions.size);
@@ -8989,6 +9076,7 @@ function refreshBadge() {
     badge.hidden = true;
   }
 }
+// [ATTENTION-END]
 
 let lastSessionEvent = null; // last session_list, so re-renders work offline
 
@@ -9421,9 +9509,15 @@ function renderSessions(event) {
   // arrives — and a list arrives right after every switch.
   const current = currentSession || event.current;
   const unreadState = { seen: seenAt, since: seenSince, current };
+  const searching = Boolean($("sessions-search").value.trim());
+  // The badge's ground truth, claimed only by an UNFILTERED SERVER list: a
+  // cached list cannot see liveness at all and a ranked search result is a
+  // subset of the chats there are, so either would silently under-count
+  // ([ATTENTION]).
+  if (!event.fromCache && !searching) setAttentionRows(event.sessions);
   // Ranked search results are ordered by relevance, so date/band grouping would
   // lie about why a row is where it is. Render a flat list.
-  if ($("sessions-search").value.trim()) {
+  if (searching) {
     if (!event.sessions.length) { list.textContent = "no matching sessions"; return; }
     for (const info of event.sessions) {
       list.appendChild(sessionRow(info, current, { unread: sessionUnread(info, unreadState) }));
@@ -9438,11 +9532,6 @@ function renderSessions(event) {
     return;
   }
   const { bands } = partitionSessions(event.sessions, unreadState);
-  // The badge is recomputed from ground truth on every list, so it clears
-  // itself as chats are read rather than needing a dismiss.
-  attentionSessions.clear();
-  for (const info of bands.needsYou) attentionSessions.add(info.name);
-  refreshBadge();
   railSection("Needs you", bands.needsYou, current, unreadState);
   railSection("Active now", bands.active, current, unreadState);
   railSection("Pinned", bands.pinned, current, unreadState);
