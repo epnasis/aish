@@ -38,13 +38,15 @@ def test_custom_title_wins_hot_and_cold(tmp_path):
     assert SessionLog.info(log.path).title == "My Renamed Chat"
     assert SessionLog._peek_title(log.path) == "My Renamed Chat"
     # pager_titles (cold path) reflects the custom title too. The 4th field is
-    # the last-interaction mtime the client's deck seeds by — a real stamp, since
-    # an undated page is discarded as a seed candidate.
+    # the last-ACTIVITY stamp the client's deck ages by (#201) — a real stamp,
+    # since an undated page is discarded as a seed candidate. It comes from the
+    # records, so it is whole seconds, and never later than the file itself.
     pages = SessionLog.pager_titles(tmp_path)
     assert [(name, title, origin) for name, title, origin, _ in pages] == [
         (log.path.name, "My Renamed Chat", "user")
     ]
-    assert pages[0][3] == log.path.stat().st_mtime
+    assert pages[0][3] == SessionLog.info(log.path).activity
+    assert 0 < pages[0][3] <= log.path.stat().st_mtime
 
 
 def test_latest_title_record_wins(tmp_path):
@@ -1102,3 +1104,92 @@ class TestWriteLock:
             json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()
         ]
         assert len(records) == 400
+
+
+class TestActivityIsNotAFileTouch:
+    """"Last interaction" used to be the file's mtime, which cannot tell a chat
+    that DID something from one that was merely looked at (#201).
+
+    The chat that surfaced it held three remote images off the fetch whitelist.
+    Every replay re-reported them, the report was written to the log, and the
+    write landed a second or so AFTER the client had stamped "seen" — so the
+    chat came back unread the moment you left it, forever, and opening it to
+    check was what re-armed the signal. 53 identical records had accumulated.
+
+    The rule: a record that renders nowhere is not activity.
+    """
+
+    def _activity(self, log):
+        return SessionLog.info(log.path).activity
+
+    def test_a_renderless_record_does_not_count_as_activity(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "find me a thermal mug"})
+        log.message({"role": "assistant", "content": "here are three"})
+        after_talking = self._activity(log)
+
+        # What merely LOOKING at the chat writes: a lazily-flushed model record
+        # and the browser reporting images that will never render.
+        time.sleep(1.1)  # ISO stamps are whole seconds
+        log.model("gemini:gemini-3.5-flash")
+        log.step({"kind": "render_error", "what": "image", "items": ["https://x/y.jpg"]})
+        log.close()
+
+        assert self._activity(log) == after_talking, "a glance is not activity"
+        assert log.path.stat().st_mtime > after_talking, "the file DID change"
+
+    def test_a_real_message_after_a_glance_does_count(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hello"})
+        glanced = self._activity(log)
+        time.sleep(1.1)
+        log.step({"kind": "render_error", "what": "image", "items": ["https://x/y.jpg"]})
+        log.message({"role": "user", "content": "and one more thing"})
+        log.close()
+        assert self._activity(log) > glanced
+
+    def test_every_renderless_kind_is_covered_by_the_registry(self, tmp_path):
+        """Not just render_error: the #192 governance records are the same
+        shape, and a future one must inherit this without being re-taught."""
+        from aish.session import RENDERLESS_STEPS
+
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hello"})
+        quiet = self._activity(log)
+        time.sleep(1.1)
+        for kind in RENDERLESS_STEPS:
+            log.step({"kind": kind})
+        log.close()
+        assert self._activity(log) == quiet
+
+    def test_a_rendering_trace_step_is_activity(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hello"})
+        quiet = self._activity(log)
+        time.sleep(1.1)
+        log.step({"kind": "tool", "name": "run_command"})
+        log.close()
+        assert self._activity(log) > quiet, "a tool step is something happening"
+
+    def test_a_log_with_no_usable_stamps_falls_back_to_mtime(self, tmp_path):
+        """Nothing may lose its place in the list. A record with an unparseable
+        stamp still has to sort somewhere, and mtime is the old answer."""
+        path = tmp_path / "session-20260101-000000-000000.jsonl"
+        path.write_text(
+            json.dumps({"kind": "message", "role": "user", "content": "hi"}) + "\n",
+            encoding="utf-8",
+        )
+        info = SessionLog.info(path)
+        assert info.activity == info.mtime == path.stat().st_mtime
+
+    def test_the_pager_ages_pages_by_activity_too(self, tmp_path):
+        """The deck evicts members on this stamp; a glance must not refresh a
+        chat's standing there either."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hello"})
+        log.set_title("Kubek")
+        talked = SessionLog.pager_titles(tmp_path)[0][3]
+        time.sleep(1.1)
+        log.step({"kind": "render_error", "what": "image", "items": ["https://x/y.jpg"]})
+        log.close()
+        assert SessionLog.pager_titles(tmp_path)[0][3] == talked

@@ -9,6 +9,23 @@ The web UI is the main surface (approval cards, diffs, streaming). Drive it
 with the REAL server and REAL frontend but a scripted model — same shape as
 `tests/test_server.py`'s `FakeChat` — so no model or network is needed.
 
+## The rule that comes before the recipe
+
+**A verification MUST NOT type into a chat it did not create.** Use the
+isolated harness below (its own `state_dir`, port 8899, nothing shared); if a
+check genuinely needs the live server, click ＋ for a NEW chat first and drive
+only that.
+
+This is not hygiene, it is a real incident. On 2026-07-28 a verification run
+drove the live UI through Chrome while the browser was parked on the owner's
+own shopping chat, and typed five probes into it — `BANANA`, `KIWI`,
+`render-once-probe-37472`, two `read_url on example.com`. There is no way to
+delete a message from a chat, so they were permanent, they auto-retitled the
+chat, and they were still being read as "what's new here" days later.
+
+Port is not a defence: `scripts/aish-preview.sh` points preview at PROD's
+`AISH_STATE_DIR` on purpose, so :8788 writes the same sessions as :8787.
+
 ## Recipe
 
 1. Write a launcher script (scratchpad) that:

@@ -95,24 +95,26 @@ check("the same target reported twice is named once", () => {
   assert.deepStrictEqual(w.sent[0].items, ["/media/a.jpg"]);
 });
 
-check("one live failure makes the batch live (a replayed one alone does not)", () => {
-  const live = world();
-  live.note("/media/a.jpg", false);
-  live.note("/media/b.jpg", true);
-  live.fire();
-  assert.strictEqual(live.sent[0].live, true, "a live failure must not be masked");
-
+// #201: a replayed failure is not an event. Re-reading a chat used to re-report
+// its dead images, and each report was a log write that read as fresh activity —
+// the chat came back unread the moment you left it, and no amount of reading
+// could clear it. Only the turn that WROTE the image can act on the failure.
+check("a replayed failure is not reported at all", () => {
   const cold = world();
   cold.note("/media/a.jpg", false);
+  assert.strictEqual(cold.pending(), 0, "a replayed failure must not even arm the timer");
   cold.fire();
-  assert.strictEqual(cold.sent[0].live, false, "a replay-only batch must stay non-live");
+  assert.strictEqual(cold.sent.length, 0, "a replay must send nothing");
 });
 
-check("a live report about an already-buffered target upgrades it", () => {
+check("a live failure alongside replayed ones reports only itself", () => {
   const w = world();
   w.note("/media/a.jpg", false);
-  w.note("/media/a.jpg", true);
+  w.note("/media/b.jpg", true);
+  w.note("/media/c.jpg", false);
   w.fire();
+  assert.strictEqual(w.sent.length, 1);
+  assert.deepStrictEqual(w.sent[0].items, ["/media/b.jpg"]);
   assert.strictEqual(w.sent[0].live, true);
 });
 
