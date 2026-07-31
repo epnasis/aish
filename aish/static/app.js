@@ -3171,8 +3171,7 @@ function askDeleteTurn(turn) {
     body:
       "Deletes your message, the thinking steps and commands it ran, and the " +
       "answer. Gone from this chat, from what the model remembers, and from " +
-      "the offline copies on your devices. A dated \u201cMessage deleted\u201d marker " +
-      "stays in its place. This cannot be undone.",
+      "the offline copies on your devices. This cannot be undone.",
     verb: "Delete",
     action: () => send({ type: "redact", turn }),
   });
