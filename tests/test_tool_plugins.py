@@ -667,7 +667,24 @@ class TestContinuation:
             pages.append(chunk)
             page += 1
         assert counter.read_text().count("x") == 1, "the wrapper re-ran for a later page"
-        assert len("".join(pages)) == out.meta["bytes"]
+
+        # Total length alone does NOT pin this: any contiguous tiling of the
+        # text has the right total, including one that starts page 2 past the
+        # end of what the model was actually shown. The real property is that
+        # paging RESUMES WHERE THE SHOWN RESULT STOPPED — the truncated body
+        # showed text[:head] and then jumped to the LAST `tail` chars, so a
+        # page 2 anchored on head+tail would silently skip `tail` characters
+        # the model never saw. A hole in the middle of an output it was told
+        # it could page through to the end is exactly the unannounced gap #192
+        # exists to remove.
+        full = (store / f"{key}.txt").read_text()
+        head, _tail = caps
+        assert pages[0] == full[:head], "page 1 is not the shown head"
+        assert pages[1].startswith(full[head : head + 40]), (
+            "page 2 does not resume where the shown head stopped — content the "
+            "model never saw is being skipped"
+        )
+        assert "".join(pages) == full, "pages do not reconstruct the original exactly"
 
     def test_paging_resumes_where_the_shown_result_stopped(self, tmp_path):
         """No silent hole. The truncated result shows text[:head] then jumps to

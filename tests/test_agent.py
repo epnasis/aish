@@ -4709,6 +4709,33 @@ class TestTrimIsRecorded:
         agent.run_task("no tools at all")
         assert [s for s in steps if s.get("kind") == "trim"] == []
 
+    def test_the_trim_is_stamped_with_the_turn_it_prepares(self, tmp_path):
+        """The eager trim runs as preparation for the NEW task, so its record
+        must carry that task's turn. Stamped with the previous one it would
+        tell #197 that the turn which lost its evidence was the one that had
+        just finished, not the one about to run — the reader would look in the
+        wrong place. Found by driving the real UI, not by a unit test."""
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo " + "z" * 500)]),
+                model_says("first done"),
+                model_says("second done"),
+            ],
+            cwd=str(tmp_path),
+            step_log=steps.append,
+        )
+        agent.run_task("make a big result")
+        agent.run_task("the task the trim is preparing for")
+
+        trim = [s for s in steps if s.get("kind") == "trim"][0]
+        tool_steps = [s for s in steps if s.get("kind") == "tool"]
+        assert trim["turn"] == 2, "the trim is stamped with the turn it prepares"
+        # …and specifically NOT the turn whose output it destroyed, which is
+        # the wrong place for #197's reader to look.
+        assert tool_steps[0]["turn"] == 1
+        assert trim["turn"] != tool_steps[0]["turn"]
+
 
 class TestEnvelopeEndToEnd:
     """#192's own 'Done when' list, driven through the real dispatch path
