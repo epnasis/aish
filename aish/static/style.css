@@ -1385,7 +1385,7 @@ body.offline #composer { opacity: 0.55; }
    narrow multi-line box beside the buttons. */
 #composer.tall { flex-wrap: wrap; }
 #composer.tall #input { order: -1; flex-basis: 100%; }
-#composer.tall #dictate { margin-left: auto; } /* push mic+send to the right on the button row */
+#composer.tall #composer-slot { margin-left: auto; } /* push the trailing buttons right on the button row */
 
 /* Active read-aloud (#106): same wrap mechanics as tall — the input takes its
    own row so the TTS transport sits in the button row beside + / mic / send.
@@ -1473,6 +1473,19 @@ body.offline #composer { opacity: 0.55; }
 /* One button: mic icon with a tiny language label stacked under it (tap to
    dictate, hold to switch language) — the stacked label keeps the composer
    width tight instead of a separate chip. */
+/* The composer's dual-purpose slot: paste when empty, clear when not. */
+#composer-slot {
+  background: none; border: none; color: var(--dim);
+  width: 30px; flex-shrink: 0; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+#composer-slot svg { width: 21px; height: 21px; }
+#composer-slot:active { opacity: 0.5; }
+#composer-slot .i-clear { display: none; }
+#composer.has-text #composer-slot .i-paste { display: none; }
+#composer.has-text #composer-slot .i-clear { display: block; }
+/* In terminal mode the composer is a shell prompt; pasting still helps, but the
+   slot must not sit between the prompt and its text. It keeps its place. */
 #dictate {
   background: none; border: none; color: var(--dim);
   width: 34px; flex-shrink: 0; padding: 0;
@@ -1684,38 +1697,34 @@ body.offline #composer { opacity: 0.55; }
   white-space: nowrap;
 }
 .session-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; padding-top: 1px; }
-/* The stamp shares its line with the pin and the unread dot: stacked in the
-   column above, they crowded the delete control underneath them. */
 .stamp-line { display: flex; align-items: center; gap: 6px; }
 .session-right .stamp { color: var(--dim); font-size: 15px; }
-.session-row .row-delete {
-  flex: none;
-  color: var(--dim);
-  padding: 6px;
-  margin: -6px -6px -6px 0;
-  line-height: 0;
-}
-.session-row .row-delete svg { width: 15px; height: 15px; }
 .session-row .row-pin {
   flex: none;
   color: var(--blue);
   line-height: 0;
 }
-.session-row .row-pin svg { width: 13px; height: 13px; }
-/* Unread: a dot, the chat-app convention — and the title gains weight, because
-   a colour-only signal is invisible to a chunk of readers. */
-.session-row .unread-dot {
+.session-row .row-pin svg { width: 16px; height: 16px; }
+/* Unread on the LEADING edge, the mail-app convention. The slot is always in
+   the row (transparent when read) so every title starts at the same x. */
+.session-row .unread-lead {
   flex: none;
   width: 9px; height: 9px; border-radius: 50%;
-  background: var(--blue);
+  margin-right: 3px;
+  background: transparent;
 }
+.session-row .unread-lead.on { background: var(--blue); }
+/* Read titles step DOWN in weight so unread ones stand out — everything was
+   600 before, which made the bold-when-unread rule invisible. Colour alone
+   would not carry it either. */
+.session-row .title { font-weight: 500; }
 .session-row.unread .title { font-weight: 700; }
-.session-row .row-delete.armed {
-  color: var(--red);
-  font-size: 13.8px;
-  font-weight: 600;
-  line-height: 1;
-}
+/* The status icon carries a tint per state, so a screen of chats is scannable
+   instead of a column of identical grey marks. */
+.row-icon.ic-running { background: var(--green-glow); }
+.row-icon.ic-waiting { background: var(--orange-glow); }
+.row-icon.ic-auto { background: var(--purple-glow, rgba(167, 139, 250, 0.16)); }
+.row-icon.ic-chat { background: var(--chip-bg); }
 .session-row .snippet {
   display: block;
   margin-top: 3px;
@@ -2219,6 +2228,9 @@ body.rail-dragging #rail-scrim { transition: none; }
    lives where the thumb already is, and the list above it stays the whole rail. */
 .rail-searchbar {
   flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 7px 12px calc(7px + env(safe-area-inset-bottom));
   background: var(--bar-bg);
   backdrop-filter: blur(20px) saturate(180%);
@@ -2238,6 +2250,18 @@ body.kb-open .rail-searchbar { padding-bottom: 7px; }
   color: var(--fg); font-size: 17px;
 }
 .rail-search input::placeholder { color: var(--dim); }
+.rail-search { flex: 1; min-width: 0; }
+/* New chat, sized as a real thumb target (44pt) and tinted so it reads as the
+   primary action in this bar rather than a second search affordance. */
+#sessions-new {
+  flex: none;
+  width: 44px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: 11px;
+  background: var(--blue); color: #fff;
+}
+#sessions-new svg { width: 22px; height: 22px; }
+#sessions-new:active { filter: brightness(0.9); }
 #session-rail .sheet-list { flex: 1; padding: 0 6px; }
 
 /* Docked: the panel stops being a mode — it is simply always there, and the app

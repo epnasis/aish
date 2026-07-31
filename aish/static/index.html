@@ -55,13 +55,16 @@
       <span id="session-title">aish</span>
       <svg class="caret" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
-    <!-- Offline pin (#165): one tap keeps this chat on the device for good.
-         Filled = kept; outline = not. Dimmed until the store has been read,
-         so the icon never asserts a state it hasn't checked. -->
-    <button id="offline-btn" class="bar-btn icon" title="keep available offline"
-            aria-label="keep available offline" aria-pressed="false">
-      <svg class="pin-off" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 7.6v6.2m0 0 2.7-2.7M12 13.8l-2.7-2.7M8.2 16.6h7.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      <svg class="pin-on" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="currentColor"/><path d="M8.3 12.2l2.6 2.6 4.8-5.2" fill="none" stroke="var(--bg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <!-- Pin (#165 + the rail): ONE concept, one icon. Pinning a chat keeps it at
+         the top of the rail AND permanently on the device — the download glyph
+         and tick-in-a-circle it replaced named a mechanism (offline caching)
+         rather than the intent, and neither looked like the pin the list shows.
+         Outline = not pinned, filled = pinned; dimmed until the store has been
+         read, so the icon never asserts a state it hasn't checked. -->
+    <button id="offline-btn" class="bar-btn icon" title="pin this chat"
+            aria-label="pin this chat" aria-pressed="false">
+      <svg class="pin-off" viewBox="0 0 24 24"><path d="M9.4 3.6h5.2l-.75 5.4 3.3 3.2H6.85l3.3-3.2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M12 12.2V20.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      <svg class="pin-on" viewBox="0 0 24 24"><path d="M9.4 3.6h5.2l-.75 5.4 3.3 3.2H6.85l3.3-3.2z" fill="currentColor"/><path d="M12 12.2V20.4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
     </button>
     <button id="console-btn" class="bar-btn icon" title="console (⌘/Ctrl+\)" aria-label="open console">
       <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -231,6 +234,15 @@
   <span id="cmd-prompt" aria-hidden="true" hidden></span>
   <textarea id="input" rows="1" placeholder="Ask aish"
             autocomplete="off" autocapitalize="sentences" spellcheck="true"></textarea>
+  <!-- ONE slot, two states (#rail follow-up): with an empty composer the thing
+       you want is PASTE (iOS's tap-hold-Paste is a chore for something done
+       this often); with text in it, the thing you want is to CLEAR. The two
+       are mutually exclusive, so they cost one button's width, not two — which
+       is the only reason there is room for either. -->
+  <button id="composer-slot" type="button" aria-label="paste" title="paste">
+    <svg class="i-paste" viewBox="0 0 24 24"><path d="M9 4.5h6v2.2H9z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M15 5.6h2.5a1.5 1.5 0 0 1 1.5 1.5v11.4a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 18.5V7.1a1.5 1.5 0 0 1 1.5-1.5H9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+    <svg class="i-clear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="currentColor" opacity=".22"/><path d="M9.2 9.2l5.6 5.6m0-5.6l-5.6 5.6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+  </button>
   <button id="dictate" type="button" aria-label="dictate" title="tap to dictate (say &quot;stop&quot; to finish) · hold to switch language" hidden>
     <svg viewBox="0 0 24 24"><rect x="9" y="3.5" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M6 11.5a6 6 0 0 0 12 0M12 17.5v3M9 20.5h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
     <span id="dict-lang" class="dict-lang">EN</span>
@@ -329,20 +341,25 @@
   <div class="rail-head">
     <div class="rail-title-row">
       <div class="rail-title">Chats</div>
-      <button id="sessions-new" class="bar-btn icon" title="new chat" aria-label="new chat">
-        <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
-      </button>
     </div>
   </div>
   <div id="sessions-list" class="sheet-list"></div>
   <!-- search docked at the bottom, within thumb reach (iOS 15+ Safari model).
        body.kb-open shrinks the fixed body to the visual viewport, so this bar
        rides above the keyboard instead of hiding behind it. -->
+  <!-- Bottom bar: search AND new-chat, both in the thumb zone. New chat used to
+       live only in the top-right corner of the app header, which on a phone
+       needs a second hand — and starting a chat is the most frequent action
+       there is. You already swiped here with your thumb; the button is where
+       the thumb already is. -->
   <div class="rail-searchbar">
     <div class="rail-search">
       <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
       <input id="sessions-search" type="search" placeholder="Search chats">
     </div>
+    <button id="sessions-new" type="button" title="new chat" aria-label="new chat">
+      <svg viewBox="0 0 24 24"><path d="M12 5.5v13M5.5 12h13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+    </button>
   </div>
 </aside>
 

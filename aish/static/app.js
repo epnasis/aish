@@ -688,7 +688,7 @@ async function refreshOfflinePinUi() {
   button.classList.remove("unknown");
   button.classList.toggle("on", pinned);
   button.setAttribute("aria-pressed", pinned ? "true" : "false");
-  button.title = pinned ? "kept available offline — tap to stop" : "keep available offline";
+  button.title = pinned ? "pinned — tap to unpin" : "pin this chat";
 }
 
 async function toggleOfflinePin() {
@@ -710,7 +710,7 @@ async function toggleOfflinePin() {
   await idbPut("meta", current);
   offlineMeta.set(currentSession, current);
   refreshOfflinePinUi(); // reflect the new state on the toggle immediately
-  showToast(current.pinned ? "kept available offline" : "no longer kept offline");
+  showToast(current.pinned ? "pinned — kept at the top and offline" : "unpinned");
 }
 
 // There is deliberately no "clear offline copies" action. The mirror manages
@@ -5530,8 +5530,48 @@ function resizeInput() {
   const composer = $("composer");
   const stayTall = composer.classList.contains("tall") && input.value !== "";
   composer.classList.toggle("tall", !cmdMode && (input.scrollHeight > 72 || stayTall));
+  // Which of the slot's two faces is showing rides on the same signal, so it
+  // can never disagree with what is actually in the box.
+  composer.classList.toggle("has-text", input.value !== "");
+  syncComposerSlot();
   updateEmptyHint(); // draft state gates the empty-chat hint (#132)
 }
+
+// [COMPOSER-SLOT-START]
+// One button, two mutually exclusive jobs. Empty composer → paste (the phone's
+// tap-hold-Paste is a chore for something done this often, and reading the
+// clipboard on an explicit tap is a user gesture, which is what the permission
+// model wants anyway). Non-empty → clear. They can share a slot precisely
+// because they can never both apply, and that is the only reason the composer
+// has room for either.
+function syncComposerSlot() {
+  const slot = $("composer-slot");
+  if (!slot) return;
+  const hasText = input.value !== "";
+  slot.setAttribute("aria-label", hasText ? "clear" : "paste");
+  slot.title = hasText ? "clear the composer" : "paste";
+}
+
+async function composerSlotAction() {
+  if (input.value !== "") {
+    input.value = "";
+    saveDraft();
+    resizeInput();
+    input.focus();
+    return;
+  }
+  // navigator.clipboard is unavailable on insecure origins and can be refused;
+  // say so rather than appearing to do nothing. The keyboard shortcut and the
+  // tap-hold menu both still work, so this is a convenience, never the only way.
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text) { showToast("clipboard is empty"); return; }
+    composerInsert(text); // same insertion path the @/slash triggers use
+  } catch {
+    showToast("can't read the clipboard here — use tap-and-hold to paste");
+  }
+}
+// [COMPOSER-SLOT-END]
 
 // Put a previous prompt's text back in the composer. An EXPLICIT action (the
 // reuse chip on the message), not a click on the whole bubble — the big bubble
@@ -7967,18 +8007,93 @@ function trackViewportPan() {
 }
 // [TOUCH-FREEZE-END]
 
+// Some transcript children scroll sideways on their own (unwrapped command
+// output, code blocks, tables). A pan that STARTS inside one is theirs — this
+// is the same test the old pager used, and it is why swiping the whole
+// transcript is safe: the only gesture it ever stole was inside these, and
+// there it stands down. They also opt into `touch-action: pan-x pan-y`, so the
+// browser scrolls them natively while we do nothing.
+function scrollsHorizontally(node) {
+  for (; node && node !== messagesEl; node = node.parentElement) {
+    if (node.scrollWidth > node.clientWidth + 1) {
+      const overflow = getComputedStyle(node).overflowX;
+      if (overflow === "auto" || overflow === "scroll") return true;
+    }
+  }
+  return false;
+}
+
+const railSwipe = {
+  tracking: false, claimed: false, decided: false,
+  startX: 0, startY: 0, startTime: 0, dx: 0, dy: 0, width: 1,
+};
+
 messagesEl.addEventListener("touchstart", (event) => {
+  railSwipe.tracking = false;
+  railSwipe.claimed = false;
+  railSwipe.decided = false;
   if (event.touches.length !== 1) return;
   beginTranscriptTouch(document.activeElement, event.target);
+  // The rail's opening gesture lives on the WHOLE transcript, not a 24px edge.
+  // An edge-only drawer is the platform default, but this app is navigated by
+  // it constantly and the edge is a fiddly target one-handed; the transcript is
+  // the whole screen. What made the edge tempting — horizontally scrolling
+  // children — is handled by standing down inside them, exactly as the old
+  // pager did on this same surface for the same reason.
+  if (railIsOpen() || !$("backdrop").hidden || consoleOpen) return;
+  if (document.body.classList.contains("kb-open")) return;
+  if (selectionActive() || scrollsHorizontally(event.target)) return;
+  const touch = event.touches[0];
+  railSwipe.tracking = true;
+  railSwipe.startX = touch.clientX;
+  railSwipe.startY = touch.clientY;
+  railSwipe.startTime = event.timeStamp;
+  railSwipe.dx = 0;
+  railSwipe.dy = 0;
+  railSwipe.width = messagesEl.clientWidth || innerWidth;
 }, { passive: true });
 
-function endTranscriptGesture() {
+messagesEl.addEventListener("touchmove", (event) => {
+  if (!railSwipe.tracking || railSwipe.decided) return;
+  const touch = event.touches[0];
+  const dx = touch.clientX - railSwipe.startX;
+  const dy = touch.clientY - railSwipe.startY;
+  if (!railSwipe.claimed) {
+    if (Math.abs(dx) < RAIL_AXIS_AT && Math.abs(dy) < RAIL_AXIS_AT) return;
+    // Vertical-dominant, or a leftward drag (there is nothing to the left of
+    // this view any more): stand down for the whole gesture rather than
+    // half-tracking it.
+    if (dx <= 0 || Math.abs(dx) < Math.abs(dy) * 1.4) { railSwipe.decided = true; return; }
+    railSwipe.claimed = true;
+    beginRailDrag();
+  }
+  railSwipe.dx = dx;
+  railSwipe.dy = dy;
+  // Passive, no preventDefault: `#messages` carries `touch-action: pan-y`, so
+  // the browser already refuses to scroll a horizontally-started gesture. A
+  // non-passive listener here would make every scrolled frame wait on the main
+  // thread — the phone's biggest scroll-jank source.
+  dragRailTo(Math.max(0, Math.min(dx, railSwipe.width)) / railSwipe.width);
+}, { passive: true });
+
+function endTranscriptGesture(event) {
   // scrollToEnd is deliberately NOT part of the deferred settle: yanking to the
   // bottom now would scroll a just-made selection out of view.
   endTranscriptTouch(() => { syncKeyboardInset(); snapViewportSoon(); });
+  if (!railSwipe.tracking) return;
+  railSwipe.tracking = false;
+  if (!railSwipe.claimed) return;
+  railSwipe.claimed = false;
+  endRailDrag(railSwipeOpens({
+    dx: railSwipe.dx,
+    dy: railSwipe.dy,
+    width: railSwipe.width,
+    ms: (event ? event.timeStamp : railSwipe.startTime) - railSwipe.startTime,
+    keyboardUp: false,
+  }));
 }
-messagesEl.addEventListener("touchend", endTranscriptGesture);
-messagesEl.addEventListener("touchcancel", endTranscriptGesture);
+messagesEl.addEventListener("touchend", (event) => endTranscriptGesture(event));
+messagesEl.addEventListener("touchcancel", (event) => endTranscriptGesture(event));
 
 // ---- a chat that no longer exists ----------------------------------------
 // With the deck gone there is no per-device membership left to repair: the
@@ -8002,84 +8117,34 @@ function onSessionDeleted(event) {
   showToast("session deleted");
 }
 
-// ---- opening the session rail with the left edge -------------------------
-// The rail is a left slide-over, so it opens the way every platform's drawer
-// does: a drag from the LEFT EDGE, following the finger. Edge-only is not a
-// stylistic choice — the transcript legitimately contains horizontally
-// scrolling children (code blocks, tables, terminal output), and a full-surface
-// swipe-right would compete with every one of them. In the installed PWA the
-// left edge is free; in a browser tab it belongs to Safari's back gesture,
-// which is the other reason the gesture can never be the only way in — the
-// top-bar button is the contract, this is the accelerator.
+// ---- opening the session rail by swiping the transcript ------------------
+// The gesture lives on the WHOLE transcript, not a left edge. An edge-only
+// drawer is the platform default and it is what this shipped as first, but this
+// app is navigated between chats constantly and a 24px strip is a fiddly
+// one-handed target — the complaint was immediate and correct. The thing that
+// made the edge tempting is transcript children that scroll sideways
+// (unwrapped command output, code blocks, tables), and the fix for those is
+// the one the old swipe pager already used on this exact surface: stand down
+// when the pan STARTS inside one. That is a solved problem, not a reason to
+// shrink the target.
 //
 // The DECISION is a pure function so it can be unit-tested without a DOM; the
-// wiring below only feeds it live geometry.
+// wiring above only feeds it live geometry.
 // [RAILSWIPE-START]
-const RAIL_EDGE = 24;     // px from the left edge where a drag arms the rail
-const RAIL_OPEN_MIN = 55; // px of rightward travel required to commit
-const RAIL_AXIS_AT = 10;  // px of travel before the gesture picks an axis
+const RAIL_AXIS_AT = 12;      // px of travel before the gesture picks an axis
+const RAIL_COMMIT_AT = 0.28;  // fraction of the transcript width that commits
+const RAIL_FLICK_PX = 48;     // a short, fast drag commits on speed instead
+const RAIL_FLICK_MS = 260;
 
-function railEdgeOpens(g) {
-  // g: { startX, endX, dy, keyboardUp }
-  if (g.keyboardUp) return false;          // the composer owns gestures while typing
-  if (g.startX > RAIL_EDGE) return false;  // must start at the edge
-  const right = g.endX - g.startX;
-  if (right < RAIL_OPEN_MIN) return false; // too short: a tap or a stray touch
-  return Math.abs(g.dy) <= right * 0.8;    // dominant horizontal only
+function railSwipeOpens(g) {
+  // g: { dx, dy, width, ms, keyboardUp }
+  if (g.keyboardUp) return false;             // the composer owns gestures then
+  if (g.dx <= 0) return false;                // leftward opens nothing
+  if (Math.abs(g.dy) > g.dx * 0.8) return false;  // dominant horizontal only
+  if (g.dx > (g.width || 0) * RAIL_COMMIT_AT) return true;
+  return g.dx >= RAIL_FLICK_PX && g.ms <= RAIL_FLICK_MS; // flick
 }
 // [RAILSWIPE-END]
-
-(function attachRailEdgeSwipe() {
-  let sx = 0, sy = 0, tracking = false, claimed = false, width = 1;
-  addEventListener("touchstart", (event) => {
-    tracking = false;
-    if (event.touches.length !== 1 || railIsOpen()) return;
-    // Any overlay that owns the screen owns its own gestures. The keyboard is
-    // read from `kb-open` — the class that means it is physically covering the
-    // screen — NOT from "an editable has focus": the composer holds focus
-    // indefinitely on a desktop, where no keyboard is up and the gesture would
-    // simply never arm. (On a phone the two coincide, which is what hid it.)
-    if (!$("backdrop").hidden || consoleOpen) return;
-    if (document.body.classList.contains("kb-open")) return;
-    const touch = event.touches[0];
-    if (touch.clientX > RAIL_EDGE) return;
-    sx = touch.clientX;
-    sy = touch.clientY;
-    tracking = true;
-    claimed = false;
-    width = railWidth();
-  }, { passive: true });
-
-  addEventListener("touchmove", (event) => {
-    if (!tracking) return;
-    const touch = event.touches[0];
-    const dx = touch.clientX - sx;
-    const dy = touch.clientY - sy;
-    if (!claimed) {
-      if (Math.abs(dx) < RAIL_AXIS_AT && Math.abs(dy) < RAIL_AXIS_AT) return;
-      // Vertical-dominant: a scroll that happened to start at the edge. Stand
-      // down for the whole gesture rather than fighting it.
-      if (Math.abs(dx) < Math.abs(dy) * 1.2) { tracking = false; return; }
-      claimed = true;
-      beginRailDrag();
-    }
-    // Claimed: the rail follows the finger, and nothing else may act on it.
-    event.preventDefault();
-    dragRailTo(Math.max(0, Math.min(dx, width)) / width);
-  }, { passive: false });
-
-  const finish = (event) => {
-    if (!tracking) return;
-    tracking = false;
-    if (!claimed) return;
-    const touch = event.changedTouches[0];
-    endRailDrag(Boolean(touch) && railEdgeOpens({
-      startX: sx, endX: touch.clientX, dy: touch.clientY - sy, keyboardUp: false,
-    }));
-  };
-  addEventListener("touchend", finish);
-  addEventListener("touchcancel", finish);
-})();
 
 // sessions
 $("back-chip").onclick = () => toggleSessionRail();
@@ -8090,6 +8155,7 @@ $("console-btn").onclick = () => toggleConsole(); // global Quake console (#148)
 $("connbar").onclick = () => reconnect();
 $("offlinebar").onclick = () => reconnect(); // same affordance, one bar (#165)
 $("offline-btn").onclick = () => toggleOfflinePin();
+$("composer-slot").onclick = () => composerSlotAction();
 
 // ---- session title menu -------------------------------------------------
 // The tappable title opens a small menu of session actions (iOS Messages
@@ -8522,36 +8588,43 @@ function sessionStamp(ts) {
   return `${date.toLocaleDateString([], { day: "numeric", month: "short" })}, ${time}`;
 }
 
+// The row icon answers ONE question: what is the state of this chat? It used to
+// answer two badly — a blue tick for "this is the chat you're in" (which the
+// row's own highlight already says, and which read as "done"), and a provenance
+// glyph only when nothing else was showing, so a screen of ordinary chats was a
+// screen of identical grey icons. Now: attention states win, then provenance,
+// then a plain chat mark — and "current" is not an icon at all.
 const SESSION_ICONS = {
   waiting: `<svg viewBox="0 0 24 24"><path d="M12 3.5 21 19H3z" fill="none" stroke="var(--orange)" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v3.6M12 16.4v.1" stroke="var(--orange)" stroke-width="1.9" stroke-linecap="round"/></svg>`,
-  current: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="var(--blue)" stroke-width="1.8"/><path d="M8.5 12.5l2.3 2.3 4.7-5" stroke="var(--blue)" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-  idle: `<svg viewBox="0 0 24 24"><path d="M5 6h13M5 12h14M5 18h9" stroke="var(--dim)" stroke-width="1.9" stroke-linecap="round"/></svg>`,
-  // Provenance, in the slot a chat app puts a sender avatar in — the pattern
-  // nobody has to learn. Automation gets a glyph, not a container.
-  schedule: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="var(--dim)" stroke-width="1.8"/><path d="M12 7.6V12l2.8 1.7" fill="none" stroke="var(--dim)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-  email: `<svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5" fill="none" stroke="var(--dim)" stroke-width="1.8"/><path d="M4.5 8l7.5 5 7.5-5" fill="none" stroke="var(--dim)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-  webhook: `<svg viewBox="0 0 24 24"><path d="M13 4.5 6.5 13H12l-1 6.5L17.5 11H12z" fill="none" stroke="var(--dim)" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
+  chat: `<svg viewBox="0 0 24 24"><path d="M4 6.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-4 3.2V16.5a2 2 0 0 1-1-1.7z" fill="none" stroke="var(--dim)" stroke-width="1.7" stroke-linejoin="round"/></svg>`,
+  schedule: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="var(--purple, #a78bfa)" stroke-width="1.8"/><path d="M12 7.4V12l3 1.8" fill="none" stroke="var(--purple, #a78bfa)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  email: `<svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5" fill="none" stroke="var(--purple, #a78bfa)" stroke-width="1.8"/><path d="M4.5 8l7.5 5 7.5-5" fill="none" stroke="var(--purple, #a78bfa)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  webhook: `<svg viewBox="0 0 24 24"><path d="M13 4.5 6.5 13H12l-1 6.5L17.5 11H12z" fill="none" stroke="var(--purple, #a78bfa)" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
 };
 
-function sessionIcon(info, isCurrent) {
+const ORIGIN_LABELS = { email: "started by email", schedule: "scheduled", webhook: "started by a webhook" };
+
+function sessionIcon(info) {
   const wrap = document.createElement("span");
   wrap.className = "row-icon";
   const auto = info.origin && info.origin !== "user" ? info.origin : "";
   if (info.state === "running") {
-    wrap.style.background = "var(--green-glow)";
+    wrap.className += " ic-running";
     wrap.innerHTML = '<span class="spin"></span>';
+    wrap.title = "working";
   } else if (info.state === "waiting") {
-    wrap.style.background = "var(--orange-glow)";
+    wrap.className += " ic-waiting";
     wrap.innerHTML = SESSION_ICONS.waiting;
-  } else if (isCurrent) {
-    wrap.style.background = "var(--blue-glow)";
-    wrap.innerHTML = SESSION_ICONS.current;
-  } else {
-    wrap.style.background = "var(--chip-bg)";
+    wrap.title = "needs your approval";
+  } else if (auto) {
     // An unrecognised origin still reads as automation rather than as a chat.
-    wrap.innerHTML = SESSION_ICONS[auto] || (auto ? SESSION_ICONS.webhook : SESSION_ICONS.idle);
+    wrap.className += " ic-auto";
+    wrap.innerHTML = SESSION_ICONS[auto] || SESSION_ICONS.webhook;
+    wrap.title = ORIGIN_LABELS[auto] || `started by ${auto}`;
+  } else {
+    wrap.className += " ic-chat";
+    wrap.innerHTML = SESSION_ICONS.chat;
   }
-  if (auto) wrap.title = `started by ${auto}`;
   return wrap;
 }
 
@@ -8591,13 +8664,11 @@ function sessionRow(info, current, opts = {}) {
   }
   const right = document.createElement("span");
   right.className = "session-right";
-  // The stamp, the pin and the unread dot share ONE line: stacked in the
-  // column they crowded the delete control below them.
   const stampLine = document.createElement("span");
   stampLine.className = "stamp-line";
-  // Pinned is ONE concept now (#165's offline pin absorbed it): a pinned chat
-  // sits in its own band at the top AND is never evicted from the offline
-  // mirror. Two toggles for "I care about this chat" was one too many.
+  // Pinned is ONE concept (#165's offline pin absorbed it): a pinned chat sits
+  // in its own band at the top AND is never evicted from the offline mirror.
+  // Two toggles for "I care about this chat" was one too many.
   if (info.pinned) {
     const pin = document.createElement("span");
     pin.className = "row-pin";
@@ -8609,14 +8680,20 @@ function sessionRow(info, current, opts = {}) {
   stamp.className = "stamp";
   stamp.textContent = sessionStamp(info.ts);
   stampLine.append(stamp);
+  right.append(stampLine);
+  // Unread reads on the LEADING edge, the mail-app convention — a dot tucked in
+  // beside the timestamp was competing with it for the same corner and lost.
+  // The slot is always present so titles stay aligned down the column.
+  const lead = document.createElement("span");
+  lead.className = "unread-lead";
   if (opts.unread) {
-    const dot = document.createElement("span");
-    dot.className = "unread-dot";
-    dot.setAttribute("aria-label", "unread");
-    stampLine.append(dot);
+    lead.classList.add("on");
+    lead.setAttribute("aria-label", "unread");
   }
-  right.append(stampLine, sessionDeleteControl(info));
-  row.append(sessionIcon(info, isCurrent), body, right);
+  // No trash control: deleting is the row's left-swipe (and the chat menu), and
+  // a permanently visible destructive icon on every row overstated how often
+  // anyone deletes a chat.
+  row.append(lead, sessionIcon(info), body, right);
   return wrapSwipeDelete(row, info);
 }
 
@@ -8757,44 +8834,6 @@ function renderSessions(event) {
     }
     list.appendChild(sessionRow(info, event.current, { unread: false }));
   }
-}
-
-const TRASH_SVG =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
-  'stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 7V5a1 1 0 0 1 ' +
-  '1-1h2a1 1 0 0 1 1 1v2m-8 0l1 13h8l1-13M10 11v6m4-6v6"/></svg>';
-
-function sessionDeleteControl(info) {
-  // A span, not a nested <button> (the row itself is one). Deleting is
-  // destructive and unrecoverable, so it takes two taps: the first arms the
-  // control (turns into a red "Delete?"), the second sends the delete; it
-  // disarms on timeout so a stray tap can't linger. The server refuses
-  // running sessions and lands the client on a fresh chat when the current
-  // one is deleted — no client-side special cases needed.
-  const del = document.createElement("span");
-  del.className = "row-delete";
-  del.setAttribute("role", "button");
-  del.setAttribute("aria-label", `delete session ${info.title || info.name}`);
-  del.innerHTML = TRASH_SVG;
-  let armed = false;
-  let timer = null;
-  del.onclick = (event) => {
-    event.stopPropagation();
-    if (armed) {
-      clearTimeout(timer);
-      send({ type: "delete_session", name: info.name });
-      return;
-    }
-    armed = true;
-    del.classList.add("armed");
-    del.textContent = "Delete?";
-    timer = setTimeout(() => {
-      armed = false;
-      del.classList.remove("armed");
-      del.innerHTML = TRASH_SVG;
-    }, 4000);
-  };
-  return del;
 }
 
 // models
