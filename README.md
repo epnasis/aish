@@ -471,7 +471,7 @@ that exchange — the prompt, everything it made the model do, and the answer. I
 asks first, in a dialog that says what is lost, because it is irreversible: the
 text is deleted from the session log, dropped from the model's context (so it
 stops being quoted), and gone from every device's offline copy at the next sync.
-What stays is a dated "Message deleted" marker where the exchange was, so the
+What stays is a quiet "Message deleted" marker where the exchange was, so the
 deletion itself is on the record. For a message sent to the wrong chat, a
 half-typed one an autocorrect Return sent, or a secret pasted into the composer
 — previously the only options were deleting the whole chat or editing JSONL by

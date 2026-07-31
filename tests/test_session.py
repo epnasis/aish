@@ -1318,8 +1318,9 @@ class TestRedaction:
         # are gone with it, and the surviving turns still close properly.
         assert not any("hunter2" in json.dumps(ev) for ev in events)
         assert types.count("done") == 2
-        marker = events[types.index("redacted")]
-        assert marker["at"] > 0, "the marker sits in the transcript's own timeline"
+        # Undated: the marker renders without a time, so the event carries
+        # none — the record's own `at` stays on disk as the audit trail.
+        assert events[types.index("redacted")] == {"type": "redacted"}
         # Every surviving turn still names itself, so the control exists on a
         # chat reopened cold — which is most of them.
         assert all(ev.get("turn") for ev in events if ev["type"] == "user")

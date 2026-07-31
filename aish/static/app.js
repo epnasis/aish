@@ -1102,7 +1102,7 @@ function handle(event) {
     case "command_end": onCommandEnd(event); break;
     case "step": traceStep(event); break;
     case "workspace": addWorkspaceNote(event.change, event.path); break;
-    case "redacted": addRedactedMsg(event.at); break;
+    case "redacted": addRedactedMsg(); break;
     case "error":
       // A by-name action (resume/delete/rename) answered "session is gone" is a
       // navigation failure, not a task failure: prune the phantom and restore
@@ -3189,11 +3189,14 @@ function redactChip(turn) {
 }
 
 // What is left where the exchange was. A chat must not silently lose a turn:
-// the answer above it would read as a reply to nothing, and a removal you can't
-// see is indistinguishable from data quietly going missing. The row carries the
-// removed turn's OWN time, so it stays in the transcript's timeline instead of
-// looking like something that just happened.
-function addRedactedMsg(at) {
+// the answer above it would read as a reply to nothing, and a deletion you
+// can't see is indistinguishable from data quietly going missing.
+//
+// Deliberately UNDATED. The row sits between two timestamped turns, so its
+// position already says when; a number on it reads as "deleted at", which is
+// not what any stamp here could mean — the only time available is the deleted
+// MESSAGE's, so one number would be claiming two different things.
+function addRedactedMsg() {
   const el = document.createElement("div");
   el.className = "msg system-note redacted-note";
   const ico = document.createElement("span");
@@ -3205,13 +3208,6 @@ function addRedactedMsg(at) {
   label.className = "sysnote-label";
   label.textContent = "Message deleted";
   body.appendChild(label);
-  const stamp = messageStamp(at);
-  if (stamp) {
-    const detail = document.createElement("div");
-    detail.className = "sysnote-text";
-    detail.textContent = stamp;
-    body.appendChild(detail);
-  }
   el.append(ico, body);
   messagesEl.appendChild(el);
   scrollToEnd();
@@ -8498,9 +8494,9 @@ function askDeleteChat() {
   askConfirm({
     title: "Delete this chat?",
     body:
-      "The whole conversation goes — every message in it, and its log file on " +
-      "the server. The copy mirrored to your devices is dropped at the next " +
-      "sync. This cannot be undone.",
+      "Deletes the whole conversation — every message in it, and its log file " +
+      "on the server. The copy on your devices is deleted at the next sync. " +
+      "This cannot be undone.",
     verb: "Delete",
     action: () => send({ type: "delete_session", name }),
   });

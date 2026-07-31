@@ -643,11 +643,12 @@ class SessionLog:
                 # exchange, or the answer above it reads as a reply to nothing.
                 has_trace = True
                 flush()
-                event: dict = {"type": "redacted"}
-                at = record_epoch({"ts": record.get("at")}) or record_epoch(record)
-                if at:
-                    event["at"] = at
-                events.append(event)
+                # Undated on purpose: the marker renders without a time (see
+                # app.js [REDACT] — a stamp there would read as "deleted at",
+                # which is not what the only available time means), and the
+                # record's own `at` stays on disk as the audit trail rather
+                # than riding an event nothing reads.
+                events.append({"type": "redacted"})
             elif kind == "cwd":
                 # Workspace marker (issue #94): identical to the live `workspace`
                 # event on_state emits. Buffered with the open turn's steps so it

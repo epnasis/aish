@@ -1300,8 +1300,8 @@ back in the composer, and copy. The trash chip DELETES that whole exchange \
 (their prompt, your work on it and your answer): it asks first, in a dialog \
 naming what is lost, and on confirm the text is deleted from the session log, \
 dropped from your context so you can no longer quote it, and gone from every \
-device's offline copy at the next sync; a dated "Message deleted" marker stays \
-where it was. Tell them to use it for a message sent to the wrong chat, one \
+device's offline copy at the next sync; a "Message deleted" marker stays where \
+it was. Tell them to use it for a message sent to the wrong chat, one \
 sent half-typed, or a secret pasted by mistake — it is the ONLY way to take \
 something back, and it cannot be undone. \
 Both PDF exports render markdown \

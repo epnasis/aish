@@ -131,15 +131,16 @@ function world() {
   ok("…and only that one was deleted", w.sent.length === 1);
 }
 
-// 5. The gap is visible, and carries the removed turn's OWN time — not now, or
-//    an old exchange's removal would read as something that just happened.
+// 5. The gap is visible — and UNDATED. A time on it reads as "deleted at",
+//    which is not what the only available number means (it is the deleted
+//    message's own time), so one number would claim two different things.
 {
   const w = world();
-  const row = w.sandbox.addRedactedMsg(1785400000);
+  const row = w.sandbox.addRedactedMsg();
   ok("a row is added where the turn was", w.messagesEl.children.length === 1);
   const labels = row.children.flatMap((c) => c.children || []).map((c) => c.textContent);
   ok("it says what happened", labels.includes("Message deleted"));
-  ok("it carries the turn's own time", labels.includes("14:32"));
+  ok("and nothing else — no timestamp", labels.filter(Boolean).length === 1);
 }
 
 // 6. Exactly ONE place can send a deletion, and it is behind the modal. A
