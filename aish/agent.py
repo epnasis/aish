@@ -1098,6 +1098,44 @@ class Agent:
                 return text if isinstance(text, str) else None
         return None
 
+    def redact_turn(self, text: str, occurrence: int = 1) -> bool:
+        """Drop a removed turn from the model's context (#202): the user message
+        itself, its TASK_REMINDER, and everything the assistant produced from it,
+        up to the next user turn. Without this the log would be scrubbed while
+        the running conversation kept the text — and kept quoting it.
+
+        The turn is named by TEXT plus which identical-text turn it is, because
+        ids live on the log records and these dicts are what goes to the
+        backends. Not found is a no-op: the log-side removal has already
+        happened and is the durable half.
+        """
+        seen = 0
+        for i in range(1, len(self.messages)):  # messages[0] is the system prompt
+            if self.messages[i].get("role") != "user":
+                continue
+            if self.messages[i].get("content") != text:
+                continue
+            seen += 1
+            if seen < occurrence:
+                continue
+            cut = i
+            prev = self.messages[cut - 1]
+            if prev.get("role") == "system" and str(
+                prev.get("content", "")
+            ).startswith(TASK_REMINDER_MARK):
+                cut -= 1
+            end = next(
+                (
+                    j
+                    for j in range(i + 1, len(self.messages))
+                    if self.messages[j].get("role") == "user"
+                ),
+                len(self.messages),
+            )
+            del self.messages[cut:end]
+            return True
+        return False
+
     def _append(self, message: dict) -> None:
         self.messages.append(message)
         if self.on_message:

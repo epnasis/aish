@@ -1193,3 +1193,244 @@ class TestActivityIsNotAFileTouch:
         log.step({"kind": "render_error", "what": "image", "items": ["https://x/y.jpg"]})
         log.close()
         assert SessionLog.pager_titles(tmp_path)[0][3] == talked
+
+
+class TestRedaction:
+    """A chat had no eraser (#202): the log is append-only and replayed whole,
+    so a probe fired at the wrong chat, a message sent by an autocorrect Return,
+    or a secret pasted into the composer was permanent — the only tools were
+    deleting the whole chat or hand-editing JSONL with the server stopped.
+
+    Two properties carry the design, and both are pinned here: the removal is
+    REAL (the text leaves the file, so a mirror of it cannot be reconstructed),
+    and it leaves a dated tombstone AT THE TURN'S POSITION, so the removal is
+    itself auditable and the transcript does not silently lose an exchange.
+    """
+
+    def _turns(self, log):
+        """The ids of the logged user turns, in order — what a client points at
+        when it asks for one to be removed."""
+        records = [json.loads(line) for line in log.path.read_text().splitlines()]
+        return [
+            r["turn"]
+            for r in records
+            if r.get("kind") == "message" and r.get("role") == "user"
+        ]
+
+    def _conversation(self, log):
+        """Two turns with a tool step and terminal framing in the second."""
+        log.message({"role": "user", "content": "first question"})
+        log.step({"kind": "tool", "name": "read_file", "ok": True})
+        log.message({"role": "assistant", "content": "first answer"})
+        log.task_start("the SECRET token is hunter2")
+        log.message({"role": "user", "content": "the SECRET token is hunter2"})
+        log.command_event({"kind": "cmd_start", "cwd": "/x", "command": "echo hunter2"})
+        log.command_event({"kind": "cmd_end", "status": "exit", "exit_code": 0})
+        log.step({"kind": "tool", "name": "run_command", "command": "echo hunter2",
+                  "output": "hunter2\n[exit code: 0]", "ok": True})
+        log.message({"role": "assistant", "content": "I saw hunter2"})
+        log.task_end()
+        log.message({"role": "user", "content": "third question"})
+        log.message({"role": "assistant", "content": "third answer"})
+
+    def test_the_text_actually_leaves_the_file(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        self._conversation(log)
+        target = self._turns(log)[1]
+
+        removed = log.redact_turn(target)
+        log.close()
+
+        assert removed is not None
+        assert removed.text == "the SECRET token is hunter2"
+        raw = log.path.read_text(encoding="utf-8")
+        assert "hunter2" not in raw, "a hidden turn is not a removed turn"
+        assert "I saw hunter2" not in raw
+        # The neighbours are untouched — a removal is not a truncation.
+        assert "first question" in raw and "third question" in raw
+
+    def test_the_prompt_copy_in_task_start_goes_too(self, tmp_path):
+        """task_start is written BEFORE the user message and carries the prompt
+        verbatim, so cutting from the message alone would leave a copy of
+        exactly what was being removed — and would strand an unmatched
+        task_start, which restart recovery reads as a task to resume."""
+        log = SessionLog.new(tmp_path)
+        self._conversation(log)
+        log.redact_turn(self._turns(log)[1])
+        log.close()
+        assert "hunter2" not in log.path.read_text(encoding="utf-8")
+        assert SessionLog.pending_task(log.path) is None
+
+    def test_the_next_turn_keeps_its_own_opening_records(self, tmp_path):
+        """The cut ends where the NEXT turn begins, which is its task_start —
+        written before its user message, not after. Ending at the message
+        instead swallowed the following turn's prompt record."""
+        log = SessionLog.new(tmp_path)
+        self._conversation(log)
+        log.task_start("fourth question")
+        log.message({"role": "user", "content": "fourth question"})
+        log.message({"role": "assistant", "content": "fourth answer"})
+        log.task_end()
+
+        log.redact_turn(self._turns(log)[1])
+        log.close()
+        starts = [
+            r["prompt"] for r in
+            (json.loads(line) for line in log.path.read_text().splitlines())
+            if r["kind"] == "task_start"
+        ]
+        assert starts == ["fourth question"], "only the removed turn's start goes"
+
+    def test_a_dated_tombstone_marks_the_gap(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        self._conversation(log)
+        target = self._turns(log)[1]
+        original = [
+            json.loads(line) for line in log.path.read_text().splitlines()
+            if json.loads(line).get("turn") == target
+        ][0]
+
+        log.redact_turn(target)
+        log.close()
+        records = [json.loads(line) for line in log.path.read_text().splitlines()]
+        stones = [r for r in records if r["kind"] == "redact"]
+        assert len(stones) == 1
+        assert stones[0]["turn"] == target
+        assert stones[0]["at"] == original["ts"], "the marker keeps the turn's own time"
+        assert stones[0]["records"] > 1
+        # AT THE POSITION, not appended: it must close the first turn, not the last.
+        kinds = [r["kind"] for r in records]
+        assert kinds.index("redact") < len(kinds) - 1
+
+    def test_replay_shows_a_gap_where_the_turn_was(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        self._conversation(log)
+        log.redact_turn(self._turns(log)[1])
+        log.close()
+
+        events = SessionLog.reconstruct_events(log.path)
+        types = [ev["type"] for ev in events]
+        assert types.count("redacted") == 1
+        assert [ev["text"] for ev in events if ev["type"] == "user"] == [
+            "first question", "third question",
+        ]
+        # No orphaned halves: the removed turn's terminal block and its answer
+        # are gone with it, and the surviving turns still close properly.
+        assert not any("hunter2" in json.dumps(ev) for ev in events)
+        assert types.count("done") == 2
+        marker = events[types.index("redacted")]
+        assert marker["at"] > 0, "the marker sits in the transcript's own timeline"
+        # Every surviving turn still names itself, so the control exists on a
+        # chat reopened cold — which is most of them.
+        assert all(ev.get("turn") for ev in events if ev["type"] == "user")
+
+    def test_it_names_which_identically_worded_turn_it_was(self, tmp_path):
+        """The live Agent's messages hold no ids, so the caller finds the same
+        turn there by text — and two turns saying 'ok' would otherwise be
+        indistinguishable, dropping the wrong one from the model's context."""
+        log = SessionLog.new(tmp_path)
+        for _ in range(3):
+            log.message({"role": "user", "content": "ok"})
+            log.message({"role": "assistant", "content": "sure"})
+        turns = self._turns(log)
+        removed = log.redact_turn(turns[1])
+        log.close()
+        assert removed.occurrence == 2
+
+    def test_an_unknown_turn_removes_nothing(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        self._conversation(log)
+        before = log.path.read_text(encoding="utf-8")
+        assert log.redact_turn("no-such-turn") is None
+        assert log.redact_turn("") is None
+        log.close()
+        assert log.path.read_text(encoding="utf-8") == before
+
+    def test_removing_the_same_turn_twice_is_a_miss_not_a_second_cut(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        self._conversation(log)
+        target = self._turns(log)[1]
+        assert log.redact_turn(target) is not None
+        assert log.redact_turn(target) is None, "already gone is not an error"
+        log.close()
+        assert "third question" in log.path.read_text(encoding="utf-8")
+
+    def test_the_log_keeps_working_afterwards(self, tmp_path):
+        """The rewrite closes the append handle; the next record must reopen it
+        and land at the end, not clobber what survived."""
+        log = SessionLog.new(tmp_path)
+        self._conversation(log)
+        log.redact_turn(self._turns(log)[1])
+        log.message({"role": "user", "content": "fourth question"})
+        log.close()
+        assert [m["content"] for m in SessionLog.load_messages(log.path)] == [
+            "first question", "first answer", "third question", "third answer",
+            "fourth question",
+        ]
+
+    def test_a_log_written_before_turn_ids_is_still_removable(self, tmp_path):
+        """Ids are minted at write time, so every existing chat has none — and
+        those are exactly the chats holding the messages someone wants gone."""
+        path = tmp_path / "session-20260101-000000-000000.jsonl"
+        path.write_text(
+            "\n".join(
+                json.dumps({"ts": f"2026-01-01T00:00:0{i}", "kind": "message", **m})
+                for i, m in enumerate([
+                    {"role": "user", "content": "old question"},
+                    {"role": "assistant", "content": "old answer"},
+                    {"role": "user", "content": "leaked secret"},
+                    {"role": "assistant", "content": "about that secret"},
+                ])
+            ) + "\n",
+            encoding="utf-8",
+        )
+        log = SessionLog(path)
+        target = [
+            ev["turn"]
+            for ev in SessionLog.reconstruct_events(path) or []
+            if ev.get("type") == "user"
+        ]
+        # A pre-trace log reconstructs as None, so fall back to the line index
+        # ids _turn_id mints — the same names the parse hands out.
+        if not target:
+            target = ["@2"]
+        assert log.redact_turn(target[-1]) is not None
+        log.close()
+        assert "secret" not in path.read_text(encoding="utf-8")
+
+    def test_an_auto_title_describing_the_removed_turn_is_re_derived(self, tmp_path):
+        """An auto title is a description of content; when the content goes, a
+        model-written summary of it must not stay on the sessions row — that is
+        the leak walking out through the list."""
+        log = SessionLog.new(tmp_path)
+        self._conversation(log)
+        log.set_title("Handling the hunter2 token", auto=True)
+        removed = log.redact_turn(self._turns(log)[1])
+        log.close()
+        assert removed.title == "first question"
+        assert SessionLog.info(log.path).title == "first question"
+        assert "hunter2" not in log.path.read_text(encoding="utf-8")
+
+    def test_a_hand_typed_title_is_left_alone(self, tmp_path):
+        """The same rule the auto-titler already follows: a name you typed is
+        yours, and renaming it out from under you is not this feature's call."""
+        log = SessionLog.new(tmp_path)
+        self._conversation(log)
+        log.set_title("Tuesday debugging")
+        removed = log.redact_turn(self._turns(log)[1])
+        log.close()
+        assert removed.title is None
+        assert SessionLog.info(log.path).title == "Tuesday debugging"
+
+    def test_a_removal_counts_as_activity(self, tmp_path):
+        """Unlike the renderless records #201 took out of the count: every
+        device mirrors this transcript and only refetches a session whose
+        activity stamp MOVED, so an unmoved stamp would leave the removed text
+        in IndexedDB on each of them."""
+        log = SessionLog.new(tmp_path)
+        self._conversation(log)
+        quiet = SessionLog.info(log.path).activity
+        time.sleep(1.1)  # ISO stamps are whole seconds
+        log.redact_turn(self._turns(log)[1])
+        log.close()
+        assert SessionLog.info(log.path).activity > quiet

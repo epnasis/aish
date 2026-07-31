@@ -5821,3 +5821,137 @@ class TestNoGhostTraceCards:
         )
         raw = log_path.read_text()
         assert '"kind": "trim"' in raw, "the trim record was never written"
+
+
+class TestRedactTurn:
+    """A chat had no eraser (#202): the transcript is an append-only log
+    replayed in full, so a probe fired at the wrong chat, a message sent by an
+    autocorrect Return, or a secret pasted into the composer stayed forever —
+    the only tools were deleting the whole chat or hand-editing JSONL with the
+    server stopped.
+
+    Three copies of a turn exist and all three have to go, or the removal is
+    theatre: the log, the live model's context, and the in-memory transcript
+    every viewer replays from.
+    """
+
+    @staticmethod
+    def _turn_ids(events):
+        return [e.get("turn") for e in events if e.get("type") == "user"]
+
+    def test_a_message_can_be_removed_the_moment_it_is_sent(self, app_env):
+        """The turn someone most wants back is the one they just sent, so the id
+        rides the LIVE user event — not only a transcript replayed cold."""
+        client, _ = make_client(app_env, [model_says("first answer"), model_says("ok")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "the SECRET is hunter2"})
+            live = recv_until(ws, "user")
+            assert live["turn"], "a live turn must name itself"
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "redact", "turn": live["turn"]})
+            replay = recv_until(ws, "replay")
+            blob = json.dumps(replay["events"])
+            assert "hunter2" not in blob
+            assert any(e["type"] == "redacted" for e in replay["events"])
+
+            # …and the model's context lost it too, or it goes on quoting what
+            # the user just removed.
+            session = client.app.state.server.active
+            assert not any(
+                "hunter2" in str(m.get("content", "")) for m in session.agent.messages
+            )
+            # …and the file on disk, which is what a mirror is built from.
+            assert "hunter2" not in session.logref.log.path.read_text(encoding="utf-8")
+
+    def test_the_neighbours_survive(self, app_env):
+        client, _ = make_client(
+            app_env, [model_says("A"), model_says("B"), model_says("C")]
+        )
+        with client, connected(client) as (ws, _, _):
+            for text in ("first", "second", "third"):
+                ws.send_json({"type": "task", "text": text})
+                recv_until(ws, "done")
+            session = client.app.state.server.active
+            middle = self._turn_ids(session.bridge.transcript)[1]
+
+            ws.send_json({"type": "redact", "turn": middle})
+            replay = recv_until(ws, "replay")
+            texts = [e["text"] for e in replay["events"] if e["type"] == "user"]
+            assert texts == ["first", "third"], "a removal is not a truncation"
+
+    def test_every_viewer_repaints(self, app_env):
+        """A removal made on the phone must not leave the laptop showing the
+        text — and the people watching it happen have, by definition, seen it,
+        so it must not come back at them as an unread chat either."""
+        client, _ = make_client(app_env, [model_says("answer")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "leaked secret"})
+            turn = recv_until(ws, "user")["turn"]
+            recv_until(ws, "done")
+            with client.websocket_connect(
+                f"/ws?token={TEST_TOKEN}&session={hello['session']}"
+            ) as other:
+                other.receive_json()  # hello
+                other.receive_json()  # replay
+                ws.send_json({"type": "redact", "turn": turn})
+                repaint = recv_until(other, "replay")
+                assert "leaked secret" not in json.dumps(repaint["events"])
+                assert repaint["seen"] is True
+
+    def test_it_is_refused_while_the_chat_is_working(self, app_env):
+        """The turn being removed may be the one running: its records are still
+        being written and agent.messages belongs to the worker thread."""
+        client, _ = make_client(app_env, [model_says("answer")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "a question"})
+            turn = recv_until(ws, "user")["turn"]
+            recv_until(ws, "done")
+            session = client.app.state.server.active
+            session.busy = True
+            try:
+                ws.send_json({"type": "redact", "turn": turn})
+                error = ws.receive_json()
+                assert error["type"] == "error" and "working" in error["text"]
+            finally:
+                session.busy = False
+            assert "a question" in json.dumps(session.bridge.transcript)
+
+    def test_an_unknown_turn_says_so_and_changes_nothing(self, app_env):
+        """Already removed from another tab, or a stale id: both are 'there is
+        nothing here to remove', which is the outcome asked for."""
+        client, _ = make_client(app_env, [model_says("answer")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "a question"})
+            recv_until(ws, "done")
+            session = client.app.state.server.active
+            before = list(session.bridge.transcript)
+
+            ws.send_json({"type": "redact", "turn": "no-such-turn"})
+            error = ws.receive_json()
+            assert error["type"] == "error" and "gone" in error["text"]
+            assert session.bridge.transcript == before
+
+    def test_a_cold_chat_can_be_cleaned_up_too(self, app_env):
+        """The chat holding the message you regret is usually not the one on
+        screen when you remember it — it is reopened from its log."""
+        client, chat = make_client(app_env, [model_says("answer")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "the SECRET is hunter2"})
+            recv_until(ws, "done")
+            name = hello["session"]
+        # A fresh process-level view of it: reopened from disk, not from memory.
+        client2, _ = make_client(app_env, [])
+        with client2, client2.websocket_connect(
+            f"/ws?token={TEST_TOKEN}&session={name}"
+        ) as ws2:
+            ws2.receive_json()  # hello
+            replay = ws2.receive_json()
+            turn = self._turn_ids(replay["events"])[0]
+            assert turn, "a cold-loaded turn names itself as well"
+            ws2.send_json({"type": "redact", "turn": turn})
+            after = recv_until(ws2, "replay")
+            assert "hunter2" not in json.dumps(after["events"])
+            assert "hunter2" not in (
+                app_env["state_dir"] / name
+            ).read_text(encoding="utf-8")

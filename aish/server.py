@@ -488,7 +488,16 @@ def _turn_event(text: str) -> dict[str, Any]:
     # happened, which the transcript renders. Same number here, different
     # meanings — and `at` is the one cold replay also carries (#200), which is
     # why they are not one field.
-    return {"type": "user", "text": text, "ts": now, "at": now}
+    #
+    # `turn` is what a removal names (#202), and it is minted HERE — before the
+    # turn runs — rather than by the log record it will end up on. The message
+    # someone most wants to take back is the one they just sent, so the control
+    # has to exist on a LIVE turn, not only after the chat is replayed cold;
+    # Session.open_turn hands this id to the log so both halves answer to the
+    # same name.
+    return {
+        "type": "user", "text": text, "ts": now, "at": now, "turn": uuid.uuid4().hex[:12],
+    }
 
 
 def _user_event(text: str, synthetic: str = "") -> dict[str, Any]:
@@ -1285,7 +1294,16 @@ chat, delete \
 this chat, workspace & jobs); the compose pencil (top right) starts a new \
 chat. Every \
 finished answer has a row of chips beneath it — copy, export that one answer \
-to PDF, and (where available) read-aloud. Both PDF exports render markdown \
+to PDF, and (where available) read-aloud. Each of the user's OWN prompts has a \
+row too — the time it was sent, a trash chip, a pencil that puts the prompt \
+back in the composer, and copy. The trash chip REMOVES that whole exchange \
+(their prompt, your work on it and your answer): two taps to confirm, then the \
+text is deleted from the session log, dropped from your context so you can no \
+longer quote it, and gone from every device's offline copy at the next sync; a \
+dated "Message removed" marker stays where it was. Tell them to use it for a \
+message sent to the wrong chat, one sent half-typed, or a secret pasted by \
+mistake — it is the ONLY way to take something back, and it cannot be undone. \
+Both PDF exports render markdown \
 locally and download the file; the whole-chat export includes only your final \
 answers, not thinking or intermediate steps. A single-answer PDF is titled and \
 named after the ANSWER (you write that title yourself when asked), not after \
@@ -1464,6 +1482,14 @@ class Session:
         # fix; this is the backstop no client can route around.
         self.last_render_error: tuple | None = None
 
+    def open_turn(self, event: dict) -> None:
+        """Emit the `user` event that opens a turn AND hand its id to the log,
+        so the record the agent is about to write answers to the same name
+        (#202). Every path that starts a turn goes through here — a turn whose
+        two halves disagree about its id is a turn the user cannot remove."""
+        self.logref.pending_turn = event.get("turn")
+        self.bridge.emit(event)
+
     @property
     def viewers(self) -> set:
         """Clients currently viewing this session. Owned by the bridge (it fans
@@ -1628,7 +1654,7 @@ class WebServer:
             # bubble — classified by the SAME function the cold replay uses, so
             # hot and cold cannot drift (#171). A re-issued original prompt is
             # the user's own words and stays a normal bubble.
-            session.bridge.emit(_user_event(text))
+            session.open_turn(_user_event(text))
             session.runner = asyncio.ensure_future(
                 self._run_task(session, text, resume=True)
             )
@@ -2033,6 +2059,9 @@ class WebServer:
         elif kind == "retry":
             self._claim(client)
             await self._retry_task(client, str(message.get("text", "")).strip())
+        elif kind == "redact":
+            self._claim(client)
+            await self._redact_turn(client, str(message.get("turn", "")).strip())
         elif kind == "create_issue":
             self._claim(client)
             await self._create_issue(client)
@@ -2260,6 +2289,86 @@ class WebServer:
                 del transcript[i + 1:]
                 return
 
+    async def _redact_turn(self, client: Client, turn: str) -> None:
+        """Take one exchange out of this chat for good (#202).
+
+        Three copies of a turn exist and all three have to go, or the removal is
+        theatre: the on-disk log (SessionLog.redact_turn scrubs it and leaves a
+        dated tombstone in its place), the live model's context (or the model
+        keeps quoting what the user just removed), and the in-memory transcript
+        every viewer replays from.
+
+        That last one is rebuilt from the scrubbed log rather than edited in
+        place. reconstruct_events is DEFINED to produce what a live session
+        shows — that parity is the invariant the whole cold-open path rests on —
+        so replacing the buffer with it repaints correctly AND guarantees no
+        residue survives in memory for the next viewer to replay.
+
+        Refused while the chat is working: the turn being removed may be the one
+        running, its records are still being written, and agent.messages belongs
+        to the worker thread. Stop first, then remove.
+        """
+        session = client.viewing
+        if session is None or not turn:
+            return
+        if session.busy:
+            await client.ws.send_json(
+                {
+                    "type": "error",
+                    "text": "can't remove a message while this chat is working — "
+                    "stop the task (or let it finish) and try again",
+                }
+            )
+            return
+        path = session.logref.log.path
+        removed = await asyncio.to_thread(session.logref.redact_turn, turn)
+        if removed is None:
+            # The id named nothing: already removed (from another tab), or a
+            # stale line-index id from a log written before turn ids. Both are
+            # "there is nothing here to remove", which is the outcome asked for.
+            await client.ws.send_json(
+                {"type": "error", "text": "that message is already gone"}
+            )
+            return
+        session.agent.redact_turn(removed.text, removed.occurrence)
+        events = await asyncio.to_thread(SessionLog.reconstruct_events, path)
+        if events is None:  # pre-trace log: the flat-history fallback, as cold opens use
+            history = await asyncio.to_thread(SessionLog.load_messages, path)
+            events = [{"type": "history", "messages": history}]
+        bridge = session.bridge
+        bridge.truncated = len(events) > TRANSCRIPT_MAX
+        bridge.transcript[:] = events[-TRANSCRIPT_KEEP:] if bridge.truncated else events
+        # Through the bridge, so every viewer of this chat repaints — a removal
+        # made on the phone must not leave the laptop showing the text.
+        #
+        # `seen` is true by construction here: this event reaches only clients
+        # currently VIEWING the chat, and what they are being handed is its
+        # corrected state. Without it the removal — which counts as activity, so
+        # that every device's offline mirror refetches — would mark the chat
+        # unread for the very people watching it happen.
+        bridge.emit(
+            {
+                "type": "replay",
+                "events": list(bridge.transcript),
+                "truncated": bridge.truncated,
+                "seen": True,
+            },
+            record=False,
+        )
+        if removed.title is not None:
+            # An auto title described content that is gone, so it was re-derived
+            # to the first surviving message — safe, but a description of where
+            # the chat STARTED. Forcing a retitle earns a real name back at the
+            # next completed task.
+            session.custom_title = removed.title
+            session.title_auto = True
+            session.retitle_forced = True
+            bridge.emit(
+                {"type": "session_renamed", "name": session.name, "title": removed.title},
+                record=False,
+            )
+        await self._send_sessions(client, "")
+
     def _dequeue(self, client: Client, text: str) -> None:
         """Drop the first still-waiting message matching `text` (the client's
         queued-chip remove button). A running task is never affected."""
@@ -2302,7 +2411,7 @@ class WebServer:
         # stays the /cd alias and is dispatched below inside _run_user_command.
         if text.startswith("!"):
             session.busy = True
-            session.bridge.emit(_turn_event(text))
+            session.open_turn(_turn_event(text))
             session.runner = asyncio.ensure_future(
                 self._run_user_command(session, text[1:].strip())
             )
@@ -2313,7 +2422,7 @@ class WebServer:
         if notes:
             text = f"{text}\n\n" + "\n".join(notes) if text else "\n".join(notes)
         session.busy = True
-        session.bridge.emit(_turn_event(text))
+        session.open_turn(_turn_event(text))
         if text.startswith("/"):
             # /learn and /feedback are the task-expanding slash commands on web:
             # the transcript shows what the user typed, the model gets the
@@ -2668,7 +2777,7 @@ class WebServer:
         session.pending_issue = None  # consumed; a re-tap can't double-file
         session.feedback_block = False  # filed — the adjust window is over (#130)
         session.busy = True
-        session.bridge.emit(_turn_event("Create the issue"))
+        session.open_turn(_turn_event("Create the issue"))
         session.runner = asyncio.ensure_future(self._file_issue(session, command))
 
     async def _file_issue(self, session: Session, command: str) -> None:
@@ -3384,7 +3493,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         # owner typing (#171). Marked here because the text is arbitrary; the
         # replay identifies the same message by its position in a non-user
         # session, since it is always that session's opening turn.
-        session.bridge.emit(_user_event(prompt, "trigger"))
+        session.open_turn(_user_event(prompt, "trigger"))
         session.runner = asyncio.ensure_future(self._run_task(session, prompt))
         if dedup_key:
             # Recorded only once the session actually exists, so a failed

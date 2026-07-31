@@ -4935,3 +4935,78 @@ class TestTurnAndCallIdentity:
         agent.run_task("go")
         thinking = [s for s in steps if s.get("kind") == "thinking"]
         assert thinking and all("turn" not in s for s in thinking)
+
+
+class TestRedactTurn:
+    """The log-side removal (#202) is the durable half; this is the other one.
+    Scrubbing the file while the running conversation keeps the text means the
+    model goes on quoting exactly what the user just removed."""
+
+    def _agent(self):
+        agent, _ = make_agent([])
+        agent.messages = [
+            {"role": "system", "content": "you are aish"},
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "system", "content": agent_module.TASK_REMINDER_MARK + " remember"},
+            {"role": "user", "content": "the SECRET is hunter2"},
+            {"role": "assistant", "content": "", "tool_calls": ["…"]},
+            {"role": "tool", "content": "hunter2"},
+            {"role": "assistant", "content": "I saw hunter2"},
+            {"role": "user", "content": "third question"},
+            {"role": "assistant", "content": "third answer"},
+        ]
+        return agent
+
+    def test_the_whole_turn_leaves_the_context(self):
+        agent = self._agent()
+        assert agent.redact_turn("the SECRET is hunter2") is True
+        assert not any("hunter2" in str(m.get("content")) for m in agent.messages)
+        # Its neighbours are untouched: a removal is not a truncation, and the
+        # conversation still reads as user → assistant on both sides of the gap.
+        assert [m["content"] for m in agent.messages if m["role"] == "user"] == [
+            "first question", "third question",
+        ]
+
+    def test_the_turns_reminder_goes_with_it(self):
+        """A TASK_REMINDER belongs to the turn it precedes — the same rule
+        rewind_last_task follows — and leaving it behind grows a system message
+        per removal."""
+        agent = self._agent()
+        agent.redact_turn("the SECRET is hunter2")
+        assert sum(
+            1 for m in agent.messages
+            if str(m.get("content", "")).startswith(agent_module.TASK_REMINDER_MARK)
+        ) == 0
+
+    def test_it_removes_the_turn_it_was_told_to(self):
+        """Two turns worded identically are indistinguishable by text alone, and
+        dropping the wrong one leaves the removed text in the model's context —
+        the one thing this must never do. The log counts the occurrence."""
+        agent, _ = make_agent([])
+        agent.messages = [{"role": "system", "content": "you are aish"}]
+        for i in range(3):
+            agent.messages.append({"role": "user", "content": "ok"})
+            agent.messages.append({"role": "assistant", "content": f"answer {i}"})
+
+        assert agent.redact_turn("ok", occurrence=2) is True
+        assert [m["content"] for m in agent.messages if m["role"] == "assistant"] == [
+            "answer 0", "answer 2",
+        ]
+
+    def test_a_turn_that_is_not_there_is_a_no_op(self):
+        """The durable half has already happened; a live context that never had
+        the turn (a chat reopened cold) must not raise or delete something else."""
+        agent = self._agent()
+        before = list(agent.messages)
+        assert agent.redact_turn("never said this") is False
+        assert agent.messages == before
+
+    def test_the_system_prompt_is_never_the_casualty(self):
+        agent, _ = make_agent([])
+        agent.messages = [
+            {"role": "system", "content": "you are aish"},
+            {"role": "user", "content": "hello"},
+        ]
+        agent.redact_turn("hello")
+        assert agent.messages == [{"role": "system", "content": "you are aish"}]

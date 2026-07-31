@@ -7,6 +7,7 @@ import json
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, TextIO
@@ -62,6 +63,62 @@ def record_epoch(record: dict) -> int | None:
         return int(datetime.datetime.fromisoformat(raw).timestamp())
     except ValueError:
         return None
+
+
+# Redaction (#202). A chat had no eraser: the log is append-only and replayed in
+# full, so anything that landed in it — a probe fired at the wrong chat, a secret
+# pasted into the composer, an answer that quoted what it should not have — was
+# permanent short of deleting the whole chat or hand-editing JSONL with the
+# server stopped.
+#
+# The unit removed is the TURN, not one bubble: the prompt, everything it made
+# the model do, and the answer. Half a turn is not a removal — an answer repeats
+# what the prompt said, a command echoes the argument it was given, and the
+# tool output holds both.
+#
+# Removal is REAL, not a hidden flag: the turn's records leave the file and a
+# tombstone takes their place, AT THEIR POSITION, so the log keeps a dated,
+# auditable record that something was removed and where — while the text itself
+# is gone from disk. A tombstone that only hid the turn would be the wrong
+# answer for the pasted-secret case, which is the whole point of the feature.
+#
+# A redaction IS activity (`_is_activity` does not exempt it), unlike the
+# renderless records #201 took out of that count. It has to be: every device
+# holds its own offline copy of the transcript, and the mirror only refetches a
+# session whose activity stamp MOVED — so an unmoved stamp would leave the
+# removed text sitting in IndexedDB on each of them, which is the one outcome
+# this feature exists to prevent. The cost is one unread dot, cleared by opening
+# the chat; #201's bug was different in kind, an unread state that re-armed
+# itself on every read and could never be cleared at all.
+REDACT_KIND = "redact"
+
+
+def _turn_id(record: dict, index: int) -> str:
+    """The name a user record answers to when something wants to point at its
+    turn (#202).
+
+    Written records carry their own `turn` id, minted at write time — a random
+    one rather than a counter, because a resumed log is appended to by a fresh
+    SessionLog that would have to reconstruct any counter, and because redaction
+    rewrites the file underneath it. Logs written before ids existed fall back to
+    the record's LINE INDEX, which identifies a turn perfectly well in a file
+    nobody is appending to mid-request; a redaction rewrites the file and the
+    client is handed the recomputed stream immediately after, so a shifted index
+    is never left in anyone's hands.
+    """
+    turn = record.get("turn")
+    return turn if isinstance(turn, str) and turn else f"@{index}"
+
+
+class Redaction(NamedTuple):
+    """What a completed redaction removed — enough for the caller to drop the
+    same turn from the live model's context and to repaint the view."""
+
+    turn: str
+    text: str  # the removed user message, for the in-memory context drop
+    occurrence: int  # 1-based, among user messages with identical text
+    records: int  # log lines removed
+    title: str | None  # re-derived chat title when an AUTO one was invalidated
 
 
 def synthetic_kind(content: str) -> str:
@@ -280,7 +337,13 @@ class SessionLog:
                 continue
             kind = record.get("kind")
             if SessionLog._is_activity(record):
-                activity_ts = record_epoch(record) or activity_ts
+                # The LATEST such stamp, not the last one in the file: a
+                # redaction (#202) rewrites the log and leaves its tombstone at
+                # the removed turn's position, so file order stopped being
+                # chronological order the moment anything could be removed.
+                stamp = record_epoch(record)
+                if stamp and (activity_ts is None or stamp > activity_ts):
+                    activity_ts = stamp
             if kind == "model":
                 model = record.get("model") or model
             elif kind == "title":
@@ -567,13 +630,25 @@ class SessionLog:
             steps.append({"type": "command_end", **end})
             pending_start = pending_end = None
 
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for index, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
             kind = record.get("kind")
-            if kind == "cwd":
+            if kind == REDACT_KIND:
+                # A turn the user removed (#202). It sits where the turn used to
+                # be, so it closes the previous turn like a user message does and
+                # renders in its place — a chat must not silently lose an
+                # exchange, or the answer above it reads as a reply to nothing.
+                has_trace = True
+                flush()
+                event: dict = {"type": "redacted"}
+                at = record_epoch({"ts": record.get("at")}) or record_epoch(record)
+                if at:
+                    event["at"] = at
+                events.append(event)
+            elif kind == "cwd":
                 # Workspace marker (issue #94): identical to the live `workspace`
                 # event on_state emits. Buffered with the open turn's steps so it
                 # keeps timeline order (a mid-task trust falls between traces);
@@ -648,6 +723,10 @@ class SessionLog:
                     event = {"type": "user", "text": content}
                     if synthetic:
                         event["synthetic"] = synthetic
+                    # What a per-turn "remove" action names (#202). Carried on
+                    # every replayed turn, so the control exists on a chat that
+                    # was reopened cold — which is most of them.
+                    event["turn"] = _turn_id(record, index)
                     # WHEN this turn happened (#200), deliberately under `at`
                     # and not `ts`: on a live event `ts` means "this turn is
                     # starting now" and drives the trace card's clock, and cold
@@ -741,6 +820,159 @@ class SessionLog:
             kept = lines[:cut]
             self.path.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
             return True
+
+    def redact_turn(self, turn: str) -> "Redaction | None":
+        """Take a turn out of the log for good (#202): its user message, every
+        record it produced, and the `task_start` that carries the prompt
+        verbatim. A tombstone replaces them AT THEIR POSITION — dated, naming
+        the turn, counting what went — so the removal is itself auditable while
+        the text is gone from disk.
+
+        The range is [the turn's task_start, the next user message). Walking
+        back over the `task_start` matters: it is written before the user
+        message and holds the prompt in full, so cutting from the message alone
+        would leave a copy of exactly what was being removed — and it would
+        strand an unmatched task_start, which restart recovery reads as an
+        interrupted task to resume. The knowledge/model records that can also
+        precede a user message carry no user text, so a log with no task_start
+        (every CLI session) simply cuts from the message and leaves them.
+
+        Returns what was removed, or None when no such turn is in this log —
+        an id that named a turn someone else already removed, or a client
+        holding a stale line-index id. Idempotent by that miss.
+
+        This is the second in-place rewrite of an otherwise append-only file
+        (rewind_last_turn is the first): the handle is closed here and reopened
+        lazily on the next record.
+        """
+        with self._write_lock:
+            if not self.path.exists():
+                return None
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+            records: list[dict] = []
+            for line in lines:
+                try:
+                    parsed = json.loads(line)
+                except ValueError:
+                    parsed = {}
+                records.append(parsed if isinstance(parsed, dict) else {})
+
+            def is_user(record: dict) -> bool:
+                return record.get("kind") == "message" and record.get("role") == "user"
+
+            start = next(
+                (i for i, rec in enumerate(records) if is_user(rec) and _turn_id(rec, i) == turn),
+                None,
+            )
+            if start is None:
+                return None
+            text = records[start].get("content") or ""
+            # Which of the identically-worded user turns this is. The live
+            # Agent's message list holds no ids (they are a property of the log,
+            # and its dicts go straight to the backends), so the caller finds the
+            # same turn there by text — and two turns saying "ok" would otherwise
+            # be indistinguishable, dropping the wrong one from the model's
+            # context, which is the one thing this feature must not do.
+            occurrence = sum(
+                1
+                for i, rec in enumerate(records[: start + 1])
+                if is_user(rec) and (rec.get("content") or "") == text
+            )
+            def turn_opens_at(user_index: int) -> int:
+                """Where a turn's records really begin. A turn does not start at
+                its user message: `task_start` is written first and carries the
+                prompt VERBATIM, with the knowledge/model preamble in between.
+                Used at BOTH ends — cutting from the message alone would leave a
+                copy of exactly what was removed, and cutting up to the NEXT
+                message would take that turn's task_start with it."""
+                for i in range(user_index - 1, -1, -1):
+                    kind = records[i].get("kind")
+                    if kind in ("trace", "model"):
+                        continue  # this turn's own preamble, or the last one's tail
+                    return i if kind == "task_start" else user_index
+                return user_index
+
+            first = turn_opens_at(start)
+            next_user = next(
+                (i for i in range(start + 1, len(records)) if is_user(records[i])),
+                None,
+            )
+            end = len(records) if next_user is None else turn_opens_at(next_user)
+
+            tombstone = {
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "kind": REDACT_KIND,
+                "turn": turn,
+                # When the removed turn happened, so the marker can sit in the
+                # transcript's own timeline rather than claiming to be new.
+                "at": records[start].get("ts", ""),
+                "records": end - first,
+            }
+            kept_records = records[:first] + [tombstone] + records[end:]
+            kept_lines = (
+                lines[:first]
+                + [json.dumps(tombstone, ensure_ascii=False)]
+                + lines[end:]
+            )
+            title = self._retitle_after_redaction(kept_records)
+            if title is not None:
+                # The stale auto titles are DELETED, not merely superseded: a
+                # model-written name is a summary of the conversation, so one
+                # written while the removed turn was in it can quote the very
+                # text being removed — and a later record winning the parse
+                # leaves the earlier one's words sitting in the file. Titles the
+                # user typed are their own words and are kept.
+                kept_lines = [
+                    line
+                    for line, record in zip(kept_lines, kept_records, strict=True)
+                    if not (record.get("kind") == "title" and record.get("auto"))
+                ]
+                stamped = {
+                    "ts": tombstone["ts"],
+                    "kind": "title",
+                    "title": title,
+                    "auto": True,
+                }
+                kept_lines.append(json.dumps(stamped, ensure_ascii=False))
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
+            self.path.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
+            return Redaction(
+                turn=turn,
+                text=text if isinstance(text, str) else "",
+                occurrence=occurrence,
+                records=int(tombstone["records"]),
+                title=title,
+            )
+
+    @staticmethod
+    def _retitle_after_redaction(kept: list[dict]) -> str | None:
+        """The chat's new name once a turn is gone, or None to leave it alone.
+
+        An AUTO title is a description of content, so when the content goes the
+        description has to be re-derived — otherwise a model-written summary of
+        the removed exchange stays on the row, which for the pasted-secret case
+        is the leak walking out through the sessions list. A title the user
+        TYPED is theirs and is never touched (the same rule the auto-titler
+        already follows); nor is a derived title, which re-derives itself.
+        """
+        stored: str | None = None
+        auto = False
+        messages: list[dict] = []
+        for record in kept:
+            if record.get("kind") == "title":
+                title = (record.get("title") or "").strip()
+                if title:
+                    stored, auto = title, bool(record.get("auto"))
+            elif record.get("kind") == "message" and record.get("role") != "system":
+                messages.append(record)
+        if stored is None or not auto:
+            return None
+        derived = SessionLog._derive_title(messages)
+        if derived == _NO_USER_INPUT or derived == stored:
+            return None
+        return SessionLog._truncate_title(derived)
 
     @staticmethod
     def _derive_title(messages: list[dict]) -> str:
@@ -1207,6 +1439,13 @@ class SessionLog:
         self._fh.flush()
 
     def message(self, message: dict) -> None:
+        # A user record opens a turn, and a turn is the unit a redaction names
+        # (#202), so it gets a stable id here — at the one place every logged
+        # message passes through. `_parse` keeps only the conversation keys, so
+        # the id can never leak into a resumed conversation or the model's
+        # context.
+        if message.get("role") == "user" and not message.get("turn"):
+            message = {**message, "turn": uuid.uuid4().hex[:12]}
         self._record("message", **message)
 
     def model(self, spec: str) -> None:
