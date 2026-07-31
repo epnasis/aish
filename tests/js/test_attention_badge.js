@@ -42,6 +42,8 @@ function badgeWorld() {
 const badge = (w) => w.$("back-badge");
 const counted = (w) => [...w.sandbox.attentionSessions].sort();
 
+const nowSec = () => Date.now() / SEC;
+
 // A row as the server sends it: ts is epoch SECONDS, state is liveness.
 const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
   ({ name, ts: (Date.now() - ago) / SEC, state });
@@ -183,7 +185,44 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
     found.length === cached.length && found[0].state === "running");
 }
 
-// ---- 6. wiring: what may claim the count ---------------------------------
+// ---- 6. unread is OUTPUT, not activity -----------------------------------
+// The third round on the same fact, and the one that finally split it. A row's
+// `ts` says when anything last happened — the right stamp to order by, since a
+// chat mid-turn IS the most recent thing there is — and it was also deciding
+// unread, so every thinking step moved a chat past this device's last look and
+// the row went unread with nothing new behind it. `out` is the last thing that
+// went into the conversation.
+{
+  const w = badgeWorld();
+  const s = w.sandbox;
+  const state = { seen: { "a.jsonl": Date.now() - 60 * SEC }, since: Date.now() - 3600 * SEC, current: null };
+
+  ok("steps since your last look are not unread",
+    s.sessionUnread({ name: "a.jsonl", ts: nowSec(), out: (Date.now() - 120 * SEC) / SEC }, state) === false);
+  ok("…and the answer that follows them is",
+    s.sessionUnread({ name: "a.jsonl", ts: nowSec(), out: nowSec() }, state) === true);
+  ok("a row with no output stamp falls back to activity, never to silence",
+    s.sessionUnread({ name: "a.jsonl", ts: nowSec() }, state) === true);
+  ok("a chat that has never output anything is not unread",
+    s.sessionUnread({ name: "a.jsonl", ts: 0, out: 0 }, state) === false);
+
+  // The regression this split could have introduced: a background turn lands,
+  // the server pushes its new state, and nothing tells the count that OUTPUT
+  // moved — so the answer you were waiting for would raise no dot at all until
+  // the next list arrived.
+  const anHourAgo = (Date.now() - 3600 * SEC) / SEC;
+  s.setAttentionRows([{ name: "bg.jsonl", ts: anHourAgo, out: anHourAgo, state: "running" }]);
+  ok("a chat that is merely working is not counted", counted(w).length === 0);
+  s.noteAttention("bg.jsonl", "running");
+  const pushed = s.attentionRows[0];
+  ok("a running push moves activity, not output — still nothing to read",
+    counted(w).length === 0 && pushed.ts > anHourAgo && pushed.out === anHourAgo);
+  s.noteAttention("bg.jsonl", "idle", "nightly report");
+  ok("the push that says it STOPPED moves output, so the answer counts",
+    counted(w).join() === "bg.jsonl");
+}
+
+// ---- 7. wiring: what may claim the count ---------------------------------
 // renderSessions paints from the offline mirror FIRST and from the server
 // second. The mirror's rows carry a lagging ts and cannot see liveness at all
 // (`state: ""`), and a search result is a RANKED SUBSET of the chats there are

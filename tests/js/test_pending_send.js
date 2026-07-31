@@ -96,6 +96,11 @@ function world() {
     resizeInput() {},
     showToast: (text) => toasts.push(text),
     reconnect: () => reconnects.push(true),
+    // Sending is seeing ([SEEN]): your own message is output, so the stamp has
+    // to move past it. Recorded here so the scenario below can pin that it does.
+    currentSession: "session-under-test.jsonl",
+    seenCalls: [],
+    markSeen(name) { sandbox.seenCalls.push(name); },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     clearTimeout: (id) => { if (id) timers[id - 1] = null; },
   };
@@ -110,6 +115,7 @@ function world() {
     input,
     toasts,
     reconnects,
+    seenCalls: sandbox.seenCalls,
     // The bubbles a reader would actually see, in order.
     bubbles: () =>
       messagesEl.children
@@ -128,6 +134,15 @@ scenario("a send is on screen before any server event", () => {
   w.sandbox.addPendingSend("write the report");
   assert.deepStrictEqual(w.bubbles(), ["write the report"]);
   assert.deepStrictEqual(w.statuses(), ["Sending…"]);
+});
+
+scenario("sending is seeing — the chat you typed into is not unread for it", () => {
+  const w = world();
+  w.sandbox.addPendingSend("write the report");
+  // Your own message IS output (a message in the chat), so without this stamp
+  // the chat flags itself unread for a sentence you wrote, for as long as the
+  // turn runs — the seen stamp otherwise only moves on entry and at `done`.
+  assert.deepStrictEqual(w.seenCalls, ["session-under-test.jsonl"]);
 });
 
 scenario("the server's own turn replaces the bubble rather than doubling it", () => {

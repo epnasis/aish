@@ -2338,6 +2338,22 @@ class TestSessions:
                         break
             assert states == ["idle"]
 
+    def test_rows_carry_the_output_stamp_apart_from_activity(self, app_env, tmp_path):
+        # Unread is decided by OUTPUT, ordering by activity (#203), so a row has
+        # to carry both — otherwise the client is back to one number doing two
+        # jobs and a chat that is merely thinking marks itself unread.
+        responses = [model_says("the answer")]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "ask something"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "sessions", "query": ""})
+            listing = recv_until(ws, "session_list")
+            row = next(r for r in listing["sessions"] if r["name"] == name)
+            assert row["out"] > 0
+            assert row["ts"] >= row["out"]
+
     def test_hello_pager_rows_carry_liveness(self, app_env, tmp_path):
         # The client's attention count re-derives from the rows every hello
         # already carries, so those rows have to say which chats are holding

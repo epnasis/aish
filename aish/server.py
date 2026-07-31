@@ -1838,7 +1838,7 @@ class WebServer:
     def _hello(
         self,
         session: Session,
-        pager: list[tuple[str, str, str, float]] | None = None,
+        pager: list[tuple[str, str, str, float, float]] | None = None,
         cmd_history: list[str] | None = None,
     ) -> dict:
         # The swipe pager pages through recent chats oldest→newest by last
@@ -1858,9 +1858,13 @@ class WebServer:
                 "title": title,
                 "origin": origin,
                 "ts": ts,
+                # Last OUTPUT, which is what unread compares against (#203);
+                # omitted when there is none, so a client reading an older
+                # server falls back to `ts` exactly as it always did.
+                **({"out": out} if out else {}),
                 "state": open_states.get(name, ""),
             }
-            for name, title, origin, ts in pager or []
+            for name, title, origin, ts, out in pager or []
         ]
         if all(page["name"] != session.name for page in pages):
             pages.append(
@@ -1871,6 +1875,8 @@ class WebServer:
                     # Newest thing there is, by definition — stamped like every
                     # other row so the client can order it.
                     "ts": time.time(),
+                    # No output yet by construction — a chat that had any would
+                    # have been a page already.
                     "state": session.state(),
                 }
             )
@@ -2974,6 +2980,10 @@ class WebServer:
                         # device's "seen" stamp, and a log touched by merely
                         # LOOKING at the chat must not read as new activity.
                         "ts": info.activity,
+                        # Unread compares against OUTPUT, not activity (#203):
+                        # a chat that is merely thinking writes trace records,
+                        # and those moved `ts` past the device's last look.
+                        **({"out": info.output} if info.output else {}),
                         "state": open_states.get(info.path.name, ""),
                         "cwd": self._row_cwd(
                             open_cwds.get(info.path.name) or info.cwd
@@ -3900,6 +3910,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
                         "title": info.title,
                         "snippet": info.snippet,
                         "ts": info.activity,  # last activity, not file mtime (#201)
+                        **({"out": info.output} if info.output else {}),  # #203
                         "origin": info.origin,
                     }
                     for info in infos
@@ -3962,6 +3973,10 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
                 # standing. The ETag above stays mtime-based — that one IS
                 # about the bytes on disk.
                 "ts": float(parsed.activity_ts or stat.st_mtime),
+                # …and the last OUTPUT, which is what the mirror-painted rail
+                # decides unread by (#203). Omitted when there is none, so a
+                # meta written by an older server keeps falling back to `ts`.
+                **({"out": float(parsed.output_ts)} if parsed.output_ts else {}),
                 "base": base,       # index the returned events start at
                 "total": total,     # events the client should hold afterwards
                 "sig": _prefix_sig(events, total),

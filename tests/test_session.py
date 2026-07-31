@@ -42,7 +42,7 @@ def test_custom_title_wins_hot_and_cold(tmp_path):
     # since an undated page is discarded as a seed candidate. It comes from the
     # records, so it is whole seconds, and never later than the file itself.
     pages = SessionLog.pager_titles(tmp_path)
-    assert [(name, title, origin) for name, title, origin, _ in pages] == [
+    assert [(name, title, origin) for name, title, origin, _, _ in pages] == [
         (log.path.name, "My Renamed Chat", "user")
     ]
     assert pages[0][3] == SessionLog.info(log.path).activity
@@ -388,7 +388,7 @@ def test_pager_cap_applies_after_skipping_blank_sessions(tmp_path):
     for i in range(5):  # newer blank files (pre-fix debris) must not crowd it out
         (tmp_path / f"session-20260102-00000{i}-000000.jsonl").touch()
     pages = SessionLog.pager_titles(tmp_path, limit=3)
-    assert [name for name, _, _, _ in pages] == [old.name]
+    assert [name for name, _, _, _, _ in pages] == [old.name]
 
 
 def test_model_empty_for_sessions_without_record(tmp_path):
@@ -1193,6 +1193,141 @@ class TestActivityIsNotAFileTouch:
         log.step({"kind": "render_error", "what": "image", "items": ["https://x/y.jpg"]})
         log.close()
         assert SessionLog.pager_titles(tmp_path)[0][3] == talked
+
+
+class TestOutputStamp:
+    """Unread means there is something to READ (#203).
+
+    One stamp was doing two jobs. `activity` answers "did anything happen
+    here", which is the right way to ORDER a list — a chat mid-turn is the most
+    recent thing there is. Unread was reading the same number, so every
+    thinking step a chat took moved it past the device's last look and the row
+    marked itself unread with nothing new behind it. Three consumer-side
+    patches went in before the fact itself was split.
+
+    The rule: output is what `reconstruct_events` turns into transcript
+    content — a user bubble, or the assistant text that becomes a turn's
+    answer. Everything else it emits is a trace step or a marker, and
+    everything it ignores was never on screen at all.
+    """
+
+    def _stamps(self, log):
+        info = SessionLog.info(log.path)
+        return info.activity, info.output
+
+    def test_thinking_is_activity_but_not_output(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "count the files"})
+        log.message({"role": "assistant", "content": "there are 12"})
+        _, answered = self._stamps(log)
+
+        time.sleep(1.1)  # ISO stamps are whole seconds
+        log.step({"kind": "thinking", "text": "hmm"})
+        log.step({"kind": "tool", "name": "run_command"})
+        log.close()
+
+        activity, output = self._stamps(log)
+        assert activity > answered, "a working chat IS the most recent thing"
+        assert output == answered, "…but it has produced nothing to read"
+
+    def test_the_answer_that_follows_is_output(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "count the files"})
+        _, asked = self._stamps(log)
+        time.sleep(1.1)
+        log.step({"kind": "tool", "name": "run_command"})
+        log.message({"role": "assistant", "content": "there are 12"})
+        log.close()
+        assert self._stamps(log)[1] > asked
+
+    def test_a_tool_result_is_not_output(self, tmp_path):
+        """It renders inside the trace card, never as a message."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "go"})
+        _, asked = self._stamps(log)
+        time.sleep(1.1)
+        log.message({"role": "tool", "content": "12", "tool_name": "run_command"})
+        log.close()
+        assert self._stamps(log)[1] == asked
+
+    def test_an_empty_assistant_turn_is_not_output(self, tmp_path):
+        """A tool-calling turn carries no visible text — reconstruct_events
+        keeps only the last NON-EMPTY answer, so neither may this."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "go"})
+        _, asked = self._stamps(log)
+        time.sleep(1.1)
+        log.message({"role": "assistant", "content": ""})
+        log.close()
+        assert self._stamps(log)[1] == asked
+
+    def test_aish_own_note_is_not_output(self, tmp_path):
+        """`[aish: …]` never reached the transcript live and is skipped on
+        replay (#171), so it cannot be something you have not read."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "go"})
+        _, asked = self._stamps(log)
+        time.sleep(1.1)
+        log.message({"role": "user", "content": "[aish: resumed after a restart]"})
+        log.close()
+        assert self._stamps(log)[1] == asked
+
+    def test_a_trigger_prompt_is_output(self, tmp_path):
+        """A triggered session's own prompt IS a message in the chat — it is
+        the one thing an overnight job has to show you before it answers."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "reply to the invoice email"})
+        assert self._stamps(log)[1] > 0
+
+    def test_a_rename_is_activity_but_not_output(self, tmp_path):
+        """Renaming on the laptop must not mark the chat unread on the phone."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hello"})
+        _, said = self._stamps(log)
+        time.sleep(1.1)
+        log.set_title("Invoices")
+        log.close()
+        activity, output = self._stamps(log)
+        assert activity > said and output == said
+
+    def test_a_removal_is_activity_but_not_output(self, tmp_path):
+        """Deleting a turn elsewhere changes the chat (#202) — the list must
+        re-sort — but nothing new arrived to read."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "first question"})
+        log.message({"role": "assistant", "content": "first answer"})
+        log.message({"role": "user", "content": "second question"})
+        log.message({"role": "assistant", "content": "second answer"})
+        _, said = self._stamps(log)
+        records = [json.loads(line) for line in log.path.read_text().splitlines()]
+        turn = next(r["turn"] for r in records if r.get("turn"))
+        time.sleep(1.1)
+        log.redact_turn(turn)
+        log.close()
+        activity, output = self._stamps(log)
+        assert activity > said and output == said
+
+    def test_no_output_reports_zero_rather_than_guessing(self, tmp_path):
+        """A zero reads downstream as "fall back to the activity stamp". An
+        mtime fallback here would instead claim the chat just spoke, on every
+        log the process happens to touch."""
+        path = tmp_path / "session-20260101-000000-000000.jsonl"
+        path.write_text(
+            json.dumps({"kind": "message", "role": "user", "content": "hi"}) + "\n",
+            encoding="utf-8",
+        )
+        info = SessionLog.info(path)
+        assert info.output == 0.0 and info.activity == info.mtime
+
+    def test_the_pager_carries_both_stamps(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hello"})
+        log.set_title("Kubek")
+        time.sleep(1.1)
+        log.step({"kind": "tool", "name": "run_command"})
+        log.close()
+        name, title, origin, ts, out = SessionLog.pager_titles(tmp_path)[0]
+        assert ts > out > 0, "the pager ages by activity and flags unread by output"
 
 
 class TestRedaction:
