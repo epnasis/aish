@@ -333,3 +333,24 @@ class TestHandlerRobustness:
 
         asyncio.run(main())
         assert state["max"] == 1
+
+
+class TestBackendSizedCaps:
+    """#192 sizes plugin-output truncation from the provider actually in use.
+    The wrapper's `provider` is a class attribute; the INNER agent — which is
+    where truncation is computed, via _locked_dispatch → _dispatch — defaulted
+    to "ollama", so a Claude session would have been capped as if it were a 32k
+    local one."""
+
+    def test_inner_agent_knows_it_is_on_claude_max(self, monkeypatch, tmp_path):
+        agent, _ = make_max_agent(monkeypatch, tmp_path)
+        assert agent.inner.provider == "claude-max"
+
+    def test_caps_are_not_the_ollama_default(self, monkeypatch, tmp_path):
+        from aish import backends, tool_plugins
+
+        agent, _ = make_max_agent(monkeypatch, tmp_path)
+        caps, source = agent.inner._output_caps()
+        window, _ = backends.context_window("ollama", agent.inner.num_ctx)
+        assert source == "backend:claude-max:200000"
+        assert sum(caps) > sum(tool_plugins.output_caps(window))

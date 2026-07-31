@@ -6,13 +6,20 @@ approval gate with no model, no network, and full determinism.
 """
 
 import datetime
+import re
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from aish import agent as agent_module
+from aish import session as session_module
+from aish import skills as skills_module
 from aish import tool_plugins
 from aish.agent import DENIED_RESULT, Agent
+from aish.approval import Approved, Blocked, Denied
+from aish.session import SessionLog
 
 
 def tool_call(name: str, **arguments):
@@ -3009,7 +3016,6 @@ class TestProjectScopeDisabledAgent:
     flips the switch here, this IS the default."""
 
     def _plant(self, cwd):
-        import stat
 
         tdir = cwd / ".aish" / "tools" / "ctx"
         tdir.mkdir(parents=True)
@@ -3081,7 +3087,6 @@ class TestPluginTools:
         )
 
     def _write_tool(self, cwd, name, *, mutating="no", script=None):
-        import stat
 
         tdir = cwd / ".aish" / "tools" / name
         tdir.mkdir(parents=True, exist_ok=True)
@@ -3267,7 +3272,6 @@ class TestPluginTools:
         assert any(held in m["content"] for m in tool_messages(agent.messages))
 
     def _write_preview_tool(self, cwd, name="pv"):
-        import stat
 
         tdir = cwd / ".aish" / "tools" / name
         tdir.mkdir(parents=True, exist_ok=True)
@@ -3483,7 +3487,6 @@ class TestPluginTools:
         assert not self._created_tool(tmp_path, preview="maybe").exists()
 
     def _write_tool_wraps(self, cwd, name, wraps, mutating="no"):
-        import stat
 
         tdir = cwd / ".aish" / "tools" / name
         tdir.mkdir(parents=True, exist_ok=True)
@@ -3662,7 +3665,6 @@ class TestReadonlyPluginParallel:
     ECHO = "#!/bin/sh\ncat\n"
 
     def _tool(self, cwd, name):
-        import stat
 
         tdir = cwd / ".aish" / "tools" / name
         tdir.mkdir(parents=True, exist_ok=True)
@@ -4430,3 +4432,506 @@ class TestImageRoots:
         agent, _ = make_agent([], state_dir=tmp_path)
         assert not agent.media_dir.is_relative_to(agent.scratch_dir)
         assert agent.media_dir == tmp_path / "media"
+
+
+class TestRenderlessRecords:
+    """docs/trace-contract.md §1.2/§1.3, and #192's first release blocker.
+
+    `app.js`'s `traceStep` calls `ensureTrace()` BEFORE it dispatches on
+    `step.kind`, so a record kind with no renderer does not degrade to
+    "renders nothing" — it opens an empty live trace card with a running
+    ticker. Two mechanisms are required and NEITHER IS SUFFICIENT ALONE: a
+    log-only emit path (never routed to `on_step`) and a renderless set that
+    `reconstruct_events` skips. These tests pin both halves.
+    """
+
+    def test_emit_record_never_reaches_the_renderer(self, tmp_path):
+        """Half one. If this breaks, the record reaches the frontend live and
+        opens an empty card."""
+        rendered: list[dict] = []
+        logged: list[dict] = []
+        agent, _ = make_agent([], on_step=rendered.append, step_log=logged.append)
+        for kind in sorted(session_module.RENDERLESS_STEPS):
+            agent._emit_record(kind=kind, probe=True)
+        assert [s["kind"] for s in logged] == sorted(session_module.RENDERLESS_STEPS)
+        assert rendered == []
+
+    def test_replay_skips_every_renderless_kind(self, tmp_path):
+        """Half two. If this breaks, the card appears on cold replay instead —
+        the same visible artefact, reached by the other path."""
+        log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+        log.message({"role": "user", "content": "do a thing"})
+        for kind in sorted(session_module.RENDERLESS_STEPS):
+            log.step({"kind": kind, "probe": True})
+        log.step({"kind": "tool", "name": "read_file", "ok": True, "secs": 0.1})
+        log.message({"role": "assistant", "content": "done"})
+
+        events = SessionLog.reconstruct_events(log.path)
+        assert events is not None, "a log holding governance records must still reconstruct"
+        kinds = [e.get("kind") for e in events if e.get("type") == "step"]
+        assert not (set(kinds) & session_module.RENDERLESS_STEPS)
+        assert "tool" in kinds  # the ordinary steps around them are untouched
+
+    def test_renderless_kinds_are_never_emitted_through_the_rendering_path(self):
+        """The two halves only hold if every producer uses _emit_record. A
+        renderless kind passed to _emit_step would render live no matter what
+        the replay side does, so the source is checked directly."""
+        source = Path(agent_module.__file__).read_text()
+        for kind in session_module.RENDERLESS_STEPS:
+            assert f'_emit_step(kind="{kind}"' not in source
+            assert f"_emit_step(\n            kind=\"{kind}\"" not in source
+
+    def test_pre_contract_log_replays_unchanged(self, tmp_path):
+        """A log written before this phase contains none of the new kinds, so
+        every new branch must be inert on it (contract §8.2)."""
+        log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+        log.message({"role": "user", "content": "hello"})
+        log.step({"kind": "tool", "name": "read_file", "ok": True, "secs": 0.2})
+        log.message({"role": "assistant", "content": "hi"})
+        events = SessionLog.reconstruct_events(log.path)
+        assert [e["type"] for e in events] == ["user", "step", "done"]
+        assert events[1]["kind"] == "tool"
+
+
+class TestRefusalsAreNotLoggedGreen:
+    """docs/trace-contract.md §6.13. Five refusal constants started with none
+    of the sniffed prefixes — `USER DENIED`, `NOT RUN`, `BLOCKED` — so a
+    denied, held or blocked call logged **ok: true** with no decision at all,
+    while the write path logged `held` / `ok: false` correctly. The two halves
+    of the same #81 semantics disagreed in the log, and any audit of it — the
+    #185 curation ledger included — counted a held mutation as a completed
+    one."""
+
+    @pytest.fixture(autouse=True)
+    def _opt_in(self, project_scope):
+        pass
+
+    ECHO = "#!/bin/sh\ncat\n"
+
+    def _write_tool(self, cwd, name, *, mutating="yes"):
+
+        tdir = cwd / ".aish" / "tools" / name
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "TOOL.md").write_text(
+            f"---\nname: {name}\ndescription: echo the text\nexec: ./run.sh\n"
+            f'mutating: {mutating}\nschema: {{"text": {{"type": "string", "required": true}}}}\n'
+            f"---\nbody\n"
+        )
+        p = tdir / "run.sh"
+        p.write_text(self.ECHO)
+        p.chmod(p.stat().st_mode | stat.S_IEXEC)
+
+    def _tool_step(self, tmp_path, verdict):
+        self._write_tool(tmp_path, "writer")
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("writer", text="hi")]),
+                model_says("understood"),
+            ],
+            cwd=str(tmp_path),
+            approve_tool=lambda n, a, p=None: verdict,
+            step_log=steps.append,
+        )
+        agent.run_task("write something")
+        return [s for s in steps if s.get("kind") == "tool" and s["name"] == "writer"][0]
+
+    def test_plain_denial_is_red_with_a_decision(self, tmp_path):
+        step = self._tool_step(tmp_path, False)
+        assert step["ok"] is False
+        assert step["status"] == "failed"
+        assert step["decision"] == "denied"
+        assert step["verdict_by"] == "gate"
+
+    def test_held_for_adjustment_is_red_and_says_held(self, tmp_path):
+        """The #81 HOLD: the args were NOT run. Logging it green with no
+        decision is what let a held mutation read as a completed one."""
+        step = self._tool_step(tmp_path, Approved("use a different path"))
+        assert step["ok"] is False
+        assert step["decision"] == "held"
+
+    def test_denial_with_comment_is_red(self, tmp_path):
+        step = self._tool_step(tmp_path, Denied("wrong target"))
+        assert step["ok"] is False
+        assert step["decision"] == "denied"
+
+    def test_no_approver_is_blocked_not_green(self, tmp_path):
+        self._write_tool(tmp_path, "writer")
+        steps: list[dict] = []
+        agent, _ = make_agent([model_says("done")], cwd=str(tmp_path), step_log=steps.append)
+        # A stale tool_call for a mutating tool with no approver wired.
+        agent._refresh_plugin_tools()
+        tool = agent._plugin_tools.get("writer")
+        assert tool is not None
+        result = agent._dispatch_plugin_tool(tool, {"text": "hi"})
+        assert result.meta["decision"] == "blocked"
+        assert result.meta["status"] == "failed"
+
+    def test_a_successful_call_is_still_green(self, tmp_path):
+        """The point is honesty, not pessimism."""
+        step = self._tool_step(tmp_path, True)
+        assert step["ok"] is True
+        assert step["status"] == "ok"
+        assert "decision" not in step  # an approved plugin run carries no gate verdict
+
+
+class TestNearDuplicateAdmission:
+    """docs/trace-contract.md §6.7. The one gate that demonstrably WORKED in
+    #190's evidence, and it was invisible: its refusal starts with "NOT
+    saved", which the prefix sniff read as a success, and it never recorded
+    the similarity score it decided on — which is why DEDUP_MIN_SIM is still
+    documented as "provisional until measured on the live corpus"."""
+
+    def _agent(self, tmp_path, steps):
+        memory = tmp_path / "memory"
+        memory.mkdir()
+        agent, _ = make_agent(
+            [
+                # Built directly: tool_call()'s first parameter IS `name`, so a
+                # memory slug named "name" cannot go through it.
+                model_says(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="remember",
+                                arguments={"note": "uv is required", "name": "uv-rule"},
+                            )
+                        )
+                    ]
+                ),
+                model_says("noted"),
+            ],
+            cwd=str(tmp_path),
+            step_log=steps.append,
+        )
+        return agent
+
+    def test_refusal_records_its_score_and_floor(self, tmp_path, monkeypatch):
+        """Evidence, not conclusions (contract §4): the inputs the verdict was
+        a function of, so the floor can be recalibrated later."""
+        steps: list[dict] = []
+        agent = self._agent(tmp_path, steps)
+        monkeypatch.setattr(
+            agent_module.skills,
+            "save_memory",
+            lambda *a, on_admission=None, **k: (
+                on_admission(
+                    {
+                        "name": "uv-rule",
+                        "verdict": "refused_duplicate",
+                        "tier": 1,
+                        "evidence": {
+                            "mode": "semantic",
+                            "sim": 0.612,
+                            "floor": 0.55,
+                            "against": "always-use-python-uv",
+                        },
+                    }
+                ),
+                "NOT saved — a similar memory already exists — always-use-python-uv: \"x\".",
+            )[1],
+        )
+        agent.run_task("remember that")
+
+        admissions = [s for s in steps if s.get("kind") == "admission"]
+        assert len(admissions) == 1
+        assert admissions[0]["verdict"] == "refused_duplicate"
+        assert admissions[0]["evidence"]["sim"] == 0.612
+        assert admissions[0]["evidence"]["floor"] == 0.55
+        assert admissions[0]["target"] == "memory"
+
+        tool_steps = [s for s in steps if s.get("kind") == "tool" and s["name"] == "remember"]
+        assert tool_steps[0]["ok"] is False, "a refusal must not log green"
+        assert tool_steps[0]["decision"] == "rejected"
+
+    def test_the_gate_reports_the_score_it_decided_on(self, tmp_path):
+        """The scorer itself, straight: a verdict now carries its inputs."""
+        from aish.skills import Entry, _near_duplicate
+
+        entries = [
+            Entry(
+                name="always-use-python-uv",
+                description="always use uv for python",
+                kind="memory",
+                keywords=(),
+                body="",
+                path=tmp_path / "x.md",
+            )
+        ]
+        hit, score, floor, mode = _near_duplicate(
+            "uv-rule: always use uv for python", entries, semantic=None
+        )
+        assert mode == "lexical"
+        assert 0.0 <= score <= 1.0
+        assert floor == skills_module.DEDUP_LEXICAL_RATIO
+
+
+class TestTrimIsRecorded:
+    """docs/trace-contract.md §3.5. The truncator with the LARGEST blast radius
+    — every prior tool output down to a 200-char stub at the start of every
+    task, unconditionally — and it recorded nothing at all. That silence is why
+    Session B, asked why its output was truncated, grepped aish's own source,
+    found a DIFFERENT truncator's marker and confidently blamed the wrong
+    thing."""
+
+    def test_the_eager_trim_records_that_it_was_unconditional(self, tmp_path):
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo " + "x" * 500)]),
+                model_says("first done"),
+                model_says("second done"),
+            ],
+            cwd=str(tmp_path),
+            step_log=steps.append,
+        )
+        agent.run_task("make a big result")
+        steps.clear()
+        agent.run_task("a second task, which trims the first task's output")
+
+        trims = [s for s in steps if s.get("kind") == "trim"]
+        assert len(trims) == 1
+        assert trims[0]["policy"] == "eager_stub"
+        assert trims[0]["affected"] >= 1
+        assert trims[0]["bytes_before"] > trims[0]["bytes_after"]
+        assert trims[0]["keep_chars"] == agent_module.TRIM_KEEP_CHARS
+        # `budget: null` states the fact #192 says is wrong and which no record
+        # stated before: this trim consulted no budget at all.
+        assert trims[0]["budget"] is None
+        assert trims[0]["cap_source"] == "constant:TRIM_KEEP_CHARS"
+
+    def test_a_trim_that_changed_nothing_stays_silent(self, tmp_path):
+        """Records are evidence of decisions, not heartbeat noise."""
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [model_says("nothing to trim")], cwd=str(tmp_path), step_log=steps.append
+        )
+        agent.run_task("no tools at all")
+        assert [s for s in steps if s.get("kind") == "trim"] == []
+
+
+class TestEnvelopeEndToEnd:
+    """#192's own 'Done when' list, driven through the real dispatch path
+    rather than the units underneath it."""
+
+    @pytest.fixture(autouse=True)
+    def _opt_in(self, project_scope):
+        pass
+
+    def _write_tool(self, cwd, name, script):
+        tdir = cwd / ".aish" / "tools" / name
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "TOOL.md").write_text(
+            f"---\nname: {name}\ndescription: analyse a video\nexec: ./run.sh\n"
+            f'mutating: no\nschema: {{"url": {{"type": "string"}}}}\n---\nbody\n'
+        )
+        p = tdir / "run.sh"
+        p.write_text(script)
+        p.chmod(p.stat().st_mode | stat.S_IEXEC)
+
+    def test_empty_content_with_exit_zero_is_red_and_told_to_the_model(self, tmp_path):
+        """The Session B shape end to end: the trace goes RED and the model is
+        told, in band, not to substitute a source silently."""
+        self._write_tool(
+            tmp_path,
+            "youtube_analyze",
+            "#!/bin/sh\n"
+            'printf \'{"transcript": "", "error_log": ["import failed"]}\'\n',
+        )
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("youtube_analyze", url="https://youtu.be/x")]),
+                model_says("the transcript came back empty — I could not read the video"),
+            ],
+            cwd=str(tmp_path),
+            step_log=steps.append,
+        )
+        agent.run_task("analyse this video")
+
+        tool_steps = [s for s in steps if s.get("kind") == "tool"]
+        assert tool_steps[0]["ok"] is False, "the green lie is back"
+        assert tool_steps[0]["status"] == "incomplete"
+
+        results = tool_messages(agent.messages)
+        assert "status=incomplete" in results[0]["content"]
+        assert "MUST NOT present substituted material" in results[0]["content"]
+
+    def test_a_truncated_result_pages_to_completion_without_rerunning(self, tmp_path):
+        """The dead end that manufactured improvisation, closed: the model can
+        follow the continuation, and the wrapper runs exactly once."""
+        runs = tmp_path / "runs"
+        self._write_tool(
+            tmp_path,
+            "bigread",
+            f"#!/bin/sh\necho x >> {runs}\nyes abcdefghij | head -c 30000\n",
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("bigread", url="u")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+            state_dir=tmp_path / "state",
+        )
+        agent.run_task("read the big thing")
+        first = tool_messages(agent.messages)[0]["content"]
+        assert "read_tool_output" in first, "no continuation was offered"
+
+        key = re.search(r'continuation="([0-9a-f]+)"', first).group(1)
+        page2 = agent._dispatch("read_tool_output", {"continuation": key, "page": 2})
+        assert page2.meta["source"] == "cache"
+        assert runs.read_text().count("x") == 1, "the wrapper re-ran for page 2"
+
+        # And paging to the end terminates rather than looping forever.
+        page = 2
+        while "[aish: continue with" in str(
+            agent._dispatch("read_tool_output", {"continuation": key, "page": page})
+        ):
+            page += 1
+            assert page < 60, "paging never reached the end"
+        assert runs.read_text().count("x") == 1
+
+    def test_an_unknown_continuation_says_so_instead_of_inventing(self, tmp_path):
+        agent, _ = make_agent([], cwd=str(tmp_path), state_dir=tmp_path / "state")
+        out = agent._dispatch("read_tool_output", {"continuation": "cafebabe", "page": 2})
+        assert out.meta["status"] == "failed"
+        assert "do NOT substitute another source" in out
+
+
+class TestRunCommandRefusalsAreRedToo:
+    """Wider than docs/trace-contract.md §6.13's table. `run_command` sets
+    `decision` in _run_meta but no `ok`, and DENIED_RESULT ("USER DENIED…"),
+    HELD_FOR_ADJUSTMENT ("NOT RUN…") and BLOCKED_RESULT ("BLOCKED…") start with
+    none of the sniffed prefixes — so a denied SHELL COMMAND logged green as
+    well, decision and all. One rule in _emit_tool_step covers every refusing
+    path rather than ten separate fixes."""
+
+    def _step(self, approve):
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="rm -rf /tmp/x")]),
+                model_says("understood"),
+            ],
+            approve=approve,
+            step_log=steps.append,
+        )
+        agent.run_task("do the thing")
+        return [s for s in steps if s.get("kind") == "tool"][0]
+
+    def test_denied_command_is_red(self):
+        step = self._step(lambda _cmd: False)
+        assert step["decision"] == "denied"
+        assert step["ok"] is False
+        assert step["status"] == "failed"
+        assert step["verdict_by"] == "gate"
+
+    def test_denied_with_comment_is_red(self):
+        step = self._step(lambda _cmd: Denied("not that path"))
+        assert step["ok"] is False and step["decision"] == "denied"
+
+    def test_held_for_adjustment_is_red(self):
+        step = self._step(lambda _cmd: Approved("use the scratch dir"))
+        assert step["ok"] is False and step["decision"] == "held"
+
+    def test_blocked_is_red(self):
+        step = self._step(lambda _cmd: Blocked("denylisted"))
+        assert step["ok"] is False and step["decision"] == "blocked"
+
+    def test_an_approved_command_stays_green(self):
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo hi")]),
+                model_says("done"),
+            ],
+            step_log=steps.append,
+        )
+        agent.run_task("say hi")
+        step = [s for s in steps if s.get("kind") == "tool"][0]
+        assert step["ok"] is True
+        assert step["decision"] == "approved"
+
+    @pytest.mark.parametrize(
+        "approve",
+        [
+            lambda _cmd: False,
+            lambda _cmd: True,
+            lambda _cmd: Denied("no"),
+            lambda _cmd: Approved("adjust it"),
+            lambda _cmd: Blocked("denylisted"),
+        ],
+    )
+    def test_ok_and_status_never_disagree(self, approve):
+        """`ok` is DEFINED as status == "ok" (contract §3.4). Two sources — the
+        envelope and _run_meta — used to be able to contradict each other."""
+        step = self._step(approve)
+        assert step["ok"] == (step["status"] == "ok")
+
+
+class TestTurnAndCallIdentity:
+    """docs/trace-contract.md §2. Correlating a record to a turn was positional
+    — curate._windows pairs a knowledge step with the NEXT user message because
+    that is the order run_task happens to emit in, and its docstring says so."""
+
+    def test_turn_increments_per_task_and_call_restarts(self):
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo a")]),
+                model_says("one"),
+                model_says(tool_calls=[tool_call("run_command", command="echo b")]),
+                model_says("two"),
+            ],
+            step_log=steps.append,
+        )
+        agent.run_task("first")
+        agent.run_task("second")
+        tool_steps = [s for s in steps if s.get("kind") == "tool"]
+        assert [s["turn"] for s in tool_steps] == [1, 2]
+        assert [s["call"] for s in tool_steps] == [1, 1]  # call restarts per turn
+
+    def test_parallel_reads_get_distinct_call_ids(self, tmp_path, monkeypatch):
+        """Read-only tools run concurrently, which is exactly why `call` is a
+        per-call local rather than an attribute two threads would share."""
+        monkeypatch.setattr(
+            agent_module.web, "web_search", lambda q, **k: f"results for {q}"
+        )
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("web_search", query="a"),
+                        tool_call("web_search", query="b"),
+                        tool_call("web_search", query="c"),
+                    ]
+                ),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path),
+            step_log=steps.append,
+        )
+        agent.run_task("search three things")
+        calls = [s["call"] for s in steps if s.get("kind") == "tool"]
+        assert len(calls) == 3
+        assert len(set(calls)) == 3, f"call ids collided across parallel reads: {calls}"
+
+    def test_thinking_steps_are_not_stamped(self):
+        """Design fork 1 = option (b): the high-volume kind is left alone."""
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(
+                    "checking",
+                    tool_calls=[tool_call("run_command", command="true")],
+                    thinking="hmm",
+                ),
+                model_says("done"),
+            ],
+            step_log=steps.append,
+        )
+        agent.run_task("go")
+        thinking = [s for s in steps if s.get("kind") == "thinking"]
+        assert thinking and all("turn" not in s for s in thinking)
