@@ -1372,6 +1372,19 @@ class Agent:
             )
         ]
 
+        # Per-task state (including the turn counter) is reset HERE, before
+        # anything this task does can emit a record. The eager trim below is
+        # why the position matters: it runs as preparation for THIS task, so a
+        # `trim` record stamped with the previous turn would tell #197 that the
+        # turn which lost its evidence was the one that finished, not the one
+        # about to run. Resetting first makes "every record emitted during a
+        # task carries that task's turn" true by construction rather than by
+        # each emit site being in the right half of the function.
+        # Safe to hoist: nothing between here and the old call site reads the
+        # fields it clears, and `_pending_skill_reads` is re-armed from this
+        # task's own preflight immediately below.
+        self._reset_task_state()
+
         # Old tasks' raw tool outputs are rarely needed verbatim again;
         # shrinking them keeps long REPL sessions inside the context window.
         task_start = len(self.messages)
@@ -1428,7 +1441,6 @@ class Agent:
                 "⚑ semantic recall unavailable "
                 f"({self.semantic.error[:80]}); falling back to word matching"
             )
-        self._reset_task_state()
         self._pending_skill_reads = {n: GATE_MAX_REFUSALS for n in preload.unread}
         self.messages.append(
             {"role": "system", "content": task_reminder(index, preload.text)}
