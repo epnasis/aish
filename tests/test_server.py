@@ -2403,6 +2403,21 @@ class TestSessions:
         errors = [e for e in events if e["type"] == "error"]
         assert errors and "no route to host" in errors[-1]["text"]
 
+    def test_a_published_row_carries_where_the_conversation_left_off(self, app_env):
+        # The preview was left off the roster row at first on the theory that it
+        # costs a file read (#204). It does not — it derives from the
+        # conversation the server is already holding, exactly like the title —
+        # and leaving it out meant a row that was fresh about its state and
+        # stale about its content until the next full list.
+        client, _ = make_client(app_env, [model_says("the answer you wanted")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "ask something"})
+            recv_until(ws, "done")
+            row = recv_until_row(ws, name, "idle")["row"]
+            assert row["snippet"] == "the answer you wanted"
+            assert row["title"]  # derived from the same in-memory conversation
+
     def test_rows_carry_the_output_stamp_apart_from_activity(self, app_env, tmp_path):
         # Unread is decided by OUTPUT, ordering by activity (#203), so a row has
         # to carry both — otherwise the client is back to one number doing two
