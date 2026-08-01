@@ -458,7 +458,7 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       schedulePeeks: spy("schedulePeeks"),
       markSeen: spy("markSeen"),
       setAttentionRows: spy("setAttentionRows"),
-      onRosterSeq: spy("onRosterSeq"),
+      rosterBaseline: spy("rosterBaseline"),
       requestSessions: spy("requestSessions"),
       railIsOpen: spy("railIsOpen", () => false),
       openConsole: spy("openConsole"),

@@ -38,14 +38,18 @@ function rosterWorld() {
     // repainting must not ASK: doing that turned the plane into a poll
     // triggered by its own events, which the count below is what caught.
     railIsOpen: () => true,
-    requestSessions() {},
     renderOfflineSessions() {},
+    offlineRefreshMetaMap() {},
     notify() {},
   } });
   w.load("// PURE: the whole unread decision", "// [SEEN-END]");
   w.load("// SESSIONS_PARTITION_START", "// SESSIONS_PARTITION_END");
   w.load("// [ATTENTION-START]", "// [ATTENTION-END]");
   w.load("// [ROSTER-START]", "// [ROSTER-END]");
+  // The REAL ask-or-don't decision, not a stub: whether opening the rail costs
+  // a round trip is the thing under test.
+  w.load("// Paint the rail, and ask the server ONLY when",
+    "$(\"sessions-search\").addEventListener(");
   const s = w.sandbox;
   s.seenAt = {};
   s.seenSince = Date.now() - 3600 * SEC;
@@ -64,7 +68,7 @@ const snapshots = (w) =>
   const w = rosterWorld();
   const s = w.sandbox;
   s.setAttentionRows([{ name: "bg.jsonl", ts: (Date.now() - 3600 * SEC) / SEC, state: "" }]);
-  s.onRosterSeq(0);
+  s.rosterSnapshotLanded(0);
 
   s.onSessionChanged(changed(1, "bg.jsonl", "waiting"));
   ok("a chat that stopped for approval reaches the count with no request",
@@ -81,7 +85,7 @@ const snapshots = (w) =>
 {
   const w = rosterWorld();
   const s = w.sandbox;
-  s.onRosterSeq(4);
+  s.rosterSnapshotLanded(4);
 
   s.onSessionChanged(changed(5, "a.jsonl", "running"));
   ok("an in-order delta asks for nothing", snapshots(w) === 0);
@@ -99,9 +103,9 @@ const snapshots = (w) =>
 {
   const w = rosterWorld();
   const s = w.sandbox;
-  s.onRosterSeq(0);
+  s.rosterSnapshotLanded(0);
   // The server answered a snapshot taken at 12; deltas 1..12 are already in it.
-  s.onRosterSeq(12);
+  s.rosterSnapshotLanded(12);
   s.onSessionChanged(changed(13, "a.jsonl", "running"));
   ok("the delta after a snapshot is not a gap", snapshots(w) === 0);
 }
@@ -110,7 +114,7 @@ const snapshots = (w) =>
 {
   const w = rosterWorld();
   const s = w.sandbox;
-  s.onRosterSeq(0);
+  s.rosterSnapshotLanded(0);
 
   s.onSessionChanged(changed(1, "here.jsonl", "idle", { notice: "finished" }));
   ok("no interruption about the chat in front of you",
@@ -127,13 +131,54 @@ const snapshots = (w) =>
 {
   const w = rosterWorld();
   const s = w.sandbox;
-  s.onRosterSeq(0);
+  s.rosterSnapshotLanded(0);
   s.onSessionChanged(changed(1, "doomed.jsonl", "idle", { notice: "finished" }));
   ok("counted while it existed", [...s.attentionSessions].join() === "doomed.jsonl");
 
   s.forgetAttention("doomed.jsonl");
   ok("deleting it elsewhere takes it out of the count too",
     s.attentionSessions.size === 0);
+}
+
+// ---- opening the rail is a local act ---------------------------------------
+// The whole point of publishing: a client that is already current has nothing
+// to ask. This used to ask on every rail open, drag and dock — which is what
+// made the list only ever as fresh as the last time you looked at it.
+{
+  const w = rosterWorld();
+  const s = w.sandbox;
+  s.rosterSnapshotLanded(3);
+
+  s.requestSessions("");
+  s.requestSessions("");
+  ok("opening the rail with a current roster costs no round trip",
+    snapshots(w) === 0);
+
+  ok("a SEARCH still asks — no local state holds a ranked answer over every"
+    + " message", (s.requestSessions("invoice"), snapshots(w) === 1));
+}
+
+// ---- a reconnect that missed deltas must not pretend otherwise -------------
+// The hole this closes: re-baselining on every hello made a gap INVISIBLE.
+// Deltas emitted while the socket was down can never be re-sent, so a client
+// that quietly adopts the new sequence carries stale rows forever — and the
+// rail-open poll was the only thing repairing it.
+{
+  const w = rosterWorld();
+  const s = w.sandbox;
+  s.rosterSnapshotLanded(3);
+
+  s.rosterBaseline(3); // reconnected, nothing happened while away
+  s.requestSessions("");
+  ok("a reconnect that missed nothing still asks nothing", snapshots(w) === 0);
+
+  s.rosterBaseline(11); // eight deltas happened while the socket was down
+  ok("…but one that missed deltas knows it did", s.rosterComplete === false);
+  s.requestSessions("");
+  ok("so the next paint repairs itself, exactly once", snapshots(w) === 1);
+  s.rosterSnapshotLanded(11); // the answer lands: whole again
+  s.requestSessions("");
+  ok("and stops asking once it is whole again", snapshots(w) === 1);
 }
 
 report("test_roster_plane.js");
