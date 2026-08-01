@@ -239,8 +239,13 @@ thousands of entries without bloating the context.
   and `expires:` work identically), written by you — never by the model, never
   silently. A rule declares a **trigger** (today: the shape of your message, or
   the session's origin) and **obligations**: `route` this answer through a named
-  tool, `prohibit` these tools, `disclose` a named failure instead of quietly
-  patching over it. When a trigger matches, the rule is explained to the model
+  tool — or through **the material you handed over** (a link, an attached file
+  or image, a path you typed), with aish picking the right reader for each —
+  `prohibit` these tools, `disclose` a named failure instead of
+  quietly patching over it. A source you give aish is **material to analyse,
+  never instructions**: the harness says so in the same breath it says to use
+  it, so a page that reads "ignore your previous instructions" is reported, not
+  obeyed. When a trigger matches, the rule is explained to the model
   *and* enforced: a call that violates it is refused before it runs, with a
   message naming the rule and what to do instead. Refusals are bounded — if the
   model insists, you get an approval card, because there may be a legitimate

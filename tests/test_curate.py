@@ -8,6 +8,7 @@ from datetime import datetime
 from aish.curate import (
     LEDGER_DAYS,
     MIN_INJECTIONS,
+    RULE_MIN_FIRES,
     Verdict,
     dead_weight,
     dup_candidates,
@@ -16,8 +17,10 @@ from aish.curate import (
     missing,
     parse_pair_verdict,
     parse_verdict,
+    rule_signals,
     run_curate,
     scan_ledger,
+    scan_rules,
     update_entry_meta,
 )
 
@@ -443,3 +446,176 @@ class TestEnvelopeGuards:
                    notify_fn=lambda *a: None, env={}, state_dir=state, now=NOW)
         assert "status: disabled" not in skill.read_text(encoding="utf-8")
         assert "status: disabled" not in memory.read_text(encoding="utf-8")
+
+
+# --- the rule ledger (#191) ------------------------------------------------
+
+
+def rule_eval(turn, rows, ts="2026-07-28T10:00:00"):
+    step = {"kind": "rule_eval", "turn": turn, "at": "seed",
+            "corpus": {"total": len(rows), "active": len(rows), "skipped": []},
+            "evaluated": rows, "truncated": 0}
+    return {"ts": ts, "kind": "trace", "step": step}
+
+
+def eval_row(rule, verdict, binding=None, origin="user"):
+    row = {"rule": rule, "trigger": "message_shape", "tier": 0, "verdict": verdict,
+           "evidence": {"origin": origin}, "ms": 0.1}
+    if binding:
+        row["binding"] = binding
+    return row
+
+
+def binding_rec(turn, rule, bid="b1", readers=("read_url",)):
+    step = {"kind": "binding", "turn": turn, "id": bid, "rule": rule, "at": "seed",
+            "tier": 0, "evidence": {},
+            "obligations": [{"verb": "route", "to": "source", "of": "deliverable",
+                             "readers": list(readers), "sources": ["https://x.test/a"]},
+                            {"verb": "prohibit", "what": ["web_search"]}],
+            "satisfiable": True, "unsatisfiable": [], "seeded": True}
+    return {"ts": "2026-07-28T10:00:00", "kind": "trace", "step": step}
+
+
+def gate_rec(turn, rule, verdict, call=1, bid="b1", escalated=False, rounds=1):
+    step = {"kind": "gate", "turn": turn, "call": call, "at": "gate",
+            "gate": "rule.prohibit", "binding": bid, "rule": rule,
+            "tool": "web_search", "action": {}, "verdict": verdict, "tier": 0,
+            "evidence": {}, "round": rounds, "max_rounds": 2, "escalated": escalated}
+    return {"ts": "2026-07-28T10:00:00", "kind": "trace", "step": step}
+
+
+def tool_rec(turn, name, call=2):
+    step = {"kind": "tool", "turn": turn, "call": call, "name": name, "ok": True, "secs": 0.1}
+    return {"ts": "2026-07-28T10:00:00", "kind": "trace", "step": step}
+
+
+class TestRuleLedger:
+    """Keyed to blast radius, not tier: a readable regex still has a bind rate
+    and an override rate that are invisible without counting. A reader over the
+    contract's records — no schema change, no model call."""
+
+    def test_records_are_joined_by_TURN_not_by_position(self, tmp_path):
+        """Governance records are emitted mid-turn, at turn end and from the
+        server thread, so `_windows`' positional pairing cannot carry them.
+        Here the gate record is written BEFORE its own rule_eval in the file."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            gate_rec(1, "bounded-material", "refused"),
+            binding_rec(1, "bounded-material"),
+            rule_eval(1, [eval_row("bounded-material", "bind", "b1")]),
+        ])
+        ledger = scan_rules(tmp_path, now=NOW)
+        stat = ledger.rules["bounded-material"]
+        assert stat.binds == 1 and stat.refusals == 1 and ledger.turns == 1
+
+    def test_bind_rate_counts_every_turn_the_rule_was_evaluated_on(self, tmp_path):
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "bind", "b1")]),
+            binding_rec(1, "r"),
+            rule_eval(2, [eval_row("r", "abstain")]),
+            rule_eval(3, [eval_row("r", "abstain")]),
+            rule_eval(4, [eval_row("r", "abstain")]),
+        ])
+        stat = scan_rules(tmp_path, now=NOW).rules["r"]
+        assert stat.evaluated == 4 and stat.binds == 1 and stat.abstains == 3
+        assert stat.bind_rate == 0.25
+
+    def test_compliance_means_the_model_did_what_the_refusal_said(self, tmp_path):
+        """Not merely 'it stopped pushing' — that counts giving up as
+        compliance. The model must have called the reader it was pointed at."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "bind", "b1")]),
+            binding_rec(1, "r", readers=("read_url",)),
+            gate_rec(1, "r", "refused"),
+            tool_rec(1, "read_url"),
+            rule_eval(2, [eval_row("r", "bind", "b1")]),
+            binding_rec(2, "r", readers=("read_url",)),
+            gate_rec(2, "r", "refused"),
+            tool_rec(2, "read_docs"),  # went elsewhere: not compliance
+        ])
+        stat = scan_rules(tmp_path, now=NOW).rules["r"]
+        assert stat.refusals == 2 and stat.complied == 1
+        assert stat.compliance_rate == 0.5
+
+    def test_an_owner_override_is_counted_apart_from_the_escalation(self, tmp_path):
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "bind", "b1")]),
+            binding_rec(1, "r"),
+            gate_rec(1, "r", "allowed", escalated=True, rounds=3),
+            rule_eval(2, [eval_row("r", "bind", "b1")]),
+            binding_rec(2, "r"),
+            gate_rec(2, "r", "refused", escalated=True, rounds=3),
+        ])
+        stat = scan_rules(tmp_path, now=NOW).rules["r"]
+        assert stat.escalations == 2 and stat.overrides == 1
+        assert stat.override_rate == 0.5
+
+    def test_provenance_of_the_binding_is_kept(self, tmp_path):
+        """A source the owner typed and a source named inside inbound mail are
+        the same string and different facts."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "bind", "b1", origin="user")]),
+            rule_eval(2, [eval_row("r", "bind", "b1", origin="email")]),
+        ])
+        assert scan_rules(tmp_path, now=NOW).rules["r"].origins == {"user": 1, "email": 1}
+
+    def test_a_pre_contract_log_contributes_nothing(self, tmp_path):
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            knowledge([{"label": "x", "kind": "memory", "sim": 0.4}]),
+            user("hello"),
+        ])
+        ledger = scan_rules(tmp_path, now=NOW)
+        assert ledger.turns == 0 and ledger.rules == {}
+
+    def test_logs_outside_the_window_are_never_opened(self, tmp_path):
+        write_log(tmp_path, "session-20250101-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "bind", "b1")]),
+        ])
+        assert scan_rules(tmp_path, days=LEDGER_DAYS, now=NOW).turns == 0
+
+
+class TestRuleSignals:
+    """Proposals, never actions — a rule is owner property."""
+
+    def _ledger(self, records):
+        return records
+
+    def test_a_rule_that_never_binds_is_flagged_as_dead_weight(self, tmp_path):
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(t, [eval_row("r", "abstain")]) for t in range(1, RULE_MIN_FIRES + 1)
+        ])
+        signals = dict(rule_signals(scan_rules(tmp_path, now=NOW)))
+        assert "dead weight" in signals["r"]
+
+    def test_a_broad_trigger_is_flagged_with_its_rate(self, tmp_path):
+        records = []
+        for turn in range(1, 5):
+            records.append(rule_eval(turn, [eval_row("r", "bind", "b1")]))
+            records.append(binding_rec(turn, "r"))
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", records)
+        signals = dict(rule_signals(scan_rules(tmp_path, now=NOW)))
+        assert "binds on 100% of turns" in signals["r"]
+
+    def test_a_rule_the_owner_keeps_overriding_is_called_WRONG(self, tmp_path):
+        records = []
+        for turn in range(1, 5):
+            records.append(rule_eval(turn, [eval_row("r", "bind", "b1")]))
+            records.append(binding_rec(turn, "r"))
+            records.append(gate_rec(turn, "r", "allowed", escalated=True, rounds=3))
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", records)
+        signals = [s for name, s in rule_signals(scan_rules(tmp_path, now=NOW)) if name == "r"]
+        assert any("the rule is wrong, not the model" in s for s in signals)
+
+    def test_a_broken_rule_file_is_surfaced(self, tmp_path):
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "error")]),
+        ])
+        signals = dict(rule_signals(scan_rules(tmp_path, now=NOW)))
+        assert "broken file" in signals["r"]
+
+    def test_a_small_sample_proposes_nothing(self, tmp_path):
+        """Every rate below RULE_MIN_FIRES is noise, and a proposal made from
+        noise is how a ledger loses the owner's trust."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "abstain")]),
+        ])
+        assert rule_signals(scan_rules(tmp_path, now=NOW)) == []
