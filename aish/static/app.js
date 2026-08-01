@@ -879,16 +879,23 @@ function retireSocket(sock) {
 //
 // Unstamped events (client-direct messages: session_list, peek,
 // errors, console_*) always pass — no `session` field means "not scoped".
-// Two stamped-or-self-named types are cross-session BY DESIGN and exempt:
-//   hello         — the switch mechanism itself; it MOVES currentSession
-//   session_state — "a background chat finished", sent only to non-viewers
+// Cross-session BY DESIGN, and exempt:
+//   hello           — the switch mechanism itself; it MOVES currentSession
+//   session_changed — the roster plane (#204): a row about ANY chat, for every
+//                     client whatever it is viewing. That this list kept
+//                     growing one carve-out at a time is what said the roster
+//                     needed its own channel rather than more exemptions
+//   session_deleted — same, and dropping it strands a chat that is gone
+//   session_state   — the roster plane's predecessor, kept for an old server
 // session_renamed is exempt too: its handler is by-name and idempotent, and
 // dropping it in the switch window would just desync a drawer/pager label.
 // Replayed events never reach this gate (the replay loop feeds handle()
 // directly) and carry no stamp anyway: the bridge stamps only the live
 // delivery, keeping the recorded transcript byte-identical to a cold
 // reconstruct_events replay.
-const SESSION_CROSS_EVENTS = new Set(["hello", "session_state", "session_renamed"]);
+const SESSION_CROSS_EVENTS = new Set([
+  "hello", "session_changed", "session_deleted", "session_state", "session_renamed",
+]);
 
 function foreignSessionEvent(event, current) {
   if (!event.session || SESSION_CROSS_EVENTS.has(event.type)) return false;
@@ -1293,6 +1300,7 @@ function handle(event) {
     case "file_list": onFileList(event); break;
     case "session_state": onSessionState(event); break;
     case "session_deleted": onSessionDeleted(event); break;
+    case "session_changed": onSessionChanged(event); break;
     case "peek": onPeek(event); break;
     case "session_renamed": onSessionRenamed(event); break;
     case "role": onRole(event); break;
@@ -1318,19 +1326,92 @@ function onSessionRenamed(event) {
 // second is worth a system notification, because an unattended hold already has
 // its own push (`notify_hold`, server-side) and a hold you are around for is
 // what the count and the toast are for.
-function onSessionState(event) {
-  const label = event.title
-    ? `“${event.title.slice(0, 40)}”`
-    : event.session.replace(/^session-|\.jsonl$/g, "").replace(/-\d{6}$/, "");
-  if (event.state === "waiting") {
-    showToast(`${label}: waiting for your approval — swipe from the left edge to switch`);
-  } else {
-    showToast(`${label}: task finished — swipe from the left edge to switch back`);
-    notify("aish — background task finished", event.title || event.session);
-  }
-  noteAttention(event.session, event.state, event.title);
-  if (railIsOpen()) send({ type: "sessions", query: $("sessions-search").value });
+// [ROSTER-START]
+// The stream of "chat X is now …", for every chat, whatever this client is
+// looking at (#204).
+//
+// It replaces a pull. The list of chats and what they were doing used to be
+// refreshed only when this client ASKED — which it did on opening the rail —
+// so between opens the roster decayed, and the four repairs before this one
+// each widened when it re-asks rather than making the server tell it. What was
+// never announced at all: a chat STARTING, an approval ANSWERED somewhere else
+// (so a phone went on showing "Needs approval" for a card cleared on the
+// laptop), and a chat renamed or deleted elsewhere.
+//
+// A row is applied whole and is idempotent, so a duplicate costs nothing and a
+// missed one is repaired by the next row for that chat. `seq` is what turns
+// "nothing changed" and "I missed something" into different observations: a
+// gap asks for a snapshot rather than leaving a stale row on screen forever.
+//
+// THE TIMESTAMPS ARE STAMPED HERE, not carried. The server would have to parse
+// a session log to know them, and a chat that just did something has just
+// changed its file — so the parse cache is guaranteed to miss at exactly the
+// moment a transition fires. Stamping on arrival is also the more honest
+// clock: unread compares against THIS device's "I looked at it" map.
+let rosterSeq = 0;
+
+function onRosterSeq(seq) {
+  // A snapshot or a hello re-baselines the stream. Both carry the sequence
+  // they were taken at, so anything already reflected in them is not re-asked
+  // for and anything after them still arrives as a delta.
+  if (typeof seq === "number") rosterSeq = seq;
 }
+
+function onSessionChanged(event) {
+  const row = event.row || {};
+  if (!row.name) return;
+  if (typeof event.seq === "number") {
+    // A gap means a delta was lost — a socket replaced mid-flight, an outbox
+    // dropped on a session switch. Ask for the truth instead of applying this
+    // row over rows that may already be wrong.
+    const missed = event.seq > rosterSeq + 1;
+    rosterSeq = event.seq;
+    if (missed && ws && ws.readyState === WebSocket.OPEN) {
+      send({ type: "sessions", query: $("sessions-search").value || "" });
+    }
+  }
+  noteAttention(row.name, row.state, row.title);
+  if (event.notice) rosterNotice(event.notice, row);
+  if (railIsOpen()) renderSessionsFromCache();
+}
+
+// The heads-up half, kept apart from the data half on purpose: every client
+// gets every row, but only a client that is NOT looking at the chat has any
+// reason to be interrupted about it.
+function rosterNotice(notice, row) {
+  if (row.name === currentSession) return;
+  const label = row.title
+    ? `“${row.title.slice(0, 40)}”`
+    : row.name.replace(/^session-|\.jsonl$/g, "").replace(/-\d{6}$/, "");
+  if (notice === "held") {
+    showToast(`${label}: waiting for your approval — swipe from the left edge to switch`);
+    return;
+  }
+  showToast(`${label}: task finished — swipe from the left edge to switch back`);
+  notify("aish — background task finished", row.title || row.name);
+}
+
+// The rail, repainted from what this client already knows — NO ROUND TRIP.
+// The roster is the authoritative half of that paint ([ATTENTION]) and it has
+// just been updated, so the answer is already here. Deliberately not
+// `requestSessions`, which also ASKS the server: with the rail docked open
+// that turned every delta into a snapshot request, which is the poll this
+// plane exists to remove, only now triggered by its own events.
+function renderSessionsFromCache() {
+  renderOfflineSessions($("sessions-search").value || "");
+}
+
+// A server that predates the roster plane still sends the two old pushes.
+// Kept so a new client against an old server degrades to the old behaviour
+// rather than going silent.
+function onSessionState(event) {
+  noteAttention(event.session, event.state, event.title);
+  rosterNotice(event.state === "waiting" ? "held" : "finished", {
+    name: event.session, title: event.title,
+  });
+  if (railIsOpen()) renderSessionsFromCache();
+}
+// [ROSTER-END]
 
 let sessionTitled = false;
 
@@ -1676,6 +1757,7 @@ function onHello(event) {
   // was whatever the last rail open computed, and after a reload it was EMPTY
   // until you opened the rail ([ATTENTION]).
   setAttentionRows(event.pager || []);
+  onRosterSeq(event.roster_seq); // where this connection's roster stream starts
   if (railIsOpen()) requestSessions($("sessions-search").value || ""); // docked: stay current
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
   renderWorkspace(event);
@@ -8685,6 +8767,7 @@ function forgetSession(name) {
   prefetched.delete(name);
   viewCache.delete(name);
   forgetSeen(name);
+  forgetAttention(name);
 }
 
 function onSessionGone(name) {
@@ -8695,9 +8778,14 @@ function onSessionGone(name) {
   if (awaitingPaint === name) abandonPendingView("that chat no longer exists");
 }
 
+// Every client hears this now, not just the one that asked (#204): a chat
+// deleted on the laptop used to sit on the phone's list until it refreshed,
+// and tapping it opened a chat that no longer existed.
 function onSessionDeleted(event) {
+  onRosterSeq(event.seq);
   forgetSession(event.name);
   showToast("session deleted");
+  if (railIsOpen()) renderSessionsFromCache();
 }
 
 // ---- opening the session rail by swiping the transcript ------------------
@@ -9142,6 +9230,14 @@ function railRows(cached, searching) {
   // whatever heading happened to be open when it was pushed on.
   merged.sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
   return merged;
+}
+
+// A chat that no longer exists must leave the count with it — the roster is
+// the only thing that would otherwise go on naming it.
+function forgetAttention(name) {
+  if (!name) return;
+  attentionRows = attentionRows.filter((info) => info.name !== name);
+  refreshBadge();
 }
 
 function refreshBadge() {
@@ -9610,7 +9706,10 @@ function renderSessions(event) {
   // cached list cannot see liveness at all and a ranked search result is a
   // subset of the chats there are, so either would silently under-count
   // ([ATTENTION]).
-  if (!event.fromCache && !searching) setAttentionRows(event.sessions);
+  if (!event.fromCache && !searching) {
+    setAttentionRows(event.sessions);
+    onRosterSeq(event.seq); // deltas already folded into this snapshot ([ROSTER])
+  }
   // Ranked search results are ordered by relevance, so date/band grouping would
   // lie about why a row is where it is. Render a flat list.
   if (searching) {
