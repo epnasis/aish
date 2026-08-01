@@ -1567,6 +1567,13 @@ class WebServer:
         # be answered (and double-appending to one log file).
         self._opening: dict[str, asyncio.Future[Session | None]] = {}
         self.clients: set[Client] = set()
+        # The roster plane (#204): the last row BROADCAST for each session, and
+        # the counter a client uses to notice it missed one. Deliberately "what
+        # everyone has been told", not "what is true" — a snapshot sent to one
+        # client tells the others nothing, so it must not seed this or the next
+        # transition would diff clean and never reach them.
+        self._roster: dict[str, dict] = {}
+        self._roster_seq = 0
         self._default: Session | None = None  # bare-connection landing session
         # The single GLOBAL interactive console (issue #148 follow-up), shared by
         # every connection. Held here, NEVER on a Session — the model has no
@@ -1710,10 +1717,11 @@ class WebServer:
         self.sessions[session.name] = session
         # The ONE funnel every session-creation path goes through (new, cold
         # open, /trigger, the server's first session), which is why the hold
-        # announcer is wired here rather than four times over (#203).
-        session.bridge.on_hold = lambda: asyncio.ensure_future(
-            self._announce_hold(session)
-        )
+        # announcer is wired here rather than four times over (#203) — and why
+        # a session appearing is published from here too (#204). Both run on
+        # the loop thread; `on_hold` is hopped there by the Bridge.
+        session.bridge.on_hold = lambda: self._announce_hold(session)
+        self._touch(session)
         if default:
             self._default = session
 
@@ -1891,6 +1899,11 @@ class WebServer:
             "roots": [str(root) for root in session.agent.roots],
             "home": str(Path.home()),  # client abbreviates paths to ~
             "rev": STATIC_REV,
+            # Where this client's roster stream starts (#204). Every
+            # `session_changed` carries the next number; a gap means something
+            # was missed and the client asks for a snapshot rather than going
+            # on believing a stale row.
+            "roster_seq": self._roster_seq,
             "pager": pages,
             # The user's own successful ! commands, cross-session, most-run first:
             # terminal-mode autocomplete draws from this personal palette (#104).
@@ -2068,6 +2081,10 @@ class WebServer:
             uid = str(message.get("id", ""))
             for session in self.sessions.values():
                 if session.bridge.answer(uid, message):
+                    # The hold is released: the row goes back to running, and
+                    # the OTHER devices need to hear it or they go on showing
+                    # "Needs approval" for a card cleared here (#204).
+                    self._touch(session)
                     break
             # Answering the gate is an action — claim control (the card lives in
             # the client's own view). The event loop serializes all incoming
@@ -2573,6 +2590,10 @@ class WebServer:
         # signal — every ordinary ending (answer, error, cancel) reaches the
         # `finally`. The ! command path deliberately writes no marker: re-running
         # the user's own shell command unattended is not a recovery, it's a risk.
+        # Running, and everyone hears it. This transition had NO announcement
+        # before the roster plane (#204): a triggered job showed as idle on
+        # every other device until something happened to ask.
+        self._touch(session)
         session.logref.task_start(text)
         failure = ""  # set by either except arm; recorded on the way out
         try:
@@ -2638,6 +2659,7 @@ class WebServer:
         cwd (like the / slash /cd path); any other command streams into a
         terminal block. Nothing here is model-driven, so the approval gate is
         untouched — the user typing a command is its own authorization."""
+        self._touch(session)  # running (#204)
         try:
             if not command:
                 return
@@ -2870,6 +2892,7 @@ class WebServer:
         streams into a terminal block like any ! command) and then surface the
         new issue as a CLICKABLE link — gh prints the URL to stdout, which would
         otherwise sit as plain, unclickable text in the terminal block (#110)."""
+        self._touch(session)  # running (#204)
         try:
             session.logref.command(command, "user-direct")
             output = await self._in_worker(session.agent.run_user_command, command)
@@ -2906,42 +2929,88 @@ class WebServer:
             text, attachments = session.queue.pop(0)
             self._launch(session, text, attachments)
             return
-        # A background session returned to idle: nudge every client NOT viewing
-        # it (a viewer already saw the `done`).
-        await self._announce_state(session)
+        # Back to idle. The row goes to everyone; the `notice` is what makes it
+        # a heads-up rather than silent bookkeeping, and the client suppresses
+        # it for the chat it is actually looking at (a viewer already saw the
+        # `done`).
+        self._touch(session, notice="finished")
 
-    async def _announce_hold(self, session: Session) -> None:
-        """A chat stopped on an approval. Announce it only when NOBODY is
-        viewing it: a hold someone is already looking at is a card on their
-        screen, not a chat that wants a user who is somewhere else — and
-        announcing every approval would nudge the phone in your pocket once per
-        command you approve on the laptop. Runs on the loop thread, so this
-        reads the viewer set without the benign race `on_wait` documents."""
-        if session.viewers:
-            return
-        await self._announce_state(session)
-
-    async def _announce_state(self, session: Session) -> None:
-        """Tell every client NOT viewing `session` what it is doing now.
-
-        Sent when a background chat returns to idle and when it stops on an
-        approval (#203) — the two moments a chat starts wanting a user who is
-        looking somewhere else. The attention count on the rail button is the
-        durable signal; the client's toast is the heads-up. State is READ, never
-        passed in, so the notice cannot disagree with the session it names."""
-        notice = {
-            "type": "session_state",
-            "session": session.name,
+    # ---- the roster plane (#204) -----------------------------------------
+    # A SECOND event plane, deliberately. The Bridge is the first: events
+    # belonging to ONE conversation, delivered to whoever is reading that
+    # conversation, and replayable as its transcript. A roster fact — "chat A
+    # is running now" — is none of those three. Its audience is every client
+    # whatever they are looking at, the session firewall would (correctly) drop
+    # it as belonging to another chat, and recording it would put it in a
+    # transcript it is not part of.
+    #
+    # So it gets its own channel. Not a new one, really: the two status pushes
+    # this replaces already bypassed the Bridge and wrote straight to each
+    # socket. This names that channel and gives it the three things it lacked.
+    #
+    # 1. ONE PUBLISHER. Every transition calls `_touch`. It was four fixes'
+    #    worth of evidence that "announce it at exactly the right moments" is a
+    #    rule nobody can keep: a chat STARTING was never announced, nor an
+    #    approval being answered elsewhere, so the phone showed "Needs
+    #    approval" for a card cleared on the laptop.
+    # 2. IT DIFFS. An unchanged row publishes nothing, which makes calling it
+    #    too often FREE — so the rule becomes "call it whenever you touched a
+    #    session", which is a rule that survives contact with new code.
+    # 3. A SEQUENCE NUMBER, so a client can tell "nothing changed" from "I
+    #    missed something" and ask for a snapshot. Without it this is the same
+    #    silent drift in a new costume.
+    #
+    # What the row carries is deliberately only what the server holds IN
+    # MEMORY. The timestamps a row also needs are the client's to stamp on
+    # arrival — see the client's own note — because deriving them here would
+    # mean parsing the session's log, and a chat that just did something has
+    # just changed its file, so the parse cache is guaranteed to miss at
+    # exactly the moment a transition fires.
+    def _roster_row(self, session: Session) -> dict:
+        return {
+            "name": session.name,
             "title": self._title(session),
             "state": session.state(),
+            "origin": session.origin,
+            "cwd": self._row_cwd(session.agent.cwd),
         }
+
+    def _touch(self, session: Session, notice: str = "") -> None:
+        """Publish this session's row if anything a client can see changed.
+
+        Safe to call from anywhere that touched a session, including places
+        where nothing changed — that is the point. `notice` marks the two
+        transitions that are worth interrupting someone about; it is never part
+        of the diff, so a repeat of an unchanged row stays silent."""
+        row = self._roster_row(session)
+        if self._roster.get(session.name) == row and not notice:
+            return
+        self._roster[session.name] = row
+        self._roster_seq += 1
+        event = {"type": "session_changed", "seq": self._roster_seq, "row": row}
+        if notice:
+            event["notice"] = notice
+        self._broadcast(event)
+
+    def _broadcast(self, event: dict) -> None:
+        """Send to every connected client, viewer or not. Fire-and-forget on
+        the loop thread: a roster fact is never worth blocking a caller, and a
+        dead socket is dropped by its own disconnect."""
         for client in list(self.clients):
-            if client.viewing is session:
-                continue
             try:
-                await client.ws.send_json(notice)
-            except Exception:  # noqa: BLE001 — a dead socket is dropped on its own disconnect
+                client.outbox.put_nowait(event)
+            except Exception:  # noqa: BLE001 — a client mid-teardown is not an error
                 pass
+
+    def _announce_hold(self, session: Session) -> None:
+        """A chat stopped on an approval. It always publishes its new state —
+        every client's list has to know — but the NOTICE is scoped: a hold
+        someone is already looking at is a card on their screen, not a chat
+        that wants a user who is somewhere else, and marking every approval
+        would nudge the phone in your pocket once per command approved on the
+        laptop. Runs on the loop thread, so this reads the viewer set without
+        the benign race `on_wait` documents."""
+        self._touch(session, notice="" if session.viewers else "held")
 
     def _row_cwd(self, cwd: str) -> str:
         """The directory to label a session row with, or "" for no label. A chat
@@ -2974,6 +3043,10 @@ class WebServer:
         await client.ws.send_json(
             {
                 "type": "session_list",
+                # The snapshot's own place in the stream (#204): deltas at or
+                # below it are already reflected here and are dropped, so a
+                # snapshot in flight cannot overwrite newer rows.
+                "seq": self._roster_seq,
                 "current": current,
                 "sessions": [
                     {
@@ -3235,7 +3308,12 @@ class WebServer:
         # file open via --resume keeps appending to the unlinked inode until
         # it exits — harmless, the data just vanishes with the last handle.
         await asyncio.to_thread(lambda: path.unlink(missing_ok=True))
-        await client.ws.send_json({"type": "session_deleted", "name": name})
+        # To EVERY client, not just the one that asked (#204): a chat deleted
+        # on the laptop used to stay on the phone's list until it happened to
+        # refresh, and tapping it opened a chat that no longer existed.
+        self._roster.pop(name, None)
+        self._roster_seq += 1
+        self._broadcast({"type": "session_deleted", "name": name, "seq": self._roster_seq})
         await self._send_sessions(client, "")
 
     async def _rename_session(self, client: Client, name: str, title: str) -> None:
@@ -3270,9 +3348,12 @@ class WebServer:
                     log.close()
 
             await asyncio.to_thread(write_cold)
-        await client.ws.send_json(
-            {"type": "session_renamed", "name": name, "title": title}
-        )
+        # `session_renamed` stays a broadcast of its own — the header of a chat
+        # OTHER clients are viewing follows it, which a roster row does not
+        # cover. The roster row carries the new title for their LISTS (#204).
+        self._broadcast({"type": "session_renamed", "name": name, "title": title})
+        if session is not None:
+            self._touch(session)
         await self._send_sessions(client, "")
 
     async def _send_models(self, client: Client, query: str) -> None:

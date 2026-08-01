@@ -168,6 +168,30 @@ def recv_until(ws, wanted: str, limit: int = 200) -> dict:
     raise AssertionError(f"no {wanted!r} event within {limit} events")
 
 
+def recv_until_row(ws, name: str, state: str, limit: int = 200) -> dict:
+    """Drain until the roster publishes `name` in `state` (#204). The plane is
+    chatty by design — every transition of every session travels — so a test
+    waits for the row it means rather than the next event of a type."""
+    for _ in range(limit):
+        event = ws.receive_json()
+        if event["type"] == "session_changed" and event["row"]["name"] == name:
+            if event["row"]["state"] == state:
+                return event
+        if event["type"] == "error":
+            raise AssertionError(f"error while waiting for {name} {state}: {event['text']}")
+    raise AssertionError(f"no session_changed for {name} in {state!r} within {limit} events")
+
+
+def recv_until_refusal(ws, limit: int = 200) -> dict:
+    """The next `error`, without recv_until's fail-fast on one — a refusal IS
+    an error event, and here it is what the test is waiting for."""
+    for _ in range(limit):
+        event = ws.receive_json()
+        if event["type"] == "error":
+            return event
+    raise AssertionError("no error event")
+
+
 def drain_done(client, name, token=TEST_TOKEN):
     """Wait for a background session's task to finish: attach and return once
     `done` is seen — LIVE or already in the replay. A triggered task races the
@@ -398,6 +422,11 @@ class TestSessionStamp:
             ws.send_json({"type": "task", "text": "say hi"})
             for _ in range(200):
                 event = ws.receive_json()
+                # The roster plane is cross-session by design and unstamped —
+                # it is about the LIST, not about this chat's transcript (#204).
+                if event["type"] in ("session_changed", "session_deleted"):
+                    assert "session" not in event, event
+                    continue
                 assert event["session"] == hello["session"], event
                 if event["type"] == "done":
                     break
@@ -2269,11 +2298,10 @@ class TestSessions:
             recv_until(ws, "hello")
             recv_until(ws, "replay")
             # Approve A's card while B is shown: A finishes in the background
-            # and the client gets a session_state heads-up.
+            # and the client gets a roster heads-up (#204).
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
-            notice = recv_until(ws, "session_state")
-            assert notice["session"] == session_a
-            assert notice["state"] == "idle"
+            notice = recv_until_row(ws, session_a, "idle")
+            assert notice["notice"] == "finished"
 
     def test_background_hold_sends_waiting_notice(self, app_env, tmp_path):
         # The mirror image of the idle notice (#203). A chat that STOPS on an
@@ -2296,9 +2324,8 @@ class TestSessions:
             # Approving from B lets A run on and stop at its SECOND approval,
             # now with nobody viewing it.
             ws.send_json({"type": "approval", "id": first["id"], "action": "approve"})
-            notice = recv_until(ws, "session_state")
-            assert notice["session"] == session_a
-            assert notice["state"] == "waiting"
+            notice = recv_until_row(ws, session_a, "waiting")
+            assert notice["notice"] == "held"
 
     def test_a_hold_someone_is_watching_is_not_announced(self, app_env, tmp_path):
         # Scoped deliberately: a held card on a screen someone is already
@@ -2329,14 +2356,18 @@ class TestSessions:
             # A finishing DOES reach the phone (that notice is unconditional),
             # so this drain is bounded — and what it must not contain is a
             # heads-up for the hold the laptop was looking at all along.
-            states = []
+            notices = []
             for _ in range(200):
                 event = phone.receive_json()
-                if event["type"] == "session_state":
-                    states.append(event["state"])
-                    if event["state"] == "idle":
-                        break
-            assert states == ["idle"]
+                if event["type"] != "session_changed":
+                    continue
+                if event.get("notice"):
+                    notices.append(event["notice"])
+                if event["row"]["state"] == "idle" and event.get("notice"):
+                    break
+            # The hold's ROW still travelled (every list needs it); what it must
+            # not carry is the interruption, since the laptop was looking at it.
+            assert notices == ["finished"]
 
     def test_a_failed_turn_is_recorded_and_flags_the_chat(self, app_env, tmp_path):
         # A turn that dies used to leave nothing durable: the failure text went
@@ -2434,7 +2465,7 @@ class TestSessions:
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "resume", "path": "../../../etc/passwd"})
-            error = ws.receive_json()
+            error = recv_until(ws, "error")
             assert error["type"] == "error"
             assert "no such session" in error["text"]
 
@@ -2525,7 +2556,7 @@ class TestSessions:
             request = recv_until(ws, "approval_request")
 
             ws.send_json({"type": "delete_session", "name": name})
-            error = ws.receive_json()
+            error = recv_until(ws, "error")
             assert error["type"] == "error"
             assert "still running" in error["text"]
             assert (app_env["state_dir"] / name).is_file()
@@ -2539,7 +2570,7 @@ class TestSessions:
         with client, connected(client) as (ws, _, _):
             for name in ("../../../etc/passwd", "session-nonexistent.jsonl"):
                 ws.send_json({"type": "delete_session", "name": name})
-                error = ws.receive_json()
+                error = recv_until(ws, "error")
                 assert error["type"] == "error"
                 assert "no such session" in error["text"]
 
@@ -2664,7 +2695,7 @@ class TestRename:
             ws.send_json({"type": "task", "text": "hi"})
             recv_until(ws, "done")
             ws.send_json({"type": "rename_session", "name": name, "title": "   "})
-            error = ws.receive_json()
+            error = recv_until(ws, "error")
             assert error["type"] == "error"
             assert "empty" in error["text"]
 
@@ -6045,7 +6076,7 @@ class TestRedactTurn:
             session.busy = True
             try:
                 ws.send_json({"type": "redact", "turn": turn})
-                error = ws.receive_json()
+                error = recv_until(ws, "error")
                 assert error["type"] == "error" and "working" in error["text"]
             finally:
                 session.busy = False
@@ -6062,7 +6093,7 @@ class TestRedactTurn:
             before = list(session.bridge.transcript)
 
             ws.send_json({"type": "redact", "turn": "no-such-turn"})
-            error = ws.receive_json()
+            error = recv_until(ws, "error")
             assert error["type"] == "error" and "gone" in error["text"]
             assert session.bridge.transcript == before
 
@@ -6125,7 +6156,9 @@ class TestRefusalIsNotAFailure:
             server = client.app.state.server
             assert server.active.busy
             ws.send_json({"type": "redact", "turn": "1"})
-            refusal = ws.receive_json()
+            # Not the NEXT event: the roster plane is chatty by design and any
+            # session's transition can land in between (#204).
+            refusal = recv_until_refusal(ws)
             assert refusal["type"] == "error"
             assert refusal["code"] == "refused", (
                 "without this the client ends the turn — closing the live trace, "

@@ -233,7 +233,7 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
   const src = appSource();
   const call = src.indexOf("setAttentionRows(event.sessions)");
   assert(call !== -1, "renderSessions no longer seeds the badge from a server list");
-  const guard = src.slice(src.lastIndexOf("\n", call - 1), call);
+  const guard = src.slice(src.lastIndexOf("if (", src.lastIndexOf("\n", call - 1)), call);
   ok("only an unfiltered server list claims the count",
     /!event\.fromCache\s*&&\s*!searching/.test(guard));
 
