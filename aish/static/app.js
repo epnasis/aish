@@ -1349,12 +1349,30 @@ function onSessionRenamed(event) {
 // moment a transition fires. Stamping on arrival is also the more honest
 // clock: unread compares against THIS device's "I looked at it" map.
 let rosterSeq = 0;
+// Does this client hold every chat there is, or only the ones it has been told
+// about? The pager rows a hello carries are the recency HEAD, not the archive,
+// and deltas only describe chats that changed — so until a full list lands,
+// the roster is a partial view and the rail has to ask for the rest.
+let rosterComplete = false;
 
-function onRosterSeq(seq) {
-  // A snapshot or a hello re-baselines the stream. Both carry the sequence
-  // they were taken at, so anything already reflected in them is not re-asked
-  // for and anything after them still arrives as a delta.
+function rosterBaseline(seq) {
+  // A hello. If the server's sequence is not the one we were following, deltas
+  // happened while we were not listening — a reconnect, a server restart — and
+  // they are simply GONE. Re-baselining without noticing is what would make
+  // that invisible: the client would carry on believing rows it has no reason
+  // to believe. So the mismatch marks the roster stale, and the next list
+  // request repairs it.
+  if (typeof seq !== "number") return;
+  if (seq !== rosterSeq) rosterComplete = false;
+  rosterSeq = seq;
+}
+
+function rosterSnapshotLanded(seq) {
+  // A full, unfiltered list: everything there is, as of `seq`. Deltas already
+  // folded into it must not read as a gap, and from here the stream alone is
+  // enough — which is what lets opening the rail stop being a round trip.
   if (typeof seq === "number") rosterSeq = seq;
+  rosterComplete = true;
 }
 
 function onSessionChanged(event) {
@@ -1366,8 +1384,9 @@ function onSessionChanged(event) {
     // row over rows that may already be wrong.
     const missed = event.seq > rosterSeq + 1;
     rosterSeq = event.seq;
-    if (missed && ws && ws.readyState === WebSocket.OPEN) {
-      send({ type: "sessions", query: $("sessions-search").value || "" });
+    if (missed) {
+      rosterComplete = false;
+      requestSessions($("sessions-search").value || "");
     }
   }
   noteAttention(row.name, row.state, row.title);
@@ -1757,7 +1776,7 @@ function onHello(event) {
   // was whatever the last rail open computed, and after a reload it was EMPTY
   // until you opened the rail ([ATTENTION]).
   setAttentionRows(event.pager || []);
-  onRosterSeq(event.roster_seq); // where this connection's roster stream starts
+  rosterBaseline(event.roster_seq); // and whether we missed anything while away
   if (railIsOpen()) requestSessions($("sessions-search").value || ""); // docked: stay current
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
   renderWorkspace(event);
@@ -8782,7 +8801,7 @@ function onSessionGone(name) {
 // deleted on the laptop used to sit on the phone's list until it refreshed,
 // and tapping it opened a chat that no longer existed.
 function onSessionDeleted(event) {
-  onRosterSeq(event.seq);
+  rosterBaseline(event.seq);
   forgetSession(event.name);
   showToast("session deleted");
   if (railIsOpen()) renderSessionsFromCache();
@@ -9298,12 +9317,30 @@ async function renderOfflineSessions(query) {
   return true;
 }
 
+// Paint the rail, and ask the server ONLY when asking would tell us something.
+//
+// This used to ask every time — on every rail open, drag, dock and hello — and
+// that was the refresh mechanism: the list was only ever as current as the
+// last time you opened it. With the roster published ([ROSTER]) the client is
+// already current, so opening the rail is a local act and should cost no round
+// trip (L7). Two things still genuinely need the server:
+//
+//   a SEARCH — a ranked answer over every message, which no local state holds;
+//   an INCOMPLETE roster — a fresh connection knows only the recency head the
+//     hello carried, and a reconnect knows it missed deltas it can never be
+//     sent again. Both are `rosterComplete === false`, and both are repaired
+//     by exactly one list.
+//
+// Take that guard away and the poll comes back; leave the roster's staleness
+// implicit and this becomes a client that quietly shows old rows forever.
 function requestSessions(query) {
   // The server's rows are decorated with pin state from the in-memory mirror,
   // so make sure it is current before the response lands — otherwise the
   // pinned band silently empties in the window after a reload.
   offlineRefreshMetaMap();
   renderOfflineSessions(query);
+  const searching = Boolean((query || "").trim());
+  if (rosterComplete && !searching) return;
   // Don't call send() while offline: its toast would fire on every keystroke
   // for a condition the offline bar already states.
   if (ws && ws.readyState === WebSocket.OPEN) send({ type: "sessions", query });
@@ -9708,7 +9745,7 @@ function renderSessions(event) {
   // ([ATTENTION]).
   if (!event.fromCache && !searching) {
     setAttentionRows(event.sessions);
-    onRosterSeq(event.seq); // deltas already folded into this snapshot ([ROSTER])
+    rosterSnapshotLanded(event.seq); // the stream alone suffices from here ([ROSTER])
   }
   // Ranked search results are ordered by relevance, so date/band grouping would
   // lie about why a row is where it is. Render a flat list.
