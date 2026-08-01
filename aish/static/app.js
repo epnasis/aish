@@ -1389,7 +1389,7 @@ function onSessionChanged(event) {
       requestSessions($("sessions-search").value || "");
     }
   }
-  noteAttention(row.name, row.state, row.title);
+  noteAttention(row);
   if (event.notice) rosterNotice(event.notice, row);
   if (railIsOpen()) renderSessionsFromCache();
 }
@@ -1424,7 +1424,7 @@ function renderSessionsFromCache() {
 // Kept so a new client against an old server degrades to the old behaviour
 // rather than going silent.
 function onSessionState(event) {
-  noteAttention(event.session, event.state, event.title);
+  noteAttention({ name: event.session, state: event.state, title: event.title });
   rosterNotice(event.state === "waiting" ? "held" : "finished", {
     name: event.session, title: event.title,
   });
@@ -9183,7 +9183,10 @@ function setAttentionRows(rows) {
 // is this device's clock too, so a push cannot be read as already-seen by a
 // server whose clock runs behind. The push carries a title, so a chat this
 // device has never listed is still renderable when the count names it.
-function noteAttention(name, state, title) {
+// One pushed row, applied WHOLE — a row, never a patch, so a duplicate costs
+// nothing and a missed one is repaired by the next row for that chat.
+function noteAttention(pushed) {
+  const name = pushed && pushed.name;
   if (!name) return;
   const now = Date.now() / 1000;
   // A push announcing a chat has STOPPED — finished, or holding — is announcing
@@ -9192,15 +9195,17 @@ function noteAttention(name, state, title) {
   // a background turn's answer would show no dot until the next one arrived
   // (#203). A `running` push says only that work started: `ts` moves, `out`
   // does not — the same distinction the stamps exist to draw.
-  const stamps = state === "running" ? { ts: now } : { ts: now, out: now };
-  const row = attentionRows.find((info) => info.name === name);
-  if (row) {
-    Object.assign(row, stamps);
-    row.state = state || "";
-    if (title) row.title = title;
-  } else {
-    attentionRows.push({ name, title: title || "", state: state || "", ...stamps });
+  const stamps = pushed.state === "running" ? { ts: now } : { ts: now, out: now };
+  // Empty is "no opinion", not "it is empty now": a row whose derivation had
+  // nothing to say must not blank a preview or a title this device can still
+  // show. Every field the server DOES have an opinion about wins.
+  const known = { state: pushed.state || "" };
+  for (const field of ["title", "snippet", "origin", "cwd"]) {
+    if (pushed[field]) known[field] = pushed[field];
   }
+  const row = attentionRows.find((info) => info.name === name);
+  if (row) Object.assign(row, known, stamps);
+  else attentionRows.push({ name, ...known, ...stamps });
   refreshBadge();
 }
 
@@ -9239,7 +9244,11 @@ function railRows(cached, searching) {
       state: known.state || "",
       ts: Math.max(Number(known.ts) || 0, Number(row.ts) || 0),
       out: Math.max(Number(known.out) || 0, Number(row.out) || 0),
-      title: row.title || known.title || "",
+      // The server's preview is fresher than the mirror's whenever it has one:
+      // it derives from the conversation this process is holding, so it moves
+      // with the turn rather than with the last sync.
+      title: known.title || row.title || "",
+      snippet: known.snippet || row.snippet || "",
     };
   });
   if (searching) return merged;

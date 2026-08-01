@@ -111,15 +111,15 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
   s.setAttentionRows([row("here.jsonl"), row("bg.jsonl", { ago: 7200 * SEC })]);
   ok("nothing wants you yet", badge(w).hidden === true);
 
-  s.noteAttention("bg.jsonl", "waiting");
+  s.noteAttention({ name: "bg.jsonl", state: "waiting" });
   ok("a pushed hold raises the count with no list involved",
     badge(w).textContent === "1" && counted(w).join() === "bg.jsonl");
 
-  s.noteAttention("bg.jsonl", "idle"); // it was approved elsewhere and finished
+  s.noteAttention({ name: "bg.jsonl", state: "idle" }); // approved elsewhere, finished
   ok("finishing keeps it counted — it has news you have not read",
     counted(w).join() === "bg.jsonl");
 
-  s.noteAttention("here.jsonl", "waiting");
+  s.noteAttention({ name: "here.jsonl", state: "waiting" });
   ok("a hold in the chat on screen is still never counted",
     !counted(w).includes("here.jsonl"));
 }
@@ -133,7 +133,7 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
   const s = w.sandbox;
   s.seenAt = { late: Date.now() - 5 * SEC }; // looked at it five seconds ago
   s.setAttentionRows([]);
-  s.noteAttention("late", "idle");
+  s.noteAttention({ name: "late", state: "idle" });
   ok("a push after the last look counts as unread", counted(w).join() === "late");
   const stamp = s.attentionRows.find((r) => r.name === "late").ts * SEC;
   ok("stamped from this device's clock, the one the seen map uses",
@@ -213,11 +213,11 @@ const row = (name, { ago = 60 * SEC, state = "" } = {}) =>
   const anHourAgo = (Date.now() - 3600 * SEC) / SEC;
   s.setAttentionRows([{ name: "bg.jsonl", ts: anHourAgo, out: anHourAgo, state: "running" }]);
   ok("a chat that is merely working is not counted", counted(w).length === 0);
-  s.noteAttention("bg.jsonl", "running");
+  s.noteAttention({ name: "bg.jsonl", state: "running" });
   const pushed = s.attentionRows[0];
   ok("a running push moves activity, not output — still nothing to read",
     counted(w).length === 0 && pushed.ts > anHourAgo && pushed.out === anHourAgo);
-  s.noteAttention("bg.jsonl", "idle", "nightly report");
+  s.noteAttention({ name: "bg.jsonl", state: "idle", title: "nightly report" });
   ok("the push that says it STOPPED moves output, so the answer counts",
     counted(w).join() === "bg.jsonl");
 }

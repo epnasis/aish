@@ -1843,6 +1843,17 @@ class WebServer:
             return ""
         return SessionLog._derive_title(messages)[:80]
 
+    @staticmethod
+    def _snippet(session: Session) -> str:
+        """The rail's preview line, from the SAME in-memory conversation the
+        title comes from (#204). It was left off the roster row at first on the
+        theory that a preview costs a file read — it does not: `_derive_snippet`
+        is a backwards scan of a list this process already holds, returning at
+        the first visible message. The one derived field that genuinely IS
+        expensive is the SEARCH vocabulary, which casefolds every message of
+        every chat, and that stays where it is — in the snapshot."""
+        return SessionLog._derive_snippet(session.agent.messages[1:])
+
     def _hello(
         self,
         session: Session,
@@ -2960,16 +2971,24 @@ class WebServer:
     #    missed something" and ask for a snapshot. Without it this is the same
     #    silent drift in a new costume.
     #
-    # What the row carries is deliberately only what the server holds IN
-    # MEMORY. The timestamps a row also needs are the client's to stamp on
-    # arrival — see the client's own note — because deriving them here would
-    # mean parsing the session's log, and a chat that just did something has
-    # just changed its file, so the parse cache is guaranteed to miss at
-    # exactly the moment a transition fires.
+    # What the row carries is everything the server ALREADY HOLDS about a
+    # session it is running — which, since it is the thing that ran the model
+    # and wrote the answer, is nearly all of it. Title and preview both derive
+    # from the in-memory conversation; state and cwd are attributes.
+    #
+    # Two things are deliberately absent, for two different reasons. The
+    # TIMESTAMPS are the client's to stamp on arrival (see the client's note):
+    # deriving them here would mean parsing the session's log, and a chat that
+    # just did something has just changed its file, so the parse cache is
+    # guaranteed to miss at exactly the moment a transition fires. The SEARCH
+    # vocabulary is absent because it is the one derived field that is
+    # genuinely expensive — it casefolds every message of every chat — and it
+    # belongs to the snapshot, which is where a query is answered anyway.
     def _roster_row(self, session: Session) -> dict:
         return {
             "name": session.name,
             "title": self._title(session),
+            "snippet": self._snippet(session),
             "state": session.state(),
             "origin": session.origin,
             "cwd": self._row_cwd(session.agent.cwd),

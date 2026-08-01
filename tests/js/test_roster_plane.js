@@ -60,6 +60,8 @@ function rosterWorld() {
 const changed = (seq, name, state, extra = {}) =>
   ({ type: "session_changed", seq, row: { name, state, title: name }, ...extra });
 
+const rowFor = (s, name) => s.attentionRows.find((r) => r.name === name);
+
 const snapshots = (w) =>
   w.calls.filter((c) => c.name === "send" && c.args[0] && c.args[0].type === "sessions").length;
 
@@ -179,6 +181,39 @@ const snapshots = (w) =>
   s.rosterSnapshotLanded(11); // the answer lands: whole again
   s.requestSessions("");
   ok("and stops asking once it is whole again", snapshots(w) === 1);
+}
+
+// ---- the preview rides along ----------------------------------------------
+// It was left off at first on the theory that a preview costs a file read. It
+// does not: it derives from the conversation this server is already holding,
+// exactly like the title. Leaving it out meant the rail showed the preview
+// from the last full list until the next one — a row that was fresh about its
+// state and stale about its content.
+{
+  const w = rosterWorld();
+  const s = w.sandbox;
+  s.rosterSnapshotLanded(0);
+  s.onSessionChanged({
+    type: "session_changed", seq: 1,
+    row: { name: "a.jsonl", state: "idle", title: "the job", snippet: "the answer" },
+  });
+  ok("a delta carries where the conversation left off",
+    rowFor(s, "a.jsonl").snippet === "the answer");
+
+  // A running chat's row is derived mid-turn, when the last visible message may
+  // still be the previous answer — and a row with nothing to say must not wipe
+  // what this device can still show.
+  s.onSessionChanged(changed(2, "a.jsonl", "running"));
+  ok("a row with no preview leaves the one we had alone",
+    rowFor(s, "a.jsonl").snippet === "the answer");
+  ok("…while the state it DOES have an opinion about still lands",
+    rowFor(s, "a.jsonl").state === "running");
+
+  // And the merge over the offline mirror prefers it, since the mirror's copy
+  // is only as fresh as the last sync.
+  const merged = s.railRows([{ name: "a.jsonl", title: "old", snippet: "stale", ts: 0 }], false);
+  ok("the mirror's older preview gives way to the pushed one",
+    merged.find((r) => r.name === "a.jsonl").snippet === "the answer");
 }
 
 report("test_roster_plane.js");
