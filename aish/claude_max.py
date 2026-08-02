@@ -329,6 +329,10 @@ class ClaudeMaxAgent:
             raise
         except Exception as exc:  # noqa: BLE001 — subprocess/transport errors
             raise ModelUnavailable(str(exc)) from exc
+        # The SDK's answer is final by the time it lands here, so Verify runs
+        # in its note-only mode: no ask (there is no loop to ask into, and the
+        # text has already streamed), but the rules still get their say.
+        result = self.inner.verify_final(result)
         self._record({"role": "assistant", "content": result})
         return result
 

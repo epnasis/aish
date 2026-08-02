@@ -65,15 +65,36 @@ TRIGGER_ALWAYS = "always"
 VERB_ANSWER_FROM = "answer_from"
 VERB_NEVER_USE = "never_use"
 VERB_MUST_TELL_ME_WHEN = "must_tell_me_when"
-VERBS = frozenset({VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_TELL_ME_WHEN})
+VERB_MUST_FIRST = "must_first"
+VERB_ANSWER_MUST_INCLUDE = "answer_must_include"
+VERB_ANSWER_MUST_NOT = "answer_must_not"
+VERBS = frozenset({
+    VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_TELL_ME_WHEN,
+    VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT,
+})
+# Verbs decided at the END of a turn, against the answer and the turn's own
+# record — not before a call. The gate cannot see either.
+VERIFY_VERBS = frozenset({VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT})
 # Designed, unbuilt — named here so a lint failure can say what is MISSING
 # rather than merely that the file is wrong (#205).
 VERBS_DESIGNED = {
-    "answer_must_include": "the answer must contain something — needs the Verify point",
-    "answer_must_not": "the answer must avoid something — needs the Verify point",
-    "must_first": "do A before B — needs the sequence check",
     "ask_me_first": "hold for the owner — needs the hold verb",
 }
+
+# What `answer_must_include:` / `answer_must_not:` accept. A named detector, or
+# `{pattern: <regex>}` for anything else — both are STRUCTURAL, which is the
+# admission price: a verb ships only if it compiles to a declared check. A free
+# phrase ("be terser") is a judged question and is refused by name until that
+# tier exists, rather than shipping as a promise nothing keeps.
+DETECTOR_LINKS_READ = "links_to_what_you_read"
+DETECTOR_RAW_IMAGES = "raw_image_links"
+ANSWER_DETECTORS = {
+    DETECTOR_LINKS_READ: "every page you read appears as a link in the answer",
+    DETECTOR_RAW_IMAGES: "a markdown image link that did not come from show_image",
+}
+
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
+_MD_LINK_RE = re.compile(r"\]\(\s*(https?://[^)\s]+)|(?<![\w(])(https?://[^\s)<>\]]+)")
 
 # `answer_from: material` — the obligation names THE MATERIAL THE OWNER HANDED
 # OVER, not a tool. The reader is resolved at bind time, so one rule covers
@@ -239,6 +260,18 @@ FAIL_DEFAULT = FAIL_HOLD  # over-restriction is the safe direction (R1)
 # than GATE_MAX_REFUSALS so tuning the skill gate cannot silently retune this.
 RULE_MAX_REFUSALS = 2
 
+# How many times a rule may ASK for the answer to be reworked before it gives
+# up and lets it through with a note. Same family as the refusal bound, its own
+# constant so tuning one cannot silently retune the other. The owner is the
+# loop only at the bound, which is the point: he would rather aish did the
+# asking than do it himself.
+RULE_MAX_ASKS = 2
+
+# Decisions and statuses that mean the call did not deliver. Named here rather
+# than imported from agent.py, which imports this module.
+REFUSED_DECISIONS = frozenset({"denied", "held", "blocked", "rejected"})
+STATUS_FAILED = "failed"
+
 # Write-time caps (contract §8.5) — named, so a truncated record can say which
 # cap cut it.
 RULE_EVAL_MAX = 24  # evaluated[] rows; abstentions drop first, binds never
@@ -338,6 +371,7 @@ class Binding:
     present: tuple[str, ...] = ()  # material already in context; no reader to call
     # Turn state.
     rounds: int = 0  # refusals issued so far
+    asks: int = 0  # verify reworks requested so far
     max_rounds: int = RULE_MAX_REFUSALS
     overridden: bool = False  # the owner allowed the violation for this turn
     route_calls: int = 0
@@ -560,6 +594,12 @@ def _compile(front: dict) -> _Compiled:
         )
     if prohibited := _as_list(then.get(VERB_NEVER_USE)):
         obligations.append({"verb": VERB_NEVER_USE, "what": prohibited})
+    if first := str(then.get(VERB_MUST_FIRST, "") or "").strip():
+        obligations.append({"verb": VERB_MUST_FIRST, "capability": first})
+    for verb in (VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT):
+        if (value := then.get(verb)) in (None, ""):
+            continue
+        obligations.append({"verb": verb, **_answer_check(verb, value)})
     if state := str(then.get(VERB_MUST_TELL_ME_WHEN, "") or "").strip():
         # Declared, seeded as prose, enforced at Verify — never at the gate.
         obligations.append({"verb": VERB_MUST_TELL_ME_WHEN, "state": state})
@@ -571,6 +611,28 @@ def _compile(front: dict) -> _Compiled:
     return _Compiled(
         trigger, tuple(obligations), pattern, contains, field_name, equals,
         not_equals, action,
+    )
+
+
+def _answer_check(verb: str, value: Any) -> dict:
+    """Compile an `answer_must_*` value into a declared, structural check."""
+    if isinstance(value, dict):
+        pattern = str(value.get("pattern", "") or "").strip()
+        if not pattern:
+            raise RuleError(f"`{verb}:` needs `pattern:` under it, or a detector name")
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise RuleError(f"unparseable `{verb}: pattern:` — {exc}") from exc
+        return {"pattern": pattern}
+    name = str(value).strip()
+    if name in ANSWER_DETECTORS:
+        return {"detector": name}
+    raise RuleError(
+        f"`{verb}: {name!r}` is a plain phrase, which only a judge can check, and "
+        "the judged tier is not built. Use a detector — "
+        + ", ".join(sorted(ANSWER_DETECTORS))
+        + f" — or a structural check: `{verb}: {{pattern: <regex>}}`."
     )
 
 
@@ -897,14 +959,18 @@ def resolve_route(rule: Rule, evidence: dict) -> tuple[list[str], list[str]]:
     return readers, refs
 
 
-def unsatisfiable(readers: list[str], known_tools: set[str] | None) -> list[str]:
+def unsatisfiable(rule: Rule, readers: list[str], known_tools: set[str] | None) -> list[str]:
     """Routed readers that are not exposed. Caught at BIND time so "the rule
     bound but its tool was gone" is a recorded fact rather than an inference
     from a later failure — a route to a missing tool would otherwise refuse
     every alternative and offer nothing."""
     if not known_tools:
         return []
-    return [reader for reader in readers if reader not in known_tools]
+    missing = [reader for reader in readers if reader not in known_tools]
+    for obligation in rule.obligations:
+        if obligation["verb"] == VERB_MUST_FIRST and obligation["capability"] not in known_tools:
+            missing.append(str(obligation["capability"]))
+    return missing
 
 
 def bind(
@@ -917,7 +983,7 @@ def bind(
 ) -> Binding:
     readers, sources = resolve_route(rule, evidence)
     present = present_sources(evidence)
-    missing = unsatisfiable(readers, known_tools)
+    missing = unsatisfiable(rule, readers, known_tools)
     obligations = []
     for obligation in rule.obligations:
         if obligation["verb"] == VERB_ANSWER_FROM and obligation["to"] == ROUTE_SOURCE:
@@ -1166,6 +1232,213 @@ def _refusal_text(binding: Binding, tool: str) -> str:
     )
 
 
+# ------------------------------------------------------------------ verify
+
+
+@dataclass
+class TurnEvidence:
+    """What a verify check is a function of: the answer the model proposes to
+    deliver, and the harness's own record of what ran this turn.
+
+    Both halves matter. A check over the answer ALONE can only be syntactic —
+    anything about whether the answer is grounded has to join it against what
+    actually happened, and the model does not author the trace."""
+
+    answer: str = ""
+    calls: tuple[dict, ...] = ()  # {"tool", "args", "status"} per call, in order
+
+    def called(self, capability: str) -> bool:
+        """Whether the capability actually RAN. A refused call is not a call:
+        conflating "the gate stopped it" with "it never happened" would have
+        verify ask for something the harness had just forbidden, and would let
+        a blocked reader satisfy a `must_first` with nothing behind it."""
+        return any(
+            call.get("tool") == capability and _ran(call) for call in self.calls
+        )
+
+    def refused(self, capability: str) -> bool:
+        """Proposed and stopped by a gate. Distinct from never tried, because
+        re-asking would goad the model against the harness's own refusal."""
+        return any(
+            call.get("tool") == capability and not _ran(call) for call in self.calls
+        )
+
+    def hosts_read(self) -> list[str]:
+        """Hosts actually FETCHED this turn, in order — the join's left side.
+        A refused or failed fetch is excluded, or the answer would be required
+        to link a page nobody read: an unsatisfiable ask that burns the bound."""
+        seen: list[str] = []
+        for call in self.calls:
+            if not _ran(call):
+                continue
+            url = str((call.get("args") or {}).get("url", "") or "")
+            host = host_of(url) if url else ""
+            if host and host not in seen:
+                seen.append(host)
+        return seen
+
+
+def _ran(call: dict) -> bool:
+    """A call that reached its implementation and did not come back failed."""
+    if call.get("decision") in REFUSED_DECISIONS:
+        return False
+    return call.get("status") != STATUS_FAILED
+
+
+@dataclass
+class VerifyFailure:
+    """One unmet obligation, and the question that will be put to the model.
+
+    `ask` is a GOAD, never a verdict: it provokes the work, the work lands in
+    the trace, and the trace is what the next check reads. Nothing the model
+    replies is ever an input to a verdict."""
+
+    binding: Binding
+    obligation: dict
+    evidence: dict
+    ask: str
+    askable: bool = True
+
+    @property
+    def verb(self) -> str:
+        return str(self.obligation["verb"])
+
+
+MUST_FIRST_ASK = (
+    "Before this answer can be delivered, the rule '{rule}' requires {capability} "
+    "to have run this turn, and it has not. {description}\n"
+    "Call {capability} now and then answer from what it returns."
+)
+
+MUST_INCLUDE_ASK = (
+    "The rule '{rule}' requires the answer to include {what}, and it does not. "
+    "{description}\n"
+    "Add it and give the answer again."
+)
+
+MUST_NOT_ASK = (
+    "The rule '{rule}' forbids the answer containing {what}, and it does. "
+    "{description}\n"
+    "Rewrite the answer without it."
+)
+
+LINKS_READ_ASK = (
+    "The rule '{rule}' requires every page you read to appear as a link in the "
+    "answer. You read {missing} and did not link {missing}. {description}\n"
+    "Add the link and give the answer again."
+)
+
+
+def has_verify(bindings: list[Binding]) -> bool:
+    """Whether any active binding decides something at turn end. Only these
+    turns pay the cost of holding their answer back from the stream."""
+    return any(
+        obligation["verb"] in VERIFY_VERBS
+        for binding in bindings
+        # An overridden binding decides nothing at turn end (`verify` skips it),
+        # so counting it here would hold a turn's answer back from the stream to
+        # run no checks — paying the cost with none of the benefit.
+        if not binding.overridden
+        for obligation in binding.obligations
+    )
+
+
+def verify(bindings: list[Binding], evidence: TurnEvidence) -> list[VerifyFailure]:
+    """Every unmet verify obligation across the active bindings.
+
+    Structural throughout: a check either joins the answer against facts the
+    harness recorded, or is purely syntactic over the answer's text. A semantic
+    check over the model's own words is decoration and has no home here.
+    """
+    failures: list[VerifyFailure] = []
+    for binding in bindings:
+        if binding.overridden:
+            continue
+        for obligation in binding.obligations:
+            if obligation["verb"] not in VERIFY_VERBS:
+                continue
+            failure = _verify_one(binding, obligation, evidence)
+            if failure is not None:
+                failures.append(failure)
+    return failures
+
+
+def _verify_one(
+    binding: Binding, obligation: dict, evidence: TurnEvidence
+) -> VerifyFailure | None:
+    rule = binding.rule
+    common = {"rule": rule.name, "description": rule.description}
+    verb = obligation["verb"]
+
+    if verb == VERB_MUST_FIRST:
+        capability = str(obligation["capability"])
+        if evidence.called(capability):
+            return None
+        blocked = evidence.refused(capability)
+        return VerifyFailure(
+            binding, obligation,
+            {
+                "capability": capability,
+                "called": [c.get("tool") for c in evidence.calls],
+                "refused": blocked,
+            },
+            MUST_FIRST_ASK.format(capability=capability, **common),
+            # Asking would send the model back at a call another gate just
+            # stopped. Unmet, and said — never re-asked.
+            askable=not blocked,
+        )
+
+    if detector := obligation.get("detector"):
+        return _verify_detector(binding, obligation, evidence, detector, common)
+
+    pattern = re.compile(str(obligation["pattern"]))
+    hit = pattern.search(evidence.answer or "")
+    wanted = verb == VERB_ANSWER_MUST_INCLUDE
+    if bool(hit) == wanted:
+        return None
+    template = MUST_INCLUDE_ASK if wanted else MUST_NOT_ASK
+    return VerifyFailure(
+        binding, obligation,
+        {"pattern": obligation["pattern"], "matched": bool(hit)},
+        template.format(what=f"the pattern /{obligation['pattern']}/", **common),
+    )
+
+
+def _verify_detector(
+    binding: Binding, obligation: dict, evidence: TurnEvidence, detector: str, common: dict
+) -> VerifyFailure | None:
+    answer = evidence.answer or ""
+    if detector == DETECTOR_RAW_IMAGES:
+        # show_image hands back a LOCAL path; an http(s) image link in the
+        # answer therefore did not come from it. A join in the cheapest possible
+        # form — no judge, no list of phrases, just where the bytes came from.
+        external = [
+            url for url in _MD_IMAGE_RE.findall(answer)
+            if url.lower().startswith(("http://", "https://"))
+        ]
+        if not external:
+            return None
+        return VerifyFailure(
+            binding, obligation, {"detector": detector, "found": external[:4]},
+            MUST_NOT_ASK.format(what=ANSWER_DETECTORS[detector], **common)
+            + f"\nThese are external image links: {', '.join(external[:4])}. "
+            "Call show_image for each and use the markdown it returns.",
+        )
+
+    # DETECTOR_LINKS_READ: every host fetched this turn appears in the answer.
+    read = evidence.hosts_read()
+    if not read:
+        return None
+    linked = {host_of(u) for group in _MD_LINK_RE.findall(answer) for u in group if u}
+    missing = [host for host in read if host not in linked]
+    if not missing:
+        return None
+    return VerifyFailure(
+        binding, obligation, {"detector": detector, "read": read, "missing": missing},
+        LINKS_READ_ASK.format(missing=", ".join(missing), **common),
+    )
+
+
 # -------------------------------------------------------------------- seed
 
 
@@ -1225,11 +1498,22 @@ def _obligation_line(obligation: dict) -> str:
             f"· MUST NOT call {what} for this turn. If you genuinely need another "
             "source, ASK the user — do not go and get one."
         )
-    return (
-        f"· MUST state it plainly if this happens: {obligation['state']} — never "
-        "patch over it with another source, and never present someone else's "
-        "material as if it came from the source you were given."
-    )
+    if verb == VERB_MUST_TELL_ME_WHEN:
+        return (
+            f"· MUST state it plainly if this happens: {obligation['state']} — never "
+            "patch over it with another source, and never present someone else's "
+            "material as if it came from the source you were given."
+        )
+    if verb == VERB_MUST_FIRST:
+        return (
+            f"· MUST call {obligation['capability']} before answering. The answer "
+            "is checked for it, and held back until it has run."
+        )
+    what = obligation.get("detector") or f"the pattern /{obligation.get('pattern')}/"
+    described = ANSWER_DETECTORS.get(str(what), what)
+    if verb == VERB_ANSWER_MUST_INCLUDE:
+        return f"· MUST: the answer includes {described}. It is checked before you see it."
+    return f"· MUST NOT: the answer contains {described}. It is checked before delivery."
 
 
 # ------------------------------------------------------------------ records

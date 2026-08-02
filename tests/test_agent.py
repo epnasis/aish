@@ -50,7 +50,10 @@ class FakeChat:
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        # The streaming shape ollama yields, so a test that wires `on_token`
+        # exercises the same path the web server uses rather than a second one.
+        return iter([response]) if kwargs.get("stream") else response
 
 
 def make_agent(responses, approve=lambda _cmd: True, **kwargs):
@@ -5175,6 +5178,13 @@ def records(logged, kind):
     return [r for r in logged if r.get("kind") == kind]
 
 
+def gates(logged):
+    """Gate verdicts at the DISPATCH point. Verify emits `gate` records too
+    (contract §7 maps `verify_pass` onto `gate{at:"verify"}`), and a test about
+    what the pre-dispatch gate decided must not see them."""
+    return [r for r in records(logged, "gate") if r.get("at") != "verify"]
+
+
 def _seeded_reminders(agent):
     """The per-task reminder carrying the rules block. messages[0] is excluded:
     the system prompt QUOTES the header (it tells the model what a rules block
@@ -5331,7 +5341,7 @@ class TestRuleGate:
             step_log=steps.append,
         )
         agent.run_task(TASK)
-        [gate] = records(steps, "gate")
+        [gate] = gates(steps)
         [tool_step] = [s for s in steps if s.get("kind") == "tool"]
         assert gate["call"] == tool_step["call"] and gate["call"] > 0
         assert gate["verdict"] == "refused" and gate["at"] == "gate"
@@ -5360,7 +5370,7 @@ class TestRuleGate:
             agent.run_task(TASK)
         finally:
             importlib.reload(agent_module.web)
-        [gate] = records(steps, "gate")
+        [gate] = gates(steps)
         assert gate["verdict"] == "allowed" and gate["tool"] == "read_url"
 
     def test_no_gate_record_when_no_rule_bound(self, tmp_path):
@@ -5558,16 +5568,16 @@ class TestBoundedRefusalAndEscalation:
         agent.run_task(TASK)
         last = tool_messages(agent.messages)[-1]["content"]
         assert "STOP retrying" in last
-        assert records(steps, "gate")[-1]["escalated"] is True
+        assert gates(steps)[-1]["escalated"] is True
 
     def test_the_escalation_records_the_round_it_escalated_on(self, tmp_path):
         steps = []
         agent, _ = rules_agent(tmp_path, self._responses(3), step_log=steps.append)
         agent.approve_tool = lambda name, args, preview: False
         agent.run_task(TASK)
-        gates = records(steps, "gate")
-        assert [g["round"] for g in gates] == [1, 2, 3]
-        assert [g["escalated"] for g in gates] == [False, False, True]
+        verdicts = gates(steps)
+        assert [g["round"] for g in verdicts] == [1, 2, 3]
+        assert [g["escalated"] for g in verdicts] == [False, False, True]
 
     def test_one_call_leaves_exactly_one_verdict_per_binding(self, tmp_path):
         """A per-gate tally must not count one allowance twice: the override
@@ -5618,7 +5628,7 @@ class TestARuleNeverLicenses:
         assert "elsewhere.example" in result and "NOT EXECUTED" in result
         # Both verdicts exist and they disagree, which is the point: the rule
         # permitted the TOOL, the egress gate withheld the HOST.
-        [gate] = records(steps, "gate")
+        [gate] = gates(steps)
         assert gate["verdict"] == "allowed" and gate["tool"] == "read_url"
         [tool_step] = [s for s in steps if s.get("kind") == "tool"]
         assert tool_step["ok"] is False and tool_step["decision"] == "blocked"
@@ -5831,3 +5841,271 @@ You MUST always use the show_image tool.
         warned = [line for line in seen if "not in force" in line]
         assert len(warned) == 2
         assert {"half-written" in w for w in warned} == {True, False}
+
+
+# A verify rule whose obligation is met by any ordinary answer: the pass path.
+RULE_VERIFY_SATISFIED = """---
+name: no-hedging
+description: Answers do not hedge.
+when: always
+then:
+  answer_must_not:
+    pattern: "as an AI"
+---
+"""
+
+RULE_VERIFY = """---
+name: live-price
+description: A price you quote comes from the store's page, this turn.
+when: always
+then:
+  must_first: read_url
+  answer_must_include: links_to_what_you_read
+---
+
+Quote prices only from the page you fetched this turn.
+"""
+
+
+class TestVerify:
+    """The turn's answer is a PROPOSAL until the rules have seen it. Verify
+    runs inside the loop for that reason: outside it there is no way to
+    continue a turn — the budget, the stop gate and the terminators all assume
+    final text is final, and a second answer is a second answer in an
+    append-only log."""
+
+    def test_an_answer_that_satisfies_its_rules_is_delivered_untouched(self, tmp_path):
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://shop.test/a")]),
+                model_says("It costs 40 EUR — [shop](https://shop.test/a)."),
+            ],
+            rule_texts=(RULE_VERIFY,),
+        )
+        agent_module.web.read_url = lambda *a, **k: "the page says 40 EUR"
+        try:
+            answer = agent.run_task("what does the mouse cost")
+        finally:
+            importlib.reload(agent_module.web)
+        assert answer == "It costs 40 EUR — [shop](https://shop.test/a)."
+        assert "[aish]" not in answer
+
+    def test_an_unmet_rule_sends_the_turn_back_instead_of_delivering(self, tmp_path):
+        """The whole point: the answer is not the end of the turn."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("It costs about 40 EUR."),          # no page read
+                model_says(tool_calls=[tool_call("read_url", url="https://shop.test/a")]),
+                model_says("It costs 40 EUR — [shop](https://shop.test/a)."),
+            ],
+            rule_texts=(RULE_VERIFY,),
+        )
+        agent_module.web.read_url = lambda *a, **k: "the page says 40 EUR"
+        try:
+            answer = agent.run_task("what does the mouse cost")
+        finally:
+            importlib.reload(agent_module.web)
+        assert answer == "It costs 40 EUR — [shop](https://shop.test/a)."
+        asked = [m for m in agent.messages if m.get("role") == "user"
+                 and "live-price" in str(m.get("content"))]
+        assert asked, "the model was never told what was missing"
+        assert "read_url" in asked[0]["content"]
+
+    def test_the_ask_names_the_VALUE_not_a_yes_or_no(self, tmp_path):
+        """Asking for confirmation invites a yes; asking for the thing itself
+        requires having looked. The ask is a goad — it provokes the work, the
+        work lands in the trace, and the TRACE is what the next check reads."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("It costs about 40 EUR."),
+                model_says(tool_calls=[tool_call("read_url", url="https://shop.test/a")]),
+                model_says("It costs 40 EUR — [shop](https://shop.test/a)."),
+            ],
+            rule_texts=(RULE_VERIFY,),
+        )
+        agent_module.web.read_url = lambda *a, **k: "40 EUR"
+        try:
+            agent.run_task("price?")
+        finally:
+            importlib.reload(agent_module.web)
+        ask = [m["content"] for m in agent.messages if m.get("role") == "user"
+               and "live-price" in str(m.get("content"))][0]
+        assert "Call read_url now" in ask
+        assert "did you" not in ask.lower()
+
+    def test_the_model_saying_it_did_is_not_evidence(self, tmp_path):
+        """It answers again claiming it checked, without calling anything. The
+        verdict reads the trace, so the claim changes nothing."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("It costs about 40 EUR."),
+                model_says("I did check the live price. It is 40 EUR."),
+                model_says("Yes, definitely checked. 40 EUR."),
+            ],
+            rule_texts=(RULE_VERIFY,),
+        )
+        answer = agent.run_task("price?")
+        assert "[aish] rule 'live-price' not followed" in answer
+
+    def test_the_asks_are_bounded_and_the_answer_still_ships(self, tmp_path):
+        """Holding it hostage would trade a silent failure for a wedged turn."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(f"about 40 EUR ({i})") for i in range(4)],
+            rule_texts=(RULE_VERIFY,),
+        )
+        answer = agent.run_task("price?")
+        asked = [m for m in agent.messages if m.get("role") == "user"
+                 and "live-price" in str(m.get("content"))]
+        assert len(asked) == rules_module.RULE_MAX_ASKS
+        assert answer.startswith("about 40 EUR")
+        assert "[aish] rule 'live-price' not followed" in answer
+
+    def test_the_note_is_written_by_the_harness_not_asked_of_the_model(self, tmp_path):
+        """A disclosure the model is asked to make is one it can skip."""
+        agent, chat = rules_agent(
+            tmp_path,
+            [model_says(f"about 40 EUR ({i})") for i in range(4)],
+            rule_texts=(RULE_VERIFY,),
+        )
+        answer = agent.run_task("price?")
+        note = [line for line in answer.splitlines() if line.startswith("[aish]")]
+        assert note and "live-price" in note[0]
+        # The model never produced that text.
+        assert not any("[aish]" in str(m.get("content", "")) for m in agent.messages
+                       if m.get("role") == "assistant")
+
+    def test_verify_records_its_verdicts(self, tmp_path):
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(f"about 40 EUR ({i})") for i in range(4)],
+            rule_texts=(RULE_VERIFY,),
+            step_log=steps.append,
+        )
+        agent.run_task("price?")
+        verify_records = [g for g in records(steps, "gate") if g["at"] == "verify"]
+        assert verify_records, "verify decided and recorded nothing"
+        assert [g["round"] for g in verify_records][:2] == [1, 2]
+        assert verify_records[-1]["escalated"] is True
+        # The answer SHIPPED with a note. Calling that "stopped" would have the
+        # ledger count delivered turns as terminations.
+        assert verify_records[-1]["verdict"] == "advised"
+        assert verify_records[0]["gate"] == "rule.must_first"
+
+    def test_a_refused_call_does_not_count_as_a_call_that_ran(self, tmp_path):
+        """Conflating "the gate stopped it" with "it never happened" would let a
+        blocked reader satisfy a must_first with nothing behind it."""
+        evidence = rules_module.TurnEvidence(
+            answer="about 40 EUR",
+            calls=({"tool": "read_url", "args": {"url": "https://shop.example/x"},
+                    "decision": "denied", "status": "failed"},),
+        )
+        assert evidence.called("read_url") is False
+        assert evidence.refused("read_url") is True
+        # …and the fetch it never made is not a host anyone read.
+        assert evidence.hosts_read() == []
+
+    def test_a_refused_capability_is_reported_and_never_re_asked(self, tmp_path):
+        """The goad must not send the model back at a call another gate just
+        stopped — that is the harness arguing with itself."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path, [], rule_texts=(RULE_VERIFY,), step_log=steps.append
+        )
+        agent.seed_rules("price?")
+        agent._note_turn_call(
+            "read_url", {"url": "https://shop.example/x"}, "USER DENIED"
+        )
+        agent._turn_calls[-1]["decision"] = "denied"
+        assert agent._verify_answer("about 40 EUR") is None, "a refused call was goaded"
+        assert any("not followed" in note for note in agent._not_followed)
+        assert all(g["verdict"] != "refused"
+                   for g in records(steps, "gate") if g["at"] == "verify")
+
+    def test_a_satisfied_rule_records_that_it_was_checked(self, tmp_path):
+        """A satisfied rule and an unchecked one must not look identical in the
+        log — absence is never the evidence."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says("hello")],
+            rule_texts=(RULE_VERIFY_SATISFIED,),
+            step_log=steps.append,
+        )
+        agent.run_task("hi")
+        passes = [g for g in records(steps, "gate")
+                  if g["at"] == "verify" and g["verdict"] == "allowed"]
+        assert passes and passes[0]["evidence"]["checked"] is True
+
+    def test_a_rule_deciding_nothing_at_turn_end_records_no_check(self, tmp_path):
+        """`checked: true` must mean something was checked."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path, [model_says("hello")], rule_texts=(RULE_SESSION,),
+            origin="automation", step_log=steps.append,
+        )
+        agent.run_task("hi")
+        assert not [g for g in records(steps, "gate") if g["at"] == "verify"]
+
+    def test_a_rejected_answer_never_reaches_the_log(self, tmp_path):
+        """The owner never saw it live; a page reload must not show it either,
+        or one turn has two answers."""
+        logged = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says("about 40 EUR")] * 4,
+            rule_texts=(RULE_VERIFY,),
+        )
+        agent.on_message = logged.append
+        answer = agent.run_task("price?")
+        answers = [m["content"] for m in logged if m.get("role") == "assistant"]
+        assert answers == ["about 40 EUR"], (
+            f"a rejected proposal was logged as an answer: {answers}"
+        )
+        assert "not followed" in answer
+
+    def test_a_turn_no_rule_governs_is_untouched(self, tmp_path):
+        agent, _ = rules_agent(
+            tmp_path, [model_says("plain answer")], rule_texts=()
+        )
+        assert agent.run_task("hello") == "plain answer"
+
+
+class TestHeldAnswer:
+    """A bound turn does not stream. The promise is that a rule is checked
+    BEFORE the owner reads the answer, and on a device that streams token by
+    token he has read it long before the check runs."""
+
+    def test_a_bound_turn_holds_its_answer_until_it_passes(self, tmp_path):
+        streamed = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("It costs about 40 EUR."),
+                model_says(tool_calls=[tool_call("read_url", url="https://shop.test/a")]),
+                model_says("It costs 40 EUR — [shop](https://shop.test/a)."),
+            ],
+            rule_texts=(RULE_VERIFY,),
+            on_token=streamed.append,
+        )
+        agent_module.web.read_url = lambda *a, **k: "40 EUR"
+        try:
+            agent.run_task("price?")
+        finally:
+            importlib.reload(agent_module.web)
+        out = "".join(streamed)
+        assert "40 EUR — [shop]" in out, "the accepted answer never reached the client"
+        assert "about 40 EUR" not in out, "the rejected answer was shown to the owner"
+
+    def test_an_unbound_turn_streams_as_before(self, tmp_path):
+        streamed = []
+        agent, _ = rules_agent(
+            tmp_path, [model_says("plain answer")], rule_texts=(), on_token=streamed.append
+        )
+        agent.run_task("hello")
+        assert "plain answer" in "".join(streamed)

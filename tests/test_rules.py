@@ -773,11 +773,23 @@ class TestTheWholeMaterialChannel:
         toward what exists, or to extend the engine. "Not expressible" alone
         gives him neither choice."""
         rule = load_one(tmp_path, CANONICAL.replace(
-            "  never_use: [web_search]", "  answer_must_not: a raw markdown image link"
+            "  never_use: [web_search]", "  ask_me_first: true"
         ))
         assert "designed but not built yet" in rule.error
-        assert "Verify point" in rule.error
+        assert "hold for the owner" in rule.error
         assert ", ".join(sorted(rules.VERBS)) in rule.error
+
+    def test_a_phrase_only_a_judge_could_check_is_refused_by_name(self, tmp_path):
+        """The admission line, at the one place it is tempting to bend: a verb
+        ships only if it compiles to a declared check. "be less annoying" is a
+        judged question, and the judged tier is not built — so it is refused
+        with the two structural forms that ARE available, rather than shipping
+        as a promise nothing keeps."""
+        rule = load_one(tmp_path, CANONICAL.replace(
+            "  never_use: [web_search]", "  answer_must_not: be less annoying about it"
+        ))
+        assert "only a judge can check" in rule.error
+        assert "raw_image_links" in rule.error and "pattern" in rule.error
 
 
 class TestEnabledFlag:

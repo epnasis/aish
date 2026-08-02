@@ -59,8 +59,28 @@ The runtime object is the **binding**: when a trigger matches a turn, the harnes
 |---|---|---|---|
 | **Seed** | turn start | evaluate the corpus, create bindings, announce them (R5) | **built** |
 | **Gate** | pre-dispatch | membership against the binding: route / prohibit / sequence / hold | **built** |
-| **Verify** | turn end | did the deliverable satisfy route / shape / disclose? | **not built** |
+| **Verify** | turn end | did the ANSWER satisfy the rules, and if not, ask | **built** |
 | **Audit** | offline | the ledger and the weekly curate pass, for rules too fuzzy or too expensive to check per turn (style rules like sycophancy belong here, not in a per-turn judge) | not built |
+
+---
+
+## Verify — the answer is a proposal until the rules have seen it
+
+**Check the ANSWER, not the prompt.** This is the reframe that made the whole point cheap. *"Verify prices live"* looked like it needed a semantic trigger — *is this about buying something?* — which no pattern can catch and which drags a calibration bill behind it. Written on the answer side it is free and deterministic:
+
+> the answer quotes a price → **a read of the store's own domain must exist in this turn's trace**
+
+Moving the condition from *what the owner asked* to *what the model produced* is what turned most of the behaviour-shaped corpus from "unverifiable" into plain code — and it is why scored triggers are cut rather than deferred.
+
+**The sorting law.** A verify check either **joins the answer against harness-recorded facts** or is **purely syntactic**. A semantic check over the model's own text alone is decoration and has no home here. `links_to_what_you_read` is the strongest kind — the model does not author the trace, so it cannot fake having read a page.
+
+**It runs INSIDE the loop.** A finished answer becomes a proposal; the check happens before delivery. Outside the loop there is no way to continue a turn — the step budget, the stop gate and the terminators all assume final text is final, and a second answer would be a second answer in an append-only log. `TestVerify`.
+
+**Asking is a goad, never a verdict.** A failed check does not end the turn: the harness composes a question and the turn continues. The question provokes the work, the work lands in the trace, and **the trace is what the next check reads** — the model's reply is never an input to any verdict. So *"I did check, honestly"* changes nothing, which is pinned. Ask for the **value**, not for confirmation: *"did you check?"* invites a yes, *"call read_url now"* requires having done it.
+
+**Bounded, and the answer always ships.** `RULE_MAX_ASKS` (2) per binding. Past that the answer is delivered carrying a line the **harness** writes — not requested of the model, so it cannot be skipped, and identical attended or not, because a rule that was tried and failed must be visible to the owner and not only to automation. Holding the answer hostage would trade one silent failure for a wedged turn.
+
+**A bound turn does not stream.** The promise is that a rule is checked *before* the owner reads the answer, and on a device that streams token by token he has read it long before the check runs. So a turn with verify obligations withholds its tokens until the checks pass. The cost is the owner's, deliberately: *"I'd rather have a verified answer than a faster one that is wrong."* Paid only on turns a rule governs. `TestHeldAnswer`.
 
 **Verify is the genuinely new capability.** Nothing in aish has ever checked the *answer*: the loop detector and the stall budget are mid-loop. It is where the #190 incident — a 4,600-character answer sourced entirely from news sites and presented as a video's content — would have been caught, and it is the next slice.
 
@@ -161,7 +181,8 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 | `answer_from: <tool> \| material` | the deliverable comes from here | **yes** |
 | `never_use: [tools]` | these tools are refused for the turn | **yes** |
 | `must_tell_me_when: <plain phrase>` | this failure must be stated to the owner | declared; enforced at Verify |
-| `answer_must_include:` / `answer_must_not:` | the answer must contain / avoid something | no |
+| `must_first: <cap>` | this capability must have run before the answer | **yes** |
+| `answer_must_include:` / `answer_must_not:` | a named detector, or `{pattern: <regex>}` | **yes** |
 | ~~`keep_in_mind:`~~ | **deleted** — see below | never |
 | `must_first: <action>` | do this before the triggering action | no |
 | `ask_me_first: true` | hold for the owner | no |

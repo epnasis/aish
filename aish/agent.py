@@ -731,6 +731,15 @@ REMEMBER_DENIED = (
     "state the fact in your report instead and let the owner decide."
 )
 
+# aish's own voice in the conversation (#171): `synthetic_kind` classifies a
+# user-role message opening with this as a NOTE, so replay renders it as the
+# harness speaking rather than as a blue bubble the owner never typed.
+AISH_NOTE = "[aish: "
+
+NOT_FOLLOWED_NOTE = (
+    "[aish] rule '{rule}' not followed: {detail}"
+)
+
 REMEMBER_NO_APPROVER = (
     "NOT EXECUTED: this automated session cannot write to memory — a knowledge "
     "write needs the owner's review and no approver is available. State the "
@@ -1040,6 +1049,17 @@ class Agent:
         # case and costs one set-membership test per dispatch.
         self._bindings: list[rules.Binding] = []
         self._binding_seq = itertools.count(1)
+        # What ran this turn, in order — the left side of every verify join.
+        # The model does not author this, which is the whole reason a verify
+        # check can be trusted at all.
+        self._turn_calls: list[dict] = []
+        # Tokens withheld from the client while a bound turn's answer is still
+        # unverified. `None` means stream normally.
+        self._held_answer: list[str] | None = None
+        self._held_entry: dict | None = None
+        # Harness-written lines for rules that could not be satisfied — appended
+        # to the answer at delivery so a failure is never silent.
+        self._not_followed: list[str] = []
         # Rules already reported as broken. A rule file does not fix itself
         # between turns, so warning every turn is nagging, not information —
         # and a warning that is always there is one nobody reads. Session-
@@ -1396,6 +1416,10 @@ class Agent:
         # claude-max never enters. Both entry points re-seed immediately after.
         self._bindings = []
         self._binding_seq = itertools.count(1)
+        self._turn_calls = []
+        self._held_answer = None
+        self._held_entry = None
+        self._not_followed = []
         # Skill-read gates belong to the task that armed them; run_task re-arms
         # from its own preflight right after this reset.
         self._pending_skill_reads = {}
@@ -1505,6 +1529,13 @@ class Agent:
         )
         if rules_text:
             self.mark_rules_seeded()  # the prose reached context — record it
+        if rules.has_verify(self._bindings):
+            # Unconditional, not gated on `on_token`. The hold does two jobs —
+            # keep the answer off the stream AND keep a rejected proposal out
+            # of the log — and only the first one is about streaming. Tying
+            # both to a live token sink logged every rejected answer on any
+            # client that does not stream.
+            self._held_answer = []  # this turn's answer waits for its checks
         if preload.names:
             self._note("⚑ preloaded knowledge: " + ", ".join(preload.names))
             # sim/rail/score diagnostics persist to the session log via the
@@ -1542,6 +1573,12 @@ class Agent:
             # A live "Thinking…" row on the trace timeline; it finalizes to
             # "Thought for Xs" when the turn produced tools, or is dropped when
             # the turn was a plain answer (thinking_cancel below).
+            if self._held_answer is not None:
+                # Per TURN: preamble alongside a turn's tool calls is not part
+                # of the answer, and keeping it would glue a rejected turn's
+                # words onto the delivered one — making the streamed text
+                # differ from what is returned and logged.
+                self._held_answer = []
             self._emit_step(kind="thinking_start")
             self.status.start("thinking")
             try:
@@ -1561,7 +1598,18 @@ class Agent:
                 # tool_use): the backend echoes these verbatim on the next
                 # request instead of reconstructing the turn.
                 entry["raw_blocks"] = raw_blocks
-            self._append(entry)
+            # A bound turn's finished answer is a PROPOSAL. It goes into the
+            # model's own history (the ask that may follow refers to it) but
+            # NOT into the log, or a rejected answer the owner never saw live
+            # would come back as an assistant bubble on the next page load —
+            # two answers for one turn, which is the thing the hold exists to
+            # prevent. It is logged, once, if and when it is released.
+            proposal = self._held_answer is not None and not tool_calls
+            if proposal:
+                self.messages.append(entry)
+                self._held_entry = entry
+            else:
+                self._append(entry)
 
             # Deny means STOP: only a TEXT-ONLY turn clears the stop gate.
             # Clearing on any content would be defeated by chatty preamble (or
@@ -1570,11 +1618,45 @@ class Agent:
             # holds until the model stops and replies with no tool call; that
             # turn also ends the task (normal loop semantics), so the user
             # steers before anything else runs.
+            # Captured BEFORE the clear: a denial's stop gate is lifted by this
+            # very turn, and Verify must not then use the turn to keep going.
+            was_stopped = self._pending_comment_response
             if content and not tool_calls:
                 self._pending_comment_response = False
 
             if not tool_calls:
                 result = content or EMPTY_RESPONSE
+                # VERIFY (#191). A finished answer is a PROPOSAL until the
+                # turn's rules have been checked against it — so the check runs
+                # here, inside the loop, rather than after run_task returns.
+                # Outside it there is no way to continue the turn: the budget,
+                # the stop gate and the terminators all assume final text is
+                # final, and a second answer would be a second answer in an
+                # append-only log.
+                # Deny means STOP, and that outranks Verify (#81 over #191).
+                # Asking here would use the goad to drive the very tool call the
+                # owner just denied — proven live before this guard existed. The
+                # rules still get their say: the checks run, nothing is asked,
+                # and an unmet rule is still SAID, so a denial cannot silence a
+                # disclosure either.
+                unmet = self._verify_answer(result, ask=not was_stopped)
+                if unmet is not None:
+                    # Not delivered. The model is told what is missing and the
+                    # turn goes on — the ask provokes the work, the work lands
+                    # in the trace, and the trace is what the next check reads.
+                    self._release_held(discard=True)
+                    # Close the turn's live row: `continue` would otherwise skip
+                    # the cancel below and leave a Thinking… ticker running for
+                    # every rejected answer, live and on replay.
+                    self._emit_step(
+                        kind="thinking_cancel", secs=turn_secs, tokens=list(usage)
+                    )
+                    # Marked as aish's own words (#171), or replay renders the
+                    # harness's question as a blue bubble the owner never typed.
+                    self._append({"role": "user", "content": AISH_NOTE + unmet + "]"})
+                    continue
+                result = self._release_held(text=result)
+                self._log_held_entry()
                 if not content and self.on_token:
                     self.on_token(result + "\n")
                 self._note(f"✓ answered in {format_secs(turn_secs)}{_tokens_note(usage)}")
@@ -1660,7 +1742,7 @@ class Agent:
         arguments = repr(sorted((function.get("arguments") or {}).items()))
         return (function["name"], arguments, result)
 
-    def _finish_stopped(self, note: str, headline: str) -> str:
+    def _finish_stopped(self, note: str, headline: str) -> str:  # noqa: D401
         """Step budget exhausted or loop detected: one final no-tools turn so
         the model can judge completion and report state (what's done, what
         remains, why it's stuck) instead of the task cutting off with a bare
@@ -1689,6 +1771,8 @@ class Agent:
                 entry["tool_calls"] = tool_calls
             if raw_blocks:
                 entry["raw_blocks"] = raw_blocks
+            # No hold here: this wrap-up turn is terminal by construction, so
+            # it is never a proposal — nothing downstream could release it.
             self._append(entry)
             for call in tool_calls:  # every tool_use still needs a paired result
                 self._append(
@@ -1698,6 +1782,12 @@ class Agent:
                         "content": NOT_EXECUTED_LIMIT,
                     }
                 )
+        # Every exit releases the hold, or a bound turn that ends at the loop
+        # detector, the stall cap or the ceiling delivers NOTHING: the wrap-up
+        # text sits in the buffer and the client shows a dead turn. The note
+        # rides it too — a rule that was not followed must be said on the way
+        # out, whichever way the turn ends.
+        content = self._release_held(text=content)
         if not content and self.on_token:
             self.on_token(headline + "\n")
         return f"{headline}\n\n{content}" if content else headline
@@ -1776,9 +1866,16 @@ class Agent:
                 if message.content:
                     if not parts:
                         self.status.stop()  # erase the live timer line first
-                        self.on_token("\n")
+                        if self._held_answer is None:
+                            self.on_token("\n")
                     parts.append(message.content)
-                    self.on_token(message.content)
+                    if self._held_answer is None:
+                        self.on_token(message.content)
+                    else:
+                        # A bound turn's answer is a proposal until Verify has
+                        # seen it; streaming it would break the promise that a
+                        # rule is checked before the owner reads the answer.
+                        self._held_answer.append(message.content)
                 if message.tool_calls:
                     raw_calls.extend(message.tool_calls)
                 if getattr(message, "raw_blocks", None):
@@ -1787,7 +1884,7 @@ class Agent:
                     usage = _usage(chunk)
             content = "".join(parts)
             thinking = "".join(thinking_parts)
-            if content:
+            if content and self._held_answer is None:
                 self.on_token("\n")
         return content, [self._normalize_call(c) for c in raw_calls], usage, raw_blocks, thinking
 
@@ -2204,6 +2301,7 @@ class Agent:
         # included — so a binding's view of "was the routed tool tried, and did
         # it work?" cannot miss a call that took another branch (#191).
         self._observe_for_rules(name, result)
+        self._note_turn_call(name, args, result)
         return result
 
     def _emit_tool_step(
@@ -2843,6 +2941,170 @@ class Agent:
             )
         for binding in self._bindings:
             binding.note_tool_result(name, status)
+
+    def _verify_answer(self, answer: str, ask: bool = True) -> str | None:
+        """None when the answer may be delivered, else what to ask the model.
+
+        Bounded: RULE_MAX_ASKS per binding. Past that the answer IS delivered —
+        holding it hostage would trade one silent failure for a wedged turn —
+        carrying a line the HARNESS writes saying what was not followed. That
+        line is not requested of the model, so it cannot be skipped, and it
+        reads the same attended or not: a rule that was tried and failed must
+        be visible to the owner, not only to automation.
+        """
+        if not self._bindings:
+            return None
+        evidence = rules.TurnEvidence(answer=answer, calls=tuple(self._turn_calls))
+        failures = rules.verify(self._bindings, evidence)
+        for binding in self._bindings:
+            # "Checked and satisfied" must be distinguishable from "never
+            # checked" — absence is never the evidence (contract corollary 2).
+            # Only bindings that actually decide something at turn end: a pass
+            # for a binding with no verify obligation would claim a check that
+            # never ran.
+            if rules.has_verify([binding]) and not any(
+                f.binding is binding for f in failures
+            ):
+                self._record_verify_pass(binding)
+        if not failures:
+            return None
+        asks, unmet = [], []
+        # ONE round per binding per pass, not one per failing obligation. A rule
+        # with two obligations was burning both its asks in a single round and
+        # getting half the patience the design promises — and the corpus is
+        # built from exactly those.
+        spent: set[str] = set()
+        for failure in failures:
+            binding = failure.binding
+            if not ask or not failure.askable or binding.asks >= rules.RULE_MAX_ASKS:
+                unmet.append(failure)
+                continue
+            if binding.id not in spent:
+                spent.add(binding.id)
+                binding.asks += 1
+            asks.append(failure)
+            self._record_verify(failure, "asked")
+        for failure in unmet:
+            self._record_verify(failure, "not_followed")
+        if not asks:
+            # Delivered, and SAID. Deduplicated: one line per rule, however
+            # many of its obligations went unmet.
+            seen: set[str] = set()
+            notes = []
+            for failure in unmet:
+                if failure.binding.id in seen:
+                    continue
+                seen.add(failure.binding.id)
+                notes.append(self._note_for(failure))
+            self._not_followed = notes
+            return None
+        self._note("⚖ " + asks[0].binding.name + ": answer held for rework")
+        return "\n\n".join(f.ask for f in asks)
+
+    @staticmethod
+    def _note_for(failure: "rules.VerifyFailure") -> str:
+        return NOT_FOLLOWED_NOTE.format(
+            rule=failure.binding.name, detail=failure.ask.split("\n")[0]
+        )
+
+    def verify_final(self, answer: str) -> str:
+        """Check a finished answer that CANNOT be reworked, and stamp what went
+        unmet onto it.
+
+        claude-max owns its own loop: there is no turn to ask into and the text
+        has already streamed, so the ask half of Verify is structurally
+        unavailable there. Skipping the checks entirely was the alternative,
+        and it is the worse one — a rule the model escapes by being asked on a
+        different backend is not a rule (the same reasoning that put seeding
+        and the gate on both paths). So the checks run, the verdicts are
+        recorded, and every unmet rule is SAID.
+        """
+        if not self._bindings:
+            return answer
+        self._verify_answer(answer, ask=False)
+        if not self._not_followed:
+            return answer
+        notes, self._not_followed = self._not_followed, []
+        return (answer + "\n\n" + "\n".join(notes)).strip()
+
+    def _log_held_entry(self) -> None:
+        """Deliver a released proposal to the log — the single point where a
+        held answer becomes THE answer. Rejected ones are simply never passed
+        here, so nothing has to be retracted."""
+        entry, self._held_entry = self._held_entry, None
+        if entry is not None and self.on_message:
+            self.on_message(_serialize(entry))
+
+    def _release_held(self, text: str = "", discard: bool = False) -> str:
+        """Hand the withheld answer to the client, or drop it.
+
+        A bound turn does not stream: the promise is that a rule is checked
+        BEFORE the owner reads the answer, and on a device that streams token
+        by token he has read it long before the check runs. The cost is his,
+        deliberately — "I'd rather have a verified answer than a faster one
+        that is wrong" — and it is paid only on turns a rule governs.
+        """
+        held, self._held_answer = self._held_answer, None
+        if held is not None and not discard and self.on_token:
+            self.on_token("\n" + "".join(held))
+        if discard and self._bindings:
+            self._held_answer = []  # keep holding: the next answer is bound too
+        if self._not_followed:
+            notes, self._not_followed = self._not_followed, []
+            text = (text + "\n\n" + "\n".join(notes)).strip()
+            if self.on_token:
+                self.on_token("\n\n" + "\n".join(notes) + "\n")
+        return text
+
+    def _record_verify_pass(self, binding: "rules.Binding") -> None:
+        """The abstention half: this binding was checked and had nothing to
+        say. Without it, a satisfied rule and an unchecked one look identical
+        in the log — and "why didn't this fire?" is #197's primary question."""
+        self._emit_record(
+            kind="gate", call=0, at="verify", gate="rule.verify",
+            binding=binding.id, rule=binding.name, tool="", action={},
+            verdict="allowed", tier=binding.rule.tier, evidence={"checked": True},
+            round=binding.asks, max_rounds=rules.RULE_MAX_ASKS, escalated=False,
+        )
+
+    def _record_verify(self, failure: "rules.VerifyFailure", verdict: str) -> None:
+        """A `gate` record at the verify point (contract §3.3)."""
+        binding = failure.binding
+        self._emit_record(
+            kind="gate",
+            call=0,
+            at="verify",
+            gate=f"rule.{failure.verb}",
+            binding=binding.id,
+            rule=binding.name,
+            tool="",
+            action={},
+            # `advised` rather than `stopped` when the answer ships anyway:
+            # the turn was not stopped, it was delivered with a caveat, and a
+            # ledger counting these as terminations would overstate the engine.
+            verdict="refused" if verdict == "asked" else "advised",
+            tier=binding.rule.tier,
+            evidence=failure.evidence,
+            round=binding.asks,
+            max_rounds=rules.RULE_MAX_ASKS,
+            escalated=verdict == "not_followed",
+            message=failure.ask[: rules.GATE_MESSAGE_CHARS],
+        )
+
+    def _note_turn_call(self, name: str, args: dict, result: str) -> None:
+        """Append one call to this turn's record, for Verify to read.
+
+        A REFUSED call is recorded too, with its decision — "the reader was
+        proposed and the gate stopped it" is a different fact from "it was
+        never tried", and a verify check that conflated them would ask the
+        model to do something the harness had just forbidden."""
+        meta = getattr(result, "meta", None) or {}
+        self._turn_calls.append({
+            "tool": name,
+            "args": dict(args or {}),
+            "status": meta.get("status") or "",
+            "decision": meta.get("decision") or "",
+        })
 
     def _rule_gate(self, name: str, args: dict) -> str | None:
         """Membership against this turn's bindings: None = proceed, else the
