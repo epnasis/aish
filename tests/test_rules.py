@@ -19,34 +19,38 @@ from aish import rules
 CANONICAL = """---
 name: bounded-material
 description: Answer from the material I gave you.
-tier: 0
-fail: open
-trigger: message_shape
-contains: source
-route: source
-prohibit: web_search
-disclose: source_unavailable
+when:
+  request:
+    has: material
+then:
+  answer_from: material
+  never_use: [web_search]
+  must_tell_me_when: the material could not be read
+if_unsure: proceed
 ---
 
-Answer from the source the user gave you.
+Answer from the material the user gave you.
 """
 
-SHAPE_RULE = """---
-name: shape-rule
+PATTERN_RULE = """---
+name: pattern-rule
 description: An owner-written pattern, for shapes with no built-in detector.
-trigger: message_shape
-match: ^\\s*deploy\\b
-prohibit: web_search
+when:
+  request:
+    matches: ^\\s*deploy\\b
+then:
+  never_use: [web_search]
 ---
 """
 
 SESSION_RULE = """---
 name: no-forget-when-triggered
 description: An unattended session never deletes the owner's knowledge.
-trigger: session_context
-field: origin
-is_not: user
-prohibit: forget_memory
+when:
+  session:
+    origin: automation
+then:
+  never_use: [forget_memory]
 ---
 """
 
@@ -77,19 +81,19 @@ class TestRuleFileFormat:
     def test_frontmatter_compiles_to_the_contract_obligation_shape(self, tmp_path):
         rule = load_one(tmp_path, CANONICAL)
         assert rule.obligations == (
-            {"verb": "route", "to": "source", "of": "deliverable"},
-            {"verb": "prohibit", "what": ["web_search"]},
-            {"verb": "disclose", "state": "source_unavailable"},
+            {"verb": "answer_from", "to": "material", "of": "deliverable"},
+            {"verb": "never_use", "what": ["web_search"]},
+            {"verb": "must_tell_me_when", "state": "the material could not be read"},
         )
-        assert rule.tier == 0 and rule.fail == "open"
-        assert rule.prose.startswith("Answer from the source the user gave you.")
+        assert rule.tier == 0 and rule.fail == "proceed"
+        assert rule.prose.startswith("Answer from the material the user gave you.")
 
     def test_tier_and_fail_are_present_from_day_one(self, tmp_path):
         """v1 is Tier 0 only, but the FIELDS ship now so a v0 file does not
         break the day a scored trigger arrives."""
         rule = load_one(tmp_path, SESSION_RULE)
         assert rule.tier == 0
-        assert rule.fail == rules.FAIL_OPEN
+        assert rule.fail == rules.FAIL_DEFAULT
 
     def test_a_rule_cannot_declare_words_that_lift_a_prohibition(self, tmp_path):
         """#191 A4. The gate has NO view of what the model said, and there is
@@ -105,7 +109,8 @@ class TestRuleFileFormat:
     def test_a_broken_regex_is_a_named_error_not_an_exception(self, tmp_path):
         """A hand-edited typo must be visible in the corpus and the log, never
         an exception thrown inside a gate half a turn later."""
-        rule = load_one(tmp_path, SHAPE_RULE.replace("match: ^\\s*deploy\\b", "match: ^[unclosed"))
+        broken = PATTERN_RULE.replace("matches: ^\\s*deploy\\b", "matches: ^[unclosed")
+        rule = load_one(tmp_path, broken)
         assert rule.error
         verdict, evidence = rules.evaluate(rule, rules.TurnContext(task="anything"))
         assert verdict == rules.VERDICT_ERROR
@@ -114,18 +119,24 @@ class TestRuleFileFormat:
     @pytest.mark.parametrize(
         "text,expected",
         [
-            (CANONICAL.replace("trigger: message_shape\n", ""), "unknown trigger"),
-            (CANONICAL.replace("contains: source", "contains: vibes"), "unknown `contains:`"),
-            (CANONICAL.replace("contains: source\n", ""), "needs a `contains:` detector"),
+            (CANONICAL.replace("  request:\n    has: material\n", "  vibes: yes\n"),
+             "unknown `when:` subject"),
+            (CANONICAL.replace("has: material", "has: vibes"), "unknown `has:` value"),
             (
-                CANONICAL.replace("contains: source", "contains: source\nmatch: ^x"),
-                "OR `match:`, not both",
+                CANONICAL.replace("    has: material\n", "").replace(
+                    "  answer_from: material\n", ""
+                ),
+                "needs `has:` or `matches:`",
             ),
-            (CANONICAL.replace("contains: source", "match: ^x"), "needs a `contains:` detector"),
             (
-                CANONICAL.replace("route: source\n", "")
-                .replace("prohibit: web_search\n", "")
-                .replace("disclose: source_unavailable\n", ""),
+                CANONICAL.replace("has: material", "has: material\n    matches: ^x"),
+                "OR `matches:`, not both",
+            ),
+            (CANONICAL.replace("has: material", "matches: ^x"), "needs `when: request: has:"),
+            (
+                CANONICAL.replace("  answer_from: material\n", "")
+                .replace("  never_use: [web_search]\n", "")
+                .replace("  must_tell_me_when: the material could not be read\n", ""),
                 "no obligation",
             ),
         ],
@@ -133,11 +144,11 @@ class TestRuleFileFormat:
     def test_an_uncompilable_rule_says_what_is_wrong(self, tmp_path, text, expected):
         assert expected in load_one(tmp_path, text).error
 
-    def test_session_context_needs_exactly_one_comparison(self, tmp_path):
-        both = SESSION_RULE.replace("is_not: user", "is_not: user\nis: email")
-        assert "exactly one" in load_one(tmp_path, both).error
-        neither = SESSION_RULE.replace("is_not: user\n", "")
-        assert "exactly one" in load_one(tmp_path, neither).error
+    def test_session_origin_must_be_a_known_value(self, tmp_path):
+        both = SESSION_RULE.replace("origin: automation", "origin: nonsense")
+        assert "unknown `origin:` value" in load_one(tmp_path, both).error
+        neither = SESSION_RULE.replace("    origin: automation\n", "")
+        assert "needs `origin:`" in load_one(tmp_path, neither).error
 
 
 class TestRuleLifecycle:
@@ -145,12 +156,13 @@ class TestRuleLifecycle:
     same two frontmatter fields, the same read-time evaluation."""
 
     def test_disabled_and_expired_rules_are_skipped_with_a_reason(self, tmp_path):
-        write(tmp_path, "off", SESSION_RULE.replace("trigger:", "status: disabled\ntrigger:"))
+        write(tmp_path, "off", SESSION_RULE.replace("when:", "status: disabled\nwhen:"))
         yesterday = date.today() - timedelta(days=1)
         write(
             tmp_path,
             "old",
-            CANONICAL.replace("tier: 0", f"expires: {yesterday.isoformat()}\ntier: 0"),
+            CANONICAL.replace("name: bounded-material",
+                              f"name: bounded-material\nexpires: {yesterday.isoformat()}"),
         )
         write(tmp_path, "live", SESSION_RULE.replace("no-forget-when-triggered", "live-rule"))
         active, skipped = rules.partition(rules.load_rules([tmp_path]))
@@ -162,7 +174,13 @@ class TestRuleLifecycle:
 
     def test_a_rule_stays_valid_through_its_expiry_day(self, tmp_path):
         today = date.today()
-        write(tmp_path, "r", CANONICAL.replace("tier: 0", f"expires: {today.isoformat()}\ntier: 0"))
+        write(
+            tmp_path,
+            "r",
+            CANONICAL.replace(
+                "name: bounded-material", f"name: bounded-material\nexpires: {today}"
+            ),
+        )
         active, skipped = rules.partition(rules.load_rules([tmp_path]))
         assert len(active) == 1 and not skipped
 
@@ -171,7 +189,7 @@ class TestTriggers:
     def test_an_owner_written_pattern_still_works(self, tmp_path):
         """`match:` remains for shapes with no built-in detector — command
         prefixes, file paths. What it must never do is stand in for intent."""
-        rule = load_one(tmp_path, SHAPE_RULE)
+        rule = load_one(tmp_path, PATTERN_RULE)
         hit = rules.evaluate(rule, rules.TurnContext(task="deploy the web app"))
         assert hit[0] == rules.VERDICT_BIND
         assert hit[1]["matched"] is True and hit[1]["span"] == [0, 6]
@@ -181,7 +199,7 @@ class TestTriggers:
     def test_abstention_evidence_is_the_inputs_not_the_conclusion(self, tmp_path):
         """Contract §4: a record of 'the message did not match' cannot be
         re-examined after the pattern moves; the pattern itself can."""
-        rule = load_one(tmp_path, SHAPE_RULE)
+        rule = load_one(tmp_path, PATTERN_RULE)
         _, evidence = rules.evaluate(rule, rules.TurnContext(task="hello"))
         assert evidence["pattern"] == rule.pattern.pattern
         assert evidence["on"] == "task"
@@ -206,7 +224,7 @@ class TestBinding:
         binding = bind_canonical(tmp_path, "https://youtu.be/abc")
         record = rules.binding_record(binding)
         binding.rule.path.write_text(
-            CANONICAL.replace("prohibit: web_search", "prohibit: nothing_at_all")
+            CANONICAL.replace("never_use: [web_search]", "never_use: [nothing_at_all]")
         )
         assert record["obligations"][1]["what"] == ["web_search"]
 
@@ -243,7 +261,7 @@ class TestSourceRouting:
         recorded (contract corollary 1)."""
         binding = bind_canonical(tmp_path, "https://youtu.be/x")
         route = rules.binding_record(binding)["obligations"][0]
-        assert route["to"] == "source"
+        assert route["to"] == "material"
         assert route["readers"] == ["youtube_analyze"]
         assert route["sources"] == ["https://youtu.be/x"]
         assert "present" not in route  # a link is not already in context
@@ -525,25 +543,63 @@ class TestShippedExamples:
 
 
 class TestRetiredKeys:
-    """Removing behaviour that had already governed live turns (#191 A4). A
-    retired key must fail LOUDLY: a file that reads as if it still lifts a
-    prohibition, and quietly does not, is worse than one that stops loading."""
+    """Removing a format that had already governed live turns. A retired key
+    must fail LOUDLY and name its replacement: a file that reads as if it still
+    works, and quietly does not, is worse than one that stops loading. Azure
+    silently ignores unknown fields — exactly the wrong behaviour for a file
+    the owner hand-edits."""
 
-    def test_a_file_written_against_the_old_shape_says_what_changed(self, tmp_path):
-        old = CANONICAL.replace(
-            "prohibit: web_search",
-            "prohibit: web_search\nunless: disclosed\ndisclosure_terms: transcript",
-        )
-        rule = load_one(tmp_path, old)
-        assert "`unless:` was retired" in rule.error
-        assert "only the owner can lift it" in rule.error
-        verdict, evidence = rules.evaluate(rule, rules.TurnContext(task="https://youtu.be/x"))
+    # The v1 format, verbatim. Every key in it is now retired.
+    OLD_FORMAT = """---
+name: bounded-material
+description: Answer from the material I gave you.
+tier: 0
+fail: open
+trigger: message_shape
+contains: source
+route: source
+prohibit: web_search
+unless: disclosed
+disclosure_terms: transcript
+disclose: source_unavailable
+---
+
+Prose.
+"""
+
+    @pytest.mark.parametrize(
+        "key,names",
+        [
+            ("trigger", "`when: request:`"),
+            ("contains", "`when: request: has:`"),
+            ("route", "`then: answer_from:`"),
+            ("prohibit", "`then: never_use:`"),
+            ("disclose", "`then: must_tell_me_when:`"),
+            ("tier", "the trigger's own form"),
+            ("fail", "`if_unsure:"),
+            ("unless", "only the owner can lift it"),
+            ("disclosure_terms", "no longer reads the model's prose"),
+        ],
+    )
+    def test_every_retired_key_names_its_replacement(self, tmp_path, key, names):
+        """Not just "this is wrong" — WHAT to write instead. A rule file is
+        edited by someone who will not go and read the source."""
+        assert key in rules.RETIRED_KEYS
+        assert names in rules.RETIRED_KEYS[key], rules.RETIRED_KEYS[key]
+
+    def test_a_file_in_the_old_format_fails_loudly_and_binds_nothing(self, tmp_path):
+        rule = load_one(tmp_path, self.OLD_FORMAT)
+        assert "was retired" in rule.error
+        assert rule.obligations == ()
+        verdict, evidence = rules.evaluate(rule, rules.TurnContext(task="https://x.test/a"))
         assert verdict == rules.VERDICT_ERROR and "retired" in evidence["error"]
 
-    def test_the_retired_key_binds_nothing_rather_than_meaning_something_else(self, tmp_path):
-        rule = load_one(tmp_path, CANONICAL.replace("prohibit: web_search", "unless: disclosed"))
-        assert rule.obligations == ()
-
+    def test_the_gate_has_no_key_that_could_read_the_model_s_prose(self, tmp_path):
+        """#191 A4, still true after the rename: no frontmatter key gives the
+        gate a view of what the model SAID, in any language."""
+        source = Path(rules.__file__).read_text()
+        assert source.count("disclosure_terms") == 1  # only inside RETIRED_KEYS
+        assert not any(hasattr(rules.Binding, a) for a in ("disclosed", "disclosure_met"))
 
 class TestTheWholeMaterialChannel:
     """An attachment is the LEAST ambiguous "here, answer from this" there is —
@@ -653,7 +709,7 @@ class TestTheWholeMaterialChannel:
     def test_the_narrow_url_detector_still_ignores_attachments(self, tmp_path):
         """`contains: url` is the narrower detector, kept for a rule that
         really does mean web pages only. It must not silently widen."""
-        rule = load_one(tmp_path, CANONICAL.replace("contains: source", "contains: url"))
+        rule = load_one(tmp_path, CANONICAL.replace("has: material", "has: link"))
         verdict, _ = rules.evaluate(
             rule, self._ctx("summarize this", documents=("/tmp/report.pdf",))
         )

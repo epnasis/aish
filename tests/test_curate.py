@@ -4,7 +4,9 @@ the judge is an injected callable and the ledger reads synthetic JSONL logs."""
 
 import json
 from datetime import datetime
+from pathlib import Path
 
+from aish import curate as curate_module
 from aish.curate import (
     LEDGER_DAYS,
     MIN_INJECTIONS,
@@ -619,3 +621,100 @@ class TestRuleSignals:
             rule_eval(1, [eval_row("r", "abstain")]),
         ])
         assert rule_signals(scan_rules(tmp_path, now=NOW)) == []
+
+
+class TestRuleLedgerHasAReader:
+    """Counters nobody reads are the failure this epic is about. The scan
+    needed a CALLER more than it needed more counters — it rides the weekly
+    pass that already reads these logs."""
+
+    def _state(self, tmp_path, records):
+        state = tmp_path / "state"
+        write_log(state, "session-20260728-100000-000001.jsonl", records)
+        return state
+
+    def _run(self, state, tmp_path, notify_fn=lambda *a: None, dry_run=True):
+        logged = []
+        original = curate_module.log
+        curate_module.log = logged.append
+        try:
+            run_curate(
+                dry_run=dry_run,
+                judge=lambda _p: "skip",
+                notify_fn=notify_fn,
+                env={},
+                state_dir=state,
+                now=NOW,
+            )
+        finally:
+            curate_module.log = original
+        return logged
+
+    def test_the_weekly_pass_reports_rule_signals(self, tmp_path):
+        records = []
+        for turn in range(1, 5):
+            records.append(rule_eval(turn, [eval_row("r", "bind", "b1")]))
+            records.append(binding_rec(turn, "r"))
+            records.append(gate_rec(turn, "r", "allowed", escalated=True, rounds=3))
+        logged = self._run(self._state(tmp_path, records), tmp_path)
+        lines = [line for line in logged if line.startswith("rule r:")]
+        assert lines, logged
+        assert any("the rule is wrong, not the model" in line for line in lines)
+
+    def test_it_proposes_and_never_acts(self, tmp_path):
+        """A rule is owner property. The pass may say a rule looks wrong; it
+        must not disable, edit or delete one."""
+        source = Path(curate_module.__file__).read_text()
+        scan = source[source.index("def scan_rules") : source.index("def rule_signals")]
+        signals = source[source.index("def rule_signals") :]
+        signals = signals[: signals.index("\ndef ")]
+        for body in (scan, signals):
+            for mutation in ("write_text", "update_entry_meta", "unlink", "os.remove"):
+                assert mutation not in body
+
+    def test_the_push_says_the_signals_changed_nothing(self, tmp_path):
+        pushed = []
+        records = []
+        for turn in range(1, 5):
+            records.append(rule_eval(turn, [eval_row("r", "bind", "b1")]))
+            records.append(binding_rec(turn, "r"))
+        self._run(
+            self._state(tmp_path, records),
+            tmp_path,
+            notify_fn=lambda title, body: pushed.append((title, body)),
+            dry_run=False,
+        )
+        assert pushed, "a rule signal must reach the owner, not only the log"
+        assert "proposals only — nothing changed" in pushed[0][1]
+
+    def test_a_dry_run_never_pushes(self, tmp_path):
+        pushed = []
+        records = [rule_eval(t, [eval_row("r", "abstain")]) for t in range(1, 5)]
+        self._run(
+            self._state(tmp_path, records),
+            tmp_path,
+            notify_fn=lambda title, body: pushed.append((title, body)),
+        )
+        assert pushed == []
+
+    def test_a_week_with_nothing_to_curate_still_reports_a_bad_rule(self, tmp_path):
+        """The early return a quiet week takes — the exact path where a rule
+        the owner overrides every time it fires would otherwise stay silent."""
+        pushed = []
+        records = []
+        for turn in range(1, 5):
+            records.append(rule_eval(turn, [eval_row("r", "bind", "b1")]))
+            records.append(binding_rec(turn, "r"))
+            records.append(gate_rec(turn, "r", "allowed", escalated=True, rounds=3))
+        logged = self._run(
+            self._state(tmp_path, records),
+            tmp_path,
+            notify_fn=lambda title, body: pushed.append((title, body)),
+            dry_run=False,
+        )
+        assert any("nothing to curate" in line for line in logged)
+        assert pushed and "rule signal" in pushed[0][1]
+
+    def test_a_corpus_with_no_rules_stays_quiet(self, tmp_path):
+        logged = self._run(self._state(tmp_path, [user("hello")]), tmp_path)
+        assert not [line for line in logged if line.startswith("rule ")]

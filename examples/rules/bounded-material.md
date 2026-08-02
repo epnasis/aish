@@ -1,13 +1,14 @@
 ---
 name: bounded-material
 description: Answer from the material I gave you; widening it needs my say-so.
-tier: 0
-fail: open
-trigger: message_shape
-contains: source
-route: source
-prohibit: web_search
-disclose: source_unavailable
+when:
+  request:
+    has: material        # a link, an attached file, or a file path I handed over
+then:
+  answer_from: material
+  never_use: [web_search]
+  must_tell_me_when: the material could not be read
+if_unsure: proceed
 ---
 
 The user handed you material — a link, an attached file, a screenshot, a path

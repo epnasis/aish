@@ -239,6 +239,7 @@ def scan_ledger(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None)
 # bought. Zero model calls, and every signal below is a PROPOSAL. Nothing here
 # edits or retires a rule; rules are owner property.
 
+RULE_SIGNALS_IN_PUSH = 3  # a push notification is a headline, not a report
 RULE_MIN_FIRES = 3  # below this, every rate is noise
 RULE_BROAD_BIND_RATE = 0.33  # binding on a third of turns is a cost to accept deliberately
 RULE_OVERRIDE_WRONG_RATE = 0.5  # overridden more often than not = the rule is wrong
@@ -806,7 +807,27 @@ def run_curate(
         if a.name not in recent and b.name not in recent
     ]
 
+    # The rule ledger rides the same weekly pass — same logs, same reading, no
+    # model calls. Placed before every early return: it is INDEPENDENT of the
+    # knowledge pass, and a week with nothing to curate can still hold a rule
+    # that never binds or that the owner overrides every time it fires.
+    # It PROPOSES and never acts — a rule is owner property, and every signal
+    # is a judgement about intent that a counter can only prompt. Counters
+    # nobody reads are the failure this epic is about, so the scan needed a
+    # CALLER more than it needed more counters (#205).
+    rule_ledger = scan_rules(state_dir, now=now)
+    proposals = rule_signals(rule_ledger)
+    for rule_name, proposal in proposals:
+        log(f"rule {rule_name}: {proposal}")
+    if rule_ledger.rules and not proposals:
+        log(
+            f"rules: {len(rule_ledger.rules)} evaluated over {rule_ledger.turns} "
+            "turns, nothing to propose"
+        )
+
     if dry_run:
+        for rule_name, proposal in proposals:
+            print(f"rule {rule_name}: {proposal}")
         print(f"suspects ({len(suspects)}):")
         for s, category in suspects:
             print(f"  {s.name} [{category}] injections={s.injections} misses={s.miss_reads}")
@@ -816,6 +837,7 @@ def run_curate(
         return 0
     if not suspects and not pairs:
         log(f"nothing to curate ({ledger.tasks} tasks scanned)")
+        _push(_notifier(notify_fn), now, "", proposals)
         return 0
 
     if judge is None:
@@ -914,18 +936,38 @@ def run_curate(
 
     summary = ", ".join(f"{k}={v}" for k, v in counts.items() if v)
     log(f"pass complete: {summary or 'no decisions'}")
-    if notify_fn is None:
-        from . import notify
-
-        if notify.configured():
-            notify_fn = notify.pushover
-    if notify_fn is not None and any(counts.values()):
-        notify_fn(
-            "aish knowledge curation",
-            f"Week {now:%G-W%V}: {summary}. All changes reversible "
-            "(knowledge git; disabled entries can be re-enabled).",
-        )
+    _push(_notifier(notify_fn), now, summary, proposals)
     return 0
+
+
+def _notifier(notify_fn):
+    """The injected notifier, or the real one when configured. Resolved in one
+    place so BOTH exit paths push — the early return is the one a week with no
+    knowledge decisions but a misbehaving rule takes."""
+    if notify_fn is not None:
+        return notify_fn
+    from . import notify
+
+    return notify.pushover if notify.configured() else None
+
+
+def _push(notify_fn, now: datetime, summary: str, proposals: list[tuple[str, str]]) -> None:
+    """One push for the whole pass. Rule signals ride it because a proposal
+    nobody sees is the same failure as a counter nobody reads — and it says
+    explicitly that they changed nothing, so a rule the owner values is never
+    assumed to have been touched."""
+    if notify_fn is None or not (summary or proposals):
+        return
+    body = f"Week {now:%G-W%V}: {summary or 'no knowledge decisions'}."
+    if proposals:
+        body += f" {len(proposals)} rule signal(s): " + "; ".join(
+            f"{name} — {text}" for name, text in proposals[:RULE_SIGNALS_IN_PUSH]
+        )
+    notify_fn(
+        "aish knowledge curation",
+        body + " All changes reversible (knowledge git; disabled entries can be "
+        "re-enabled). Rule signals are proposals only — nothing changed.",
+    )
 
 
 def main() -> int:

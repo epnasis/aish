@@ -2726,6 +2726,18 @@ class Agent:
                 self._bindings.append(binding)
             rows.append(row)
         self._emit_record(**rules.eval_record(active, skipped, rows))
+        # A rule that does not COMPILE is the one failure the owner must not
+        # discover months later: the file sits in the corpus reading exactly
+        # like a rule that works, and enforces nothing. It has always been in
+        # the record — as `verdict: "error"` — but a record is not a person,
+        # and the whole point of this engine is that policy stops being
+        # something you hope someone reads (#205).
+        for row in rows:
+            if row["verdict"] == rules.VERDICT_ERROR:
+                self.echo(
+                    f"⚠ rule '{row['rule']}' is not in force — "
+                    f"{row['evidence'].get('error', 'it does not compile')}"
+                )
         if not self._bindings:
             return ""
         for binding in self._bindings:
