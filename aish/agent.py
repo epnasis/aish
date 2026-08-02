@@ -1658,14 +1658,21 @@ class Agent:
         is the user's call."""
         self._append({"role": "user", "content": note})
         self.status.start("wrapping up")
+        turn_start = time.perf_counter()
+        usage = (0, 0)
         try:
-            content, tool_calls, _usage, raw_blocks, _thinking = self._chat_turn()
+            content, tool_calls, usage, raw_blocks, _thinking = self._chat_turn()
         except TaskCancelled:
             return self._finish_cancelled()
         except ModelUnavailable:
             content, tool_calls, raw_blocks = "", [], None
         finally:
             self.status.stop()
+        # The wrap-up turn is a real answer turn: it costs time and tokens like
+        # any other, and without this step the trace header reports a total that
+        # excludes the very turn the user is reading.
+        self._emit_step(kind="thinking_cancel", secs=time.perf_counter() - turn_start,
+                        tokens=list(usage))
         if content or tool_calls:
             entry: dict = {"role": "assistant", "content": content}
             if tool_calls:

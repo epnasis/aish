@@ -2508,8 +2508,13 @@ function traceStep(step) {
     // into it (relabeled "Answering…"), keep it as a finalized "Answered" step
     // instead of dropping it.
     // A text-only turn never emits a "thinking" step (that only fires when the
-    // turn has tool calls), so this is the only place its token usage lands —
-    // without it the "↑N ↓M tokens" header goes missing on plain answers (#84).
+    // turn has tool calls), so this is the only place its token usage AND its
+    // duration land. Unbooked, the finished header contradicted its own
+    // timeline: a turn that thought for 3.6s, ran one tool for 2.2s and then
+    // spent 23s writing the answer summarized itself as "Worked for 5.8s" with
+    // an "Answered in 23s" row sitting right below it. Writing the answer is
+    // the work the turn is usually mostly made of.
+    accountStepTime(t, step.secs);
     if (step.tokens) { t.tokensIn += step.tokens[0] || 0; t.tokensOut += step.tokens[1] || 0; }
     if (t.thinkingRow) {
       if (t.thinkingRow.isAnswer) finalizeAnswerRow(t, t.thinkingRow, step.secs);
