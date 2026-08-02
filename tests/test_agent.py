@@ -6082,6 +6082,29 @@ class TestVerify:
         agent.run_task("price?")
         assert "".join(streamed).count("not followed") == 1
 
+    def test_the_shipped_show_image_rule_catches_a_raw_link(self, tmp_path):
+        """The acceptance rule itself, driven through a real turn — not a
+        fixture shaped like it. It was inert for months; "it parses" is not
+        the claim that matters."""
+        example = (
+            Path(__file__).resolve().parent.parent
+            / "examples" / "rules" / "always-use-show-image.md"
+        )
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("here it is: ![map](https://tiles.example/x.png)"),
+                model_says("here it is: ![map](/tmp/aish-media/x.png)"),
+            ],
+            rule_texts=(example.read_text(encoding="utf-8"),),
+        )
+        answer = agent.run_task("show me the map")
+        # Asked, reworked, delivered clean — no note, because the rule was met.
+        assert "tiles.example" not in answer
+        assert "not followed" not in answer
+        ask = [m for m in agent.messages if str(m.get("content", "")).startswith("[aish:")]
+        assert ask and "show_image" in ask[0]["content"]
+
     def test_a_turn_no_rule_governs_is_untouched(self, tmp_path):
         agent, _ = rules_agent(
             tmp_path, [model_says("plain answer")], rule_texts=()
