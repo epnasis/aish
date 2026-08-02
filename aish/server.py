@@ -1126,6 +1126,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             "verb": verb,
             "target": str(plan.target),
             "diff": plan.diff,
+            "note": plan.note,
             "added": plan.added,
             "removed": plan.removed,
         }

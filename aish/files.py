@@ -93,6 +93,10 @@ class WritePlan:
     new: str
     is_new: bool
     error: str | None = None
+    # Free text shown ABOVE the diff at approval time. A rule's diff is YAML
+    # the owner did not write; what he is agreeing to is the behaviour, so the
+    # compiled meaning goes here and the diff stays available underneath.
+    note: str = ""
 
     @property
     def diff(self) -> str:

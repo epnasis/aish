@@ -536,6 +536,13 @@ def _filter_topic(text: str, topic: str) -> str:
     return "\n".join(out)
 
 
+_WHEN_SUBJECT = (
+    "Which subject the trigger examines: 'prompt' (what the user typed, plus their "
+    "attachments), 'session' (how this session was started), 'action' (the call "
+    "about to run), or 'always'. Pick the NARROWEST one that is true — a rule that "
+    "binds every turn costs every turn."
+)
+
 TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -1128,6 +1135,163 @@ TOOL_SCHEMAS = [
                     },
                 },
                 "required": ["repo"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_rule",
+            "description": (
+                "Write a RULE — a standing instruction aish ENFORCES on you, unlike a "
+                "skill or a memory, which only inform you. Create one when the user says "
+                "something should ALWAYS or NEVER happen ('always use show_image', 'never "
+                "search the web when I give you a link'). For a one-off, just do it; for "
+                "a fact about them or their world, use remember instead. "
+                "You do NOT write the file and you do NOT write YAML: name the field "
+                "values below and aish renders, validates and shows the user what it "
+                "MEANS before anything is saved. If the rule cannot be expressed in these "
+                "fields, say so and tell the user exactly what could not be expressed — "
+                "that is a feature request for aish, not a reason to write vague prose. "
+                "RULES ONLY RESTRICT: there is no verb that grants permission or "
+                "auto-approves anything, by design."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Short kebab-case name, e.g. 'bounded-material'. "
+                        "It is how the user will refer to the rule.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "One line: what the rule requires, in the user's "
+                        "own terms. Shown whenever the rule binds.",
+                    },
+                    "when_subject": {"type": "string", "description": _WHEN_SUBJECT},
+                    "when_has": {
+                        "type": "string",
+                        "description": "For when_subject='prompt': what the message must "
+                        "carry — 'source' (any material: a link, an attachment or a typed "
+                        "path), 'link', 'attachment' or 'path'.",
+                    },
+                    "when_matches": {
+                        "type": "string",
+                        "description": "For when_subject='prompt': a regex the message "
+                        "must match. Prefer when_has — a keyword regex fires on 'the "
+                        "Docker image is broken' and is the classic way to write a rule "
+                        "that binds the wrong turns.",
+                    },
+                    "when_origin": {
+                        "type": "string",
+                        "description": "For when_subject='session': 'owner' (the user is "
+                        "there) or 'automation' (nobody is).",
+                    },
+                    "when_action": {
+                        "type": "object",
+                        "description": "For when_subject='action': any of tool, "
+                        "path_under, command_starts_with. All named conditions must hold.",
+                    },
+                    "answer_from": {
+                        "type": "string",
+                        "description": "A tool name, or 'source' meaning the material the "
+                        "user handed over (aish picks the right reader for each kind). "
+                        "Everything else is then refused for this answer.",
+                    },
+                    "never_use": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tool names that must not run on a matching turn.",
+                    },
+                    "must_first": {
+                        "type": "string",
+                        "description": "A tool that must have RUN before the answer is "
+                        "delivered. Checked at the end of the turn against what actually "
+                        "happened, not against what you say happened.",
+                    },
+                    "answer_must_include": {
+                        "type": "string",
+                        "description": "A named check on the finished answer: "
+                        "'links_to_what_you_read'. A plain phrase is NOT accepted — a "
+                        "check nothing can evaluate is a promise nothing keeps.",
+                    },
+                    "answer_must_not": {
+                        "type": "string",
+                        "description": "A named check the answer must FAIL: "
+                        "'raw_image_links'. Same rule — named checks only.",
+                    },
+                    "must_tell_me_when": {
+                        "type": "string",
+                        "description": "A failure the user must be told about rather than "
+                        "quietly patched over, e.g. 'the material could not be read'.",
+                    },
+                    "prose": {
+                        "type": "string",
+                        "description": "The body: WHY this rule exists, in the user's "
+                        "words. Shown to you when the rule binds, so write what a reader "
+                        "needs in order to comply well — never the obligation itself, "
+                        "which the fields above already enforce.",
+                    },
+                },
+                "required": ["name", "description", "when_subject"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_rule",
+            "description": (
+                "Change an existing rule. Name ONLY the fields that change — everything "
+                "else is carried over from the file unchanged, so a rule cannot silently "
+                "lose what it already did. Never re-state the whole rule: that is how a "
+                "working rule gets quietly broken by one sentence of new prose. Same "
+                "fields as create_rule."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The rule to change."},
+                    "description": {"type": "string"},
+                    "when_subject": {"type": "string", "description": _WHEN_SUBJECT},
+                    "when_has": {"type": "string"},
+                    "when_matches": {"type": "string"},
+                    "when_origin": {"type": "string"},
+                    "when_action": {"type": "object"},
+                    "answer_from": {"type": "string"},
+                    "never_use": {"type": "array", "items": {"type": "string"}},
+                    "must_first": {"type": "string"},
+                    "answer_must_include": {"type": "string"},
+                    "answer_must_not": {"type": "string"},
+                    "must_tell_me_when": {"type": "string"},
+                    "prose": {"type": "string"},
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "false retires the rule; true brings it back.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "retire_rule",
+            "description": (
+                "Stop a rule binding, reversibly — the file stays and the user can bring "
+                "it back with edit_rule. Use when the user says a rule is wrong, "
+                "annoying, or no longer applies. There is no delete: the rules folder is "
+                "the user's own git-backed knowledge, and removing a file from it is "
+                "theirs to do."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The rule to retire."},
+                },
+                "required": ["name"],
             },
         },
     },

@@ -46,6 +46,10 @@ Three properties are load-bearing, and each is pinned:
 - **It is keyed by the turn id `#202` already mints** for removal — stable live and on replay, so no second identity scheme. The answer element carries it in `data-turn`, populated from `currentTurnId`, which `addUserMsg` sets on both the live and the replay path exactly as `prompt` and `answerTiming` already are.
 - **Ratings replay LAST.** `reconstruct_events` defers them to the end of the stream: a rating decorates a turn rather than being one, it is applied by id rather than position, and it can be written long after the turn it names. In file order the frontend would receive a decoration for a turn it has not rendered yet. `TestRateAnswer`.
 
+### The approval card for a rule shows what it MEANS
+
+A write approval card renders the plan's diff. For a rule that diff is YAML **the owner did not write** — the model named field values and the harness rendered the file — so approving the diff would mean approving an implementation detail he has no reason to audit. The card therefore carries an optional `note`, the compiled meaning in English (*when this, then that*) plus which of his recent turns the rule would have bound, and it renders **above** the diff rather than instead of it: the YAML stays one glance away for anyone who wants it. Set as text, never markup — the words are the owner's own description coming back to him. An ordinary file write sends no note and is unchanged, with no empty box. `tests/js/test_rule_card_note.js`.
+
 **Nothing acts on it.** No model reads it, it claims no control of the chat, and the comment never enters the conversation — making a feedback control steer the running session would turn it into a lever the model can be pointed at. It is evidence for the weekly pass (`curate.scan_ratings`, `TestRatingLedger`) and for the owner.
 
 ## Connection, identity, and painting a view

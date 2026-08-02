@@ -7,6 +7,7 @@ approval gate with no model, no network, and full determinism.
 
 import datetime
 import importlib
+import json
 import re
 import stat
 from pathlib import Path
@@ -6205,6 +6206,144 @@ class TestVerify:
             tmp_path, [model_says("plain answer")], rule_texts=()
         )
         assert agent.run_task("hello") == "plain answer"
+
+
+class TestRuleAuthoring:
+    """A rule is the artifact class that BINDS the model, so the model writing
+    one silently would be the engine's own failure mode reappearing in its
+    authoring path. Every write goes through the diff gate, and the lint runs
+    inside the tool where it cannot be skipped."""
+
+    FIELDS = {
+        "name": "bounded-material",
+        "description": "Answer from the material I gave you.",
+        "when_subject": "prompt",
+        "when_has": "source",
+        "answer_from": "source",
+    }
+
+    def _agent(self, tmp_path, responses=(), **kw):
+        agent, chat = rules_agent(tmp_path, list(responses), rule_texts=(), **kw)
+        agent._rules_monkeypatch.setattr(
+            rules_module, "GLOBAL_RULES_DIR", tmp_path / "rules"
+        )
+        (tmp_path / "rules").mkdir(exist_ok=True)
+        return agent
+
+    def test_an_invalid_rule_never_reaches_the_approver(self, tmp_path):
+        """The lint is the point. If it ran outside the tool it would be
+        advice — which is what rules exist to abolish."""
+        asked = []
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: asked.append(plan) or True
+        result = agent._dispatch("create_rule", {
+            "name": "no-obligation", "description": "d", "when_subject": "always",
+            "prose": "You MUST always use show_image.",
+        })
+        assert result.startswith("ERROR")
+        assert "restricts nothing" in result
+        assert asked == [], "an invalid rule was shown for approval"
+        assert not list((tmp_path / "rules").glob("*.md"))
+
+    def test_a_rule_naming_a_missing_tool_is_refused(self, tmp_path):
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", {
+            **self.FIELDS, "name": "typo", "answer_from": "gws_gmial_send",
+        })
+        assert result.startswith("ERROR") and "gws_gmial_send" in result
+        assert not list((tmp_path / "rules").glob("*.md"))
+
+    def test_the_card_carries_the_compiled_meaning_not_the_yaml(self, tmp_path):
+        """The owner did not write the file and should not have to audit it."""
+        seen = []
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: seen.append(plan) or True
+        agent._dispatch("create_rule", self.FIELDS)
+        assert seen and "material" in seen[0].note
+        assert "when:" not in seen[0].note
+
+    def test_a_denied_rule_is_not_written(self, tmp_path):
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: False
+        agent._dispatch("create_rule", self.FIELDS)
+        assert not list((tmp_path / "rules").glob("*.md"))
+
+    def test_an_approved_rule_lands_and_binds_the_next_turn(self, tmp_path):
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", self.FIELDS)
+        assert not result.startswith("ERROR"), result
+        written = (tmp_path / "rules" / "bounded-material.md")
+        assert written.exists()
+        loaded = rules_module.load_rules([tmp_path / "rules"])
+        assert [r.error for r in loaded] == [""]
+
+    def test_creating_over_an_existing_rule_is_refused(self, tmp_path):
+        """Silently overwriting is how a rule loses what it already did."""
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        agent._dispatch("create_rule", self.FIELDS)
+        again = agent._dispatch("create_rule", {**self.FIELDS, "answer_from": "read_url"})
+        assert again.startswith("ERROR") and "edit_rule" in again
+
+    def test_an_edit_keeps_every_obligation_it_was_not_asked_to_touch(self, tmp_path):
+        """The regression problem, end to end: one new sentence must not undo
+        the four things the rule already did."""
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        agent._dispatch("create_rule", {**self.FIELDS, "never_use": ["web_search"]})
+        agent._dispatch("edit_rule", {
+            "name": "bounded-material", "must_tell_me_when": "the material failed",
+        })
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        verbs = {o["verb"] for o in rule.obligations}
+        assert verbs == {
+            rules_module.VERB_ANSWER_FROM,
+            rules_module.VERB_NEVER_USE,
+            rules_module.VERB_MUST_TELL_ME_WHEN,
+        }
+
+    def test_editing_a_rule_that_does_not_exist_says_so(self, tmp_path):
+        agent = self._agent(tmp_path)
+        result = agent._dispatch("edit_rule", {"name": "ghost", "description": "d"})
+        assert result.startswith("ERROR") and "ghost" in result
+
+    def test_an_edit_naming_nothing_is_refused(self, tmp_path):
+        """"Change the rule" with no field named is a rewrite request, and a
+        rewrite is what the patch shape exists to make impossible."""
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        agent._dispatch("create_rule", self.FIELDS)
+        result = agent._dispatch("edit_rule", {"name": "bounded-material"})
+        assert result.startswith("ERROR") and "at least one field" in result
+
+    def test_retiring_keeps_the_file_and_stops_the_binding(self, tmp_path):
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        agent._dispatch("create_rule", self.FIELDS)
+        result = agent._dispatch("retire_rule", {"name": "bounded-material"})
+        assert not result.startswith("ERROR"), result
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        assert rule.status == "disabled"
+        assert (tmp_path / "rules" / "bounded-material.md").exists()
+
+    def test_the_card_shows_the_turns_this_would_have_bound(self, tmp_path):
+        """Retro-match: a rule is a function of logged facts, so real history
+        is better evidence than any synthetic run."""
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / "session-20260101-000000-000000.jsonl").write_text(
+            json.dumps({"kind": "message", "role": "user",
+                        "content": "summarize https://example.com/x", "turn": "a"}) + chr(10),
+            encoding="utf-8",
+        )
+        seen = []
+        agent = self._agent(tmp_path, state_dir=str(state))
+        agent.approve_write = lambda plan: seen.append(plan) or True
+        agent._dispatch("create_rule", self.FIELDS)
+        assert seen and "would have bound on 1" in seen[0].note
+        assert "summarize https://example.com/x" in seen[0].note
 
 
 class TestHeldAnswer:

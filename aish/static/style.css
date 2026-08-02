@@ -1082,6 +1082,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .card-hsub { font-size: 13.2px; color: var(--dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-head.danger .card-hsub { color: var(--orange); }
 .card-hsub.mono { font-family: var(--mono); }
+.card-note { margin: 0; padding: 12px 14px; border-bottom: 0.5px solid var(--sep); font-size: 14.5px; line-height: 1.5; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool-preview { margin: 10px 0 0; padding: 9px 11px; background: rgba(127,127,127,0.10); border-left: 3px solid var(--blue, #0a84ff); border-radius: 6px; font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
 .tool-args { margin: 10px 0 0; display: flex; flex-direction: column; gap: 6px; }
 .tool-args.secondary { margin-top: 8px; opacity: 0.72; }

@@ -235,6 +235,36 @@ Frontmatter is real YAML (`yaml.safe_load`, which constructs no objects, so a ru
 
 ---
 
+## Authoring — the model names values, the tool writes the file
+
+#205's exhibit is a rule **aish wrote for itself**, which loaded as `error: a rule with no obligation restricts nothing` and had been inert since the day it was written. It put the obligation in *prose* — inside the one artifact class that exists to abolish prose obligations — reached for a keyword regex on a semantic trigger, and read the developer docs because there was no authoring grammar to read. The conclusion that shaped this layer: **a grammar that is only described is advice; a grammar that is validated is binding.** Writing a better authoring guide would have repeated, one level up, exactly the mistake the enforcement layer was built to correct.
+
+**The model never emits the file, and never emits YAML.** It names field values (`when_subject`, `when_has`, `answer_from`, …) and `render()` builds the frontmatter. That deletes an entire failure class — quoting, indentation, key names, the `pattern:` nesting — which is the class the exhibit failed on, and which is also the one real cost of the nested format. A value that would change meaning unquoted is quoted by the renderer, so no author has to know which values those are.
+
+**The lint runs inside the tool, before the write.** If editing a rule were an ordinary `write_file`, then "run the linter" would be advice again. `create_rule` / `edit_rule` / `retire_rule` make it unskippable: render → lint → card → write, and a failing lint means no file lands and no approval is even requested. Hand-editing still works — the corpus is the owner's git-backed knowledge and the tool is the *supported* path, not the only one — which is why the same lint also runs at load. `TestAuthoring`, `TestRuleAuthoring`.
+
+Beyond compiling, the lint checks that **everything the rule names exists**. A route or `must_first` naming a missing tool refuses every alternative and offers nothing, on every turn it binds; a `never_use` naming a misspelled tool never fires, and a restriction that never fires looks exactly like one that is working.
+
+**What the owner approves is the compiled MEANING, not the diff.** He did not write the file and should not have to audit it, so the approval card carries an English sentence — *when this, then that* — plus which enforcement moment applies, above the diff rather than instead of it.
+
+### Retro-match — a rule is a function of logged facts
+
+The card also answers *"what would this have done?"* by replaying the candidate over the owner's own recent turns: **this would have bound on 3 of your last 200, here they are.** For a tool you must execute it to know; for a rule you must not — manufacturing a synthetic turn tests the harness, not the rule.
+
+A rule that binds on **nothing** in the history is shown as exactly that. It is not an error (it may be about the future), but the other explanation is that the rule is wrong, and only the owner can tell which. Notes in the user slot — aish's own not-followed lines, resume notices — are excluded, or a rule would appear to bind on turns nobody took.
+
+**The honest limit, stated rather than sold:** none of this catches a change that alters *future* behaviour without altering any *past* behaviour. Broadening a trigger in a way no logged turn exercises looks identical to changing nothing. Prevented for what the history exercises; detected afterwards by the bind-rate counter for the rest. `TestRetroMatch`.
+
+### An edit is a patch, never a rewrite
+
+The sharpest risk in the whole authoring design: a rule works, the owner says *"also cover attachments"*, and a compiler regenerating from that sentence silently breaks the four things the rule already did. Prose is not precise; a working rule is.
+
+So **"start over" is not in the input space.** `edit_rule` takes named field changes; everything unnamed is read back from the file and written unchanged, and the prose body is carried verbatim. An edit naming no field at all is refused rather than treated as a rewrite request. Creating over an existing name is refused too, pointing at `edit_rule` — silent overwrite is the same defect wearing the other verb.
+
+**There is no delete verb.** `retire_rule` sets `enabled: false`: the file stays, the rule stops binding, and the owner can bring it back. Removing a file from his own git-backed knowledge is his to do, with his own hands — the knowledge layer's "retire, don't delete" (L4), applied here for the same reason.
+
+---
+
 ## What v1 built
 
 The file format · the loader with lifecycle inheritance · the binding runtime · **seed** and **gate** with bounded refuse-first and Tier-3 escalation · the three trace records · trigger kinds **message shape** and **session context** · obligation verbs **route**, **prohibit**, **disclose**.

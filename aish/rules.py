@@ -19,7 +19,9 @@ wedges a small model into a stall-out).
 
 from __future__ import annotations
 
+import json
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -1590,3 +1592,369 @@ def cap_action(args: dict | None) -> dict:
         text = value if isinstance(value, str) else repr(value)
         shown[key] = text[:ACTION_ARGS_CHARS]
     return shown
+
+
+# --------------------------------------------------------------- authoring
+
+
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+# The fields an author supplies. The MODEL NEVER EMITS THE FILE — it names
+# values against this list and the renderer builds the YAML, which deletes an
+# entire failure class (quoting, indentation, key names) and is why the exhibit
+# in #205 could not have been written correctly by any author, human or model.
+AUTHOR_FIELDS = (
+    "name", "description", "prose", "enabled", "expires",
+    "when_subject", "when_has", "when_matches", "when_origin", "when_action",
+    VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
+    VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT, VERB_MUST_TELL_ME_WHEN,
+)
+
+
+class LintError(Exception):
+    """An authoring input that cannot become a rule file. Distinct from
+    RuleError, which is about a file that already exists."""
+
+
+def _yaml_scalar(value: Any) -> str:
+    """A scalar YAML will read back as the same string. Quoted whenever it
+    could be read as something else — the renderer exists precisely so nobody
+    has to remember which cases those are."""
+    text = str(value)
+    risky = text.strip() != text or not text or text[0] in "&*!|>%@`{}[]#-?:,\"'"
+    if risky or ": " in text or text.casefold() in ("yes", "no", "true", "false", "null"):
+        return json.dumps(text)  # JSON strings are valid YAML strings
+    return text
+
+
+def render(fields: dict) -> str:
+    """Field values → a rule file. One direction only: there is no path where
+    an author hands over YAML text.
+
+    Fields not named are ABSENT, never defaulted to something plausible. A
+    guessed obligation is indistinguishable from an authored one once written,
+    and only one of them is what the owner asked for.
+    """
+    unknown = [key for key in fields if key not in AUTHOR_FIELDS]
+    if unknown:
+        raise LintError(
+            f"unknown field {unknown[0]!r} — have " + ", ".join(AUTHOR_FIELDS)
+        )
+    name = str(fields.get("name", "") or "").strip()
+    if not NAME_RE.match(name):
+        raise LintError(
+            f"invalid rule name {name!r} — lowercase letters, digits and hyphens, "
+            "starting with a letter or digit, e.g. 'bounded-material'"
+        )
+    description = str(fields.get("description", "") or "").strip()
+    if not description:
+        raise LintError(
+            "`description:` is required — it is the one line the owner reads in "
+            "the corpus listing and the model reads when the rule binds"
+        )
+
+    lines = ["---", f"name: {_yaml_scalar(name)}",
+             f"description: {_yaml_scalar(description)}"]
+    if fields.get("enabled") is False:
+        lines.append("enabled: false")
+    if expires := str(fields.get("expires", "") or "").strip():
+        lines.append(f"expires: {_yaml_scalar(expires)}")
+
+    subject = str(fields.get("when_subject", "") or "").strip()
+    if subject == SUBJECT_ALWAYS:
+        lines.append(f"when: {SUBJECT_ALWAYS}")
+    elif subject == SUBJECT_PROMPT:
+        key, value = ("has", fields.get("when_has")) if fields.get("when_has") \
+            else ("matches", fields.get("when_matches"))
+        lines += ["when:", f"  {SUBJECT_PROMPT}:", f"    {key}: {_yaml_scalar(value or '')}"]
+    elif subject == SUBJECT_SESSION:
+        lines += ["when:", f"  {SUBJECT_SESSION}:",
+                  f"    origin: {_yaml_scalar(fields.get('when_origin') or '')}"]
+    elif subject == SUBJECT_ACTION:
+        action = fields.get("when_action") or {}
+        if not isinstance(action, dict) or not action:
+            raise LintError(
+                "`when_action` needs at least one of: " + ", ".join(ACTION_FIELDS)
+            )
+        lines += ["when:", f"  {SUBJECT_ACTION}:"]
+        lines += [f"    {k}: {_yaml_scalar(v)}" for k, v in action.items()]
+    else:
+        raise LintError(
+            f"`when_subject` must be one of {SUBJECT_PROMPT}, {SUBJECT_SESSION}, "
+            f"{SUBJECT_ACTION}, {SUBJECT_ALWAYS} — got {subject!r}"
+        )
+
+    then: list[str] = []
+    for verb in (VERB_ANSWER_FROM, VERB_MUST_FIRST, VERB_MUST_TELL_ME_WHEN):
+        if value := str(fields.get(verb, "") or "").strip():
+            then.append(f"  {verb}: {_yaml_scalar(value)}")
+    if never := _as_list(fields.get(VERB_NEVER_USE)):
+        then.append(f"  {VERB_NEVER_USE}: [{', '.join(never)}]")
+    for verb in (VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT):
+        value = fields.get(verb)
+        if value in (None, "", {}):
+            continue
+        if isinstance(value, dict):
+            then += [f"  {verb}:", f"    pattern: {_yaml_scalar(value.get('pattern', ''))}"]
+        else:
+            then.append(f"  {verb}: {_yaml_scalar(value)}")
+    if not then:
+        raise LintError(
+            "a rule with no obligation restricts nothing — name at least one of: "
+            + ", ".join(sorted(VERBS))
+        )
+    lines += ["then:", *then, "---", ""]
+
+    prose = str(fields.get("prose", "") or "").strip()
+    return "\n".join(lines) + (prose + "\n" if prose else "")
+
+
+def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, list[str]]:
+    """(rule, errors) for candidate file text. Nothing is written on an error.
+
+    Deterministic and instant — no model. This is the half #193 drew the line
+    at for tools: the lint checks that the rule COMPILES and that everything it
+    names exists. Whether it does what the owner meant is the retro-match's
+    question, and only he can answer it.
+    """
+    with tempfile.TemporaryDirectory(prefix="aish-rule-lint-") as tmp:
+        path = Path(tmp) / "candidate.md"
+        path.write_text(text, encoding="utf-8")
+        rule = _parse(path)
+    if rule.error:
+        return None, [rule.error]
+    errors = []
+    if known_tools:
+        readers = [o["to"] for o in rule.obligations
+                   if o["verb"] == VERB_ANSWER_FROM and o["to"] != ROUTE_SOURCE]
+        firsts = [o["capability"] for o in rule.obligations if o["verb"] == VERB_MUST_FIRST]
+        for named in readers + firsts:
+            if named not in known_tools:
+                errors.append(
+                    f"names a tool that does not exist: {named!r}. A rule routing to "
+                    "or requiring a missing tool refuses every alternative and offers "
+                    "nothing, on every turn it binds."
+                )
+        for prohibited in (o["what"] for o in rule.obligations if o["verb"] == VERB_NEVER_USE):
+            for tool_name in prohibited:
+                if tool_name not in known_tools:
+                    errors.append(
+                        f"forbids a tool that does not exist: {tool_name!r} — the "
+                        "restriction would never fire. Check the spelling."
+                    )
+    return (rule if not errors else None), errors
+
+
+def explain(rule: Rule) -> str:
+    """The compiled meaning, in English. What the owner approves is THIS, never
+    the YAML: he is agreeing to a behaviour, and the file is an implementation
+    detail he did not write and should not have to audit."""
+    when = {
+        TRIGGER_ALWAYS: "On every turn",
+        TRIGGER_SESSION_CONTEXT: (
+            "When this session was started by "
+            + ("anything but you" if rule.not_equals else f"{rule.equals or 'you'}")
+        ),
+        TRIGGER_MESSAGE_SHAPE: (
+            f"When your message carries {CONTAINS_LABELS.get(rule.contains, rule.contains)}"
+            if rule.contains else
+            f"When your message matches /{rule.pattern.pattern if rule.pattern else ''}/"
+        ),
+        TRIGGER_ACTION_SHAPE: (
+            "Before any action where "
+            + ", ".join(f"{k} = {v}" for k, v in sorted(rule.action.items()))
+        ),
+    }.get(rule.trigger, f"When {rule.trigger}")
+
+    says = []
+    for obligation in rule.obligations:
+        verb = obligation["verb"]
+        if verb == VERB_ANSWER_FROM:
+            target = obligation["to"]
+            says.append(
+                "answer from the material I gave you, read with whichever tool fits it"
+                if target == ROUTE_SOURCE else f"answer from {target}"
+            )
+        elif verb == VERB_NEVER_USE:
+            says.append("never use " + ", ".join(obligation["what"]))
+        elif verb == VERB_MUST_FIRST:
+            says.append(f"call {obligation['capability']} before answering")
+        elif verb == VERB_MUST_TELL_ME_WHEN:
+            says.append(f"tell me when {obligation['state']}")
+        elif detector := obligation.get("detector"):
+            says.append(
+                ("the answer must show that " if verb == VERB_ANSWER_MUST_INCLUDE
+                 else "the answer must never contain ")
+                + ANSWER_DETECTORS[detector]
+            )
+        else:
+            says.append(
+                ("the answer must match " if verb == VERB_ANSWER_MUST_INCLUDE
+                 else "the answer must not match ")
+                + f"/{obligation['pattern']}/"
+            )
+    lines = [f"{when}: {'; '.join(says)}."]
+    at_gate = [o for o in rule.obligations if o["verb"] not in VERIFY_VERBS]
+    at_verify = [o for o in rule.obligations if o["verb"] in VERIFY_VERBS]
+    if at_gate:
+        lines.append("Enforced before a call runs: a call that violates this is refused.")
+    if at_verify:
+        lines.append(
+            "Checked when the answer is finished, before you see it: aish asks for "
+            "the missing work, and says so on the answer if it never arrives."
+        )
+    if rule.status == "disabled":
+        lines.append("DISABLED — it will not bind until you enable it.")
+    return "\n".join(lines)
+
+
+# Read by `explain` only. The trigger keys are terse because they are typed;
+# these are the words for the sentence the owner reads.
+CONTAINS_LABELS = {
+    CONTAINS_SOURCE: "material — a link, an attached file, or a path you typed",
+    CONTAINS_LINK: "a link",
+    CONTAINS_ATTACHMENT: "an attached file or image",
+    CONTAINS_PATH: "a file path",
+}
+
+
+@dataclass
+class RetroMatch:
+    """What a candidate rule would have done to turns that already happened."""
+
+    checked: int = 0
+    bound: list[dict] = field(default_factory=list)
+    unevaluable: int = 0
+
+    @property
+    def rate(self) -> float:
+        return len(self.bound) / self.checked if self.checked else 0.0
+
+
+def past_turns(state_dir: Path, limit: int = 400) -> list[dict]:
+    """{turn, prompt, origin} for recent turns, newest sessions first.
+
+    Reads the session logs the owner already has. Nothing is synthesised: a
+    manufactured turn tests the harness, not the rule.
+    """
+    try:
+        paths = sorted(state_dir.glob("session-*.jsonl"), reverse=True)
+    except OSError:
+        return []
+    turns: list[dict] = []
+    for path in paths:
+        origin = ORIGIN_OWNER_VALUE
+        try:
+            handle = path.open(encoding="utf-8")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if record.get("kind") == "origin":
+                    origin = str(record.get("origin") or origin)
+                    continue
+                if record.get("kind") != "message" or record.get("role") != "user":
+                    continue
+                prompt = str(record.get("content") or "").strip()
+                # aish's own notes are addressed TO the owner and arrive in the
+                # user slot; counting them as prompts would have a rule appear
+                # to bind on turns nobody took.
+                if not prompt or prompt.startswith(AISH_NOTE_MARKERS):
+                    continue
+                turns.append({
+                    "turn": str(record.get("turn") or ""),
+                    "prompt": prompt,
+                    "origin": origin,
+                    "session": path.stem,
+                })
+                if len(turns) >= limit:
+                    return turns
+    return turns
+
+
+# Text in the user slot that the OWNER did not type. Kept here rather than
+# imported from session.py, which imports nothing from this module by design.
+AISH_NOTE_MARKERS = ("[aish:", "[aish]", "[automatic resume]")
+
+
+def retro_match(rule: Rule, turns: list[dict]) -> RetroMatch:
+    """Replay a candidate rule over turns that already happened.
+
+    The strongest evidence available at authoring time, and it costs nothing:
+    a rule is a function of logged facts, so "this would have bound on these
+    three turns, here they are" is a real answer where a synthetic run is a
+    test of the harness. The honest limit is stated where it is shown — a
+    trigger broadened in a way no logged turn exercises looks identical to one
+    that changed nothing.
+    """
+    result = RetroMatch()
+    for turn in turns:
+        ctx = TurnContext(task=turn["prompt"], origin=turn.get("origin", ORIGIN_OWNER_VALUE))
+        verdict, _evidence = evaluate(rule, ctx)
+        result.checked += 1
+        if verdict == VERDICT_BIND:
+            result.bound.append(turn)
+        elif verdict in (VERDICT_UNEVALUABLE, VERDICT_ERROR):
+            result.unevaluable += 1
+    return result
+
+
+def author_fields(path: Path) -> dict:
+    """A rule file, back in the shape `render` takes.
+
+    Needed so an EDIT is a patch. #205's sharpest risk is the compiler
+    regenerating a working rule from one sentence of prose and silently
+    dropping the four things it already did — so "start over" is kept out of
+    the input space entirely: the tool takes named field changes, everything
+    else is read from here and written back unchanged, and the prose body is
+    carried verbatim.
+    """
+    text = path.read_text(encoding="utf-8")
+    front: dict = {}
+    body = text
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) == 3:
+            _, header, body = parts
+            loaded = yaml.safe_load(header) if header.strip() else {}
+            front = loaded if isinstance(loaded, dict) else {}
+    fields: dict = {
+        "name": str(front.get("name") or path.stem),
+        "description": str(front.get("description", "") or ""),
+        "prose": body.strip(),
+    }
+    if front.get("enabled") is False:
+        fields["enabled"] = False
+    if expires := str(front.get("expires", "") or "").strip():
+        fields["expires"] = expires
+
+    when = front.get("when")
+    if when == SUBJECT_ALWAYS or when is True:
+        fields["when_subject"] = SUBJECT_ALWAYS
+    elif isinstance(when, dict):
+        for subject in (SUBJECT_PROMPT, SUBJECT_SESSION, SUBJECT_ACTION):
+            block = when.get(subject)
+            if not isinstance(block, dict):
+                continue
+            fields["when_subject"] = subject
+            if subject == SUBJECT_PROMPT:
+                if has := str(block.get("has", "") or ""):
+                    fields["when_has"] = has
+                if matches := str(block.get("matches", "") or ""):
+                    fields["when_matches"] = matches
+            elif subject == SUBJECT_SESSION:
+                fields["when_origin"] = str(block.get("origin", "") or "")
+            else:
+                fields["when_action"] = {k: str(v) for k, v in block.items()}
+            break
+
+    then = front.get("then")
+    if isinstance(then, dict):
+        for verb, value in then.items():
+            if verb in VERBS:
+                fields[verb] = value
+    return fields

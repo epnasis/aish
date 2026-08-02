@@ -273,6 +273,14 @@ thousands of entries without bloating the context.
   that never satisfied its rule arrives with a line saying so, written by aish
   and not by the model, so it cannot be skipped.
 
+  You can write a rule by hand, or just say it: *"always use show_image"* is
+  enough. aish names the field values, renders the file itself, checks that
+  everything the rule mentions actually exists, and shows you what the rule
+  **means** — plus which of your recent turns it would have bound — before
+  anything is saved. Changing one only touches the fields you name, so a rule
+  never quietly loses what it already did; retiring one leaves the file in
+  place so you can bring it back.
+
   Rules only ever **restrict**: there is no "auto-approve this" verb,
   deliberately, so a bad rule can annoy you and can never widen what runs
   without asking. Worked examples ship in `examples/rules/` — one per trigger

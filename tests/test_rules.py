@@ -9,6 +9,8 @@ engine rests on.
 
 from __future__ import annotations
 
+import json
+import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -1000,3 +1002,158 @@ class TestAlwaysSubject:
             verdict = rules.gate([binding], "run_command", {"command": command},
                                  cwd=str(tmp_path))[0]
             assert verdict.verdict == "refused", command
+
+
+class TestAuthoring:
+    """The model names field values; the TOOL renders the file. #205's exhibit
+    is a rule aish wrote itself that loaded as `error: a rule with no obligation
+    restricts nothing` and had been inert since the day it was written."""
+
+    BASE = {
+        "name": "bounded-material",
+        "description": "Answer from the material I gave you.",
+        "when_subject": "prompt",
+        "when_has": "source",
+        "answer_from": "source",
+        "never_use": ["web_search"],
+    }
+
+    def test_rendered_fields_round_trip_through_the_parser(self):
+        """The only claim that matters: what render() emits, _parse() reads
+        back as the rule that was asked for."""
+        rule, errors = rules.lint(rules.render(self.BASE))
+        assert not errors and rule is not None
+        assert rule.name == "bounded-material"
+        assert rule.trigger == rules.TRIGGER_MESSAGE_SHAPE
+        verbs = {o["verb"] for o in rule.obligations}
+        assert verbs == {rules.VERB_ANSWER_FROM, rules.VERB_NEVER_USE}
+
+    def test_a_value_that_would_break_yaml_is_quoted(self):
+        """The renderer exists so no author has to know which values need
+        quoting — a colon in a description is the ordinary case, not an edge."""
+        rule, errors = rules.lint(rules.render(
+            {**self.BASE, "description": "material: use it, don't widen it"}
+        ))
+        assert not errors and rule is not None
+        assert rule.description == "material: use it, don't widen it"
+
+    def test_a_rule_with_no_obligation_is_refused_at_render(self):
+        """#205's exhibit, caught before a file exists rather than months
+        after: it put the obligation in PROSE, which restricts nothing."""
+        fields = {k: v for k, v in self.BASE.items()
+                  if k not in ("answer_from", "never_use")}
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({**fields, "prose": "You MUST use show_image."})
+        assert "restricts nothing" in str(exc.value)
+
+    def test_an_unknown_field_names_what_is_available(self):
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({**self.BASE, "tier": 0})
+        assert "unknown field 'tier'" in str(exc.value)
+        assert "when_subject" in str(exc.value)
+
+    def test_a_rule_naming_a_missing_tool_does_not_pass_lint(self):
+        """A route to a tool that does not exist refuses every alternative and
+        offers nothing, on every turn it binds."""
+        text = rules.render({**self.BASE, "answer_from": "gws_gmial_send"})
+        rule, errors = rules.lint(text, known_tools={"read_url", "web_search"})
+        assert rule is None
+        assert "gws_gmial_send" in errors[0]
+
+    def test_a_prohibition_on_a_missing_tool_is_caught_too(self):
+        """It would never fire — and a rule that never fires looks exactly like
+        a rule that is working."""
+        text = rules.render({**self.BASE, "never_use": ["web_serch"]})
+        rule, errors = rules.lint(text, known_tools={"read_url", "web_search"})
+        assert rule is None and "web_serch" in errors[0]
+
+    def test_editing_carries_over_everything_not_named(self):
+        """#205's sharpest risk: the compiler regenerating a working rule from
+        one sentence and silently dropping the four things it already did."""
+        original = rules.render(self.BASE)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bounded-material.md"
+            path.write_text(original, encoding="utf-8")
+            fields = {**rules.author_fields(path), "must_tell_me_when": "it failed"}
+        rule, errors = rules.lint(rules.render(fields))
+        assert not errors and rule is not None
+        verbs = {o["verb"] for o in rule.obligations}
+        assert verbs == {
+            rules.VERB_ANSWER_FROM, rules.VERB_NEVER_USE, rules.VERB_MUST_TELL_ME_WHEN,
+        }, "an edit dropped an obligation it was never asked to touch"
+
+    def test_the_prose_body_survives_an_edit_verbatim(self):
+        body = "Widening quietly costs them the ability to trust any answer."
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "r.md"
+            path.write_text(rules.render({**self.BASE, "prose": body}), encoding="utf-8")
+            fields = rules.author_fields(path)
+        assert body in rules.render({**fields, "description": "changed"})
+
+    def test_explain_says_when_and_what_without_naming_yaml(self):
+        """What the owner approves is the MEANING. He did not write the file
+        and should not have to audit it."""
+        rule, _ = rules.lint(rules.render(self.BASE))
+        text = rules.explain(rule)
+        assert "material" in text and "web_search" in text
+        assert "when:" not in text and "then:" not in text
+
+    def test_explain_names_the_moment_a_verify_rule_is_checked(self):
+        rule, _ = rules.lint(rules.render({
+            "name": "live-price", "description": "Prices come from the store.",
+            "when_subject": "always", "must_first": "read_url",
+        }))
+        assert "before you see it" in rules.explain(rule)
+
+    def test_a_retired_rule_says_so_in_its_own_card(self):
+        rule, _ = rules.lint(rules.render({**self.BASE, "enabled": False}))
+        assert "DISABLED" in rules.explain(rule)
+
+
+class TestRetroMatch:
+    """Replay a candidate over turns that already happened. A manufactured turn
+    tests the harness; a real one tests the rule."""
+
+    TURNS = [
+        {"turn": "1", "prompt": "summarize https://example.com/post", "origin": "user"},
+        {"turn": "2", "prompt": "what is the capital of France", "origin": "user"},
+        {"turn": "3", "prompt": "read ~/notes/plan.md and tell me", "origin": "user"},
+    ]
+
+    def _rule(self, **over):
+        fields = {"name": "r", "description": "d", "when_subject": "prompt",
+                  "when_has": "source", "answer_from": "source", **over}
+        rule, _ = rules.lint(rules.render(fields))
+        return rule
+
+    def test_it_reports_which_real_turns_would_have_bound(self):
+        match = rules.retro_match(self._rule(), self.TURNS)
+        assert match.checked == 3
+        assert [t["turn"] for t in match.bound] == ["1", "3"]
+
+    def test_a_narrower_trigger_binds_strictly_fewer_turns(self):
+        """The behaviour diff the design asks for, in its simplest form: the
+        same history, two rules, a comparable answer."""
+        wide = rules.retro_match(self._rule(), self.TURNS)
+        narrow = rules.retro_match(
+            self._rule(when_has="link", answer_from="read_url"), self.TURNS
+        )
+        assert {t["turn"] for t in narrow.bound} < {t["turn"] for t in wide.bound}
+
+    def test_a_rule_binding_nothing_is_visible_as_such(self):
+        """Not an error — it may be about the future. But the owner has to see
+        it, because the other explanation is that the rule is wrong."""
+        match = rules.retro_match(self._rule(when_has="attachment"), self.TURNS)
+        assert match.checked == 3 and not match.bound
+
+    def test_past_turns_skips_text_the_owner_never_typed(self, tmp_path):
+        """aish's own notes arrive in the user slot. Counting them would have a
+        rule appear to bind on turns nobody took."""
+        log = tmp_path / "session-20260101-000000-000000.jsonl"
+        log.write_text("\n".join(json.dumps(r) for r in [
+            {"kind": "message", "role": "user", "content": "real question", "turn": "a"},
+            {"kind": "message", "role": "user", "content": "[aish: rework this]", "turn": "b"},
+            {"kind": "message", "role": "assistant", "content": "an answer"},
+        ]) + "\n", encoding="utf-8")
+        turns = rules.past_turns(tmp_path)
+        assert [t["prompt"] for t in turns] == ["real question"]

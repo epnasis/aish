@@ -6,6 +6,7 @@ run_command cannot be reached there unless the approve() callback returns
 the command to run (possibly edited by the user).
 """
 
+import dataclasses
 import datetime
 import getpass
 import itertools
@@ -120,11 +121,16 @@ Rules:
    the gate will keep refusing until you have said it. If you genuinely
    believe the rule should not apply here, say why in text and propose the
    call again — the user is asked after two refusals and can allow it.
-   Rules live in ~/.config/aish/rules/ and only the USER writes them: when
-   they state a standing rule that must be ENFORCED rather than merely
-   remembered ("if I paste only a link, analyse THAT and nothing else"),
-   tell them a rule file is where it belongs and offer to draft one for
-   their approval — do not save it as a memory and hope.
+   Rules live in ~/.config/aish/rules/. When the user states a standing rule
+   that must be ENFORCED rather than merely remembered ("if I paste only a
+   link, analyse THAT and nothing else", "always use show_image"), you MUST
+   call create_rule — do not save it as a memory and hope. You never write the
+   file and never write YAML: name the field values and aish renders, checks
+   and shows the user what it MEANS before anything is saved, so a rule cannot
+   land without their approval. Changing one: edit_rule, naming ONLY what
+   changes. Stopping one: retire_rule. If what they want cannot be expressed
+   in those fields, say exactly what could not be expressed — that is a gap in
+   aish worth reporting, not a reason to write vague prose.
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. A COMMENT
    the user attaches to a decision changes what you do next, and approve vs
@@ -3497,6 +3503,15 @@ class Agent:
         if name == "import_skill":
             return self._import_skill(args)
 
+        if name == "create_rule":
+            return self._create_rule(args)
+
+        if name == "edit_rule":
+            return self._edit_rule(args)
+
+        if name == "retire_rule":
+            return self._retire_rule(args)
+
         if name == "run_command":
             # Expand any aish alias on the first word BEFORE the gate, so the
             # denylist/approval/cd-check all classify the real command.
@@ -3867,6 +3882,147 @@ class Agent:
             except OSError as exc:
                 return f"ERROR: wrote {target} but could not make it executable: {exc}"
         return None
+
+    # ------------------------------------------------------- rule authoring
+
+    RULE_FIELD_ARGS = (
+        "description", "prose", "enabled", "expires",
+        "when_subject", "when_has", "when_matches", "when_origin", "when_action",
+        "answer_from", "never_use", "must_first",
+        "answer_must_include", "answer_must_not", "must_tell_me_when",
+    )
+
+    # How many matched turns the approval card lists before it summarises. The
+    # card has to fit on a phone; the count above it is the real number.
+    RULE_RETRO_SHOWN = 4
+
+    def _rules_dir(self) -> Path:
+        return rules.rule_dirs()[0]
+
+    def _rule_path(self, name: str) -> Path:
+        return self._rules_dir() / f"{name}.md"
+
+    def _rule_card(self, rule: "rules.Rule", text: str, verb: str) -> str:
+        """What the owner actually approves: the compiled MEANING plus the
+        turns this would have changed. Not a YAML diff — he is agreeing to a
+        behaviour, and the file is an implementation detail he did not write."""
+        parts = [f"{verb} rule '{rule.name}'", "", rules.explain(rule)]
+        history = rules.past_turns(Path(self.state_dir)) if self.state_dir else []
+        match = rules.retro_match(rule, history)
+        if match.checked:
+            parts += ["", f"Over your last {match.checked} turns this would have "
+                          f"bound on {len(match.bound)}."]
+            for turn in match.bound[:self.RULE_RETRO_SHOWN]:
+                parts.append(f"  · {turn['prompt'][:100]}")
+            if len(match.bound) > self.RULE_RETRO_SHOWN:
+                parts.append(f"  · … and {len(match.bound) - self.RULE_RETRO_SHOWN} more")
+            if not match.bound:
+                # Said plainly rather than left as an empty list: a rule that
+                # binds on nothing you have ever asked is either about the
+                # future or written wrong, and only the owner can tell which.
+                parts.append("  (nothing in your history — it may still be right.)")
+        return "\n".join(parts)
+
+    def _write_rule(self, path: Path, text: str, rule: "rules.Rule", verb: str) -> str:
+        """One write, through the SAME diff-approval gate as any other file. A
+        rule is the artifact class that binds the model, so the model creating
+        one silently would be the engine's own failure mode in its authoring
+        path."""
+        if self.approve_write is None:
+            return "ERROR: no write approver available; cannot change rules."
+        plan = files.plan_write(str(path), text, self.cwd)
+        if plan.error:
+            return f"ERROR: {plan.error}"
+        plan = dataclasses.replace(plan, note=self._rule_card(rule, text, verb))
+        decision = self.approve_write(plan)
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            return _with_feedback(WRITE_DENIED, decision.comment)
+        if isinstance(decision, Approved):
+            return WRITE_HELD_FOR_ADJUSTMENT.format(comment=decision.comment)
+        if not decision:
+            return WRITE_DENIED
+        files.commit(plan)
+        return (
+            f"{verb} rule '{rule.name}'.\n\n{rules.explain(rule)}\n\n"
+            "It is in force from your next turn."
+        )
+
+    def _rule_fields(self, args: dict) -> dict:
+        return {
+            key: args[key] for key in self.RULE_FIELD_ARGS
+            if args.get(key) not in (None, "")
+        }
+
+    def _create_rule(self, args: dict) -> str:
+        """Author a rule (#205). The lint is UNSKIPPABLE — it runs here, before
+        the write, and a failing lint means no file lands. If editing a rule
+        were an ordinary file write then "run the linter" would be advice,
+        which is precisely the failure the rules engine exists to abolish,
+        reappearing inside its own authoring path."""
+        name = str(args.get("name", "") or "").strip()
+        path = self._rule_path(name) if rules.NAME_RE.match(name) else None
+        if path is not None and path.exists():
+            return (
+                f"ERROR: a rule named {name!r} already exists. Use edit_rule to change "
+                "it — that carries over everything you do not name, so a rule cannot "
+                "lose what it already did."
+            )
+        fields = {"name": name, **self._rule_fields(args)}
+        return self._compile_and_write(fields, verb="Created")
+
+    def _edit_rule(self, args: dict) -> str:
+        """Change named fields of an existing rule. A PATCH, never a rewrite:
+        whatever is not named is read from the file and written back unchanged.
+        Regenerating a working rule from one sentence of prose is #205's
+        sharpest risk, so "start over" is kept out of the input space."""
+        name = str(args.get("name", "") or "").strip()
+        path = self._rule_path(name) if rules.NAME_RE.match(name) else None
+        if path is None or not path.exists():
+            return f"ERROR: no rule named {name!r} in {_display_path(self._rules_dir())}."
+        changes = self._rule_fields(args)
+        if not changes:
+            return (
+                "ERROR: edit_rule needs at least one field to change. Name only what "
+                f"changes — have: {', '.join(self.RULE_FIELD_ARGS)}."
+            )
+        try:
+            fields = {**rules.author_fields(path), **changes}
+        except OSError as exc:
+            return f"ERROR: could not read {_display_path(path)} ({exc})."
+        return self._compile_and_write(fields, verb="Updated")
+
+    def _retire_rule(self, args: dict) -> str:
+        """Stop a rule binding, reversibly. The file stays — retire, don't
+        delete (the knowledge layer's L4), which is also why there is no delete
+        verb here: the corpus is git-backed and removing a file is the owner's
+        own call, made with his own hands."""
+        name = str(args.get("name", "") or "").strip()
+        path = self._rule_path(name) if rules.NAME_RE.match(name) else None
+        if path is None or not path.exists():
+            return f"ERROR: no rule named {name!r} in {_display_path(self._rules_dir())}."
+        try:
+            fields = {**rules.author_fields(path), "enabled": False}
+        except OSError as exc:
+            return f"ERROR: could not read {_display_path(path)} ({exc})."
+        return self._compile_and_write(fields, verb="Retired")
+
+    def _compile_and_write(self, fields: dict, verb: str) -> str:
+        """Render → lint → card → write. The model never emits the file: it
+        names field values and this renders the YAML, which deletes an entire
+        failure class (quoting, indentation, key names) that no author, human
+        or model, was reliably getting right."""
+        try:
+            text = rules.render(fields)
+        except rules.LintError as exc:
+            return f"ERROR: {exc}"
+        rule, errors = rules.lint(text, known_tools=self._known_tool_names())
+        if rule is None:
+            return (
+                f"ERROR: that rule did not validate: {'; '.join(errors)} "
+                "Fix and call again."
+            )
+        return self._write_rule(self._rule_path(str(fields["name"])), text, rule, verb)
 
     def _import_skill(self, args: dict) -> str:
         """Import a skill (#139). Untrusted content — the whole skill is shown in

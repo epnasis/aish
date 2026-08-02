@@ -453,6 +453,10 @@ def make_write_approver(log):
         verb = "create" if plan.is_new else "edit"
         print(f"\n{YELLOW}{BOLD}▶ {verb} file?{RESET} {BOLD}{plan.target}{RESET} "
               f"{DIM}(+{plan.added} -{plan.removed}){RESET}")
+        if plan.note:
+            # Above the diff, because for a rule the diff is YAML the owner did
+            # not write and the note is what he is actually agreeing to.
+            print(f"{BOLD}{plan.note}{RESET}\n")
         if plan.diff.strip():
             print(colorize_diff(plan.diff))
         else:

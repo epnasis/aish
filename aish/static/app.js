@@ -2258,6 +2258,9 @@ const TOOL_META = {
   edit_file: ["edit_file", "write", "--green"],
   remember: ["Saved to memory", "knowledge", "--yellow"],
   forget_memory: ["Forgot a memory", "knowledge", "--yellow"],
+  create_rule: ["Wrote a rule", "knowledge", "--orange"],
+  edit_rule: ["Changed a rule", "knowledge", "--orange"],
+  retire_rule: ["Retired a rule", "knowledge", "--orange"],
 };
 
 // [TRACE-TAIL-START]
@@ -6028,6 +6031,16 @@ function buildWriteCard(card, event) {
   removed.textContent = `−${event.removed}`;
   head.append(ico, htext, added, removed);
   card.appendChild(head);
+
+  // The compiled meaning, when the harness sent one (a rule write). It goes
+  // ABOVE the diff because the diff is YAML the owner did not write, and what
+  // he is agreeing to is the behaviour it describes.
+  if (event.note) {
+    const note = document.createElement("div");
+    note.className = "card-note";
+    note.textContent = event.note;
+    card.appendChild(note);
+  }
 
   card.appendChild(renderDiff(event.diff || ""));
 
