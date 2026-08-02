@@ -28,6 +28,18 @@ Seven rules explain most of the fences. Every entry below cites one instead of r
 
 ---
 
+## Rating an answer (#207)
+
+👍/👎 with an optional reason, in the answer's tool row. It exists because the rules engine is about to start checking answers before it delivers them, and the only honest test of that machinery is whether the owner is **still correcting turns that passed every rule they were subject to** — a signal aish could not detect at all before this.
+
+Three properties are load-bearing, and each is pinned:
+
+- **The tap records immediately**, before any comment is typed. A rating that waits for a reason is a rating that mostly does not happen, and the *count* is what the metric needs; the reason box opens after and sends a second record for the same turn, last one winning. `tests/js/test_rating_chip.js`.
+- **It is keyed by the turn id `#202` already mints** for removal — stable live and on replay, so no second identity scheme. The answer element carries it in `data-turn`, populated from `currentTurnId`, which `addUserMsg` sets on both the live and the replay path exactly as `prompt` and `answerTiming` already are.
+- **Ratings replay LAST.** `reconstruct_events` defers them to the end of the stream: a rating decorates a turn rather than being one, it is applied by id rather than position, and it can be written long after the turn it names. In file order the frontend would receive a decoration for a turn it has not rendered yet. `TestRateAnswer`.
+
+**Nothing acts on it.** No model reads it, it claims no control of the chat, and the comment never enters the conversation — making a feedback control steer the running session would turn it into a lever the model can be pointed at. It is evidence for the weekly pass (`curate.scan_ratings`, `TestRatingLedger`) and for the owner.
+
 ## Connection, identity, and painting a view
 
 ### `[CONNECT-WIRE]` — builds the socket and wires its handlers

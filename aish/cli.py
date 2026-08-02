@@ -270,6 +270,9 @@ class LogRef:
     def rewind_last_turn(self) -> bool:
         return self.log.rewind_last_turn()
 
+    def rating(self, turn: str, rating: str, comment: str = "") -> None:
+        self.log.rating(turn, rating, comment)
+
     def redact_turn(self, turn: str):
         return self.log.redact_turn(turn)
 

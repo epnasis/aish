@@ -6293,3 +6293,108 @@ class TestQueueIsBackendAuthoritative:
             assert server.active.queue == []
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
             recv_until(ws, "done")
+
+
+class TestRateAnswer:
+    """👍/👎 with a reason (#207). The rules engine is about to start checking
+    answers before it delivers them, and the honest question about that
+    machinery — *does it change anything?* — is only answerable if there is a
+    record of the owner being unhappy with an answer that passed every rule.
+    Nothing detected that before this."""
+
+    def test_a_rating_is_recorded_against_the_turn_it_names(self, app_env):
+        client, _ = make_client(app_env, [model_says("an answer")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "a question"})
+            live = recv_until(ws, "user")
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "rate", "turn": live["turn"], "rating": "down",
+                          "comment": "the price was stale"})
+            echo = recv_until(ws, "rating")
+            assert echo["turn"] == live["turn"] and echo["rating"] == "down"
+            assert echo["comment"] == "the price was stale"
+
+        log = next(Path(app_env["state_dir"]).glob("session-*.jsonl"))
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        [rating] = [r for r in records if r.get("kind") == "rating"]
+        assert rating["turn"] == live["turn"]
+        assert rating["rating"] == "down" and rating["comment"] == "the price was stale"
+
+    def test_a_rating_survives_a_cold_reopen(self, app_env):
+        """Applied by turn id, and replayed LAST — a rating decorates a turn
+        rather than being one, and it can be written long after the turn it
+        names, so file order would hand the frontend a decoration for a turn it
+        has not rendered."""
+        client, _ = make_client(app_env, [model_says("first"), model_says("second")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "one"})
+            first = recv_until(ws, "user")
+            recv_until(ws, "done")
+            ws.send_json({"type": "rate", "turn": first["turn"], "rating": "up"})
+            recv_until(ws, "rating")
+            ws.send_json({"type": "task", "text": "two"})
+            recv_until(ws, "done")
+
+        log = next(Path(app_env["state_dir"]).glob("session-*.jsonl"))
+        events = SessionLog.reconstruct_events(log)
+        assert events[-1]["type"] == "rating", [e["type"] for e in events]
+        assert events[-1]["turn"] == first["turn"]
+
+    def test_an_unknown_rating_is_ignored(self, app_env):
+        """A closed vocabulary: the record feeds a metric, and a third value
+        would silently split every count that reads it."""
+        client, _ = make_client(app_env, [model_says("an answer")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "a question"})
+            live = recv_until(ws, "user")
+            recv_until(ws, "done")
+            ws.send_json({"type": "rate", "turn": live["turn"], "rating": "meh"})
+            ws.send_json({"type": "sessions"})
+            recv_until(ws, "session_list")  # the socket is alive and said nothing
+
+        log = next(Path(app_env["state_dir"]).glob("session-*.jsonl"))
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        assert not [r for r in records if r.get("kind") == "rating"]
+
+    def test_rating_puts_nothing_into_the_conversation(self, app_env):
+        """Inert by design: it writes a record and nothing else. Making it act
+        would turn a feedback control into a lever the model can be steered
+        by — and the comment is the owner's words about an answer, which must
+        never come back at him as context the model then agrees with."""
+        client, _ = make_client(app_env, [model_says("an answer"), model_says("ok")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "a question"})
+            live = recv_until(ws, "user")
+            recv_until(ws, "done")
+            ws.send_json({"type": "rate", "turn": live["turn"], "rating": "down",
+                          "comment": "SENTINEL-not-a-prompt"})
+            recv_until(ws, "rating")
+
+        log = next(Path(app_env["state_dir"]).glob("session-*.jsonl"))
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        messages = [r for r in records if r.get("kind") == "message"]
+        assert not [m for m in messages if "SENTINEL" in json.dumps(m)]
+        assert len([r for r in records if r.get("kind") == "rating"]) == 1
+
+    def test_a_rating_survives_a_RECONNECT_not_only_a_cold_open(self, app_env):
+        """Two paths restore a chat and both must agree: a reconnect replays
+        the live transcript, a cold open replays the log. A rating that
+        survived one and vanished on the other is the worst of both — and the
+        live path is the one someone actually hits, by locking their phone."""
+        client, _ = make_client(app_env, [model_says("an answer"), model_says("ok")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "a question"})
+            live = recv_until(ws, "user")
+            recv_until(ws, "done")
+            ws.send_json({"type": "rate", "turn": live["turn"], "rating": "up"})
+            recv_until(ws, "rating")
+
+        with client, connected(client) as (_ws, _hello, replay):
+            ratings = [e for e in replay["events"] if e["type"] == "rating"]
+            assert ratings, "a reconnect lost the rating"
+            assert ratings[0]["turn"] == live["turn"] and ratings[0]["rating"] == "up"
+            # Hot and cold must be byte-identical: `seen` is a delivery flag and
+            # has no business in a recorded event, or replay stops matching the
+            # log's own reconstruction.
+            assert "seen" not in ratings[0]

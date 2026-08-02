@@ -248,6 +248,11 @@ INTERRUPTED_TASK = (
 # cannot grow the log without bound.
 TASK_ERROR_CAP = 500
 
+# A rating's reason is a sentence, not an essay — and it is the owner's own
+# words, so it is quoted back to him in the weekly pass and must stay readable.
+RATING_COMMENT_CAP = 1000
+RATINGS = frozenset({"up", "down"})
+
 
 @dataclass
 class SessionInfo:
@@ -610,6 +615,7 @@ class SessionLog:
         Returns None when the log predates trace records (no `trace` kind), so
         the caller can fall back to a flat conversation history."""
         events: list[dict] = []
+        ratings: list[dict] = []
         steps: list[dict] = []
         answer = ""
         open_turn = False
@@ -735,6 +741,21 @@ class SessionLog:
                 has_trace = True
                 ev = {"type": "workspace", "change": "trust", "path": record.get("path", "")}
                 (steps if open_turn else events).append(ev)
+            elif kind == "rating":
+                # Replayed so a reopened chat shows what he already rated —
+                # otherwise he re-rates it, or assumes the tap was lost.
+                # DEFERRED to the end of the stream, not appended here: a
+                # rating DECORATES a turn rather than being one, it is keyed by
+                # turn id rather than by position, and it can be written long
+                # after the turn it names (he rates when he notices). Replaying
+                # it in file order would hand the frontend a decoration for a
+                # turn it has not rendered yet.
+                ratings.append({
+                    "type": "rating",
+                    "turn": record.get("turn", ""),
+                    "rating": record.get("rating", ""),
+                    "comment": record.get("comment", ""),
+                })
             elif kind == "origin":
                 origin = record.get("origin") or origin
             elif kind == "task_end" and record.get("status") not in (None, "ok"):
@@ -822,6 +843,8 @@ class SessionLog:
                 if content:
                     answer = content
         flush()
+        # Decorations last: every turn they name now exists in the stream.
+        events.extend(ratings)
         return events if has_trace else None
 
     @staticmethod
@@ -1549,6 +1572,22 @@ class SessionLog:
         old session must not hoist it to most-recent; only new activity does."""
         with self._write_lock:
             self._pending_model = spec
+
+    def rating(self, turn: str, rating: str, comment: str = "") -> None:
+        """The owner's verdict on one answer (#207) — 👍/👎 with an optional
+        reason, keyed by the same turn id a redaction names (#202), so it is
+        stable live AND on replay and needs no new identity scheme.
+
+        This is a RECORD, not a judgement: no model reads it, nothing acts on
+        it. It exists so two questions have answers instead of impressions —
+        "is he still correcting turns that passed every rule they were subject
+        to" (the metric that decides whether turn-end verification earns its
+        place) and "which rules were governing the answer he disliked". The
+        rule records for that turn sit between this turn's `task_start` and
+        `task_end`, so the join is a lookup inside a bracket."""
+        self._record(
+            "rating", turn=turn, rating=rating, comment=comment[:RATING_COMMENT_CAP]
+        )
 
     def command(self, command: str, decision: str) -> None:
         self._record("command", command=command, decision=decision)

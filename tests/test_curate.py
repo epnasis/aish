@@ -22,6 +22,7 @@ from aish.curate import (
     rule_signals,
     run_curate,
     scan_ledger,
+    scan_ratings,
     scan_rules,
     update_entry_meta,
 )
@@ -718,3 +719,37 @@ class TestRuleLedgerHasAReader:
     def test_a_corpus_with_no_rules_stays_quiet(self, tmp_path):
         logged = self._run(self._state(tmp_path, [user("hello")]), tmp_path)
         assert not [line for line in logged if line.startswith("rule ")]
+
+
+def rating_rec(turn, rating, comment="", ts="2026-07-28T10:05:00"):
+    return {"ts": ts, "kind": "rating", "turn": turn, "rating": rating, "comment": comment}
+
+
+class TestRatingLedger:
+    """#207's records, read by the weekly pass. No model, no judgement — the
+    count is the thing."""
+
+    def test_ratings_are_collected_by_turn(self, tmp_path):
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            user("one"), rating_rec("t1", "down", "stale price"),
+            user("two"), rating_rec("t2", "up"),
+        ])
+        ratings = scan_ratings(tmp_path, now=NOW)
+        assert ratings["t1"]["rating"] == "down"
+        assert ratings["t1"]["comment"] == "stale price"
+        assert ratings["t2"]["rating"] == "up"
+
+    def test_the_reason_arrives_as_a_second_record_and_wins(self, tmp_path):
+        """The tap records immediately so the count is never lost; a reason
+        typed after is a second record for the same turn."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rating_rec("t1", "down"),
+            rating_rec("t1", "down", "it never read the page"),
+        ])
+        ratings = scan_ratings(tmp_path, now=NOW)
+        assert len(ratings) == 1
+        assert ratings["t1"]["comment"] == "it never read the page"
+
+    def test_logs_outside_the_window_are_not_read(self, tmp_path):
+        write_log(tmp_path, "session-20250101-100000-000001.jsonl", [rating_rec("t1", "up")])
+        assert scan_ratings(tmp_path, now=NOW) == {}
