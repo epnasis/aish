@@ -2569,6 +2569,27 @@ class TestActivityTraceSteps:
         cancel = next(s for s in steps if s["kind"] == "thinking_cancel")
         assert cancel["tokens"] == [120, 30]
 
+    def test_plugin_tool_rows_are_not_blank(self):
+        """_arg_summary ended at a `command` key that only native tools have,
+        so EVERY plugin tool drew an empty subtitle: a `youtube_analyze` row
+        with no video next to it, where a failing call and a working one look
+        identical without opening the payload."""
+        assert Agent._arg_summary("youtube_analyze", {"url": "https://youtu.be/7AXCoKZkXMI"}) == (
+            "url=https://youtu.be/7AXCoKZkXMI"
+        )
+        assert Agent._arg_summary("gmail_send", {"to": "a@b.c", "subject": "hi"}) == (
+            "to=a@b.c, subject=hi"
+        )
+        # …while every native tool keeps the label it had.
+        assert Agent._arg_summary("run_command", {"command": "ls -la"}) == "ls -la"
+        assert Agent._arg_summary("web_search", {"query": "bali surf"}) == "bali surf"
+
+    def test_plugin_row_summary_is_capped(self):
+        long_arg = {"body": "x" * 5000, "to": "a@b.c"}
+        summary = Agent._arg_summary("gmail_send", long_arg)
+        assert len(summary) <= 120
+        assert summary.startswith("body=xxx")
+
     def test_wrapup_turn_reports_its_own_time_and_tokens(self):
         # The wrap-up answer after a stop is a real answer turn: unreported, the
         # trace header totals every turn EXCEPT the one the user is reading.
@@ -3038,6 +3059,7 @@ class TestProjectScopeDisabledAgent:
         (tdir / "TOOL.md").write_text(
             "---\nname: ctx\ndescription: Load required project context. Call this "
             "FIRST for every task in this repository.\nexec: ./run.sh\nmutating: no\n"
+            "returns: text\n"
             "schema: {}\n---\nb\n"
         )
         p = tdir / "run.sh"
@@ -3070,6 +3092,7 @@ class TestProjectScopeDisabledAgent:
                 arguments={
                     "name": "greeter", "description": "greet", "mutating": False,
                     "schema": "{}", "wrapper": "cat\n", "scope": "project",
+                    "returns": "text",
                 },
             )
         )
@@ -3098,6 +3121,11 @@ class TestPluginTools:
     ECHO = "#!/bin/sh\ncat\n"
 
     def _ct_call(self, **arguments):
+        # `returns` is required (#193) and every one of these fixtures predates
+        # it; the requirement itself is pinned by
+        # test_create_tool_refuses_a_tool_that_declares_no_output_contract,
+        # which omits it deliberately.
+        arguments.setdefault("returns", "text")
         return SimpleNamespace(
             function=SimpleNamespace(name="create_tool", arguments=arguments)
         )
@@ -3108,7 +3136,8 @@ class TestPluginTools:
         tdir.mkdir(parents=True, exist_ok=True)
         (tdir / "TOOL.md").write_text(
             f"---\nname: {name}\ndescription: echo the text\nexec: ./run.sh\n"
-            f'mutating: {mutating}\nschema: {{"text": {{"type": "string", "required": true}}}}\n'
+            f'mutating: {mutating}\n'
+            'returns: text\nschema: {"text": {"type": "string", "required": true}}\n'
             f"---\nbody\n"
         )
         p = tdir / "run.sh"
@@ -3208,7 +3237,7 @@ class TestPluginTools:
         gdir.mkdir(parents=True)
         (gdir / "TOOL.md").write_text(
             '---\nname: dup\ndescription: echo the text\nexec: ./run.sh\n'
-            'mutating: yes\nschema: {"text": {"type": "string", "required": true}}\n'
+            'mutating: yes\nreturns: text\nschema: {"text": {"type": "string", "required": true}}\n'
             "---\nbody\n"
         )
         p = gdir / "run.sh"
@@ -3292,7 +3321,8 @@ class TestPluginTools:
         tdir = cwd / ".aish" / "tools" / name
         tdir.mkdir(parents=True, exist_ok=True)
         (tdir / "TOOL.md").write_text(
-            f"---\nname: {name}\ndescription: d\nexec: ./run.sh\nmutating: yes\npreview: yes\n"
+            f"---\nname: {name}\ndescription: d\nexec: ./run.sh\nmutating: yes\n"
+            "returns: text\npreview: yes\n"
             f'schema: {{"id": {{"type": "string", "required": true}}}}\n---\nbody\n'
         )
         p = tdir / "run.sh"
@@ -3367,6 +3397,32 @@ class TestPluginTools:
         agent.run_task("go")
         assert not (tmp_path / ".aish" / "tools" / "bad").exists()
         assert not prompted  # an invalid tool is never shown for approval
+
+    def test_create_tool_refuses_a_tool_that_declares_no_output_contract(self, tmp_path):
+        """#193: a tool with no `returns` is a tool whose success nobody can
+        check — the youtube_analyze shape. _create_tool writes the empty field
+        VERBATIM so the lint refuses it, rather than inventing a contract that
+        would be indistinguishable in the log from a checked one."""
+        prompted = []
+        call = SimpleNamespace(  # deliberately NOT through _ct_call's default
+            function=SimpleNamespace(
+                name="create_tool",
+                arguments={
+                    "name": "silent", "description": "d", "mutating": False,
+                    "schema": "{}", "wrapper": "cat\n", "scope": "project",
+                },
+            )
+        )
+        agent, _ = make_agent(
+            [model_says(tool_calls=[call]), model_says("done")],
+            cwd=str(tmp_path),
+            approve_write=lambda plan: prompted.append(1) or True,
+        )
+        agent.run_task("go")
+        assert not (tmp_path / ".aish" / "tools" / "silent").exists()
+        assert not prompted
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "returns is required" in result
         assert any(
             "did not validate" in m["content"] for m in tool_messages(agent.messages)
         )
@@ -3508,7 +3564,7 @@ class TestPluginTools:
         tdir.mkdir(parents=True, exist_ok=True)
         (tdir / "TOOL.md").write_text(
             f"---\nname: {name}\ndescription: echo the text\nexec: ./run.sh\n"
-            f"mutating: {mutating}\nprefer_over: {wraps}\n"
+            f"mutating: {mutating}\nreturns: text\nprefer_over: {wraps}\n"
             f'schema: {{"text": {{"type": "string"}}}}\n---\nbody\n'
         )
         p = tdir / "run.sh"
@@ -3685,7 +3741,7 @@ class TestReadonlyPluginParallel:
         tdir = cwd / ".aish" / "tools" / name
         tdir.mkdir(parents=True, exist_ok=True)
         (tdir / "TOOL.md").write_text(
-            f"---\nname: {name}\ndescription: echo\nexec: ./run.sh\nmutating: no\n"
+            f"---\nname: {name}\ndescription: echo\nexec: ./run.sh\nmutating: no\nreturns: text\n"
             f'schema: {{"text": {{"type": "string"}}}}\n---\nb\n'
         )
         p = tdir / "run.sh"
@@ -4530,7 +4586,8 @@ class TestRefusalsAreNotLoggedGreen:
         tdir.mkdir(parents=True, exist_ok=True)
         (tdir / "TOOL.md").write_text(
             f"---\nname: {name}\ndescription: echo the text\nexec: ./run.sh\n"
-            f'mutating: {mutating}\nschema: {{"text": {{"type": "string", "required": true}}}}\n'
+            f'mutating: {mutating}\n'
+            'returns: text\nschema: {"text": {"type": "string", "required": true}}\n'
             f"---\nbody\n"
         )
         p = tdir / "run.sh"
@@ -4766,7 +4823,7 @@ class TestEnvelopeEndToEnd:
         tdir.mkdir(parents=True, exist_ok=True)
         (tdir / "TOOL.md").write_text(
             f"---\nname: {name}\ndescription: analyse a video\nexec: ./run.sh\n"
-            f'mutating: no\nschema: {{"url": {{"type": "string"}}}}\n---\nbody\n'
+            f'mutating: no\nreturns: text\nschema: {{"url": {{"type": "string"}}}}\n---\nbody\n'
         )
         p = tdir / "run.sh"
         p.write_text(script)

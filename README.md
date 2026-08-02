@@ -149,6 +149,15 @@ shows red in the activity trace, and the model is told, on the result itself,
 that it must disclose the failure before using any other source. Substituting a
 different source silently is the specific behaviour this exists to stop.
 
+That verdict does not depend on the tool being honest about itself. Every
+`TOOL.md` must declare `returns:` — **what a successful result contains** —
+and aish checks it on every call: a field list for a JSON payload (each named
+field must come back non-empty), `text` where non-empty output is the whole
+contract, or `none` where nothing can be checked. A wrapper that reports a
+failure in its own output and exits 0 anyway is caught by its own declared
+contract, not trusted. `create_tool` refuses to write a tool that declares
+none.
+
 When a result is too large it is cut to fit the context window of the model
 **actually in use** (a 1M-token cloud model keeps far more than an 8k local
 one), and the remainder is cached rather than discarded: the model pages

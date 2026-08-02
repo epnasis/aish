@@ -101,8 +101,13 @@ Rules:
    it is invoked FREQUENTLY, its arguments are FREE-TEXT/shell-fragile, AND
    reliability matters (mutating or user-facing output); otherwise write a
    skill. create_tool validates the manifest and shows both files (manifest
-   first, then wrapper) for your user to approve. To install a skill from a
-   git repo or local path, use import_skill — it is untrusted content, so
+   first, then wrapper) for your user to approve. Every tool MUST declare
+   `returns` — what a successful result contains — and its wrapper MUST exit
+   non-zero when it did not do that; aish CHECKS the declared contract on
+   every call and marks the result failed when it is not met, whatever the
+   wrapper claimed. When a tool result says status=incomplete or failed, say
+   so to your user and NEVER answer from another source as if it had worked.
+   To install a skill from a git repo or local path, use import_skill — it is untrusted content, so
    aish shows the user every file for approval before anything lands; after
    staging, summarize what the skill and its scripts do so they can review.
 2d. RULES are not advice. A message headed "RULES IN FORCE FOR THIS TURN"
@@ -2086,6 +2091,19 @@ class Agent:
         return fn(), time.perf_counter() - start
 
     @staticmethod
+    def _kv_summary(args: dict, cap: int = 120) -> str:
+        """`k=v, k=v` for a tool whose args this module does not know by name.
+        Capped, because a plugin arg can be a whole document."""
+        parts = []
+        for key, value in args.items():
+            text = str(value)
+            if len(text) > 60:
+                text = text[:59] + "…"
+            parts.append(f"{key}={text}")
+        line = ", ".join(parts)
+        return line[: cap - 1] + "…" if len(line) > cap else line
+
+    @staticmethod
     def _arg_summary(name: str, args: dict) -> str:
         """A one-line human label for a tool call — the trace step subtitle."""
         a = args or {}
@@ -2103,8 +2121,14 @@ class Agent:
             return str(a.get("path", ""))
         if name in ("remember", "forget_memory"):
             return str(a.get("name") or "memory")
-        # read_docs, run_command, and anything else: the command/topic string.
-        return str(a.get("command", ""))
+        if "command" in a:
+            return str(a["command"])  # read_docs, run_command
+        # A PLUGIN tool: its args are its own, and this used to fall through to
+        # a `command` key it never has — so every plugin tool drew a BLANK row
+        # on the timeline. `youtube_analyze` with no subject next to it is why
+        # a failing call could not be told from a working one without opening
+        # the payload. Shape is the trace contract's (§3.4): `url=https://…`.
+        return Agent._kv_summary(a)
 
     def _call_result(
         self,
@@ -3352,6 +3376,11 @@ class Agent:
             lines.append(f"prefer_over: {str(args['prefer_over']).strip()}")
         if str(args.get("secrets", "") or "").strip():
             lines.append(f"secrets: {str(args['secrets']).strip()}")
+        # Written verbatim, and ABSENT when the model omitted it, so the lint
+        # below refuses the tool rather than this inventing a contract on the
+        # author's behalf — a guessed contract is indistinguishable from a
+        # checked one in the log, and only one of them is true.
+        lines.append(f"returns: {str(args.get('returns', '') or '').strip()}")
         lines.append(f"schema: {json.dumps(schema_obj)}")
         lines.append("---")
         lines.append(str(args.get("notes", "")).strip() or f"{name} tool.")
