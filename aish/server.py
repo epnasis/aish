@@ -145,7 +145,17 @@ STATIC_REV = _static_rev()
 # whitelisted image hosts. Applied to EVERY http response — index, static
 # files, /file, JSON, errors, sw.js (whose worker-scope CSP this also is).
 CSP_IMG_HOSTS = "https://img.youtube.com https://i.ytimg.com https://maps.googleapis.com"
-CSP_FRAME_HOSTS = "https://www.youtube-nocookie.com https://maps.google.com"
+# frame-src must name the REDIRECT TARGET, not just the URL we set on the
+# iframe: `maps.google.com/maps?…&output=embed` answers 301 →
+# `www.google.com/maps/embed?…`, and CSP re-checks the destination. Listing only
+# maps.google.com blocked every map card at the browser with nothing in the UI
+# to show for it — an empty box and a console line nobody reads. Path-scoped, so
+# this grants the maps embed endpoint rather than all of www.google.com; the
+# path is ignored when matching a redirect, which is exactly the case here.
+CSP_FRAME_HOSTS = (
+    "https://www.youtube-nocookie.com https://maps.google.com "
+    "https://www.google.com/maps/"
+)
 _HOST_OK_RE = re.compile(r"^[A-Za-z0-9.\-:\[\]]+$")  # header-injection guard
 
 
