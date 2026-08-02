@@ -268,27 +268,32 @@ check("an unusable stamp falls back to reconstructing from the steps", () => {
 // "thinking" step), and while its seconds went unbooked the finished header
 // contradicted the timeline printed directly beneath it: "Worked for 5.8s" over
 // a row reading "Answered in 23s".
+//
+// The durations are the ones the reporting turn actually recorded — the YouTube
+// digest in session-20260802-132456-439726.jsonl — rather than round numbers.
+// Its task_start (13:25:04) to its answer (13:25:33) is 29s of wall clock, so
+// the fixed total is also the first one that agrees with the turn's own length.
+const REAL_TURN = [
+  { kind: "thinking_start" },
+  { kind: "thinking", secs: 3.6145043335855007, tokens: [15807, 43],
+    gist: "Analyzing the Video's Content" },
+  { kind: "tool_start", name: "youtube_analyze", summary: "" },
+  { kind: "tool", name: "youtube_analyze", secs: 2.212645374238491, ok: true, summary: "" },
+  { kind: "thinking_start" },
+  { kind: "thinking_cancel", secs: 22.97553041577339, tokens: [26247, 1391] },
+];
+
 check("the answer turn counts toward the finished total", () => {
   const s = makeSandbox();
   s.turnStart = s.at();
-  s.traceStep({ kind: "thinking_start" });
-  s.traceStep({ kind: "thinking", secs: 3.6 });
-  s.traceStep({ kind: "tool_start", name: "youtube_analyze", summary: "a video" });
-  s.traceStep({ kind: "tool", name: "youtube_analyze", secs: 2.2, ok: true, summary: "a video" });
-  s.traceStep({ kind: "thinking_start" });
-  s.traceStep({ kind: "thinking_cancel", secs: 23, tokens: [42100, 1400] });
+  REAL_TURN.forEach((step) => s.traceStep(step));
   assert.strictEqual(s.workedText(), "Worked for 29s", "3.6 + 2.2 + 23, not 5.8");
 });
 
 check("a replayed turn totals the same as the live one", () => {
   const s = makeSandbox();
   s.replaying = true;
-  s.traceStep({ kind: "thinking_start" });
-  s.traceStep({ kind: "thinking", secs: 3.6 });
-  s.traceStep({ kind: "tool_start", name: "youtube_analyze", summary: "a video" });
-  s.traceStep({ kind: "tool", name: "youtube_analyze", secs: 2.2, ok: true, summary: "a video" });
-  s.traceStep({ kind: "thinking_start" });
-  s.traceStep({ kind: "thinking_cancel", secs: 23, tokens: [42100, 1400] });
+  REAL_TURN.forEach((step) => s.traceStep(step));
   s.replaying = false;
   assert.strictEqual(s.workedText(), "Worked for 29s", "cold replay must not report less");
 });
