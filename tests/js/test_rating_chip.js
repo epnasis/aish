@@ -328,4 +328,34 @@ function world() {
   ok("and offers it for editing", reopened.value === "it never read the page");
 }
 
+// --- one tap does one thing, even with the box open -------------------------
+// Reported from real use: with text in the field, tapping a thumb only closed
+// the box — the blur committed, the row shrank, and the tap landed on a moved
+// target. The chip now declines focus and commits the reason itself.
+{
+  const { sandbox, sent } = world();
+  const { host, tools } = mount(sandbox, "turn-abc", "down");
+  const up = sandbox.ratingChip("turn-abc", "up");
+  tools.appendChild(up);
+  const down = tools.children[0];
+
+  ok("the chip declines focus while typing", typeof up.onmousedown === "function");
+  let defaultPrevented = false;
+  up.onmousedown({ preventDefault: () => { defaultPrevented = true; } });
+  ok("by preventing the default focus shift", defaultPrevented);
+
+  down.onclick();
+  const note = host.children.find((c) => c.className === "rating-note");
+  note.value = "stale price";
+
+  // No blur — the chip declined focus, so the field still has it.
+  up.onclick();
+  const kinds = sent.map((m) => m.rating);
+  ok("the typed reason is committed by the tap itself",
+     sent.some((m) => m.comment === "stale price"));
+  ok("and the tap still performs its own action", kinds[kinds.length - 1] === "up");
+  ok("in that order — reason first, then the new verdict",
+     sent.findIndex((m) => m.comment === "stale price") < kinds.lastIndexOf("up"));
+}
+
 console.log(`ok - rating chip (${checks} checks)`);
