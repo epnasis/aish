@@ -5118,13 +5118,12 @@ RULE_SOURCE = """---
 name: bounded-material
 description: Answer from the material I gave you.
 when:
-  request:
-    has: material
+  prompt:
+    has: source
 then:
-  answer_from: material
+  answer_from: source
   never_use: [web_search]
   must_tell_me_when: the material could not be read
-if_unsure: proceed
 ---
 
 Answer from the material the user gave you.
@@ -5226,7 +5225,7 @@ class TestRuleSeeding:
         assert binding["rule"] == "bounded-material" and binding["seeded"] is True
         assert binding["obligations"][0] == {
             "verb": "answer_from",
-            "to": "material",
+            "to": "source",
             "of": "deliverable",
             "readers": ["read_url"],
             "sources": [SOURCE_URL],
@@ -5768,8 +5767,8 @@ class TestABrokenRuleIsLoud:
 name: half-written
 description: The obligation is in the prose, where it enforces nothing.
 when:
-  request:
-    has: material
+  prompt:
+    has: source
 ---
 
 You MUST always use the show_image tool.
@@ -5801,3 +5800,34 @@ You MUST always use the show_image tool.
         agent, _ = rules_agent(tmp_path, [model_says("done")], echo=seen.append)
         agent.run_task("summarize https://x.test/a")
         assert not [line for line in seen if "not in force" in line]
+
+    def test_the_warning_does_not_nag_every_turn(self, tmp_path):
+        """A rule file does not fix itself between turns, so repeating the
+        warning is nagging rather than information — and a warning that is
+        always on screen is one nobody reads."""
+        seen = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says("a"), model_says("b"), model_says("c")],
+            rule_texts=(self.BROKEN,),
+            echo=seen.append,
+        )
+        for _ in range(3):
+            agent.run_task("summarize https://x.test/a")
+        assert len([line for line in seen if "not in force" in line]) == 1
+
+    def test_a_SECOND_broken_rule_is_still_reported(self, tmp_path):
+        """Deduplication is per rule, not a one-shot mute for the session."""
+        seen = []
+        second = self.BROKEN.replace("half-written", "also-broken")
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says("a"), model_says("b")],
+            rule_texts=(self.BROKEN, second),
+            echo=seen.append,
+        )
+        agent.run_task("summarize https://x.test/a")
+        agent.run_task("summarize https://x.test/b")
+        warned = [line for line in seen if "not in force" in line]
+        assert len(warned) == 2
+        assert {"half-written" in w for w in warned} == {True, False}

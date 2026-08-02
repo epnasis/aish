@@ -1040,6 +1040,11 @@ class Agent:
         # case and costs one set-membership test per dispatch.
         self._bindings: list[rules.Binding] = []
         self._binding_seq = itertools.count(1)
+        # Rules already reported as broken. A rule file does not fix itself
+        # between turns, so warning every turn is nagging, not information —
+        # and a warning that is always there is one nobody reads. Session-
+        # scoped, NOT per-task: the point is to tell the owner once.
+        self._warned_rules: set[str] = set()
         # Plugin tools (TOOL.md), rebuilt only when the tool dirs' signature
         # moves — a mid-task manifest edit is picked up on the next step.
         # Read-only tools are always exposed; mutating ones only when a tool
@@ -2764,7 +2769,8 @@ class Agent:
         # and the whole point of this engine is that policy stops being
         # something you hope someone reads (#205).
         for row in rows:
-            if row["verdict"] == rules.VERDICT_ERROR:
+            if row["verdict"] == rules.VERDICT_ERROR and row["rule"] not in self._warned_rules:
+                self._warned_rules.add(row["rule"])
                 self.echo(
                     f"⚠ rule '{row['rule']}' is not in force — "
                     f"{row['evidence'].get('error', 'it does not compile')}"

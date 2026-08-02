@@ -20,7 +20,6 @@ wedges a small model into a stall-out).
 from __future__ import annotations
 
 import re
-import warnings
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -38,13 +37,14 @@ GLOBAL_RULES_DIR = Path.home() / ".config" / "aish" / "rules"
 # `session`. Designed, unbuilt: `task` (semantic), `result` (a tool's outcome),
 # `action` (a proposed call's shape), `answer` (the deliverable).
 #
-# `request` rather than `message` on purpose: attachments reach the agent as
-# separate parameters and appear in no message text at all, so "message" was
-# false the moment attached material became a source. What the code reads is
-# the owner's REQUEST — text plus attachments plus the paths they typed.
-SUBJECT_REQUEST = "request"
+# `prompt` is the owner's word, and it is the one that matches how he thinks:
+# he considers an attachment part of the prompt he sent. It is DEFINED as text
+# + attachments + typed paths — the definition that made `message` wrong (an
+# attachment appears in no message text) survives the rename. `request:` was
+# tried and rejected as ambiguous: a request can be a curl call to a website.
+SUBJECT_PROMPT = "prompt"
 SUBJECT_SESSION = "session"
-SUBJECTS = frozenset({SUBJECT_REQUEST, SUBJECT_SESSION})
+SUBJECTS = frozenset({SUBJECT_PROMPT, SUBJECT_SESSION})
 SUBJECTS_DESIGNED = ("task", "result", "action", "answer")
 
 # Internal trigger ids, kept because the trace records name them and #197 reads
@@ -77,7 +77,7 @@ VERBS_DESIGNED = {
 # appears. `answer_from: <tool>` still works; this is a second form of the same
 # verb. The noun is `material` on BOTH sides of the rule — `has: material` /
 # `answer_from: material` — so a reader can see they refer to the same thing.
-ROUTE_SOURCE = "material"
+ROUTE_SOURCE = "source"
 
 # The sentence that keeps `route: source` from being a promotion. A rule is the
 # one artifact class that is NOT advice, so its seeded prose is the highest-
@@ -116,7 +116,7 @@ DEFAULT_READER = "read_url"
 # `material` is the whole channel; the narrow ones exist so a rule that really
 # does mean web pages only can say so. The noun matches the obligation's value
 # (`answer_from: material`), so both sides of a rule name the same thing.
-CONTAINS_MATERIAL = "material"
+CONTAINS_SOURCE = "source"
 CONTAINS_LINK = "link"
 CONTAINS_ATTACHMENT = "attachment"
 CONTAINS_PATH = "path"
@@ -152,7 +152,7 @@ SOURCE_PATH = "path"
 SOURCE_ATTACHMENT = "attachment"
 
 DETECTOR_KINDS: dict[str, frozenset[str]] = {
-    CONTAINS_MATERIAL: frozenset({SOURCE_URL, SOURCE_ATTACHMENT, SOURCE_PATH}),
+    CONTAINS_SOURCE: frozenset({SOURCE_URL, SOURCE_ATTACHMENT, SOURCE_PATH}),
     CONTAINS_LINK: frozenset({SOURCE_URL}),
     CONTAINS_ATTACHMENT: frozenset({SOURCE_ATTACHMENT}),
     CONTAINS_PATH: frozenset({SOURCE_PATH}),
@@ -168,9 +168,9 @@ READER_PRESENT = ""
 # turns (#191 A4). Kept named here so a file written against the old shape
 # fails LOUDLY, with the reason, instead of quietly meaning something else.
 RETIRED_KEYS = {
-    "trigger": "the file names its SUBJECT instead — `when: request:` or `when: session:`.",
-    "contains": "now `when: request: has:`.",
-    "match": "now `when: request: matches:`.",
+    "trigger": "the file names its SUBJECT instead — `when: prompt:` or `when: session:`.",
+    "contains": "now `when: prompt: has:`.",
+    "match": "now `when: prompt: matches:`.",
     "field": "the field is the key now — `when: session: origin:`.",
     "is": "now `when: session: origin: <value>`.",
     "is_not": "now `when: session: origin: automation` — a positive match, not a negation.",
@@ -183,6 +183,20 @@ RETIRED_KEYS = {
     ),
     "tier": "deleted — the trigger's own form says how it is evaluated.",
     "fail": "now `if_unsure: proceed | ask_me`.",
+    "keep_in_mind": (
+        "deleted. A verb ships only if it compiles to a declared check — an "
+        "unenforced verb inside an enforcement engine is a costume, and the lint "
+        "already refuses `a rule with no obligation restricts nothing`. If the "
+        "check is buildable, leave the rule failing here as the build queue; if "
+        "nothing could ever check it, it is a FACT about you and belongs in "
+        "memory, stated declaratively."
+    ),
+    "if_unsure": (
+        "deleted with the scored triggers it existed for. A condition phrased "
+        "on the answer cannot fail to evaluate, so there was nothing left to "
+        "direct. The harness asks the owner if it ever cannot tell."
+    ),
+    "status": "now `enabled: false` — `status:` reads like a field you cannot set.",
     "unless": (
         "a prohibition is now absolute for the turn and only the owner can "
         "lift it. Nothing the model says has any effect, because a word list "
@@ -205,11 +219,14 @@ VERDICT_ABSTAIN = "abstain"
 VERDICT_UNEVALUABLE = "unevaluable"
 VERDICT_ERROR = "error"
 
-# What to do when the harness cannot tell whether the rule applies. `fail:
-# open` was security jargon for a question the owner can answer in English:
-# proceed without the rule, or ask me?
-FAIL_OPEN = "proceed"  # do not bind — the owner is watching
-FAIL_HOLD = "ask_me"  # bind, and take the first violation straight to the owner
+# What to do when the harness cannot tell whether a rule applies. NOT authored:
+# the only triggers that can fail to evaluate are the scored ones, which are
+# CUT (a condition phrased on the answer needs no scoring), so an author-facing
+# key here would be inert in every file that can be written today. The constant
+# stays because the code path does — a trigger evaluator that raises falls here
+# — and the direction is the safe one: bind, and take it to the owner.
+FAIL_OPEN = "proceed"
+FAIL_HOLD = "ask_me"
 FAIL_DIRECTIONS = frozenset({FAIL_OPEN, FAIL_HOLD})
 FAIL_DEFAULT = FAIL_HOLD  # over-restriction is the safe direction (R1)
 
@@ -429,14 +446,14 @@ def _compile(front: dict) -> _Compiled:
 
     pattern: re.Pattern | None = None
     contains = field_name = equals = not_equals = ""
-    if SUBJECT_REQUEST in when:
-        fields = when[SUBJECT_REQUEST]
+    if SUBJECT_PROMPT in when:
+        fields = when[SUBJECT_PROMPT]
         if not isinstance(fields, dict):
-            raise RuleError("`request:` needs `has:` or `matches:` under it")
+            raise RuleError("`prompt:` needs `has:` or `matches:` under it")
         contains = str(fields.get("has", "") or "").strip().casefold()
         source = str(fields.get("matches", "") or "").strip()
         if contains and source:
-            raise RuleError("`request:` takes `has:` OR `matches:`, not both")
+            raise RuleError("`prompt:` takes `has:` OR `matches:`, not both")
         if contains and contains not in CONTAINS_DETECTORS:
             raise RuleError(
                 f"unknown `has:` value {contains!r} — have "
@@ -444,7 +461,7 @@ def _compile(front: dict) -> _Compiled:
             )
         if not contains:
             if not source:
-                raise RuleError("`request:` needs `has:` or `matches:`")
+                raise RuleError("`prompt:` needs `has:` or `matches:`")
             try:
                 pattern = re.compile(source)
             except re.error as exc:
@@ -484,7 +501,7 @@ def _compile(front: dict) -> _Compiled:
     if route := str(then.get(VERB_ANSWER_FROM, "") or "").strip():
         if route == ROUTE_SOURCE and contains not in DETECTOR_KINDS:
             raise RuleError(
-                f"`{VERB_ANSWER_FROM}: {ROUTE_SOURCE}` needs `when: request: has: …` "
+                f"`{VERB_ANSWER_FROM}: {ROUTE_SOURCE}` needs `when: prompt: has: …` "
                 "— otherwise there is no material to answer from"
             )
         obligations.append(
@@ -552,15 +569,13 @@ def _parse(path: Path) -> Rule:
             if line.strip():
                 description = line.strip().lstrip("# ").strip()
                 break
-    status = str(front.get("status", "") or "").casefold()
+    # `enabled: false` rather than `status: disabled`: "status" reads like a
+    # field the owner reports rather than one he sets. The lifecycle predicate
+    # is still the knowledge layer's, so the two stay one family.
+    enabled = front.get("enabled", True)
+    status = "disabled" if enabled is False or str(enabled).casefold() == "false" else ""
     expires = skills.parse_expiry(str(front.get("expires", "") or ""), path)
-    fail = str(front.get("if_unsure", "") or "").strip().casefold() or FAIL_DEFAULT
-    if fail not in FAIL_DIRECTIONS:
-        warnings.warn(
-            f"{path}: unknown `if_unsure:` value {fail!r}; using {FAIL_DEFAULT!r}",
-            stacklevel=2,
-        )
-        fail = FAIL_DEFAULT
+    fail = FAIL_DEFAULT  # not authored — see FAIL_DIRECTIONS
     try:
         compiled = _compile(front)
     except RuleError as exc:
