@@ -5047,13 +5047,12 @@ RULE_SOURCE = """---
 name: bounded-material
 description: Answer from the material I gave you.
 when:
-  request:
-    has: material
+  prompt:
+    has: source
 then:
-  answer_from: material
+  answer_from: source
   never_use: [web_search]
   must_tell_me_when: the material could not be read
-if_unsure: proceed
 ---
 
 Answer from the material the user gave you.
@@ -5155,7 +5154,7 @@ class TestRuleSeeding:
         assert binding["rule"] == "bounded-material" and binding["seeded"] is True
         assert binding["obligations"][0] == {
             "verb": "answer_from",
-            "to": "material",
+            "to": "source",
             "of": "deliverable",
             "readers": ["read_url"],
             "sources": [SOURCE_URL],
@@ -5697,8 +5696,8 @@ class TestABrokenRuleIsLoud:
 name: half-written
 description: The obligation is in the prose, where it enforces nothing.
 when:
-  request:
-    has: material
+  prompt:
+    has: source
 ---
 
 You MUST always use the show_image tool.

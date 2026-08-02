@@ -20,13 +20,12 @@ CANONICAL = """---
 name: bounded-material
 description: Answer from the material I gave you.
 when:
-  request:
-    has: material
+  prompt:
+    has: source
 then:
-  answer_from: material
+  answer_from: source
   never_use: [web_search]
   must_tell_me_when: the material could not be read
-if_unsure: proceed
 ---
 
 Answer from the material the user gave you.
@@ -36,7 +35,7 @@ PATTERN_RULE = """---
 name: pattern-rule
 description: An owner-written pattern, for shapes with no built-in detector.
 when:
-  request:
+  prompt:
     matches: ^\\s*deploy\\b
 then:
   never_use: [web_search]
@@ -81,11 +80,11 @@ class TestRuleFileFormat:
     def test_frontmatter_compiles_to_the_contract_obligation_shape(self, tmp_path):
         rule = load_one(tmp_path, CANONICAL)
         assert rule.obligations == (
-            {"verb": "answer_from", "to": "material", "of": "deliverable"},
+            {"verb": "answer_from", "to": "source", "of": "deliverable"},
             {"verb": "never_use", "what": ["web_search"]},
             {"verb": "must_tell_me_when", "state": "the material could not be read"},
         )
-        assert rule.tier == 0 and rule.fail == "proceed"
+        assert rule.tier == 0 and rule.fail == rules.FAIL_DEFAULT
         assert rule.prose.startswith("Answer from the material the user gave you.")
 
     def test_tier_and_fail_are_present_from_day_one(self, tmp_path):
@@ -119,22 +118,22 @@ class TestRuleFileFormat:
     @pytest.mark.parametrize(
         "text,expected",
         [
-            (CANONICAL.replace("  request:\n    has: material\n", "  vibes: yes\n"),
+            (CANONICAL.replace("  prompt:\n    has: source\n", "  vibes: yes\n"),
              "unknown `when:` subject"),
-            (CANONICAL.replace("has: material", "has: vibes"), "unknown `has:` value"),
+            (CANONICAL.replace("has: source", "has: vibes"), "unknown `has:` value"),
             (
-                CANONICAL.replace("    has: material\n", "").replace(
-                    "  answer_from: material\n", ""
+                CANONICAL.replace("    has: source\n", "").replace(
+                    "  answer_from: source\n", ""
                 ),
                 "needs `has:` or `matches:`",
             ),
             (
-                CANONICAL.replace("has: material", "has: material\n    matches: ^x"),
+                CANONICAL.replace("has: source", "has: source\n    matches: ^x"),
                 "OR `matches:`, not both",
             ),
-            (CANONICAL.replace("has: material", "matches: ^x"), "needs `when: request: has:"),
+            (CANONICAL.replace("has: source", "matches: ^x"), "needs `when: prompt: has:"),
             (
-                CANONICAL.replace("  answer_from: material\n", "")
+                CANONICAL.replace("  answer_from: source\n", "")
                 .replace("  never_use: [web_search]\n", "")
                 .replace("  must_tell_me_when: the material could not be read\n", ""),
                 "no obligation",
@@ -156,7 +155,7 @@ class TestRuleLifecycle:
     same two frontmatter fields, the same read-time evaluation."""
 
     def test_disabled_and_expired_rules_are_skipped_with_a_reason(self, tmp_path):
-        write(tmp_path, "off", SESSION_RULE.replace("when:", "status: disabled\nwhen:"))
+        write(tmp_path, "off", SESSION_RULE.replace("when:", "enabled: false\nwhen:"))
         yesterday = date.today() - timedelta(days=1)
         write(
             tmp_path,
@@ -261,7 +260,7 @@ class TestSourceRouting:
         recorded (contract corollary 1)."""
         binding = bind_canonical(tmp_path, "https://youtu.be/x")
         route = rules.binding_record(binding)["obligations"][0]
-        assert route["to"] == "material"
+        assert route["to"] == "source"
         assert route["readers"] == ["youtube_analyze"]
         assert route["sources"] == ["https://youtu.be/x"]
         assert "present" not in route  # a link is not already in context
@@ -570,8 +569,8 @@ Prose.
     @pytest.mark.parametrize(
         "key,names",
         [
-            ("trigger", "`when: request:`"),
-            ("contains", "`when: request: has:`"),
+            ("trigger", "`when: prompt:`"),
+            ("contains", "`when: prompt: has:`"),
             ("route", "`then: answer_from:`"),
             ("prohibit", "`then: never_use:`"),
             ("disclose", "`then: must_tell_me_when:`"),
@@ -709,7 +708,7 @@ class TestTheWholeMaterialChannel:
     def test_the_narrow_url_detector_still_ignores_attachments(self, tmp_path):
         """`contains: url` is the narrower detector, kept for a rule that
         really does mean web pages only. It must not silently widen."""
-        rule = load_one(tmp_path, CANONICAL.replace("has: material", "has: link"))
+        rule = load_one(tmp_path, CANONICAL.replace("has: source", "has: link"))
         verdict, _ = rules.evaluate(
             rule, self._ctx("summarize this", documents=("/tmp/report.pdf",))
         )
@@ -748,3 +747,44 @@ class TestTheWholeMaterialChannel:
         assert evidence["sources"] == [{"ref": path, "kind": "path"}]
         binding = rules.bind(rule, evidence, "b1", {"read_file", "read_url"})
         assert binding.readers == ("read_file",) and binding.present == ()
+
+    def test_keep_in_mind_is_refused_with_the_admission_line(self, tmp_path):
+        """The verb that was proposed, tried and deleted. An unenforced verb
+        inside an enforcement engine is the costume the owner objected to, so
+        the refusal states the admission line AND both destinations — the build
+        queue if a check is buildable, memory if nothing could ever check it."""
+        rule = load_one(tmp_path, CANONICAL.replace(
+            "  never_use: [web_search]", "  keep_in_mind: be nice about it"
+        ))
+        assert "`keep_in_mind:` was retired" in rule.error
+        assert "compiles to a declared check" in rule.error
+        assert "belongs in memory" in rule.error
+
+    def test_the_designed_verbs_say_what_is_MISSING_not_just_that_it_is_wrong(self, tmp_path):
+        """A refused rule is a legible gap — the owner can decide to rephrase
+        toward what exists, or to extend the engine. "Not expressible" alone
+        gives him neither choice."""
+        rule = load_one(tmp_path, CANONICAL.replace(
+            "  never_use: [web_search]", "  answer_must_not: a raw markdown image link"
+        ))
+        assert "designed but not built yet" in rule.error
+        assert "Verify point" in rule.error
+        assert ", ".join(sorted(rules.VERBS)) in rule.error
+
+
+class TestEnabledFlag:
+    def test_enabled_false_retires_a_rule(self, tmp_path):
+        write(tmp_path, "r", CANONICAL.replace("name: bounded-material",
+                                               "name: bounded-material\nenabled: false"))
+        active, skipped = rules.partition(rules.load_rules([tmp_path]))
+        assert not active and skipped == [{"rule": "bounded-material", "why": "disabled"}]
+
+    def test_a_rule_is_enabled_unless_it_says_otherwise(self, tmp_path):
+        active, _ = rules.partition([load_one(tmp_path, CANONICAL)])
+        assert len(active) == 1
+
+    def test_status_disabled_is_retired_and_says_so(self, tmp_path):
+        """`status:` reads like a field you report, not one you set."""
+        rule = load_one(tmp_path, CANONICAL.replace("name: bounded-material",
+                                                    "name: bounded-material\nstatus: disabled"))
+        assert "`status:` was retired" in rule.error and "enabled: false" in rule.error

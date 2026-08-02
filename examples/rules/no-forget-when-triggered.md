@@ -6,7 +6,6 @@ when:
     origin: automation
 then:
   never_use: [forget_memory]
-if_unsure: ask_me
 ---
 
 Deleting a memory with nobody watching is never the right call, whatever the

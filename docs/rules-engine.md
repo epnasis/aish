@@ -112,13 +112,12 @@ One file per rule in `~/.config/aish/rules/`, global only — a rule is a policy
 name: bounded-material
 description: Answer from the material I gave you; widening it needs my say-so.
 when:
-  request:
-    has: material        # a link, an attached file, or a file path I handed over
+  prompt:
+    has: source        # a link, an attached file, or a file path I handed over
 then:
-  answer_from: material
+  answer_from: source
   never_use: [web_search]
   must_tell_me_when: the material could not be read
-if_unsure: proceed
 ---
 
 Prose the model is shown verbatim when this rule binds. Explain the intent —
@@ -138,14 +137,14 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 
 | subject | fields | built |
 |---|---|---|
-| `request:` | `has: material \| link \| attachment \| path`, `matches: <regex>` | **yes** |
+| `request:` | `has: source \| link \| attachment \| path`, `matches: <regex>` | **yes** |
 | `session:` | `origin: owner \| automation \| email \| schedule` | **yes** |
 | `task:` | `about: <plain text>` — semantic; the word is what makes it scored | no |
 | `result:` | `of: <tool>`, `was: empty \| error` | no |
 | `action:` | `tool:`, `command_starts_with:`, `sends_to:`, `host:` | no |
 | `answer:` | `contains:`, `matches:` | no |
 
-**`request`, not `message`.** Attachments reach the agent as separate parameters and appear in no message text at all, so "message" became false the moment attached material counted as a source. What the code reads is the owner's **request**: text plus attachments plus the paths they typed.
+**`prompt`, not `message` and not `request`.** Attachments reach the agent as separate parameters and appear in no message text at all, so "message" became false the moment attached material counted as a source. It is DEFINED as text plus attachments plus the paths the owner typed — the definition that made `message` wrong survives the rename. `request:` was tried and rejected as ambiguous (a request can be a curl call).
 
 **`origin: automation`** is the umbrella for every non-owner origin — a positive match rather than a negation, because negation is where hand-edits go wrong and "automation" is what the rule is actually about.
 
@@ -159,22 +158,25 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 | `never_use: [tools]` | these tools are refused for the turn | **yes** |
 | `must_tell_me_when: <plain phrase>` | this failure must be stated to the owner | declared; enforced at Verify |
 | `answer_must_include:` / `answer_must_not:` | the answer must contain / avoid something | no |
+| ~~`keep_in_mind:`~~ | **deleted** — see below | never |
 | `must_first: <action>` | do this before the triggering action | no |
 | `ask_me_first: true` | hold for the owner | no |
+
+**A verb ships only if it compiles to a declared check.** `keep_in_mind:` — seeded prose with a deterministic trigger and no enforcement — was proposed as a staging area for obligations no check could reach, and deleted on the owner's objection: *"if most rules end up as reminders, this is a nicer memory system wearing an enforcement engine's clothes."* The lint already refuses *a rule with no obligation restricts nothing*; a rule with an **unenforceable** obligation is the same thing wearing a verb. What it held goes to one of two places, never a third: **checkable in principle but not yet** → a rule file that loudly fails to load, which IS the build queue; **nothing could ever check it** → memory, and only as a declarative fact (*"Pawel prefers terse answers"*, never *"always be terse"*), so memory's facts-not-behaviours contract does not widen. `TestRetiredKeys`, `TestEnabledFlag`.
 
 Plain English imperatives, in the ESLint tradition (`no-console`, `prefer-const`): **a verb you must read documentation to understand is a bad verb** — and these words are read far more often than written, since they also appear in the prose the model is shown.
 
 Three of the names carry an argument worth keeping:
 
-- **`material`, not `source`, on BOTH sides** (`has: material` / `answer_from: material`) — so a reader can see the trigger and the obligation refer to the same thing. The prose, the channel-separation text and the whole R1 analysis had already standardised on *material*; only the frontmatter hadn't.
+- **`material`, not `source`, on BOTH sides** (`has: source` / `answer_from: source`) — so a reader can see the trigger and the obligation refer to the same thing. The prose, the channel-separation text and the whole R1 analysis had already standardised on *material*; only the frontmatter hadn't.
 - **`must_tell_me_when` rather than a bare "must say" — name the audience.** "Say" is satisfiable by a mid-turn preamble, which is precisely the failure the word-list post-mortem documents: the preamble is not what the owner reads.
 - **`must_first` needs only one key**, because the "before B" half is the trigger: `when: action: {tool: gmail_send}` / `then: must_first: show_me_the_draft`. The when/then split absorbs half the verb's complexity — the structural argument in miniature.
 
 ### Disposition
 
-`if_unsure: proceed | ask_me` — what to do when the harness cannot tell whether the rule applies. `proceed` = do not bind, the owner is watching; `ask_me` = bind conservatively and send the first violation straight to the owner. **Default `ask_me`**, because over-restriction is the safe direction. (`fail: open` was security jargon for a question the owner can answer in English.)
+`enabled: false` and `expires:` are the knowledge lifecycle, inherited through `skills.lifecycle_active` — read-time, so a long-running process crosses an expiry without an mtime change. `status: disabled` is retired: *status* reads like a field the owner reports rather than one he sets.
 
-`status: disabled` and `expires:` are the knowledge lifecycle, inherited verbatim through `skills.lifecycle_active` — read-time, so a long-running process crosses an expiry without an mtime change.
+**`if_unsure:` is gone too.** It directed what to do when a trigger could not be evaluated — which only scored triggers can, and those are cut (a condition phrased on the ANSWER cannot fail to evaluate). An author-facing key that is inert in every writable file is ceremony.
 
 **`tier` is gone from the file.** No policy language asks the author to annotate the evaluation strategy; it is always derived from the condition's form, and it is here too — a detector or a regex is structural, a semantic `about:` is scored. `tier: 1` meant nothing to the owner. The ladder stays in the engine.
 
