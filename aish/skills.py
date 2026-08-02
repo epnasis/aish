@@ -389,11 +389,23 @@ def list_skills(dirs: list[Path]) -> list[tuple[str, str]]:
     )
 
 
-def knowledge_index(cwd: str, lessons_path=None) -> str:
+def knowledge_index(cwd: str, lessons_path=None, on_index=None) -> str:
     """The capped Skills + Memory sections of the system prompt, rebuilt
     every task so new entries appear without a restart. Empty string when
-    nothing exists."""
+    nothing exists.
+
+    `on_index` receives what this composition SELECTED and what it left out —
+    the `context` record's payload (docs/trace-contract.md §3.10). A callback,
+    not a changed return type, for the reason `save_memory(on_admission=…)`
+    is one: the string return is what `compose_system_content`, cli.py and
+    every test read.
+
+    Names only, never descriptions. The record has to stay bounded enough to
+    emit on EVERY task, and the name identifies the entry — which is the
+    question ("which entry told it that?"), where the description would be
+    an unbounded second copy of the prompt."""
     sections = []
+    selected: list[dict] = []
     *project_dirs, global_dir = skill_dirs(cwd)  # project dirs only when opted in (#178)
     project = [e for d in project_dirs for e in _dir_entries(d, "skill") if entry_active(e)]
     names = {e.name for e in project}
@@ -405,8 +417,9 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
     globals_.sort(key=lambda e: e.mtime, reverse=True)
     room = max(0, INDEX_SKILLS_MAX - len(project))
     skills = project + globals_[:room]
+    hidden = len(globals_) - min(room, len(globals_))
     if skills:
-        hidden = len(globals_) - min(room, len(globals_))
+        selected += [{"label": e.name, "kind": e.kind, "slot": "skill"} for e in skills]
         lines = "\n".join(f"- {e.name}: {e.description}" for e in skills)
         note = (
             f"\n(…and {hidden} more skills — find them with recall(<what you are doing>))"
@@ -430,6 +443,10 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
     pinned = sorted((e for e in memory if e.pinned), key=lambda e: e.name)
     unpinned = [e for e in memory if not e.pinned]
     if pinned:
+        selected += [
+            {"label": e.name, "kind": e.kind, "slot": "pinned"}
+            for e in pinned[:INDEX_PINNED_MAX]
+        ]
         lines = "\n".join(f"- {e.description}" for e in pinned[:INDEX_PINNED_MAX])
         note = (
             f"\n(…and {len(pinned) - INDEX_PINNED_MAX} more standing rules — "
@@ -443,6 +460,7 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
         )
     shown = unpinned[:INDEX_MEMORY_MAX]
     if shown:
+        selected += [{"label": e.name, "kind": e.kind, "slot": "memory"} for e in shown]
         lines = "\n".join(f"- {e.description}" for e in shown)
         note = (
             "\n(…and more saved memory — search it with recall(<topic>))"
@@ -459,7 +477,39 @@ def knowledge_index(cwd: str, lessons_path=None) -> str:
             "Memory — facts and lessons you saved earlier; apply them "
             "proactively:\n" + lines + note
         )
-    return "\n\n".join(sections)
+    text = "\n\n".join(sections)
+    if on_index is not None:
+        on_index(
+            {
+                "items": selected,
+                # The thresholds in force AT THE TIME. They live as constants
+                # in source, so a log recording only the outcome cannot be
+                # re-read after someone moves one (contract §3.8, `floors`).
+                "caps": {
+                    "skills": INDEX_SKILLS_MAX,
+                    "pinned": INDEX_PINNED_MAX,
+                    "memory": INDEX_MEMORY_MAX,
+                },
+                # `memory` counts unpinned entries INCLUDING legacy lessons,
+                # which is what competes for the mtime-recency cap.
+                "corpus": {
+                    "skills": len(project) + len(globals_),
+                    "pinned": len(pinned),
+                    "memory": len(unpinned),
+                    "lessons": len(lessons),
+                },
+                # The abstentions. "Why did it know that?" and "why did my
+                # entry NOT reach the prompt?" are the same question asked
+                # from either side, and only one of them was answerable.
+                "omitted": {
+                    "skills": hidden,
+                    "pinned": max(0, len(pinned) - INDEX_PINNED_MAX),
+                    "memory": max(0, len(unpinned) - INDEX_MEMORY_MAX),
+                },
+                "chars": len(text),
+            }
+        )
+    return text
 
 
 def _block_header(entry: Entry) -> str:

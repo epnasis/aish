@@ -1,3 +1,4 @@
+import json
 import os
 
 from aish import skills as skills_module
@@ -1075,3 +1076,98 @@ class TestLifecycle:
         save_memory("temp fact", d, name="t", expires="2999-01-31")
         save_memory("temp fact updated", d, name="t")
         assert "expires: 2999-01-31" in (d / "t.md").read_text()
+
+
+class TestIndexSelectionRecord:
+    """#208, docs/trace-contract.md §3.10 — the `context` record's payload.
+
+    The index is the largest single input to `messages[0]` and was the only
+    one with no record of any kind: the model was handed up to 15 memory
+    descriptions, 20 standing rules and 30 skill lines before its first
+    token, and nothing anywhere said which. `on_index` is the seam that makes
+    the selection reportable without changing the string return that
+    `compose_system_content`, cli.py and ~20 tests read.
+    """
+
+    def _capture(self, cwd):
+        record: dict = {}
+        text = knowledge_index(str(cwd), on_index=record.update)
+        return text, record
+
+    def _memory(self, name, description, ts=1000, extra=""):
+        path = write_skill(
+            skills_module.GLOBAL_MEMORY_DIR,
+            f"{name}.md",
+            f"---\nname: {name}\ndescription: {description}\n{extra}---\n",
+        )
+        os.utime(path, (ts, ts))
+        return path
+
+    def test_names_the_entry_that_reached_the_prompt(self, tmp_path):
+        """The incident, reduced: a fact enters every task through a memory
+        DESCRIPTION, with no tool call to trace. The record is the only place
+        the entry's identity can be recovered afterwards."""
+        self._memory(
+            "user-staying-villa-victoriya-bali",
+            "User is staying at Villa Victoriya (Gg. Bunga Kecil), Seminyak, Bali.",
+        )
+        text, record = self._capture(tmp_path)
+        assert "Gg. Bunga Kecil" in text, "the address really is in the prompt"
+        labels = [i["label"] for i in record["items"]]
+        assert "user-staying-villa-victoriya-bali" in labels
+        assert record["items"][0]["slot"] == "memory"
+
+    def test_carries_no_descriptions_only_names(self, tmp_path):
+        """Bounded enough to emit on EVERY task. The name answers "which
+        entry?"; the description would be a second copy of the prompt in the
+        log, and for memories saved via `remember` it is often the whole
+        fact — the exact text an audit record should not duplicate."""
+        self._memory("holiday", "staying at Villa Victoriya in Seminyak")
+        _, record = self._capture(tmp_path)
+        assert "Villa Victoriya" not in json.dumps(record)
+
+    def test_records_the_caps_in_force_not_just_the_outcome(self, tmp_path):
+        """Contract §3.8's `floors` argument: the caps live as constants in
+        source, so a log holding only the outcome cannot be re-read after
+        someone moves one."""
+        self._memory("a-fact", "some fact")
+        _, record = self._capture(tmp_path)
+        assert record["caps"]["memory"] == INDEX_MEMORY_MAX
+        assert record["caps"]["skills"] == INDEX_SKILLS_MAX
+        assert record["chars"] > 0
+
+    def test_counts_what_was_left_out(self, tmp_path):
+        """"Why did it know that?" and "why was MY entry not there?" are the
+        same question from either side; only the first was answerable."""
+        for i in range(INDEX_MEMORY_MAX + 4):
+            self._memory(f"f{i:03d}", f"fact {i}", ts=2000 + i)
+        _, record = self._capture(tmp_path)
+        assert record["corpus"]["memory"] == INDEX_MEMORY_MAX + 4
+        assert record["omitted"]["memory"] == 4
+        assert len(record["items"]) == INDEX_MEMORY_MAX
+
+    def test_pinned_entries_are_marked_as_their_own_slot(self, tmp_path):
+        """Standing rules ride a separate budget, exempt from the recency cap
+        (#178 P1-7). A record that flattened them into `memory` would mislead
+        exactly where the cap question gets asked."""
+        self._memory("always-ask", "Always ask before pushing", extra="pinned: yes\n")
+        self._memory("plain", "an ordinary fact")
+        _, record = self._capture(tmp_path)
+        slots = {i["label"]: i["slot"] for i in record["items"]}
+        assert slots["always-ask"] == "pinned"
+        assert slots["plain"] == "memory"
+        assert record["corpus"]["pinned"] == 1
+
+    def test_empty_corpus_still_reports(self, tmp_path):
+        """"Selected nothing" and "never ran" must not share a log shape —
+        contract §3.8(a), the defect this record must not inherit."""
+        text, record = self._capture(tmp_path)
+        assert text == ""
+        assert record["items"] == []
+        assert record["chars"] == 0
+        assert record["caps"]["memory"] == INDEX_MEMORY_MAX
+
+    def test_callback_is_optional(self, tmp_path):
+        """Every existing caller passes no callback and must be unaffected."""
+        self._memory("a-fact", "some fact")
+        assert "some fact" in knowledge_index(str(tmp_path))

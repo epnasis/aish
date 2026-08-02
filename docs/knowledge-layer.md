@@ -44,6 +44,14 @@ Caps are **per type** (`INDEX_SKILLS_MAX`, `INDEX_MEMORY_MAX`), so one entry typ
 
 A per-task `TASK_REMINDER` system message is re-inserted before each user message — directly, never via `_append`, so it stays out of logs and transcripts. Recency is what makes small local models actually consult skills.
 
+**The index is an INPUT to the model, and inputs get recorded too (#208).** `knowledge_index(on_index=…)` reports what the composition selected and what it capped out; `run_task` turns that into the `context` record (`docs/trace-contract.md` §3.10). A callback rather than a changed return type, for the same reason as `save_memory(on_admission=…)`: the string return is what `compose_system_content`, cli.py and ~20 tests read.
+
+This exists because a session once answered a question about a sick child with the owner's holiday street address, and **the owner could not find where it came from in their own session log** — correctly, because it wasn't there. The address was one memory's `description`, pasted into `messages[0]` before the first token. No tool call, no trace. The gates all behaved: `rule_eval` sees message and action shapes, not assembled context; `admission` sees writes, not reads; `knowledge` records preload, a different mechanism, and is suppressed when it selects nothing.
+
+The live rescan two paragraphs up is exactly why this cannot be left to reconstruction. The index is a pure function of a **mutable directory at a moment in time** — mtime order, `expires` filtering — so touching one file makes yesterday's index unrecoverable. The entry in that incident carried `expires:`, so the evidence was on a timer. Names only, never descriptions: the name answers "which entry?", while for `remember`-saved memories the description often *is* the whole fact, and a log that copies it has re-leaked what it was written to explain. `TestIndexSelectionRecord`, `TestContextRecord`.
+
+**Open, and the reason that memory's body was empty:** a `description` is both the retrieval key `recall` ranks on and the payload injected into every task. Writing one to be findable makes it a fact in every unrelated conversation. Descriptions should say what an entry is *about*, with the specifics in the body — a corpus migration plus a `remember` prompt change, not yet done.
+
 ---
 
 ## Pre-flight injection (L3)

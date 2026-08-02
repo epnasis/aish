@@ -201,6 +201,7 @@ RENDERLESS_STEPS = frozenset(
         "trim",  # #192
         "tool_check",  # #193
         "admission",  # #194
+        "context",  # #208
     }
 )
 
