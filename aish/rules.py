@@ -649,12 +649,7 @@ def _parse(path: Path) -> Rule:
     """
     text = path.read_text(encoding="utf-8")
     front: dict = {}
-    body = text
-    header = ""
-    if text.startswith("---"):
-        parts = text.split("---", 2)
-        if len(parts) == 3:
-            _, header, body = parts
+    header, body = split_frontmatter(text)
     name = path.stem
     prose = body.strip()
     description = ""
@@ -1616,6 +1611,26 @@ class LintError(Exception):
     RuleError, which is about a file that already exists."""
 
 
+# The frontmatter terminator, anchored to its OWN LINE. A naive `split("---")`
+# treats a `---` anywhere — including mid-sentence in a description — as the
+# end of the header, so every key below it becomes prose. The owner then
+# approves a diff that visibly contains `never_use: [web_search]` while the
+# compiled rule has no prohibition at all: the diff says one thing, the card
+# says another, and the file behaves like the card. Quoting cannot fix it
+# (`"a --- b"` still contains the marker), and "empty --- say so" is ordinary
+# writing rather than an attack.
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)(?:\r?\n)?^---[ \t]*\r?$\n?",
+                             re.DOTALL | re.MULTILINE)
+
+
+def split_frontmatter(text: str) -> tuple[str, str]:
+    """(header, body). ("", text) when there is no well-formed frontmatter."""
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return "", text
+    return match.group(1), text[match.end():]
+
+
 def _yaml_scalar(value: Any) -> str:
     """A scalar YAML will read back as the SAME string. Always — the check is
     a round trip through the parser, not a list of risky characters.
@@ -1898,6 +1913,14 @@ def past_turns(state_dir: Path, limit: int = 400) -> list[dict]:
                     "prompt": prompt,
                     "origin": origin,
                     "session": path.stem,
+                    # Attachments reach the agent as separate parameters and
+                    # appear in no message text, so a replay reading only
+                    # `content` would report "would never have fired" for the
+                    # canonical shipped rule — understating on the most common
+                    # trigger kind, which is the same dishonesty as the action
+                    # rule's overstating, pointed the other way.
+                    "images": tuple(record.get("images") or ()),
+                    "documents": tuple(record.get("documents") or ()),
                 })
                 if len(turns) >= limit:
                     return turns
@@ -1923,7 +1946,12 @@ def retro_match(rule: Rule, turns: list[dict]) -> RetroMatch:
     if result.per_call:
         return result
     for turn in turns:
-        ctx = TurnContext(task=turn["prompt"], origin=turn.get("origin", ORIGIN_OWNER_VALUE))
+        ctx = TurnContext(
+            task=turn["prompt"],
+            origin=turn.get("origin", ORIGIN_OWNER_VALUE),
+            images=tuple(turn.get("images") or ()),
+            documents=tuple(turn.get("documents") or ()),
+        )
         verdict, _evidence = evaluate(rule, ctx)
         result.checked += 1
         if verdict == VERDICT_BIND:
@@ -1941,17 +1969,18 @@ def disable_text(text: str) -> str:
     owner reaches for retire. Requiring a valid rule in order to stop it would
     leave the only unstoppable rules the broken ones.
     """
-    if not text.startswith("---"):
+    header, body = split_frontmatter(text)
+    if not header.strip():
         return "---\nenabled: false\n---\n\n" + text
-    parts = text.split("---", 2)
-    if len(parts) != 3:
-        return text
-    _, header, body = parts
+    # Anchored to column zero: `enabled:` is a top-level key, and stripping any
+    # line that merely *starts with* it after indentation would delete a nested
+    # one. No such key exists in today's grammar — but this is an unanchored
+    # text edit on a structured file, and that is how those go wrong.
     kept = [
-        line for line in header.strip("\n").splitlines()
-        if not line.strip().casefold().startswith("enabled:")
+        line for line in header.splitlines()
+        if not line.casefold().startswith("enabled:")
     ]
-    return "---\n" + "\n".join([*kept, "enabled: false"]).strip("\n") + "\n---" + body
+    return "---\n" + "\n".join([*kept, "enabled: false"]).strip("\n") + "\n---\n" + body
 
 
 def author_fields(path: Path) -> dict:
@@ -1965,14 +1994,9 @@ def author_fields(path: Path) -> dict:
     carried verbatim.
     """
     text = path.read_text(encoding="utf-8")
-    front: dict = {}
-    body = text
-    if text.startswith("---"):
-        parts = text.split("---", 2)
-        if len(parts) == 3:
-            _, header, body = parts
-            loaded = yaml.safe_load(header) if header.strip() else {}
-            front = loaded if isinstance(loaded, dict) else {}
+    header, body = split_frontmatter(text)
+    loaded = yaml.safe_load(header) if header.strip() else {}
+    front: dict = loaded if isinstance(loaded, dict) else {}
     fields: dict = {
         "name": str(front.get("name") or path.stem),
         "description": str(front.get("description", "") or ""),

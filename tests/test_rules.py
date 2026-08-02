@@ -1151,6 +1151,31 @@ class TestRenderedMeaningMatchesTheFile:
         rule, _ = rules.lint(rules.render({**self.BASE, "description": "  spaced  "}))
         assert rule is not None and rule.description == "spaced"
 
+    def test_a_value_containing_a_frontmatter_marker_keeps_every_key_below_it(self):
+        """The diff the owner approves visibly contained `never_use:` — and a
+        naive split made everything below the marker PROSE, so the compiled
+        rule had no prohibition. Quoting cannot fix it (`"a --- b"` still
+        contains the marker), and "empty --- say so" is ordinary writing."""
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_has": "source", "answer_from": "source",
+            "must_tell_me_when": "the source came back empty --- say so",
+            "never_use": ["web_search"],
+        }))
+        assert not errors and rule is not None
+        assert {o["verb"] for o in rule.obligations} == {
+            rules.VERB_ANSWER_FROM, rules.VERB_MUST_TELL_ME_WHEN, rules.VERB_NEVER_USE,
+        }, "an obligation below a --- was read as prose"
+        [told] = [o for o in rule.obligations if o["verb"] == rules.VERB_MUST_TELL_ME_WHEN]
+        assert told["state"] == "the source came back empty --- say so"
+
+    def test_a_frontmatter_marker_in_a_description_is_just_text(self):
+        """It used to fail with "a rule needs a `when:` block" — naming
+        something the author had in fact supplied, so a retry writes the same
+        rule again."""
+        rule, errors = rules.lint(rules.render({**self.BASE, "description": "a --- b"}))
+        assert not errors and rule is not None and rule.description == "a --- b"
+
     def test_a_regex_with_backslashes_is_not_re_escaped(self):
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "prompt",
@@ -1190,6 +1215,13 @@ class TestRetireWithoutCompiling:
         once = rules.disable_text(text)
         assert once.count("enabled:") == 1
         assert rules.disable_text(once).count("enabled:") == 1
+
+    def test_only_a_top_level_enabled_key_is_replaced(self):
+        """An unanchored text edit on a structured file deletes whatever
+        happens to share a prefix at any depth."""
+        text = ("---\nname: x\ndescription: d\nwhen:\n  prompt:\n"
+                "    enabled: keep-me\n---\n")
+        assert "enabled: keep-me" in rules.disable_text(text)
 
     def test_the_body_survives_retiring(self):
         text = "---\nname: x\ndescription: d\nwhen: always\n---\n\nWhy it exists.\n"
@@ -1245,6 +1277,23 @@ class TestRetroMatch:
         it, because the other explanation is that the rule is wrong."""
         match = rules.retro_match(self._rule(when_has="attachment"), self.TURNS)
         assert match.checked == 3 and not match.bound
+
+    def test_an_attachment_turn_is_replayed_as_carrying_material(self, tmp_path):
+        """Attachments reach the agent as separate parameters and appear in no
+        message text. Reading only `content` made the canonical shipped rule's
+        card say "would never have fired" — understating on the most common
+        trigger kind."""
+        log = tmp_path / "session-20260101-000000-000000.jsonl"
+        log.write_text(json.dumps({
+            "kind": "message", "role": "user", "turn": "a",
+            "content": "what does this say", "documents": ["/tmp/report.pdf"],
+        }) + "\n", encoding="utf-8")
+        turns = rules.past_turns(tmp_path)
+        rule, _ = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_has": "attachment", "answer_from": "source",
+        }))
+        assert [t["turn"] for t in rules.retro_match(rule, turns).bound] == ["a"]
 
     def test_past_turns_skips_text_the_owner_never_typed(self, tmp_path):
         """aish's own notes arrive in the user slot. Counting them would have a

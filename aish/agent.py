@@ -3986,9 +3986,10 @@ class Agent:
         if not errors:
             return None
         return (
-            f"ERROR: that would not load as a rule: {'; '.join(errors)} "
-            "Use create_rule or edit_rule — they render the file for you and show "
-            "the user what it means before it is saved."
+            f"ERROR: {_display_path(target)} is in the rules folder, which holds rule "
+            f"files and nothing else — and that would not load as one: "
+            f"{'; '.join(errors)} Use create_rule or edit_rule, which render the file "
+            "for you and show the user what it means before it is saved."
         )
 
     def _create_rule(self, args: dict) -> str:
