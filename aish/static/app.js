@@ -5027,9 +5027,34 @@ function openRatingComment(btn, turn, kind) {
     if (comment) send({ type: "rate", turn, rating: kind, comment });
     note.remove();
   };
-  note.onblur = () => { if (!note.value.trim()) note.remove(); };
+  note.onblur = () => {
+    stopKeepingInView();
+    if (!note.value.trim()) note.remove();
+  };
   host.appendChild(note);
+
+  // Focusing is not enough on a phone. The keyboard opens AFTER focus, and
+  // `syncKeyboardInset` then clamps the body to the visible strip — so a note
+  // that was on screen when tapped ends up under the keyboard, with nothing
+  // scrolling it back. That is the whole of "I tap the thumb, the keyboard
+  // opens, and there is nowhere to type": the field exists, at full width,
+  // just below the fold.
+  //
+  // So it is scrolled into view now AND again on each viewport change while it
+  // holds focus, because the keyboard arrives, animates, and settles over
+  // several events rather than one.
+  const keepInView = () => note.scrollIntoView({ block: "center" });
+  const stopKeepingInView = () => {
+    if (!window.visualViewport) return;
+    visualViewport.removeEventListener("resize", keepInView);
+    visualViewport.removeEventListener("scroll", keepInView);
+  };
+  if (window.visualViewport) {
+    visualViewport.addEventListener("resize", keepInView);
+    visualViewport.addEventListener("scroll", keepInView);
+  }
   note.focus();
+  keepInView();
 }
 
 // Applied by turn id rather than by position: a rating can be written long
