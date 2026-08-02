@@ -52,10 +52,13 @@ function fakeElement(tag) {
     children: [],
     parentElement: null,
     _classes: new Set(),
+    // The real classList reflects whatever `className` was assigned; a fake
+    // that only tracks add()/remove() would report false for the classes the
+    // code sets as a string, which is how it builds every chip.
     classList: {
       add(c) { el._classes.add(c); },
       remove(c) { el._classes.delete(c); },
-      contains(c) { return el._classes.has(c); },
+      contains(c) { return el._classes.has(c) || el.className.split(/\s+/).includes(c); },
       toggle(c, on) { if (on) el._classes.add(c); else el._classes.delete(c); },
     },
     setAttribute(k, v) { el.attrs[k] = v; },
@@ -65,14 +68,45 @@ function fakeElement(tag) {
       const p = el.parentElement;
       if (p) p.children = p.children.filter((c) => c !== el);
     },
+    dataset: {},
+    // A very small selector matcher — enough for the three lookups the real
+    // code makes, and no more: it must not quietly answer a query the shipped
+    // code does not actually issue.
     querySelector(sel) {
-      return el.children.find((c) => sel.includes("rating-note") && c.className === "rating-note")
-        || null;
+      const hit = (node) => {
+        if (sel.startsWith("[data-turn=")) {
+          return node.dataset && node.dataset.turn === sel.slice(12, -2);
+        }
+        return node.className === sel.replace(".", "");
+      };
+      const walk = (node) => {
+        for (const kid of node.children) {
+          if (hit(kid)) return kid;
+          const deep = walk(kid);
+          if (deep) return deep;
+        }
+        return null;
+      };
+      return walk(el);
     },
     querySelectorAll() { return el.children.filter((c) => c.className.includes("rating-chip")); },
     focus() {},
   };
   return el;
+}
+
+// The chip lives in `.msg-tools`, which lives in the answer element — the
+// reason box goes on the ANSWER, one row below the strip.
+function mount(sandbox, turn, kind) {
+  const host = fakeElement("div");
+  host.dataset.turn = turn;             // as attachAnswerTools sets it
+  const tools = fakeElement("div");
+  tools.className = "msg-tools";
+  host.appendChild(tools);
+  const chip = sandbox.ratingChip(turn, kind);
+  tools.appendChild(chip);
+  sandbox.messagesEl.appendChild(host); // so markRating can find it, as in the page
+  return { host, tools, chip };
 }
 
 function world() {
@@ -82,6 +116,8 @@ function world() {
     messagesEl: fakeElement("div"),
     send: (m) => { sent.push(m); return true; },
     CSS: { escape: (s) => s },
+    // Defined elsewhere in app.js; the chip only needs it to return a node.
+    svgIcon: () => fakeElement("svg"),
   };
   vm.createContext(sandbox);
   vm.runInContext(extract("// [RATING]", "function copyChip("), sandbox);
@@ -91,9 +127,7 @@ function world() {
 // --- the tap records before any comment exists ------------------------------
 {
   const { sandbox, sent } = world();
-  const tools = fakeElement("div");
-  const chip = sandbox.ratingChip("turn-abc", "down");
-  tools.appendChild(chip);
+  const { chip } = mount(sandbox, "turn-abc", "down");
   chip.onclick();
   ok("the tap sends immediately", sent.length === 1);
   ok("it is a rate message", sent[0].type === "rate");
@@ -105,12 +139,11 @@ function world() {
 // --- the comment is a SECOND record, not a precondition ---------------------
 {
   const { sandbox, sent } = world();
-  const tools = fakeElement("div");
-  const chip = sandbox.ratingChip("turn-abc", "down");
-  tools.appendChild(chip);
+  const { host, tools, chip } = mount(sandbox, "turn-abc", "down");
   chip.onclick();
-  const note = tools.children.find((c) => c.className === "rating-note");
+  const note = host.children.find((c) => c.className === "rating-note");
   ok("a reason box opens after the tap", !!note);
+  ok("on its own row, not squeezed into the chip strip", !tools.children.includes(note));
   note.value = "the price was stale";
   note.onkeydown({ key: "Enter", preventDefault() {} });
   ok("submitting sends a second record", sent.length === 2);
@@ -122,11 +155,9 @@ function world() {
 // --- an empty reason writes nothing extra -----------------------------------
 {
   const { sandbox, sent } = world();
-  const tools = fakeElement("div");
-  const chip = sandbox.ratingChip("turn-abc", "up");
-  tools.appendChild(chip);
+  const { host, chip } = mount(sandbox, "turn-abc", "up");
   chip.onclick();
-  const note = tools.children.find((c) => c.className === "rating-note");
+  const note = host.children.find((c) => c.className === "rating-note");
   note.value = "   ";
   note.onkeydown({ key: "Enter", preventDefault() {} });
   ok("an empty reason adds no record", sent.length === 1);
@@ -135,13 +166,38 @@ function world() {
 // --- a second tap does not stack a second box -------------------------------
 {
   const { sandbox } = world();
-  const tools = fakeElement("div");
-  const chip = sandbox.ratingChip("turn-abc", "down");
-  tools.appendChild(chip);
+  const { host, chip } = mount(sandbox, "turn-abc", "down");
   chip.onclick();
-  chip.onclick();
-  const boxes = tools.children.filter((c) => c.className === "rating-note");
+  const boxes = host.children.filter((c) => c.className === "rating-note");
   ok("only one reason box exists", boxes.length === 1);
+}
+
+
+// --- an opinion can be taken back -------------------------------------------
+{
+  const { sandbox, sent } = world();
+  const { host, chip } = mount(sandbox, "turn-abc", "down");
+  chip.onclick();
+  ok("the first tap records the verdict", sent[0].rating === "down");
+  ok("and lights the chip", chip.classList.contains("on"));
+  chip.onclick();
+  ok("tapping the lit thumb withdraws it", sent[1].rating === "none");
+  ok("naming the same turn", sent[1].turn === "turn-abc");
+  ok("the chip goes dark", !chip.classList.contains("on"));
+  ok("and the reason box closes with it",
+     !host.children.some((c) => c.className === "rating-note"));
+}
+
+// --- withdrawal is a record, never a deletion --------------------------------
+{
+  const { sandbox, sent } = world();
+  const { chip } = mount(sandbox, "turn-abc", "up");
+  chip.onclick();
+  chip.onclick();
+  chip.onclick();
+  ok("every tap writes", sent.length === 3);
+  ok("alternating opinion and withdrawal",
+     sent.map((m) => m.rating).join(",") === "up,none,up");
 }
 
 console.log(`ok - rating chip (${checks} checks)`);

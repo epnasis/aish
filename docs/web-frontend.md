@@ -34,7 +34,10 @@ Seven rules explain most of the fences. Every entry below cites one instead of r
 
 Three properties are load-bearing, and each is pinned:
 
+- **Tapping the lit thumb withdraws it** — `none` written after `down`, never a deletion, so the log stays append-only and readers taking the last record simply stop counting it. A verdict you cannot take back is one you hesitate to give.
+- **The reason box is its own row**, under the tool strip rather than inside it. As a flex item competing with eight 40px chips it collapsed to nothing on a phone: the keyboard opened onto a field with no width, which reads as a broken button.
 - **The tap records immediately**, before any comment is typed. A rating that waits for a reason is a rating that mostly does not happen, and the *count* is what the metric needs; the reason box opens after and sends a second record for the same turn, last one winning. `tests/js/test_rating_chip.js`.
+- **Delivered exactly once.** Recording and delivering were two calls that both fanned out, so every viewer received each rating twice — invisible on screen, wrong in the transcript. The transcript append and the delivery are now separate, and only the delivered copy carries `seen`.
 - **It is keyed by the turn id `#202` already mints** for removal — stable live and on replay, so no second identity scheme. The answer element carries it in `data-turn`, populated from `currentTurnId`, which `addUserMsg` sets on both the live and the replay path exactly as `prompt` and `answerTiming` already are.
 - **Ratings replay LAST.** `reconstruct_events` defers them to the end of the stream: a rating decorates a turn rather than being one, it is applied by id rather than position, and it can be written long after the turn it names. In file order the frontend would receive a decoration for a turn it has not rendered yet. `TestRateAnswer`.
 

@@ -251,7 +251,12 @@ TASK_ERROR_CAP = 500
 # A rating's reason is a sentence, not an essay — and it is the owner's own
 # words, so it is quoted back to him in the weekly pass and must stay readable.
 RATING_COMMENT_CAP = 1000
-RATINGS = frozenset({"up", "down"})
+# `none` is a WITHDRAWAL, not a third opinion: tapping a lit thumb again takes
+# it back, and the log stays append-only (a `none` written after a `down`)
+# rather than growing a delete path. Readers take the last record per turn, so
+# a withdrawn rating simply stops counting.
+RATING_NONE = "none"
+RATINGS = frozenset({"up", "down", RATING_NONE})
 
 
 @dataclass

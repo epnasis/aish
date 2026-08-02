@@ -6398,3 +6398,45 @@ class TestRateAnswer:
             # has no business in a recorded event, or replay stops matching the
             # log's own reconstruction.
             assert "seen" not in ratings[0]
+
+    def test_an_opinion_can_be_withdrawn(self, app_env):
+        """Tapping the lit thumb takes it back. A verdict you cannot undo is
+        one you hesitate to give, and the count is only worth having if a
+        mistap is cheap. Withdrawal is a RECORD, never a deletion — the log
+        stays append-only and readers take the last one."""
+        client, _ = make_client(app_env, [model_says("an answer"), model_says("ok")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "a question"})
+            live = recv_until(ws, "user")
+            recv_until(ws, "done")
+            ws.send_json({"type": "rate", "turn": live["turn"], "rating": "down"})
+            recv_until(ws, "rating")
+            ws.send_json({"type": "rate", "turn": live["turn"], "rating": "none"})
+            withdrawn = recv_until(ws, "rating")
+            assert withdrawn["rating"] == "none"
+
+        log = next(Path(app_env["state_dir"]).glob("session-*.jsonl"))
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        ratings = [r for r in records if r.get("kind") == "rating"]
+        assert [r["rating"] for r in ratings] == ["down", "none"], "a withdrawal must not delete"
+
+    def test_a_rating_is_delivered_exactly_once(self, app_env):
+        """Recording and delivering were two calls that both fanned out, so
+        every viewer received each rating twice. Harmless on screen — the
+        marking is idempotent — and wrong in the transcript, where it becomes
+        two entries for one tap."""
+        client, _ = make_client(app_env, [model_says("an answer"), model_says("ok")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "a question"})
+            live = recv_until(ws, "user")
+            recv_until(ws, "done")
+            ws.send_json({"type": "rate", "turn": live["turn"], "rating": "up"})
+            recv_until(ws, "rating")
+            # A second, distinguishable action: if the rating were delivered
+            # twice, this would find the duplicate rather than the new event.
+            ws.send_json({"type": "rate", "turn": live["turn"], "rating": "down"})
+            assert recv_until(ws, "rating")["rating"] == "down"
+
+        with client, connected(client) as (_ws, _hello, replay):
+            ratings = [e for e in replay["events"] if e["type"] == "rating"]
+            assert [r["rating"] for r in ratings] == ["up", "down"]

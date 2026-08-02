@@ -753,3 +753,15 @@ class TestRatingLedger:
     def test_logs_outside_the_window_are_not_read(self, tmp_path):
         write_log(tmp_path, "session-20250101-100000-000001.jsonl", [rating_rec("t1", "up")])
         assert scan_ratings(tmp_path, now=NOW) == {}
+
+    def test_a_withdrawn_rating_stops_counting(self, tmp_path):
+        """`none` written after `down` is the owner taking it back — it is not
+        a third opinion, and counting it as one would put a mistap into the
+        metric that decides whether verification earns its place."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rating_rec("t1", "down"), rating_rec("t1", "none"),
+            rating_rec("t2", "up"),
+        ])
+        ratings = scan_ratings(tmp_path, now=NOW)
+        assert "t1" not in ratings
+        assert ratings["t2"]["rating"] == "up"

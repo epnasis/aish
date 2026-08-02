@@ -2433,7 +2433,13 @@ class WebServer:
         # the people being shown this are the ones who just tapped it, and a
         # rating must never mark the chat unread for them.
         event = {"type": "rating", "turn": turn, "rating": rating, "comment": comment}
-        session.bridge.record(event)
+        # Appended to the transcript directly, then delivered ONCE. `record()`
+        # would do both — and fan the event out a second time, so every viewer
+        # received each rating twice. The recorded dict is exactly what
+        # `reconstruct_events` produces (hot/cold parity); the delivered copy
+        # carries `seen`, because the person being shown this is the one who
+        # just tapped it and it must not mark the chat unread for them.
+        session.bridge.transcript.append(dict(event))
         session.bridge.emit({**event, "seen": True}, record=False)
 
     async def _redact_turn(self, client: Client, turn: str) -> None:
