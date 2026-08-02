@@ -6177,17 +6177,28 @@ class TestVerify:
         # Exactly one delivery, carrying both unmet obligations.
         assert len([g for g in verify if g["verdict"] == "advised"]) == 2
 
-    def test_a_terminal_turn_still_says_what_was_not_followed(self, tmp_path):
+    def test_a_terminal_turn_still_says_what_was_not_followed(self, tmp_path, monkeypatch):
         """A stopped turn is still an answer the owner reads. Skipping the
-        checks there would make the loop detector a way past every rule."""
+        checks there would make the loop detector a way past every rule — and
+        a text-only turn cannot reach that exit, so this drives the real one:
+        the same tool call, the same result, five times."""
+        logged = []
+        call = [tool_call("read_docs", command="ls")]
         agent, _ = rules_agent(
             tmp_path,
-            [model_says("about 40 EUR")] * 12,
+            [model_says(tool_calls=call) for _ in range(8)] + [model_says("about 40 EUR")],
             rule_texts=(RULE_VERIFY,),
-            max_steps=2,
         )
+        monkeypatch.setattr(
+            agent_module.tools, "read_docs", lambda *a, **k: "same output every time"
+        )
+        agent.on_message = logged.append
         answer = agent.run_task("price?")
-        assert "not followed" in answer
+        assert "not followed" in answer, answer
+        # And it SURVIVES: a note that lives only in the token stream is gone
+        # on the next cold reload, and the rule then reads as followed.
+        answers = [m["content"] for m in logged if m.get("role") == "assistant"]
+        assert any("not followed" in a for a in answers), answers
 
     def test_a_turn_no_rule_governs_is_untouched(self, tmp_path):
         agent, _ = rules_agent(

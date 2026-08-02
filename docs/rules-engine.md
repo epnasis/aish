@@ -94,7 +94,9 @@ This only works if *every* refusal path says so. Two gates (stop, skill) returne
 
 What is logged carries the not-followed note, because a note that exists only in the live token stream is a note that a restart or a cold reload erases — and then an unfollowed rule reads as followed, which is the exact silence the note exists to break. The log gets a **copy**: the model's own history keeps the model's own words, since feeding aish's line back as something the model said would have it defend or repeat a sentence it never wrote.
 
-**A terminal turn is still an answer.** The loop detector, the stall cap and the hard ceiling all end a task with a wrap-up turn, and that text is what the owner reads. It is verified too — note-only, since asking there would restart the very loop the terminator just concluded. Skipping it would make the loop detector a way past every rule.
+**A terminal turn is still an answer.** The loop detector, the stall cap and the hard ceiling all end a task with a wrap-up turn, and that text is what the owner reads. It is verified too — note-only, since asking there would restart the very loop the terminator just concluded. Skipping it would make the loop detector a way past every rule. Its answer is held and logged on exactly the same terms: terminal means it is never *rejected*, not that it skips the release, and a wrap-up that says nothing at all still logs the note on its own.
+
+**Every verdict for a turn is written by the pass that DELIVERS.** An asking pass records only what it asked. Writing an `advised` row — "the answer shipped carrying a note" — while the turn is still running claimed a delivery that had not happened, which a binding does on every round the moment it mixes an askable obligation with an unaskable one. The abstentions move with them, so §7's counters count turns rather than passes.
 
 **One ask round per binding, not per obligation.** A rule with two obligations that both fail spends *one* of its two rounds, not both. Per-obligation counting gave the rules built from real behaviour — which are usually the multi-obligation ones — half the patience the design promises.
 

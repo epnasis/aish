@@ -1807,9 +1807,21 @@ class Agent:
                 entry["tool_calls"] = tool_calls
             if raw_blocks:
                 entry["raw_blocks"] = raw_blocks
-            # No hold here: this wrap-up turn is terminal by construction, so
-            # it is never a proposal — nothing downstream could release it.
-            self._append(entry)
+            # Held on exactly the same terms as an ordinary answer, and for
+            # the same reason: the note is stamped a few lines below, and an
+            # entry already sent to the log carries the model's words without
+            # it. That left every loop/stall/ceiling exit with the note in the
+            # live stream only — gone on the next cold reload, and the rule
+            # reading as followed. Terminal only means it is never REJECTED;
+            # it still has to be released.
+            # Tool calls included: the entry stays in `self.messages` whole
+            # (every tool_use needs its pair), and it is the LOG copy that gets
+            # the delivered text.
+            if self._held_answer is not None:
+                self.messages.append(entry)
+                self._held_entry = entry
+            else:
+                self._append(entry)
             for call in tool_calls:  # every tool_use still needs a paired result
                 self._append(
                     {
@@ -1827,7 +1839,15 @@ class Agent:
         # text sits in the buffer and the client shows a dead turn. The note
         # rides it too — a rule that was not followed must be said on the way
         # out, whichever way the turn ends.
+        had_hold = self._held_answer is not None
         content = self._release_held(text=content)
+        if self._held_entry is not None:
+            self._log_held_entry(content)
+        elif had_hold and content and self.on_message:
+            # The wrap-up said nothing at all, so there is no entry to stamp —
+            # but the note still has to reach the log, or the only record of a
+            # rule that was not followed is a token stream nobody kept.
+            self.on_message(_serialize({"role": "assistant", "content": content}))
         if not content and self.on_token:
             self.on_token(headline + "\n")
         return f"{headline}\n\n{content}" if content else headline
@@ -2992,18 +3012,6 @@ class Agent:
             return None
         evidence = rules.TurnEvidence(answer=answer, calls=tuple(self._turn_calls))
         failures = rules.verify(self._bindings, evidence)
-        for binding in self._bindings:
-            # "Checked and satisfied" must be distinguishable from "never
-            # checked" — absence is never the evidence (contract corollary 2).
-            # Only bindings that actually decide something at turn end: a pass
-            # for a binding with no verify obligation would claim a check that
-            # never ran.
-            if rules.has_verify([binding]) and not any(
-                f.binding is binding for f in failures
-            ):
-                self._record_verify_pass(binding)
-        if not failures:
-            return None
         asks, unmet = [], []
         # ONE round per binding per pass, not one per failing obligation. A rule
         # with two obligations was burning both its asks in a single round and
@@ -3027,9 +3035,27 @@ class Agent:
                 spent.add(binding.id)
                 binding.asks += 1
             asks.append(failure)
-            self._record_verify(failure, "asked")
-        for failure in unmet:
-            self._record_verify(failure, "not_followed")
+        if asks:
+            # An asking pass records only what it asked. `advised` means "the
+            # answer shipped carrying a note", so writing one for an unaskable
+            # obligation while the turn is still going claimed a delivery that
+            # had not happened — and a binding mixing an askable obligation
+            # with an unaskable one did it on every round.
+            for failure in asks:
+                self._record_verify(failure, "asked")
+        else:
+            # The delivering pass. Every verdict for this turn is written here,
+            # exactly once — including the abstentions, so a satisfied rule and
+            # an unchecked one are distinguishable in the log (absence is never
+            # the evidence). Recording them on every pass instead would have
+            # §7's counters counting passes rather than turns.
+            for failure in unmet:
+                self._record_verify(failure, "not_followed")
+            for binding in self._bindings:
+                if rules.has_verify([binding]) and not any(
+                    f.binding is binding for f in failures
+                ):
+                    self._record_verify_pass(binding)
         if not asks:
             # Delivered, and SAID. Deduplicated: one line per rule, however
             # many of its obligations went unmet.
@@ -3338,7 +3364,12 @@ class Agent:
         # Carried structurally rather than sniffed: the stop gate fires on
         # EVERY tool, parallel reads included, where an instance attribute
         # would race between concurrent calls.
-        return _gate_outcome(STOP_GATE_REFUSAL, decision="held")
+        # `blocked`, NOT `held`: the frontend paints `held` as amber "Held —
+        # adjust", the approve-with-comment tag that tells the owner the model
+        # should rework and retry. Deny means STOP. It also matches what a
+        # stop-gated run_command already logged through `_run_meta`, so the one
+        # gate stops disagreeing with itself about what it did.
+        return _gate_outcome(STOP_GATE_REFUSAL, decision="blocked")
 
     def _skill_gate(self, name: str, args: dict) -> str | None:
         """Refusal text while a flagged oversized skill is unread, else None.
