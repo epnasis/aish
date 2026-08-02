@@ -162,6 +162,35 @@ function world() {
   ok("and the box closes", !tools.children.includes(note));
 }
 
+// --- typing and tapping AWAY still saves ------------------------------------
+// The bug the owner hit twice: blur kept the text and sent nothing, so the log
+// held his tap with an empty comment and the words were gone. On a phone,
+// tapping away is how you finish typing.
+{
+  const { sandbox, sent } = world();
+  const { host, chip } = mount(sandbox, "turn-abc", "down");
+  chip.onclick();
+  const note = host.children.find((c) => c.className === "rating-note");
+  note.value = "it never read the page";
+  note.onblur();
+  ok("blurring commits the reason", sent.length === 2);
+  ok("with the words typed", sent[1].comment === "it never read the page");
+  ok("the box closes", !host.children.includes(note));
+  ok("and the reason is shown", host.children.some((c) => c.className === "rating-said"));
+}
+
+// --- committing happens once, whichever way you leave -----------------------
+{
+  const { sandbox, sent } = world();
+  const { host, chip } = mount(sandbox, "turn-abc", "down");
+  chip.onclick();
+  const note = host.children.find((c) => c.className === "rating-note");
+  note.value = "once";
+  note.onkeydown({ key: "Enter", preventDefault() {} });
+  note.onblur();                      // the browser fires blur after removal too
+  ok("Return then blur writes one record, not two", sent.length === 2);
+}
+
 // --- an empty reason writes nothing extra -----------------------------------
 {
   const { sandbox, sent } = world();
