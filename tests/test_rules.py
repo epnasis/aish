@@ -479,9 +479,17 @@ class TestShippedExamples:
     EXAMPLES = Path(__file__).resolve().parent.parent / "examples" / "rules"
 
     def test_every_shipped_example_compiles(self):
+        """They are what the owner copies into ~/.config/aish/rules/, so a
+        broken one is a broken corpus, not a broken test fixture."""
         loaded = rules.load_rules([self.EXAMPLES])
-        assert len(loaded) == 2
-        assert not [r.name for r in loaded if r.error]
+        assert loaded, "the examples went missing"
+        assert not [f"{r.name}: {r.error}" for r in loaded if r.error]
+
+    def test_the_examples_cover_every_built_subject(self):
+        """An example per subject is how the format is actually learned — by
+        the owner and by a model reading the folder."""
+        subjects = {r.trigger for r in rules.load_rules([self.EXAMPLES])}
+        assert subjects >= {"message_shape", "session_context", "action_shape"}
 
     def _canonical(self):
         return next(
@@ -788,3 +796,176 @@ class TestEnabledFlag:
         rule = load_one(tmp_path, CANONICAL.replace("name: bounded-material",
                                                     "name: bounded-material\nstatus: disabled"))
         assert "`status:` was retired" in rule.error and "enabled: false" in rule.error
+
+
+ACTION_RULE = """---
+name: never-edit-aish-itself
+description: aish's own source changes through issues, not directly.
+when:
+  action:
+    path_under: {root}
+then:
+  never_use: [write_file, edit_file]
+---
+
+File an issue instead. The config directory is fine to change.
+"""
+
+ALWAYS_RULE = """---
+name: always-on
+description: Applies to every turn.
+when: always
+then:
+  never_use: [web_search]
+---
+"""
+
+
+class TestActionSubject:
+    """`when: action:` asks about a call aish is ABOUT to make — the cheapest
+    enforcement in the vocabulary, because the gate it needs already exists and
+    every field is a fact the harness holds before dispatch."""
+
+    def _bound(self, tmp_path, root, known=("write_file", "edit_file")):
+        rule = load_one(tmp_path, ACTION_RULE.format(root=root))
+        assert not rule.error, rule.error
+        verdict, evidence = rules.evaluate(rule, rules.TurnContext(task="fix a bug"))
+        assert verdict == rules.VERDICT_BIND
+        return rules.bind(rule, evidence, "b1", set(known))
+
+    def test_it_arms_at_seed_and_decides_at_the_gate(self, tmp_path):
+        """The condition is about a call nobody has proposed yet, so binding
+        is not "it applied" — it is "it is watching". The gate records say
+        whether it ever fired."""
+        binding = self._bound(tmp_path, str(tmp_path / "src"))
+        assert binding.evidence == {
+            "on": "action", "conditions": {"path_under": str(tmp_path / "src")}
+        }
+
+    def test_a_write_inside_the_path_is_refused(self, tmp_path):
+        binding = self._bound(tmp_path, str(tmp_path / "src"))
+        [verdict] = rules.gate([binding], "write_file", {"path": str(tmp_path / "src/a.py")})
+        assert verdict.verdict == "refused"
+        assert "never-edit-aish-itself" in verdict.message
+
+    def test_a_write_OUTSIDE_the_path_is_untouched(self, tmp_path):
+        """The owner's requirement exactly: the source is off-limits, the
+        config beside it is his to change."""
+        binding = self._bound(tmp_path, str(tmp_path / "src"))
+        [verdict] = rules.gate([binding], "write_file", {"path": str(tmp_path / "config/a.md")})
+        assert verdict.verdict == "allowed"
+
+    def test_a_tool_the_rule_does_not_name_is_untouched(self, tmp_path):
+        binding = self._bound(tmp_path, str(tmp_path / "src"))
+        [verdict] = rules.gate([binding], "read_file", {"path": str(tmp_path / "src/a.py")})
+        assert verdict.verdict == "allowed"
+
+    def test_dot_dot_cannot_walk_out_of_the_condition(self, tmp_path):
+        """Resolved, never string-matched. A path condition that `..` steps
+        around protects nothing — and the direction that matters is that a
+        path LEAVING the root stops matching, not that it starts."""
+        binding = self._bound(tmp_path, str(tmp_path / "src"))
+        outside = str(tmp_path / "src" / ".." / "elsewhere" / "a.py")
+        assert rules.gate([binding], "write_file", {"path": outside})[0].verdict == "allowed"
+
+    def test_a_path_inside_reached_through_dot_dot_still_matches(self, tmp_path):
+        """The mirror: resolution must not become an escape hatch either."""
+        binding = self._bound(tmp_path, str(tmp_path / "src"))
+        inside = str(tmp_path / "other" / ".." / "src" / "a.py")
+        assert rules.gate([binding], "write_file", {"path": inside})[0].verdict == "refused"
+
+    def test_a_relative_path_resolves_against_the_session_cwd(self, tmp_path):
+        binding = self._bound(tmp_path, str(tmp_path / "src"))
+        verdict = rules.gate([binding], "write_file", {"path": "a.py"},
+                             cwd=str(tmp_path / "src"))[0]
+        assert verdict.verdict == "refused"
+
+    def test_a_path_named_inside_a_shell_command_counts(self, tmp_path):
+        """`write_file` is not the only way to change a file."""
+        rule = load_one(tmp_path, ACTION_RULE.format(root=str(tmp_path / "src")).replace(
+            "never_use: [write_file, edit_file]", "never_use: [run_command]"
+        ))
+        _, evidence = rules.evaluate(rule, rules.TurnContext(task="x"))
+        binding = rules.bind(rule, evidence, "b1", {"run_command"})
+        command = f"sed -i '' s/a/b/ {tmp_path}/src/a.py"
+        assert rules.gate([binding], "run_command", {"command": command})[0].verdict == "refused"
+
+    def test_the_tool_shorthand_expands(self, tmp_path):
+        """`when: {action: remember}` is the common case; the long form is
+        ceremony for it. The record always carries the expanded condition."""
+        rule = load_one(tmp_path, ALWAYS_RULE.replace(
+            "when: always", "when:\n  action: remember"
+        ).replace("never_use: [web_search]", "never_use: [forget_memory]"))
+        assert not rule.error, rule.error
+        assert rule.action == {"tool": "remember"}
+
+    @pytest.mark.parametrize("field", ["sends_to", "host"])
+    def test_the_unbuilt_fields_say_what_they_need(self, tmp_path, field):
+        rule = load_one(tmp_path, ACTION_RULE.format(root="/x").replace(
+            "path_under: /x", f"{field}: someone@example.com"
+        ))
+        assert "designed but not built yet" in rule.error
+        assert "recipient/host parse" in rule.error
+
+    def test_an_unknown_action_field_lists_the_real_ones(self, tmp_path):
+        rule = load_one(tmp_path, ACTION_RULE.format(root="/x").replace(
+            "path_under: /x", "vibes: bad"
+        ))
+        assert "unknown `action:` field" in rule.error
+        assert "command_starts_with" in rule.error
+
+
+class TestAlwaysSubject:
+    """A rule with no condition. Style obligations apply to every turn, and
+    spelling that out beats an empty block that reads like an oversight."""
+
+    def test_it_binds_on_every_turn(self, tmp_path):
+        rule = load_one(tmp_path, ALWAYS_RULE)
+        assert not rule.error, rule.error
+        for task in ("anything", "", "https://x.test/a"):
+            verdict, evidence = rules.evaluate(rule, rules.TurnContext(task=task))
+            assert verdict == rules.VERDICT_BIND and evidence == {"on": "always"}
+
+    def test_it_gates_like_any_other_binding(self, tmp_path):
+        rule = load_one(tmp_path, ALWAYS_RULE)
+        _, evidence = rules.evaluate(rule, rules.TurnContext(task="x"))
+        binding = rules.bind(rule, evidence, "b1", {"web_search"})
+        assert rules.gate([binding], "web_search")[0].verdict == "refused"
+        assert rules.gate([binding], "read_file")[0].verdict == "allowed"
+
+    @pytest.mark.parametrize(
+        "command,expected",
+        [
+            ("git status", "allowed"),
+            ("git commit -m 'fix the parser'", "allowed"),
+            ("uv run pytest -q", "allowed"),
+            ("ls", "allowed"),
+        ],
+    )
+    def test_a_bare_word_in_a_command_is_not_a_path(self, tmp_path, command, expected):
+        """Found by running the real rule: every word in a command resolved
+        against cwd, so `git status` run from INSIDE the protected tree matched
+        a `path_under` condition naming it — the rule would have refused every
+        command in the directory it guards. A token that is not path-shaped is
+        never resolved, the same discipline the approval gate uses."""
+        rule = load_one(tmp_path, ACTION_RULE.format(root=str(tmp_path)).replace(
+            "never_use: [write_file, edit_file]", "never_use: [run_command]"
+        ))
+        _, evidence = rules.evaluate(rule, rules.TurnContext(task="x"))
+        binding = rules.bind(rule, evidence, "b1", {"run_command"})
+        verdict = rules.gate([binding], "run_command", {"command": command},
+                             cwd=str(tmp_path))[0]
+        assert verdict.verdict == expected
+
+    def test_a_path_shaped_token_in_a_command_still_counts(self, tmp_path):
+        """The other half: the filter must not become the escape."""
+        rule = load_one(tmp_path, ACTION_RULE.format(root=str(tmp_path / "src")).replace(
+            "never_use: [write_file, edit_file]", "never_use: [run_command]"
+        ))
+        _, evidence = rules.evaluate(rule, rules.TurnContext(task="x"))
+        binding = rules.bind(rule, evidence, "b1", {"run_command"})
+        for command in (f"echo x > {tmp_path}/src/a.py", "rm ./src/a.py"):
+            binding.rounds = 0
+            verdict = rules.gate([binding], "run_command", {"command": command},
+                                 cwd=str(tmp_path))[0]
+            assert verdict.verdict == "refused", command
