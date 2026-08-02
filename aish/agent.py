@@ -1655,9 +1655,11 @@ class Agent:
                     # harness's question as a blue bubble the owner never typed.
                     self._append({"role": "user", "content": AISH_NOTE + unmet + "]"})
                     continue
+                was_held = self._held_answer is not None
                 result = self._release_held(text=result)
                 self._log_held_entry()
-                if not content and self.on_token:
+                # A released hold has already streamed itself, notes included.
+                if not content and not was_held and self.on_token:
                     self.on_token(result + "\n")
                 self._note(f"✓ answered in {format_secs(turn_secs)}{_tokens_note(usage)}")
                 total = time.perf_counter() - task_started
@@ -3046,7 +3048,10 @@ class Agent:
         """
         held, self._held_answer = self._held_answer, None
         if held is not None and not discard and self.on_token:
-            self.on_token("\n" + "".join(held))
+            # `text` covers the turn that answered with nothing: the buffer is
+            # empty, the caller's own stream is suppressed (it would double the
+            # notes), so the placeholder has to leave from here or not at all.
+            self.on_token("\n" + ("".join(held) or text))
         if discard and self._bindings:
             self._held_answer = []  # keep holding: the next answer is bound too
         if self._not_followed:

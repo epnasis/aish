@@ -6069,6 +6069,19 @@ class TestVerify:
         )
         assert "not followed" in answer
 
+    def test_an_empty_answer_streams_its_note_once(self, tmp_path):
+        """The hold streams itself, notes included. A caller that streams the
+        result again shows the owner every not-followed line twice."""
+        streamed = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says("")] * 4,
+            rule_texts=(RULE_VERIFY,),
+            on_token=streamed.append,
+        )
+        agent.run_task("price?")
+        assert "".join(streamed).count("not followed") == 1
+
     def test_a_turn_no_rule_governs_is_untouched(self, tmp_path):
         agent, _ = rules_agent(
             tmp_path, [model_says("plain answer")], rule_texts=()

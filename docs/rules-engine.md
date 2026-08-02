@@ -82,7 +82,19 @@ Moving the condition from *what the owner asked* to *what the model produced* is
 
 **A bound turn does not stream.** The promise is that a rule is checked *before* the owner reads the answer, and on a device that streams token by token he has read it long before the check runs. So a turn with verify obligations withholds its tokens until the checks pass. The cost is the owner's, deliberately: *"I'd rather have a verified answer than a faster one that is wrong."* Paid only on turns a rule governs. `TestHeldAnswer`.
 
-**Verify is the genuinely new capability.** Nothing in aish has ever checked the *answer*: the loop detector and the stall budget are mid-loop. It is where the #190 incident — a 4,600-character answer sourced entirely from news sites and presented as a video's content — would have been caught, and it is the next slice.
+**Verify is the genuinely new capability.** Nothing in aish had ever checked the *answer*: the loop detector and the stall budget are mid-loop. It is where the #190 incident — a 4,600-character answer sourced entirely from news sites and presented as a video's content — would have been caught.
+
+### Four things Verify is careful about, and why
+
+**A refused call is not a call.** `must_first` reads the turn's own record for a capability that *ran* — a call another gate denied, held or blocked counts as unmet. Conflating "the gate stopped it" with "it never happened" would let a blocked reader satisfy the obligation with nothing behind it. The other half matters more: such an obligation is reported but **never asked**, because the goad would send the model straight back at a call the harness had just refused, which is the harness arguing with itself.
+
+**A rejected proposal never reaches the log.** A held answer goes into the model's own history — the ask that follows refers to it — but not into the session log until it is released. Otherwise the answer the owner never saw live comes back as an assistant bubble on the next page load, and one turn has two answers. The hold arms on the presence of verify obligations alone, **not** on whether a token stream is attached: it does two jobs, and only one of them is about streaming.
+
+**One ask round per binding, not per obligation.** A rule with two obligations that both fail spends *one* of its two rounds, not both. Per-obligation counting gave the rules built from real behaviour — which are usually the multi-obligation ones — half the patience the design promises.
+
+**claude-max verifies too, in note-only mode.** The SDK owns its loop, so there is no turn to ask into and the text has already streamed: `verify_final` runs the checks, records the verdicts and stamps every unmet rule onto the answer. The ask half is structurally unavailable there; skipping the checks was the alternative and it is the worse one, since a rule the model escapes by being asked on a different backend is not a rule. Same reasoning that put seeding and the gate on both paths.
+
+**Turn-scoped by definition, including across a restart.** A resumed task is a new turn with an empty call record, so a `must_first` will ask again for a fetch that happened before the restart. That is the honest reading — the note says *this turn* — and the alternative, carrying evidence across turns, would break the scoping the whole engine rests on.
 
 ---
 
@@ -180,7 +192,7 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 |---|---|---|
 | `answer_from: <tool> \| material` | the deliverable comes from here | **yes** |
 | `never_use: [tools]` | these tools are refused for the turn | **yes** |
-| `must_tell_me_when: <plain phrase>` | this failure must be stated to the owner | declared; enforced at Verify |
+| `must_tell_me_when: <plain phrase>` | this failure must be stated to the owner | declared, seeded as prose; the structural half is not built (a plain phrase is a judged question) |
 | `must_first: <cap>` | this capability must have run before the answer | **yes** |
 | `answer_must_include:` / `answer_must_not:` | a named detector, or `{pattern: <regex>}` | **yes** |
 | ~~`keep_in_mind:`~~ | **deleted** — see below | never |
