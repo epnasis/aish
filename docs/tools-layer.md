@@ -28,6 +28,8 @@ Frontmatter is dependency-free line parsing (`schema` is a JSON object string). 
 
 The agent rescans only when the dirs' `signature()` (an mtime set) moves, so a mid-task manifest edit is picked up on the next step.
 
+**A broken manifest in a TEST fixture HANGS the suite, it does not fail it.** Skipping is right in production and treacherous in tests: the tool is simply not discovered, so a `test_server.py` test waiting on its approval card waits forever — no error, no failing assertion, just a run parked at 71%. A dropped `f` prefix while reflowing a fixture string did exactly this (`{{` left doubled in a plain string, so the schema JSON was literally `{{"text": …}}`). When a tool test hangs, suspect the manifest before the socket.
+
 **Shadowing is a monotone floor across scopes (#178 P1-3).** A project `TOOL.md` shadows a same-named global one, but a shadow may only RAISE a tool to mutating, never lower it: a downgrading shadow — project `mutating: no` over global `mutating: yes`, which would route the mutation through the ungated parallel read path — is REFUSED outright in `discover`, the global mutating tool survives (still gated), and a loud warning names both paths. Same-flag and upgrade shadows keep project-wins. Dormant while project dirs are unscanned, load-bearing for the future trust gate. `TestCollision`.
 
 **Declarable fields beyond the schema:** `mutating` (required), `returns` (required), `preview`, `prefer_over`, `secrets`.
