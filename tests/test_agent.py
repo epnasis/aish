@@ -2569,6 +2569,20 @@ class TestActivityTraceSteps:
         cancel = next(s for s in steps if s["kind"] == "thinking_cancel")
         assert cancel["tokens"] == [120, 30]
 
+    def test_wrapup_turn_reports_its_own_time_and_tokens(self):
+        # The wrap-up answer after a stop is a real answer turn: unreported, the
+        # trace header totals every turn EXCEPT the one the user is reading.
+        steps, result = run_with_steps(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")])] * 5
+            + [model_says("here's where I got to", tokens=(900, 40))],
+            max_steps=25,
+        )
+        assert result.startswith("(stopped")
+        cancel = steps[-1]
+        assert cancel["kind"] == "thinking_cancel"
+        assert cancel["tokens"] == [900, 40]
+        assert cancel["secs"] >= 0
+
     def test_output_is_bounded_in_step(self):
         from aish.agent import STEP_OUTPUT_CAP
 

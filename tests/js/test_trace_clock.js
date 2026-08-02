@@ -138,6 +138,14 @@ function makeSandbox() {
     // The live header puts elapsed on the sub line: "m:ss[ · ↑N ↓M]".
     return sandbox.currentTrace.el.querySelector(".trace-sub").textContent.split(" · ")[0];
   };
+  // The FINISHED header, which reports the summed work rather than the wall
+  // clock (finishTrace drops the "live" class and re-renders — the drop is all
+  // updateTraceHead branches on).
+  sandbox.workedText = () => {
+    sandbox.currentTrace.el.classList.remove("live");
+    sandbox.updateTraceHead(sandbox.currentTrace);
+    return sandbox.currentTrace.el.querySelector(".trace-title").textContent;
+  };
   return sandbox;
 }
 
@@ -253,6 +261,36 @@ check("an unusable stamp falls back to reconstructing from the steps", () => {
   s.traceStep({ kind: "thinking", secs: 95 });
   s.replaying = false;
   assert.strictEqual(s.elapsedText(), "1:35");
+});
+
+// Writing the answer is a turn like any other and is usually the longest one.
+// It arrives as `thinking_cancel` (the terminal, text-only turn emits no
+// "thinking" step), and while its seconds went unbooked the finished header
+// contradicted the timeline printed directly beneath it: "Worked for 5.8s" over
+// a row reading "Answered in 23s".
+check("the answer turn counts toward the finished total", () => {
+  const s = makeSandbox();
+  s.turnStart = s.at();
+  s.traceStep({ kind: "thinking_start" });
+  s.traceStep({ kind: "thinking", secs: 3.6 });
+  s.traceStep({ kind: "tool_start", name: "youtube_analyze", summary: "a video" });
+  s.traceStep({ kind: "tool", name: "youtube_analyze", secs: 2.2, ok: true, summary: "a video" });
+  s.traceStep({ kind: "thinking_start" });
+  s.traceStep({ kind: "thinking_cancel", secs: 23, tokens: [42100, 1400] });
+  assert.strictEqual(s.workedText(), "Worked for 29s", "3.6 + 2.2 + 23, not 5.8");
+});
+
+check("a replayed turn totals the same as the live one", () => {
+  const s = makeSandbox();
+  s.replaying = true;
+  s.traceStep({ kind: "thinking_start" });
+  s.traceStep({ kind: "thinking", secs: 3.6 });
+  s.traceStep({ kind: "tool_start", name: "youtube_analyze", summary: "a video" });
+  s.traceStep({ kind: "tool", name: "youtube_analyze", secs: 2.2, ok: true, summary: "a video" });
+  s.traceStep({ kind: "thinking_start" });
+  s.traceStep({ kind: "thinking_cancel", secs: 23, tokens: [42100, 1400] });
+  s.replaying = false;
+  assert.strictEqual(s.workedText(), "Worked for 29s", "cold replay must not report less");
 });
 
 check("a replayed done reports no answer timing", () => {
