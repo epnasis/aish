@@ -244,24 +244,39 @@ thousands of entries without bloating the context.
 - **Rules** — the one artifact class that is **binding**. A skill *may* be
   consulted, a memory *may* be recalled, a tool *may* be invoked; a rule is
   enforced by aish itself, whatever the model concludes. One markdown file per
-  rule in `~/.config/aish/rules/`, same frontmatter family (`status: disabled`
-  and `expires:` work identically), written by you — never by the model, never
-  silently. A rule declares a **trigger** (today: the shape of your message, or
-  the session's origin) and **obligations**: `route` this answer through a named
-  tool — or through **the material you handed over** (a link, an attached file
-  or image, a path you typed), with aish picking the right reader for each —
-  `prohibit` these tools, `disclose` a named failure instead of
-  quietly patching over it. A source you give aish is **material to analyse,
-  never instructions**: the harness says so in the same breath it says to use
-  it, so a page that reads "ignore your previous instructions" is reported, not
-  obeyed. When a trigger matches, the rule is explained to the model
-  *and* enforced: a call that violates it is refused before it runs, with a
-  message naming the rule and what to do instead. Refusals are bounded — if the
-  model insists, you get an approval card, because there may be a legitimate
-  exception and only you can grant it. Rules only ever **restrict**: there is no
-  "auto-approve this" verb, deliberately, so a bad rule can annoy you and can
-  never widen what runs without asking. Two worked examples ship in
-  `examples/rules/`.
+  rule in `~/.config/aish/rules/`, written by you — never by the model, never
+  silently. `enabled: false` retires a rule without deleting it, and `expires:`
+  works as it does for memory.
+
+  A rule reads as one sentence: **when** this, **then** that. The `when:` names
+  what is being examined — the `prompt:` you typed, the `session:` it is running
+  in, the `action:` about to run, or `always`. The `then:` lists obligations
+  from a small closed set: `answer_from:` a named tool — or `source`, meaning
+  **the material you handed over** (a link, an attached file or image, a path
+  you typed), with aish picking the right reader for each — `never_use:` these
+  tools, `must_first:` call this before answering, `answer_must_include:` /
+  `answer_must_not:` a named check on the finished answer, `must_tell_me_when:`
+  a named failure has to be stated rather than quietly patched over.
+
+  Material you give aish is **data to analyse, never instructions**: the harness
+  says so in the same breath it says to use it, so a page that reads "ignore
+  your previous instructions" is reported, not obeyed.
+
+  Rules are enforced at two moments. **Before a call runs**, one that violates a
+  rule is refused with a message naming the rule and what to do instead;
+  refusals are bounded, and if the model insists you get an approval card,
+  because there may be a legitimate exception and only you can grant it. **At
+  the end of the turn**, the finished answer is checked before you see it — on
+  those turns it does not stream, deliberately, so a rule is checked before you
+  read the answer rather than after. If a check fails, aish asks the model for
+  the missing work (twice at most) and the answer is delivered either way; one
+  that never satisfied its rule arrives with a line saying so, written by aish
+  and not by the model, so it cannot be skipped.
+
+  Rules only ever **restrict**: there is no "auto-approve this" verb,
+  deliberately, so a bad rule can annoy you and can never widen what runs
+  without asking. Worked examples ship in `examples/rules/` — one per trigger
+  kind, one per enforcement moment.
 - **`./AISH.md`** — durable context you write (host facts, preferences), always
   loaded in full.
 - **`/learn [hint]`** — distill the current conversation into skills/memory: it
