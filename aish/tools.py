@@ -125,6 +125,18 @@ def classify_output(text: str, exit_code: int, required: list[str] | None = None
 
     payload = _json_object(text)
     if payload is None:
+        if required:
+            # Declared fields with no JSON to hold them. Grading this `ok`
+            # would make the contract opt-out-able by a wrapper that simply
+            # stops printing JSON — the exact silence #193 exists to end.
+            return (
+                STATUS_INCOMPLETE,
+                VERDICT_REQUIRED_FIELDS,
+                {"declared": list(required), "missing": list(required),
+                 "empty": [], "payload": "not_json"},
+            )
+        if required is not None:
+            evidence["declared"] = []
         return STATUS_OK, VERDICT_EXIT_CODE, evidence
 
     if required:
@@ -962,9 +974,14 @@ TOOL_SCHEMAS = [
                 "(it mutates state or produces user-facing output). If any is false, "
                 "write a skill instead — do NOT create a tool for read-only, simple-"
                 "argument, or one-off operations. The wrapper receives the validated "
-                "arguments as a JSON object on STDIN, prints results to stdout, and its "
-                "exit code signals success/failure (no shell quoting in the path — that "
-                "is the whole point). aish writes each tool as its OWN directory: "
+                "arguments as a JSON object on STDIN, prints results to stdout, and MUST "
+                "exit NON-ZERO whenever it did not do what it promises — a wrapper that "
+                "prints an error into its output and exits 0 anyway reports a failure as "
+                "a success, and the model then answers from something else. Declare what "
+                "a good result contains in 'returns' as well: aish checks it on every "
+                "call, so the contract does not depend on the exit code alone. (No shell "
+                "quoting in the argument path — that is the whole point.) "
+                "aish writes each tool as its OWN directory: "
                 "<scope>/tools/<name>/ containing TOOL.md (the manifest) and the wrapper "
                 "script — the manifest shown first, then the wrapper, each diff-approved. "
                 "Do NOT describe or invent any other layout (there is no flat '.json' "
@@ -1027,6 +1044,23 @@ TOOL_SCHEMAS = [
                         "description": "Optional prose body for the TOOL.md: how the "
                         "underlying CLI behaves, gotchas.",
                     },
+                    "returns": {
+                        "type": "string",
+                        "description": "REQUIRED — the tool's success contract, which aish "
+                        "CHECKS on every call. If the wrapper prints a JSON OBJECT, list the "
+                        "fields a SUCCESSFUL result must contain, non-empty, space-separated (e.g. "
+                        "'transcript' for a transcript fetcher, 'url id' for an uploader): "
+                        "aish then marks the call FAILED whenever one of them comes back "
+                        "missing, null or empty, no matter what the exit code said. Use "
+                        "'text' when the wrapper prints prose, or a JSON ARRAY, or anything "
+                        "else where non-empty output is the whole contract (a search that "
+                        "legitimately finds nothing SUCCEEDED — do not make emptiness a "
+                        "failure). Use 'none' ONLY when nothing about the output can "
+                        "be checked — that is an opt-out and it is recorded as one. Do NOT "
+                        "list optional fields: every field you name here is one the tool "
+                        "PROMISES, and a promise it cannot keep is reported to the user as "
+                        "a failure.",
+                    },
                     "prefer_over": {
                         "type": "string",
                         "description": "Optional: raw command(s) this tool should be used "
@@ -1056,7 +1090,7 @@ TOOL_SCHEMAS = [
                         "title, a message body).",
                     },
                 },
-                "required": ["name", "description", "mutating", "schema", "wrapper"],
+                "required": ["name", "description", "mutating", "schema", "wrapper", "returns"],
             },
         },
     },

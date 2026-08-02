@@ -14,7 +14,9 @@
 
 **Indistinguishable from native tools.** `to_tool_def()` emits the exact `{"type":"function","function":{…}}` shape `tools.TOOL_SCHEMAS` uses, and `agent._dispatch` routes both through the same gate. Anything that makes plugin tools a second class — a separate dispatch path, a separate approval channel, a separate parallelism rule — is a regression. `TestToolDef`, `TestValidateArgs`, `TestExecute`.
 
-**Fail closed.** `mutating` is **required** in the manifest: one that does not declare it is invalid, never silently read-only. It is a **floor, never authority** — see shadowing.
+**Fail closed.** `mutating` is **required** in the manifest: one that does not declare it is invalid, never silently read-only. It is a **floor, never authority** — see shadowing. `returns` is required on the same terms — see the output contract.
+
+**A tool's own verdict is not evidence.** The wrapper decides its exit code, and the wrapper is usually written by a model. Everything the runtime knows about whether a call worked, it must be able to check itself.
 
 ---
 
@@ -28,7 +30,19 @@ The agent rescans only when the dirs' `signature()` (an mtime set) moves, so a m
 
 **Shadowing is a monotone floor across scopes (#178 P1-3).** A project `TOOL.md` shadows a same-named global one, but a shadow may only RAISE a tool to mutating, never lower it: a downgrading shadow — project `mutating: no` over global `mutating: yes`, which would route the mutation through the ungated parallel read path — is REFUSED outright in `discover`, the global mutating tool survives (still gated), and a loud warning names both paths. Same-flag and upgrade shadows keep project-wins. Dormant while project dirs are unscanned, load-bearing for the future trust gate. `TestCollision`.
 
-**Declarable fields beyond the schema:** `mutating` (required), `preview`, `prefer_over`, `secrets`.
+**Declarable fields beyond the schema:** `mutating` (required), `returns` (required), `preview`, `prefer_over`, `secrets`.
+
+### The output contract — `returns` (#193)
+
+**What a successful result must contain, declared by the author and checked by the runtime on every call.** Three forms, and all three are explicit because the field is REQUIRED: a space-separated **field list** (the JSON object must carry each one, non-empty), **`text`** (non-empty output is the whole contract — prose, or a JSON array, where a legitimately empty result is still a success), or **`none`** (nothing about the output is checkable; recorded as the opt-out it is). `_parse_returns` skips a manifest that declares nothing, exactly as a missing `mutating` does.
+
+It flows straight into `classify_output`'s `required`, which #192 had already built and which nothing had ever populated: `Tool.returns` → `execute` → `envelope(required=…)`. `None` means no contract, `()` means `text` and records `declared: []` so a real contract can be told from an absent one in the log, and a tuple means the fields.
+
+**The hole it closes.** `youtube_analyze` printed `transcript: null` beside a populated `error_log`, exited **0**, and was graded `ok`. The model received a title, an author, a thumbnail and no words, and wrote a confident digest of the podcast from elsewhere. Only `error_field` stood between that and a silent substitution, and only because this author happened to name the field `error_log` — a wrapper reporting failure any other way had nothing at all. The exit code is supplied by whoever wrote the wrapper, which is usually a model; the declared contract is the runtime's own check, so it holds whatever the wrapper claims.
+
+**Declared fields with a non-JSON payload is `incomplete`, not `ok`.** Otherwise a wrapper opts out of its own contract by no longer printing JSON — the same silence in a new costume. This is why a JSON **array** tool (`gmail_search`) must declare `text`: an array holds no named fields, and zero search hits is a success, not a failure.
+
+The linter cannot check that a declared field is one the wrapper can actually produce — that needs a run, which is #193's birth check and is deliberately not built here (a mutating tool cannot be smoke-run without mutating). What ships is the declaration, the runtime check, and `create_tool` refusing a manifest without one. `TestOutputContract`.
 
 ---
 
@@ -71,6 +85,8 @@ A native, model-autonomous tool that writes a new `TOOL.md` plus wrapper. Three 
 1. **The WHEN test is imperative in the tool's description** (see Doctrine) — capability phrasing in aish's own prompts gets ignored by small models unless it is a MUST plus a concrete example.
 2. **`Agent._create_tool` LINTS the drafted manifest in a temp dir** and refuses to write on any error, returning structured feedback so the model corrects and retries. A broken tool cannot land. A non-bool `preview:` value is written verbatim rather than coerced, precisely so this refusal catches it instead of producing a tool that silently promises a preview it never emits.
 3. **Both files go through the normal `approve_write` diff gate.** The **manifest is written and approved FIRST** — the interface: review intent, then verify the code — then the wrapper. A denial aborts without leaving an orphan.
+
+`returns` is a REQUIRED argument of `create_tool` and is written into the manifest **verbatim, including when the model omitted it** — so the lint refuses the tool rather than `_create_tool` inventing a contract on the author's behalf. A guessed contract and a checked one are indistinguishable in the log, and only one of them is true. The argument's description carries the WHEN test the same way the doctrine does (imperative, with examples), plus the instruction the original wrapper most needed: **exit non-zero when the tool did not do what it promises.**
 
 The wrapper is `chmod +x`'d after commit and the plugin signature is reset, so the new tool is offered on the next step. `wrapper_lang` sets file and shebang (sh|python). `scope` picks global; `scope: project` is refused with a structured error while project discovery is off, since a tool that is never discovered would be a silent no-op. Each tool is its OWN directory holding `TOOL.md` + wrapper, stated imperatively in the description so the model stops inventing a flat `.json` layout. Out-of-project write cards show the full home-abbreviated path, so a global-config destination cannot be mistaken for a file in the current project.
 

@@ -117,6 +117,7 @@ def write_plugin_tool(project_dir, name, *, mutating):
         "description: test plugin tool\n"
         "exec: ./run.sh\n"
         f"mutating: {'yes' if mutating else 'no'}\n"
+        "returns: text\n"
         'schema: {"text": {"type": "string", "required": true}}\n'
         "---\nbody\n"
     )

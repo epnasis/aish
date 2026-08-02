@@ -58,6 +58,13 @@ GLOBAL_TOOLS_DIR = Path.home() / ".config" / "aish" / "tools"
 TOOL_BUDGET = 25
 NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+# The two declarations that are NOT a field list. `text` says non-empty output
+# is the whole contract; `none` says the runtime cannot check anything beyond
+# the exit code. Both are explicit ON PURPOSE — `returns:` is required, so the
+# way to opt out of a field contract is to say so, never to omit it (#193).
+RETURNS_TEXT = "text"
+RETURNS_NONE = "none"
 _ARG_TYPES = {"string", "integer", "number", "boolean"}
 DEFAULT_TIMEOUT = 120
 MAX_TIMEOUT = 900
@@ -122,6 +129,14 @@ class Tool:
     prefer_over: tuple[str, ...] = ()
     secrets: tuple[str, ...] = ()  # env-var names injected from the Keychain at exec
     preview: bool = False  # if set, resolve args to a human sentence before the gate (#157)
+    # The declared output contract (#193), fed straight to classify_output's
+    # `required`. None = `returns: none`, no contract beyond the exit code; ()
+    # = `returns: text`, non-empty output is the whole contract; a tuple of
+    # names = the JSON payload must carry them all, non-empty. The DATACLASS
+    # default is the lenient one only because direct construction (tests, other
+    # code) is not the trust boundary — `_parse_tool` is, and it refuses a
+    # manifest that declares nothing.
+    returns: tuple[str, ...] | None = None
 
 
 def _truncate(text: str, head: int = _OUT_HEAD, tail: int = _OUT_TAIL) -> str:
@@ -321,6 +336,9 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
         else:
             errors.extend(_validate_schema(manifest, schema))
 
+    returns, returns_errors = _parse_returns(manifest, fields)
+    errors.extend(returns_errors)
+
     secrets = tuple(re.split(r"[,\s]+", fields.get("secrets", "").strip())) if fields.get(
         "secrets", ""
     ).strip() else ()
@@ -347,9 +365,48 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
             ),
             secrets=secrets,
             preview=preview,
+            returns=returns,
         ),
         [],
     )
+
+
+def _parse_returns(manifest: Path, fields: dict) -> tuple[tuple[str, ...] | None, list[str]]:
+    """The declared output contract, or an error that skips the tool.
+
+    Required, and fail-closed for the same reason `mutating` is: the runtime's
+    only other success signal is the wrapper's exit code, supplied by whoever
+    wrote the wrapper. `youtube_analyze` printed `transcript: null` beside a
+    populated `error_log` and exited 0 — a failure the harness graded `ok`
+    because nothing had ever declared what a successful result must contain.
+    An omitted `returns:` is that hole; it is therefore an error, and the way
+    to have no field contract is to write `none` and mean it.
+    """
+    raw = fields.get("returns", "").strip()
+    if not raw:
+        return None, [
+            f"{manifest}: returns is required — declare the fields a SUCCESSFUL result "
+            f"must contain (e.g. 'returns: transcript'), or '{RETURNS_TEXT}' if non-empty "
+            f"output is the whole contract, or '{RETURNS_NONE}' if the exit code is all "
+            "the runtime can check (fail-closed)"
+        ]
+    tokens = [t for t in re.split(r"[,\s]+", raw) if t]
+    lowered = [t.lower() for t in tokens]
+    for word in (RETURNS_TEXT, RETURNS_NONE):
+        if word in lowered:
+            if len(tokens) > 1:
+                return None, [
+                    f"{manifest}: returns {raw!r} mixes {word!r} with field names — "
+                    "it is one or the other"
+                ]
+            return (None if word == RETURNS_NONE else ()), []
+    bad = [t for t in tokens if not _FIELD_NAME_RE.match(t)]
+    if bad:
+        return None, [
+            f"{manifest}: returns field name(s) {', '.join(repr(b) for b in bad)} invalid "
+            "(need [A-Za-z_][A-Za-z0-9_.-]*)"
+        ]
+    return tuple(tokens), []
 
 
 def lint(manifest: Path) -> list[str]:
@@ -513,7 +570,15 @@ def execute(
             error="start_failed",
         )
     out = (proc.stdout or "") + (proc.stderr or "")
-    return envelope(tool.name, out, proc.returncode, caps, cap_source, store_dir)
+    return envelope(
+        tool.name,
+        out,
+        proc.returncode,
+        caps,
+        cap_source,
+        store_dir,
+        required=None if tool.returns is None else list(tool.returns),
+    )
 
 
 def envelope(

@@ -4603,7 +4603,8 @@ class TestToolApproval:
         tdir.mkdir(parents=True, exist_ok=True)
         (tdir / "TOOL.md").write_text(
             f"---\nname: {name}\ndescription: writer tool\nexec: ./run.sh\n"
-            f'mutating: {mutating}\nschema: {{"text": {{"type": "string"}}}}\n---\nb\n'
+            f'mutating: {mutating}\n'
+            'returns: text\nschema: {"text": {"type": "string"}}\n---\nb\n'
         )
         p = tdir / "run.sh"
         p.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n")
@@ -4649,7 +4650,8 @@ class TestToolApproval:
         tdir = Path(cwd) / ".aish" / "tools" / name
         tdir.mkdir(parents=True, exist_ok=True)
         (tdir / "TOOL.md").write_text(
-            f"---\nname: {name}\ndescription: d\nexec: ./run.sh\nmutating: yes\npreview: yes\n"
+            f"---\nname: {name}\ndescription: d\nexec: ./run.sh\nmutating: yes\n"
+            "returns: text\npreview: yes\n"
             f'schema: {{"id": {{"type": "string"}}}}\n---\nb\n'
         )
         p = tdir / "run.sh"
