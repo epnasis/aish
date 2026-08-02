@@ -5026,18 +5026,29 @@ function openRatingComment(btn, turn, kind, existing) {
   note.type = "text";
   note.className = "rating-note";
   note.placeholder = kind === "up" ? "what worked? (optional)" : "what was wrong? (optional)";
-  note.onkeydown = (e) => {
-    if (e.key !== "Enter") return;
-    e.preventDefault();
+  // COMMITTED ON THE WAY OUT, however you leave — Return, tapping elsewhere,
+  // dismissing the keyboard. Blur used to keep the text and send nothing, so a
+  // comment typed and then tapped away from was silently discarded: the log
+  // recorded the tap with `comment: ""` and the owner, reasonably, reported
+  // that his comment had vanished. On a phone, tapping away IS how you finish
+  // typing — especially now that the box scrolls itself to mid-screen, well
+  // away from the keyboard's return key.
+  let committed = false;
+  const commit = () => {
+    if (committed) return;
+    committed = true;
+    stopKeepingInView();
     const comment = note.value.trim();
     if (comment) send({ type: "rate", turn, rating: kind, comment });
     note.remove();
     showRatingComment(ratingHost(btn), comment);
   };
-  note.onblur = () => {
-    stopKeepingInView();
-    if (!note.value.trim()) note.remove();
+  note.onkeydown = (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    commit();
   };
+  note.onblur = commit;
   host.appendChild(note);
 
   // Focusing is not enough on a phone. The keyboard opens AFTER focus, and
