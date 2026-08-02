@@ -6440,3 +6440,29 @@ class TestRateAnswer:
         with client, connected(client) as (_ws, _hello, replay):
             ratings = [e for e in replay["events"] if e["type"] == "rating"]
             assert [r["rating"] for r in ratings] == ["up", "down"]
+
+    def test_the_reason_is_replayed_with_the_rating(self, app_env):
+        """Persisted is only half of it. The comment has to come BACK on
+        render, or the owner reopens a chat, sees a lit thumb with no words,
+        and cannot tell what he objected to — which reads as the note having
+        been lost."""
+        client, _ = make_client(app_env, [model_says("an answer"), model_says("ok")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "a question"})
+            live = recv_until(ws, "user")
+            recv_until(ws, "done")
+            ws.send_json({"type": "rate", "turn": live["turn"], "rating": "down",
+                          "comment": "it never read the page"})
+            recv_until(ws, "rating")
+
+        # Reconnect: the live transcript.
+        with client, connected(client) as (_ws, _hello, replay):
+            [rating] = [e for e in replay["events"] if e["type"] == "rating"]
+            assert rating["comment"] == "it never read the page"
+
+        # Cold open: reconstructed from the log. Both paths must carry it.
+        log = next(Path(app_env["state_dir"]).glob("session-*.jsonl"))
+        events = SessionLog.reconstruct_events(log)
+        [cold] = [e for e in events if e["type"] == "rating"]
+        assert cold["comment"] == "it never read the page"
+        assert cold == rating, "hot and cold must agree on the whole event"
