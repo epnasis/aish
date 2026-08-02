@@ -62,6 +62,7 @@ function fakeElement(tag) {
       toggle(c, on) { if (on) el._classes.add(c); else el._classes.delete(c); },
     },
     setAttribute(k, v) { el.attrs[k] = v; },
+    scrollIntoView() { el.scrolledIntoView = (el.scrolledIntoView || 0) + 1; },
     append(...kids) { kids.forEach((k) => { k.parentElement = el; el.children.push(k); }); },
     appendChild(kid) { kid.parentElement = el; el.children.push(kid); return kid; },
     remove() {
@@ -118,6 +119,10 @@ function world() {
     CSS: { escape: (s) => s },
     // Defined elsewhere in app.js; the chip only needs it to return a node.
     svgIcon: () => fakeElement("svg"),
+    // The note keeps itself on screen as the keyboard opens; the listeners are
+    // real code and need somewhere to attach.
+    visualViewport: { addEventListener() {}, removeEventListener() {} },
+    window: { visualViewport: { addEventListener() {}, removeEventListener() {} } },
   };
   vm.createContext(sandbox);
   vm.runInContext(extract("// [RATING]", "function copyChip("), sandbox);
@@ -143,6 +148,7 @@ function world() {
   chip.onclick();
   const note = host.children.find((c) => c.className === "rating-note");
   ok("a reason box opens after the tap", !!note);
+  ok("and is scrolled into view, not left under the keyboard", note.scrolledIntoView > 0);
   ok("on its own row, not squeezed into the chip strip", !tools.children.includes(note));
   note.value = "the price was stale";
   note.onkeydown({ key: "Enter", preventDefault() {} });
