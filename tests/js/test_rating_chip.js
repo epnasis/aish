@@ -78,7 +78,11 @@ function fakeElement(tag) {
         if (sel.startsWith("[data-turn=")) {
           return node.dataset && node.dataset.turn === sel.slice(12, -2);
         }
-        return node.className === sel.replace(".", "");
+        // Compound class selectors (".rating-chip.on"), matched through
+        // classList so a class added after construction counts — which is
+        // exactly how the lit state is set.
+        return sel.split(".").filter(Boolean)
+          .every((cls) => node.classList.contains(cls));
       };
       const walk = (node) => {
         for (const kid of node.children) {
@@ -204,6 +208,50 @@ function world() {
   ok("every tap writes", sent.length === 3);
   ok("alternating opinion and withdrawal",
      sent.map((m) => m.rating).join(",") === "up,none,up");
+}
+
+// --- the reason is read back on render --------------------------------------
+{
+  const { sandbox } = world();
+  const { host } = mount(sandbox, "turn-abc", "down");
+  sandbox.markRating("turn-abc", "down", "it never read the page");
+  const said = host.children.find((c) => c.className === "rating-said");
+  ok("a replayed reason is shown", !!said);
+  ok("with the words the owner wrote", said.textContent === "it never read the page");
+}
+
+// --- withdrawing takes the words with it ------------------------------------
+{
+  const { sandbox } = world();
+  const { host } = mount(sandbox, "turn-abc", "down");
+  sandbox.markRating("turn-abc", "down", "it never read the page");
+  sandbox.markRating("turn-abc", "none", "");
+  ok("a withdrawn rating shows no reason",
+     !host.children.some((c) => c.className === "rating-said"));
+}
+
+// --- a rating with no reason shows no empty line ----------------------------
+{
+  const { sandbox } = world();
+  const { host } = mount(sandbox, "turn-abc", "up");
+  sandbox.markRating("turn-abc", "up", "");
+  ok("no blank line for a bare thumb",
+     !host.children.some((c) => c.className === "rating-said"));
+}
+
+// --- the reason can be corrected --------------------------------------------
+{
+  const { sandbox, sent } = world();
+  const { host, chip } = mount(sandbox, "turn-abc", "down");
+  sandbox.markRating("turn-abc", "down", "first try");
+  const said = host.children.find((c) => c.className === "rating-said");
+  said.onclick();
+  const note = host.children.find((c) => c.className === "rating-note");
+  ok("tapping the reason reopens the box", !!note);
+  ok("pre-filled with what was written", note.value === "first try");
+  note.value = "second try";
+  note.onkeydown({ key: "Enter", preventDefault() {} });
+  ok("and the correction is sent", sent[sent.length - 1].comment === "second try");
 }
 
 console.log(`ok - rating chip (${checks} checks)`);

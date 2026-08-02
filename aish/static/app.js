@@ -1237,7 +1237,7 @@ function handle(event) {
     case "step": traceStep(event); break;
     case "workspace": addWorkspaceNote(event.change, event.path); break;
     case "redacted": addRedactedMsg(); break;
-    case "rating": markRating(event.turn, event.rating); break;
+    case "rating": markRating(event.turn, event.rating, event.comment); break;
     case "error":
       // [ERROR-KIND-START]
       // An `error` says one of two unrelated things, and everything below the
@@ -4972,8 +4972,13 @@ function ratingChip(turn, kind) {
     const next = btn.classList.contains("on") ? "none" : kind;
     send({ type: "rate", turn, rating: next });
     markRating(turn, next);
-    if (next === "none") closeRatingComment(btn);
-    else openRatingComment(btn, turn, kind);
+    if (next === "none") {
+      closeRatingComment(btn);
+      showRatingComment(ratingHost(btn), "");
+    } else {
+      const said = ratingHost(btn).querySelector(".rating-said");
+      openRatingComment(btn, turn, kind, said ? said.textContent : "");
+    }
   };
   return btn;
 }
@@ -5013,10 +5018,11 @@ function closeRatingComment(btn) {
   if (note) note.remove();
 }
 
-function openRatingComment(btn, turn, kind) {
+function openRatingComment(btn, turn, kind, existing) {
   const host = ratingHost(btn);
   if (!host || host.querySelector(".rating-note")) return;
   const note = document.createElement("input");
+  if (existing) note.value = existing;
   note.type = "text";
   note.className = "rating-note";
   note.placeholder = kind === "up" ? "what worked? (optional)" : "what was wrong? (optional)";
@@ -5026,6 +5032,7 @@ function openRatingComment(btn, turn, kind) {
     const comment = note.value.trim();
     if (comment) send({ type: "rate", turn, rating: kind, comment });
     note.remove();
+    showRatingComment(ratingHost(btn), comment);
   };
   note.onblur = () => {
     stopKeepingInView();
@@ -5059,7 +5066,7 @@ function openRatingComment(btn, turn, kind) {
 
 // Applied by turn id rather than by position: a rating can be written long
 // after the turn it names, and on replay they all arrive at the end.
-function markRating(turn, kind) {
+function markRating(turn, kind, comment) {
   const el = messagesEl.querySelector(`[data-turn="${CSS.escape(turn)}"]`);
   if (!el) return;
   const tools = el.querySelector(".msg-tools");
@@ -5068,6 +5075,32 @@ function markRating(turn, kind) {
     // `none` is a withdrawal: it lights nothing.
     chip.classList.toggle("on", chip.classList.contains(`rating-${kind}`));
   });
+  showRatingComment(el, kind === "none" ? "" : comment);
+}
+
+// A reason is written to the log and replayed with the rating, so it must be
+// READ BACK on render too — otherwise the owner reopens a chat, sees a lit
+// thumb with no words, and cannot tell what he objected to. That is worse than
+// no comment at all: it looks like the note was lost.
+function showRatingComment(el, comment) {
+  const existing = el.querySelector(".rating-said");
+  if (existing) existing.remove();
+  if (!comment) return;
+  const said = document.createElement("button");
+  said.type = "button";
+  said.className = "rating-said";
+  said.title = "edit your note";
+  said.textContent = comment;
+  // Tapping it reopens the box, pre-filled: the thumbs toggle the verdict, so
+  // without this there is no way to correct a note short of withdrawing it.
+  said.onclick = () => {
+    const chip = el.querySelector(".rating-chip.on");
+    if (!chip) return;
+    const kind = chip.classList.contains("rating-up") ? "up" : "down";
+    said.remove();
+    openRatingComment(chip, el.dataset.turn, kind, comment);
+  };
+  el.appendChild(said);
 }
 
 function copyChip(getText, label) {

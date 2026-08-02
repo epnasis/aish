@@ -2795,3 +2795,20 @@ body.console-open {
   font-size: 13px;
 }
 .rating-note:focus { outline: none; border-color: var(--accent, var(--dim)); }
+
+/* The reason, read back on render. A rating you can see with words you cannot
+   is worse than none — it reads as though the note was lost. */
+.rating-said {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 2px 0 4px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 12.5px;
+  font-style: italic;
+  line-height: 1.35;
+}
+.rating-said:active { opacity: 0.5; }
