@@ -5831,3 +5831,105 @@ You MUST always use the show_image tool.
         warned = [line for line in seen if "not in force" in line]
         assert len(warned) == 2
         assert {"half-written" in w for w in warned} == {True, False}
+
+
+class TestContextRecord:
+    """#208, docs/trace-contract.md §3.10.
+
+    The incident: a session answered with the owner's holiday street address
+    and the log had no record of where it came from. It came from a memory
+    DESCRIPTION in the knowledge index — pasted into messages[0] before the
+    first token, so no tool call, so no trace. aish recorded what the model
+    did (`tool`/`gate`), what governed it (`rule_eval`/`binding`) and what it
+    stored (`admission`), but never what it was TOLD.
+
+    Worse than a missing record: `knowledge_index` is recomputed live from
+    current mtime order, so the evidence cannot be reconstructed afterwards —
+    and that entry carried `expires:`, so it was going to disappear entirely.
+    """
+
+    def _memory(self, name, description):
+        d = agent_module.skills.GLOBAL_MEMORY_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n")
+
+    def _run(self, tmp_path, task="what should I do?"):
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [model_says("here you go")], cwd=str(tmp_path), step_log=steps.append
+        )
+        agent.run_task(task)
+        return steps
+
+    def _contexts(self, steps):
+        return [s for s in steps if s.get("kind") == "context"]
+
+    def test_the_entry_that_leaked_the_address_is_named(self, tmp_path):
+        self._memory(
+            "user-staying-villa-victoriya-bali",
+            "User is staying at Villa Victoriya (Gg. Bunga Kecil), Seminyak, Bali.",
+        )
+        steps = self._run(tmp_path, "co zrobic jak Kuba ma biegunke?")
+        contexts = self._contexts(steps)
+        assert len(contexts) == 1
+        labels = [i["label"] for i in contexts[0]["index"]["items"]]
+        assert "user-staying-villa-victoriya-bali" in labels
+
+    def test_emitted_even_when_nothing_was_selected(self, tmp_path):
+        """The defect §3.8(a) documents for `knowledge`, which this record
+        must not inherit: "composed an empty index" and "never got there" are
+        different facts and must not share a log shape."""
+        contexts = self._contexts(self._run(tmp_path))
+        assert len(contexts) == 1
+        assert contexts[0]["index"]["items"] == []
+
+    def test_records_preload_outcome_including_the_empty_one(self, tmp_path):
+        """`knowledge` is emitted only under `if preload.names:`. Carrying the
+        count here makes the empty case provable WITHOUT changing that
+        record's `items[]`, which `curate.scan_ledger` reads."""
+        steps = self._run(tmp_path)
+        assert not [s for s in steps if s.get("kind") == "knowledge"]
+        assert self._contexts(steps)[0]["preload"]["count"] == 0
+
+    def test_stamped_with_the_turn_it_governed(self, tmp_path):
+        """The join key for "what was this turn told" (contract §2). The
+        index is rebuilt per task, so a record without a turn cannot be
+        attributed to the answer it produced."""
+        self._memory("a-fact", "some saved fact")
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [model_says("one"), model_says("two")],
+            cwd=str(tmp_path),
+            step_log=steps.append,
+        )
+        agent.run_task("first")
+        agent.run_task("second")
+        assert [c["turn"] for c in self._contexts(steps)] == [1, 2]
+
+    def test_tracks_a_mid_session_memory_appearing(self, tmp_path):
+        """The freshness that makes the record necessary: the corpus changes
+        under a live session, so each task's record must describe THAT task's
+        prompt, not the session's opening one."""
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [model_says("one"), model_says("two")],
+            cwd=str(tmp_path),
+            step_log=steps.append,
+        )
+        agent.run_task("before")
+        self._memory("late-arrival", "a fact saved mid-session")
+        agent.run_task("after")
+        first, second = self._contexts(steps)
+        assert first["index"]["items"] == []
+        assert [i["label"] for i in second["index"]["items"]] == ["late-arrival"]
+
+    def test_is_renderless(self, tmp_path):
+        """It carries no user-facing news — and a kind with no renderer opens
+        an EMPTY live trace card with a running ticker (§1.2)."""
+        assert "context" in session_module.RENDERLESS_STEPS
+        rendered: list[dict] = []
+        agent, _ = make_agent(
+            [model_says("done")], cwd=str(tmp_path), on_step=rendered.append
+        )
+        agent.run_task("hello")
+        assert not [s for s in rendered if s.get("kind") == "context"]

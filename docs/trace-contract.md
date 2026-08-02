@@ -72,6 +72,7 @@ RENDERLESS_STEPS = frozenset({
     "trim",                            # #192
     "tool_check",                      # #193
     "admission",                       # #194
+    "context",                         # #208
 })
 ```
 
@@ -412,6 +413,39 @@ Written when the owner points at a failure and aish produces an explanation. It 
 | `gaps[]` | Where the log could not answer. #197: *"Where the log cannot answer, it must say so rather than infer."* A record with an empty `gaps` list and `confidence: recorded` is a strong claim; the field forces it to be made explicitly. |
 | `repair` | The named destination. `applied` is set when the mutation lands (a rule file written, a `tool_check` passed). |
 
+### 3.10 · `context` — what the model was TOLD (#208)
+
+**BUILT (2026-08-02).** Emitted at seed, next to `rule_eval`, on every task that reached index composition. Renderless.
+
+The other nine records answer what the model **did**, what **governed** it, and what it **stored**. None of them answers what it was **given**, and the thing it is given is not small: `knowledge_index` pastes up to `INDEX_SKILLS_MAX` skill lines, `INDEX_PINNED_MAX` standing rules and `INDEX_MEMORY_MAX` memory descriptions into `messages[0]` before the first token, on every task, unsolicited.
+
+The incident that named it: a session answered a question about a sick child with the owner's holiday street address. The log showed `recall("Kuba")` returning a family profile, then a `google_maps` call whose query *already contained the address*, with nothing in between. The address had arrived in the index, via one memory's `description` field. The owner read their own log and could not find it, correctly, because it was not there.
+
+```json
+{"kind": "context", "turn": 1,
+ "index": {
+   "items": [{"label": "user-staying-villa-victoriya-bali", "kind": "memory", "slot": "memory"}],
+   "caps": {"skills": 30, "pinned": 20, "memory": 15},
+   "corpus": {"skills": 31, "pinned": 4, "memory": 74, "lessons": 0},
+   "omitted": {"skills": 1, "pinned": 0, "memory": 59},
+   "chars": 3117},
+ "preload": {"mode": "semantic", "count": 0, "names": []}}
+```
+
+| field | why |
+|---|---|
+| `index.items[]` | `label` + `kind` + `slot` (`skill` \| `pinned` \| `memory`). **Names only, never descriptions.** The name identifies the entry, which is the question being asked; the description would be an unbounded second copy of the prompt in the log — and for memories saved through `remember` the description often *is* the whole fact, which is the one text an audit record must not duplicate. |
+| `index.caps` | The thresholds in force at the time, for §3.8's `floors` reason: they live as constants in source, so a log recording only the outcome cannot be re-read after someone moves one. |
+| `index.corpus` / `index.omitted` | The abstention half (§5). "Why did it know that?" and "why did my entry never reach the prompt?" are one question asked from either side, and only the first was ever answerable. `corpus.memory` counts unpinned entries *including* legacy lessons — that is the population competing for the recency cap. |
+| `index.chars` | Sizes the channel: how much text entered `messages[0]` that nobody asked for. |
+| `preload` | `mode` + `count` + `names`. Rides here so the **empty** preload case is provable — §3.8(a)'s defect — without touching the `knowledge` record's `items[]`, which `curate.scan_ledger` reads. §3.8(a) and (b) remain open for `knowledge` itself; this does not close them, it stops the absence from being unprovable. |
+
+**Why this one cannot be reconstructed later, unlike every other gap in this document.** A missing `rule_eval` can be recovered by re-running the rules against the logged message; a missing `floors` can be recovered from a git blame of the constant. The index cannot: it is a pure function of a **mutable directory at a moment in time**, ordered by mtime, filtered by `expires`. Touch one file and yesterday's index is unrecoverable. The entry in the incident above carried `expires: 2026-08-07` — after that date the investigation returns nothing at all and the question stops being merely tedious. **This is the sharpest instance in the document of evidence that decays rather than merely being absent**, and it is why the record is unconditional rather than sampled or capped by relevance.
+
+`TestContextRecord` (agent side, emit discipline), `TestIndexSelectionRecord` (skills side, payload).
+
+> **Known second-order defect, not fixed here.** A memory's `description` is both the **retrieval key** `recall` ranks on and the **payload** injected into every task. So an entry written to be findable necessarily becomes a fact in every unrelated conversation — a question about Python gets the holiday address too. The record makes this measurable (`chars`, `items[]`); it does not fix it. The fix is descriptions that say what an entry is *about*, with specifics in the body behind `recall`, which is a corpus migration plus a `remember` prompt change.
+
 ---
 
 ## 4 · Evidence, not conclusions
@@ -466,8 +500,9 @@ Concretely, and each of these is a live gap today:
 | what abstained | must record | today |
 |---|---|---|
 | a rule that did not bind | one `rule_eval.evaluated[]` row, verdict `abstain`, with the evidence and the floor | does not exist |
-| preflight selecting nothing | a `knowledge` step with `items: []` | **suppressed entirely** |
+| preflight selecting nothing | a `knowledge` step with `items: []` | **suppressed entirely** — but `context.preload.count` now proves the empty case (§3.10) |
 | preflight scoring an entry below the floor | a `considered[]` row with `why` | not recorded |
+| the knowledge index composing nothing, or capping entries out | `context` with `index.items: []` and `index.omitted` | **built** — §3.10 / #208 (2026-08-02) |
 | an armed gate that allowed the call | `gate` with `verdict:"allowed"` | only auto-approval, as the bare string `"auto"` |
 | a disarmed gate | *nothing* — provided the disarming fact is a session-level record | see §3.3 |
 | a tool contract with no declared required fields | `required.declared: []` on the `tool` step | **built** — `returns: text` (2026-08-02) |
