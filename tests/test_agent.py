@@ -6328,6 +6328,61 @@ class TestRuleAuthoring:
         assert rule.status == "disabled"
         assert (tmp_path / "rules" / "bounded-material.md").exists()
 
+    def test_a_raw_write_into_the_rules_folder_must_still_lint(self, tmp_path):
+        """Otherwise "unskippable" is false by one hop: write_file pointed at
+        the rules folder lands anything, and the card is raw YAML with no
+        meaning and no retro-match. A never_use naming a misspelled tool is
+        checked NOWHERE on that path — and a restriction that never fires
+        looks exactly like one that works."""
+        asked = []
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: asked.append(plan) or True
+        result = agent._dispatch("write_file", {
+            "path": str(tmp_path / "rules" / "sneaky.md"),
+            "content": "---\nname: sneaky\ndescription: d\nwhen: always\n"
+                       "then:\n  never_use: [web_serch]\n---\n",
+        })
+        assert result.startswith("ERROR") and "web_serch" in result
+        assert asked == [], "an unlinted rule was shown for approval"
+        assert not (tmp_path / "rules" / "sneaky.md").exists()
+
+    def test_an_ordinary_file_write_is_not_touched_by_the_rule_lint(self, tmp_path):
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("write_file", {
+            "path": str(tmp_path / "notes.md"), "content": "then: not a rule\n",
+        })
+        assert not result.startswith("ERROR"), result
+
+    def test_a_broken_rule_can_be_retired_even_though_it_cannot_compile(self, tmp_path):
+        """The loud broken-rule warning is exactly when the owner reaches for
+        this. Requiring a valid rule would leave the broken ones unstoppable."""
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        broken = tmp_path / "rules" / "broken.md"
+        broken.write_text(
+            "---\nname: broken\ndescription: d\nwhen: always\nthen: {}\n---\n",
+            encoding="utf-8",
+        )
+        result = agent._dispatch("retire_rule", {"name": "broken"})
+        assert not result.startswith("ERROR"), result
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        assert rule.status == "disabled" and rule.error
+
+    def test_an_action_rule_card_says_its_history_cannot_be_replayed(self, tmp_path):
+        """Overstating on the one trigger kind where bound and fired differ
+        would undermine the feature that exists to build trust."""
+        seen = []
+        agent = self._agent(tmp_path, state_dir=str(tmp_path))
+        agent.approve_write = lambda plan: seen.append(plan) or True
+        agent._dispatch("create_rule", {
+            "name": "no-edit", "description": "Not aish's own source.",
+            "when_subject": "action", "when_action": {"path_under": "~/dev/aish"},
+            "never_use": ["write_file"],
+        })
+        assert seen and "not replayed" in seen[0].note
+        assert "would have bound" not in seen[0].note
+
     def test_the_card_shows_the_turns_this_would_have_bound(self, tmp_path):
         """Retro-match: a rule is a function of logged facts, so real history
         is better evidence than any synthetic run."""

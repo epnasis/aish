@@ -448,6 +448,16 @@ def colorize_diff(diff: str) -> str:
     return "\n".join(out)
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _plain(text: str) -> str:
+    """Text that cannot repaint the terminal it is printed into. Newlines and
+    tabs survive; every other control character, escape sequences included,
+    becomes a visible marker rather than an instruction to the terminal."""
+    return _CONTROL_CHARS.sub("\ufffd", text)
+
+
 def make_write_approver(log):
     def approve_write(plan) -> bool:
         verb = "create" if plan.is_new else "edit"
@@ -456,7 +466,12 @@ def make_write_approver(log):
         if plan.note:
             # Above the diff, because for a rule the diff is YAML the owner did
             # not write and the note is what he is actually agreeing to.
-            print(f"{BOLD}{plan.note}{RESET}\n")
+            # Sanitised: the note quotes the model's description and the owner's
+            # own past prompts (which in a triggered session came from an email),
+            # and an escape sequence reaching a terminal can repaint the very
+            # approval card it is printed inside. The web card is safe by
+            # construction (textContent); a terminal has no such property.
+            print(f"{BOLD}{_plain(plan.note)}{RESET}\n")
         if plan.diff.strip():
             print(colorize_diff(plan.diff))
         else:

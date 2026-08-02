@@ -1617,14 +1617,30 @@ class LintError(Exception):
 
 
 def _yaml_scalar(value: Any) -> str:
-    """A scalar YAML will read back as the same string. Quoted whenever it
-    could be read as something else — the renderer exists precisely so nobody
-    has to remember which cases those are."""
+    """A scalar YAML will read back as the SAME string. Always — the check is
+    a round trip through the parser, not a list of risky characters.
+
+    A denylist was the first attempt and it was wrong in the one direction
+    that matters. It missed colon-NEWLINE, so a description reading
+    `x\nenabled:\n false` rendered unquoted, YAML read the second line as a
+    real top-level key, and the rule landed DISABLED while the approval card
+    described a healthy one. Same shape with `expires:` lands a rule already
+    expired. The party this renderer serves is the model — the party rules
+    exist to bind — so "the file means something the card does not say" is the
+    adversarial case, not a curiosity. It also missed the YAML 1.1 resolutions
+    no first-character list will ever enumerate: `on`, `off`, `~`, `0x1A`,
+    `0755` (octal), `12:34` (sexagesimal).
+
+    Round-tripping through `yaml.safe_load` covers every one of them, and every
+    resolver surprise nobody has thought of yet.
+    """
     text = str(value)
-    risky = text.strip() != text or not text or text[0] in "&*!|>%@`{}[]#-?:,\"'"
-    if risky or ": " in text or text.casefold() in ("yes", "no", "true", "false", "null"):
-        return json.dumps(text)  # JSON strings are valid YAML strings
-    return text
+    try:
+        if yaml.safe_load(f"k: {text}") == {"k": text}:
+            return text
+    except yaml.YAMLError:
+        pass
+    return json.dumps(text)  # JSON strings are valid YAML strings
 
 
 def render(fields: dict) -> str:
@@ -1664,6 +1680,12 @@ def render(fields: dict) -> str:
     if subject == SUBJECT_ALWAYS:
         lines.append(f"when: {SUBJECT_ALWAYS}")
     elif subject == SUBJECT_PROMPT:
+        if fields.get("when_has") and fields.get("when_matches"):
+            raise LintError(
+                "`when_has` and `when_matches` are alternatives — a message shape is "
+                "one or the other. Dropping one silently would have written a rule "
+                "with a trigger the author did not choose."
+            )
         key, value = ("has", fields.get("when_has")) if fields.get("when_has") \
             else ("matches", fields.get("when_matches"))
         lines += ["when:", f"  {SUBJECT_PROMPT}:", f"    {key}: {_yaml_scalar(value or '')}"]
@@ -1825,6 +1847,12 @@ class RetroMatch:
     checked: int = 0
     bound: list[dict] = field(default_factory=list)
     unevaluable: int = 0
+    # An `action:` rule binds every turn and decides per CALL — and the call
+    # history is not replayed here, only prompts. Counting its binds would read
+    # as "this fires constantly" for a rule that may never fire at all, on the
+    # one trigger kind where bound and fired are different things. The honest
+    # answer is to say what cannot be replayed rather than to answer anyway.
+    per_call: bool = False
 
     @property
     def rate(self) -> float:
@@ -1891,7 +1919,9 @@ def retro_match(rule: Rule, turns: list[dict]) -> RetroMatch:
     trigger broadened in a way no logged turn exercises looks identical to one
     that changed nothing.
     """
-    result = RetroMatch()
+    result = RetroMatch(per_call=rule.trigger == TRIGGER_ACTION_SHAPE)
+    if result.per_call:
+        return result
     for turn in turns:
         ctx = TurnContext(task=turn["prompt"], origin=turn.get("origin", ORIGIN_OWNER_VALUE))
         verdict, _evidence = evaluate(rule, ctx)
@@ -1901,6 +1931,27 @@ def retro_match(rule: Rule, turns: list[dict]) -> RetroMatch:
         elif verdict in (VERDICT_UNEVALUABLE, VERDICT_ERROR):
             result.unevaluable += 1
     return result
+
+
+def disable_text(text: str) -> str:
+    """The same file with `enabled: false` in its frontmatter.
+
+    A TEXT edit, not a re-render, because retiring must work on a rule that
+    does NOT compile — and the loud broken-rule warning is the exact moment an
+    owner reaches for retire. Requiring a valid rule in order to stop it would
+    leave the only unstoppable rules the broken ones.
+    """
+    if not text.startswith("---"):
+        return "---\nenabled: false\n---\n\n" + text
+    parts = text.split("---", 2)
+    if len(parts) != 3:
+        return text
+    _, header, body = parts
+    kept = [
+        line for line in header.strip("\n").splitlines()
+        if not line.strip().casefold().startswith("enabled:")
+    ]
+    return "---\n" + "\n".join([*kept, "enabled: false"]).strip("\n") + "\n---" + body
 
 
 def author_fields(path: Path) -> dict:

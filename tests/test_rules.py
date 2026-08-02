@@ -1110,6 +1110,92 @@ class TestAuthoring:
         assert "DISABLED" in rules.explain(rule)
 
 
+class TestRenderedMeaningMatchesTheFile:
+    """The card shows the compiled meaning; the file is what runs. Anything
+    that renders but parses back as something DIFFERENT is the worst bug
+    available here — and the party writing these values is the model, which is
+    the party rules exist to bind."""
+
+    BASE = {
+        "name": "r", "description": "d", "when_subject": "always",
+        "answer_from": "read_url",
+    }
+
+    @pytest.mark.parametrize("hostile", [
+        "x\nenabled:\n false",          # lands the rule DISABLED
+        "x\nexpires:\n 2020-01-01",     # lands it already expired
+        "x\nthen:\n  never_use: [x]",   # smuggles an obligation
+    ])
+    def test_a_value_cannot_smuggle_a_second_key(self, hostile):
+        rule, errors = rules.lint(rules.render({**self.BASE, "description": hostile}))
+        assert not errors and rule is not None
+        assert rule.description == hostile
+        assert rule.status == "", "a description turned the rule off"
+        assert rule.expires is None, "a description expired the rule"
+        assert {o["verb"] for o in rule.obligations} == {rules.VERB_ANSWER_FROM}
+
+    @pytest.mark.parametrize("value", [
+        "on", "off", "yes", "no", "~", "null", "0x1A", "0755", "12:34", "1_000",
+        "true", "material: use it", "#hash", "- dash", "a  b", "*star", "&amp;amp",
+    ])
+    def test_yaml_resolutions_survive_verbatim(self, value):
+        """No denylist of first characters enumerates YAML 1.1's resolver. The
+        renderer round-trips through the parser instead."""
+        rule, errors = rules.lint(rules.render({**self.BASE, "description": value}))
+        assert not errors and rule is not None
+        assert rule.description == value
+
+    def test_surrounding_whitespace_is_normalised_deliberately(self):
+        """The one value that does NOT survive verbatim, and on purpose: a
+        description is a sentence, and leading space in one is a typo."""
+        rule, _ = rules.lint(rules.render({**self.BASE, "description": "  spaced  "}))
+        assert rule is not None and rule.description == "spaced"
+
+    def test_a_regex_with_backslashes_is_not_re_escaped(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_matches": r"\bhttps?://\S+", "answer_from": "read_url",
+        }))
+        assert not errors and rule is not None
+        assert rule.pattern is not None
+        assert rule.pattern.pattern == r"\bhttps?://\S+"
+
+    def test_two_trigger_forms_at_once_are_refused_not_dropped(self):
+        """Dropping one silently writes a rule with a trigger nobody chose."""
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({
+                "name": "r", "description": "d", "when_subject": "prompt",
+                "when_has": "link", "when_matches": "x", "answer_from": "read_url",
+            })
+        assert "alternatives" in str(exc.value)
+
+
+class TestRetireWithoutCompiling:
+    """The loud broken-rule warning is exactly when an owner reaches for
+    retire. If retiring required a valid rule, the only unstoppable rules
+    would be the broken ones."""
+
+    def test_a_rule_that_does_not_compile_can_still_be_retired(self):
+        broken = "---\nname: x\ndescription: d\nwhen: always\nthen: {}\n---\n\nbody\n"
+        disabled = rules.disable_text(broken)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "x.md"
+            path.write_text(disabled, encoding="utf-8")
+            rule = rules.load_rules([Path(tmp)])[0]
+        assert rule.status == "disabled"
+        assert rule.error, "the rule is still broken — retiring does not repair it"
+
+    def test_retiring_twice_does_not_stack_the_key(self):
+        text = "---\nname: x\ndescription: d\nenabled: true\nwhen: always\n---\n"
+        once = rules.disable_text(text)
+        assert once.count("enabled:") == 1
+        assert rules.disable_text(once).count("enabled:") == 1
+
+    def test_the_body_survives_retiring(self):
+        text = "---\nname: x\ndescription: d\nwhen: always\n---\n\nWhy it exists.\n"
+        assert "Why it exists." in rules.disable_text(text)
+
+
 class TestRetroMatch:
     """Replay a candidate over turns that already happened. A manufactured turn
     tests the harness; a real one tests the rule."""
@@ -1139,6 +1225,20 @@ class TestRetroMatch:
             self._rule(when_has="link", answer_from="read_url"), self.TURNS
         )
         assert {t["turn"] for t in narrow.bound} < {t["turn"] for t in wide.bound}
+
+    def test_an_action_rule_reports_that_it_cannot_be_replayed(self):
+        """It arms every turn and fires per CALL, and calls are not replayed
+        here. Counting its binds would read as "this fires constantly" for a
+        rule that may never fire — on the one trigger kind where bound and
+        fired are different things."""
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "action",
+            "when_action": {"tool": "remember"}, "never_use": ["remember"],
+        }))
+        assert not errors and rule is not None
+        match = rules.retro_match(rule, self.TURNS)
+        assert match.per_call is True
+        assert match.checked == 0 and not match.bound
 
     def test_a_rule_binding_nothing_is_visible_as_such(self):
         """Not an error — it may be about the future. But the owner has to see

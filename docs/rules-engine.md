@@ -239,9 +239,13 @@ Frontmatter is real YAML (`yaml.safe_load`, which constructs no objects, so a ru
 
 #205's exhibit is a rule **aish wrote for itself**, which loaded as `error: a rule with no obligation restricts nothing` and had been inert since the day it was written. It put the obligation in *prose* — inside the one artifact class that exists to abolish prose obligations — reached for a keyword regex on a semantic trigger, and read the developer docs because there was no authoring grammar to read. The conclusion that shaped this layer: **a grammar that is only described is advice; a grammar that is validated is binding.** Writing a better authoring guide would have repeated, one level up, exactly the mistake the enforcement layer was built to correct.
 
-**The model never emits the file, and never emits YAML.** It names field values (`when_subject`, `when_has`, `answer_from`, …) and `render()` builds the frontmatter. That deletes an entire failure class — quoting, indentation, key names, the `pattern:` nesting — which is the class the exhibit failed on, and which is also the one real cost of the nested format. A value that would change meaning unquoted is quoted by the renderer, so no author has to know which values those are.
+**The model never emits the file, and never emits YAML.** It names field values (`when_subject`, `when_has`, `answer_from`, …) and `render()` builds the frontmatter. That deletes an entire failure class — quoting, indentation, key names, the `pattern:` nesting — which is the class the exhibit failed on, and which is also the one real cost of the nested format.
+
+**The renderer decides quoting by ROUND TRIP, never by a denylist.** Every scalar is parsed back and quoted unless it reads as the identical string. The first version tested for risky characters and missed colon-*newline*, so a description reading `x\nenabled:\n false` rendered unquoted, YAML read the second line as a real top-level key, and the rule landed **disabled while the card described a healthy one**; the same shape with `expires:` lands a rule already dead. The party writing these values is the model — the party rules exist to bind — so "the file means something the card does not say" is the adversarial case, not a curiosity. The denylist also missed every YAML 1.1 resolution (`on`, `off`, `~`, `0x1A`, `0755` octal, `12:34` sexagesimal), which no list of first characters was ever going to enumerate. `TestRenderedMeaningMatchesTheFile`.
 
 **The lint runs inside the tool, before the write.** If editing a rule were an ordinary `write_file`, then "run the linter" would be advice again. `create_rule` / `edit_rule` / `retire_rule` make it unskippable: render → lint → card → write, and a failing lint means no file lands and no approval is even requested. Hand-editing still works — the corpus is the owner's git-backed knowledge and the tool is the *supported* path, not the only one — which is why the same lint also runs at load. `TestAuthoring`, `TestRuleAuthoring`.
+
+**And the raw write path is gated too**, or "unskippable" is false by one hop: `write_file` aimed at the rules folder used to land anything at all, with an approval card showing raw YAML and no meaning. Load-time parse still makes a *broken* rule loud and bind time catches a route to a missing tool — but a `never_use` naming a misspelled tool is checked on neither, and a restriction that never fires looks exactly like one that works. `_dispatch_write` now lints any `.md` resolving under a rules directory and refuses. The owner's own editor does not pass through there, so hand-editing is untouched; this closes the model's path, which the system prompt could otherwise only advise against.
 
 Beyond compiling, the lint checks that **everything the rule names exists**. A route or `must_first` naming a missing tool refuses every alternative and offers nothing, on every turn it binds; a `never_use` naming a misspelled tool never fires, and a restriction that never fires looks exactly like one that is working.
 
@@ -253,6 +257,8 @@ The card also answers *"what would this have done?"* by replaying the candidate 
 
 A rule that binds on **nothing** in the history is shown as exactly that. It is not an error (it may be about the future), but the other explanation is that the rule is wrong, and only the owner can tell which. Notes in the user slot — aish's own not-followed lines, resume notices — are excluded, or a rule would appear to bind on turns nobody took.
 
+**An `action:` rule says it cannot be replayed, rather than answering anyway.** It arms on every turn and decides per *call*, and call history is not replayed here — only prompts. Counting its binds would report "would have bound on 200 of your last 200" for a rule that may never fire once, on the single trigger kind where bound and fired are different things. Overstating there would undermine the feature whose whole job is to earn trust.
+
 **The honest limit, stated rather than sold:** none of this catches a change that alters *future* behaviour without altering any *past* behaviour. Broadening a trigger in a way no logged turn exercises looks identical to changing nothing. Prevented for what the history exercises; detected afterwards by the bind-rate counter for the rest. `TestRetroMatch`.
 
 ### An edit is a patch, never a rewrite
@@ -262,6 +268,8 @@ The sharpest risk in the whole authoring design: a rule works, the owner says *"
 So **"start over" is not in the input space.** `edit_rule` takes named field changes; everything unnamed is read back from the file and written unchanged, and the prose body is carried verbatim. An edit naming no field at all is refused rather than treated as a rewrite request. Creating over an existing name is refused too, pointing at `edit_rule` — silent overwrite is the same defect wearing the other verb.
 
 **There is no delete verb.** `retire_rule` sets `enabled: false`: the file stays, the rule stops binding, and the owner can bring it back. Removing a file from his own git-backed knowledge is his to do, with his own hands — the knowledge layer's "retire, don't delete" (L4), applied here for the same reason.
+
+Retiring is a **text edit, not a re-render**, so it works on a rule that does not compile. That case is not an edge: a broken rule announces itself every session, and that announcement is precisely when the owner reaches for retire. Requiring a valid rule in order to stop one would have left the broken rules as the only unstoppable ones. `TestRetireWithoutCompiling`.
 
 ---
 

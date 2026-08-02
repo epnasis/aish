@@ -3909,7 +3909,11 @@ class Agent:
         parts = [f"{verb} rule '{rule.name}'", "", rules.explain(rule)]
         history = rules.past_turns(Path(self.state_dir)) if self.state_dir else []
         match = rules.retro_match(rule, history)
-        if match.checked:
+        if match.per_call:
+            parts += ["", "This arms on every turn and fires only on a matching "
+                          "action — and past calls are not replayed here, so there "
+                          "is no history to show."]
+        elif match.checked:
             parts += ["", f"Over your last {match.checked} turns this would have "
                           f"bound on {len(match.bound)}."]
             for turn in match.bound[:self.RULE_RETRO_SHOWN]:
@@ -3953,6 +3957,39 @@ class Agent:
             key: args[key] for key in self.RULE_FIELD_ARGS
             if args.get(key) not in (None, "")
         }
+
+    def _rule_file_lint(self, plan: "files.WritePlan") -> str | None:
+        """Refuse a raw write into the rules folder that would not lint.
+
+        Without this the "unskippable" claim is false by one hop: write_file
+        pointed at ~/.config/aish/rules/ lands whatever it likes, and the
+        approval card is raw YAML with no meaning and no retro-match. Load-time
+        parse still makes a BROKEN rule loud, and bind time catches a route to
+        a missing tool — but a `never_use` naming a misspelled tool is checked
+        on neither, and a restriction that never fires looks exactly like one
+        that works.
+
+        Hand-editing is untouched: the owner's editor does not come through
+        here. This gates the MODEL's raw path, which is the one the system
+        prompt could otherwise only advise against — and advice is the failure
+        rules exist to abolish.
+        """
+        try:
+            target = plan.target.resolve()
+            if not any(target.is_relative_to(d.resolve()) for d in rules.rule_dirs()):
+                return None
+        except OSError:
+            return None
+        if target.suffix != ".md":
+            return None
+        _rule, errors = rules.lint(plan.new, known_tools=self._known_tool_names())
+        if not errors:
+            return None
+        return (
+            f"ERROR: that would not load as a rule: {'; '.join(errors)} "
+            "Use create_rule or edit_rule — they render the file for you and show "
+            "the user what it means before it is saved."
+        )
 
     def _create_rule(self, args: dict) -> str:
         """Author a rule (#205). The lint is UNSKIPPABLE — it runs here, before
@@ -4002,10 +4039,20 @@ class Agent:
         if path is None or not path.exists():
             return f"ERROR: no rule named {name!r} in {_display_path(self._rules_dir())}."
         try:
-            fields = {**rules.author_fields(path), "enabled": False}
+            text = rules.disable_text(path.read_text(encoding="utf-8"))
         except OSError as exc:
             return f"ERROR: could not read {_display_path(path)} ({exc})."
-        return self._compile_and_write(fields, verb="Retired")
+        # A TEXT edit, deliberately: retiring must work on a rule that does not
+        # compile, and a broken rule shouting every session is exactly when the
+        # owner reaches for this. Rendering it afresh would refuse.
+        rule, _errors = rules.lint(text)
+        if rule is None:
+            rule = rules.Rule(
+                name=name, description="(this rule does not compile)", prose="",
+                trigger="unknown", tier=0, fail=rules.FAIL_DEFAULT, obligations=(),
+                status="disabled",
+            )
+        return self._write_rule(path, text, rule, verb="Retired")
 
     def _compile_and_write(self, fields: dict, verb: str) -> str:
         """Render → lint → card → write. The model never emits the file: it
@@ -4104,6 +4151,8 @@ class Agent:
             )
         if plan.error:
             return f"ERROR: {plan.error}"
+        if refusal := self._rule_file_lint(plan):
+            return refusal
         # Writes into the ephemeral scratch workspace are auto-approved (issue
         # #70) — no diff card. Confined strictly inside the scratch dir;
         # anything resolving outside falls through to the normal approval gate.
