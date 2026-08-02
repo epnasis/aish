@@ -3146,7 +3146,13 @@ class Agent:
             evidence=failure.evidence,
             round=binding.asks,
             max_rounds=rules.RULE_MAX_ASKS,
-            escalated=verdict == "not_followed",
+            # Never at Verify. §3.3 defines `escalated` as "reached Tier 3 —
+            # the OWNER had to decide", and the whole design of the bound is
+            # that he does NOT: the answer ships with a note and nobody is
+            # asked. Setting it on a bound-hit conflated "the rule gave up"
+            # with "the owner overrode it", which is the ledger's single most
+            # load-bearing lifecycle signal.
+            escalated=False,
             message=failure.ask[: rules.GATE_MESSAGE_CHARS],
         )
 

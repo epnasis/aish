@@ -6005,10 +6005,12 @@ class TestVerify:
         verify_records = [g for g in records(steps, "gate") if g["at"] == "verify"]
         assert verify_records, "verify decided and recorded nothing"
         assert [g["round"] for g in verify_records][:2] == [1, 2]
-        assert verify_records[-1]["escalated"] is True
         # The answer SHIPPED with a note. Calling that "stopped" would have the
-        # ledger count delivered turns as terminations.
+        # ledger count delivered turns as terminations — and `escalated` means
+        # the OWNER had to decide, which at a bound hit is precisely what did
+        # not happen.
         assert verify_records[-1]["verdict"] == "advised"
+        assert all(g["escalated"] is False for g in verify_records)
         assert verify_records[0]["gate"] == "rule.must_first"
 
     def test_a_refused_call_does_not_count_as_a_call_that_ran(self, tmp_path):
