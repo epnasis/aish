@@ -2866,7 +2866,7 @@ class Agent:
         for _ in range(len(self._bindings) + 1):
             refusal: str | None = None
             stopped = False
-            for verdict in rules.gate(self._bindings, name):
+            for verdict in rules.gate(self._bindings, name, args, self.cwd):
                 if verdict.verdict == "allowed":
                     if verdict.binding.id not in recorded:
                         recorded.add(verdict.binding.id)

@@ -139,14 +139,18 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 |---|---|---|
 | `request:` | `has: source \| link \| attachment \| path`, `matches: <regex>` | **yes** |
 | `session:` | `origin: owner \| automation \| email \| schedule` | **yes** |
-| `task:` | `about: <plain text>` — semantic; the word is what makes it scored | no |
+| `action:` | `sends_to:`, `host:` — need the recipient/host parse the egress gate owns | no |
 | `result:` | `of: <tool>`, `was: empty \| error` | no |
-| `action:` | `tool:`, `command_starts_with:`, `sends_to:`, `host:` | no |
-| `answer:` | `contains:`, `matches:` | no |
 
 **`prompt`, not `message` and not `request`.** Attachments reach the agent as separate parameters and appear in no message text at all, so "message" became false the moment attached material counted as a source. It is DEFINED as text plus attachments plus the paths the owner typed — the definition that made `message` wrong survives the rename. `request:` was tried and rejected as ambiguous (a request can be a curl call).
 
 **`origin: automation`** is the umbrella for every non-owner origin — a positive match rather than a negation, because negation is where hand-edits go wrong and "automation" is what the rule is actually about.
+
+**`action:` arms at seed and decides at the gate.** Its condition is about a call nobody has proposed yet, so binding it does not mean *"it applied"* — it means *"it is watching"*, the same shape the stop and skill gates already have, and the `gate` records say whether it ever fired. Every field is a fact the harness holds **before dispatch**, so the check is free and the answer is known before anything runs.
+
+`path_under:` is **resolved, never string-matched** — a condition that `../` steps around protects nothing, and the mirror matters just as much: a path that reaches *inside* the root through `..` must still match. Relative paths resolve against the session's cwd, which is where the model's own paths are interpreted, and paths named inside a shell command count, because `write_file` is not the only way to change a file. `TestActionSubject`.
+
+**`when: always`** is the bare literal for a rule with no condition. Style obligations apply to every turn, and spelling that out beats an empty block that reads like an oversight — but an always-on rule is prose in **every** turn's context, so they should be few and short. `TestAlwaysSubject`.
 
 **One subject per rule.** Siblings would AND, but two subjects in one file is nearly always a rule that wanted to be two files — and because restrictions compose by **union** (R1), two files are *provably equivalent* to one with both. That theorem is what lets the grammar stay flat where every big policy language needs combinators.
 

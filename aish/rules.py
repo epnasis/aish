@@ -20,7 +20,7 @@ wedges a small model into a stall-out).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -44,14 +44,18 @@ GLOBAL_RULES_DIR = Path.home() / ".config" / "aish" / "rules"
 # tried and rejected as ambiguous: a request can be a curl call to a website.
 SUBJECT_PROMPT = "prompt"
 SUBJECT_SESSION = "session"
-SUBJECTS = frozenset({SUBJECT_PROMPT, SUBJECT_SESSION})
-SUBJECTS_DESIGNED = ("task", "result", "action", "answer")
+SUBJECT_ACTION = "action"
+SUBJECT_ALWAYS = "always"
+SUBJECTS = frozenset({SUBJECT_PROMPT, SUBJECT_SESSION, SUBJECT_ACTION})
+SUBJECTS_DESIGNED = ("result",)
 
 # Internal trigger ids, kept because the trace records name them and #197 reads
 # them. The FILE never spells these — it names a subject (`request:`,
 # `session:`) and the compiler maps it here.
 TRIGGER_MESSAGE_SHAPE = "message_shape"
 TRIGGER_SESSION_CONTEXT = "session_context"
+TRIGGER_ACTION_SHAPE = "action_shape"
+TRIGGER_ALWAYS = "always"
 
 # The VERBS a `then:` block can use. Every one is a RESTRICTION (see the module
 # docstring) and every one is a plain English imperative, in the ESLint
@@ -268,6 +272,8 @@ class Rule:
     field_name: str = ""
     equals: str = ""
     not_equals: str = ""
+    # `when: action:` conditions, checked per CALL rather than per turn.
+    action: dict = field(default_factory=dict)
     # Non-empty when the file could not be compiled — carried rather than
     # raised so the rule still appears in the corpus with an `error` verdict.
     error: str = ""
@@ -280,6 +286,12 @@ class Rule:
             if obligation["verb"] == VERB_ANSWER_FROM:
                 return str(obligation["to"])
         return ""
+
+
+# What `when: action:` can examine about a call the model is ABOUT to make.
+# Every one is a fact the harness holds before dispatch, so the check is Tier 0
+# and the answer is known before anything runs.
+ACTION_FIELDS = ("tool", "path_under", "command_starts_with", "sends_to", "host")
 
 
 @dataclass
@@ -382,6 +394,7 @@ class _Compiled(NamedTuple):
     field_name: str
     equals: str
     not_equals: str
+    action: dict
 
 
 def _as_list(value: Any) -> list[str]:
@@ -414,7 +427,15 @@ def _compile(front: dict) -> _Compiled:
     SUBJECT named as the key rather than implied by a type tag. Everything a
     gate needs is resolved here, so the gate itself is pure set membership.
     """
-    when, then = _block(front, "when"), _block(front, "then")
+    raw_when = front.get("when")
+    # `when: always` — the bare literal. A rule with no condition is a real
+    # shape (style obligations apply to every turn), and spelling it out is
+    # better than an empty block that reads like an oversight.
+    if isinstance(raw_when, str) and raw_when.strip().casefold() == SUBJECT_ALWAYS:
+        when = {SUBJECT_ALWAYS: True}
+    else:
+        when = _block(front, "when")
+    then = _block(front, "then")
     # FIRST, before any structural complaint: a file written against the old
     # format must be told it is the old format. "needs a `when:` block" is
     # true and useless to someone holding a file that used to work.
@@ -426,7 +447,7 @@ def _compile(front: dict) -> _Compiled:
             "a rule needs a `when:` block saying what it applies to — subjects: "
             + ", ".join(sorted(SUBJECTS))
         )
-    unknown = [key for key in when if key not in SUBJECTS]
+    unknown = [key for key in when if key not in SUBJECTS and key != SUBJECT_ALWAYS]
     if unknown:
         designed = [key for key in unknown if key in SUBJECTS_DESIGNED]
         detail = (
@@ -446,7 +467,37 @@ def _compile(front: dict) -> _Compiled:
 
     pattern: re.Pattern | None = None
     contains = field_name = equals = not_equals = ""
-    if SUBJECT_PROMPT in when:
+    action: dict = {}
+    if SUBJECT_ALWAYS in when:
+        trigger = TRIGGER_ALWAYS
+    elif SUBJECT_ACTION in when:
+        # Scalar shorthand: `when: {action: remember}` is the common case and
+        # `action: {tool: remember}` is ceremony for it. One subject per rule
+        # makes the short form unambiguous; the record always carries the
+        # expanded one.
+        fields = when[SUBJECT_ACTION]
+        if isinstance(fields, str):
+            fields = {"tool": fields.strip()}
+        if not isinstance(fields, dict) or not fields:
+            raise RuleError("`action:` needs a field under it — " + ", ".join(ACTION_FIELDS))
+        unknown_fields = [key for key in fields if key not in ACTION_FIELDS]
+        if unknown_fields:
+            raise RuleError(
+                f"unknown `action:` field {unknown_fields[0]!r} — have "
+                + ", ".join(ACTION_FIELDS)
+            )
+        for key in ("sends_to", "host"):
+            if key in fields:
+                raise RuleError(
+                    f"`action: {key}:` is designed but not built yet — it needs the "
+                    "recipient/host parse the egress gate owns. Express what you can "
+                    "with tool, path_under or command_starts_with."
+                )
+        action = {k: str(v).strip() for k, v in fields.items() if str(v).strip()}
+        if not action:
+            raise RuleError("`action:` fields cannot be empty")
+        trigger = TRIGGER_ACTION_SHAPE
+    elif SUBJECT_PROMPT in when:
         fields = when[SUBJECT_PROMPT]
         if not isinstance(fields, dict):
             raise RuleError("`prompt:` needs `has:` or `matches:` under it")
@@ -518,7 +569,8 @@ def _compile(front: dict) -> _Compiled:
             "at least one of: " + ", ".join(sorted(VERBS))
         )
     return _Compiled(
-        trigger, tuple(obligations), pattern, contains, field_name, equals, not_equals
+        trigger, tuple(obligations), pattern, contains, field_name, equals,
+        not_equals, action,
     )
 
 
@@ -604,6 +656,7 @@ def _parse(path: Path) -> Rule:
         field_name=compiled.field_name,
         equals=compiled.equals,
         not_equals=compiled.not_equals,
+        action=compiled.action,
     )
 
 
@@ -670,6 +723,14 @@ def evaluate(rule: Rule, ctx: TurnContext) -> tuple[str, dict]:
     """
     if rule.error:
         return VERDICT_ERROR, {"error": rule.error[:EVIDENCE_CHARS]}
+    if rule.trigger == TRIGGER_ALWAYS:
+        return VERDICT_BIND, {"on": "always"}
+    if rule.trigger == TRIGGER_ACTION_SHAPE:
+        # An action condition is about a call that has not been proposed yet,
+        # so it ARMS at seed and decides at the gate — the same shape the stop
+        # and skill gates already have. Binding here is not "it applied": it is
+        # "it is watching", and the `gate` records say whether it ever fired.
+        return VERDICT_BIND, {"on": "action", "conditions": dict(rule.action)}
     if rule.trigger == TRIGGER_MESSAGE_SHAPE and rule.contains:
         sources = find_sources(ctx, rule.contains)
         evidence: dict = {
@@ -953,7 +1014,72 @@ def affects(bindings: list[Binding], tool: str) -> bool:
     return False
 
 
-def gate(bindings: list[Binding], tool: str) -> list[GateVerdict]:
+def action_matches(conditions: dict, tool: str, args: dict, cwd: str = "") -> bool:
+    """Whether a proposed call satisfies an `action:` condition. Every field
+    ANDs, matching the sibling-keys rule, and every one is a fact the harness
+    holds BEFORE dispatch — so the answer is known before anything runs."""
+    if not conditions:
+        return False
+    if (want := conditions.get("tool")) and tool != want:
+        return False
+    if prefix := conditions.get("command_starts_with"):
+        command = str((args or {}).get("command", "")).strip()
+        if not command.startswith(prefix):
+            return False
+    if root := conditions.get("path_under"):
+        if not _touches_path(args or {}, root, cwd):
+            return False
+    return True
+
+
+def _looks_like_a_path(token: str) -> bool:
+    """A command token that is actually referring to a location."""
+    return "/" in token or token.startswith(("~", "."))
+
+
+def _touches_path(args: dict, root: str, cwd: str) -> bool:
+    """Whether any path-shaped argument lands under `root`.
+
+    Resolved rather than string-matched: `~/dev/aish/../elsewhere` is not under
+    `~/dev/aish`, and a rule that could be stepped around with `..` protects
+    nothing. Relative paths resolve against the session's cwd, which is where
+    the model's own paths are interpreted.
+    """
+    base = Path(root).expanduser()
+    try:
+        base = base.resolve()
+    except OSError:
+        return False
+    for key in ("path", "file", "target", "dest", "command"):
+        value = str(args.get(key, "") or "").strip()
+        if not value:
+            continue
+        for token in (value.split() if key == "command" else [value]):
+            token = token.strip("\"'`,;:()")
+            if not token or token.startswith("-"):
+                continue
+            if key == "command" and not _looks_like_a_path(token):
+                # A bare word in a command is a subcommand, a flag value, a
+                # branch name — not a path. Resolving it against cwd would make
+                # every word land under cwd, so `git status` run from inside the
+                # protected tree would match a `path_under` condition naming it.
+                # Same discipline as the approval gate: a token that names
+                # nothing path-shaped is never resolved.
+                continue
+            candidate = Path(token).expanduser()
+            if not candidate.is_absolute() and cwd:
+                candidate = Path(cwd) / candidate
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved == base or base in resolved.parents:
+                return True
+    return False
+
+
+def gate(bindings: list[Binding], tool: str, args: dict | None = None,
+         cwd: str = "") -> list[GateVerdict]:
     """Every active binding's verdict on one proposed call, in bind order.
 
     Set membership against precomputed obligations — Tier 0 by construction,
@@ -965,15 +1091,20 @@ def gate(bindings: list[Binding], tool: str) -> list[GateVerdict]:
     """
     verdicts: list[GateVerdict] = []
     for binding in bindings:
-        verdict = _gate_one(binding, tool)
+        verdict = _gate_one(binding, tool, args or {}, cwd)
         verdicts.append(verdict)
         if verdict.verdict != "allowed":
             break
     return verdicts
 
 
-def _gate_one(binding: Binding, tool: str) -> GateVerdict:
+def _gate_one(binding: Binding, tool: str, args: dict, cwd: str) -> GateVerdict:
     rule = binding.rule
+    if rule.trigger == TRIGGER_ACTION_SHAPE and not action_matches(
+        rule.action, tool, args, cwd
+    ):
+        # Armed, watching a different action. Not a verdict about this call.
+        return GateVerdict("allowed", binding, {"obligation": None, "matched": None})
     for obligation in binding.obligations:
         if obligation["verb"] != VERB_NEVER_USE or tool not in obligation["what"]:
             continue
