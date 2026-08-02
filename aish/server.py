@@ -98,7 +98,7 @@ from .cli import (
 from .embeddings import SemanticIndex
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .pty_session import PtySession
-from .session import RESUME_MARKER, SessionLog, synthetic_kind, title_drifted
+from .session import RATINGS, RESUME_MARKER, SessionLog, synthetic_kind, title_drifted
 
 if TYPE_CHECKING:
     from .claude_max import ClaudeMaxAgent
@@ -2156,6 +2156,10 @@ class WebServer:
         elif kind == "redact":
             self._claim(client)
             await self._redact_turn(client, str(message.get("turn", "")).strip())
+        elif kind == "rate":
+            # Not a session action in the control sense — rating an answer does
+            # not claim the chat or interrupt anything running.
+            await self._rate_turn(client, message)
         elif kind == "create_issue":
             self._claim(client)
             await self._create_issue(client)
@@ -2399,6 +2403,38 @@ class WebServer:
             if transcript[i].get("type") == "user":
                 del transcript[i + 1:]
                 return
+
+    async def _rate_turn(self, client: Client, message: dict) -> None:
+        """Record 👍/👎 (+ an optional reason) against one answer (#207).
+
+        Deliberately inert: it writes a record and echoes it to the other
+        viewers so every open tab agrees. Nothing reads it during the session —
+        it is evidence for the weekly pass and for the owner, and making it act
+        would turn a feedback control into a lever the model can be steered by.
+        """
+        session = client.viewing
+        if session is None:
+            return
+        turn = str(message.get("turn", "")).strip()
+        rating = str(message.get("rating", "")).strip()
+        if not turn or rating not in RATINGS:
+            return
+        comment = str(message.get("comment", "") or "")
+        session.logref.rating(turn, rating, comment)
+        # Recorded AND emitted, deliberately as two steps.
+        #
+        # `record` keeps it in the live transcript, so a reconnecting tab still
+        # sees what was rated — the log-backed cold path already replays it, and
+        # a rating that survived a cold open but vanished on a reconnect is the
+        # worst of both. The recorded dict is exactly what
+        # `reconstruct_events` emits, keeping hot and cold byte-identical.
+        #
+        # The DELIVERED copy carries `seen`, which the recorded one must not:
+        # the people being shown this are the ones who just tapped it, and a
+        # rating must never mark the chat unread for them.
+        event = {"type": "rating", "turn": turn, "rating": rating, "comment": comment}
+        session.bridge.record(event)
+        session.bridge.emit({**event, "seen": True}, record=False)
 
     async def _redact_turn(self, client: Client, turn: str) -> None:
         """Take one exchange out of this chat for good (#202).

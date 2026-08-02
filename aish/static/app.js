@@ -1237,6 +1237,7 @@ function handle(event) {
     case "step": traceStep(event); break;
     case "workspace": addWorkspaceNote(event.change, event.path); break;
     case "redacted": addRedactedMsg(); break;
+    case "rating": markRating(event.turn, event.rating); break;
     case "error":
       // [ERROR-KIND-START]
       // An `error` says one of two unrelated things, and everything below the
@@ -3504,6 +3505,7 @@ function addUserMsg(text, at, turn) {
   // A turn id exists only for a turn the server has logged, so a live turn gets
   // its remove control on the next replay rather than a control that would name
   // nothing.
+  currentTurnId = turn || "";
   if (turn) tools.append(redactChip(turn));
   tools.append(reuseChip(getText), copyChip(getText, "copy prompt"));
   stampTurn(tools, at);
@@ -4940,6 +4942,66 @@ async function copyText(text) {
   return ok;
 }
 
+// [RATING]
+// 👍/👎 on an answer, with an optional reason (#207). Two properties matter and
+// both are deliberate:
+//
+//   The tap records IMMEDIATELY. A rating that waits for a comment is a rating
+//   that mostly does not happen, and the count is the part the rules engine
+//   needs — it is how "is he still correcting turns that passed every rule"
+//   gets answered at all. The comment box opens after, and sending it writes a
+//   second record for the same turn; the ledger takes the last.
+//
+//   Nothing here acts on the rating. It is evidence for the weekly pass and for
+//   the owner — making it steer the running session would turn a feedback
+//   control into a lever the model can be pointed at.
+function ratingChip(turn, kind) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = `rating-chip rating-${kind}`;
+  const label = kind === "up" ? "good answer" : "bad answer";
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.textContent = kind === "up" ? "👍" : "👎";
+  btn.onclick = () => {
+    send({ type: "rate", turn, rating: kind });
+    markRating(turn, kind);
+    openRatingComment(btn, turn, kind);
+  };
+  return btn;
+}
+
+function openRatingComment(btn, turn, kind) {
+  const tools = btn.parentElement;
+  if (!tools || tools.querySelector(".rating-note")) return;
+  const note = document.createElement("input");
+  note.type = "text";
+  note.className = "rating-note";
+  note.placeholder = kind === "up" ? "what worked? (optional)" : "what was wrong? (optional)";
+  note.onkeydown = (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const comment = note.value.trim();
+    if (comment) send({ type: "rate", turn, rating: kind, comment });
+    note.remove();
+  };
+  note.onblur = () => { if (!note.value.trim()) note.remove(); };
+  tools.appendChild(note);
+  note.focus();
+}
+
+// Applied by turn id rather than by position: a rating can be written long
+// after the turn it names, and on replay they all arrive at the end.
+function markRating(turn, kind) {
+  const el = messagesEl.querySelector(`[data-turn="${CSS.escape(turn)}"]`);
+  if (!el) return;
+  const tools = el.querySelector(".msg-tools");
+  if (!tools) return;
+  tools.querySelectorAll(".rating-chip").forEach((chip) => {
+    chip.classList.toggle("on", chip.classList.contains(`rating-${kind}`));
+  });
+}
+
 function copyChip(getText, label) {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -5169,6 +5231,12 @@ let answerTiming = 0;
 // is rebuilt (replay/history), so it stays aligned with the log's answer order.
 let renderedAnswers = 0;
 
+// The turn id a rating names (#207) is minted for the USER message (#202's
+// removal id), and the answer is rendered separately — so it is carried
+// forward here, exactly as `prompt` and `answerTiming` already are, and
+// populated by both the live and the history-replay paths.
+let currentTurnId = "";
+
 function attachAnswerTools(el, source, prompt) {
   const ordinal = ++renderedAnswers;
   const tools = document.createElement("div");
@@ -5194,6 +5262,11 @@ function attachAnswerTools(el, source, prompt) {
     regen.onclick = () => rerunPrompt(prompt);
     tools.appendChild(regen);
     lastRegenBtn = regen;
+  }
+  if (currentTurnId) {
+    el.dataset.turn = currentTurnId;
+    tools.appendChild(ratingChip(currentTurnId, "up"));
+    tools.appendChild(ratingChip(currentTurnId, "down"));
   }
   tools.appendChild(copyChip(() => source, "copy answer"));
   // The trailing group: readouts first, then jump-to-top LAST, hard against the

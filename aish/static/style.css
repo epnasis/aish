@@ -2755,3 +2755,36 @@ body.console-open {
 /* An armed swipe-to-delete (second tap commits). Deleting a chat is
    irreversible — there is no undo and the offline mirror drops it on the next
    sync — so the control states plainly that it is now live. */
+
+/* [RATING] 👍/👎 on an answer (#207). Sized and spaced like the other chips in
+   the tool row so the row reads as one control strip, and dimmed until tapped —
+   an unrated answer must not look like a rated one. */
+.rating-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0.42;
+  filter: grayscale(1);
+}
+.rating-chip:active { opacity: 0.7; }
+.rating-chip.on { opacity: 1; filter: none; }
+.rating-note {
+  flex: 1 1 140px;
+  min-width: 120px;
+  margin-left: 6px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-raised, transparent);
+  color: var(--fg);
+  font-size: 13px;
+}
+.rating-note:focus { outline: none; border-color: var(--accent, var(--dim)); }

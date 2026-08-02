@@ -283,6 +283,44 @@ class RuleLedger:
         return self.rules.setdefault(name, RuleStats(name))
 
 
+def scan_ratings(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None) -> dict:
+    """The owner's verdicts on recent answers (#207), keyed by turn id.
+
+    Pure code, no model. The kill metric for turn-end verification reads this:
+    a thumbs-down on a turn where every rule that bound was satisfied is the
+    evidence that the checking is not catching what he actually minds. Counting
+    it is the whole reason the control exists.
+    """
+    now = now or datetime.now()
+    floor = f"session-{(now - timedelta(days=days)):%Y%m%d}"
+    ratings: dict[str, dict] = {}
+    for path in sorted(Path(state_dir).glob("session-*.jsonl")):
+        if path.name < floor:
+            continue
+        try:
+            for line in path.open(encoding="utf-8"):
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if record.get("kind") != "rating":
+                    continue
+                turn = str(record.get("turn", ""))
+                if not turn:
+                    continue
+                # Last write wins: the tap records at once and a reason may
+                # follow as a second record for the same turn.
+                ratings[turn] = {
+                    "session": path.name,
+                    "rating": record.get("rating", ""),
+                    "comment": record.get("comment", ""),
+                    "ts": record.get("ts", ""),
+                }
+        except OSError:
+            continue
+    return ratings
+
+
 def _rule_turns(path: Path):
     """Yield one dict per turn from a session log, joined by the `turn` id the
     trace contract stamps — never by position. `curate._windows` pairs a
