@@ -225,6 +225,198 @@ def scan_ledger(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None)
     return ledger
 
 
+# --- the rule ledger (#191) ------------------------------------------------
+#
+# Keyed to BLAST RADIUS, not to evaluation tier. The admission rule was written
+# as "no non-Tier-0 verdict ships without instrumentation", but its REASON is
+# that some quantities are only visible in aggregate — and a Tier-0 regex has
+# that problem the moment its trigger goes from firing on almost nothing to
+# firing on any message carrying a link. The pattern is readable; the bind rate
+# and the override rate are not.
+#
+# A reader, not a schema change: `binding` and `gate` records already carry
+# everything, joined by `turn` — which is what landing the trace contract first
+# bought. Zero model calls, and every signal below is a PROPOSAL. Nothing here
+# edits or retires a rule; rules are owner property.
+
+RULE_MIN_FIRES = 3  # below this, every rate is noise
+RULE_BROAD_BIND_RATE = 0.33  # binding on a third of turns is a cost to accept deliberately
+RULE_OVERRIDE_WRONG_RATE = 0.5  # overridden more often than not = the rule is wrong
+
+
+@dataclass
+class RuleStats:
+    """Per-rule ledger row. One turn contributes at most one bind."""
+
+    name: str
+    evaluated: int = 0
+    binds: int = 0
+    abstains: int = 0
+    unevaluable: int = 0
+    errors: int = 0
+    refusals: int = 0
+    escalations: int = 0
+    overrides: int = 0  # the owner allowed the violation
+    complied: int = 0  # a refusal was followed by the routed reader, same turn
+    origins: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def bind_rate(self) -> float:
+        return self.binds / self.evaluated if self.evaluated else 0.0
+
+    @property
+    def override_rate(self) -> float:
+        return self.overrides / self.escalations if self.escalations else 0.0
+
+    @property
+    def compliance_rate(self) -> float:
+        return self.complied / self.refusals if self.refusals else 0.0
+
+
+@dataclass
+class RuleLedger:
+    rules: dict[str, RuleStats] = field(default_factory=dict)
+    turns: int = 0  # turns that reached the rule engine at all
+
+    def stat(self, name: str) -> RuleStats:
+        return self.rules.setdefault(name, RuleStats(name))
+
+
+def _rule_turns(path: Path):
+    """Yield one dict per turn from a session log, joined by the `turn` id the
+    trace contract stamps — never by position. `curate._windows` pairs a
+    knowledge step with the NEXT user message because that is the order
+    run_task happens to emit in; governance records are emitted mid-turn, at
+    turn end and from the server thread, so that heuristic cannot carry them."""
+    turns: dict[int, dict] = {}
+    for line in path.open(encoding="utf-8"):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("kind") != "trace":
+            continue
+        step = rec.get("step", {})
+        kind = step.get("kind")
+        if kind not in ("rule_eval", "binding", "gate", "tool"):
+            continue
+        turn = step.get("turn")
+        if not isinstance(turn, int):
+            continue
+        entry = turns.setdefault(
+            turn, {"turn": turn, "eval": None, "bindings": {}, "gates": [], "tools": []}
+        )
+        if kind == "rule_eval":
+            entry["eval"] = step
+        elif kind == "binding":
+            entry["bindings"][str(step.get("id"))] = step
+        elif kind == "gate":
+            entry["gates"].append(step)
+        elif str(step.get("name")):
+            entry["tools"].append(step)
+    yield from (turns[key] for key in sorted(turns))
+
+
+def _readers_of(binding: dict) -> set[str]:
+    readers: set[str] = set()
+    for obligation in binding.get("obligations") or []:
+        if obligation.get("verb") == "route":
+            readers.update(obligation.get("readers") or [])
+            if isinstance(obligation.get("to"), str) and obligation["to"] != "source":
+                readers.add(obligation["to"])
+    return readers
+
+
+def scan_rules(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None) -> RuleLedger:
+    """Per-rule counters over the recent session logs. Pure code, no model."""
+    now = now or datetime.now()
+    floor = f"session-{(now - timedelta(days=days)):%Y%m%d}"
+    ledger = RuleLedger()
+    for path in sorted(Path(state_dir).glob("session-*.jsonl")):
+        if path.name < floor:
+            continue
+        try:
+            for turn in _rule_turns(path):
+                if turn["eval"] is None:
+                    continue
+                ledger.turns += 1
+                for row in turn["eval"].get("evaluated") or []:
+                    stat = ledger.stat(str(row.get("rule", "")))
+                    stat.evaluated += 1
+                    verdict = row.get("verdict")
+                    if verdict == "bind":
+                        stat.binds += 1
+                        origin = str((row.get("evidence") or {}).get("origin") or "")
+                        if origin:
+                            stat.origins[origin] = stat.origins.get(origin, 0) + 1
+                    elif verdict == "abstain":
+                        stat.abstains += 1
+                    elif verdict == "unevaluable":
+                        stat.unevaluable += 1
+                    elif verdict == "error":
+                        stat.errors += 1
+                _score_gates(ledger, turn)
+        except OSError:
+            continue
+    return ledger
+
+
+def _score_gates(ledger: RuleLedger, turn: dict) -> None:
+    """Refusals, escalations, overrides — and compliance, which is the only
+    one that needs the turn's tool steps: a refusal was COMPLIED WITH when the
+    model went on to call the reader the refusal pointed it at, in the same
+    turn. 'No further refusal' would count giving up as compliance."""
+    called = {str(step.get("name")) for step in turn["tools"]}
+    refused_bindings: set[str] = set()
+    for gate in turn["gates"]:
+        name = str(gate.get("rule") or "")
+        if not name:
+            continue
+        stat = ledger.stat(name)
+        if gate.get("verdict") == "refused":
+            stat.refusals += 1
+            refused_bindings.add(str(gate.get("binding")))
+        if gate.get("escalated"):
+            stat.escalations += 1
+            if gate.get("verdict") == "allowed":
+                stat.overrides += 1
+    for binding_id in refused_bindings:
+        binding = turn["bindings"].get(binding_id)
+        if binding and (_readers_of(binding) & called):
+            ledger.stat(str(binding.get("rule") or "")).complied += 1
+
+
+def rule_signals(ledger: RuleLedger) -> list[tuple[str, str]]:
+    """(rule, proposal) pairs for the owner to act on or ignore. Deliberately
+    NOT actions: a rule is owner property, and every one of these is a
+    judgement about intent that a counter can only prompt."""
+    out: list[tuple[str, str]] = []
+    for stat in sorted(ledger.rules.values(), key=lambda s: s.name):
+        if stat.evaluated >= RULE_MIN_FIRES and stat.binds == 0:
+            out.append((stat.name, f"never bound in {stat.evaluated} turns — dead weight?"))
+        if stat.errors:
+            out.append((stat.name, f"{stat.errors} turns could not compile it — broken file"))
+        if stat.binds >= RULE_MIN_FIRES and stat.bind_rate >= RULE_BROAD_BIND_RATE:
+            out.append((
+                stat.name,
+                f"binds on {stat.bind_rate:.0%} of turns — narrow the trigger, "
+                "or accept the cost deliberately",
+            ))
+        if stat.escalations >= RULE_MIN_FIRES and stat.override_rate >= RULE_OVERRIDE_WRONG_RATE:
+            out.append((
+                stat.name,
+                f"you overrode it on {stat.override_rate:.0%} of escalations — "
+                "the rule is wrong, not the model",
+            ))
+        if stat.refusals >= RULE_MIN_FIRES and stat.complied == 0:
+            out.append((
+                stat.name,
+                f"{stat.refusals} refusals and never complied — the refusal text "
+                "may not be actionable",
+            ))
+    return out
+
+
 def dead_weight(ledger: Ledger) -> list[EntryStats]:
     """Entries injected repeatedly with zero engagement, worst first. Skills
     have a hard engagement signal (read_skill); memories cannot (a fact

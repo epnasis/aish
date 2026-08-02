@@ -388,12 +388,6 @@ class ClaudeMaxAgent:
                     for block in message.content:
                         if isinstance(block, sdk.TextBlock) and block.text:
                             final = block.text
-                            # A `disclose` obligation lifts on the model's own
-                            # words (#191). The SDK delivers this block before
-                            # the tool_use blocks beside it reach the handler,
-                            # so the ordering the local loop gets by placing the
-                            # call after _append holds here too.
-                            self.inner.note_model_text(block.text)
                             if self.on_token is None:
                                 self.echo(block.text)
                 elif isinstance(message, sdk.ResultMessage):

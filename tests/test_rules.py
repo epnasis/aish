@@ -17,20 +17,27 @@ import pytest
 from aish import rules
 
 CANONICAL = """---
-name: youtube-url-analysis
-description: A bare YouTube URL means analyse that video.
+name: bounded-material
+description: Answer from the material I gave you.
 tier: 0
 fail: open
 trigger: message_shape
-match: ^\\s*https?://(www\\.)?(youtu\\.be|youtube\\.com)/\\S+\\s*$
-route: youtube_analyze
-prohibit: web_search, read_url
-unless: disclosed
-disclose: transcript_unavailable
-disclosure_terms: transcript
+contains: source
+route: source
+prohibit: web_search
+disclose: source_unavailable
 ---
 
-Tell me what is IN this video.
+Answer from the source the user gave you.
+"""
+
+SHAPE_RULE = """---
+name: shape-rule
+description: An owner-written pattern, for shapes with no built-in detector.
+trigger: message_shape
+match: ^\\s*deploy\\b
+prohibit: web_search
+---
 """
 
 SESSION_RULE = """---
@@ -57,7 +64,9 @@ def load_one(tmp_path: Path, text: str, name: str = "r") -> rules.Rule:
     return next(r for r in loaded if r.path and r.path.stem == name)
 
 
-def bind_canonical(tmp_path: Path, task: str, known=("youtube_analyze",)) -> rules.Binding:
+def bind_canonical(
+    tmp_path: Path, task: str, known=("youtube_analyze", "read_url")
+) -> rules.Binding:
     rule = load_one(tmp_path, CANONICAL)
     verdict, evidence = rules.evaluate(rule, rules.TurnContext(task=task))
     assert verdict == rules.VERDICT_BIND
@@ -68,12 +77,12 @@ class TestRuleFileFormat:
     def test_frontmatter_compiles_to_the_contract_obligation_shape(self, tmp_path):
         rule = load_one(tmp_path, CANONICAL)
         assert rule.obligations == (
-            {"verb": "route", "to": "youtube_analyze", "of": "deliverable"},
-            {"verb": "prohibit", "what": ["web_search", "read_url"], "unless": "disclosed"},
-            {"verb": "disclose", "state": "transcript_unavailable", "terms": ["transcript"]},
+            {"verb": "route", "to": "source", "of": "deliverable"},
+            {"verb": "prohibit", "what": ["web_search"]},
+            {"verb": "disclose", "state": "source_unavailable"},
         )
         assert rule.tier == 0 and rule.fail == "open"
-        assert rule.prose.startswith("Tell me what is IN this video.")
+        assert rule.prose.startswith("Answer from the source the user gave you.")
 
     def test_tier_and_fail_are_present_from_day_one(self, tmp_path):
         """v1 is Tier 0 only, but the FIELDS ship now so a v0 file does not
@@ -82,41 +91,47 @@ class TestRuleFileFormat:
         assert rule.tier == 0
         assert rule.fail == rules.FAIL_OPEN
 
-    def test_disclosure_terms_default_to_the_state_words(self, tmp_path):
-        rule = load_one(tmp_path, CANONICAL.replace("disclosure_terms: transcript\n", ""))
-        assert rule.disclosure_terms == ("transcript", "unavailable")
+    def test_a_rule_cannot_declare_words_that_lift_a_prohibition(self, tmp_path):
+        """#191 A4. The gate has NO view of what the model said, and there is
+        no frontmatter key that gives it one — a hand-written word list cannot
+        cover a language, and similarity cannot tell asserting a failure from
+        mentioning one. Whether the answer disclosed belongs to Verify."""
+        source = Path(rules.__file__).read_text()
+        # It survives only inside RETIRED_KEYS, which exists to REJECT it.
+        assert source.count("disclosure_terms") == 1
+        assert "disclosure_terms" in rules.RETIRED_KEYS
+        assert not any(hasattr(rules.Binding, a) for a in ("disclosed", "disclosure_met"))
 
     def test_a_broken_regex_is_a_named_error_not_an_exception(self, tmp_path):
         """A hand-edited typo must be visible in the corpus and the log, never
         an exception thrown inside a gate half a turn later."""
-        rule = load_one(tmp_path, CANONICAL.replace("match: ^\\s*", "match: ^[unclosed"))
+        rule = load_one(tmp_path, SHAPE_RULE.replace("match: ^\\s*deploy\\b", "match: ^[unclosed"))
         assert rule.error
         verdict, evidence = rules.evaluate(rule, rules.TurnContext(task="anything"))
         assert verdict == rules.VERDICT_ERROR
         assert "unparseable" in evidence["error"]
 
     @pytest.mark.parametrize(
-        "mangle,expected",
+        "text,expected",
         [
-            ("trigger: message_shape", "unknown trigger"),
+            (CANONICAL.replace("trigger: message_shape\n", ""), "unknown trigger"),
+            (CANONICAL.replace("contains: source", "contains: vibes"), "unknown `contains:`"),
+            (CANONICAL.replace("contains: source\n", ""), "needs a `contains:` detector"),
             (
-                "match: ^\\s*https?://(www\\.)?(youtu\\.be|youtube\\.com)/\\S+\\s*$",
-                "needs a `match:`",
+                CANONICAL.replace("contains: source", "contains: source\nmatch: ^x"),
+                "OR `match:`, not both",
             ),
-            ("prohibit: web_search, read_url", "no obligation"),
-            ("disclose: transcript_unavailable", "needs a `disclose:`"),
+            (CANONICAL.replace("contains: source", "match: ^x"), "needs a `contains:` detector"),
+            (
+                CANONICAL.replace("route: source\n", "")
+                .replace("prohibit: web_search\n", "")
+                .replace("disclose: source_unavailable\n", ""),
+                "no obligation",
+            ),
         ],
     )
-    def test_an_uncompilable_rule_says_what_is_wrong(self, tmp_path, mangle, expected):
-        text = CANONICAL.replace(mangle + "\n", "")
-        if expected == "no obligation":
-            text = text.replace("route: youtube_analyze\n", "").replace(
-                "unless: disclosed\n", ""
-            ).replace("disclose: transcript_unavailable\n", "").replace(
-                "disclosure_terms: transcript\n", ""
-            )
-        rule = load_one(tmp_path, text)
-        assert expected in rule.error
+    def test_an_uncompilable_rule_says_what_is_wrong(self, tmp_path, text, expected):
+        assert expected in load_one(tmp_path, text).error
 
     def test_session_context_needs_exactly_one_comparison(self, tmp_path):
         both = SESSION_RULE.replace("is_not: user", "is_not: user\nis: email")
@@ -141,8 +156,8 @@ class TestRuleLifecycle:
         active, skipped = rules.partition(rules.load_rules([tmp_path]))
         assert [r.name for r in active] == ["live-rule"]
         assert sorted(skipped, key=lambda s: s["rule"]) == [
+            {"rule": "bounded-material", "why": "expired"},
             {"rule": "no-forget-when-triggered", "why": "disabled"},
-            {"rule": "youtube-url-analysis", "why": "expired"},
         ]
 
     def test_a_rule_stays_valid_through_its_expiry_day(self, tmp_path):
@@ -153,23 +168,20 @@ class TestRuleLifecycle:
 
 
 class TestTriggers:
-    def test_message_shape_binds_on_a_bare_url_and_abstains_otherwise(self, tmp_path):
-        rule = load_one(tmp_path, CANONICAL)
-        bare = rules.evaluate(rule, rules.TurnContext(task="https://youtu.be/abc123"))
-        assert bare[0] == rules.VERDICT_BIND
-        assert bare[1]["matched"] is True and bare[1]["span"] == [0, 23]
-        # The URL is IN the message but the message is not only the URL: the
-        # user asked something else, so the deliverable is not the video.
-        chatty = rules.evaluate(
-            rule, rules.TurnContext(task="is https://youtu.be/abc123 worth watching?")
-        )
-        assert chatty[0] == rules.VERDICT_ABSTAIN
-        assert chatty[1]["matched"] is False
+    def test_an_owner_written_pattern_still_works(self, tmp_path):
+        """`match:` remains for shapes with no built-in detector — command
+        prefixes, file paths. What it must never do is stand in for intent."""
+        rule = load_one(tmp_path, SHAPE_RULE)
+        hit = rules.evaluate(rule, rules.TurnContext(task="deploy the web app"))
+        assert hit[0] == rules.VERDICT_BIND
+        assert hit[1]["matched"] is True and hit[1]["span"] == [0, 6]
+        miss = rules.evaluate(rule, rules.TurnContext(task="what is deployment"))
+        assert miss[0] == rules.VERDICT_ABSTAIN and miss[1]["matched"] is False
 
     def test_abstention_evidence_is_the_inputs_not_the_conclusion(self, tmp_path):
-        """Contract §4: a record of 'the message was not a URL' cannot be
+        """Contract §4: a record of 'the message did not match' cannot be
         re-examined after the pattern moves; the pattern itself can."""
-        rule = load_one(tmp_path, CANONICAL)
+        rule = load_one(tmp_path, SHAPE_RULE)
         _, evidence = rules.evaluate(rule, rules.TurnContext(task="hello"))
         assert evidence["pattern"] == rule.pattern.pattern
         assert evidence["on"] == "task"
@@ -194,92 +206,176 @@ class TestBinding:
         binding = bind_canonical(tmp_path, "https://youtu.be/abc")
         record = rules.binding_record(binding)
         binding.rule.path.write_text(
-            CANONICAL.replace("prohibit: web_search, read_url", "prohibit: nothing_at_all")
+            CANONICAL.replace("prohibit: web_search", "prohibit: nothing_at_all")
         )
-        assert record["obligations"][1]["what"] == ["web_search", "read_url"]
-
-    def test_a_route_to_a_missing_tool_is_caught_at_bind_time(self, tmp_path):
-        binding = bind_canonical(tmp_path, "https://youtu.be/abc", known=("web_search",))
-        assert binding.satisfiable is False
-        assert binding.unsatisfiable == ("youtube_analyze",)
-        assert "not available" in rules.seed_text([binding])
+        assert record["obligations"][1]["what"] == ["web_search"]
 
     def test_seed_text_states_every_obligation_imperatively(self, tmp_path):
         text = rules.seed_text([bind_canonical(tmp_path, "https://youtu.be/abc")])
         assert "MUST" in text and "MUST NOT call web_search" in text
-        assert "youtube-url-analysis" in text
+        assert "bounded-material" in text
+        assert "ASK the user" in text  # the escape is stated, not only the ban
+
+
+class TestSourceRouting:
+    """`route: source` — the obligation names the source the OWNER handed over,
+    and the harness resolves which reader can read it. One rule covers every
+    source; nothing has to be maintained when a new reader appears (#191 A3)."""
+
+    def test_a_youtube_link_routes_to_the_transcript_tool(self, tmp_path):
+        binding = bind_canonical(tmp_path, "summarize https://youtu.be/kJQP7kiw5Fk")
+        assert binding.readers == ("youtube_analyze",)
+        assert binding.sources == ("https://youtu.be/kJQP7kiw5Fk",)
+
+    def test_any_other_link_routes_to_the_page_reader(self, tmp_path):
+        binding = bind_canonical(tmp_path, "who wrote https://example.com/post")
+        assert binding.readers == ("read_url",)
+
+    def test_two_sources_route_to_both_readers(self, tmp_path):
+        binding = bind_canonical(
+            tmp_path, "compare https://youtu.be/x with https://example.com/p"
+        )
+        assert set(binding.readers) == {"youtube_analyze", "read_url"}
+
+    def test_the_binding_snapshots_what_the_source_resolved_to(self, tmp_path):
+        """"source" alone would send a later reader back to guess which link
+        was in the message — the resolution is turn-specific, so it is
+        recorded (contract corollary 1)."""
+        binding = bind_canonical(tmp_path, "https://youtu.be/x")
+        route = rules.binding_record(binding)["obligations"][0]
+        assert route["to"] == "source"
+        assert route["readers"] == ["youtube_analyze"]
+        assert route["sources"] == ["https://youtu.be/x"]
+        assert "present" not in route  # a link is not already in context
+
+    def test_a_missing_reader_is_unsatisfiable_at_bind_time(self, tmp_path):
+        binding = bind_canonical(tmp_path, "https://youtu.be/x", known=("read_url",))
+        assert binding.satisfiable is False
+        assert binding.unsatisfiable == ("youtube_analyze",)
+        assert "not available" in rules.seed_text([binding])
+
+    @pytest.mark.parametrize(
+        "url,reader",
+        [
+            ("https://youtu.be/x", "youtube_analyze"),
+            ("https://www.youtube.com/watch?v=x", "youtube_analyze"),
+            ("https://m.youtube.com/watch?v=x", "youtube_analyze"),
+            ("https://music.youtube.com/watch?v=x", "youtube_analyze"),
+            ("https://example.com/a", "read_url"),
+            ("https://notyoutube.com/a", "read_url"),
+            ("https://youtube.com.evil.test/a", "read_url"),
+        ],
+    )
+    def test_the_reader_is_chosen_by_host_not_by_substring(self, url, reader):
+        """A host is matched as a host, never as a substring: `youtube.com` in
+        the middle of an attacker-chosen name is not YouTube."""
+        assert rules.reader_for(url) == reader
+
+
+class TestTriggerFindsSourcesNotIntent:
+    """#191 A1/A2. The first version of this rule asked "is the message ONLY a
+    link?" — sentence shape standing in for INTENT — and abstained on every
+    way the owner actually types. Regex keeps the job it is honest at: finding
+    the URLs. It never guesses what the request means."""
+
+    @pytest.mark.parametrize(
+        "task",
+        [
+            "https://youtu.be/kJQP7kiw5Fk",
+            "summarize https://youtu.be/kJQP7kiw5Fk",
+            "who is the author of https://youtu.be/kJQP7kiw5Fk",
+            "what's their argument in https://youtu.be/x? in 3 bullets",
+            "podsumuj https://youtu.be/x",
+            "  <https://youtu.be/x>  ",
+            "https://example.com/article — is this true?",
+        ],
+    )
+    def test_a_message_carrying_a_source_binds_however_it_is_phrased(self, tmp_path, task):
+        rule = load_one(tmp_path, CANONICAL)
+        verdict, evidence = rules.evaluate(rule, rules.TurnContext(task=task))
+        assert verdict == rules.VERDICT_BIND
+        assert evidence["sources"] and evidence["sources"][0]["kind"] == "url"
+
+    @pytest.mark.parametrize(
+        "task",
+        ["find me a hotel in Rome", "what is tar -xzf", "email me the report"],
+    )
+    def test_a_message_with_no_source_does_not_bind(self, tmp_path, task):
+        rule = load_one(tmp_path, CANONICAL)
+        verdict, evidence = rules.evaluate(rule, rules.TurnContext(task=task))
+        assert verdict == rules.VERDICT_ABSTAIN
+        assert evidence["sources"] == []
 
 
 class TestGate:
-    """The sequence the canonical rule exists to enforce, in order."""
+    """The sequence the source-authority rule enforces."""
 
-    def test_a_prohibited_tool_is_refused_before_the_route_is_tried(self, tmp_path):
-        binding = bind_canonical(tmp_path, "https://youtu.be/abc")
+    def test_a_prohibited_tool_is_refused_before_the_source_is_read(self, tmp_path):
+        binding = bind_canonical(tmp_path, "summarize https://youtu.be/x")
         [verdict] = rules.gate([binding], "web_search")
         assert verdict.verdict == "refused"
-        assert "youtube-url-analysis" in verdict.message
+        assert "bounded-material" in verdict.message
         assert "Call youtube_analyze now" in verdict.message
+        assert "ASK them in plain text" in verdict.message
 
-    def test_the_routed_tool_itself_is_never_refused(self, tmp_path):
-        binding = bind_canonical(tmp_path, "https://youtu.be/abc")
-        [verdict] = rules.gate([binding], "youtube_analyze")
-        assert verdict.verdict == "allowed"
+    def test_the_routed_reader_itself_is_never_refused(self, tmp_path):
+        binding = bind_canonical(tmp_path, "summarize https://youtu.be/x")
+        assert rules.gate([binding], "youtube_analyze")[0].verdict == "allowed"
 
-    def test_a_successful_route_does_not_license_a_second_source(self, tmp_path):
-        binding = bind_canonical(tmp_path, "https://youtu.be/abc")
+    def test_a_successful_read_does_not_license_a_second_source(self, tmp_path):
+        binding = bind_canonical(tmp_path, "summarize https://youtu.be/x")
         binding.note_tool_result("youtube_analyze", "ok")
-        binding.note_assistant_text("the transcript is fine, now let me search")
         [verdict] = rules.gate([binding], "web_search")
         assert verdict.verdict == "refused"
-        assert "second source" in verdict.message
+        assert "widen the material" in verdict.message
 
-    def test_a_failed_route_still_refuses_until_the_failure_is_STATED(self, tmp_path):
-        """The #190 incident, exactly: transcript empty, then six web searches
-        and an answer sourced from news sites with nothing said about it."""
-        binding = bind_canonical(tmp_path, "https://youtu.be/abc")
+    def test_a_FAILED_read_still_does_not_license_a_second_source(self, tmp_path):
+        """#190's incident: the transcript came back empty and six web searches
+        followed. A dead source is a reason to say so and ask — never a licence
+        to substitute."""
+        binding = bind_canonical(tmp_path, "summarize https://youtu.be/x")
         binding.note_tool_result("youtube_analyze", "incomplete")
-        binding.note_assistant_text("Let me look into this from another angle.")
         [verdict] = rules.gate([binding], "web_search")
         assert verdict.verdict == "refused"
-        assert "WITHOUT SAYING SO" in verdict.message
+        assert "SAY SO" in verdict.message and "ASK" in verdict.message
 
-    def test_disclosure_lifts_the_prohibition_and_nothing_else_does(self, tmp_path):
-        binding = bind_canonical(tmp_path, "https://youtu.be/abc")
-        binding.note_tool_result("youtube_analyze", "incomplete")
-        binding.note_assistant_text("The transcript came back empty, so I cannot read the video.")
-        [verdict] = rules.gate([binding], "web_search")
-        assert verdict.verdict == "allowed"
-        assert verdict.evidence["disclosed"] is True
+    def test_NOTHING_the_model_says_can_lift_the_prohibition(self, tmp_path):
+        """The anti-regression for #191 A4. v1 lifted the prohibition when the
+        model's prose contained a declared word — a hand-written list that
+        cannot cover a language, and that similarity cannot fix because
+        "the transcript is unavailable" and "let me get the transcript another
+        way" are the same topic and opposite meanings. The gate now has no
+        view of model prose at all, in ANY language."""
+        for said in (
+            "The transcript is unavailable.",
+            "Transkrypcja jest niedostępna.",
+            "let me get the transcript another way",
+            "",
+        ):
+            binding = bind_canonical(tmp_path, "summarize https://youtu.be/x")
+            binding.note_tool_result("youtube_analyze", "incomplete")
+            assert not hasattr(binding, "note_assistant_text")
+            assert rules.gate([binding], "web_search")[0].verdict == "refused", said
 
-    def test_a_later_failed_route_re_arms_the_disclosure_requirement(self, tmp_path):
-        """One disclosure is not a licence for the rest of the turn: a second
-        failure is a second thing the owner has not been told."""
-        binding = bind_canonical(tmp_path, "https://youtu.be/abc")
-        binding.note_tool_result("youtube_analyze", "incomplete")
-        binding.note_assistant_text("The transcript is unavailable.")
-        assert rules.gate([binding], "web_search")[0].verdict == "allowed"
-        binding.note_tool_result("youtube_analyze", "failed")
-        assert rules.gate([binding], "web_search")[0].verdict == "refused"
-
-    def test_a_refused_tool_call_never_counts_as_having_routed(self, tmp_path):
-        binding = bind_canonical(tmp_path, "https://youtu.be/abc")
-        binding.note_tool_result("web_search", "failed")  # a different tool
+    def test_a_refused_tool_call_never_counts_as_having_read_the_source(self, tmp_path):
+        binding = bind_canonical(tmp_path, "summarize https://youtu.be/x")
+        binding.note_tool_result("web_search", "failed")  # not a routed reader
         assert binding.route_calls == 0
 
     def test_refusals_are_bounded_then_escalate(self, tmp_path):
-        binding = bind_canonical(tmp_path, "https://youtu.be/abc")
+        binding = bind_canonical(tmp_path, "summarize https://youtu.be/x")
         outcomes = [rules.gate([binding], "web_search")[0].verdict for _ in range(4)]
         assert outcomes == ["refused", "refused", "escalate", "escalate"]
         assert binding.max_rounds == rules.RULE_MAX_REFUSALS
 
-    def test_an_owner_override_lifts_the_binding_for_the_turn(self, tmp_path):
-        binding = bind_canonical(tmp_path, "https://youtu.be/abc")
+    def test_only_the_owner_can_lift_it(self, tmp_path):
+        binding = bind_canonical(tmp_path, "summarize https://youtu.be/x")
         binding.overridden = True
         assert rules.gate([binding], "web_search")[0].verdict == "allowed"
 
     def test_fail_hold_sends_the_first_violation_straight_to_the_owner(self, tmp_path):
         rule = load_one(tmp_path, CANONICAL)
-        binding = rules.bind(rule, {}, "b1", {"youtube_analyze"}, max_rounds=0)
+        binding = rules.bind(rule, {}, "b1", {"read_url"}, max_rounds=0)
         assert rules.gate([binding], "web_search")[0].verdict == "escalate"
 
 
@@ -347,9 +443,9 @@ class TestRecordShapes:
         TestShippedExamples. The verdict carries the whole instruction; the
         record is what gets cut, and it is cut where it is written."""
         rule = load_one(
-            tmp_path, CANONICAL.replace("A bare YouTube URL means analyse that video.", "x" * 900)
+            tmp_path, CANONICAL.replace("Answer from the material I gave you.", "x" * 900)
         )
-        binding = rules.bind(rule, {}, "b1", {"youtube_analyze"})
+        binding = rules.bind(rule, {}, "b1", {"read_url"})
         [verdict] = rules.gate([binding], "web_search")
         assert len(verdict.message) > rules.GATE_MESSAGE_CHARS
         assert not verdict.message.endswith("…")
@@ -370,36 +466,229 @@ class TestShippedExamples:
         assert len(loaded) == 2
         assert not [r.name for r in loaded if r.error]
 
+    def _canonical(self):
+        return next(
+            r for r in rules.load_rules([self.EXAMPLES]) if r.trigger == "message_shape"
+        )
+
     def test_the_refusal_the_model_reads_is_never_truncated(self):
-        """The write-time cap (§8.5) belongs at the record, never on the text
-        handed to the model. It was applied in both places, and the canonical
-        rule's disclose refusal landed at EXACTLY the cap — losing its closing
-        clause, the one sentence the engine exists to deliver. A refusal cut
-        mid-instruction is the uninstructive refusal `_refusal_text` forbids."""
-        rule = next(r for r in rules.load_rules([self.EXAMPLES]) if r.trigger == "message_shape")
+        """The write-time cap belongs at the record, never on the text handed
+        to the model. It was applied in both places and a refusal landed at
+        EXACTLY the cap, losing its closing clause. A refusal cut mid-
+        instruction is the uninstructive refusal `_refusal_text` forbids."""
+        rule = self._canonical()
         known = {"youtube_analyze", "web_search", "read_url"}
+        evidence = rules.evaluate(rule, rules.TurnContext(task="https://youtu.be/x"))[1]
 
         def refusal(prepare) -> str:
-            binding = rules.bind(rule, {}, "b1", known)
+            binding = rules.bind(rule, evidence, "b1", known)
             prepare(binding)
             return rules.gate([binding], "web_search")[0].message
 
-        before_route = refusal(lambda b: None)
-        succeeded = refusal(lambda b: b.note_tool_result("youtube_analyze", "ok"))
-        failed = refusal(lambda b: b.note_tool_result("youtube_analyze", "incomplete"))
-
-        for message in (before_route, succeeded, failed):
+        messages = [
+            refusal(lambda b: None),
+            refusal(lambda b: b.note_tool_result("youtube_analyze", "ok")),
+            refusal(lambda b: b.note_tool_result("youtube_analyze", "incomplete")),
+        ]
+        for message in messages:
             assert not message.endswith("…"), f"refusal was truncated: {message!r}"
             assert message.rstrip().endswith((".", "!")), (
                 f"refusal does not end on a complete sentence: {message!r}"
             )
-        # The clause the cap ate, verbatim: substituted material must not be
-        # passed off as the routed tool's output.
-        assert "as if it came from youtube_analyze" in failed
+        # The clause the cap ate: substituted material must never be passed off
+        # as the source's own.
+        assert "as if it were theirs" in messages[-1]
 
-    def test_the_canonical_rule_binds_on_a_bare_url_only(self):
-        rule = next(r for r in rules.load_rules([self.EXAMPLES]) if r.trigger == "message_shape")
-        for task in ("https://youtu.be/kJQP7kiw5Fk", "  https://www.youtube.com/watch?v=x  "):
+    def test_the_canonical_rule_binds_however_the_request_is_phrased(self):
+        """The v1 trigger ("the message is ONLY a link") abstained on every one
+        of these — sentence shape standing in for intent (#191 A1)."""
+        rule = self._canonical()
+        for task in (
+            "https://youtu.be/kJQP7kiw5Fk",
+            "  https://www.youtube.com/watch?v=x  ",
+            "summarize https://youtu.be/x",
+            "who is the author of https://youtu.be/x",
+            "what is https://youtu.be/x about",
+            "https://vimeo.com/12345",
+        ):
             assert rules.evaluate(rule, rules.TurnContext(task=task))[0] == rules.VERDICT_BIND
-        for task in ("what is https://youtu.be/x about", "https://vimeo.com/12345"):
+        for task in ("find me a hotel", "what is tar -xzf"):
             assert rules.evaluate(rule, rules.TurnContext(task=task))[0] == rules.VERDICT_ABSTAIN
+
+    def test_a_vimeo_link_is_still_a_source_but_a_different_reader(self):
+        """"YouTube or other for that matter" — the rule is about sources, not
+        about YouTube. Only the reader differs."""
+        rule = self._canonical()
+        evidence = rules.evaluate(rule, rules.TurnContext(task="https://vimeo.com/12345"))[1]
+        binding = rules.bind(rule, evidence, "b1", {"read_url", "youtube_analyze"})
+        assert binding.readers == ("read_url",)
+
+
+class TestRetiredKeys:
+    """Removing behaviour that had already governed live turns (#191 A4). A
+    retired key must fail LOUDLY: a file that reads as if it still lifts a
+    prohibition, and quietly does not, is worse than one that stops loading."""
+
+    def test_a_file_written_against_the_old_shape_says_what_changed(self, tmp_path):
+        old = CANONICAL.replace(
+            "prohibit: web_search",
+            "prohibit: web_search\nunless: disclosed\ndisclosure_terms: transcript",
+        )
+        rule = load_one(tmp_path, old)
+        assert "`unless:` was retired" in rule.error
+        assert "only the owner can lift it" in rule.error
+        verdict, evidence = rules.evaluate(rule, rules.TurnContext(task="https://youtu.be/x"))
+        assert verdict == rules.VERDICT_ERROR and "retired" in evidence["error"]
+
+    def test_the_retired_key_binds_nothing_rather_than_meaning_something_else(self, tmp_path):
+        rule = load_one(tmp_path, CANONICAL.replace("prohibit: web_search", "unless: disclosed"))
+        assert rule.obligations == ()
+
+
+class TestTheWholeMaterialChannel:
+    """An attachment is the LEAST ambiguous "here, answer from this" there is —
+    and it was invisible to the first detector, because attachments reach the
+    agent as separate parameters and never appear in the message text at all.
+    A rule that covers links but not the PDF you just dropped in covers the
+    easy half of its own subject."""
+
+    def _ctx(self, task="", **kw):
+        return rules.TurnContext(task=task, **kw)
+
+    def _evaluate(self, tmp_path, ctx):
+        return rules.evaluate(load_one(tmp_path, CANONICAL), ctx)
+
+    def test_an_attached_document_binds_with_no_url_in_sight(self, tmp_path):
+        verdict, evidence = self._evaluate(
+            tmp_path, self._ctx("summarize this", documents=("/tmp/report.pdf",))
+        )
+        assert verdict == rules.VERDICT_BIND
+        assert evidence["sources"] == [{"ref": "/tmp/report.pdf", "kind": "attachment"}]
+
+    def test_an_attached_image_binds_too(self, tmp_path):
+        verdict, evidence = self._evaluate(
+            tmp_path, self._ctx("what is this?", images=("/tmp/shot.png",))
+        )
+        assert verdict == rules.VERDICT_BIND
+        assert evidence["sources"][0]["kind"] == "attachment"
+
+    def test_attached_material_needs_no_reader_and_says_so(self, tmp_path):
+        """The second shape of `route`: the material is already in context, so
+        the obligation is satisfied by construction. Recorded, not hidden."""
+        rule = load_one(tmp_path, CANONICAL)
+        _, evidence = rules.evaluate(
+            rule, self._ctx("summarize this", documents=("/tmp/report.pdf",))
+        )
+        binding = rules.bind(rule, evidence, "b1", {"read_url", "read_file"})
+        assert binding.readers == ()
+        assert binding.present == ("/tmp/report.pdf",)
+        assert binding.satisfiable is True  # nothing to call cannot be missing
+        route = rules.binding_record(binding)["obligations"][0]
+        assert route["present"] == ["/tmp/report.pdf"]
+        assert "already in front of you" in rules.seed_text([binding])
+
+    def test_the_prohibition_still_bites_for_attached_material(self, tmp_path):
+        """The half that does the work when there is no reader to call."""
+        rule = load_one(tmp_path, CANONICAL)
+        _, evidence = rules.evaluate(
+            rule, self._ctx("summarize this", documents=("/tmp/report.pdf",))
+        )
+        binding = rules.bind(rule, evidence, "b1", {"read_url"})
+        [verdict] = rules.gate([binding], "web_search")
+        assert verdict.verdict == "refused"
+        assert "already in front of you" in verdict.message
+        assert "ASK them" in verdict.message
+
+    @pytest.mark.parametrize(
+        "task,ref",
+        [
+            ("summarize ~/Downloads/report.pdf", "~/Downloads/report.pdf"),
+            ("read /var/log/system.log please", "/var/log/system.log"),
+            ("what does ./notes.md say", "./notes.md"),
+            ("check ../other/data.csv", "../other/data.csv"),
+            ("summarize report.pdf", "report.pdf"),
+            ("what is in agent.py", "agent.py"),
+        ],
+    )
+    def test_a_path_the_owner_typed_is_material_too(self, tmp_path, task, ref):
+        verdict, evidence = self._evaluate(tmp_path, self._ctx(task))
+        assert verdict == rules.VERDICT_BIND
+        assert evidence["sources"] == [{"ref": ref, "kind": "path"}]
+
+    def test_a_named_path_routes_to_the_file_reader(self, tmp_path):
+        rule = load_one(tmp_path, CANONICAL)
+        _, evidence = rules.evaluate(rule, self._ctx("summarize ~/report.pdf"))
+        binding = rules.bind(rule, evidence, "b1", {"read_file", "read_url"})
+        assert binding.readers == ("read_file",)
+
+    @pytest.mark.parametrize(
+        "task",
+        [
+            "find me a hotel in Rome",
+            "what is tar -xzf",
+            "the version is 1.2.3",
+            "i.e. the second one",
+            "run it e.g. tomorrow",
+            "email me at pawel@wenda.eu",
+            "is 3.5 better than 4.0",
+        ],
+    )
+    def test_prose_is_not_mistaken_for_material(self, tmp_path, task):
+        """The bare-filename form is the one that can false-positive, so it is
+        held to a known extension list rather than 'anything with a dot'."""
+        verdict, evidence = self._evaluate(tmp_path, self._ctx(task))
+        assert verdict == rules.VERDICT_ABSTAIN, evidence["sources"]
+
+    def test_a_url_is_never_double_counted_as_a_path(self, tmp_path):
+        _, evidence = self._evaluate(tmp_path, self._ctx("summarize https://x.test/a/b.pdf"))
+        assert [s["kind"] for s in evidence["sources"]] == ["url"]
+
+    def test_attachments_and_links_compose_into_one_material_set(self, tmp_path):
+        _, evidence = self._evaluate(
+            tmp_path,
+            self._ctx("compare this with https://x.test/a", documents=("/tmp/r.pdf",)),
+        )
+        assert [s["kind"] for s in evidence["sources"]] == ["attachment", "url"]
+
+    def test_the_narrow_url_detector_still_ignores_attachments(self, tmp_path):
+        """`contains: url` is the narrower detector, kept for a rule that
+        really does mean web pages only. It must not silently widen."""
+        rule = load_one(tmp_path, CANONICAL.replace("contains: source", "contains: url"))
+        verdict, _ = rules.evaluate(
+            rule, self._ctx("summarize this", documents=("/tmp/report.pdf",))
+        )
+        assert verdict == rules.VERDICT_ABSTAIN
+
+    def test_provenance_is_carried_for_attached_material_too(self, tmp_path):
+        """An attachment the owner uploaded and one that arrived on inbound
+        mail are the same bytes and different facts."""
+        _, evidence = self._evaluate(
+            tmp_path, self._ctx("summarize", documents=("/tmp/r.pdf",), origin="email")
+        )
+        assert evidence["origin"] == "email"
+
+    def test_a_natively_delivered_attachment_is_ONE_source_not_two(self, tmp_path):
+        """The web server names an attachment BOTH ways: an image the backend
+        can see is passed as a parameter AND announced in the text as
+        "[image attached: … file at <path>]". The path detector would find that
+        same path, so dedup by ref must collapse them — and the ATTACHMENT
+        reading must win, because the material really is in context and there
+        is nothing to call."""
+        path = "/tmp/uploads/shot.png"
+        _, evidence = self._evaluate(
+            tmp_path,
+            self._ctx(f"what is this? [image attached: shot.png — file at {path}]",
+                      images=(path,)),
+        )
+        assert evidence["sources"] == [{"ref": path, "kind": "attachment"}]
+
+    def test_a_file_the_backend_could_NOT_take_natively_routes_to_read_file(self, tmp_path):
+        """The third shape the server produces: no parameter, just
+        "[attached file: <path>]". The model must read it — so the route
+        resolves to a reader rather than to `present`."""
+        path = "/tmp/uploads/report.txt"
+        rule = load_one(tmp_path, CANONICAL)
+        _, evidence = rules.evaluate(rule, self._ctx(f"summarize this [attached file: {path}]"))
+        assert evidence["sources"] == [{"ref": path, "kind": "path"}]
+        binding = rules.bind(rule, evidence, "b1", {"read_file", "read_url"})
+        assert binding.readers == ("read_file",) and binding.present == ()

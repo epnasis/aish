@@ -1489,7 +1489,7 @@ class Agent:
         # Seed (#191): evaluate the rule corpus against this turn and create the
         # bindings, at the same position `knowledge` is emitted from — before
         # the user message, so nothing this turn dispatches can outrun the gate.
-        rules_text = self.seed_rules(task)
+        rules_text = self.seed_rules(task, images, documents)
         self.messages.append(
             {"role": "system", "content": task_reminder(index, preload.text, rules_text)}
         )
@@ -1552,13 +1552,6 @@ class Agent:
                 # request instead of reconstructing the turn.
                 entry["raw_blocks"] = raw_blocks
             self._append(entry)
-            # A `disclose` obligation lifts on the model's own words, and those
-            # words must land BEFORE this turn's tool calls are dispatched —
-            # the whole point is that the substitution is announced, not
-            # explained afterwards. Only `content` counts: it is what the user
-            # sees, unlike the thinking channel (#191).
-            if content:
-                self.note_model_text(content)
 
             # Deny means STOP: only a TEXT-ONLY turn clears the stop gate.
             # Clearing on any content would be defeated by chatty preamble (or
@@ -2020,18 +2013,23 @@ class Agent:
             if (name in READ_ONLY_TOOLS or self._is_readonly_plugin(name))
             and not self._read_needs_prompt(name, args)
         ]
-        # While ANY gate is armed, everything goes through _dispatch
-        # sequentially — the parallel thunks below would bypass the gate (and
-        # neither the skill-counter dict nor a binding's refusal rounds are
-        # thread-safe). `_bindings` belongs in this condition for exactly the
-        # reason the other two do: a rule that only holds for serial turns is
-        # not a rule, and web_search/read_url — the tools the canonical rule
-        # prohibits — are the readonly set this branch fans out.
+        # While a gate is armed, the calls it governs go through _dispatch
+        # sequentially — the parallel thunks below bypass the gate entirely
+        # (and neither the skill-counter dict nor a binding's refusal rounds
+        # are thread-safe). The stop and skill gates govern EVERY call, so they
+        # disable the whole batch. A rule binding governs only the tools it
+        # prohibits and the readers it routes to (`rules.affects`), so a turn
+        # that binds a source rule and then reads three local files keeps its
+        # concurrency: the sacrifice is paid where the rule actually applies,
+        # not on every link-carrying turn.
+        gated_by_rule = self._bindings and any(
+            rules.affects(self._bindings, name) for name, _args in calls
+        )
         if (
             len(concurrent) < 2
             or self._pending_skill_reads
             or self._pending_comment_response
-            or self._bindings
+            or gated_by_rule
         ):
             return [
                 self._call_result(
@@ -2668,7 +2666,12 @@ class Agent:
 
     # ------------------------------------------------------------ rules (#191)
 
-    def seed_rules(self, task: str) -> str:
+    def seed_rules(
+        self,
+        task: str,
+        images: list[str] | None = None,
+        documents: list[str] | None = None,
+    ) -> str:
         """Evaluate the rule corpus against this turn and create the bindings.
 
         The ONE seed point, called by both entry points (run_task, and
@@ -2689,7 +2692,9 @@ class Agent:
         for rule in active:
             started = time.perf_counter()
             try:
-                verdict, evidence = rules.evaluate(rule, self._turn_context(task))
+                verdict, evidence = rules.evaluate(
+                    rule, self._turn_context(task, images, documents)
+                )
             except Exception as exc:  # noqa: BLE001 — a broken evaluator must not kill the turn
                 verdict, evidence = rules.VERDICT_UNEVALUABLE, {"error": repr(exc)[:200]}
             row: dict = {
@@ -2736,10 +2741,25 @@ class Agent:
             binding.seeded = True
             self._emit_record(**rules.binding_record(binding))
 
-    def _turn_context(self, task: str) -> rules.TurnContext:
+    def _turn_context(
+        self,
+        task: str,
+        images: list[str] | None = None,
+        documents: list[str] | None = None,
+    ) -> rules.TurnContext:
         """The facts Tier-0 triggers read. Gathered by the HARNESS — never the
-        acting model's summary of its own turn (contract corollary 3)."""
-        return rules.TurnContext(task=task, origin=self.origin)
+        acting model's summary of its own turn (contract corollary 3).
+
+        Attachments are passed explicitly because they are NOT in `task`: they
+        reach run_task as separate parameters, so a trigger reading only the
+        message text cannot see them — and an attached document is the least
+        ambiguous "answer from this" the owner can send."""
+        return rules.TurnContext(
+            task=task,
+            origin=self.origin,
+            images=tuple(images or ()),
+            documents=tuple(documents or ()),
+        )
 
     def _known_tool_names(self) -> set[str]:
         """Everything the model can call this turn, for the bind-time
@@ -2774,12 +2794,6 @@ class Agent:
             )
         for binding in self._bindings:
             binding.note_tool_result(name, status)
-
-    def note_model_text(self, text: str) -> None:
-        """Assistant prose emitted ALONGSIDE tool calls — the only place a
-        mid-task disclosure can live, since a text-only turn ends the task."""
-        for binding in self._bindings:
-            binding.note_assistant_text(text)
 
     def _rule_gate(self, name: str, args: dict) -> str | None:
         """Membership against this turn's bindings: None = proceed, else the
