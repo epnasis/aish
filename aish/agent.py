@@ -370,6 +370,34 @@ def _with_feedback(base: str, comment: str) -> str:
     return base + FEEDBACK_NOTE.format(comment=comment) if comment else base
 
 
+# Text that means THE ACTION DID NOT HAPPEN, for the paths that still return a
+# bare string. Structural carriers (`_gate_outcome`, `ToolOutcome.meta`) are
+# preferred and checked first; this is the floor under the ones that predate
+# them, and it is enumerated in ONE place so the eleventh refusal site inherits
+# it instead of being forgotten.
+REFUSAL_OPENINGS = (
+    "ERROR", "NOT EXECUTED", "(not executed", "USER DENIED", "NOT RUN", "BLOCKED",
+)
+
+
+def _call_facts(result: str, run_meta: dict | None) -> tuple[str, str]:
+    """(status, decision) for one finished call — the single reading of "did
+    this actually run?".
+
+    Two consumers with the same question were answering it differently:
+    `_observe_for_rules` had the fallback, `_note_turn_call` had only the
+    envelope, so a refusal carrying no envelope satisfied a `must_first` and
+    logged a verify PASS on the strength of a call the harness had stopped.
+    """
+    meta = getattr(result, "meta", None) or {}
+    decision = str(meta.get("decision") or (run_meta or {}).get("decision") or "")
+    status = meta.get("status")
+    if status is None:
+        failed = decision in REFUSED_DECISIONS or result.startswith(REFUSAL_OPENINGS)
+        status = tools.STATUS_FAILED if failed else tools.STATUS_OK
+    return str(status), decision
+
+
 def _gate_outcome(text: str, decision: str) -> tools.ToolOutcome:
     """A refusal, carrying its own verdict (#192, contract §6.13).
 
@@ -1657,7 +1685,7 @@ class Agent:
                     continue
                 was_held = self._held_answer is not None
                 result = self._release_held(text=result)
-                self._log_held_entry()
+                self._log_held_entry(result)
                 # A released hold has already streamed itself, notes included.
                 if not content and not was_held and self.on_token:
                     self.on_token(result + "\n")
@@ -1751,6 +1779,12 @@ class Agent:
         error line. The step budget is never silently exceeded — continuing
         is the user's call."""
         self._append({"role": "user", "content": note})
+        if self._held_answer is not None:
+            # Per turn, like the loop's own reset — which this exit skips. The
+            # stuck turn's buffered preamble was still in there and got streamed
+            # glued in front of the wrap-up text, so the owner saw something the
+            # return value and the log did not contain.
+            self._held_answer = []
         self.status.start("wrapping up")
         turn_start = time.perf_counter()
         usage = (0, 0)
@@ -1784,6 +1818,10 @@ class Agent:
                         "content": NOT_EXECUTED_LIMIT,
                     }
                 )
+        # A terminal answer is still an answer, so the rules still get their
+        # say — note-only, because there is no turn left to ask into and asking
+        # here would restart the very loop the terminator just concluded.
+        self._verify_answer(content, ask=False)
         # Every exit releases the hold, or a bound turn that ends at the loop
         # detector, the stall cap or the ceiling delivers NOTHING: the wrap-up
         # text sits in the buffer and the client shows a dead turn. The note
@@ -2298,12 +2336,15 @@ class Agent:
             )
             return result
         self._note(f"{mark} {name} {format_secs(elapsed)}")
-        self._emit_tool_step(name, args, result, elapsed, call_no)
         # The single funnel every tool call passes through, parallel path
         # included — so a binding's view of "was the routed tool tried, and did
         # it work?" cannot miss a call that took another branch (#191).
+        # BEFORE _emit_tool_step, which consumes `_run_meta`: that is where a
+        # denied, held or blocked run_command carries its verdict, and reading
+        # it afterwards saw nothing at all.
         self._observe_for_rules(name, result)
         self._note_turn_call(name, args, result)
+        self._emit_tool_step(name, args, result, elapsed, call_no)
         return result
 
     def _emit_tool_step(
@@ -2931,16 +2972,9 @@ class Agent:
         """
         if not self._bindings:
             return
-        meta = getattr(result, "meta", None) or {}
-        if meta.get("decision") in REFUSED_DECISIONS:
+        status, decision = _call_facts(result, self._run_meta)
+        if decision in REFUSED_DECISIONS:
             return
-        status = meta.get("status")
-        if status is None:
-            status = (
-                tools.STATUS_FAILED
-                if result.startswith(("ERROR", "NOT EXECUTED"))
-                else tools.STATUS_OK
-            )
         for binding in self._bindings:
             binding.note_tool_result(name, status)
 
@@ -2978,10 +3012,18 @@ class Agent:
         spent: set[str] = set()
         for failure in failures:
             binding = failure.binding
-            if not ask or not failure.askable or binding.asks >= rules.RULE_MAX_ASKS:
+            # `spent` FIRST: on a binding's last round the increment below has
+            # already raised `asks` to the cap, and re-reading it here shunted
+            # that binding's second failing obligation to `unmet` mid-pass —
+            # recording an "answer shipped with a note" for an answer that was
+            # not shipped, and dropping the obligation from the goad.
+            fresh = binding.id not in spent
+            if not ask or not failure.askable or (
+                fresh and binding.asks >= rules.RULE_MAX_ASKS
+            ):
                 unmet.append(failure)
                 continue
-            if binding.id not in spent:
+            if fresh:
                 spent.add(binding.id)
                 binding.asks += 1
             asks.append(failure)
@@ -3029,13 +3071,25 @@ class Agent:
         notes, self._not_followed = self._not_followed, []
         return (answer + "\n\n" + "\n".join(notes)).strip()
 
-    def _log_held_entry(self) -> None:
+    def _log_held_entry(self, text: str = "") -> None:
         """Deliver a released proposal to the log — the single point where a
         held answer becomes THE answer. Rejected ones are simply never passed
-        here, so nothing has to be retracted."""
+        here, so nothing has to be retracted.
+
+        `text` is the answer AS DELIVERED, note included. Logging the model's
+        original words instead would make a rule that was tried and failed
+        visible only in the live stream: after a restart or a cold reload the
+        note is gone and an unfollowed rule reads as followed — the exact
+        silence the note exists to break.
+        """
         entry, self._held_entry = self._held_entry, None
-        if entry is not None and self.on_message:
-            self.on_message(_serialize(entry))
+        if entry is None or not self.on_message:
+            return
+        # A COPY. `entry` is the model's own history entry and must keep the
+        # model's own words: the note is aish speaking to the owner, and
+        # feeding it back as something the model said would have it defend or
+        # repeat a line it never wrote.
+        self.on_message(_serialize({**entry, "content": text} if text else entry))
 
     def _release_held(self, text: str = "", discard: bool = False) -> str:
         """Hand the withheld answer to the client, or drop it.
@@ -3051,7 +3105,7 @@ class Agent:
             # `text` covers the turn that answered with nothing: the buffer is
             # empty, the caller's own stream is suppressed (it would double the
             # notes), so the placeholder has to leave from here or not at all.
-            self.on_token("\n" + ("".join(held) or text))
+            self.on_token("\n" + ("".join(held) or text) + "\n")
         if discard and self._bindings:
             self._held_answer = []  # keep holding: the next answer is bound too
         if self._not_followed:
@@ -3103,12 +3157,12 @@ class Agent:
         proposed and the gate stopped it" is a different fact from "it was
         never tried", and a verify check that conflated them would ask the
         model to do something the harness had just forbidden."""
-        meta = getattr(result, "meta", None) or {}
+        status, decision = _call_facts(result, self._run_meta)
         self._turn_calls.append({
             "tool": name,
             "args": dict(args or {}),
-            "status": meta.get("status") or "",
-            "decision": meta.get("decision") or "",
+            "status": status,
+            "decision": decision,
         })
 
     def _rule_gate(self, name: str, args: dict) -> str | None:
@@ -3275,7 +3329,10 @@ class Agent:
                 "output": "Held until you address the user's concern.",
             }
         self._note("✋ stopped until you address the user's concern")
-        return STOP_GATE_REFUSAL
+        # Carried structurally rather than sniffed: the stop gate fires on
+        # EVERY tool, parallel reads included, where an instance attribute
+        # would race between concurrent calls.
+        return _gate_outcome(STOP_GATE_REFUSAL, decision="held")
 
     def _skill_gate(self, name: str, args: dict) -> str | None:
         """Refusal text while a flagged oversized skill is unread, else None.
@@ -3297,7 +3354,9 @@ class Agent:
             if self._pending_skill_reads[key] <= 0:
                 del self._pending_skill_reads[key]
         self._note(f"✋ gated until read_skill: {names}")
-        return SKILL_GATE_REFUSAL.format(names=names, first=first)
+        return _gate_outcome(
+            SKILL_GATE_REFUSAL.format(names=names, first=first), decision="blocked"
+        )
 
     def _dispatch(self, name: str, args: dict) -> str:
         # The gates run before everything — a refusal must never reach an

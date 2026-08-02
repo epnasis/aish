@@ -1374,13 +1374,19 @@ def _verify_one(
         capability = str(obligation["capability"])
         if evidence.called(capability):
             return None
-        blocked = evidence.refused(capability)
+        # Two ways this can never be met, and neither is the model's fault:
+        # another gate stopped the call, or the capability is not exposed at
+        # all. Asking in either case spends the bound goading the model toward
+        # something that cannot happen — and the second one would do it on
+        # EVERY governed turn, forever, for a typo in the rule file.
+        blocked = evidence.refused(capability) or capability in binding.unsatisfiable
         return VerifyFailure(
             binding, obligation,
             {
                 "capability": capability,
                 "called": [c.get("tool") for c in evidence.calls],
-                "refused": blocked,
+                "refused": evidence.refused(capability),
+                "unavailable": capability in binding.unsatisfiable,
             },
             MUST_FIRST_ASK.format(capability=capability, **common),
             # Asking would send the model back at a call another gate just

@@ -5854,6 +5854,20 @@ then:
 ---
 """
 
+# Two verify obligations that fail INDEPENDENTLY — the round-accounting case.
+# `links_to_what_you_read` cannot do it: with no reads there is nothing to link,
+# so it passes exactly when must_first fails.
+RULE_VERIFY_TWO = """---
+name: two-checks
+description: A price comes from the store, and never in EUR.
+when: always
+then:
+  must_first: read_url
+  answer_must_not:
+    pattern: "EUR"
+---
+"""
+
 RULE_VERIFY = """---
 name: live-price
 description: A price you quote comes from the store's page, this turn.
@@ -6064,9 +6078,13 @@ class TestVerify:
         agent.on_message = logged.append
         answer = agent.run_task("price?")
         answers = [m["content"] for m in logged if m.get("role") == "assistant"]
-        assert answers == ["about 40 EUR"], (
+        assert len(answers) == 1, (
             f"a rejected proposal was logged as an answer: {answers}"
         )
+        # And what is logged is the answer AS DELIVERED. Logging the model's
+        # original words would leave the note in the live stream only, so a
+        # cold reload would show an unfollowed rule as followed.
+        assert answers[0] == answer
         assert "not followed" in answer
 
     def test_an_empty_answer_streams_its_note_once(self, tmp_path):
@@ -6104,6 +6122,70 @@ class TestVerify:
         assert "not followed" not in answer
         ask = [m for m in agent.messages if str(m.get("content", "")).startswith("[aish:")]
         assert ask and "show_image" in ask[0]["content"]
+
+    def test_a_denial_outranks_verify(self, tmp_path):
+        """#81 over #191. The stop gate is lifted BY the text-only turn Verify
+        is about to inspect, so without the guard the goad drives the very call
+        the owner just denied — the harness laundering a denial."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("run_command", command="curl shop")]),
+                model_says("about 40 EUR"),
+            ],
+            rule_texts=(RULE_VERIFY,),
+            approve=lambda _cmd: Denied("no, stop looking things up"),
+        )
+        answer = agent.run_task("price?")
+        asks = [m for m in agent.messages if str(m.get("content", "")).startswith("[aish:")]
+        assert not asks, "a denial was overridden by a rule's ask"
+        # The rules still get their say — a denial silences the ASK, not the
+        # disclosure.
+        assert "not followed" in answer
+
+    def test_a_gate_refused_call_does_not_satisfy_must_first(self, tmp_path):
+        """The stop and skill gates returned bare strings, so the evidence
+        funnel saw a call that "ran" — and a must_first was satisfied by a call
+        the harness had stopped, with a verify PASS recorded to prove it."""
+        agent, _ = rules_agent(tmp_path, [], rule_texts=(RULE_VERIFY,))
+        agent.seed_rules("price?")
+        agent._arm_stop_gate("stop")
+        result = agent._dispatch("read_url", {"url": "https://shop.example/x"})
+        agent._note_turn_call("read_url", {"url": "https://shop.example/x"}, result)
+        evidence = rules_module.TurnEvidence(answer="40 EUR", calls=tuple(agent._turn_calls))
+        assert evidence.called("read_url") is False
+        assert evidence.refused("read_url") is True
+
+    def test_the_last_ask_round_carries_every_obligation(self, tmp_path):
+        """The round guard read the counter the same pass had just raised, so
+        a two-obligation rule dropped its second obligation from the final goad
+        and logged an "answer shipped with a note" for an answer that was not
+        shipped."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(f"about 40 EUR ({i})") for i in range(4)],
+            rule_texts=(RULE_VERIFY_TWO,),
+            step_log=steps.append,
+        )
+        agent.run_task("price?")
+        verify = [g for g in records(steps, "gate") if g["at"] == "verify"]
+        rounds = [g["round"] for g in verify if g["verdict"] == "refused"]
+        assert rounds == [1, 1, 2, 2], f"an obligation was dropped mid-round: {rounds}"
+        # Exactly one delivery, carrying both unmet obligations.
+        assert len([g for g in verify if g["verdict"] == "advised"]) == 2
+
+    def test_a_terminal_turn_still_says_what_was_not_followed(self, tmp_path):
+        """A stopped turn is still an answer the owner reads. Skipping the
+        checks there would make the loop detector a way past every rule."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says("about 40 EUR")] * 12,
+            rule_texts=(RULE_VERIFY,),
+            max_steps=2,
+        )
+        answer = agent.run_task("price?")
+        assert "not followed" in answer
 
     def test_a_turn_no_rule_governs_is_untouched(self, tmp_path):
         agent, _ = rules_agent(
