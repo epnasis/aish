@@ -4975,7 +4975,17 @@ function ratingChip(turn, kind) {
   btn.title = label;
   btn.setAttribute("aria-label", label);
   btn.append(thumbIcon(kind));
+  // Do not steal focus from an open reason box. Without this the tap blurs the
+  // field first, blur commits and removes it, the row loses ~20px of height,
+  // and the thumb the finger was aimed at has MOVED by the time the click
+  // lands — so the first tap appears to do nothing but close the box. Toolbar
+  // controls beside a text field conventionally decline focus for exactly this
+  // reason. The commit still happens, below, in an order we choose.
+  btn.onmousedown = (e) => e.preventDefault();
   btn.onclick = () => {
+    // Commit anything typed BEFORE acting, so the reason belongs to the
+    // verdict it was written under and the draft is up to date for a switch.
+    commitOpenReason(ratingHost(btn));
     // Tapping the lit thumb withdraws it. An opinion you cannot take back is
     // one you hesitate to give, and the count this feeds is only worth having
     // if a mistap is cheap to undo. Withdrawal is a RECORD like any other —
@@ -5028,6 +5038,13 @@ function thumbIcon(kind) {
 // row it was a flex item competing with eight 40px controls, so on a phone it
 // collapsed to nothing: the keyboard opened onto a field with no width, which
 // reads exactly like a broken button.
+// Commit an open reason box without waiting for blur, so a tap on another
+// control performs its own action AND saves what was typed.
+function commitOpenReason(host) {
+  const note = host && host.querySelector(".rating-note");
+  if (note && note.commitReason) note.commitReason();
+}
+
 function ratingHost(btn) {
   const tools = btn.parentElement;
   return (tools && tools.parentElement) || tools;
@@ -5067,6 +5084,7 @@ function openRatingComment(btn, turn, kind, existing) {
     note.remove();
     showRatingComment(ratingHost(btn), comment);
   };
+  note.commitReason = commit;   // so another control can commit it deliberately
   note.onkeydown = (e) => {
     if (e.key !== "Enter") return;
     e.preventDefault();
