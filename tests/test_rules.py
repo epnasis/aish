@@ -472,9 +472,9 @@ class TestRecordShapes:
 
 
 class TestShippedExamples:
-    """The two files in examples/rules/ are the acceptance set — one per
-    trigger kind. They must stay loadable, because they are what the owner
-    copies into ~/.config/aish/rules/."""
+    """The files in examples/rules/ are the acceptance set — one per trigger
+    kind, plus one per enforcement point. They must stay loadable, because they
+    are what the owner copies into ~/.config/aish/rules/."""
 
     EXAMPLES = Path(__file__).resolve().parent.parent / "examples" / "rules"
 
@@ -484,6 +484,25 @@ class TestShippedExamples:
         loaded = rules.load_rules([self.EXAMPLES])
         assert loaded, "the examples went missing"
         assert not [f"{r.name}: {r.error}" for r in loaded if r.error]
+
+    def test_no_shipped_example_needs_a_verb_that_is_not_built(self):
+        """An example that does not run is an example that teaches the wrong
+        grammar. `always-use-show-image` shipped for months written against an
+        unbuilt verb, warning on every session start until it was parked — the
+        loudness was correct, having to park it was not."""
+        loaded = rules.load_rules([self.EXAMPLES])
+        parked = [r.name for r in loaded if r.status == "disabled"]
+        assert not parked, f"a shipped example is disabled: {parked}"
+
+    def test_the_examples_cover_every_enforcement_point(self):
+        """Gate and Verify are enforced by different machinery and fail in
+        different ways. The folder has to show both, or half the format is
+        learned only from the docs."""
+        obligations = {
+            o["verb"] for r in rules.load_rules([self.EXAMPLES]) for o in r.obligations
+        }
+        assert obligations & rules.VERIFY_VERBS, "no example decides anything at turn end"
+        assert obligations - rules.VERIFY_VERBS, "no example decides anything at the gate"
 
     def test_the_examples_cover_every_built_subject(self):
         """An example per subject is how the format is actually learned — by
