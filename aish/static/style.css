@@ -802,6 +802,31 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .msg.md .embed-youtube:hover .embed-play .yt-btn,
 .msg.md .embed-youtube:focus-visible .embed-play .yt-btn { fill: #f00; opacity: 1; }
 .msg.md .embed-youtube:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* A map card showing its static poster: tappable, with a pin badge saying so.
+   object-fit is `contain` here, not the thumbnail's `cover` — a static map is
+   framed around its subject, and cropping it can push the pin off the card. */
+.msg.md .embed-poster { cursor: pointer; }
+.msg.md .embed-poster .embed-thumb { object-fit: contain; }
+/* Cornered, not centred: a static map already has its own marker in the middle,
+   and a badge on top of it reads as a second pin rather than as "tap me". */
+.msg.md .embed-open {
+  top: auto;
+  left: auto;
+  right: 10px;
+  bottom: 10px;
+  transform: none;
+  width: 30px;
+  height: 30px;
+  padding: 6px;
+  box-sizing: border-box;
+  color: var(--blue);
+  background: var(--bg-elev1);
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.35);
+}
+.msg.md .embed-poster:hover .embed-open,
+.msg.md .embed-poster:focus-visible .embed-open { opacity: 0.75; }
+.msg.md .embed-poster:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
 /* ---- copy-to-clipboard chips ---- */
 .copy-chip {

@@ -4316,35 +4316,25 @@ function flushRenderErrors() {
 // endpoint, which only serves image files inside the active session's
 // roots. Any other scheme stays as the literal text. Tap opens the
 // full-size image in a new tab.
-function inlineImage(alt, target) {
-  let src;
-  // Whether this render is the live turn, captured now: onerror fires later, by
-  // which time `replaying` says nothing about where this image came from.
-  const live = !replaying && !offlineViewing;
+// The src a markdown image target may actually be loaded from, or null when
+// policy forbids it. Factored out of inlineImage so an embed POSTER resolves
+// through the identical rules — a poster that skipped the whitelist would be
+// the same zero-click fetch this policy exists to close.
+function imageSrc(target) {
   if (/^https?:\/\//.test(target)) {
-    if (!imageFetchAllowed(target)) {
-      // Same visual as the broken-image note; the anchor keeps the URL
-      // reachable by an explicit user tap — only the zero-click fetch is out.
-      // Reported on the LIVE turn (#188/#201): a hand-written remote image link
-      // means the model skipped show_image, and that turn is the only one that
-      // can still act on it. Re-reporting it on every later read of the chat
-      // taught nobody and marked the chat unread — see [RENDERERR].
-      noteRenderError(target, live);
-      const link = externalAnchor(target);
-      link.className = "img-link img-broken";
-      link.textContent = `🖼 ${alt || target} (not embedded)`;
-      return link;
-    }
-    src = target;
-  } else if (target.startsWith("/")) {
+    return imageFetchAllowed(target) ? target : null;
+  }
+  if (target.startsWith("/")) {
     const params = new URLSearchParams({ path: target });
     if (token) params.set("token", token);
-    src = `/file?${params}`;
-  } else {
-    return document.createTextNode(`![${alt}](${target})`);
+    return `/file?${params}`;
   }
-  const link = externalAnchor(src);
-  link.className = "img-link";
+  return null;
+}
+
+// The <img> itself, with the broken-file handling every image render shares.
+// `onBroken` lets the caller decide what a failure looks like in its own layout.
+function markdownImg(alt, src, target, live, onBroken) {
   const img = document.createElement("img");
   img.className = "md-img";
   img.loading = "lazy";
@@ -4352,12 +4342,42 @@ function inlineImage(alt, target) {
   // A missing file (deleted since, or another session's roots) renders as a
   // small broken-image note instead of the browser's default glyph.
   img.onerror = () => {
-    link.textContent = `🖼 ${alt || target} (unavailable)`;
-    link.classList.add("img-broken");
+    onBroken();
     noteRenderError(target, live);
   };
   img.src = src;
-  link.appendChild(img);
+  return img;
+}
+
+function inlineImage(alt, target) {
+  // Whether this render is the live turn, captured now: onerror fires later, by
+  // which time `replaying` says nothing about where this image came from.
+  const live = !replaying && !offlineViewing;
+  const src = imageSrc(target);
+  if (src === null) {
+    if (!/^https?:\/\//.test(target)) {
+      return document.createTextNode(`![${alt}](${target})`);
+    }
+    // Same visual as the broken-image note; the anchor keeps the URL
+    // reachable by an explicit user tap — only the zero-click fetch is out.
+    // Reported on the LIVE turn (#188/#201): a hand-written remote image link
+    // means the model skipped show_image, and that turn is the only one that
+    // can still act on it. Re-reporting it on every later read of the chat
+    // taught nobody and marked the chat unread — see [RENDERERR].
+    noteRenderError(target, live);
+    const broken = externalAnchor(target);
+    broken.className = "img-link img-broken";
+    broken.textContent = `🖼 ${alt || target} (not embedded)`;
+    return broken;
+  }
+  const link = externalAnchor(src);
+  link.className = "img-link";
+  link.appendChild(
+    markdownImg(alt, src, target, live, () => {
+      link.textContent = `🖼 ${alt || target} (unavailable)`;
+      link.classList.add("img-broken");
+    })
+  );
   return link;
 }
 
@@ -4483,7 +4503,9 @@ const YT_PLAY_SVG =
 
 // Returns an embed element for a whitelisted link, or null so the caller
 // falls back to a normal <a>. `label` is used as accessible text/alt.
-function embedForLink(label, url) {
+// `poster` (optional, from the [![img](src)](url) form) is a resolved image src
+// shown INSTEAD of loading the frame immediately — see mapsCard.
+function embedForLink(label, url, poster) {
   const yt = url.match(YOUTUBE_RE);
   if (yt) return youtubeEmbed(yt[1] || yt[2], label);
   const maps = url.match(MAPS_RE);
@@ -4492,13 +4514,13 @@ function embedForLink(label, url) {
     const saddr = params.get("saddr");
     const daddr = params.get("daddr");
     if (saddr && daddr) {
-      return mapsDirectionsEmbed(saddr, daddr, label);
+      return mapsDirectionsEmbed(saddr, daddr, label, poster);
     }
     // "q" is the classic ?q= link param; "query" is what the standard
     // /maps/search/?api=1&query=... share links use instead.
     const q = params.get("q") || params.get("query");
     if (q) {
-      return mapsEmbed(encodeURIComponent(q), label);
+      return mapsEmbed(encodeURIComponent(q), label, poster);
     }
     // No renderable query (e.g. only @lat,lng / view params) — plain link.
     return null;
@@ -4559,48 +4581,120 @@ function youtubeEmbed(id, label) {
   return card;
 }
 
-function mapsEmbed(query, label) {
+const MAP_OPEN_SVG =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a7 7 0 0 0-7 7c0 5 7 13 7 13s7-8 7-13a7 7 0 0 0-7-7z" fill="currentColor"/><circle cx="12" cy="9" r="2.6" fill="var(--bg-elev2)"/></svg>';
+
+// One map card, with or without a poster.
+//
+// WITHOUT a poster the frame loads immediately (the pre-existing behaviour for
+// a bare maps link). WITH one — the [![static map](…)](maps link) form — the
+// picture the tool already produced is painted instead, and the live frame is
+// built on tap. That is not only cosmetic: the poster is same-origin and
+// already stored, so it is what remains visible when the frame cannot load at
+// all (offline, or Google blocked), where an eager iframe leaves a black box.
+// Same interaction as the YouTube card above.
+function mapsCard(frameSrc, label, poster) {
   const card = document.createElement("div");
   card.className = "embed embed-maps";
-  const frame = document.createElement("iframe");
-  frame.className = "embed-frame";
-  frame.src = `https://maps.google.com/maps?q=${query}&output=embed`;
-  frame.title = label;
-  frame.loading = "lazy";
-  frame.referrerPolicy = "no-referrer";
-  frame.allowFullscreen = true;
-  // Same sandbox level as the YouTube embed above: allow-same-origin is safe
-  // here BECAUSE maps.google.com is cross-origin to aish, so it grants Maps
-  // its own origin (needed to bootstrap its "View larger map"/Directions UI)
-  // without any ability to reach aish's origin. allow-popups-to-escape-sandbox
-  // keeps the tab those buttons open from inheriting this sandbox; allow-forms
-  // lets Maps' own search/route boxes submit.
-  frame.setAttribute(
-    "sandbox",
-    "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-forms"
-  );
-  card.appendChild(frame);
+  const buildFrame = () => {
+    const frame = document.createElement("iframe");
+    frame.className = "embed-frame";
+    frame.src = frameSrc;
+    frame.title = label;
+    frame.loading = "lazy";
+    frame.referrerPolicy = "no-referrer";
+    frame.allowFullscreen = true;
+    // Same sandbox level as the YouTube embed above: allow-same-origin is safe
+    // here BECAUSE maps.google.com is cross-origin to aish, so it grants Maps
+    // its own origin (needed to bootstrap its "View larger map"/Directions UI)
+    // without any ability to reach aish's origin. allow-popups-to-escape-sandbox
+    // keeps the tab those buttons open from inheriting this sandbox; allow-forms
+    // lets Maps' own search/route boxes submit.
+    frame.setAttribute(
+      "sandbox",
+      "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-forms"
+    );
+    return frame;
+  };
+
+  if (!poster) {
+    card.appendChild(buildFrame());
+    return card;
+  }
+
+  card.classList.add("embed-poster");
+  card.setAttribute("role", "button");
+  card.tabIndex = 0;
+  card.setAttribute("aria-label", `Open the interactive map: ${label}`);
+  const img = document.createElement("img");
+  img.className = "embed-thumb";
+  img.loading = "lazy";
+  img.alt = label;
+  img.src = poster;
+  card.appendChild(img);
+  const badge = document.createElement("div");
+  badge.className = "embed-play embed-open";
+  badge.innerHTML = MAP_OPEN_SVG;
+  card.appendChild(badge);
+
+  const activate = () => {
+    card.replaceChildren(buildFrame());
+    card.classList.add("embed-active");
+    card.classList.remove("embed-poster");
+    card.removeAttribute("role");
+    card.removeAttribute("tabindex");
+    card.removeAttribute("aria-label");
+  };
+  card.addEventListener("click", activate);
+  card.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      activate();
+    }
+  });
   return card;
 }
 
-function mapsDirectionsEmbed(saddr, daddr, label) {
-  const card = document.createElement("div");
-  card.className = "embed embed-maps";
-  const frame = document.createElement("iframe");
-  frame.className = "embed-frame";
-  frame.src = `https://maps.google.com/maps?saddr=${encodeURIComponent(saddr)}&daddr=${encodeURIComponent(daddr)}&output=embed`;
-  frame.title = label;
-  frame.loading = "lazy";
-  frame.referrerPolicy = "no-referrer";
-  frame.allowFullscreen = true;
-  // Same sandbox as mapsEmbed above — see its comment for the allow-same-origin
-  // rationale (cross-origin to aish) and why each flag is needed.
-  frame.setAttribute(
-    "sandbox",
-    "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-forms"
+function mapsEmbed(query, label, poster) {
+  return mapsCard(`https://maps.google.com/maps?q=${query}&output=embed`, label, poster);
+}
+
+function mapsDirectionsEmbed(saddr, daddr, label, poster) {
+  const src =
+    `https://maps.google.com/maps?saddr=${encodeURIComponent(saddr)}` +
+    `&daddr=${encodeURIComponent(daddr)}&output=embed`;
+  return mapsCard(src, label, poster);
+}
+
+// [![alt](image)](url) — an image that is ALSO a link. Deliberately kept out of
+// INLINE_RE: its plain-link branch would read a remote-hosted poster as a link
+// labelled "![alt", and adding a branch there would renumber ten capture groups
+// the whole renderer indexes by hand. inlineMd tries this first at each
+// position instead.
+const IMAGE_LINK_RE = /\[!\[([^\]\n]*)\]\(([^)\s]+)\)\]\((https?:\/\/[^)\s]+)\)/;
+
+// An embeddable target becomes a poster-backed card; anything else stays a
+// perfectly ordinary clickable picture.
+function imageLink(alt, imageTarget, url) {
+  const poster = imageSrc(imageTarget);
+  if (poster !== null) {
+    const embed = embedForLink(alt, url, poster);
+    if (embed) return embed;
+  }
+  const link = externalAnchor(url);
+  link.className = "img-link";
+  if (poster === null) {
+    link.textContent = alt || url;
+    return link;
+  }
+  const live = !replaying && !offlineViewing;
+  link.appendChild(
+    markdownImg(alt, poster, imageTarget, live, () => {
+      link.textContent = `🖼 ${alt || url} (unavailable)`;
+      link.classList.add("img-broken");
+    })
   );
-  card.appendChild(frame);
-  return card;
+  return link;
 }
 
 function inlineMd(text) {
@@ -4610,7 +4704,13 @@ function inlineMd(text) {
   // and keep it literal). Stripping here covers streaming, replay, and reload.
   let rest = text.replace(/\[no-chips\]/gi, "");
   while (rest) {
-    const match = rest.match(INLINE_RE);
+    const inline = rest.match(INLINE_RE);
+    const imageLinkMatch = rest.match(IMAGE_LINK_RE);
+    // A tie goes to the image-link: starting at the same index it is the more
+    // specific reading, and INLINE_RE would otherwise tear it into three nodes.
+    const nested =
+      imageLinkMatch && (!inline || imageLinkMatch.index <= inline.index);
+    const match = nested ? imageLinkMatch : inline;
     if (!match) {
       frag.appendChild(document.createTextNode(rest));
       break;
@@ -4618,7 +4718,9 @@ function inlineMd(text) {
     if (match.index > 0) {
       frag.appendChild(document.createTextNode(rest.slice(0, match.index)));
     }
-    if (match[1]) {
+    if (nested) {
+      frag.appendChild(imageLink(match[1], match[2], match[3]));
+    } else if (match[1]) {
       const code = document.createElement("code");
       code.textContent = match[1].slice(1, -1);
       frag.appendChild(code);

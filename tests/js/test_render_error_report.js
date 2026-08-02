@@ -162,30 +162,43 @@ check("a flush with nothing buffered sends nothing", () => {
   assert.strictEqual(w.sent.length, 0);
 });
 
+// Both checks below read the WHOLE image-render path (imageSrc + markdownImg +
+// inlineImage + imageLink), not one function. It was one function until the
+// poster-backed map embed gave it a second entry point; scoping the invariant
+// to the path rather than to a single body is what keeps it true as the path
+// grows another caller.
+const IMAGE_PATH = src.slice(
+  src.indexOf("// The src a markdown image target"),
+  src.indexOf("// Quick replies (#17)")
+) + src.slice(src.indexOf("function imageLink("), src.indexOf("function inlineMd"));
+
 check("what is reported is the model's own target, never the tokened /file URL", () => {
   // The renderer rewrites a local path to /file?path=…&token=…; reporting THAT
   // would write the server's access token into the session log.
-  const inlineImage = src.slice(src.indexOf("function inlineImage("));
-  const body = inlineImage.slice(0, inlineImage.indexOf("\n}"));
-  const calls = body.match(/noteRenderError\(([^)]*)\)/g) || [];
-  assert(calls.length >= 2, `expected inlineImage to report both failure paths, got ${calls.length}`);
+  const calls = IMAGE_PATH.match(/noteRenderError\(([^)]*)\)/g) || [];
+  assert(calls.length >= 2, `expected both failure paths to report, got ${calls.length}`);
   for (const call of calls) {
     assert(/noteRenderError\(target,\s*live\)/.test(call), `reports the wrong value: ${call}`);
   }
-  assert(!/noteRenderError\(\s*src/.test(body), "must never report the rewritten src");
+  assert(!/noteRenderError\(\s*src/.test(IMAGE_PATH), "must never report the rewritten src");
 });
 
 check("liveness is captured at render time, not read inside onerror", () => {
   // onerror fires long after the render; by then `replaying` says nothing about
-  // where this particular image came from.
-  const inlineImage = src.slice(src.indexOf("function inlineImage("));
-  const body = inlineImage.slice(0, inlineImage.indexOf("\n}"));
-  const decl = body.indexOf("const live =");
-  const onerror = body.indexOf("img.onerror");
-  assert(decl !== -1, "inlineImage must capture liveness in a local");
-  assert(decl < onerror, "liveness must be captured before the handler closes over it");
-  const handler = body.slice(onerror);
-  assert(!/\breplaying\b/.test(handler), "onerror must not read `replaying` itself");
+  // where this particular image came from. Every entry point into the path must
+  // therefore capture it up front and hand it to the handler as a value.
+  const onerror = IMAGE_PATH.indexOf("img.onerror");
+  assert(onerror !== -1, "the image path no longer installs an onerror handler");
+  const handler = IMAGE_PATH.slice(onerror, IMAGE_PATH.indexOf("img.src =", onerror));
+  assert(
+    !/\breplaying\b|\bofflineViewing\b/.test(handler),
+    "onerror must not read `replaying`/`offlineViewing` itself"
+  );
+  const captured = IMAGE_PATH.match(/const live = !replaying && !offlineViewing;/g) || [];
+  assert(
+    captured.length >= 2,
+    `every entry point must capture liveness at render time, found ${captured.length}`
+  );
 });
 
 if (failures) {
