@@ -4955,6 +4955,18 @@ async function copyText(text) {
 //   Nothing here acts on the rating. It is evidence for the weekly pass and for
 //   the owner — making it steer the running session would turn a feedback
 //   control into a lever the model can be pointed at.
+// What was typed for a turn, kept for THIS browser session only. Switching
+// thumb, or withdrawing and changing your mind, must not cost you the sentence
+// you already wrote — but a comment with no verdict attached is not a rating,
+// so it is never written to the log until a thumb is on. Memory, not storage.
+const ratingDrafts = new Map();
+
+function ratingDraft(turn, el) {
+  if (ratingDrafts.has(turn)) return ratingDrafts.get(turn);
+  const said = el && el.querySelector(".rating-said");
+  return said ? said.textContent : "";
+}
+
 function ratingChip(turn, kind) {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -4969,15 +4981,24 @@ function ratingChip(turn, kind) {
     // if a mistap is cheap to undo. Withdrawal is a RECORD like any other —
     // `none` written after `down` — never a deletion, so the log stays
     // append-only and the ledger's last-wins already does the right thing.
+    const host = ratingHost(btn);
+    const draft = ratingDraft(turn, host);
     const next = btn.classList.contains("on") ? "none" : kind;
-    send({ type: "rate", turn, rating: next });
-    markRating(turn, next);
     if (next === "none") {
+      // The words stay in memory — changing your mind back should not cost
+      // you the sentence — but they are NOT written, because a comment with
+      // no verdict attached is not a rating.
+      send({ type: "rate", turn, rating: next });
+      markRating(turn, next);
       closeRatingComment(btn);
-      showRatingComment(ratingHost(btn), "");
+      showRatingComment(host, "");
     } else {
-      const said = ratingHost(btn).querySelector(".rating-said");
-      openRatingComment(btn, turn, kind, said ? said.textContent : "");
+      // Selecting, or switching thumb. The reason carries over so the record
+      // stays coherent — the latest one is always verdict + reason together —
+      // and the box opens pre-filled so it can be edited to match.
+      send({ type: "rate", turn, rating: kind, ...(draft ? { comment: draft } : {}) });
+      markRating(turn, kind, draft);
+      openRatingComment(btn, turn, kind, draft);
     }
   };
   return btn;
@@ -5039,6 +5060,9 @@ function openRatingComment(btn, turn, kind, existing) {
     committed = true;
     stopKeepingInView();
     const comment = note.value.trim();
+    // Remembered either way, so withdrawing and reselecting restores it.
+    if (comment) ratingDrafts.set(turn, comment);
+    else ratingDrafts.delete(turn);
     if (comment) send({ type: "rate", turn, rating: kind, comment });
     note.remove();
     showRatingComment(ratingHost(btn), comment);
@@ -5086,6 +5110,9 @@ function markRating(turn, kind, comment) {
     // `none` is a withdrawal: it lights nothing.
     chip.classList.toggle("on", chip.classList.contains(`rating-${kind}`));
   });
+  // A replayed reason seeds the draft, so editing after a reload starts from
+  // what was written rather than from an empty box.
+  if (comment) ratingDrafts.set(turn, comment);
   showRatingComment(el, kind === "none" ? "" : comment);
 }
 

@@ -283,4 +283,49 @@ function world() {
   ok("and the correction is sent", sent[sent.length - 1].comment === "second try");
 }
 
+// --- the words survive switching thumb --------------------------------------
+{
+  const { sandbox, sent } = world();
+  const { host, tools } = mount(sandbox, "turn-abc", "down");
+  const up = sandbox.ratingChip("turn-abc", "up");
+  tools.appendChild(up);
+  const down = tools.children[0];
+
+  down.onclick();
+  const note = host.children.find((c) => c.className === "rating-note");
+  note.value = "the price was stale";
+  note.onblur();
+  ok("the reason is saved with the down", sent[1].comment === "the price was stale");
+
+  up.onclick();
+  ok("switching thumb carries the reason", sent[2].rating === "up");
+  ok("with the same words", sent[2].comment === "the price was stale");
+  const reopened = host.children.find((c) => c.className === "rating-note");
+  ok("and the box reopens pre-filled to edit", reopened.value === "the price was stale");
+}
+
+// --- withdrawing keeps the words in memory, not in the log -------------------
+{
+  const { sandbox, sent } = world();
+  const { host, chip } = mount(sandbox, "turn-abc", "down");
+  chip.onclick();
+  const note = host.children.find((c) => c.className === "rating-note");
+  note.value = "it never read the page";
+  note.onblur();
+
+  chip.onclick();                                   // withdraw
+  const withdrawal = sent[sent.length - 1];
+  ok("withdrawal is recorded", withdrawal.rating === "none");
+  ok("WITHOUT the reason — a comment with no verdict is not a rating",
+     !("comment" in withdrawal));
+  ok("and the shown reason goes with it",
+     !host.children.some((c) => c.className === "rating-said"));
+
+  chip.onclick();                                   // change of mind
+  const back = sent[sent.length - 1];
+  ok("reselecting restores the reason", back.comment === "it never read the page");
+  const reopened = host.children.find((c) => c.className === "rating-note");
+  ok("and offers it for editing", reopened.value === "it never read the page");
+}
+
 console.log(`ok - rating chip (${checks} checks)`);
