@@ -66,6 +66,7 @@ from pathlib import Path
 
 from . import skills
 from .embeddings import entry_text
+from .session import RATING_NONE
 
 # The judge reads evidence excerpts of what the owner typed, so it must run
 # on a model meeting the strictest privacy bar among its sources: a LOCAL
@@ -318,7 +319,9 @@ def scan_ratings(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None
                 }
         except OSError:
             continue
-    return ratings
+    # A withdrawn rating is not an opinion — drop it rather than counting a
+    # tap someone took back.
+    return {k: v for k, v in ratings.items() if v["rating"] != RATING_NONE}
 
 
 def _rule_turns(path: Path):

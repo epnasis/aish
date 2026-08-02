@@ -4962,18 +4962,60 @@ function ratingChip(turn, kind) {
   const label = kind === "up" ? "good answer" : "bad answer";
   btn.title = label;
   btn.setAttribute("aria-label", label);
-  btn.textContent = kind === "up" ? "👍" : "👎";
+  btn.append(thumbIcon(kind));
   btn.onclick = () => {
-    send({ type: "rate", turn, rating: kind });
-    markRating(turn, kind);
-    openRatingComment(btn, turn, kind);
+    // Tapping the lit thumb withdraws it. An opinion you cannot take back is
+    // one you hesitate to give, and the count this feeds is only worth having
+    // if a mistap is cheap to undo. Withdrawal is a RECORD like any other —
+    // `none` written after `down` — never a deletion, so the log stays
+    // append-only and the ledger's last-wins already does the right thing.
+    const next = btn.classList.contains("on") ? "none" : kind;
+    send({ type: "rate", turn, rating: next });
+    markRating(turn, next);
+    if (next === "none") closeRatingComment(btn);
+    else openRatingComment(btn, turn, kind);
   };
   return btn;
 }
 
-function openRatingComment(btn, turn, kind) {
+// One drawing, used both ways: thumbs-down is the same hand rotated half a
+// turn about the icon's centre. Two hand-drawn paths would drift apart the
+// first time either is nudged, and these two must read as exact opposites.
+function thumbIcon(kind) {
+  return svgIcon(`i-thumb i-thumb-${kind}`, (make, svg) => {
+    const g = make("g", {
+      fill: "none", stroke: "currentColor", "stroke-width": "1.7",
+      "stroke-linecap": "round", "stroke-linejoin": "round",
+      ...(kind === "down" ? { transform: "rotate(180 12 12)" } : {}),
+    });
+    // The cuff, and the hand: thumb up the left edge, four knuckles across.
+    g.appendChild(make("rect", { x: "3", y: "11.2", width: "4", height: "9", rx: "1.2" }));
+    g.appendChild(make("path", {
+      d: "M7 20.2v-9l4.1-8a2 2 0 0 1 1.9 2.7l-1 4.1h5.2a2.1 2.1 0 0 1 2 2.6l-1.2 5.4"
+         + "a2.2 2.2 0 0 1-2.1 1.7H7z",
+    }));
+    svg.appendChild(g);
+  });
+}
+
+// The box goes on its OWN row, under the tools — not inside them. In the chip
+// row it was a flex item competing with eight 40px controls, so on a phone it
+// collapsed to nothing: the keyboard opened onto a field with no width, which
+// reads exactly like a broken button.
+function ratingHost(btn) {
   const tools = btn.parentElement;
-  if (!tools || tools.querySelector(".rating-note")) return;
+  return (tools && tools.parentElement) || tools;
+}
+
+function closeRatingComment(btn) {
+  const host = ratingHost(btn);
+  const note = host && host.querySelector(".rating-note");
+  if (note) note.remove();
+}
+
+function openRatingComment(btn, turn, kind) {
+  const host = ratingHost(btn);
+  if (!host || host.querySelector(".rating-note")) return;
   const note = document.createElement("input");
   note.type = "text";
   note.className = "rating-note";
@@ -4986,7 +5028,7 @@ function openRatingComment(btn, turn, kind) {
     note.remove();
   };
   note.onblur = () => { if (!note.value.trim()) note.remove(); };
-  tools.appendChild(note);
+  host.appendChild(note);
   note.focus();
 }
 
@@ -4998,6 +5040,7 @@ function markRating(turn, kind) {
   const tools = el.querySelector(".msg-tools");
   if (!tools) return;
   tools.querySelectorAll(".rating-chip").forEach((chip) => {
+    // `none` is a withdrawal: it lights nothing.
     chip.classList.toggle("on", chip.classList.contains(`rating-${kind}`));
   });
 }
