@@ -5046,27 +5046,27 @@ class TestRedactTurn:
 RULE_SOURCE = """---
 name: bounded-material
 description: Answer from the material I gave you.
-tier: 0
-fail: open
-trigger: message_shape
-contains: source
-route: source
-prohibit: web_search
-disclose: source_unavailable
+when:
+  request:
+    has: material
+then:
+  answer_from: material
+  never_use: [web_search]
+  must_tell_me_when: the material could not be read
+if_unsure: proceed
 ---
 
-Answer from the source the user gave you.
+Answer from the material the user gave you.
 """
 
 RULE_SESSION = """---
 name: no-forget-when-triggered
 description: An unattended session never deletes the owner's knowledge.
-tier: 0
-fail: open
-trigger: session_context
-field: origin
-is_not: user
-prohibit: forget_memory
+when:
+  session:
+    origin: automation
+then:
+  never_use: [forget_memory]
 ---
 """
 
@@ -5154,8 +5154,8 @@ class TestRuleSeeding:
         [binding] = records(logged, "binding")
         assert binding["rule"] == "bounded-material" and binding["seeded"] is True
         assert binding["obligations"][0] == {
-            "verb": "route",
-            "to": "source",
+            "verb": "answer_from",
+            "to": "material",
             "of": "deliverable",
             "readers": ["read_url"],
             "sources": [SOURCE_URL],
@@ -5589,10 +5589,11 @@ class TestARuleNeverLicenses:
         ):
             assert licensing not in source, f"the rule engine reaches for {licensing}"
         # And no verb in the vocabulary can express a grant.
-        assert not {"allow", "trust", "approve"} & {
-            v for v in (rules_module.VERB_ROUTE, rules_module.VERB_PROHIBIT,
-                        rules_module.VERB_DISCLOSE)
-        }
+        # No verb in the vocabulary — built OR designed — can express a grant.
+        vocabulary = set(rules_module.VERBS) | set(rules_module.VERBS_DESIGNED)
+        assert not [v for v in vocabulary if any(
+            word in v for word in ("allow", "trust", "approve", "permit", "grant")
+        )]
 
 
 class TestParallelSacrificeIsNarrow:
@@ -5683,3 +5684,49 @@ class TestAttachmentsAreMaterial:
         agent, _ = rules_agent(tmp_path, [model_says("done")], step_log=logged.append)
         agent.run_task("what is the weather")
         assert not records(logged, "binding")
+
+
+class TestABrokenRuleIsLoud:
+    """A rule that does not compile reads exactly like one that works. It has
+    always been in the record as `verdict: "error"` — but a record is not a
+    person, and the owner would go on believing the rule was in force. This is
+    the exhibit #205 was filed on: `always-use-show-image` sat inert in the
+    live corpus and nothing said so."""
+
+    BROKEN = """---
+name: half-written
+description: The obligation is in the prose, where it enforces nothing.
+when:
+  request:
+    has: material
+---
+
+You MUST always use the show_image tool.
+"""
+
+    def test_the_owner_is_told_on_the_turn_it_fails_to_compile(self, tmp_path):
+        seen = []
+        agent, _ = rules_agent(
+            tmp_path, [model_says("done")], rule_texts=(self.BROKEN,), echo=seen.append
+        )
+        agent.run_task("summarize https://x.test/a")
+        warnings = [line for line in seen if "not in force" in line]
+        assert warnings, f"a broken rule was silent: {seen}"
+        assert "half-written" in warnings[0]
+        assert "no obligation" in warnings[0]  # WHY, not just that
+
+    def test_it_is_still_recorded_as_an_error_and_binds_nothing(self, tmp_path):
+        logged = []
+        agent, _ = rules_agent(
+            tmp_path, [model_says("done")], rule_texts=(self.BROKEN,), step_log=logged.append
+        )
+        agent.run_task("summarize https://x.test/a")
+        [row] = records(logged, "rule_eval")[0]["evaluated"]
+        assert row["verdict"] == "error"
+        assert not records(logged, "binding")
+
+    def test_a_working_rule_says_nothing_about_being_broken(self, tmp_path):
+        seen = []
+        agent, _ = rules_agent(tmp_path, [model_says("done")], echo=seen.append)
+        agent.run_task("summarize https://x.test/a")
+        assert not [line for line in seen if "not in force" in line]

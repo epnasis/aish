@@ -83,6 +83,8 @@ An earlier draft of this design said a trigger must be evaluable "without a mode
 
 `curate.scan_rules` is a **reader, not a schema change** — which is what landing the trace contract first bought. Pure code over the session logs, zero model calls, pairing each `binding` with the `gate` records sharing its `turn` (joined by id, never by position — governance records are emitted mid-turn, at turn end and from the server thread, so `_windows`' positional heuristic cannot carry them). Per rule: binds, **bind rate** against turns evaluated, refusals, escalations, owner overrides, and **compliance-after-refusal** — defined as *the model went on to call the reader the refusal pointed it at*, because "it stopped pushing" would count giving up as compliance.
 
+It runs in the **weekly curate pass**, before that pass's early returns — the rule ledger is independent of the knowledge one, and a week with nothing to curate can still hold a rule the owner overrides every time it fires. Signals ride the same push, saying explicitly that they changed nothing. `TestRuleLedgerHasAReader`.
+
 `rule_signals` turns those into **proposals and never actions**, because a rule is owner property: a rule that never binds is dead weight; one the owner overrides more often than not is **wrong, not the model**; one binding on a third of turns needs its trigger narrowed or its cost accepted deliberately; one refused repeatedly and never complied with may have unactionable refusal text. Every rate is suppressed below `RULE_MIN_FIRES`, because a proposal made from noise is how a ledger loses the owner's trust. `TestRuleLedger`, `TestRuleSignals`.
 
 **Privacy composes:** the judge runs on the session's own model or a stricter one, and an unbuildable judge **fails closed per the declared direction, never silently falls back to cloud**. Honest caveat: on local, an 8B judges its own kind. Isolation removes the *motive* — self-justification is mostly a context pathology — but same-weights blind spots correlate, and the privacy constraint forbids model diversity. The mitigation is the closed vocabulary and the Tier 0/1 prefilters, not a second opinion.
@@ -103,35 +105,86 @@ A trigger reads facts the **harness** gathered, never the acting model's account
 
 ## The file format
 
-One file per rule in `~/.config/aish/rules/`, global only — a rule is a policy about how aish behaves, not a property of a checkout, and a project-local rule file would be a policy anyone who hands you a repo can write. Two worked examples ship in `examples/rules/`, one per v1 trigger kind, and `TestShippedExamples` keeps them loadable.
+One file per rule in `~/.config/aish/rules/`, global only — a rule is a policy about how aish behaves, not a property of a checkout, and a project-local rule file would be a policy anyone who hands you a repo can write. Worked examples ship in `examples/rules/`, and `TestShippedExamples` keeps them loadable.
 
 ```markdown
 ---
-name: source-authority
-description: A source you were handed is the authority — the answer comes from IT.
-tier: 0
-fail: open
-trigger: message_shape
-contains: url
-route: source
-prohibit: web_search
-disclose: source_unavailable
+name: bounded-material
+description: Answer from the material I gave you; widening it needs my say-so.
+when:
+  request:
+    has: material        # a link, an attached file, or a file path I handed over
+then:
+  answer_from: material
+  never_use: [web_search]
+  must_tell_me_when: the material could not be read
+if_unsure: proceed
 ---
 
 Prose the model is shown verbatim when this rule binds. Explain the intent —
 this is the half that keeps a refusal from being an ambush.
 ```
 
-| key | meaning |
-|---|---|
-| `trigger` | `message_shape` — with either `contains:` (a built-in detector: `source` for the whole material channel, `url` for links only) or `match:` (an owner-written pattern, for shapes with no detector); or `session_context` (needs `field: origin` plus exactly one of `is:` / `is_not:`) |
-| `tier` / `fail` | declared from day one so a v0 file does not break when a scored trigger arrives. `fail` is the direction for an **unevaluable** trigger: `open` = do not bind, the owner is watching; `hold` = bind conservatively AND send the first violation straight to the owner, since the harness could not confirm the trigger and must not decide the exception itself |
-| `route` | a tool name, **or `source`** — the deliverable comes from the source the owner handed over, and the harness resolves host → reader (see below) |
-| `prohibit` | comma- or space-separated tool names. Absolute for the turn; the only escape is the owner |
-| `disclose` | the failure state that must be stated. Seeded as prose and enforced at **Verify** — never at the gate (see below) |
-| `status` / `expires` | the knowledge lifecycle, inherited verbatim through `skills.lifecycle_active` — evaluated at read time, so a long-running process crosses an expiry without an mtime change |
+**The shape is borrowed, the words are not.** Reviewed against the industry policy languages (Azure Policy, Kyverno, Cedar, OPA/Rego, AWS IAM, Sigma, ESLint), because a model is better at a language that already exists than at a bespoke one. What transfers is the **grammar**, and only the grammar: none of those languages can be adopted wholesale, since they govern *resources* and nothing in Azure or Cedar can say "the answer must come from the material the owner handed over" — clouds have no answers and no conversational turns. Four conventions every one of them shares, all adopted here:
 
-A file that parses but does not **compile** — unknown trigger, unparseable regex, `route: source` without `contains: url` to find the source with, a rule with no obligation at all — still yields a `Rule`, carrying its error. It is recorded with verdict `error` and binds nothing. That is deliberate: a hand-edited typo must be visible in the corpus and in the log, never an exception thrown inside a gate half a turn later, and never a silent absence. `error` (broken file) and `unevaluable` (working rule, failed evaluator) fail in **opposite** directions and are never conflated — a typo must not hold every unattended turn. `TestRuleFileFormat`, `TestRuleLifecycle`.
+1. **Condition and effect are separate named blocks** — `if`/`then`, `match`/`validate`, `detection`/`level`. The v1 format put condition, effect and disposition keys flat as undifferentiated siblings, so a reader could not tell which keys were the "if". **The structure failed the no-documentation test before the verbs did.**
+2. **The matched subject is named** — never a bare `contains:`. `when: request:` says what is being examined.
+3. **Effects are a tiny closed enum**, not an expression language. Rego's learnability is OPA's most-cited adoption failure; the closed vocabulary is the right reaction at this scale.
+4. **The human explanation rides with the rule** — Kyverno's `message`, Prometheus's `annotations`. The markdown body is that convention executed better.
+
+Deliberately **refused as scale artefacts**: precedence and priority algebra, parameterisation and templating, scope inheritance, `any:`/`all:` combinator trees. They exist because clouds are multi-tenant; here they would be cargo-culting.
+
+### Subjects — the `when:` block
+
+| subject | fields | built |
+|---|---|---|
+| `request:` | `has: material \| link \| attachment \| path`, `matches: <regex>` | **yes** |
+| `session:` | `origin: owner \| automation \| email \| schedule` | **yes** |
+| `task:` | `about: <plain text>` — semantic; the word is what makes it scored | no |
+| `result:` | `of: <tool>`, `was: empty \| error` | no |
+| `action:` | `tool:`, `command_starts_with:`, `sends_to:`, `host:` | no |
+| `answer:` | `contains:`, `matches:` | no |
+
+**`request`, not `message`.** Attachments reach the agent as separate parameters and appear in no message text at all, so "message" became false the moment attached material counted as a source. What the code reads is the owner's **request**: text plus attachments plus the paths they typed.
+
+**`origin: automation`** is the umbrella for every non-owner origin — a positive match rather than a negation, because negation is where hand-edits go wrong and "automation" is what the rule is actually about.
+
+**One subject per rule.** Siblings would AND, but two subjects in one file is nearly always a rule that wanted to be two files — and because restrictions compose by **union** (R1), two files are *provably equivalent* to one with both. That theorem is what lets the grammar stay flat where every big policy language needs combinators.
+
+### Verbs — the `then:` block
+
+| verb | means | built |
+|---|---|---|
+| `answer_from: <tool> \| material` | the deliverable comes from here | **yes** |
+| `never_use: [tools]` | these tools are refused for the turn | **yes** |
+| `must_tell_me_when: <plain phrase>` | this failure must be stated to the owner | declared; enforced at Verify |
+| `answer_must_include:` / `answer_must_not:` | the answer must contain / avoid something | no |
+| `must_first: <action>` | do this before the triggering action | no |
+| `ask_me_first: true` | hold for the owner | no |
+
+Plain English imperatives, in the ESLint tradition (`no-console`, `prefer-const`): **a verb you must read documentation to understand is a bad verb** — and these words are read far more often than written, since they also appear in the prose the model is shown.
+
+Three of the names carry an argument worth keeping:
+
+- **`material`, not `source`, on BOTH sides** (`has: material` / `answer_from: material`) — so a reader can see the trigger and the obligation refer to the same thing. The prose, the channel-separation text and the whole R1 analysis had already standardised on *material*; only the frontmatter hadn't.
+- **`must_tell_me_when` rather than a bare "must say" — name the audience.** "Say" is satisfiable by a mid-turn preamble, which is precisely the failure the word-list post-mortem documents: the preamble is not what the owner reads.
+- **`must_first` needs only one key**, because the "before B" half is the trigger: `when: action: {tool: gmail_send}` / `then: must_first: show_me_the_draft`. The when/then split absorbs half the verb's complexity — the structural argument in miniature.
+
+### Disposition
+
+`if_unsure: proceed | ask_me` — what to do when the harness cannot tell whether the rule applies. `proceed` = do not bind, the owner is watching; `ask_me` = bind conservatively and send the first violation straight to the owner. **Default `ask_me`**, because over-restriction is the safe direction. (`fail: open` was security jargon for a question the owner can answer in English.)
+
+`status: disabled` and `expires:` are the knowledge lifecycle, inherited verbatim through `skills.lifecycle_active` — read-time, so a long-running process crosses an expiry without an mtime change.
+
+**`tier` is gone from the file.** No policy language asks the author to annotate the evaluation strategy; it is always derived from the condition's form, and it is here too — a detector or a regex is structural, a semantic `about:` is scored. `tier: 1` meant nothing to the owner. The ladder stays in the engine.
+
+### When a file does not compile
+
+A file that parses but does not compile still yields a `Rule` carrying its error; it is recorded with verdict `error`, binds nothing, **and the owner is told on the turn it happens.** That last part was missing and is the reason #205 exists: a rule the model wrote sat inert in the live corpus for days, announcing itself only as a log record nobody reads. A record is not a person.
+
+The lint says what to write instead wherever it can — `RETIRED_KEYS` names the replacement for every v1 key, and a `then:` verb that is *designed but unbuilt* is refused by name with what it needs, so "the vocabulary is too small" surfaces as a legible gap rather than a broken file. `error` (broken file) and `unevaluable` (working rule, failed evaluator) fail in **opposite** directions and are never conflated. `TestRuleFileFormat`, `TestRuleLifecycle`, `TestRetiredKeys`, `TestABrokenRuleIsLoud`.
+
+Frontmatter is real YAML (`yaml.safe_load`, which constructs no objects, so a rule file cannot execute anything). That is the one cost of nesting: **indentation is how hand-edited YAML breaks**, and the flat v1 format could not be indented wrong. The bet is that two levels stay shallow, that the authoring tool (#205) becomes the usual path, and that the subject namespace would collide with the effect namespace once all six subjects land. Unreadable frontmatter says *"check the indentation"* by name. If a rule is ever broken by a stray space, the flat variant was right.
 
 ---
 

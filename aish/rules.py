@@ -24,30 +24,60 @@ import warnings
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
+
+import yaml
 
 from . import skills
 
 GLOBAL_RULES_DIR = Path.home() / ".config" / "aish" / "rules"
 
-# Trigger kinds. v1 ships the two Tier-0 ones; the remaining four (tool
-# outcome, task domain, action shape, deliverable shape) are named in
-# docs/rules-engine.md and arrive as new evaluators against this same runtime.
+# The SUBJECTS a `when:` block can examine — the thing being matched, named,
+# the way every policy language names it (IAM's Action/Resource, Cedar's
+# principal/action/resource, Sigma's logsource). Built: `request` and
+# `session`. Designed, unbuilt: `task` (semantic), `result` (a tool's outcome),
+# `action` (a proposed call's shape), `answer` (the deliverable).
+#
+# `request` rather than `message` on purpose: attachments reach the agent as
+# separate parameters and appear in no message text at all, so "message" was
+# false the moment attached material became a source. What the code reads is
+# the owner's REQUEST — text plus attachments plus the paths they typed.
+SUBJECT_REQUEST = "request"
+SUBJECT_SESSION = "session"
+SUBJECTS = frozenset({SUBJECT_REQUEST, SUBJECT_SESSION})
+SUBJECTS_DESIGNED = ("task", "result", "action", "answer")
+
+# Internal trigger ids, kept because the trace records name them and #197 reads
+# them. The FILE never spells these — it names a subject (`request:`,
+# `session:`) and the compiler maps it here.
 TRIGGER_MESSAGE_SHAPE = "message_shape"
 TRIGGER_SESSION_CONTEXT = "session_context"
-TRIGGER_KINDS = frozenset({TRIGGER_MESSAGE_SHAPE, TRIGGER_SESSION_CONTEXT})
 
-# Obligation verbs. Every one is a RESTRICTION — see the module docstring.
-VERB_ROUTE = "route"
-VERB_PROHIBIT = "prohibit"
-VERB_DISCLOSE = "disclose"
+# The VERBS a `then:` block can use. Every one is a RESTRICTION (see the module
+# docstring) and every one is a plain English imperative, in the ESLint
+# tradition (`no-console`, `prefer-const`): a verb you must read documentation
+# to understand is a bad verb, and these words are read far more often than
+# they are written — they also appear in the prose the model is shown.
+VERB_ANSWER_FROM = "answer_from"
+VERB_NEVER_USE = "never_use"
+VERB_MUST_TELL_ME_WHEN = "must_tell_me_when"
+VERBS = frozenset({VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_TELL_ME_WHEN})
+# Designed, unbuilt — named here so a lint failure can say what is MISSING
+# rather than merely that the file is wrong (#205).
+VERBS_DESIGNED = {
+    "answer_must_include": "the answer must contain something — needs the Verify point",
+    "answer_must_not": "the answer must avoid something — needs the Verify point",
+    "must_first": "do A before B — needs the sequence check",
+    "ask_me_first": "hold for the owner — needs the hold verb",
+}
 
-# `route: source` — the obligation names THE SOURCE THE OWNER HANDED OVER, not
-# a tool. The reader is resolved from the host at bind time, so one rule covers
-# every source ("YouTube or other for that matter") and nothing has to be
-# maintained when a new reader appears. Routing to a named tool still works;
-# this is a second form of the same verb, not a replacement.
-ROUTE_SOURCE = "source"
+# `answer_from: material` — the obligation names THE MATERIAL THE OWNER HANDED
+# OVER, not a tool. The reader is resolved at bind time, so one rule covers
+# every kind of material and nothing needs maintaining when a new reader
+# appears. `answer_from: <tool>` still works; this is a second form of the same
+# verb. The noun is `material` on BOTH sides of the rule — `has: material` /
+# `answer_from: material` — so a reader can see they refer to the same thing.
+ROUTE_SOURCE = "material"
 
 # The sentence that keeps `route: source` from being a promotion. A rule is the
 # one artifact class that is NOT advice, so its seeded prose is the highest-
@@ -82,9 +112,14 @@ DEFAULT_READER = "read_url"
 # `source` is the whole material channel: links, attachments, and paths the
 # owner named. `url` is the narrower one, for a rule that really does mean web
 # pages only. Both are Tier 0.
-CONTAINS_URL = "url"
-CONTAINS_SOURCE = "source"
-CONTAINS_DETECTORS = frozenset({CONTAINS_URL, CONTAINS_SOURCE})
+# What `when: request: has:` accepts, and which kinds of material each admits.
+# `material` is the whole channel; the narrow ones exist so a rule that really
+# does mean web pages only can say so. The noun matches the obligation's value
+# (`answer_from: material`), so both sides of a rule name the same thing.
+CONTAINS_MATERIAL = "material"
+CONTAINS_LINK = "link"
+CONTAINS_ATTACHMENT = "attachment"
+CONTAINS_PATH = "path"
 
 _URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"\']+|(?<![\w.@])(?:www\.)[^\s<>()]+", re.I)
 
@@ -105,9 +140,24 @@ _PATH_RE = re.compile(
     r"|(?<![\w@./])[\w][\w.\-]*\.([A-Za-z0-9]{1,6})(?![\w/])",  # bare name.ext
 )
 
+# Origin values as the OWNER would say them, not as the code stores them.
+# `automation` is the umbrella for every non-owner origin.
+ORIGIN_OWNER = "owner"
+ORIGIN_AUTOMATION = "automation"
+ORIGIN_VALUES = frozenset({ORIGIN_OWNER, ORIGIN_AUTOMATION, "email", "schedule"})
+ORIGIN_OWNER_VALUE = "user"  # what Agent.origin actually holds for the owner
+
 SOURCE_URL = "url"
 SOURCE_PATH = "path"
 SOURCE_ATTACHMENT = "attachment"
+
+DETECTOR_KINDS: dict[str, frozenset[str]] = {
+    CONTAINS_MATERIAL: frozenset({SOURCE_URL, SOURCE_ATTACHMENT, SOURCE_PATH}),
+    CONTAINS_LINK: frozenset({SOURCE_URL}),
+    CONTAINS_ATTACHMENT: frozenset({SOURCE_ATTACHMENT}),
+    CONTAINS_PATH: frozenset({SOURCE_PATH}),
+}
+CONTAINS_DETECTORS = frozenset(DETECTOR_KINDS)
 
 # An attachment is already in the model's context — the material is PRESENT, so
 # there is nothing to call to fetch it. That is a second shape of `route`, not a
@@ -118,6 +168,21 @@ READER_PRESENT = ""
 # turns (#191 A4). Kept named here so a file written against the old shape
 # fails LOUDLY, with the reason, instead of quietly meaning something else.
 RETIRED_KEYS = {
+    "trigger": "the file names its SUBJECT instead — `when: request:` or `when: session:`.",
+    "contains": "now `when: request: has:`.",
+    "match": "now `when: request: matches:`.",
+    "field": "the field is the key now — `when: session: origin:`.",
+    "is": "now `when: session: origin: <value>`.",
+    "is_not": "now `when: session: origin: automation` — a positive match, not a negation.",
+    "route": f"now `then: {VERB_ANSWER_FROM}:`, and its `source` value is `{ROUTE_SOURCE}`.",
+    "prohibit": f"now `then: {VERB_NEVER_USE}:`.",
+    "disclose": (
+        f"now `then: {VERB_MUST_TELL_ME_WHEN}:`, and it takes a plain phrase — "
+        "naming the audience is the point, since a mid-turn preamble is not what "
+        "the owner reads."
+    ),
+    "tier": "deleted — the trigger's own form says how it is evaluated.",
+    "fail": "now `if_unsure: proceed | ask_me`.",
     "unless": (
         "a prohibition is now absolute for the turn and only the owner can "
         "lift it. Nothing the model says has any effect, because a word list "
@@ -140,10 +205,13 @@ VERDICT_ABSTAIN = "abstain"
 VERDICT_UNEVALUABLE = "unevaluable"
 VERDICT_ERROR = "error"
 
-# Failure direction for an UNEVALUABLE trigger, declared per rule.
-FAIL_OPEN = "open"  # do not bind — the owner is watching
-FAIL_HOLD = "hold"  # bind, and take the first violation straight to the owner
+# What to do when the harness cannot tell whether the rule applies. `fail:
+# open` was security jargon for a question the owner can answer in English:
+# proceed without the rule, or ask me?
+FAIL_OPEN = "proceed"  # do not bind — the owner is watching
+FAIL_HOLD = "ask_me"  # bind, and take the first violation straight to the owner
 FAIL_DIRECTIONS = frozenset({FAIL_OPEN, FAIL_HOLD})
+FAIL_DEFAULT = FAIL_HOLD  # over-restriction is the safe direction (R1)
 
 # Bounded refuse-first. The model gets this many instructive refusals per
 # binding; the next violation escalates to the owner. Its own constant rather
@@ -192,7 +260,7 @@ class Rule:
         """The tool name, or ROUTE_SOURCE when the rule routes to whatever
         source the message carried."""
         for obligation in self.obligations:
-            if obligation["verb"] == VERB_ROUTE:
+            if obligation["verb"] == VERB_ANSWER_FROM:
                 return str(obligation["to"])
         return ""
 
@@ -299,69 +367,139 @@ class _Compiled(NamedTuple):
     not_equals: str
 
 
-def _compile(front: dict[str, str]) -> _Compiled:
+def _as_list(value: Any) -> list[str]:
+    """A YAML scalar or list, as a list of strings. A list inside a field means
+    ANY-OF, the Sigma/Kyverno/IAM convention; a bare scalar is the one-item
+    case, because making the owner write `[web_search]` for one tool is the
+    kind of ceremony that gets rules written wrong."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [part.strip() for part in re.split(r"[,\s]+", str(value)) if part.strip()]
+
+
+def _block(front: dict, key: str) -> dict:
+    block = front.get(key)
+    if block is None:
+        return {}
+    if not isinstance(block, dict):
+        raise RuleError(f"`{key}:` must be a block of keys, not a single value")
+    return block
+
+
+def _compile(front: dict) -> _Compiled:
     """Trigger parameters + compiled obligations, or a RuleError naming the
-    problem. Everything a gate needs is resolved HERE so the gate itself is
-    pure set membership — the cost law (#191) falls out of that, not out of a
-    policy bolted on afterwards."""
-    trigger = front.get("trigger", "").strip()
-    if trigger not in TRIGGER_KINDS:
+    problem AND, where it can, what is missing.
+
+    The shape is the one every policy language shares — a named `when:` block
+    of conditions and a named `then:` block of effects, with the matched
+    SUBJECT named as the key rather than implied by a type tag. Everything a
+    gate needs is resolved here, so the gate itself is pure set membership.
+    """
+    when, then = _block(front, "when"), _block(front, "then")
+    # FIRST, before any structural complaint: a file written against the old
+    # format must be told it is the old format. "needs a `when:` block" is
+    # true and useless to someone holding a file that used to work.
+    for key, why in RETIRED_KEYS.items():
+        if front.get(key) or key in then or key in when:
+            raise RuleError(f"`{key}:` was retired — {why}")
+    if not when:
         raise RuleError(
-            f"unknown trigger {trigger!r} — v1 supports "
-            + ", ".join(sorted(TRIGGER_KINDS))
+            "a rule needs a `when:` block saying what it applies to — subjects: "
+            + ", ".join(sorted(SUBJECTS))
         )
+    unknown = [key for key in when if key not in SUBJECTS]
+    if unknown:
+        designed = [key for key in unknown if key in SUBJECTS_DESIGNED]
+        detail = (
+            f" — `{designed[0]}:` is designed but not built yet"
+            if designed
+            else " — have " + ", ".join(sorted(SUBJECTS))
+        )
+        raise RuleError(f"unknown `when:` subject {unknown[0]!r}{detail}")
+    if len(when) > 1:
+        # Sibling subjects would AND together, which is expressible — but two
+        # subjects in one file is almost always a rule that wanted to be two
+        # files, and restriction-only composition (R1) makes those equivalent.
+        raise RuleError(
+            "one subject per rule — write two files; restrictions compose by "
+            "union, so two rules are exactly equivalent to one with both"
+        )
+
     pattern: re.Pattern | None = None
     contains = field_name = equals = not_equals = ""
-    if trigger == TRIGGER_MESSAGE_SHAPE:
-        # Two forms. `contains:` is a BUILT-IN detector that returns structured
-        # evidence (the URLs, their hosts) the obligation can then route on;
-        # `match:` is an owner-written pattern for shapes with no detector.
-        contains = front.get("contains", "").strip().casefold()
-        source = front.get("match", "").strip()
+    if SUBJECT_REQUEST in when:
+        fields = when[SUBJECT_REQUEST]
+        if not isinstance(fields, dict):
+            raise RuleError("`request:` needs `has:` or `matches:` under it")
+        contains = str(fields.get("has", "") or "").strip().casefold()
+        source = str(fields.get("matches", "") or "").strip()
         if contains and source:
-            raise RuleError("message_shape takes `contains:` OR `match:`, not both")
+            raise RuleError("`request:` takes `has:` OR `matches:`, not both")
         if contains and contains not in CONTAINS_DETECTORS:
             raise RuleError(
-                f"unknown `contains:` detector {contains!r} — have "
+                f"unknown `has:` value {contains!r} — have "
                 + ", ".join(sorted(CONTAINS_DETECTORS))
             )
         if not contains:
             if not source:
-                raise RuleError("message_shape needs a `contains:` detector or a `match:` regex")
+                raise RuleError("`request:` needs `has:` or `matches:`")
             try:
                 pattern = re.compile(source)
             except re.error as exc:
-                raise RuleError(f"unparseable `match:` regex — {exc}") from exc
+                raise RuleError(f"unparseable `matches:` regex — {exc}") from exc
+        trigger = TRIGGER_MESSAGE_SHAPE
     else:
-        field_name = front.get("field", "").strip()
-        if field_name != "origin":
-            raise RuleError("session_context supports `field: origin` in v1")
-        equals, not_equals = front.get("is", "").strip(), front.get("is_not", "").strip()
-        if bool(equals) == bool(not_equals):
-            raise RuleError("session_context needs exactly one of `is:` / `is_not:`")
-
-    # Keys that governed live turns and no longer do. Silently ignoring a
-    # retired key is the worst option: the owner keeps a file that reads as if
-    # it still lifts a prohibition, and nothing anywhere says otherwise. An
-    # error is loud, appears in `rule_eval`, and names the replacement.
-    for key, why in RETIRED_KEYS.items():
-        if front.get(key, "").strip():
-            raise RuleError(f"`{key}:` was retired — {why}")
+        fields = when[SUBJECT_SESSION]
+        if not isinstance(fields, dict) or "origin" not in fields:
+            raise RuleError("`session:` needs `origin:` under it")
+        origin = str(fields["origin"]).strip().casefold()
+        if origin not in ORIGIN_VALUES:
+            raise RuleError(
+                f"unknown `origin:` value {origin!r} — have "
+                + ", ".join(sorted(ORIGIN_VALUES))
+            )
+        field_name = "origin"
+        # `automation` is the umbrella for every origin that is not the owner.
+        # A positive match rather than a negation: negation is where hand-edits
+        # go wrong, and "automation" is what the rule is actually about.
+        if origin == ORIGIN_AUTOMATION:
+            not_equals = ORIGIN_OWNER_VALUE
+        else:
+            equals = ORIGIN_OWNER_VALUE if origin == ORIGIN_OWNER else origin
+        trigger = TRIGGER_SESSION_CONTEXT
 
     obligations: list[dict] = []
-    if route := front.get("route", "").strip():
-        if route == ROUTE_SOURCE and not contains:
+    unknown_verbs = [verb for verb in then if verb not in VERBS]
+    if unknown_verbs:
+        verb = unknown_verbs[0]
+        if verb in VERBS_DESIGNED:
             raise RuleError(
-                "`route: source` needs a `contains:` detector to find the material"
+                f"`{verb}:` is designed but not built yet — {VERBS_DESIGNED[verb]}. "
+                "Either express this with what exists (" + ", ".join(sorted(VERBS))
+                + "), or the engine needs extending before this rule can work."
             )
-        obligations.append({"verb": VERB_ROUTE, "to": route, "of": "deliverable"})
-    if prohibited := _split_list(front.get("prohibit", "")):
-        obligations.append({"verb": VERB_PROHIBIT, "what": prohibited})
-    if state := front.get("disclose", "").strip():
-        # Declared, seeded as prose, and enforced at Verify — never at the gate.
-        obligations.append({"verb": VERB_DISCLOSE, "state": state})
+        raise RuleError(f"unknown `then:` verb {verb!r} — have " + ", ".join(sorted(VERBS)))
+    if route := str(then.get(VERB_ANSWER_FROM, "") or "").strip():
+        if route == ROUTE_SOURCE and contains not in DETECTOR_KINDS:
+            raise RuleError(
+                f"`{VERB_ANSWER_FROM}: {ROUTE_SOURCE}` needs `when: request: has: …` "
+                "— otherwise there is no material to answer from"
+            )
+        obligations.append(
+            {"verb": VERB_ANSWER_FROM, "to": route, "of": "deliverable"}
+        )
+    if prohibited := _as_list(then.get(VERB_NEVER_USE)):
+        obligations.append({"verb": VERB_NEVER_USE, "what": prohibited})
+    if state := str(then.get(VERB_MUST_TELL_ME_WHEN, "") or "").strip():
+        # Declared, seeded as prose, enforced at Verify — never at the gate.
+        obligations.append({"verb": VERB_MUST_TELL_ME_WHEN, "state": state})
     if not obligations:
-        raise RuleError("a rule with no obligation restricts nothing")
+        raise RuleError(
+            "a rule with no obligation restricts nothing — a `then:` block needs "
+            "at least one of: " + ", ".join(sorted(VERBS))
+        )
     return _Compiled(
         trigger, tuple(obligations), pattern, contains, field_name, equals, not_equals
     )
@@ -370,65 +508,82 @@ def _compile(front: dict[str, str]) -> _Compiled:
 def _parse(path: Path) -> Rule:
     """One rule file. A file that cannot be COMPILED still yields a Rule —
     carrying its error — because a broken rule must be visible in the corpus
-    and in the log, not silently absent (contract corollary 2)."""
+    and in the log, not silently absent (contract corollary 2).
+
+    The frontmatter is real YAML now, not the line-splitting the flat format
+    got away with: `when:`/`then:` are nested blocks. `yaml.safe_load` never
+    constructs objects, so a rule file cannot execute anything.
+    """
     text = path.read_text(encoding="utf-8")
-    front: dict[str, str] = {}
+    front: dict = {}
     body = text
+    header = ""
     if text.startswith("---"):
         parts = text.split("---", 2)
         if len(parts) == 3:
             _, header, body = parts
-            for line in header.strip().splitlines():
-                key, _, value = line.partition(":")
-                if key.strip():
-                    front[key.strip()] = value.strip()
-    name = front.get("name") or path.stem
-    description = front.get("description", "")
+    name = path.stem
     prose = body.strip()
+    description = ""
+    try:
+        loaded = yaml.safe_load(header) if header.strip() else {}
+        if loaded is not None and not isinstance(loaded, dict):
+            raise RuleError("frontmatter must be a block of keys")
+        front = loaded or {}
+    except yaml.YAMLError as exc:
+        # The one failure mode the nested format adds, so it says so plainly:
+        # a stray space is the way hand-edited YAML breaks.
+        problem = str(getattr(exc, "problem", "") or exc).strip()
+        return Rule(
+            name=name, description="", prose=prose, trigger="unknown", tier=0,
+            fail=FAIL_DEFAULT, obligations=(), path=path,
+            error=f"unreadable frontmatter — {problem} (check the indentation)",
+        )
+    except RuleError as exc:
+        return Rule(
+            name=name, description="", prose=prose, trigger="unknown", tier=0,
+            fail=FAIL_DEFAULT, obligations=(), path=path, error=str(exc),
+        )
+
+    name = str(front.get("name") or path.stem).strip() or path.stem
+    description = str(front.get("description", "") or "").strip()
     if not description:
         for line in prose.splitlines():
             if line.strip():
                 description = line.strip().lstrip("# ").strip()
                 break
-    status = front.get("status", "").casefold()
-    expires = skills.parse_expiry(front.get("expires", ""), path)
-    try:
-        tier = int(front.get("tier", "0") or 0)
-    except ValueError:
-        tier = 0
-    fail = front.get("fail", FAIL_OPEN).strip().casefold() or FAIL_OPEN
+    status = str(front.get("status", "") or "").casefold()
+    expires = skills.parse_expiry(str(front.get("expires", "") or ""), path)
+    fail = str(front.get("if_unsure", "") or "").strip().casefold() or FAIL_DEFAULT
     if fail not in FAIL_DIRECTIONS:
         warnings.warn(
-            f"{path}: unknown fail direction {fail!r}; using {FAIL_OPEN!r}", stacklevel=2
+            f"{path}: unknown `if_unsure:` value {fail!r}; using {FAIL_DEFAULT!r}",
+            stacklevel=2,
         )
-        fail = FAIL_OPEN
+        fail = FAIL_DEFAULT
     try:
         compiled = _compile(front)
     except RuleError as exc:
         return Rule(
-            name=name,
-            description=description,
-            prose=prose,
-            trigger=front.get("trigger", "").strip() or "unknown",
-            tier=tier,
-            fail=fail,
-            obligations=(),
-            status=status,
-            expires=expires,
-            path=path,
-            error=str(exc),
+            name=name, description=description, prose=prose, status=status,
+            expires=expires, path=path,
+            trigger="unknown", tier=0, fail=fail, obligations=(), error=str(exc),
         )
     return Rule(
         name=name,
         description=description,
         prose=prose,
-        trigger=compiled.trigger,
-        tier=tier,
-        fail=fail,
-        obligations=compiled.obligations,
         status=status,
         expires=expires,
         path=path,
+        trigger=compiled.trigger,
+        # DERIVED, never declared: the trigger's own form says how it must be
+        # evaluated (a detector or a regex is structural; a semantic `about:`
+        # is scored). No policy language asks the author to annotate the
+        # evaluation strategy, and `tier: 1` means nothing to the owner.
+        tier=0,
+        fail=fail,
+        obligations=compiled.obligations,
         pattern=compiled.pattern,
         contains=compiled.contains,
         field_name=compiled.field_name,
@@ -580,18 +735,20 @@ def find_paths(text: str) -> list[str]:
 
 
 def find_sources(ctx: TurnContext, detector: str) -> list[dict]:
-    """The whole material channel for this turn, as (ref, kind, host) rows.
+    """The material this turn carries, as (ref, kind, host) rows, filtered to
+    the kinds the detector admits.
 
     Order is deliberate: attachments first, because they are the least
     ambiguous "here, answer from this" there is, then the links and paths in
     the text. Deduplicated by ref, so an attachment named in the text too is
     one source, not two.
     """
+    kinds = DETECTOR_KINDS.get(detector, frozenset())
     sources: list[dict] = []
     seen: set[str] = set()
 
     def add(ref: str, kind: str, host: str = "") -> None:
-        if not ref or ref in seen:
+        if not ref or ref in seen or kind not in kinds:
             return
         seen.add(ref)
         row = {"ref": ref, "kind": kind}
@@ -599,12 +756,11 @@ def find_sources(ctx: TurnContext, detector: str) -> list[dict]:
             row["host"] = host
         sources.append(row)
 
-    if detector == CONTAINS_SOURCE:
-        for ref in (*ctx.images, *ctx.documents):
-            add(str(ref), SOURCE_ATTACHMENT)
+    for ref in (*ctx.images, *ctx.documents):
+        add(str(ref), SOURCE_ATTACHMENT)
     for url in find_urls(ctx.task or ""):
         add(url, SOURCE_URL, host_of(url))
-    if detector == CONTAINS_SOURCE:
+    if SOURCE_PATH in kinds:
         # A path candidate that is a FRAGMENT of material already counted is
         # the same material, not more of it. The web server announces a
         # natively-delivered attachment as "[image attached: shot.png — file at
@@ -688,7 +844,7 @@ def bind(
     missing = unsatisfiable(readers, known_tools)
     obligations = []
     for obligation in rule.obligations:
-        if obligation["verb"] == VERB_ROUTE and obligation["to"] == ROUTE_SOURCE:
+        if obligation["verb"] == VERB_ANSWER_FROM and obligation["to"] == ROUTE_SOURCE:
             # Snapshot what "the source" meant for THIS turn (contract
             # corollary 1) — a record naming only "source" would send a later
             # reader back to guess which material was in the message. `present`
@@ -777,7 +933,7 @@ def affects(bindings: list[Binding], tool: str) -> bool:
         if tool in binding.readers:
             return True
         for obligation in binding.obligations:
-            if obligation["verb"] == VERB_PROHIBIT and tool in obligation["what"]:
+            if obligation["verb"] == VERB_NEVER_USE and tool in obligation["what"]:
                 return True
     return False
 
@@ -804,10 +960,10 @@ def gate(bindings: list[Binding], tool: str) -> list[GateVerdict]:
 def _gate_one(binding: Binding, tool: str) -> GateVerdict:
     rule = binding.rule
     for obligation in binding.obligations:
-        if obligation["verb"] != VERB_PROHIBIT or tool not in obligation["what"]:
+        if obligation["verb"] != VERB_NEVER_USE or tool not in obligation["what"]:
             continue
         evidence = {
-            "obligation": VERB_PROHIBIT,
+            "obligation": VERB_NEVER_USE,
             "matched": tool,
             "route": rule.route_target,
             "readers": list(binding.readers),
@@ -901,7 +1057,7 @@ def seed_text(bindings: list[Binding]) -> str:
 
 def _obligation_line(obligation: dict) -> str:
     verb = obligation["verb"]
-    if verb == VERB_ROUTE:
+    if verb == VERB_ANSWER_FROM:
         if obligation["to"] == ROUTE_SOURCE:
             sources = ", ".join(obligation.get("sources") or []) or "the message"
             readers = ", ".join(obligation.get("readers") or [])
@@ -917,7 +1073,7 @@ def _obligation_line(obligation: dict) -> str:
                 f"anywhere else.\n  · {CHANNEL_SEPARATION}"
             )
         return f"· MUST: the {obligation['of']} comes from {obligation['to']}."
-    if verb == VERB_PROHIBIT:
+    if verb == VERB_NEVER_USE:
         what = ", ".join(obligation["what"])
         return (
             f"· MUST NOT call {what} for this turn. If you genuinely need another "
