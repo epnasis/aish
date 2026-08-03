@@ -1263,6 +1263,57 @@ class TestShowsAPicture:
         assert "show_image" in failure.ask and "paste the markdown" in failure.ask
 
 
+class TestVisualIsPictureOrVideo:
+    """"Something to look at" is ONE idea to the owner, not two joined by a
+    keyword. So the OR lives inside a named check rather than in an `any_of:`
+    combinator — a general expression language is what every surveyed policy
+    language is criticised for, and the grammar stays flat."""
+
+    RAN = ({"tool": "show_image", "args": {}, "status": "ok", "decision": ""},)
+    VIDEO = "Here it is: https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    PICTURE = "Here it is: ![ubud](/media/a1b2.png)"
+
+    def _fail(self, detector, answer, calls=()):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "answer_must_include": detector,
+        }), known_tools={"show_image"})
+        assert not errors, errors
+        binding = rules.bind(rule, {"on": "always"}, "b1", {"show_image"})
+        return rules.verify([binding], rules.TurnEvidence(answer=answer, calls=calls))
+
+    def test_a_video_satisfies_the_visual_check(self):
+        assert not self._fail("shows_something_visual", self.VIDEO)
+
+    def test_a_picture_satisfies_the_visual_check(self):
+        assert not self._fail("shows_something_visual", self.PICTURE, self.RAN)
+
+    def test_plain_text_satisfies_neither(self):
+        assert self._fail("shows_something_visual", "Ubud is greener than the coast.")
+
+    def test_a_video_does_not_satisfy_a_picture_rule(self):
+        """The narrower check stays narrow — sometimes a map IS the answer."""
+        assert self._fail("shows_a_picture", self.VIDEO)
+
+    def test_a_picture_does_not_satisfy_a_video_rule(self):
+        assert self._fail("shows_a_video", self.PICTURE, self.RAN)
+
+    def test_the_video_check_matches_what_the_app_actually_plays(self):
+        """If the check and the renderer disagreed, a rule would pass on a link
+        the owner cannot play — worse than no rule."""
+        for link in ("https://youtu.be/dQw4w9WgXcQ",
+                     "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+                     "https://youtube.com/watch?list=x&v=dQw4w9WgXcQ"):
+            assert not self._fail("shows_a_video", f"see {link}"), link
+
+    def test_a_page_about_a_video_is_not_a_video(self):
+        assert self._fail("shows_a_video", "read https://example.com/best-videos")
+
+    def test_the_ask_offers_both_ways_out(self):
+        [failure] = self._fail("shows_something_visual", "nothing visual")
+        assert "show_image" in failure.ask and "YouTube" in failure.ask
+
+
 class TestRetireWithoutCompiling:
     """The loud broken-rule warning is exactly when an owner reaches for
     retire. If retiring required a valid rule, the only unstoppable rules

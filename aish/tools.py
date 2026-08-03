@@ -1233,11 +1233,13 @@ TOOL_SCHEMAS = [
                     },
                     "answer_must_include": {
                         "type": "string",
-                        "description": "A named check on the finished answer: "
-                        "'shows_a_picture' (a picture fetched with show_image this "
-                        "turn) or 'links_to_what_you_read'. A plain phrase is NOT "
-                        "accepted — a check nothing can evaluate is a promise nothing "
-                        "keeps.",
+                        "description": "A named check on the finished answer. "
+                        "'shows_something_visual' (a picture OR a playable video — use "
+                        "this when the user says 'show me'), 'shows_a_picture' (a "
+                        "picture specifically, fetched with show_image this turn), "
+                        "'shows_a_video', or 'links_to_what_you_read'. A plain phrase "
+                        "is NOT accepted — a check nothing can evaluate is a promise "
+                        "nothing keeps.",
                     },
                     "answer_must_not": {
                         "type": "string",

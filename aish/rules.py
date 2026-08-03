@@ -94,11 +94,27 @@ VERBS_DESIGNED = {
 DETECTOR_LINKS_READ = "links_to_what_you_read"
 DETECTOR_RAW_IMAGES = "raw_image_links"
 DETECTOR_SHOWS_PICTURE = "shows_a_picture"
+DETECTOR_SHOWS_VIDEO = "shows_a_video"
+DETECTOR_SHOWS_VISUAL = "shows_something_visual"
 ANSWER_DETECTORS = {
     DETECTOR_LINKS_READ: "a link to every page you read",
     DETECTOR_RAW_IMAGES: "a markdown image link that did not come from show_image",
     DETECTOR_SHOWS_PICTURE: "a picture, fetched with show_image this turn",
+    DETECTOR_SHOWS_VIDEO: "a video the app can play",
+    DETECTOR_SHOWS_VISUAL: "something to look at — a picture or a video",
 }
+VISUAL_DETECTORS = frozenset(
+    {DETECTOR_SHOWS_PICTURE, DETECTOR_SHOWS_VIDEO, DETECTOR_SHOWS_VISUAL}
+)
+
+# What the web UI actually turns into a playable card. Mirrored from app.js's
+# YOUTUBE_RE on purpose: if the check and the renderer disagreed, a rule would
+# pass on a link the owner cannot play, which is worse than no rule at all.
+_VIDEO_RE = re.compile(
+    r"https?://(?:www\.)?(?:youtube\.com/(?:watch\?(?:[^#\s]*&)?v=|shorts/)"
+    r"([\w-]{11})|youtu\.be/([\w-]{11}))",
+    re.IGNORECASE,
+)
 
 _MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
 _MD_LINK_RE = re.compile(r"\]\(\s*(https?://[^)\s]+)|(?<![\w(])(https?://[^\s)<>\]]+)")
@@ -919,6 +935,54 @@ def _evaluate_meaning(rule: Rule, ctx: TurnContext, meaning) -> tuple[str, dict]
     return (VERDICT_BIND if score >= MEANING_FLOOR else VERDICT_ABSTAIN), evidence
 
 
+def _verify_visual(
+    binding: Binding, obligation: dict, evidence: TurnEvidence, detector: str, common: dict
+) -> VerifyFailure | None:
+    """Picture, video, or either.
+
+    The picture half is a JOIN, unfakeable in both directions: show_image must
+    have RUN this turn (the harness wrote that, not the model), and its output
+    — a LOCAL path, never a URL — must appear in the answer. A call with no
+    image in the answer is a picture fetched and dropped; an image link with no
+    call is a URL the model pasted, which renders as a broken box.
+
+    "Either" lives in a NAMED detector rather than in an `any_of:` combinator.
+    "Something to look at" is one idea to the owner, not two joined by a
+    keyword — and a general expression language is what every surveyed policy
+    language is criticised for. The grammar stays flat; the OR sits inside a
+    check defined once, in code, and tested.
+
+    The tripwire, so this does not become a habit: if a THIRD combination is
+    ever asked for, the pattern is telling us the grammar wants a real OR, and
+    that is the moment to build one properly rather than name a fourth
+    detector.
+    """
+    answer = evidence.answer or ""
+    picture = [
+        url for url in _MD_IMAGE_RE.findall(answer)
+        if not url.lower().startswith(("http://", "https://"))
+    ] if evidence.called("show_image") else []
+    video = [match.group(0) for match in _VIDEO_RE.finditer(answer)]
+    satisfied = {
+        DETECTOR_SHOWS_PICTURE: bool(picture),
+        DETECTOR_SHOWS_VIDEO: bool(video),
+        DETECTOR_SHOWS_VISUAL: bool(picture or video),
+    }[detector]
+    if satisfied:
+        return None
+    how = {
+        DETECTOR_SHOWS_PICTURE: SHOW_PICTURE_HOW,
+        DETECTOR_SHOWS_VIDEO: SHOW_VIDEO_HOW,
+        DETECTOR_SHOWS_VISUAL: SHOW_PICTURE_HOW + " " + SHOW_VIDEO_HOW,
+    }[detector]
+    return VerifyFailure(
+        binding, obligation,
+        {"detector": detector, "picture": picture[:4], "video": video[:4],
+         "called_show_image": evidence.called("show_image")},
+        MUST_INCLUDE_ASK.format(what=ANSWER_DETECTORS[detector], **common) + "\n" + how,
+    )
+
+
 def find_urls(text: str) -> list[str]:
     """Every URL in a message, in order, de-duplicated. Parsing, not intent."""
     seen: list[str] = []
@@ -1400,6 +1464,17 @@ MUST_FIRST_ASK = (
     "Call {capability} now and then answer from what it returns."
 )
 
+# How to satisfy each visual check, in the model's own terms. A refusal that
+# does not say what to do instead is the uninstructive refusal R6 forbids.
+SHOW_PICTURE_HOW = (
+    "Call show_image for the picture that belongs here, and paste the markdown "
+    "line it gives you back into the answer exactly as written."
+)
+SHOW_VIDEO_HOW = (
+    "Or include a YouTube link on its own line — the app turns one into a video "
+    "the user can play. A link to a page ABOUT a video is not a video."
+)
+
 MUST_INCLUDE_ASK = (
     "The rule '{rule}' requires the answer to include {what}, and it does not. "
     "{description}\n"
@@ -1521,27 +1596,8 @@ def _verify_detector(
             "Call show_image for each and use the markdown it returns.",
         )
 
-    if detector == DETECTOR_SHOWS_PICTURE:
-        # A JOIN, and unfakeable in both directions: show_image must have RUN
-        # this turn (the harness wrote that, not the model), and its output — a
-        # LOCAL path, never a URL — must appear in the answer. Neither half
-        # alone is enough. A call with no image in the answer is a picture
-        # fetched and dropped; an image link with no call is a URL the model
-        # pasted, which renders as a broken box.
-        shown = [
-            url for url in _MD_IMAGE_RE.findall(answer)
-            if not url.lower().startswith(("http://", "https://"))
-        ]
-        if shown and evidence.called("show_image"):
-            return None
-        return VerifyFailure(
-            binding, obligation,
-            {"detector": detector, "shown": shown[:4],
-             "called": evidence.called("show_image")},
-            MUST_INCLUDE_ASK.format(what=ANSWER_DETECTORS[detector], **common)
-            + "\nCall show_image now for the picture that belongs here, and paste "
-            "the markdown line it gives you back into the answer exactly as written.",
-        )
+    if detector in VISUAL_DETECTORS:
+        return _verify_visual(binding, obligation, evidence, detector, common)
 
     # DETECTOR_LINKS_READ: every host fetched this turn appears in the answer.
     read = evidence.hosts_read()
