@@ -38,6 +38,10 @@ MAX_ROUNDS = 4
 
 NUM_CTX = 8192
 
+# The refusal is a sentence for a person, and an uncapped one arrives as a wall
+# of text in an approval-adjacent message.
+CANNOT_CHARS = 400
+
 
 @dataclass
 class Compiled:
@@ -147,21 +151,58 @@ Two ways forward — say which:
   · leave it as it is, and this becomes a request to extend aish itself."""
 
 
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
 def _parse(reply: str) -> dict | None:
-    """The model's JSON, or None. Tolerant of a fenced block or a stray
-    sentence around it — the failure we care about is a wrong FIELD, which the
-    lint catches, not a wrapper the parser can see past."""
-    match = _JSON_RE.search(reply or "")
-    if not match:
-        return None
-    try:
-        loaded = json.loads(match.group(0))
-    except ValueError:
-        return None
-    return loaded if isinstance(loaded, dict) else None
+    """The model's JSON, or None.
+
+    Tolerant of a fenced block or a sentence either side of it. A single greedy
+    `{.*}` was not: one brace anywhere outside the object — prose with a
+    `{placeholder}`, a `:}` sign-off, a second object — swallowed everything
+    between the first and last brace and failed to parse. That only ever cost a
+    retry, never a wrong reading, but a retry spends a bounded round on a reply
+    that was fine.
+    """
+    text = (reply or "").strip()
+    for candidate in _candidates(text):
+        try:
+            loaded = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(loaded, dict):
+            return loaded
+    return None
+
+
+def _candidates(text: str):
+    """The whole reply, then any fenced block, then each brace-balanced span —
+    cheapest and most likely first."""
+    yield text
+    for match in _FENCE_RE.finditer(text):
+        yield match.group(1)
+    depth = 0
+    start = -1
+    in_string = escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0:
+                yield text[start : i + 1]
 
 
 def compile_request(
@@ -199,13 +240,26 @@ def compile_request(
         if parsed is None:
             errors = ["the reply was not a JSON object"]
             continue
-        if refusal := str(parsed.get("cannot", "") or "").strip():
+        raw = parsed.get("cannot")
+        if raw is not None and not isinstance(raw, str):
+            # A non-string went straight into owner-facing text as
+            # "I could not turn that into a rule: True". It is a malformed
+            # reply, which is a non-answer — so it retries like any other.
+            errors = ["`cannot` must be a sentence explaining what could not be expressed"]
+            continue
+        if refusal := (raw or "").strip()[:CANNOT_CHARS]:
             # Taken at face value and NOT retried. A compiler told the request
             # is inexpressible, then asked again, will invent an approximation
             # — and an approximation is the failure mode this whole layer
             # exists to prevent, because it looks like it worked.
             return Compiled(problem=_cannot(refusal), rounds=attempt)
-        fields = {k: v for k, v in parsed.items() if k in rules.AUTHOR_FIELDS}
+        # COMPILER_FIELDS, not AUTHOR_FIELDS: the prompt never asks for
+        # `enabled` or `expires`, and a reply carrying `expires: "2020-01-01"`
+        # renders, lints, lands, is dropped at load — and the card describes in
+        # full a rule that will never bind once. Accepting a key nobody asked
+        # for is pure attack surface, and the request text reaching this can
+        # have come from an email.
+        fields = {k: v for k, v in parsed.items() if k in rules.COMPILER_FIELDS}
         if existing:
             fields = {**existing, **fields}
         try:

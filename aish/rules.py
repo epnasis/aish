@@ -1598,12 +1598,24 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 # values against this list and the renderer builds the YAML, which deletes an
 # entire failure class (quoting, indentation, key names) and is why the exhibit
 # in #205 could not have been written correctly by any author, human or model.
+# What a rule's LIFECYCLE is made of. Separated because these are the owner's
+# to set and nothing else's: a rule that binds nothing is indistinguishable
+# from a rule that is working unless someone reads the frontmatter, so they are
+# not part of what a compiler may propose.
+LIFECYCLE_FIELDS = ("enabled", "expires")
+
 AUTHOR_FIELDS = (
     "name", "description", "prose", "enabled", "expires",
     "when_subject", "when_has", "when_matches", "when_origin", "when_action",
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
     VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT, VERB_MUST_TELL_ME_WHEN,
 )
+
+# The subset a prose compiler may propose. The prompt never asks for the
+# lifecycle keys, so accepting them is pure attack surface: `expires:
+# "2020-01-01"` renders, lints and lands, is dropped at load, and the approval
+# card describes in full detail a rule that will never bind once.
+COMPILER_FIELDS = tuple(f for f in AUTHOR_FIELDS if f not in LIFECYCLE_FIELDS)
 
 
 class LintError(Exception):
@@ -1842,6 +1854,16 @@ def explain(rule: Rule) -> str:
         )
     if rule.status == "disabled":
         lines.append("DISABLED — it will not bind until you enable it.")
+    if rule.expires:
+        # Silence here read as a healthy rule. A rule with a past expiry is
+        # dropped at load and binds NOTHING, so a card that describes what it
+        # would enforce while omitting that it never will is the same defect as
+        # a smuggled `enabled: false` — an inert rule that reads as working.
+        lines.append(
+            f"EXPIRED on {rule.expires} — it binds nothing."
+            if rule.expires < date.today()
+            else f"Expires on {rule.expires}; after that it binds nothing."
+        )
     return "\n".join(lines)
 
 

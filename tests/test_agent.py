@@ -6477,6 +6477,43 @@ class TestRuleAuthoring:
         assert result.startswith("ERROR") and "gws_gmial_send" in result
         assert seen == [], "an uncompilable rule reached the approver"
 
+    def test_a_compiler_cannot_land_a_rule_that_binds_nothing(self, tmp_path):
+        """The card described in full detail a rule that would never bind once:
+        #205's own exhibit, reproduced through the feature built to prevent
+        it. Reachable from `request` text, which on a triggered session came
+        from an email."""
+        seen = []
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = lambda p: json.dumps({
+            "name": "inert", "description": "Never search the web.",
+            "when_subject": "always", "never_use": ["web_search"],
+            "expires": "2020-01-01",
+        })
+        agent.approve_write = lambda plan: seen.append(plan) or True
+        result = agent._dispatch("create_rule", {"request": "never search the web"})
+        assert not result.startswith("ERROR"), result
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        assert rule.expires is None, "a compiled reply expired the rule it wrote"
+        assert "EXPIRED" not in seen[0].note
+
+    def test_an_unreachable_compiler_falls_back_instead_of_crashing(self, tmp_path):
+        """`make_compiler` only CONSTRUCTS the callable — the connection
+        happens on the first ask, so catching at construction covered half the
+        failure and the owner got "tool failed internally" for a model being
+        down."""
+        def dead(_prompt):
+            raise RuntimeError("connection refused")
+
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = dead
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", {"request": "never search the web"})
+        assert result.startswith("ERROR") and "naming the fields directly" in result
+        # …and a call that ALSO named fields just uses them.
+        assert not agent._dispatch(
+            "create_rule", {"request": "x", **self.FIELDS}
+        ).startswith("ERROR")
+
     def test_the_card_shows_the_turns_this_would_have_bound(self, tmp_path):
         """Retro-match: a rule is a function of logged facts, so real history
         is better evidence than any synthetic run."""

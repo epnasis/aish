@@ -3997,9 +3997,21 @@ class Agent:
                 f"ERROR: could not reach a model to turn that into a rule ({exc}). "
                 "Call create_rule again naming the fields directly."
             )
-        compiled = rule_compiler.compile_request(
-            request, ask, self._known_tool_names(), existing=existing
-        )
+        try:
+            compiled = rule_compiler.compile_request(
+                request, ask, self._known_tool_names(), existing=existing
+            )
+        except Exception as exc:  # noqa: BLE001 — a dead backend is a fallback
+            # `make_compiler` only CONSTRUCTS the callable; the connection
+            # happens on the first ask, so catching at construction covered
+            # half the failure. Without this the owner gets "tool 'create_rule'
+            # failed internally" for a model being down.
+            if named:
+                return named
+            return (
+                f"ERROR: could not reach a model to turn that into a rule ({exc}). "
+                "Call create_rule again naming the fields directly."
+            )
         if compiled.problem:
             # Handed back whole. It names WHAT could not be expressed and what
             # the two options are, and the second option — "this becomes a

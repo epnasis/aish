@@ -86,6 +86,57 @@ class TestCompiling:
         assert result and "tier" not in result.fields
 
 
+class TestTheCompilerCannotTouchTheLIFECYCLE:
+    """A rule that binds NOTHING is indistinguishable from one that works
+    unless someone reads the frontmatter. The prompt never asks for these keys,
+    so accepting them is pure attack surface — and the request text can have
+    come from an email on a triggered session."""
+
+    def test_a_smuggled_expiry_is_dropped(self):
+        reply = json.dumps({**json.loads(GOOD), "expires": "2020-01-01"})
+        result = rule_compiler.compile_request("x", scripted(reply), TOOLS)
+        assert result and "expires" not in result.fields
+
+    def test_a_smuggled_disable_is_dropped(self):
+        reply = json.dumps({**json.loads(GOOD), "enabled": False})
+        result = rule_compiler.compile_request("x", scripted(reply), TOOLS)
+        assert result and "enabled" not in result.fields
+        rule, _ = rules.lint(rules.render(result.fields), known_tools=TOOLS)
+        assert rule is not None and rule.status == ""
+
+    def test_the_prompt_never_asks_for_a_lifecycle_key(self):
+        """The filter and the prompt have to agree, or one of them is wrong."""
+        ask = scripted(GOOD)
+        rule_compiler.compile_request("x", ask, TOOLS)
+        for key in rules.LIFECYCLE_FIELDS:
+            assert key not in ask.prompts[0]
+
+
+class TestParsingAReply:
+    """A brace outside the object used to swallow everything between the first
+    and the last one. That only cost a retry, never a wrong reading — but a
+    retry spends a bounded round on a reply that was fine."""
+
+    def test_prose_containing_braces_around_the_object(self):
+        result = rule_compiler.compile_request(
+            "x", scripted("Use {name} as the key. " + GOOD + " Hope that helps :}"), TOOLS
+        )
+        assert result and result.rounds == 1
+
+    def test_a_fenced_object_followed_by_commentary(self):
+        result = rule_compiler.compile_request(
+            "x", scripted(f"```json\n{GOOD}\n```\nLet me know if {{anything}} is off."),
+            TOOLS,
+        )
+        assert result and result.rounds == 1
+
+    def test_the_first_complete_object_wins_when_two_are_sent(self):
+        result = rule_compiler.compile_request(
+            "x", scripted(GOOD + "\n" + json.dumps({"cannot": "actually no"})), TOOLS
+        )
+        assert result and result.fields["name"] == "bounded-material"
+
+
 class TestRetry:
     def test_a_lint_failure_is_fed_back_and_the_retry_lands(self):
         """The instructive-refusal law, applied to authoring: the compiler is
@@ -138,6 +189,20 @@ class TestCannot:
         result = rule_compiler.compile_request("be terser", ask, TOOLS)
         assert not result and result.rounds == 1
         assert len(ask.prompts) == 1, "a stated impossibility was argued with"
+
+    def test_a_cannot_that_is_not_a_sentence_is_a_non_answer(self):
+        """It went straight into owner-facing text as "I could not turn that
+        into a rule: True"."""
+        ask = scripted(json.dumps({"cannot": True}), GOOD)
+        result = rule_compiler.compile_request("x", ask, TOOLS)
+        assert result and result.rounds == 2, "a malformed refusal was printed"
+
+    def test_a_very_long_refusal_is_capped(self):
+        result = rule_compiler.compile_request(
+            "x", scripted(json.dumps({"cannot": "because " * 500})), TOOLS
+        )
+        assert not result
+        assert len(result.problem) < 1000
 
     def test_what_aish_can_enforce_is_listed_from_the_code(self):
         result = rule_compiler.compile_request("x", scripted(self.REFUSAL), TOOLS)

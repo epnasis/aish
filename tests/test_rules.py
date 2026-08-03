@@ -1176,6 +1176,18 @@ class TestRenderedMeaningMatchesTheFile:
         rule, errors = rules.lint(rules.render({**self.BASE, "description": "a --- b"}))
         assert not errors and rule is not None and rule.description == "a --- b"
 
+    @pytest.mark.parametrize("key", rules.LIFECYCLE_FIELDS)
+    def test_a_lifecycle_key_is_never_silently_absent_from_the_card(self, key):
+        """A rule that binds NOTHING must not read as one that works. Both keys
+        make a rule inert, and the card has to say so — this is parametrised
+        over the constant so a lifecycle key added later inherits the check
+        instead of being the fourth instance of this bug."""
+        value = {"enabled": False, "expires": "2020-01-01"}[key]
+        rule, errors = rules.lint(rules.render({**self.BASE, key: value}))
+        assert not errors and rule is not None
+        text = rules.explain(rule)
+        assert "DISABLED" in text or "EXPIRED" in text, text
+
     def test_a_regex_with_backslashes_is_not_re_escaped(self):
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "prompt",
