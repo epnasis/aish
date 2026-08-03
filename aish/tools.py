@@ -1186,12 +1186,23 @@ TOOL_SCHEMAS = [
                         "carry — 'source' (any material: a link, an attachment or a typed "
                         "path), 'link', 'attachment' or 'path'.",
                     },
+                    "when_means_like": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "For when_subject='prompt': 3-5 EXAMPLE MESSAGES, "
+                        "written the way the user actually types (include their other "
+                        "language if they use one). Matched by MEANING, not by words. "
+                        "Use this whenever the condition is about what a message means "
+                        "— 'when I ask to be shown something', 'when I'm planning a "
+                        "trip'. This is almost always what you want.",
+                    },
                     "when_matches": {
                         "type": "string",
-                        "description": "For when_subject='prompt': a regex the message "
-                        "must match. Prefer when_has — a keyword regex fires on 'the "
-                        "Docker image is broken' and is the classic way to write a rule "
-                        "that binds the wrong turns.",
+                        "description": "For when_subject='prompt': a regex. ONLY for a "
+                        "literal string such as a domain. NEVER a list of words standing "
+                        "in for a meaning — 'show|display|picture' fires on 'the Docker "
+                        "image is broken' and misses the same sentence in Polish. aish "
+                        "refuses those. Use when_means_like instead.",
                     },
                     "when_origin": {
                         "type": "string",
@@ -1223,8 +1234,10 @@ TOOL_SCHEMAS = [
                     "answer_must_include": {
                         "type": "string",
                         "description": "A named check on the finished answer: "
-                        "'links_to_what_you_read'. A plain phrase is NOT accepted — a "
-                        "check nothing can evaluate is a promise nothing keeps.",
+                        "'shows_a_picture' (a picture fetched with show_image this "
+                        "turn) or 'links_to_what_you_read'. A plain phrase is NOT "
+                        "accepted — a check nothing can evaluate is a promise nothing "
+                        "keeps.",
                     },
                     "answer_must_not": {
                         "type": "string",
@@ -1272,6 +1285,7 @@ TOOL_SCHEMAS = [
                     "description": {"type": "string"},
                     "when_subject": {"type": "string", "description": _WHEN_SUBJECT},
                     "when_has": {"type": "string"},
+                    "when_means_like": {"type": "array", "items": {"type": "string"}},
                     "when_matches": {"type": "string"},
                     "when_origin": {"type": "string"},
                     "when_action": {"type": "object"},

@@ -265,7 +265,33 @@ Beyond compiling, the lint checks that **everything the rule names exists** — 
 
 **The compiler cannot touch a rule's lifecycle.** `enabled` and `expires` are the owner's to set and nothing else's, so they are not in the subset a compiler may propose — the prompt never asks for them, and accepting a key nobody asked for is pure attack surface. A reply carrying `expires: "2020-01-01"` renders, lints and lands, is dropped at load, and the card describes in full detail a rule that will **never bind once**: #205's own exhibit, reproduced through the feature built to prevent it, and reachable from `request` text that on a triggered session came from an email. Belt and braces, because the same silence bites hand-written rules too: `explain()` now states expiry, and shouts when it is already past. An edit *can* retire a rule this way, and that is fine — the card says DISABLED, which is honest.
 
-**A stated impossibility is never argued with.** When the compiler answers `{"cannot": …}` it is taken at face value and not retried: asked again, a model told the request is inexpressible will invent something close, and something close is precisely the failure this layer exists to prevent, because it looks like it worked. What comes back names *what* could not be expressed, lists what aish can enforce today, and offers two ways forward — rephrase toward what exists, **or leave it and treat this as a request to extend aish itself**. That second option is the point: a failed compile is a feature request in structured form, which is the self-improvement loop of #190 working for once. `TestCannot`, `TestTheCompilerCannotTouchTheLIFECYCLE`, `TestParsingAReply`, `TestRuleAuthoring`.
+**A stated impossibility is never argued with.** When the compiler answers `{"cannot": …}` it is taken at face value and not retried: asked again, a model told the request is inexpressible will invent something close, and something close is precisely the failure this layer exists to prevent, because it looks like it worked. What comes back names *what* could not be expressed, lists what aish can enforce today, and offers two ways forward — rephrase toward what exists, **or leave it and treat this as a request to extend aish itself**. That second option is the point: a failed compile is a feature request in structured form, which is the self-improvement loop of #190 working for once. When the owner takes that second option, the issue is written **here** rather than by the acting model: the two facts that make a gap report worth filing — what he asked for and what could not be expressed — are the two the acting model was not part of, so a report it composed from memory would be a guess about a guess. `TestCannot`, `TestTheCompilerCannotTouchTheLIFECYCLE`, `TestParsingAReply`, `TestCompiling`, `TestRetry`, `TestRuleAuthoring`.
+
+### When a rule needs MEANING — the owner's examples are the anchor
+
+Reported from a real session. *"Show me the difference between Ubud and the beach"* came back as a text table; he wanted photographs. He asked for a rule: *when I ask to be shown something, show me a picture.* The compiler wrote a keyword list, and on each retry made the list longer. Three attempts, three wrong rules.
+
+**That was the vocabulary's fault, not the compiler's.** The condition is a fact about the *request*, and the answer-side reframe cannot reach it: by the time an answer exists, "was I asked to be shown something?" is gone. Literal matching was the only trigger on offer, so a word list was the only thing to reach for — and a word list fires on *"the Docker image is broken"* and misses the same sentence in Polish. **This is the first rule that provably cannot be phrased answer-side, and it is the case the design said would bring scored triggers back.**
+
+```yaml
+when:
+  prompt:
+    means_like:
+      - show me the difference between X and Y
+      - pokaż mi jak to wygląda
+then:
+  answer_must_include: shows_a_picture
+```
+
+**Examples, not a threshold.** The owner writes 3–5 whole messages the way he actually types them, in whichever languages he uses. A new message is compared to them by meaning — the same local multilingual embedding model that already finds his skills and memories, so this is existing plumbing pointed at a new job. A miss is fixed by adding one more example. **He never sets a number and never sees one**; what he sees is the retro-match, *"this would have caught these 6 of your last 200 messages"*, made of his own traffic.
+
+**Why a fuzzy trigger is affordable here, and only here.** Rules only ever RESTRICT, so a wrong match costs one refused or one required tool call. It cannot widen anything. That is the restriction-only law paying for itself: the same trigger would be indefensible on a gate that *granted* something, which is why autonomy grants stay Tier 0 forever. The tier is **derived** from the trigger's form — examples are scored, everything else is structural — because no policy language asks an author to annotate evaluation strategy and `tier: 1` means nothing to the owner.
+
+**No embedding model is a THIRD answer.** A rule that needs meaning records `unevaluable`, never a quiet abstain. "The model was down" and "the rule did not apply" are different facts, and a rule whose evaluation silently degrades looks exactly like one that is working. Both similarity distributions are recorded, not only the matches — you cannot tell that a floor sits below a corpus's noise from the hits alone. `TestMeaningTrigger`.
+
+**A word list standing in for a meaning is now refused at the lint**, with the alternative named. Structural, so it does not depend on the compiler being persuaded: a pattern that is nothing but an alternation of ordinary words is the exact shape of the mistake, and punctuation separates it cleanly from the legitimate cases — `youtube\.com|youtu\.be` is a literal string and passes. `TestKeywordListsAreRefused`.
+
+**And the obligation his rule needed did not exist either.** `shows_a_picture` is a join, unfakeable in both directions: `show_image` must have RUN this turn (the harness wrote that, not the model), and its output — a LOCAL path, never a URL — must appear in the answer. A call with no image in the answer is a picture fetched and dropped; an image link with no call is a URL the model pasted, which renders as a broken box. `TestShowsAPicture`.
 
 ### Retro-match — a rule is a function of logged facts
 

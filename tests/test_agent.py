@@ -6421,7 +6421,11 @@ class TestRuleAuthoring:
         # written, so the call must not log green — and what it says is what
         # the owner needs to decide between rephrasing and extending aish.
         assert result.startswith("ERROR")
-        assert "about style" in result and "extend aish" in result
+        # …and it hands the model a ready-made gap report to offer, so a rule
+        # the vocabulary cannot express becomes a feature request instead of
+        # evaporating.
+        assert "about style" in result and "GitHub issue" in result
+        assert "be terser" in result
         assert not list((tmp_path / "rules").glob("*.md"))
 
     def test_fields_the_model_named_itself_win_over_the_compiler(self, tmp_path):

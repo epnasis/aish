@@ -42,6 +42,10 @@ NUM_CTX = 8192
 # of text in an approval-adjacent message.
 CANNOT_CHARS = 400
 
+# The owner's own words, quoted back into the issue. Bounded because a whole
+# pasted document would drown the two facts that make the report useful.
+REQUEST_CHARS = 300
+
 
 @dataclass
 class Compiled:
@@ -75,9 +79,12 @@ def _vocabulary() -> str:
         "words rather than quietly patched over.",
     ]
     subjects = [
-        "- prompt: what the owner typed, plus any attachments. Give when_has "
-        "(one of " + ", ".join(sorted(rules.CONTAINS_DETECTORS)) + ") or, only if "
-        "nothing else fits, when_matches with a regex.",
+        "- prompt: what the owner typed, plus any attachments. Give ONE of: "
+        "when_has (" + ", ".join(sorted(rules.CONTAINS_DETECTORS)) + ") when the "
+        "condition is about what the message CARRIES; when_means_like, a list of "
+        "3-5 example messages, when it is about what the message MEANS; "
+        "when_matches with a regex ONLY when the thing being matched is a "
+        "literal string such as a domain.",
         "- session: how the session started. Give when_origin: owner or automation.",
         "- action: the call about to run. Give when_action with any of "
         + ", ".join(rules.ACTION_FIELDS[:3]) + ".",
@@ -121,9 +128,13 @@ ordinary request can still produce an answer that wants one. That is \
 when_subject "always" plus an obligation on the answer, and it is both cheaper \
 and more correct than any trigger.
 
-2. A KEYWORD REGEX IS ALMOST ALWAYS WRONG. when_matches on "image|photo" fires \
-on "the Docker image is broken". Reach for when_has first; use when_matches \
-only when the thing being matched really is a literal string.
+2. NEVER USE A WORD LIST FOR A MEANING. when_matches on "show|display|picture" \
+fires on "the Docker image is broken" and misses the same sentence in another \
+language, and adding more words makes both worse. If the condition is about \
+what the message MEANS — "when I ask to be shown something", "when I am \
+planning a trip" — use when_means_like and write 3-5 whole example messages the \
+way that person actually types, including in their other language if they use \
+one. Examples are matched by meaning, not by letters.
 
 If their instruction cannot be expressed with these fields, reply with a JSON \
 object of exactly one key, "cannot", whose value says WHAT could not be \
@@ -146,9 +157,24 @@ I could not turn that into a rule: {reason}
 
 What aish can enforce today: {vocabulary_summary}
 
-Two ways forward — say which:
-  · rephrase it toward what exists, or
-  · leave it as it is, and this becomes a request to extend aish itself."""
+TELL THE USER THIS, then offer them the choice — do not pick for them:
+  · they rephrase it toward what exists, or
+  · you open a GitHub issue on epnasis/aish so aish learns to enforce it.
+
+If they choose the issue, open it with this title and body, and nothing you \
+invented on top:
+
+  title: rules: cannot express "{request}"
+  body:
+    The owner asked for a rule and it could not be compiled.
+
+    **What they asked for:** {request}
+
+    **What could not be expressed:** {reason}
+
+    **What the vocabulary offers today:** {vocabulary_summary}
+
+    Filed from a failed compile, so it is a real gap rather than a guess."""
 
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -252,7 +278,7 @@ def compile_request(
             # is inexpressible, then asked again, will invent an approximation
             # — and an approximation is the failure mode this whole layer
             # exists to prevent, because it looks like it worked.
-            return Compiled(problem=_cannot(refusal), rounds=attempt)
+            return Compiled(problem=_cannot(refusal, request), rounds=attempt)
         # COMPILER_FIELDS, not AUTHOR_FIELDS: the prompt never asks for
         # `enabled` or `expires`, and a reply carrying `expires: "2020-01-01"`
         # renders, lints, lands, is dropped at load — and the card describes in
@@ -282,12 +308,19 @@ def compile_request(
     )
 
 
-def _cannot(reason: str) -> str:
+def _cannot(reason: str, request: str = "") -> str:
     """The refusal the owner reads. "Not expressible in the current vocabulary"
     is useless; this names what, why, and what the two options are — and the
     second option is the point. **A failed compile is a feature request in
-    structured form**, which is the self-improvement loop working for once."""
+    structured form**, which is the self-improvement loop working for once.
+
+    The issue text is written HERE rather than left to the acting model,
+    because the two facts that make it worth filing — what was asked and what
+    could not be expressed — are the two the model was not part of. A gap
+    report it composed from memory would be a guess about a guess.
+    """
     return CANNOT_TEMPLATE.format(
+        request=(request or "(not recorded)").strip()[:REQUEST_CHARS],
         reason=reason.rstrip("."),
         vocabulary_summary=(
             "answer from a named tool or from the material you gave it; never use "

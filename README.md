@@ -250,7 +250,11 @@ thousands of entries without bloating the context.
 
   A rule reads as one sentence: **when** this, **then** that. The `when:` names
   what is being examined — the `prompt:` you typed, the `session:` it is running
-  in, the `action:` about to run, or `always`. The `then:` lists obligations
+  in, the `action:` about to run, or `always`. When the condition is about what
+  a message *means* rather than what it contains, you give **examples** —
+  `means_like:` with a few messages in your own words, in any language you use —
+  and aish matches by meaning rather than by wording. A miss is fixed by adding
+  another example, never by tuning anything. The `then:` lists obligations
   from a small closed set: `answer_from:` a named tool — or `source`, meaning
   **the material you handed over** (a link, an attached file or image, a path
   you typed), with aish picking the right reader for each — `never_use:` these

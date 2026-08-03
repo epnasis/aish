@@ -131,7 +131,7 @@ class TestRuleFileFormat:
             ),
             (
                 CANONICAL.replace("has: source", "has: source\n    matches: ^x"),
-                "OR `matches:`, not both",
+                "ONE of `has:`, `matches:` or `means_like:`",
             ),
             (CANONICAL.replace("has: source", "matches: ^x"), "needs `when: prompt: has:"),
             (
@@ -1226,6 +1226,43 @@ class TestRenderedMeaningMatchesTheFile:
         assert "alternatives" in str(exc.value)
 
 
+class TestShowsAPicture:
+    """A join, unfakeable in both directions. Its motivating turn: "show me the
+    difference between Ubud and the beach" came back as a text table, and the
+    owner wanted photographs."""
+
+    def _fail(self, answer, calls):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "answer_must_include": "shows_a_picture",
+        }), known_tools={"show_image"})
+        assert not errors
+        binding = rules.bind(rule, {"on": "always"}, "b1", {"show_image"})
+        return rules.verify([binding], rules.TurnEvidence(answer=answer, calls=calls))
+
+    RAN = ({"tool": "show_image", "args": {}, "status": "ok", "decision": ""},)
+
+    def test_a_picture_from_show_image_satisfies_it(self):
+        assert not self._fail("here ![ubud](/media/a1b2.png)", self.RAN)
+
+    def test_a_pasted_url_does_not(self):
+        """It renders as a broken box, which is the whole reason show_image
+        exists — so an image link nobody fetched is not a picture."""
+        assert self._fail("here ![ubud](https://example.com/a.jpg)", self.RAN)
+
+    def test_calling_show_image_and_not_using_it_does_not(self):
+        """A picture fetched and dropped is a picture the owner never saw."""
+        assert self._fail("Ubud is greener than the coast.", self.RAN)
+
+    def test_a_local_path_with_no_call_does_not(self):
+        """The trace is written by the harness, so this half cannot be faked."""
+        assert self._fail("here ![x](/media/a1b2.png)", ())
+
+    def test_the_ask_tells_the_model_exactly_what_to_do(self):
+        [failure] = self._fail("no picture here", ())
+        assert "show_image" in failure.ask and "paste the markdown" in failure.ask
+
+
 class TestRetireWithoutCompiling:
     """The loud broken-rule warning is exactly when an owner reaches for
     retire. If retiring required a valid rule, the only unstoppable rules
@@ -1257,6 +1294,138 @@ class TestRetireWithoutCompiling:
     def test_the_body_survives_retiring(self):
         text = "---\nname: x\ndescription: d\nwhen: always\n---\n\nWhy it exists.\n"
         assert "Why it exists." in rules.disable_text(text)
+
+
+class TestMeaningTrigger:
+    """The trigger that needs MEANING. "When I ask to be SHOWN something" is a
+    fact about the request and it is gone by the time there is an answer to
+    check — the one case the answer-side reframe cannot reach. Anchored on the
+    owner's own examples, so a miss is fixed by adding one, not by tuning a
+    number he can never see."""
+
+    ANCHORS = ["show me the difference between X and Y", "pokaż mi jak to wygląda"]
+
+    def _rule(self, **over):
+        rule, errors = rules.lint(rules.render({
+            "name": "show-me", "description": "Show me a picture.",
+            "when_subject": "prompt", "when_means_like": self.ANCHORS,
+            "answer_must_include": "shows_a_picture", **over,
+        }), known_tools={"show_image"})
+        assert not errors, errors
+        return rule
+
+    def _scores(self, mapping):
+        return lambda task, sentences: {s: mapping.get(s, 0.0) for s in sentences}
+
+    def test_a_close_message_binds(self):
+        rule = self._rule()
+        verdict, evidence = rules.evaluate(
+            rule, rules.TurnContext(task="show me difference between Ubud and the beach"),
+            meaning=self._scores({self.ANCHORS[0]: 0.81}),
+        )
+        assert verdict == rules.VERDICT_BIND
+        assert evidence["closest"] == self.ANCHORS[0]
+        assert evidence["floor"] == rules.MEANING_FLOOR
+
+    def test_an_unrelated_message_abstains(self):
+        verdict, evidence = rules.evaluate(
+            self._rule(), rules.TurnContext(task="what time is my flight"),
+            meaning=self._scores({a: 0.2 for a in self.ANCHORS}),
+        )
+        assert verdict == rules.VERDICT_ABSTAIN
+        # Both distributions, not only the hits: you cannot tell a floor sits
+        # below a corpus's noise from the matches alone.
+        assert len(evidence["sims"]) == len(self.ANCHORS)
+
+    def test_the_evidence_carries_the_floor_that_was_in_force(self):
+        """A threshold change later must not silently rewrite what past turns
+        meant (contract §4)."""
+        _v, evidence = rules.evaluate(
+            self._rule(), rules.TurnContext(task="x"), meaning=self._scores({})
+        )
+        assert evidence["floor"] == rules.MEANING_FLOOR
+
+    def test_no_embedding_model_is_a_third_answer_not_a_quiet_no(self):
+        """"The model was down" and "the rule did not apply" are different
+        facts. A rule whose evaluation silently degrades to abstaining looks
+        exactly like one that is working."""
+        verdict, evidence = rules.evaluate(
+            self._rule(), rules.TurnContext(task="show me"), meaning=None
+        )
+        assert verdict == rules.VERDICT_UNEVALUABLE
+        assert "embedding" in evidence["why"]
+
+    def test_an_embedding_failure_is_also_unevaluable(self):
+        verdict, _e = rules.evaluate(
+            self._rule(), rules.TurnContext(task="show me"),
+            meaning=lambda task, sentences: None,
+        )
+        assert verdict == rules.VERDICT_UNEVALUABLE
+
+    def test_the_tier_is_derived_from_the_trigger_not_declared(self):
+        """No policy language asks an author to annotate evaluation strategy,
+        and "tier: 1" means nothing to the owner."""
+        assert self._rule().tier == 1
+        structural, _e = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_has": "source", "answer_from": "source",
+        }))
+        assert structural.tier == 0
+
+    def test_the_examples_are_on_the_card_in_the_owners_own_words(self):
+        text = rules.explain(self._rule())
+        for anchor in self.ANCHORS:
+            assert anchor in text
+        assert "0.6" not in text, "the owner was shown a threshold"
+
+    def test_one_message_shape_per_rule(self):
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({
+                "name": "r", "description": "d", "when_subject": "prompt",
+                "when_means_like": ["a"], "when_has": "link", "answer_from": "read_url",
+            })
+        assert "alternatives" in str(exc.value)
+
+    def test_too_many_examples_is_refused(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_means_like": [f"example {i}" for i in range(rules.MEANING_MAX_ANCHORS + 1)],
+            "answer_from": "read_url",
+        }))
+        assert rule is None and "at most" in errors[0]
+
+
+class TestKeywordListsAreRefused:
+    """The exact shape a compiler produces when asked for a MEANING with only
+    literal matching available — and extending the list is exactly how it tries
+    to fix it. Reported from a real session: three attempts, three longer word
+    lists, all wrong."""
+
+    def _lint(self, pattern):
+        return rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_matches": pattern, "answer_from": "read_url",
+        }), known_tools={"read_url"})
+
+    @pytest.mark.parametrize("pattern", [
+        "(?i)(show|display|view|picture)",
+        "(?i)(pokaż|show me|zobacz)",
+        "show|display|picture|photo",
+    ])
+    def test_a_word_list_is_refused_and_told_what_to_use(self, pattern):
+        rule, errors = self._lint(pattern)
+        assert rule is None
+        assert "means_like" in errors[0]
+        assert "Docker image" in errors[0], "the refusal must show WHY, not just say no"
+
+    @pytest.mark.parametrize("pattern", [
+        r"youtube\.com|youtu\.be",     # a domain list is a literal string
+        r"^\s*https?://\S+\s*$",        # structure, not vocabulary
+        "^show me",                     # anchored: a real string match
+    ])
+    def test_a_literal_pattern_is_still_allowed(self, pattern):
+        rule, errors = self._lint(pattern)
+        assert rule is not None, errors
 
 
 class TestRetroMatch:

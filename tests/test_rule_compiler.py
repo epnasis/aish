@@ -61,6 +61,32 @@ class TestCompiling:
         assert "read_url" in ask.prompts[0]
         assert "gws_gmail_send" not in ask.prompts[0]
 
+    def test_the_compiler_is_told_to_use_examples_not_word_lists(self):
+        """The reported failure: asked for a MEANING with only literal matching
+        available, it wrote a word list and then kept extending it. Three
+        attempts, three longer lists, all wrong."""
+        ask = scripted(GOOD)
+        rule_compiler.compile_request("x", ask, TOOLS)
+        prompt = ask.prompts[0]
+        assert "when_means_like" in prompt
+        assert "NEVER USE A WORD LIST FOR A MEANING" in prompt
+
+    def test_a_word_list_reply_is_refused_and_the_retry_is_told_why(self):
+        wordy = json.dumps({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_matches": "(?i)(show|display|picture|photo)",
+            "answer_must_include": "shows_a_picture",
+        })
+        good = json.dumps({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_means_like": ["show me the difference between X and Y"],
+            "answer_must_include": "shows_a_picture",
+        })
+        ask = scripted(wordy, good)
+        result = rule_compiler.compile_request("show me things", ask, TOOLS)
+        assert result and result.rounds == 2
+        assert "means_like" in ask.prompts[1]
+
     def test_the_vocabulary_is_generated_from_the_code(self):
         """A prompt listing the verbs by hand is a second copy, and the first
         thing that happens to a second copy is that it drifts."""
@@ -179,7 +205,7 @@ class TestCannot:
         assert not result
         assert "about style" in result.problem
         assert "rephrase" in result.problem
-        assert "extend aish" in result.problem
+        assert "GitHub issue" in result.problem
 
     def test_a_refusal_is_never_retried_into_an_approximation(self):
         """Asked again, a compiler told the request is inexpressible will
@@ -198,11 +224,32 @@ class TestCannot:
         assert result and result.rounds == 2, "a malformed refusal was printed"
 
     def test_a_very_long_refusal_is_capped(self):
+        """A sentence for a person. Uncapped, it arrives as a wall of text."""
         result = rule_compiler.compile_request(
             "x", scripted(json.dumps({"cannot": "because " * 500})), TOOLS
         )
         assert not result
-        assert len(result.problem) < 1000
+        reason = result.problem.splitlines()[0]
+        assert len(reason) < rule_compiler.CANNOT_CHARS + 60
+
+    def test_a_pasted_document_does_not_drown_the_gap_report(self):
+        result = rule_compiler.compile_request(
+            "please " * 400, scripted(self.REFUSAL), TOOLS
+        )
+        assert not result
+        quoted = [ln for ln in result.problem.splitlines() if "What they asked" in ln]
+        assert quoted and len(quoted[0]) < rule_compiler.REQUEST_CHARS + 60
+
+    def test_the_refusal_carries_a_ready_made_gap_report(self):
+        """The two facts that make it worth filing — what was asked and what
+        could not be expressed — are the two the acting model was not part of.
+        A report it composed from memory would be a guess about a guess."""
+        result = rule_compiler.compile_request(
+            "be terser with me", scripted(self.REFUSAL), TOOLS
+        )
+        assert "be terser with me" in result.problem
+        assert "epnasis/aish" in result.problem
+        assert "do not pick for them" in result.problem
 
     def test_what_aish_can_enforce_is_listed_from_the_code(self):
         result = rule_compiler.compile_request("x", scripted(self.REFUSAL), TOOLS)

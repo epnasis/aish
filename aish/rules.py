@@ -58,6 +58,9 @@ TRIGGER_MESSAGE_SHAPE = "message_shape"
 TRIGGER_SESSION_CONTEXT = "session_context"
 TRIGGER_ACTION_SHAPE = "action_shape"
 TRIGGER_ALWAYS = "always"
+# The trigger that needs MEANING. Anchored on examples the owner writes, not on
+# a threshold he has to imagine: a miss is fixed by adding one more example.
+TRIGGER_MESSAGE_MEANING = "message_meaning"
 
 # The VERBS a `then:` block can use. Every one is a RESTRICTION (see the module
 # docstring) and every one is a plain English imperative, in the ESLint
@@ -90,9 +93,11 @@ VERBS_DESIGNED = {
 # tier exists, rather than shipping as a promise nothing keeps.
 DETECTOR_LINKS_READ = "links_to_what_you_read"
 DETECTOR_RAW_IMAGES = "raw_image_links"
+DETECTOR_SHOWS_PICTURE = "shows_a_picture"
 ANSWER_DETECTORS = {
-    DETECTOR_LINKS_READ: "every page you read appears as a link in the answer",
+    DETECTOR_LINKS_READ: "a link to every page you read",
     DETECTOR_RAW_IMAGES: "a markdown image link that did not come from show_image",
+    DETECTOR_SHOWS_PICTURE: "a picture, fetched with show_image this turn",
 }
 
 _MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
@@ -104,6 +109,22 @@ _MD_LINK_RE = re.compile(r"\]\(\s*(https?://[^)\s]+)|(?<![\w(])(https?://[^\s)<>
 # appears. `answer_from: <tool>` still works; this is a second form of the same
 # verb. The noun is `material` on BOTH sides of the rule — `has: material` /
 # `answer_from: material` — so a reader can see they refer to the same thing.
+# How close a message has to be to one of a rule's examples before it binds.
+# A code-held constant, never authored: no owner can imagine what 0.62 means,
+# and a number in a rule file is a number nobody can maintain. What he sees
+# instead is which of his real past messages it would have caught.
+#
+# Safe to be approximate, and this is the whole argument for allowing a fuzzy
+# trigger at all: rules only ever RESTRICT, so a wrong match costs one refused
+# or one required tool call. It cannot widen anything. A trigger this loose
+# would be indefensible on a gate that GRANTED something — which is why the
+# restriction-only law is what makes meaning-matching affordable here.
+MEANING_FLOOR = 0.62
+
+# How many examples a meaning trigger may carry. Enough to cover a phrasing in
+# two languages; few enough that the owner can read them all on the card.
+MEANING_MAX_ANCHORS = 8
+
 ROUTE_SOURCE = "source"
 
 # The sentence that keeps `route: source` from being a promotion. A rule is the
@@ -304,6 +325,8 @@ class Rule:
     # verdict on a named rule rather than an exception inside the gate.
     pattern: re.Pattern | None = None
     contains: str = ""  # built-in message detector, e.g. `contains: url`
+    # `when: prompt: means_like:` — the owner's own example messages.
+    anchors: tuple[str, ...] = ()
     field_name: str = ""
     equals: str = ""
     not_equals: str = ""
@@ -431,6 +454,7 @@ class _Compiled(NamedTuple):
     equals: str
     not_equals: str
     action: dict
+    anchors: tuple[str, ...] = ()
 
 
 def _as_list(value: Any) -> list[str]:
@@ -502,6 +526,7 @@ def _compile(front: dict) -> _Compiled:
         )
 
     pattern: re.Pattern | None = None
+    anchors: tuple[str, ...] = ()
     contains = field_name = equals = not_equals = ""
     action: dict = {}
     if SUBJECT_ALWAYS in when:
@@ -539,21 +564,42 @@ def _compile(front: dict) -> _Compiled:
             raise RuleError("`prompt:` needs `has:` or `matches:` under it")
         contains = str(fields.get("has", "") or "").strip().casefold()
         source = str(fields.get("matches", "") or "").strip()
-        if contains and source:
-            raise RuleError("`prompt:` takes `has:` OR `matches:`, not both")
+        anchors = tuple(
+            line.strip() for line in _as_list(fields.get("means_like")) if line.strip()
+        )
+        chosen = [name for name, value in
+                  (("has", contains), ("matches", source), ("means_like", anchors))
+                  if value]
+        if len(chosen) > 1:
+            raise RuleError(
+                "`prompt:` takes ONE of `has:`, `matches:` or `means_like:` — got "
+                + ", ".join(chosen)
+            )
+        if anchors and len(anchors) > MEANING_MAX_ANCHORS:
+            raise RuleError(
+                f"`means_like:` takes at most {MEANING_MAX_ANCHORS} examples — "
+                "they all have to fit on the approval card, and past a handful "
+                "another example stops changing what matches"
+            )
         if contains and contains not in CONTAINS_DETECTORS:
             raise RuleError(
                 f"unknown `has:` value {contains!r} — have "
                 + ", ".join(sorted(CONTAINS_DETECTORS))
             )
-        if not contains:
+        if anchors:
+            trigger = TRIGGER_MESSAGE_MEANING
+        elif contains:
+            trigger = TRIGGER_MESSAGE_SHAPE
+        else:
             if not source:
-                raise RuleError("`prompt:` needs `has:` or `matches:`")
+                raise RuleError(
+                    "`prompt:` needs `has:`, `means_like:` or `matches:`"
+                )
             try:
                 pattern = re.compile(source)
             except re.error as exc:
                 raise RuleError(f"unparseable `matches:` regex — {exc}") from exc
-        trigger = TRIGGER_MESSAGE_SHAPE
+            trigger = TRIGGER_MESSAGE_SHAPE
     else:
         fields = when[SUBJECT_SESSION]
         if not isinstance(fields, dict) or "origin" not in fields:
@@ -612,7 +658,7 @@ def _compile(front: dict) -> _Compiled:
         )
     return _Compiled(
         trigger, tuple(obligations), pattern, contains, field_name, equals,
-        not_equals, action,
+        not_equals, action, anchors,
     )
 
 
@@ -704,14 +750,15 @@ def _parse(path: Path) -> Rule:
         path=path,
         trigger=compiled.trigger,
         # DERIVED, never declared: the trigger's own form says how it must be
-        # evaluated (a detector or a regex is structural; a semantic `about:`
-        # is scored). No policy language asks the author to annotate the
-        # evaluation strategy, and `tier: 1` means nothing to the owner.
-        tier=0,
+        # evaluated (a detector or a regex is structural; examples are scored).
+        # No policy language asks the author to annotate the evaluation
+        # strategy, and `tier: 1` means nothing to the owner.
+        tier=1 if compiled.trigger == TRIGGER_MESSAGE_MEANING else 0,
         fail=fail,
         obligations=compiled.obligations,
         pattern=compiled.pattern,
         contains=compiled.contains,
+        anchors=compiled.anchors,
         field_name=compiled.field_name,
         equals=compiled.equals,
         not_equals=compiled.not_equals,
@@ -773,12 +820,18 @@ def partition(rules: list[Rule], today: date | None = None) -> tuple[list[Rule],
 # ----------------------------------------------------------------- evaluate
 
 
-def evaluate(rule: Rule, ctx: TurnContext) -> tuple[str, dict]:
+def evaluate(rule: Rule, ctx: TurnContext, meaning=None) -> tuple[str, dict]:
     """(verdict, evidence) for one rule against one turn.
 
     Evidence is the INPUTS the verdict was a function of, never a rendering of
     the verdict (contract §4) — so a trigger can be re-examined after the file
     changes, and a corpus of them can be counted.
+
+    `meaning` is `SemanticIndex.sentence_scores` when a scored trigger can be
+    evaluated at all. Absent, a rule that needs meaning is `unevaluable` — a
+    THIRD answer, never a quiet yes or no. "The embedding model was down" and
+    "the rule did not apply" are different facts, and a rule whose evaluation
+    silently degrades to abstaining looks exactly like one that is working.
     """
     if rule.error:
         return VERDICT_ERROR, {"error": rule.error[:EVIDENCE_CHARS]}
@@ -790,6 +843,8 @@ def evaluate(rule: Rule, ctx: TurnContext) -> tuple[str, dict]:
         # and skill gates already have. Binding here is not "it applied": it is
         # "it is watching", and the `gate` records say whether it ever fired.
         return VERDICT_BIND, {"on": "action", "conditions": dict(rule.action)}
+    if rule.trigger == TRIGGER_MESSAGE_MEANING:
+        return _evaluate_meaning(rule, ctx, meaning)
     if rule.trigger == TRIGGER_MESSAGE_SHAPE and rule.contains:
         sources = find_sources(ctx, rule.contains)
         evidence: dict = {
@@ -824,6 +879,44 @@ def evaluate(rule: Rule, ctx: TurnContext) -> tuple[str, dict]:
     evidence = {"field": rule.field_name, "value": value, "required": required}
     hit = value == rule.equals if rule.equals else value != rule.not_equals
     return (VERDICT_BIND if hit else VERDICT_ABSTAIN), evidence
+
+
+def _evaluate_meaning(rule: Rule, ctx: TurnContext, meaning) -> tuple[str, dict]:
+    """Does this message MEAN something like one of the owner's examples?
+
+    The one place in the engine where a verdict is a number rather than a fact.
+    It exists because some rules really are about meaning — "when I ask to be
+    SHOWN something" is a property of the request, and it is gone by the time
+    there is an answer to check. A keyword list cannot express it: it fires on
+    "the Docker image is broken" and misses the same sentence in Polish.
+
+    Every input is recorded, and the floor in force is recorded WITH the
+    verdict (contract §4), so a threshold change later does not silently
+    rewrite what past turns meant.
+    """
+    task = (ctx.task or "").strip()
+    base: dict = {
+        "on": "task",
+        "means_like": list(rule.anchors),
+        "floor": MEANING_FLOOR,
+        "origin": ctx.origin,
+    }
+    if meaning is None:
+        return VERDICT_UNEVALUABLE, {**base, "why": "no embedding model available"}
+    scores = meaning(task, list(rule.anchors)) if task else None
+    if scores is None:
+        return VERDICT_UNEVALUABLE, {**base, "why": "the embedding model did not answer"}
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best, score = ranked[0] if ranked else ("", 0.0)
+    evidence = {
+        **base,
+        "closest": best,
+        "sim": round(float(score), 4),
+        # Both distributions, not only the hit: you cannot tell that a floor
+        # sits below the noise of a corpus from the matches alone.
+        "sims": {sentence: round(float(value), 4) for sentence, value in ranked},
+    }
+    return (VERDICT_BIND if score >= MEANING_FLOOR else VERDICT_ABSTAIN), evidence
 
 
 def find_urls(text: str) -> list[str]:
@@ -1428,6 +1521,28 @@ def _verify_detector(
             "Call show_image for each and use the markdown it returns.",
         )
 
+    if detector == DETECTOR_SHOWS_PICTURE:
+        # A JOIN, and unfakeable in both directions: show_image must have RUN
+        # this turn (the harness wrote that, not the model), and its output — a
+        # LOCAL path, never a URL — must appear in the answer. Neither half
+        # alone is enough. A call with no image in the answer is a picture
+        # fetched and dropped; an image link with no call is a URL the model
+        # pasted, which renders as a broken box.
+        shown = [
+            url for url in _MD_IMAGE_RE.findall(answer)
+            if not url.lower().startswith(("http://", "https://"))
+        ]
+        if shown and evidence.called("show_image"):
+            return None
+        return VerifyFailure(
+            binding, obligation,
+            {"detector": detector, "shown": shown[:4],
+             "called": evidence.called("show_image")},
+            MUST_INCLUDE_ASK.format(what=ANSWER_DETECTORS[detector], **common)
+            + "\nCall show_image now for the picture that belongs here, and paste "
+            "the markdown line it gives you back into the answer exactly as written.",
+        )
+
     # DETECTOR_LINKS_READ: every host fetched this turn appears in the answer.
     read = evidence.hosts_read()
     if not read:
@@ -1606,7 +1721,8 @@ LIFECYCLE_FIELDS = ("enabled", "expires")
 
 AUTHOR_FIELDS = (
     "name", "description", "prose", "enabled", "expires",
-    "when_subject", "when_has", "when_matches", "when_origin", "when_action",
+    "when_subject", "when_has", "when_means_like", "when_matches",
+    "when_origin", "when_action",
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
     VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT, VERB_MUST_TELL_ME_WHEN,
 )
@@ -1707,15 +1823,22 @@ def render(fields: dict) -> str:
     if subject == SUBJECT_ALWAYS:
         lines.append(f"when: {SUBJECT_ALWAYS}")
     elif subject == SUBJECT_PROMPT:
-        if fields.get("when_has") and fields.get("when_matches"):
+        chosen = [name for name in ("when_has", "when_means_like", "when_matches")
+                  if fields.get(name)]
+        if len(chosen) > 1:
             raise LintError(
-                "`when_has` and `when_matches` are alternatives — a message shape is "
-                "one or the other. Dropping one silently would have written a rule "
-                "with a trigger the author did not choose."
+                "`when_has`, `when_means_like` and `when_matches` are alternatives — "
+                "a message shape is one of the three. Dropping one silently would "
+                "have written a rule with a trigger the author did not choose."
             )
-        key, value = ("has", fields.get("when_has")) if fields.get("when_has") \
-            else ("matches", fields.get("when_matches"))
-        lines += ["when:", f"  {SUBJECT_PROMPT}:", f"    {key}: {_yaml_scalar(value or '')}"]
+        lines += ["when:", f"  {SUBJECT_PROMPT}:"]
+        if examples := _as_list(fields.get("when_means_like")):
+            lines.append("    means_like:")
+            lines += [f"      - {_yaml_scalar(example)}" for example in examples]
+        else:
+            key, value = ("has", fields.get("when_has")) if fields.get("when_has") \
+                else ("matches", fields.get("when_matches"))
+            lines.append(f"    {key}: {_yaml_scalar(value or '')}")
     elif subject == SUBJECT_SESSION:
         lines += ["when:", f"  {SUBJECT_SESSION}:",
                   f"    origin: {_yaml_scalar(fields.get('when_origin') or '')}"]
@@ -1758,6 +1881,18 @@ def render(fields: dict) -> str:
     return "\n".join(lines) + (prose + "\n" if prose else "")
 
 
+# A regex that is nothing but an alternation of ordinary words. This is the
+# exact shape a compiler produces when it is asked for a MEANING and only has
+# literal matching to offer — and extending the list is the exact way it tries
+# to fix it. Domains and paths are excluded by the punctuation they carry, so
+# `youtube\.com|youtu\.be` is untouched.
+_WORD_LIST_RE = re.compile(r"^\(?(\?i\))?\(?[\w ]+(\|[\w ]+){2,}\)?$")
+
+
+def _is_a_keyword_list(pattern: str) -> bool:
+    return bool(_WORD_LIST_RE.match(pattern.strip()))
+
+
 def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, list[str]]:
     """(rule, errors) for candidate file text. Nothing is written on an error.
 
@@ -1773,6 +1908,15 @@ def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, l
     if rule.error:
         return None, [rule.error]
     errors = []
+    if rule.pattern is not None and _is_a_keyword_list(rule.pattern.pattern):
+        errors.append(
+            "that trigger is a list of words standing in for a meaning "
+            f"(/{rule.pattern.pattern}/). It fires on the wrong sentences — "
+            "\"image\" matches \"the Docker image is broken\" — and misses the "
+            "right ones in another language. Adding more words makes both worse. "
+            "Use `means_like:` with 3-5 example messages instead; those are "
+            "matched by MEANING, so wording and language do not have to match."
+        )
     if known_tools:
         readers = [o["to"] for o in rule.obligations
                    if o["verb"] == VERB_ANSWER_FROM and o["to"] != ROUTE_SOURCE]
@@ -1818,6 +1962,11 @@ def explain(rule: Rule) -> str:
             if rule.contains else
             f"When your message matches /{rule.pattern.pattern if rule.pattern else ''}/"
         ),
+        TRIGGER_MESSAGE_MEANING: (
+            "When your message means something like:\n"
+            + "\n".join(f"    · {anchor}" for anchor in rule.anchors)
+            + "\n  …judged by meaning, so wording and language do not have to match"
+        ),
         TRIGGER_ACTION_SHAPE: (
             "Before any action where "
             + ", ".join(f"{k} = {v}" for k, v in sorted(rule.action.items()))
@@ -1841,7 +1990,7 @@ def explain(rule: Rule) -> str:
             says.append(f"tell me when {obligation['state']}")
         elif detector := obligation.get("detector"):
             says.append(
-                ("the answer must show that " if verb == VERB_ANSWER_MUST_INCLUDE
+                ("the answer must contain " if verb == VERB_ANSWER_MUST_INCLUDE
                  else "the answer must never contain ")
                 + ANSWER_DETECTORS[detector]
             )
@@ -1851,7 +2000,8 @@ def explain(rule: Rule) -> str:
                  else "the answer must not match ")
                 + f"/{obligation['pattern']}/"
             )
-    lines = [f"{when}: {'; '.join(says)}."]
+    joined = "; ".join(says)
+    lines = [f"{when}\n  → {joined}." if "\n" in when else f"{when}: {joined}."]
     at_gate = [o for o in rule.obligations if o["verb"] not in VERIFY_VERBS]
     at_verify = [o for o in rule.obligations if o["verb"] in VERIFY_VERBS]
     if at_gate:
@@ -1963,7 +2113,7 @@ def past_turns(state_dir: Path, limit: int = 400) -> list[dict]:
 AISH_NOTE_MARKERS = ("[aish:", "[aish]", "[automatic resume]")
 
 
-def retro_match(rule: Rule, turns: list[dict]) -> RetroMatch:
+def retro_match(rule: Rule, turns: list[dict], meaning=None) -> RetroMatch:
     """Replay a candidate rule over turns that already happened.
 
     The strongest evidence available at authoring time, and it costs nothing:
@@ -1983,7 +2133,7 @@ def retro_match(rule: Rule, turns: list[dict]) -> RetroMatch:
             images=tuple(turn.get("images") or ()),
             documents=tuple(turn.get("documents") or ()),
         )
-        verdict, _evidence = evaluate(rule, ctx)
+        verdict, _evidence = evaluate(rule, ctx, meaning=meaning)
         result.checked += 1
         if verdict == VERDICT_BIND:
             result.bound.append(turn)
@@ -2050,6 +2200,8 @@ def author_fields(path: Path) -> dict:
             if subject == SUBJECT_PROMPT:
                 if has := str(block.get("has", "") or ""):
                     fields["when_has"] = has
+                if examples := _as_list(block.get("means_like")):
+                    fields["when_means_like"] = examples
                 if matches := str(block.get("matches", "") or ""):
                     fields["when_matches"] = matches
             elif subject == SUBJECT_SESSION:

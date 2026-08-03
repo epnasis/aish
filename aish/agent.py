@@ -2937,7 +2937,8 @@ class Agent:
             started = time.perf_counter()
             try:
                 verdict, evidence = rules.evaluate(
-                    rule, self._turn_context(task, images, documents)
+                    rule, self._turn_context(task, images, documents),
+                    meaning=self._meaning_scorer(),
                 )
             except Exception as exc:  # noqa: BLE001 — a broken evaluator must not kill the turn
                 verdict, evidence = rules.VERDICT_UNEVALUABLE, {"error": repr(exc)[:200]}
@@ -3017,6 +3018,17 @@ class Agent:
             images=tuple(images or ()),
             documents=tuple(documents or ()),
         )
+
+    def _meaning_scorer(self):
+        """The sentence-similarity callable a scored trigger needs, or None.
+
+        None is a real answer here, not a failure to hide: a rule that needs
+        meaning then records `unevaluable` rather than quietly abstaining. "The
+        embedding model was down" and "the rule did not apply" are different
+        facts, and a rule whose evaluation silently degrades looks exactly like
+        one that is working.
+        """
+        return self.semantic.sentence_scores if self.semantic is not None else None
 
     def _known_tool_names(self) -> set[str]:
         """Everything the model can call this turn, for the bind-time
@@ -3928,7 +3940,8 @@ class Agent:
 
     RULE_FIELD_ARGS = (
         "description", "prose", "enabled", "expires",
-        "when_subject", "when_has", "when_matches", "when_origin", "when_action",
+        "when_subject", "when_has", "when_means_like", "when_matches",
+        "when_origin", "when_action",
         "answer_from", "never_use", "must_first",
         "answer_must_include", "answer_must_not", "must_tell_me_when",
     )
@@ -3949,7 +3962,7 @@ class Agent:
         behaviour, and the file is an implementation detail he did not write."""
         parts = [f"{verb} rule '{rule.name}'", "", rules.explain(rule)]
         history = rules.past_turns(Path(self.state_dir)) if self.state_dir else []
-        match = rules.retro_match(rule, history)
+        match = rules.retro_match(rule, history, meaning=self._meaning_scorer())
         if match.per_call:
             parts += ["", "This arms on every turn and fires only on a matching "
                           "action — and past calls are not replayed here, so there "
