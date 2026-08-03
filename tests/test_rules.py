@@ -2304,3 +2304,90 @@ class TestOneCommandHasManySpellings:
     def test_the_card_reads_every_spelling_aloud(self):
         card = rules.explain(self._rule(["pip", "python -m pip"]))
         assert "`pip` or `python -m pip`" in card
+
+
+class TestLinksYouDidNotOpen:
+    """The general form of a rule the owner kept writing per topic.
+
+    His failure was never "visas": he asked about entry requirements, got
+    government URLs, and they were wrong because the site had changed. Written
+    as a topic rule it needs a list — travel, tax, health, legal — maintained
+    forever and wrong at the edges by construction. Written as a fact about the
+    ANSWER it needs no list at all."""
+
+    def _binding(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "opened-links-only", "description": "Only links you opened.",
+            "when_subject": "always",
+            "answer_must_not_include": "unverified_links",
+        }), capabilities={"read_url"})
+        assert not errors, errors
+        return rules.bind(rule, {"on": "always"}, "b1", {"read_url"})
+
+    def _check(self, answer, calls=()):
+        return rules.verify([self._binding()],
+                            rules.TurnEvidence(answer=answer, calls=tuple(calls)))
+
+    def test_an_answer_with_no_links_is_fine(self):
+        assert self._check("Mutexes are exclusive, semaphores count.") == []
+
+    def test_a_link_that_was_opened_passes(self):
+        assert self._check(
+            "See [the guide](https://example.com/guide).",
+            [{"tool": "read_url", "args": {"url": "https://example.com/guide"},
+              "status": "ok"}],
+        ) == []
+
+    def test_a_link_that_was_NEVER_opened_fails(self):
+        [failure] = self._check("See [the guide](https://example.com/guide).")
+        assert "example.com/guide" in failure.ask
+        assert failure.evidence["unverified"] == ["https://example.com/guide"]
+
+    def test_a_link_whose_FETCH_FAILED_does_not_count_as_opened(self):
+        """His addition, and it is the difference between "I tried" and "it
+        works": a 404 is not a link you can hand someone."""
+        [failure] = self._check(
+            "See [the guide](https://example.com/gone).",
+            [{"tool": "read_url", "args": {"url": "https://example.com/gone"},
+              "status": "failed"}],
+        )
+        assert "example.com/gone" in failure.ask
+
+    def test_seeing_a_url_in_a_search_RESULT_is_not_opening_it(self):
+        """The distinction the whole check rests on. Quoting a URL out of a
+        search snippet is precisely the move being stopped, and a snippet is
+        tool OUTPUT, never a target the harness acted on."""
+        [failure] = self._check(
+            "See [the shop](https://shop.example/item).",
+            [{"tool": "web_search", "args": {"query": "shop item"},
+              "result": "Top hit: https://shop.example/item — great prices",
+              "status": "ok"}],
+        )
+        assert failure.evidence["unverified"] == ["https://shop.example/item"]
+
+    def test_a_video_validated_by_show_video_counts(self):
+        """`show_video` takes the URL as an argument, so it was acted on. A
+        check that flagged it would make the video rules unsatisfiable."""
+        assert self._check(
+            "Here it is: [watch](https://youtu.be/abc123)",
+            [{"tool": "show_video", "args": {"url": "https://youtu.be/abc123"},
+              "status": "ok"}],
+        ) == []
+
+    def test_a_trailing_slash_or_anchor_is_the_same_page(self):
+        assert self._check(
+            "See [it](https://example.com/guide/#setup).",
+            [{"tool": "read_url", "args": {"url": "https://example.com/guide"},
+              "status": "ok"}],
+        ) == []
+
+    def test_it_reports_every_bad_link_not_only_the_first(self):
+        [failure] = self._check(
+            "[a](https://a.example/x) and [b](https://b.example/y)")
+        assert len(failure.evidence["unverified"]) == 2
+
+    def test_it_can_only_be_written_as_a_PROHIBITION(self):
+        """"Must include a link you never opened" is not a sentence anyone
+        means."""
+        with pytest.raises(rules.RuleError):
+            rules._answer_check("answer_must_include", "unverified_links")

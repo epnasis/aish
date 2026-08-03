@@ -401,6 +401,19 @@ It did not need a new tier. `answer_must_include: {like: […]}` says the same t
 
 **And the conversion is not mechanical, which is the trap worth recording.** `must_tell_me_when` was conditional in its own wording — *state it IF this happens*. `answer_must_include` is not: it applies whenever the rule binds. Copying it across on `bounded-material` produced a rule requiring **every** answer about a link to say the link could not be read. The disclosure had to move to a rule whose *trigger* is the failure (`when: result: {of: read_url, was: empty}`), which is what `say-when-the-link-failed` is. A verb that carries a hidden condition cannot be swapped for one that does not.
 
+### `unverified_links` — the general form of a rule he kept writing per topic
+
+The owner asked about entry requirements, was given government URLs, and they were wrong because the site had changed. The memory he wrote afterwards said *"check visa and government pages live"* — and that is the wrong shape. **The failure was never "visas". It was handing over links that had never been opened**, which happens in tax, health, shopping and everything else. A topic rule needs a list of topics maintained forever, and the list is wrong at the edges by construction.
+
+`answer_must_not_include: unverified_links` needs no list: **every http(s) link in an answer must be one aish opened this turn.** A join, so the model cannot argue with it — the harness writes the record of what was fetched.
+
+Two distinctions carry the whole check:
+
+- **A failed fetch is not an opened link.** A 404 is recorded as failed, so it does not count. The owner's own addition, and it is the difference between *"I tried"* and *"it works"*. Honest limit: a server returning HTTP 200 with a pretty "not found" page passes, because nothing in the response says otherwise.
+- **Seeing a URL in a tool's OUTPUT is not opening it.** Verified means the URL was the *target* of a successful call — `read_url`, `show_video`, `youtube_analyze` — never that it appeared in a search result's text. That is precisely the move being stopped: quoting a URL out of a snippet is how the wrong government link got handed over in the first place.
+
+It also repairs a rule that was overclaiming. `live-price` said *"you must have read the seller's own page"* while checking only that *some* URL was read — a description promising more than the file enforced, which is #205's own exhibit, in a hand-written rule held up as the gold standard. With this check in force, a price quoted alongside a link is a price behind a real fetch. `TestLinksYouDidNotOpen`.
+
 ### Seeding costs only what it buys
 
 Every trigger arms at seed; only a `prompt:` condition is decided there. So an ordinary turn — nothing to do with prices, images or mail — bound **15 of 21 rules and seeded 9,562 characters**, because the engine was conditional about *enforcement* and unconditional about *announcement*. That is precisely how a rules engine becomes the fatter system prompt the owner said he did not want, and two of the three arming trigger kinds were added the same day the measurement was taken.

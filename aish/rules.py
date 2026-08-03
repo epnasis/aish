@@ -211,6 +211,31 @@ WHERE_VALUES = (WHERE_ANYWHERE, WHERE_OPENING, WHERE_ENDING)
 # examples, match by meaning. One word to learn, not two.
 MEANING_KEY = "like"
 
+# `answer_must_not_include: unverified_links` — a link aish never opened.
+#
+# This replaces a whole class of rules rather than adding one. The owner's real
+# failure was not "visas": he asked about entry requirements, got government
+# URLs, and they were wrong because the site had changed. Written as a topic
+# rule it needs a list of topics maintained forever — travel, tax, health,
+# legal — and the list is wrong at the edges by construction. Written as a fact
+# about the ANSWER it needs no list at all: a link aish is about to hand over
+# is one it should have opened.
+#
+# A JOIN, so it cannot be argued with: the harness records which URLs were
+# acted on, the model does not author that record. Verified means the URL was
+# the TARGET of a successful call — read_url, show_video, youtube_analyze —
+# never merely that it appeared in a search result's text. That distinction is
+# the point: quoting a URL out of a snippet is exactly the move being stopped.
+NAMED_UNVERIFIED_LINKS = "unverified_links"
+NAMED_ANSWER_CHECKS = {
+    NAMED_UNVERIFIED_LINKS: "a link you never opened",
+}
+
+# Where a URL has to appear for a call to count as having ACTED on it. Args
+# only: a URL in a tool's OUTPUT was merely seen, and seeing is what the search
+# snippet already did.
+_URL_ARGS = ("url", "source", "link", "href")
+
 # What each kind is made of, in code, where the owner never has to look.
 #
 # `needs` is the tool whose work makes the thing real: a picture is one aish
@@ -1035,12 +1060,19 @@ def _answer_check(verb: str, value: Any) -> dict:
             raise RuleError(f"unparseable `{verb}: pattern:` — {exc}") from exc
         return {"pattern": pattern, "in": _where(value)}
     name = str(value).strip()
+    if name in NAMED_ANSWER_CHECKS:
+        if verb != VERB_ANSWER_MUST_NOT_INCLUDE:
+            raise RuleError(
+                f"`{name}` says what must NOT be in an answer — write it under "
+                f"`{VERB_ANSWER_MUST_NOT_INCLUDE}:`."
+            )
+        return {"named": name, "in": WHERE_ANYWHERE}
     if name in ANSWER_KINDS:
         return {"kinds": [name], "in": WHERE_ANYWHERE}
     raise RuleError(
         f"`{verb}: {name!r}` is a plain phrase, which only a judge can check, and "
         f"the judged tier is not built. Name something the reader would SEE — "
-        + ", ".join(sorted(ANSWER_KINDS))
+        + ", ".join(sorted(set(ANSWER_KINDS) | set(NAMED_ANSWER_CHECKS)))
         + f" — or, for anything about the wording, `{verb}: {{pattern: <regex>}}`."
     )
 
@@ -2090,6 +2122,9 @@ def _verify_one(
             askable=not blocked,
         )
 
+    if obligation.get("named") == NAMED_UNVERIFIED_LINKS:
+        return _verify_links(binding, obligation, evidence, common)
+
     if anchors := obligation.get(MEANING_KEY):
         return _verify_meaning(binding, obligation, evidence, list(anchors), common)
 
@@ -2137,6 +2172,76 @@ def _present(kind: str, evidence: TurnEvidence) -> tuple[bool, list[str]]:
                 wanted.append(value)
     wanted = list(dict.fromkeys(wanted))
     return (bool(wanted) and all(token in answer for token in wanted)), wanted
+
+
+UNVERIFIED_LINKS_ASK = (
+    "The rule '{rule}' does not allow a link you have not opened, and the answer "
+    "has {count}: {shown}. {description}\n"
+    "Open each one with read_url now. If a link 404s or will not load, it is not "
+    "a link you can give — say that plainly instead of including it."
+)
+
+
+def _normalise_url(url: str) -> str:
+    """A URL as an identity, for comparing what was linked against what was
+    opened. Fragment and trailing slash dropped, because `#section` and a
+    trailing `/` are the same page and a rule that fired on either would be
+    noise nobody could act on."""
+    url = str(url or "").strip().split("#", 1)[0]
+    return url.rstrip("/").casefold()
+
+
+def _acted_on(evidence: TurnEvidence) -> set[str]:
+    """URLs a SUCCESSFUL call this turn actually acted on.
+
+    Args, never output. A URL in a tool's output was merely seen — which is
+    precisely what a search-result snippet does, and quoting one is the move
+    being prevented. A failed call does not count either: a 404 is not a link
+    you can hand someone.
+    """
+    acted: set[str] = set()
+    for call in evidence.calls:
+        if not _ran(call):
+            continue
+        args = call.get("args") or {}
+        for key in _URL_ARGS:
+            if value := str(args.get(key, "") or "").strip():
+                acted.add(_normalise_url(value))
+    return acted
+
+
+def _verify_links(
+    binding: Binding, obligation: dict, evidence: TurnEvidence, common: dict,
+) -> VerifyFailure | None:
+    """Every http(s) link in the answer must be one aish opened this turn.
+
+    A join, so the model cannot argue with it: the harness writes the record of
+    what was fetched. This is the general form of the rule the owner kept
+    writing per topic — the failure was never "visas", it was handing over URLs
+    that were never opened, and that happens in every subject there is.
+    """
+    answer = slice_answer(evidence.answer or "", obligation.get("in", WHERE_ANYWHERE))
+    linked: list[str] = []
+    for match in _MD_LINK_RE.finditer(answer):
+        url = match.group(1) or match.group(2)
+        if url and url not in linked:
+            linked.append(url)
+    if not linked:
+        return None  # nothing claimed, nothing to verify
+    acted = _acted_on(evidence)
+    unverified = [url for url in linked if _normalise_url(url) not in acted]
+    if not unverified:
+        return None
+    shown = ", ".join(unverified[:3]) + ("…" if len(unverified) > 3 else "")
+    return VerifyFailure(
+        binding, obligation,
+        {"named": NAMED_UNVERIFIED_LINKS, "linked": linked[:8],
+         "opened": sorted(acted)[:8], "unverified": unverified[:8]},
+        UNVERIFIED_LINKS_ASK.format(
+            count=f"{len(unverified)} of them" if len(unverified) > 1 else "one",
+            shown=shown, **common,
+        ),
+    )
 
 
 def _verify_meaning(
@@ -2361,6 +2466,12 @@ def _obligation_line(obligation: dict, rule: Rule | None = None) -> str:
         return (
             f"· MUST NOT: the answer says anything like{place} — {shown}. Judged by "
             "MEANING, so rephrasing it does not get past this."
+        )
+    if obligation.get("named"):
+        return (
+            "· MUST NOT put a link in the answer that you did not OPEN this "
+            "turn. If you want to give a link, read_url it first; if it will "
+            "not load, say so instead of including it."
         )
     if kinds := obligation.get("kinds"):
         described = " or ".join(ANSWER_KINDS[kind] for kind in kinds)
@@ -2839,6 +2950,8 @@ def explain(rule: Rule) -> str:
             )
         elif verb == VERB_ASK_ME_FIRST:
             says.append("ask me first")
+        elif named := obligation.get("named"):
+            says.append(f"the answer must not contain {NAMED_ANSWER_CHECKS[named]}")
         elif anchors := obligation.get(MEANING_KEY):
             where = obligation.get("in", WHERE_ANYWHERE)
             says.append(
