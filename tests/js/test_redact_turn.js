@@ -70,6 +70,7 @@ function world() {
     document: { createElement: fakeElement },
     messagesEl,
     send: (m) => { sent.push(m); return true; },
+    act: (m) => { sent.push(m); return true; }, // [ACK-LEDGER]; nothing is claimed here
     scrollToEnd() {},
     trashIcon: () => fakeElement("svg"),
     messageStamp: (at) => (at ? "14:32" : ""),
@@ -146,10 +147,13 @@ function world() {
 // 6. Exactly ONE place can send a deletion, and it is behind the modal. A
 //    second, unconfirmed sender anywhere would defeat all of the above.
 {
-  const senders = src.match(/send\(\{ type: "redact"/g) || [];
+  const senders = src.match(/(?:send|act)\(\{ type: "redact"/g) || [];
   ok("only one code path sends redact", senders.length === 1);
   const block = extract("// [REDACT-START]", "// [REDACT-END]");
-  ok("…and it is inside the confirmation's action", block.includes('send({ type: "redact"'));
+  ok("…and it is inside the confirmation's action", block.includes('act({ type: "redact"'));
+  // Through the ledger, never bare: a destructive request handed to a dead
+  // socket is #210.
+  ok("…as an ACT, not a bare send", !/send\(\{ type: "redact"/.test(src));
   ok("the chip only ever asks", /btn\.onclick = \(\) => askDeleteTurn\(turn\)/.test(block));
 }
 

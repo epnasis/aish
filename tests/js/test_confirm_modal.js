@@ -40,6 +40,7 @@ function ok(label, cond) { assert(cond, label); checks += 1; }
 
 function world() {
   const sent = [];
+  const awaited = [];
   const nodes = {};
   const el = (id) => (nodes[id] = nodes[id] || {
     id, textContent: "", hidden: true, focused: false,
@@ -50,13 +51,18 @@ function world() {
     currentSession: "session-20260731-115636-049572.jsonl",
     send: (m) => { sent.push(m); return true; },
     closeSheets() {},
+    // The confirm action hands the delete to the ledger ([ACK-LEDGER]) —
+    // whether it ARRIVES is that block's subject, not this one's.
+    act: (message, opts) => { sent.push(message); awaited.push(opts && opts.label); return true; },
+    showToast() {},
+    offlineMode: false,
   };
   vm.createContext(sandbox);
   vm.runInContext(
     extract("// [CONFIRM-START]", "// [CONFIRM-END]").replace(/\blet\b|\bconst\b/g, "var"),
     sandbox,
   );
-  return { sandbox, sent, el };
+  return { sandbox, sent, el, awaited };
 }
 
 // 1. THE REGRESSION SHAPE: asking must not do anything.
@@ -127,6 +133,10 @@ for (const [name, dismiss] of [
   ok("confirming deletes", w.sent.length === 1 && w.sent[0].type === "delete_session");
   ok("…the chat the question was about",
     w.sent[0].name === "session-20260731-115636-049572.jsonl");
+  // Sending is not deleting: the request is held open until the server
+  // receipts it ([ACK-LEDGER]), under a label the user would recognise.
+  ok("…and it goes out as an ACT, held open until the server answers",
+    w.awaited.length === 1 && /delet/i.test(w.awaited[0]));
 }
 
 // 6. Escape answers the question rather than dismissing whatever is behind it —
@@ -143,10 +153,14 @@ for (const [name, dismiss] of [
 //    how serious the same action is.
 {
   ok("the markup exists once", (html.match(/id="confirm-modal"/g) || []).length === 1);
-  const senders = src.match(/send\(\{ type: "delete_session"/g) || [];
+  const senders = src.match(/(?:send|act)\(\{ type: "delete_session"/g) || [];
   ok("only one code path deletes a chat", senders.length === 1);
   ok("…and it is inside the shared modal's block",
-    extract("// [CONFIRM-START]", "// [CONFIRM-END]").includes('send({ type: "delete_session"'));
+    extract("// [CONFIRM-START]", "// [CONFIRM-END]").includes('act({ type: "delete_session"'));
+  // Deleting a chat must go through the ledger, never bare send(): a delete
+  // handed to a dead socket is the whole of #210.
+  ok("…and it is an ACT, not a bare send",
+    !/send\(\{ type: "delete_session"/.test(src));
   ok("the old two-tap guard is gone", !/armDeleteChat|DELARM/.test(src));
 }
 

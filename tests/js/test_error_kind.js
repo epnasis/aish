@@ -47,6 +47,7 @@ function errorWorld() {
       notify: (title) => log.push(`notify:${title}`),
       showToast: (text) => log.push(`toast:${text}`),
       onSessionGone: (name) => log.push(`gone:${name}`),
+      resolveDelete: (name) => log.push(`resolveDelete:${name}`),
       // Everything else the dispatcher can reach but this test never triggers.
       onHello() {}, onReplay() {}, onToken() {}, onDone() {}, onHistory() {},
       onStopped() {}, onStatus() {}, onApprovalRequest() {}, onApprovalResolved() {},

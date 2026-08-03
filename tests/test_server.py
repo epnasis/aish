@@ -313,6 +313,74 @@ class TestStreamCoalescer:
         assert emitted == [big]
 
 
+class TestReceipts:
+    """`rid` → `ack` (#210). The client cannot tell a request that was handled
+    from one that was never heard — a WebSocket reports OPEN long after it died
+    — so anything it must not guess about carries a receipt id and gets it
+    echoed back. A delivery fact, never a claim of success."""
+
+    def test_any_request_carrying_a_rid_is_receipted(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "jobs", "rid": "r7"})
+            ack = recv_until(ws, "ack")
+            assert ack["rid"] == "r7"
+
+    def test_a_request_without_a_rid_is_not_receipted(self, app_env):
+        """Reads opt out — receipting a per-keystroke query buys nothing."""
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "jobs"})
+            ws.send_json({"type": "jobs", "rid": "r1"})
+            # The FIRST ack seen is r1's: nothing was minted for the bare one.
+            assert recv_until(ws, "ack")["rid"] == "r1"
+
+    def test_the_receipt_follows_the_work_it_is_for(self, app_env):
+        """Stamped after the handler, so a client that hears the receipt knows
+        the events it was owed have already been sent."""
+        client, _ = make_client(app_env, [model_says("noted")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "remember the zebra"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "new"})
+            recv_until(ws, "hello")
+
+            ws.send_json({"type": "delete_session", "name": name, "rid": "r9"})
+            seen = []
+            for _ in range(80):
+                event = ws.receive_json()
+                seen.append(event["type"])
+                if event["type"] == "ack":
+                    break
+            assert seen[-1] == "ack"
+            assert "session_deleted" in seen, "the receipt outran the work it receipts"
+            assert not (app_env["state_dir"] / name).exists()
+
+    def test_a_refused_request_is_still_receipted(self, app_env, tmp_path):
+        """A refusal IS an answer — the client must stop waiting on it. Only a
+        request that never arrived (or blew up) goes unreceipted."""
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command="touch never")]),
+                model_says("gave up"),
+            ],
+        )
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "touch it"})
+            request = recv_until(ws, "approval_request")
+
+            ws.send_json({"type": "delete_session", "name": name, "rid": "r3"})
+            refusal = recv_until_refusal(ws)
+            assert refusal["code"] == "refused"
+            assert recv_until(ws, "ack")["rid"] == "r3"
+
+            ws.send_json({"type": "approval", "id": request["id"], "action": "deny"})
+            recv_until(ws, "done")
+
+
 class TestConnect:
     def test_hello_carries_model_session_scope(self, app_env):
         client, _ = make_client(app_env, [])
@@ -2574,6 +2642,11 @@ class TestSessions:
             error = recv_until(ws, "error")
             assert error["type"] == "error"
             assert "still running" in error["text"]
+            # The refusal NAMES the chat it refused. Without that the client
+            # can only render it as prose and cannot tell this from an
+            # unrelated failure — the confusion #210 was reported as.
+            assert error["code"] == "refused"
+            assert error["name"] == name
             assert (app_env["state_dir"] / name).is_file()
 
             # The pending approval survived the refused delete untouched.

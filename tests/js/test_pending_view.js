@@ -107,6 +107,7 @@ function switchWorld({ cached = null, prefetch = null, loadPromise = null } = {}
       },
       reconnect: () => reconnects.push(true),
       forgetSession() {},
+      resolveDelete() {},
       freshPrefetch: () => prefetch,
       offlineLoad: () => loadPromise || Promise.resolve(cached),
       // What the real onReplay does FIRST — mirrored here so a scenario can see
@@ -119,7 +120,7 @@ function switchWorld({ cached = null, prefetch = null, loadPromise = null } = {}
   w.load("// [SESSION-ENTER-START]", "// [SESSION-ENTER-END]");
   w.load("function resumeSession(name) {", "// [PENDING-VIEW-START]");
   w.load("// [PENDING-VIEW-START]", "// [PENDING-VIEW-END]");
-  w.load("function onSessionGone(name) {", "function onSessionDeleted(event) {");
+  w.load("function onSessionGone(name) {", "async function onSessionDeleted(event) {");
   w.sandbox.ws = { readyState: w.WebSocket.OPEN };
   w.messagesEl = messagesEl;
   w.replays = replays;
