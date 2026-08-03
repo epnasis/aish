@@ -396,6 +396,32 @@ async function offlineRefreshMetaMap() {
   for (const meta of await offlineList()) offlineMeta.set(meta.name, meta);
 }
 
+// [MIRROR-FORGET-START]
+// Dropping this device's copy of a chat that is gone from the server. ONE
+// function, because there are two ways to learn it — the sync notices the
+// catalogue no longer lists it, and the socket says so outright
+// (`session_deleted`, `no_such_session`) — and a chat half-forgotten by one of
+// them is a ghost the other never gets to clean up.
+async function offlineForget(name) {
+  if (!name) return;
+  await offlineSafe(idbDel("events", name));
+  await offlineSafe(idbDel("meta", name));
+  offlineMeta.delete(name);
+}
+
+// PURE: the cached chats the server's catalogue no longer lists.
+//
+// GONE IS GONE, pin included. A pin means "keep this copy for me" against
+// EVICTION — the budget sweep that gives up chats to stay under quota — and it
+// was read here as "keep it even if the chat no longer exists", which is not a
+// promise anyone made: the delete confirmation says in as many words that the
+// copy on your devices goes too. What it bought instead was a row no sync could
+// ever remove.
+function mirrorOrphans(cached, serverNames) {
+  return Array.from(cached.keys()).filter((name) => !serverNames.has(name));
+}
+// [MIRROR-FORGET-END]
+
 async function offlineFetchSession(name, local) {
   // since/sig ask for a delta; the ETag asks for nothing at all. Both are
   // values the server minted — the client stores them opaquely and echoes them,
@@ -437,15 +463,8 @@ async function offlineSyncOnce() {
     const server = new Map(index.sessions.map((s) => [s.name, s]));
 
     // A session deleted on the server is dropped locally too — a mirror that
-    // resurrects deleted chats is a surprise, not a feature. Pinned ones are
-    // the deliberate exception: pinning is the user saying "keep this for me".
-    for (const [name, meta] of offlineMeta) {
-      if (!server.has(name) && !meta.pinned) {
-        await offlineSafe(idbDel("events", name));
-        await offlineSafe(idbDel("meta", name));
-        offlineMeta.delete(name);
-      }
-    }
+    // resurrects deleted chats is a surprise, not a feature ([MIRROR-FORGET]).
+    for (const name of mirrorOrphans(offlineMeta, server)) await offlineForget(name);
 
     // The catalogue is newest-first, so a sync cut short by a dying connection
     // has still fetched the sessions most likely to be wanted.
@@ -6615,7 +6634,7 @@ function recallHistory(key) {
 const SLASH_COMMANDS = [
   ["/model", "switch model — opens the searchable picker"],
   ["/resume", "search & resume an earlier session"],
-  ["/delete", "delete an earlier session (trash icon in the drawer)"],
+  ["/delete", "open a chat, then Delete chat in its title menu"],
   ["/new", "fresh conversation in a new session"],
   ["/fork", "branch this conversation into a new session (original untouched)"],
   ["/learn", "save this conversation's learnings as skills/memory"],
@@ -9114,17 +9133,29 @@ messagesEl.addEventListener("touchend", (event) => endTranscriptGesture(event));
 messagesEl.addEventListener("touchcancel", (event) => endTranscriptGesture(event));
 
 // ---- a chat that no longer exists ----------------------------------------
-// With the deck gone there is no per-device membership left to repair: the
-// list is derived from the server's own session files, so a deleted chat simply
-// stops being listed. What remains is dropping anything this device had cached
-// FOR that chat (a warm peek, a stashed DOM) and saying why nothing happened.
-function forgetSession(name) {
+// [FORGET-SESSION-START]
+// Everything this device was holding for a chat that is gone: a warm peek, a
+// stashed DOM, a roster row — AND ITS CACHED COPY, which is the one that
+// decides whether the row is still on screen. The rail paints from the mirror
+// (opening it is a local act now, [ROSTER]), so a chat left in the mirror is a
+// chat still IN THE LIST however cleanly the server deleted it, until some
+// later sync happens to prune it — and never, if it was pinned.
+//
+// The SEEN STAMP STAYS, deliberately. It used to be dropped here, and that is
+// what turned a stale row into an alarming one: unread is `output newer than
+// this device's last look`, so forgetting the look made the leftover row
+// UNREAD, which put the chat you had just deleted at the TOP of the list under
+// "Needs you" and counted it on the badge. Learning that a chat is gone must
+// never make it more prominent — and there is nothing to reclaim by forgetting,
+// the map is capped (SEEN_MAX) and session names are never reused.
+async function forgetSession(name) {
   if (!name) return;
   prefetched.delete(name);
   viewCache.delete(name);
-  forgetSeen(name);
   forgetAttention(name);
+  await offlineForget(name);
 }
+// [FORGET-SESSION-END]
 
 function onSessionGone(name) {
   forgetSession(name);
@@ -9137,10 +9168,12 @@ function onSessionGone(name) {
 // Every client hears this now, not just the one that asked (#204): a chat
 // deleted on the laptop used to sit on the phone's list until it refreshed,
 // and tapping it opened a chat that no longer existed.
-function onSessionDeleted(event) {
+async function onSessionDeleted(event) {
   rosterBaseline(event.seq);
-  forgetSession(event.name);
   showToast("session deleted");
+  // Repaint only AFTER the copy is gone: the rail reads the mirror, so a
+  // render racing the eviction paints the chat straight back onto the list.
+  await forgetSession(event.name);
   if (railIsOpen()) renderSessionsFromCache();
 }
 
@@ -9391,13 +9424,6 @@ function markSeen(name) {
   }
   saveSeen();
   refreshBadge(); // reading a chat drops it from the count HERE, not a round trip later
-}
-
-function forgetSeen(name) {
-  if (!name || !(name in seenAt)) return;
-  delete seenAt[name];
-  saveSeen();
-  refreshBadge();
 }
 
 // PURE: the whole unread decision, testable with no DOM and no clock. `current`
