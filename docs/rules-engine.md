@@ -276,7 +276,7 @@ Reported from a real session. *"Show me the difference between Ubud and the beac
 ```yaml
 when:
   prompt:
-    means_like:
+    sounds_like:
       - show me the difference between X and Y
       - pokaż mi jak to wygląda
 then:
@@ -297,13 +297,15 @@ Two general forms replaced all four:
 
 ```yaml
 answer_must_show: show_image          # the answer must carry what this tool produced
-answer_must_credit: read_url          # IF it ran, its work must be visible
+answer_must_show_if_used: read_url          # IF it ran, its work must be visible
 answer_must_include: {pattern: …}     # anything about the TEXT, written by him
 ```
 
 Both new verbs name a **tool**, not a check. So a rule can require something about what aish *did* without anyone adding a name first, and a tool that does not exist yet is covered the day it arrives.
 
-**The difference between the two words is the whole difference.** `show` requires the tool to have run — no call means unmet. `credit` is conditional — nothing used, nothing to credit, rule met. Two verbs rather than one with a flag, because a reader should not have to look up which way round it is.
+**One rule with a condition, and the names say so.** The first pair was `show` and `credit`, which stretched one metaphor over two different things: you cite the page you read, but you do not "credit" `show_image` — you show the picture it made. Naming the *condition* instead of inventing a second metaphor also retired the comment that used to be needed to say which way round the two were. A name that needs a comment is the wrong name.
+
+The same correction applies to `sounds_like`, whose first name was "means_like". Its siblings are single verbs that complete the sentence — *prompt **has** source*, *prompt **matches** ^x* — and *prompt **means like** …* is not English. `sounds_like` is idiomatic, grammatical, and honest about being fuzzy; plain `means:` was the runner-up and was rejected for overstating, since the check says a message is close, not that it *is* the example.
 
 **The check is an equality, not a guess about shape.** Both `show_*` tools hand back a line containing the exact token to paste, and the check reads that token back out of the trace and looks for it in the answer. So a picture fetched and then dropped fails, and a *different* image passes for nothing.
 

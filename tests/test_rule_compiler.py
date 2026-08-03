@@ -68,7 +68,7 @@ class TestCompiling:
         ask = scripted(GOOD)
         rule_compiler.compile_request("x", ask, TOOLS)
         prompt = ask.prompts[0]
-        assert "when_means_like" in prompt
+        assert "when_sounds_like" in prompt
         assert "NEVER USE A WORD LIST FOR A MEANING" in prompt
 
     def test_a_word_list_reply_is_refused_and_the_retry_is_told_why(self):
@@ -79,13 +79,13 @@ class TestCompiling:
         })
         good = json.dumps({
             "name": "r", "description": "d", "when_subject": "prompt",
-            "when_means_like": ["show me the difference between X and Y"],
+            "when_sounds_like": ["show me the difference between X and Y"],
             "answer_must_show": "show_image",
         })
         ask = scripted(wordy, good)
         result = rule_compiler.compile_request("show me things", ask, TOOLS)
         assert result and result.rounds == 2
-        assert "means_like" in ask.prompts[1]
+        assert "sounds_like" in ask.prompts[1]
 
     def test_the_vocabulary_is_generated_from_the_code(self):
         """A prompt listing the verbs by hand is a second copy, and the first
@@ -93,7 +93,7 @@ class TestCompiling:
         ask = scripted(GOOD)
         rule_compiler.compile_request("x", ask, TOOLS)
         prompt = ask.prompts[0]
-        assert "answer_must_show" in prompt and "answer_must_credit" in prompt
+        assert "answer_must_show" in prompt and "answer_must_show_if_used" in prompt
         for verb in (rules.VERB_ANSWER_FROM, rules.VERB_MUST_FIRST):
             assert verb in prompt
 

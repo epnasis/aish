@@ -76,8 +76,10 @@ def _vocabulary() -> str:
         "- answer_must_show: a TOOL whose output must appear in the answer — the "
         "answer must carry what it produced. Use `{any_of: [tool, tool]}` when "
         "either will do.",
-        "- answer_must_credit: a TOOL that, IF it runs this turn, must have its "
-        "work visible in the answer. Does not force it to run.",
+        "- answer_must_show_if_used: the same, but CONDITIONAL — it does not force "
+        "the tool to run; it only says that if it does run, what it produced has "
+        "to appear in the answer. Use this for 'don't fetch something and then "
+        "drop it'.",
         "- answer_must_include / answer_must_not: `{pattern: <regex>}` for "
         "anything about the answer's TEXT. Never a plain phrase — a check "
         "nothing can evaluate is a promise nothing keeps.",
@@ -87,7 +89,7 @@ def _vocabulary() -> str:
     subjects = [
         "- prompt: what the owner typed, plus any attachments. Give ONE of: "
         "when_has (" + ", ".join(sorted(rules.CONTAINS_DETECTORS)) + ") when the "
-        "condition is about what the message CARRIES; when_means_like, a list of "
+        "condition is about what the message CARRIES; when_sounds_like, a list of "
         "3-5 example messages, when it is about what the message MEANS; "
         "when_matches with a regex ONLY when the thing being matched is a "
         "literal string such as a domain.",
@@ -138,7 +140,7 @@ and more correct than any trigger.
 fires on "the Docker image is broken" and misses the same sentence in another \
 language, and adding more words makes both worse. If the condition is about \
 what the message MEANS — "when I ask to be shown something", "when I am \
-planning a trip" — use when_means_like and write 3-5 whole example messages the \
+planning a trip" — use when_sounds_like and write 3-5 whole example messages the \
 way that person actually types, including in their other language if they use \
 one. Examples are matched by meaning, not by letters.
 

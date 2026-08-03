@@ -131,7 +131,7 @@ class TestRuleFileFormat:
             ),
             (
                 CANONICAL.replace("has: source", "has: source\n    matches: ^x"),
-                "ONE of `has:`, `matches:` or `means_like:`",
+                "ONE of `has:`, `matches:` or `sounds_like:`",
             ),
             (CANONICAL.replace("has: source", "matches: ^x"), "needs `when: prompt: has:"),
             (
@@ -1290,22 +1290,22 @@ class TestShowAndCredit:
     def test_credit_passes_when_the_tool_never_ran(self):
         """The difference between the two words: CREDIT is conditional. If
         nothing was used there is nothing to credit."""
-        assert not self._fail({"answer_must_credit": "read_url"}, "an answer", ())
+        assert not self._fail({"answer_must_show_if_used": "read_url"}, "an answer", ())
 
     def test_credit_fails_when_what_ran_is_not_in_the_answer(self):
         call = self._call("read_url", "page text", {"url": "https://shop.example/x"})
-        assert self._fail({"answer_must_credit": "read_url"}, "about 40 EUR", (call,))
+        assert self._fail({"answer_must_show_if_used": "read_url"}, "about 40 EUR", (call,))
 
     def test_credit_passes_when_the_page_is_linked(self):
         call = self._call("read_url", "page text", {"url": "https://shop.example/x"})
         assert not self._fail(
-            {"answer_must_credit": "read_url"},
+            {"answer_must_show_if_used": "read_url"},
             "about 40 EUR — see https://shop.example/x", (call,),
         )
 
     def test_the_ask_names_the_thing_that_is_missing(self):
         call = self._call("read_url", "t", {"url": "https://shop.example/x"})
-        [failure] = self._fail({"answer_must_credit": "read_url"}, "40 EUR", (call,))
+        [failure] = self._fail({"answer_must_show_if_used": "read_url"}, "40 EUR", (call,))
         assert "shop.example" in failure.ask
 
     def test_either_tool_satisfies_a_choice(self):
@@ -1400,7 +1400,7 @@ class TestMeaningTrigger:
     def _rule(self, **over):
         rule, errors = rules.lint(rules.render({
             "name": "show-me", "description": "Show me a picture.",
-            "when_subject": "prompt", "when_means_like": self.ANCHORS,
+            "when_subject": "prompt", "when_sounds_like": self.ANCHORS,
             "answer_must_show": "show_image", **over,
         }), known_tools={"show_image"})
         assert not errors, errors
@@ -1474,14 +1474,14 @@ class TestMeaningTrigger:
         with pytest.raises(rules.LintError) as exc:
             rules.render({
                 "name": "r", "description": "d", "when_subject": "prompt",
-                "when_means_like": ["a"], "when_has": "link", "answer_from": "read_url",
+                "when_sounds_like": ["a"], "when_has": "link", "answer_from": "read_url",
             })
         assert "alternatives" in str(exc.value)
 
     def test_too_many_examples_is_refused(self):
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "prompt",
-            "when_means_like": [f"example {i}" for i in range(rules.MEANING_MAX_ANCHORS + 1)],
+            "when_sounds_like": [f"example {i}" for i in range(rules.MEANING_MAX_ANCHORS + 1)],
             "answer_from": "read_url",
         }))
         assert rule is None and "at most" in errors[0]
@@ -1507,7 +1507,7 @@ class TestKeywordListsAreRefused:
     def test_a_word_list_is_refused_and_told_what_to_use(self, pattern):
         rule, errors = self._lint(pattern)
         assert rule is None
-        assert "means_like" in errors[0]
+        assert "sounds_like" in errors[0]
         assert "Docker image" in errors[0], "the refusal must show WHY, not just say no"
 
     @pytest.mark.parametrize("pattern", [

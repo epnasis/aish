@@ -252,7 +252,7 @@ thousands of entries without bloating the context.
   what is being examined — the `prompt:` you typed, the `session:` it is running
   in, the `action:` about to run, or `always`. When the condition is about what
   a message *means* rather than what it contains, you give **examples** —
-  `means_like:` with a few messages in your own words, in any language you use —
+  `sounds_like:` with a few messages in your own words, in any language you use —
   and aish matches by meaning rather than by wording. A miss is fixed by adding
   another example, never by tuning anything. The `then:` lists obligations
   from a small closed set: `answer_from:` a named tool — or `source`, meaning

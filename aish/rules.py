@@ -75,20 +75,20 @@ VERB_ANSWER_MUST_INCLUDE = "answer_must_include"
 VERB_ANSWER_MUST_NOT = "answer_must_not"
 # Two general forms replacing the fixed list of named checks. Both name a TOOL.
 VERB_ANSWER_MUST_SHOW = "answer_must_show"
-VERB_ANSWER_MUST_CREDIT = "answer_must_credit"
+VERB_ANSWER_MUST_SHOW_IF_USED = "answer_must_show_if_used"
 VERBS = frozenset({
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_TELL_ME_WHEN,
     VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT,
-    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT,
+    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED,
 })
 # Verbs decided at the END of a turn, against the answer and the turn's own
 # record — not before a call. The gate cannot see either.
 VERIFY_VERBS = frozenset({
     VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT,
-    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT,
+    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED,
 })
 # The verbs whose value is a tool name (or a choice of them), not a check name.
-TOOL_VERBS = frozenset({VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT})
+TOOL_VERBS = frozenset({VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED})
 # Designed, unbuilt — named here so a lint failure can say what is MISSING
 # rather than merely that the file is wrong (#205).
 VERBS_DESIGNED = {
@@ -100,7 +100,7 @@ VERBS_DESIGNED = {
 # admission price: a verb ships only if it compiles to a declared check. A free
 # phrase ("be terser") is a judged question and is refused by name until that
 # tier exists, rather than shipping as a promise nothing keeps.
-# What `answer_must_show:` / `answer_must_credit:` name: A TOOL. Not a check
+# What `answer_must_show:` / `answer_must_show_if_used:` name: A TOOL. Not a check
 # invented per media type.
 #
 # The first version shipped a fixed list of named checks — shows_a_picture,
@@ -110,7 +110,7 @@ VERBS_DESIGNED = {
 # should be his. Two general forms replace all four:
 #
 #   answer_must_show: <tool>     the answer must carry that tool's output
-#   answer_must_credit: <tool>   IF it ran, its output must be in the answer
+#   answer_must_show_if_used: <tool>   IF it ran, its output must be in the answer
 #   answer_must_include: {pattern: …}   anything about the text, written by him
 #
 # The per-tool knowledge that remains — how a given tool's work appears in an
@@ -362,7 +362,7 @@ class Rule:
     # verdict on a named rule rather than an exception inside the gate.
     pattern: re.Pattern | None = None
     contains: str = ""  # built-in message detector, e.g. `contains: url`
-    # `when: prompt: means_like:` — the owner's own example messages.
+    # `when: prompt: sounds_like:` — the owner's own example messages.
     anchors: tuple[str, ...] = ()
     field_name: str = ""
     equals: str = ""
@@ -602,19 +602,19 @@ def _compile(front: dict) -> _Compiled:
         contains = str(fields.get("has", "") or "").strip().casefold()
         source = str(fields.get("matches", "") or "").strip()
         anchors = tuple(
-            line.strip() for line in _as_list(fields.get("means_like")) if line.strip()
+            line.strip() for line in _as_list(fields.get("sounds_like")) if line.strip()
         )
         chosen = [name for name, value in
-                  (("has", contains), ("matches", source), ("means_like", anchors))
+                  (("has", contains), ("matches", source), ("sounds_like", anchors))
                   if value]
         if len(chosen) > 1:
             raise RuleError(
-                "`prompt:` takes ONE of `has:`, `matches:` or `means_like:` — got "
+                "`prompt:` takes ONE of `has:`, `matches:` or `sounds_like:` — got "
                 + ", ".join(chosen)
             )
         if anchors and len(anchors) > MEANING_MAX_ANCHORS:
             raise RuleError(
-                f"`means_like:` takes at most {MEANING_MAX_ANCHORS} examples — "
+                f"`sounds_like:` takes at most {MEANING_MAX_ANCHORS} examples — "
                 "they all have to fit on the approval card, and past a handful "
                 "another example stops changing what matches"
             )
@@ -630,7 +630,7 @@ def _compile(front: dict) -> _Compiled:
         else:
             if not source:
                 raise RuleError(
-                    "`prompt:` needs `has:`, `means_like:` or `matches:`"
+                    "`prompt:` needs `has:`, `sounds_like:` or `matches:`"
                 )
             try:
                 pattern = re.compile(source)
@@ -685,7 +685,7 @@ def _compile(front: dict) -> _Compiled:
         if (value := then.get(verb)) in (None, ""):
             continue
         obligations.append({"verb": verb, **_answer_check(verb, value)})
-    for verb in (VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT):
+    for verb in (VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED):
         if (value := then.get(verb)) in (None, "", [], {}):
             continue
         obligations.append({"verb": verb, "tools": _tool_choice(verb, value)})
@@ -757,7 +757,7 @@ def _answer_check(verb: str, value: Any) -> dict:
         f"`{verb}: {name!r}` is a plain phrase, which only a judge can check, and "
         f"the judged tier is not built. Use `{verb}: {{pattern: <regex>}}` for "
         f"something about the TEXT, or `{VERB_ANSWER_MUST_SHOW}: <tool>` / "
-        f"`{VERB_ANSWER_MUST_CREDIT}: <tool>` for something about what aish DID."
+        f"`{VERB_ANSWER_MUST_SHOW_IF_USED}: <tool>` for something about what aish DID."
     )
 
 
@@ -974,7 +974,7 @@ def _evaluate_meaning(rule: Rule, ctx: TurnContext, meaning) -> tuple[str, dict]
     task = (ctx.task or "").strip()
     base: dict = {
         "on": "task",
-        "means_like": list(rule.anchors),
+        "sounds_like": list(rule.anchors),
         "floor": MEANING_FLOOR,
         "origin": ctx.origin,
     }
@@ -1498,10 +1498,10 @@ MUST_SHOW_ASK = (
     "written — that line is what the app renders. Then give the answer again."
 )
 
-MUST_CREDIT_ASK = (
+SHOW_IF_USED_ASK = (
     "The rule '{rule}' requires that whatever {tools} produced this turn appears "
     "in the answer, and {missing} is missing. {description}\n"
-    "Add it and give the answer again."
+    "You used it and then dropped it — add it and give the answer again."
 )
 
 
@@ -1617,13 +1617,14 @@ def _cited(answer: str, call: dict) -> bool:
 def _verify_tools(
     binding: Binding, obligation: dict, evidence: TurnEvidence, common: dict
 ) -> VerifyFailure | None:
-    """`answer_must_show` and `answer_must_credit`, over one tool or a choice.
+    """`answer_must_show` and `answer_must_show_if_used`, over one tool or a choice.
 
-    The two differ in ONE way, and it is the difference between the words. SHOW
-    requires the tool to have run: no call means the rule is unmet. CREDIT is
-    conditional: if it never ran there is nothing to credit and the rule is
-    met. That is why they are two verbs rather than one with a flag — a reader
-    should not have to look up which way round it is.
+    One rule with a condition, and the names say so. The first pair was called
+    `show` and `credit`, which stretched one metaphor over two different
+    things: you cite the page you read, but you do not "credit" show_image, you
+    show the picture it made. Naming the CONDITION instead of inventing a
+    second metaphor also retires the comment that used to be needed here to say
+    which way round they were.
     """
     verb = obligation["verb"]
     tools = list(obligation["tools"])
@@ -1653,7 +1654,7 @@ def _verify_tools(
     )) or "what it produced"
     return VerifyFailure(
         binding, obligation, {**shared, "missing": missing[:EVIDENCE_CHARS]},
-        MUST_CREDIT_ASK.format(tools=wording, missing=missing[:200], **common),
+        SHOW_IF_USED_ASK.format(tools=wording, missing=missing[:200], **common),
     )
 
 
@@ -1733,11 +1734,11 @@ def _obligation_line(obligation: dict) -> str:
             f"· MUST: the answer carries what {tools} produced. Call it and paste the "
             "line it hands back EXACTLY as written — that line is what renders."
         )
-    if verb == VERB_ANSWER_MUST_CREDIT:
+    if verb == VERB_ANSWER_MUST_SHOW_IF_USED:
         tools = " or ".join(obligation["tools"])
         return (
-            f"· MUST: if {tools} runs this turn, what it produced appears in the "
-            "answer. Using something and not showing it is the failure here."
+            f"· MUST: if you use {tools}, what it produced appears in the answer. "
+            "Using something and then dropping it is the failure here."
         )
     described = f"the pattern /{obligation.get('pattern')}/"
     if verb == VERB_ANSWER_MUST_INCLUDE:
@@ -1832,11 +1833,11 @@ LIFECYCLE_FIELDS = ("enabled", "expires")
 
 AUTHOR_FIELDS = (
     "name", "description", "prose", "enabled", "expires",
-    "when_subject", "when_has", "when_means_like", "when_matches",
+    "when_subject", "when_has", "when_sounds_like", "when_matches",
     "when_origin", "when_action",
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
     VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT, VERB_MUST_TELL_ME_WHEN,
-    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT,
+    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED,
 )
 
 # The subset a prose compiler may propose. The prompt never asks for the
@@ -1935,17 +1936,17 @@ def render(fields: dict) -> str:
     if subject == SUBJECT_ALWAYS:
         lines.append(f"when: {SUBJECT_ALWAYS}")
     elif subject == SUBJECT_PROMPT:
-        chosen = [name for name in ("when_has", "when_means_like", "when_matches")
+        chosen = [name for name in ("when_has", "when_sounds_like", "when_matches")
                   if fields.get(name)]
         if len(chosen) > 1:
             raise LintError(
-                "`when_has`, `when_means_like` and `when_matches` are alternatives — "
+                "`when_has`, `when_sounds_like` and `when_matches` are alternatives — "
                 "a message shape is one of the three. Dropping one silently would "
                 "have written a rule with a trigger the author did not choose."
             )
         lines += ["when:", f"  {SUBJECT_PROMPT}:"]
-        if examples := _as_list(fields.get("when_means_like")):
-            lines.append("    means_like:")
+        if examples := _as_list(fields.get("when_sounds_like")):
+            lines.append("    sounds_like:")
             lines += [f"      - {_yaml_scalar(example)}" for example in examples]
         else:
             key, value = ("has", fields.get("when_has")) if fields.get("when_has") \
@@ -1982,7 +1983,7 @@ def render(fields: dict) -> str:
             then += [f"  {verb}:", f"    pattern: {_yaml_scalar(value.get('pattern', ''))}"]
         else:
             then.append(f"  {verb}: {_yaml_scalar(value)}")
-    for verb in (VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT):
+    for verb in (VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED):
         value = fields.get(verb)
         if value in (None, "", {}, []):
             continue
@@ -2043,7 +2044,7 @@ def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, l
             f"(/{rule.pattern.pattern}/). It fires on the wrong sentences — "
             "\"image\" matches \"the Docker image is broken\" — and misses the "
             "right ones in another language. Adding more words makes both worse. "
-            "Use `means_like:` with 3-5 example messages instead; those are "
+            "Use `sounds_like:` with 3-5 example messages instead; those are "
             "matched by MEANING, so wording and language do not have to match."
         )
     if known_tools:
@@ -2124,10 +2125,10 @@ def explain(rule: Rule) -> str:
                 "the answer must show what " + " or ".join(obligation["tools"])
                 + " produced"
             )
-        elif verb == VERB_ANSWER_MUST_CREDIT:
+        elif verb == VERB_ANSWER_MUST_SHOW_IF_USED:
             says.append(
-                "if " + " or ".join(obligation["tools"])
-                + " is used, what it produced must be in the answer"
+                "if you use " + " or ".join(obligation["tools"])
+                + ", what it produced must be in the answer"
             )
         else:
             says.append(
@@ -2335,8 +2336,8 @@ def author_fields(path: Path) -> dict:
             if subject == SUBJECT_PROMPT:
                 if has := str(block.get("has", "") or ""):
                     fields["when_has"] = has
-                if examples := _as_list(block.get("means_like")):
-                    fields["when_means_like"] = examples
+                if examples := _as_list(block.get("sounds_like")):
+                    fields["when_sounds_like"] = examples
                 if matches := str(block.get("matches", "") or ""):
                     fields["when_matches"] = matches
             elif subject == SUBJECT_SESSION:
