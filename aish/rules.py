@@ -1784,6 +1784,15 @@ def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, l
                     "or requiring a missing tool refuses every alternative and offers "
                     "nothing, on every turn it binds."
                 )
+        # The TRIGGER's tool too, not only the obligations'. A typo'd
+        # `action: tool:` arms every turn and fires on nothing, and it is the
+        # one trigger kind retro-match cannot replay — so neither honesty
+        # mechanism would catch it. Same argument as the two below.
+        if (named := rule.action.get("tool")) and named not in known_tools:
+            errors.append(
+                f"triggers on a tool that does not exist: {named!r}. The rule would "
+                "arm on every turn and fire on nothing. Check the spelling."
+            )
         for prohibited in (o["what"] for o in rule.obligations if o["verb"] == VERB_NEVER_USE):
             for tool_name in prohibited:
                 if tool_name not in known_tools:

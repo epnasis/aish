@@ -72,8 +72,15 @@ def no_real_rule_compiler(monkeypatch):
     or, on a developer machine with ollama up, quietly consuming a real model.
     """
 
+    class CompilerReached(BaseException):
+        """BaseException, not Exception: `_compiled_fields` treats any
+        Exception as "the backend is down" and falls back to named fields, so
+        an AssertionError here was swallowed on the request+fields shape and
+        the guard went quiet exactly where a test is most likely to be wrong.
+        An assertion is never an operational fallback condition."""
+
     def refuse(model=None):
-        raise AssertionError(
+        raise CompilerReached(
             "a test tried to build the real prose→rule compiler — inject "
             "Agent(rule_compiler_ask=...) or patch rule_compiler.make_compiler"
         )

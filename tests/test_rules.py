@@ -1067,6 +1067,25 @@ class TestAuthoring:
         rule, errors = rules.lint(text, known_tools={"read_url", "web_search"})
         assert rule is None and "web_serch" in errors[0]
 
+    def test_a_trigger_naming_a_missing_tool_is_caught_too(self):
+        """A typo'd `action: tool:` arms every turn and fires on nothing — and
+        it is the one trigger kind retro-match cannot replay, so neither
+        honesty mechanism would have caught it."""
+        text = rules.render({
+            "name": "r", "description": "d", "when_subject": "action",
+            "when_action": {"tool": "gws_gmial_send"}, "never_use": ["web_search"],
+        })
+        rule, errors = rules.lint(text, known_tools={"web_search", "read_url"})
+        assert rule is None and "gws_gmial_send" in errors[0]
+
+    def test_a_trigger_on_a_path_is_not_mistaken_for_a_tool(self):
+        text = rules.render({
+            "name": "r", "description": "d", "when_subject": "action",
+            "when_action": {"path_under": "~/dev/aish"}, "never_use": ["write_file"],
+        })
+        rule, errors = rules.lint(text, known_tools={"write_file"})
+        assert not errors and rule is not None
+
     def test_editing_carries_over_everything_not_named(self):
         """#205's sharpest risk: the compiler regenerating a working rule from
         one sentence and silently dropping the four things it already did."""
