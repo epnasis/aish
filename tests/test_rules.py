@@ -789,16 +789,33 @@ class TestTheWholeMaterialChannel:
         assert "compiles to a declared check" in rule.error
         assert "belongs in memory" in rule.error
 
-    def test_the_designed_verbs_say_what_is_MISSING_not_just_that_it_is_wrong(self, tmp_path):
+    def test_the_designed_verbs_say_what_is_MISSING_not_just_that_it_is_wrong(
+        self, tmp_path, monkeypatch
+    ):
         """A refused rule is a legible gap — the owner can decide to rephrase
         toward what exists, or to extend the engine. "Not expressible" alone
-        gives him neither choice."""
+        gives him neither choice.
+
+        `VERBS_DESIGNED` is EMPTY now: every verb the design named is built, and
+        `ask_me_first` — which used to be this test's example — was the last
+        one. The machinery is what is being pinned, not the entry, because the
+        next designed verb must arrive with this behaviour already working.
+        """
+        monkeypatch.setitem(rules.VERBS_DESIGNED, "answer_in_my_language",
+                            "match the language I wrote in — needs a judge")
         rule = load_one(tmp_path, CANONICAL.replace(
-            "  never_use: [web_search]", "  ask_me_first: true"
+            "  never_use: [web_search]", "  answer_in_my_language: true"
         ))
         assert "designed but not built yet" in rule.error
-        assert "hold for the owner" in rule.error
+        assert "match the language I wrote in" in rule.error
         assert ", ".join(sorted(rules.VERBS)) in rule.error
+
+    def test_every_designed_verb_is_now_built(self):
+        """The build queue, as a test. An entry here is a rule the owner can
+        write that will loudly fail to load — which is the intended behaviour,
+        but it should be a deliberate state rather than a forgotten one."""
+        assert rules.VERBS_DESIGNED == {}
+        assert rules.SUBJECTS_DESIGNED == ()
 
     def test_a_phrase_only_a_judge_could_check_is_refused_by_name(self, tmp_path):
         """The admission line, at the one place it is tempting to bend: a verb
@@ -1056,7 +1073,7 @@ class TestAuthoring:
         """A route to a tool that does not exist refuses every alternative and
         offers nothing, on every turn it binds."""
         text = rules.render({**self.BASE, "answer_from": "gws_gmial_send"})
-        rule, errors = rules.lint(text, known_tools={"read_url", "web_search"})
+        rule, errors = rules.lint(text, capabilities={"read_url", "web_search"})
         assert rule is None
         assert "gws_gmial_send" in errors[0]
 
@@ -1064,7 +1081,7 @@ class TestAuthoring:
         """It would never fire — and a rule that never fires looks exactly like
         a rule that is working."""
         text = rules.render({**self.BASE, "never_use": ["web_serch"]})
-        rule, errors = rules.lint(text, known_tools={"read_url", "web_search"})
+        rule, errors = rules.lint(text, capabilities={"read_url", "web_search"})
         assert rule is None and "web_serch" in errors[0]
 
     def test_a_trigger_naming_a_missing_tool_is_caught_too(self):
@@ -1075,7 +1092,7 @@ class TestAuthoring:
             "name": "r", "description": "d", "when_subject": "action",
             "when_action": {"tool": "gws_gmial_send"}, "never_use": ["web_search"],
         })
-        rule, errors = rules.lint(text, known_tools={"web_search", "read_url"})
+        rule, errors = rules.lint(text, capabilities={"web_search", "read_url"})
         assert rule is None and "gws_gmial_send" in errors[0]
 
     def test_a_trigger_on_a_path_is_not_mistaken_for_a_tool(self):
@@ -1083,7 +1100,7 @@ class TestAuthoring:
             "name": "r", "description": "d", "when_subject": "action",
             "when_action": {"path_under": "~/dev/aish"}, "never_use": ["write_file"],
         })
-        rule, errors = rules.lint(text, known_tools={"write_file"})
+        rule, errors = rules.lint(text, capabilities={"write_file"})
         assert not errors and rule is not None
 
     def test_editing_carries_over_everything_not_named(self):
@@ -1250,7 +1267,7 @@ class TestShowAndCredit:
     def _fail(self, then, answer, calls=()):
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always", **then,
-        }), known_tools=self.TOOLS)
+        }), capabilities=self.TOOLS)
         assert not errors, errors
         binding = rules.bind(rule, {"on": "always"}, "b1", self.TOOLS)
         return rules.verify([binding], rules.TurnEvidence(answer=answer, calls=calls))
@@ -1342,7 +1359,7 @@ class TestShowAndCredit:
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always",
             "answer_must_include": {"any_of": ["picture"]},
-        }), known_tools=self.TOOLS)
+        }), capabilities=self.TOOLS)
         assert rule is None and "at least two" in errors[0]
 
     def test_the_tool_a_kind_needs_is_checked_even_though_it_is_unnamed(self):
@@ -1352,7 +1369,7 @@ class TestShowAndCredit:
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always",
             "answer_must_include": "picture",
-        }), known_tools={"read_url"})
+        }), capabilities={"read_url"})
         assert rule is None and "show_image" in errors[0]
 
     def test_a_video_the_tool_validated_is_credited(self):
@@ -1408,7 +1425,7 @@ class TestMeaningTrigger:
             "name": "show-me", "description": "Show me a picture.",
             "when_subject": "prompt", "when_like": self.ANCHORS,
             "answer_must_include": "picture", **over,
-        }), known_tools={"show_image"})
+        }), capabilities={"show_image"})
         assert not errors, errors
         return rule
 
@@ -1503,7 +1520,7 @@ class TestKeywordListsAreRefused:
         return rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "prompt",
             "when_matches": pattern, "answer_from": "read_url",
-        }), known_tools={"read_url"})
+        }), capabilities={"read_url"})
 
     @pytest.mark.parametrize("pattern", [
         "(?i)(show|display|view|picture)",
@@ -1535,7 +1552,7 @@ class TestAnswerBeforeActing:
         rule, errors = rules.lint(rules.render({
             "name": "answer-first", "description": "Answer me before running anything.",
             "when_subject": "always", "must_first": "answer",
-        }), known_tools={"read_url"})
+        }), capabilities={"read_url"})
         assert not errors, errors
         return rule
 
@@ -1557,11 +1574,442 @@ class TestAnswerBeforeActing:
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always",
             "must_first": "read_url",
-        }), known_tools={"read_url"})
+        }), capabilities={"read_url"})
         assert not errors
         binding = rules.bind(rule, {"on": "always"}, "b1", {"read_url"})
         assert rules.wants_text_first([binding]) == []
         assert rules.has_verify([binding]) is True
+
+
+class TestAnswerSubject:
+    """`when: answer:` — a condition on the DELIVERABLE.
+
+    The engine's central move is *check the answer, not the prompt*, and its
+    worked example — "the answer quotes a price, so a read of the store's own
+    domain must exist in this turn's trace" — could not be written: an
+    obligation could be attached to the answer, but never conditioned on it.
+    """
+
+    PRICE = r"[0-9][0-9., ]*\s?(zł|PLN|EUR|USD)"
+
+    def _price_rule(self, **over):
+        fields = {
+            "name": "live-price",
+            "description": "If you quote a price, you must have read the store page.",
+            "when_subject": "answer", "when_matches": self.PRICE,
+            "must_first": "read_url",
+        }
+        rule, errors = rules.lint(rules.render({**fields, **over}),
+                                  capabilities={"read_url", "web_search"})
+        assert not errors, errors
+        return rule
+
+    def _verify(self, rule, answer, calls=(), meaning=None):
+        binding = rules.bind(rule, {"on": "answer"}, "b1", {"read_url"})
+        evidence = rules.TurnEvidence(answer=answer, calls=tuple(calls),
+                                      meaning=meaning)
+        return binding, rules.verify([binding], evidence)
+
+    def test_the_flagship_example_now_compiles(self):
+        assert self._price_rule().trigger == rules.TRIGGER_ANSWER_SHAPE
+
+    def test_it_arms_at_seed_because_there_is_no_answer_yet(self):
+        """Same shape as `action:`: binding means "it is watching", never "it
+        applied". Evaluated against a turn with no answer in it at all."""
+        verdict, evidence = rules.evaluate(
+            self._price_rule(), rules.TurnContext(task="what does a Switch cost")
+        )
+        assert verdict == rules.VERDICT_BIND
+        assert evidence["on"] == "answer"
+
+    def test_an_answer_with_no_price_asks_for_nothing(self):
+        _b, failures = self._verify(self._price_rule(), "The capital is Paris.")
+        assert failures == []
+
+    def test_an_answer_quoting_a_price_with_no_fetch_fails(self):
+        _b, [failure] = self._verify(self._price_rule(), "It is 249 PLN at the store.")
+        assert failure.verb == "must_first"
+        assert failure.askable is True
+
+    def test_a_price_backed_by_a_real_read_passes(self):
+        _b, failures = self._verify(
+            self._price_rule(), "It is 249 PLN at the store.",
+            calls=[{"tool": "read_url", "args": {"url": "https://shop.example/x"},
+                    "status": "ok"}],
+        )
+        assert failures == []
+
+    def test_a_refused_read_does_not_satisfy_it(self):
+        """A call another gate stopped is not a call — and is never re-asked,
+        or the harness argues with itself."""
+        _b, [failure] = self._verify(
+            self._price_rule(), "It is 249 PLN.",
+            calls=[{"tool": "read_url", "args": {}, "decision": "denied"}],
+        )
+        assert failure.askable is False
+
+    def test_the_ask_says_what_provoked_it(self):
+        """R6: the model cannot see the condition, so a goad that does not name
+        it is not instructive."""
+        _b, [failure] = self._verify(self._price_rule(), "It is 249 PLN.")
+        assert "Your answer" in failure.ask
+        assert "read_url" in failure.ask
+        assert failure.evidence["condition"]["matched"] is True
+
+    def test_a_gate_verb_under_an_answer_condition_is_refused(self):
+        """The condition is unknowable before a call runs, so the restriction
+        would silently never fire — and one that never fires looks exactly like
+        one that works."""
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "answer",
+            "when_matches": "x", "never_use": ["web_search"],
+        }), capabilities={"web_search"})
+        assert rule is None
+        assert "cannot carry `never_use:`" in errors[0]
+
+    def test_a_plain_phrase_is_refused_by_name(self):
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({
+                "name": "r", "description": "d", "when_subject": "answer",
+            })
+        assert "judged question" in str(exc.value)
+
+    def test_the_condition_can_be_scoped_to_the_ending(self):
+        """"If the answer ends with a question, give me tap buttons" — the
+        second rule that had nowhere to live."""
+        rule, errors = rules.lint(rules.render({
+            "name": "chips", "description": "Questions get tap buttons.",
+            "when_subject": "answer", "when_matches": r"\?\s*$", "when_in": "ending",
+            "answer_must_include": {"pattern": "aish-reply://"},
+        }))
+        assert not errors, errors
+        assert rule.where == "ending"
+        # A question in the MIDDLE is not the answer ending in one.
+        _b, failures = self._verify(rule, "Is it raining?\n\nIt is not raining.")
+        assert failures == []
+        _b, [failure] = self._verify(rule, "It is raining.\n\nShall I book a taxi?")
+        assert failure.verb == "answer_must_include"
+
+    def test_an_examples_condition_is_scored_and_needs_no_threshold_authored(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "answer",
+            "when_like": ["here is a recipe you can cook"],
+            "answer_must_include": {"pattern": "ingredients"},
+        }))
+        assert not errors, errors
+        assert rule.tier == 1
+        _b, [failure] = self._verify(
+            rule, "A lovely dish to make tonight.",
+            meaning=lambda text, anchors: {a: 0.9 for a in anchors},
+        )
+        assert failure.verb == "answer_must_include"
+
+    def test_with_no_scorer_a_meaning_condition_does_not_fire(self):
+        """Opposite direction to the trigger side, deliberately: this condition
+        only ever ADDS obligations, so failing to evaluate it can never lift
+        one."""
+        rule, _e = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "answer",
+            "when_like": ["here is a recipe"],
+            "answer_must_include": {"pattern": "ingredients"},
+        }))
+        _b, failures = self._verify(rule, "A lovely dish.")
+        assert failures == []
+
+    def test_the_binding_records_why_it_stayed_quiet(self):
+        """Armed-and-silent and fired-and-passed are different facts, and only
+        the log can tell them apart afterwards."""
+        binding, failures = self._verify(self._price_rule(), "No prices here.")
+        assert failures == []
+        assert binding.answer_condition["matched"] is False
+        assert binding.answer_condition["on"] == "answer"
+
+    def test_it_holds_the_answer_back_from_the_stream(self):
+        rule = self._price_rule()
+        binding = rules.bind(rule, {"on": "answer"}, "b1", {"read_url"})
+        assert rules.has_verify([binding]) is True
+
+    def test_an_edit_round_trips_the_condition(self, tmp_path):
+        path = tmp_path / "live-price.md"
+        path.write_text(rules.render({
+            "name": "live-price", "description": "d", "when_subject": "answer",
+            "when_matches": self.PRICE, "when_in": "ending", "must_first": "read_url",
+        }), encoding="utf-8")
+        fields = rules.author_fields(path)
+        assert fields["when_subject"] == "answer"
+        assert fields["when_matches"] == self.PRICE
+        assert fields["when_in"] == "ending"
+        again, errors = rules.lint(rules.render(fields), capabilities={"read_url"})
+        assert not errors, errors
+        assert again.where == "ending"
+
+
+class TestAskMeFirst:
+    """The HOLD verb — R7's other half.
+
+    Route and prohibit are things the model can comply with by choosing
+    differently. "Check with me before you file that" is not addressed to the
+    model at all, so refusing it would be the harness arguing with someone who
+    cannot answer the question."""
+
+    def _rule(self, **over):
+        fields = {
+            "name": "confirm-issues",
+            "description": "Check with me before filing an issue.",
+            "when_subject": "action", "when_action": {"tool": "gh_issue_create"},
+            "ask_me_first": True,
+        }
+        rule, errors = rules.lint(rules.render({**fields, **over}),
+                                  capabilities={"gh_issue_create", "web_search"})
+        return rule, errors
+
+    def _bound(self):
+        rule, errors = self._rule()
+        assert not errors, errors
+        return rules.bind(rule, {"on": "action"}, "b1", {"gh_issue_create"})
+
+    def test_it_compiles(self):
+        rule, errors = self._rule()
+        assert not errors, errors
+        assert rule.obligations[0]["verb"] == "ask_me_first"
+
+    def test_it_holds_the_matching_call(self):
+        binding = self._bound()
+        [verdict] = rules.gate([binding], "gh_issue_create", {"title": "x"})
+        assert verdict.verdict == "hold"
+        assert "the owner decides this one" in verdict.message
+
+    def test_it_leaves_every_other_call_alone(self):
+        binding = self._bound()
+        assert rules.gate([binding], "web_search", {})[0].verdict == "allowed"
+
+    def test_it_does_NOT_refuse_first(self):
+        """The bounded refuse-first discipline is for obligations the model can
+        satisfy by choosing differently. This one it cannot."""
+        binding = self._bound()
+        for _ in range(rules.RULE_MAX_REFUSALS + 2):
+            assert rules.gate([binding], "gh_issue_create", {})[0].verdict == "hold"
+        assert binding.rounds == 0
+
+    def test_it_reaches_dispatch_rather_than_the_parallel_path(self):
+        """A held call that never reaches `_dispatch` is not held at all — the
+        read-only fan-out bypasses it, and holding an auto-approved read is
+        exactly what someone writes this verb for."""
+        binding = self._bound()
+        assert rules.affects([binding], "gh_issue_create") is True
+
+    def test_it_needs_an_action_subject(self):
+        """Without one there is nothing to hold: attached to a prompt condition
+        it would mean every call for the whole turn."""
+        _rule, errors = self._rule(when_subject="always", when_action=None)
+        assert errors and "needs `when: action:`" in errors[0]
+
+    def test_the_seed_tells_the_model_to_expect_it(self):
+        assert "The USER decides this one" in rules.seed_text([self._bound()])
+
+    def test_the_card_states_the_promise_it_makes(self):
+        rule, _e = self._rule()
+        card = rules.explain(rule)
+        assert "Put to you before it runs, every time" in card
+        assert "refused" not in card
+
+    def test_it_grants_nothing(self):
+        """R1: a rule restricts. This verb only ever ADDS a card — it can never
+        make a call that would have been approved into one that is not asked."""
+        binding = self._bound()
+        verdicts = rules.gate([binding], "gh_issue_create", {})
+        assert all(v.verdict != "allowed" for v in verdicts)
+
+
+class TestResultSubject:
+    """`when: result:` — the condition #190 was founded on.
+
+    "If the transcript comes back empty, say so — do not go and get a news
+    article instead" is a fact about a TOOL RESULT. Retrieval keys on the
+    user's text, so no memory could ever be delivered on the turn it mattered:
+    a bare URL has no lexical or semantic surface to match. This is the trigger
+    kind that was structurally undeliverable by the knowledge layer.
+    """
+
+    def _rule(self, **over):
+        fields = {
+            "name": "transcript-failure",
+            "description": "If the transcript comes back empty, tell me — don't substitute.",
+            "when_subject": "result",
+            "when_result_of": "youtube_analyze", "when_result_was": "empty",
+            "never_use": ["web_search"],
+        }
+        return rules.lint(
+            rules.render({**fields, **over}),
+            capabilities={"youtube_analyze", "web_search"},
+        )
+
+    def _bound(self, **over):
+        rule, errors = self._rule(**over)
+        assert not errors, errors
+        return rules.bind(rule, {"on": "result", "of": rule.result_of,
+                                 "was": rule.result_was}, "b1", {"web_search"})
+
+    def test_the_founding_memory_now_compiles(self):
+        rule, errors = self._rule()
+        assert not errors, errors
+        assert rule.trigger == rules.TRIGGER_RESULT_STATE
+
+    def test_it_arms_at_seed_so_the_model_is_told_before_it_happens(self):
+        """The whole difference from the memory that failed. The condition is in
+        context BEFORE the tool runs, rather than arriving as a refusal for a
+        rule the model was never shown."""
+        binding = self._bound()
+        text = rules.seed_text([binding])
+        assert "CONDITIONAL" in text
+        assert "youtube_analyze" in text
+        assert "web_search" in text
+
+    def test_it_restricts_nothing_while_armed(self):
+        """Refusing a web search BEFORE the transcript failed is a different and
+        much worse rule than the one he wrote."""
+        binding = self._bound()
+        assert binding.active is False
+        [verdict] = rules.gate([binding], "web_search", {"query": "x"})
+        assert verdict.verdict == "allowed"
+
+    def test_a_healthy_result_does_not_fire_it(self):
+        binding = self._bound()
+        binding.note_tool_result("youtube_analyze", "ok")
+        assert binding.active is False
+        assert rules.gate([binding], "web_search", {})[0].verdict == "allowed"
+
+    def test_an_empty_result_fires_it_and_the_substitution_is_refused(self):
+        binding = self._bound()
+        binding.note_tool_result("youtube_analyze", "incomplete")
+        assert binding.active is True
+        [verdict] = rules.gate([binding], "web_search", {"query": "x"})
+        assert verdict.verdict == "refused"
+        assert "web_search" in verdict.message
+
+    def test_another_tool_failing_does_not_fire_it(self):
+        binding = self._bound()
+        binding.note_tool_result("read_url", "incomplete")
+        assert binding.active is False
+
+    def test_error_and_empty_are_different_states(self):
+        binding = self._bound(when_result_was="error")
+        binding.note_tool_result("youtube_analyze", "incomplete")
+        assert binding.active is False
+        binding.note_tool_result("youtube_analyze", "failed")
+        assert binding.active is True
+
+    def test_a_later_success_does_not_un_fire_it(self):
+        """Latched on purpose. A retry that works does not undo an answer built
+        partly on a source that failed — and nothing would say so."""
+        binding = self._bound()
+        binding.note_tool_result("youtube_analyze", "incomplete")
+        binding.note_tool_result("youtube_analyze", "ok")
+        assert binding.active is True
+
+    def test_a_typo_in_the_watched_tool_is_refused(self):
+        """The least visible typo in the vocabulary: the rule looks armed all
+        turn and simply never fires."""
+        _rule, errors = self._rule(when_result_of="youtube_analize")
+        assert errors and "waits on a tool that does not exist" in errors[0]
+
+    def test_an_unknown_state_is_refused_with_the_options(self):
+        _rule, errors = self._rule(when_result_was="truncated")
+        assert errors and "empty" in errors[0] and "error" in errors[0]
+
+    def test_verify_is_silent_while_it_is_armed(self):
+        binding = self._bound(never_use="", must_first="youtube_analyze")
+        assert rules.verify([binding], rules.TurnEvidence(answer="anything")) == []
+
+    def test_the_card_says_when_in_english(self):
+        rule, _e = self._rule()
+        assert "Once youtube_analyze has come back" in rules.explain(rule)
+
+    def test_it_round_trips_through_an_edit(self, tmp_path):
+        path = tmp_path / "r.md"
+        rule, _e = self._rule()
+        path.write_text(rules.render({
+            "name": "transcript-failure", "description": "d",
+            "when_subject": "result", "when_result_of": "youtube_analyze",
+            "when_result_was": "empty", "never_use": ["web_search"],
+        }), encoding="utf-8")
+        fields = rules.author_fields(path)
+        assert fields["when_result_of"] == "youtube_analyze"
+        assert fields["when_result_was"] == "empty"
+
+
+class TestASkillIsACapability:
+    """"For accommodation use trippy" names ONE capability to the owner. Which
+    side of aish's internal tool/skill fence it lives on is not his concern —
+    the decision was recorded and never reached the code, so the design's own
+    worked example for `must_first` failed the lint as a missing tool."""
+
+    def _rule(self, **over):
+        fields = {
+            "name": "accommodation-via-trippy",
+            "description": "Accommodation searches go through trippy.",
+            "when_subject": "prompt",
+            "when_like": ["find me a villa in Uluwatu", "szukam noclegu w Warszawie"],
+            "must_first": "trippy_search",
+            "never_use": ["web_search"],
+        }
+        return rules.lint(
+            rules.render({**fields, **over}),
+            capabilities={"web_search", "read_url", "trippy_search"},
+            skill_names={"trippy_search"},
+        )
+
+    def test_a_rule_may_require_a_skill(self):
+        rule, errors = self._rule()
+        assert not errors, errors
+        assert rule is not None
+
+    def test_an_unknown_name_is_still_refused(self):
+        _rule, errors = self._rule(must_first="tripy_serch")
+        assert errors and "does not exist" in errors[0]
+
+    def test_reading_the_skill_satisfies_it(self):
+        """The other half. Without it the lint would accept a rule naming a
+        skill that Verify could never see satisfied — a rule that asks forever,
+        which is worse than one that refuses to compile."""
+        rule, _e = self._rule()
+        binding = rules.bind(rule, {"on": "task"}, "b1", {"trippy_search"})
+        evidence = rules.TurnEvidence(
+            answer="Two villas, both available.",
+            calls=({"tool": "read_skill", "args": {"name": "trippy_search"},
+                    "status": "ok"},),
+        )
+        assert rules.verify([binding], evidence) == []
+
+    def test_reading_a_DIFFERENT_skill_does_not(self):
+        rule, _e = self._rule()
+        binding = rules.bind(rule, {"on": "task"}, "b1", {"trippy_search"})
+        evidence = rules.TurnEvidence(
+            answer="Two villas.",
+            calls=({"tool": "read_skill", "args": {"name": "gh_issue"},
+                    "status": "ok"},),
+        )
+        assert len(rules.verify([binding], evidence)) == 1
+
+    def test_a_refused_skill_read_is_not_a_read(self):
+        rule, _e = self._rule()
+        binding = rules.bind(rule, {"on": "task"}, "b1", {"trippy_search"})
+        evidence = rules.TurnEvidence(
+            answer="Two villas.",
+            calls=({"tool": "read_skill", "args": {"name": "trippy_search"},
+                    "decision": "denied"},),
+        )
+        [failure] = rules.verify([binding], evidence)
+        assert failure.askable is False
+
+    def test_a_skill_cannot_be_routed_to(self):
+        """`answer_from` means "the deliverable comes from HERE and everything
+        else is refused". A skill is guidance; it produces no deliverable, so
+        routing to one prohibits every tool in favour of something that can
+        never satisfy the route."""
+        _rule, errors = self._rule(must_first="", answer_from="trippy_search")
+        assert errors and "names a skill" in errors[0]
+        assert "must_first" in errors[0]
 
 
 class TestSecretsInCommands:
@@ -1576,7 +2024,7 @@ class TestSecretsInCommands:
             "name": "no-inline-secrets", "description": "No secrets in commands.",
             "when_subject": "action", "when_action": self.ACTION,
             "never_use": ["run_command"],
-        }), known_tools={"run_command"})
+        }), capabilities={"run_command"})
         assert not errors, errors
         return rule
 
@@ -1605,7 +2053,7 @@ class TestSecretsInCommands:
             "name": "r", "description": "d", "when_subject": "action",
             "when_action": {"tool": "run_command", "command_has": "sk-[a-z]+"},
             "never_use": ["run_command"],
-        }), known_tools={"run_command"})
+        }), capabilities={"run_command"})
         assert rule is None
         assert "would be the very thing it stops" in errors[0]
 

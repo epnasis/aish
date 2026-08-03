@@ -2991,7 +2991,7 @@ class Agent:
         """
         corpus = rules.load_rules()
         active, skipped = rules.partition(corpus)
-        known = self._known_tool_names()
+        known = self._known_capabilities()
         rows: list[dict] = []
         for rule in active:
             started = time.perf_counter()
@@ -3090,16 +3090,42 @@ class Agent:
         """
         return self.semantic.sentence_scores if self.semantic is not None else None
 
-    def _known_tool_names(self) -> set[str]:
-        """Everything the model can call this turn, for the bind-time
-        unsatisfiability check: a route to a tool that no longer exists must
-        surface when it fires, not months later."""
+    def _known_capabilities(self) -> set[str]:
+        """Everything the model can reach this turn, for the bind-time
+        unsatisfiability check: a rule requiring something that no longer exists
+        must surface when it fires, not months later.
+
+        **Skills count, and that is the point of the word "capability".** The
+        vocabulary decision was recorded — *a `<cap>` is a tool OR a skill; the
+        distinction was implementation leaking* — and never reached the code, so
+        `must_first: trippy_search` failed the lint as a missing tool. The
+        design's own worked example for this verb could not be written. To the
+        owner, "use trippy for accommodation" names one capability; which side of
+        aish's internal fence it lives on is not his concern.
+        """
         self._refresh_plugin_tools()
         names = set()
         for schema in [*tools.TOOL_SCHEMAS, *self._plugin_defs]:
             function: dict = schema["function"]
             names.add(str(function["name"]))
+        names |= self._known_skill_names()
         return names
+
+    def _known_skill_names(self) -> set[str]:
+        """Skill names, treated as capabilities a rule may require.
+
+        Best-effort by construction: a knowledge store that cannot be read must
+        never take the rule engine down with it, and an empty set only means the
+        unsatisfiability check has nothing to say — it can never invent a
+        restriction.
+        """
+        try:
+            return {
+                name for name, _description
+                in skills.list_skills(skills.skill_dirs(self.cwd))
+            }
+        except Exception:  # noqa: BLE001 — knowledge is best-effort here
+            return set()
 
     def _observe_for_rules(self, name: str, result: str) -> None:
         """Feed a completed tool call back into the bindings.
@@ -3267,10 +3293,19 @@ class Agent:
         """The abstention half: this binding was checked and had nothing to
         say. Without it, a satisfied rule and an unchecked one look identical
         in the log — and "why didn't this fire?" is #197's primary question."""
+        evidence: dict = {"checked": True}
+        # A `when: answer:` rule has TWO ways of being quiet, and they are
+        # different facts: its obligations were met, or its condition never held
+        # for this answer. Recording only the first would have every armed
+        # answer rule read as a rule that passed.
+        if binding.rule.trigger == rules.TRIGGER_ANSWER_SHAPE:
+            condition = binding.answer_condition or {}
+            evidence["condition"] = condition
+            evidence["applied"] = bool(condition.get("matched"))
         self._emit_record(
             kind="gate", call=0, at="verify", gate="rule.verify",
             binding=binding.id, rule=binding.name, tool="", action={},
-            verdict="allowed", tier=binding.rule.tier, evidence={"checked": True},
+            verdict="allowed", tier=binding.rule.tier, evidence=evidence,
             round=binding.asks, max_rounds=rules.RULE_MAX_ASKS, escalated=False,
         )
 
@@ -3393,6 +3428,11 @@ class Agent:
         if speak_first := self._speak_first_gate(name):
             return speak_first
         recorded: set[str] = set()
+        # Bindings whose hold the owner has already answered FOR THIS CALL.
+        # `ask_me_first` deliberately does not mark the binding overridden — it
+        # means each time — so without this the re-pass below would put the same
+        # card up again, once per binding, for one call.
+        released: set[str] = set()
         # One pass per binding at most: an escalation either refuses (returns)
         # or marks that binding overridden, so it can never escalate twice. The
         # re-pass matters — an owner exception to ONE rule must not silently
@@ -3403,6 +3443,8 @@ class Agent:
             for verdict in rules.gate(
                 self._bindings, name, args, self.cwd, self._command_has_a_secret
             ):
+                if verdict.verdict == "hold" and verdict.binding.id in released:
+                    continue
                 if verdict.verdict == "allowed":
                     if verdict.binding.id not in recorded:
                         recorded.add(verdict.binding.id)
@@ -3413,6 +3455,10 @@ class Agent:
                     self._note(f"⚖ {verdict.binding.name}: {name} refused")
                     self._record_gate(verdict, name, args, "refused")
                     refusal = _gate_outcome(verdict.message, decision="blocked")
+                elif verdict.verdict == "hold":
+                    refusal = self._hold_for_owner(verdict, name, args)
+                    recorded.add(verdict.binding.id)
+                    released.add(verdict.binding.id)
                 else:
                     refusal = self._escalate_rule(verdict, name, args)
                     # The escalation already wrote this binding's verdict for
@@ -3430,6 +3476,62 @@ class Agent:
                 return refusal
             if not stopped:
                 return None
+        return None
+
+    def _hold_for_owner(
+        self, verdict: "rules.GateVerdict", name: str, args: dict
+    ) -> str | None:
+        """`ask_me_first` — R7's other half. Straight to the owner, with no
+        refusals first, because the decision is his BY CONSTRUCTION: the model
+        cannot comply its way out of "check with me", since the question was
+        never addressed to it.
+
+        Returns the refusal text, or None when he approved this one call.
+
+        **Approval releases the CALL, never the turn.** The escalation path
+        marks the binding overridden — right there, where the owner is granting
+        an exception to a rule the model kept pushing against, and re-prompting
+        would be friction on a decision already made. Here it would be the
+        opposite: "ask me first" means each time, and a rule that asks once and
+        then waves through the next four is not the rule he wrote.
+        """
+        binding = verdict.binding
+        if self.approve_tool is None:
+            # Unattended, and the one person who could answer is not there. It
+            # fails to restriction and says so, rather than looping.
+            message = rules.OWNER_HELD.format(rule=binding.name, tool=name)
+            self._record_gate(verdict, name, args, "held", escalated=True,
+                              message=message)
+            return _gate_outcome(message, decision="held")
+        self._note(f"⚖ {binding.name}: {name} held for you")
+        preview = (
+            f"the rule '{binding.name}' says you decide this one "
+            f"({binding.rule.description})"
+        )
+        decision = self.approve_tool(name, args, preview)
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            message = _with_feedback(
+                rules.OWNER_DENIED.format(rule=binding.name, tool=name),
+                decision.comment,
+            )
+            self._record_gate(verdict, name, args, "refused", escalated=True,
+                              message=message)
+            return _gate_outcome(message, decision="denied")
+        if isinstance(decision, Approved):
+            message = TOOL_HELD_FOR_ADJUSTMENT.format(
+                name=name, comment=decision.comment
+            )
+            self._record_gate(verdict, name, args, "held", escalated=True,
+                              message=message)
+            return _gate_outcome(message, decision="held")
+        if decision is None or decision is False:
+            message = rules.OWNER_HELD.format(rule=binding.name, tool=name)
+            self._record_gate(verdict, name, args, "refused", escalated=True,
+                              message=message)
+            return _gate_outcome(message, decision="denied")
+        self._record_gate(verdict, name, args, "allowed", escalated=True,
+                          message="owner approved this call")
         return None
 
     def _escalate_rule(
@@ -4169,7 +4271,7 @@ class Agent:
             )
         try:
             compiled = rule_compiler.compile_request(
-                request, ask, self._known_tool_names(), existing=existing
+                request, ask, self._known_capabilities(), existing=existing
             )
         except Exception as exc:  # noqa: BLE001 — a dead backend is a fallback
             # `make_compiler` only CONSTRUCTS the callable; the connection
@@ -4224,7 +4326,8 @@ class Agent:
             return None
         if target.suffix != ".md":
             return None
-        _rule, errors = rules.lint(plan.new, known_tools=self._known_tool_names())
+        _rule, errors = rules.lint(plan.new, capabilities=self._known_capabilities(),
+                                   skill_names=self._known_skill_names())
         if not errors:
             return None
         return (
@@ -4328,7 +4431,8 @@ class Agent:
             text = rules.render(fields)
         except rules.LintError as exc:
             return f"ERROR: {exc}"
-        rule, errors = rules.lint(text, known_tools=self._known_tool_names())
+        rule, errors = rules.lint(text, capabilities=self._known_capabilities(),
+                                  skill_names=self._known_skill_names())
         if rule is None:
             return (
                 f"ERROR: that rule did not validate: {'; '.join(errors)} "

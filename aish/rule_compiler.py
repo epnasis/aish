@@ -81,6 +81,10 @@ def _vocabulary() -> str:
         "nothing keeps.",
         "- must_tell_me_when: a failure the owner must be told about in plain "
         "words rather than quietly patched over.",
+        "- ask_me_first: true — the owner decides this one, every time it comes "
+        "up. Needs when_subject 'action', because it holds ONE kind of call. "
+        "Use it when the point is that HE chooses, not that the assistant "
+        "should choose differently.",
     ]
     subjects = [
         "- prompt: what the owner typed, plus any attachments. Give ONE of: "
@@ -92,8 +96,20 @@ def _vocabulary() -> str:
         "- session: how the session started. Give when_origin: owner or automation.",
         "- action: the call about to run. Give when_action with any of "
         + ", ".join(rules.ACTION_FIELDS[:3]) + ".",
-        "- always: every turn. Correct whenever the condition is really about "
-        "the ANSWER rather than the request.",
+        "- result: a condition on what a TOOL came back with, for \"if X comes "
+        "back empty, tell me rather than quietly using something else\". Give "
+        "when_result_of (the tool) and when_result_was ("
+        + ", ".join(sorted(rules.RESULT_STATES)) + "). It restricts nothing "
+        "until that actually happens.",
+        "- answer: a condition on the FINISHED answer, for a rule whose 'if' is "
+        "about what came out rather than what went in — \"if you quote me a "
+        "price, you must have read the store page\". Give when_matches with a "
+        "regex, or when_like with example answers when it is about meaning; "
+        "when_in (opening, ending) narrows it to one paragraph. Only obligations "
+        "checked at turn end may go with it — never never_use or answer_from.",
+        "- always: every turn. Correct when the obligation is on the answer and "
+        "there is no 'if' at all. If there IS an 'if' about the answer, use the "
+        "answer subject instead of forcing it onto every turn.",
     ]
     return (
         "SUBJECTS (when_subject is exactly one of these):\n" + "\n".join(subjects)
@@ -118,8 +134,9 @@ TOOLS THAT EXIST (nothing else may be named):
 Reply with ONE JSON object and nothing else. Keys:
   name              short-kebab-case, e.g. "bounded-material"
   description       one line, in THEIR words, saying what is required
-  when_subject      one of: prompt, session, action, always
-  when_has / when_matches / when_origin / when_action   as the subject needs
+  when_subject      exactly one of the SUBJECTS above
+  when_has / when_like / when_matches / when_in / when_origin / when_action
+                    whichever that subject takes — see above
   plus at least one obligation key from the list above
   prose             two or three sentences on WHY this matters to them. Never \
 restate the obligation — the fields above are what is enforced.
@@ -242,7 +259,7 @@ def _candidates(text: str):
 def compile_request(
     request: str,
     ask: Callable[[str], str],
-    known_tools: set[str],
+    capabilities: set[str],
     existing: dict | None = None,
 ) -> Compiled:
     """One prose instruction → validated field values, or a stated problem.
@@ -254,7 +271,7 @@ def compile_request(
     """
     prompt = PROMPT.format(
         request=request.strip(),
-        tools=", ".join(sorted(known_tools)) or "(none)",
+        tools=", ".join(sorted(capabilities)) or "(none)",
         vocabulary=_vocabulary(),
     )
     if existing:
@@ -301,7 +318,7 @@ def compile_request(
         except rules.LintError as exc:
             errors = [str(exc)]
             continue
-        rule, lint_errors = rules.lint(text, known_tools=known_tools)
+        rule, lint_errors = rules.lint(text, capabilities=capabilities)
         if rule is not None:
             return Compiled(fields=fields, rounds=attempt)
         errors = lint_errors

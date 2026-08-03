@@ -187,10 +187,11 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 |---|---|---|
 | `prompt:` | `has: material \| link \| attachment \| path`, `like: [examples]`, `matches: <regex>` | **yes** |
 | `session:` | `origin: owner \| automation \| email \| schedule` | **yes** |
-| `action:` | `tool:`, `path_under:`, `command_starts_with:` | **yes** |
+| `action:` | `tool:`, `path_under:`, `command_starts_with:`, `command_has: a_secret` | **yes** |
+| `answer:` | `matches: <regex>`, `like: [examples]`, `in: opening \| ending \| anywhere` | **yes** |
+| `result:` | `of: <tool>`, `was: empty \| error` | **yes** |
 | `always` | no fields — every turn | **yes** |
 | `action:` | `sends_to:`, `host:` — need the recipient/host parse the egress gate owns | no |
-| `result:` | `of: <tool>`, `was: empty \| error` | no |
 
 **`prompt`, not `message` and not `request`.** Attachments reach the agent as separate parameters and appear in no message text at all, so "message" became false the moment attached material counted. It is DEFINED as text plus attachments plus the paths the owner typed — the definition that made `message` wrong survives the rename. `request:` was tried and rejected as ambiguous (a request can be a curl call).
 
@@ -199,6 +200,48 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 **`action:` arms at seed and decides at the gate.** Its condition is about a call nobody has proposed yet, so binding it does not mean *"it applied"* — it means *"it is watching"*, the same shape the stop and skill gates already have, and the `gate` records say whether it ever fired. Every field is a fact the harness holds **before dispatch**, so the check is free and the answer is known before anything runs.
 
 `path_under:` is **resolved, never string-matched** — a condition that `../` steps around protects nothing, and the mirror matters just as much: a path that reaches *inside* the root through `..` must still match. Relative paths resolve against the session's cwd, which is where the model's own paths are interpreted, and paths named inside a shell command count, because `write_file` is not the only way to change a file. `TestActionSubject`.
+
+### `ask_me_first` — the hold verb, and R7's other half
+
+Route, prohibit and sequence are things the model can comply with **by choosing differently**, which is why they refuse rather than escalate. *"Check with me before you file that"* is not addressed to the model at all — it cannot comply its way out of a question it was never asked. Refusing it first would be the harness arguing with someone who cannot answer, so it goes **straight to the owner, with no bounded refusals**.
+
+**It licenses nothing.** R1 holds without strain: the verb can only ever *add* a card. It cannot turn a call that would have been refused into one that runs, and it cannot make an unapproved call approved. Denial refuses; approval releases exactly the one call that was shown.
+
+**Approval releases the CALL, never the turn** — and this is the one place it deliberately differs from an escalation override. There, the owner is granting an exception to a rule the model kept pushing against, and re-prompting per call would be friction on a decision already made. Here, *"ask me first"* means each time; a rule that asks once and then waves through the next four is not the rule he wrote. The gate re-passes bindings so an exception to one rule cannot release a call a second rule forbids, so the hold is remembered **for that call** — otherwise the same card would appear again on the re-pass, for one action.
+
+**It requires `when: action:`.** Without one there is nothing to hold: attached to a prompt condition it would mean every call for the whole turn, which is not a rule anyone wants and is not what the words read as. Refused at compile.
+
+**And it must reach `_dispatch` at all.** `affects` returns true for a held tool, because the read-only fan-out bypasses dispatch entirely — and holding a call that is otherwise auto-approved is precisely what someone writes this verb for. Where the condition is about paths or command text, which `affects` cannot see, it errs toward the safe path. `TestAskMeFirst`, `TestAskMeFirstReachesTheOwner`.
+
+### `when: result:` — the condition this whole epic was founded on
+
+*"If the transcript comes back empty, say so — do not go and get a news article instead."* That is a fact about a **tool result**, and retrieval keys on the user's text: a bare YouTube URL has no lexical or semantic surface to match, so the memory carrying this policy was **never injected on the triggering turn at all**. It is the proof that memory was the wrong channel, and it stayed unwritable until the result envelope existed to say what "came back empty" means.
+
+`was: empty` is the envelope's `incomplete`; `was: error` is `failed`. The distinction earns its keep on the founding incident exactly: `youtube_analyze` returned **exit 0** with `transcript: ""` and a populated `error_log`, so every prefix sniff in the codebase graded it green. Only a populated error channel tells them apart, and that is what `incomplete` is.
+
+**It arms at seed and fires when the result lands.** Arming is the point rather than a mechanism: the condition goes into the model's context *before* the tool runs, so the model knows what is expected of it the moment the transcript comes back empty — instead of being refused afterwards by a rule it was never shown. That is precisely what the memory could not do, and it is R5 (*the model must never be ambushed by a gate*) paying for itself.
+
+**While armed it restricts nothing.** A binding whose tool has not failed yet returns `allowed` from the gate, carrying `armed` in its evidence. Refusing a web search *before* the transcript failed would be a different and much worse rule.
+
+**Firing latches.** A later successful retry does not un-fire it: the answer would then be built partly on a source that failed, with nothing saying so — which is the substitution the rule exists to stop.
+
+**Every trigger now arms at seed; what differs is when it decides** — `prompt:` and `session:` at seed, `action:` at the gate, `result:` when a result lands, `answer:` at turn end. `Binding.active` is the one place that difference lives. `TestResultSubject`.
+
+### `when: answer:` — the reframe could not express itself
+
+**This subject was missing, and its absence was invisible because the design's own worked example was never written down as a file.** The engine turns on *check the ANSWER, not the prompt*, and the example that justified cutting scored triggers is *the answer quotes a price → a read of the store's own domain must exist in this turn's trace*. Running the whole behaviour-shaped memory corpus through the lint is what surfaced it: an obligation could be attached to the answer, but nothing could be **conditioned** on it. Two rules were blocked by this and no other — the live-price rule, and *"if the answer ends with a question, add quick-reply chips."*
+
+`when: always` is not a substitute. Forcing a `read_url` onto every turn, or chips onto every answer, is a different and wrong rule.
+
+**It arms at seed and decides at Verify** — the same shape `action:` has at the gate, and for the same reason: the subject does not exist yet. Binding means *it is watching*, never *it applied*, and `answer_applies` settles it at turn end.
+
+**It carries only turn-end obligations, enforced at compile.** A `never_use:` under an answer condition would have to be decided at the gate, where the condition is unknowable, so it would silently never fire — and a restriction that never fires looks exactly like one that works. The lint names the verb and points at `prompt:` / `session:` / `action:` instead.
+
+**Its two forms are the answer obligations' two forms**, deliberately: `matches:` is structural, `like:` is scored, and `in:` slices by paragraph exactly as it does on the obligation side. Nothing new had to be learned to write a condition about the thing a rule could already constrain, and no new noun entered the vocabulary — which is the admission law holding: *nothing enters until a rule the owner actually tried to write fails to compile.* Two did.
+
+**A meaning condition with no scorer does NOT fire** — the opposite direction from the trigger side's `unevaluable`, and deliberately. An answer condition only ever *adds* obligations to a turn, so failing to evaluate it can never lift one; on the trigger side an unevaluable rule may need to hold. Same principle (fail toward restriction), opposite mechanics.
+
+**Armed-and-silent is recorded, not inferred.** The verify pass row carries the condition and whether it held, because *"the answer had no price in it"* and *"the rule never bound"* are different facts and only the log can separate them afterwards. And the ask names what provoked it — the model cannot see the condition, so a goad that does not state it is the uninstructive refusal R6 forbids. `TestAnswerSubject`.
 
 **`when: always`** is the bare literal for a rule with no condition. Style obligations apply to every turn, and spelling that out beats an empty block that reads like an oversight — but an always-on rule is prose in **every** turn's context, so they should be few and short. `TestAlwaysSubject`.
 
@@ -213,15 +256,18 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 | `must_tell_me_when: <plain phrase>` | this failure must be stated to the owner | declared, seeded as prose; the structural half is not built (a plain phrase is a judged question) |
 | `must_first: <tool>` | this tool must have run before the answer | **yes** |
 | `answer_must_include:` / `answer_must_not_include:` | something the reader would SEE (`picture`, `video`, `sources`), `{any_of: […]}`, or `{pattern: <regex>}` over the wording | **yes** |
+| `ask_me_first: true` | the owner decides this one, every time | **yes** |
 | ~~`keep_in_mind:`~~ | **deleted** — see below | never |
-| `must_first: <action>` | do this before the triggering action | no |
-| `ask_me_first: true` | hold for the owner | no |
 
 **A verb ships only if it compiles to a declared check.** `keep_in_mind:` — seeded prose with a deterministic trigger and no enforcement — was proposed as a staging area for obligations no check could reach, and deleted on the owner's objection: *"if most rules end up as reminders, this is a nicer memory system wearing an enforcement engine's clothes."* The lint already refuses *a rule with no obligation restricts nothing*; a rule with an **unenforceable** obligation is the same thing wearing a verb. What it held goes to one of two places, never a third: **checkable in principle but not yet** → a rule file that loudly fails to load, which IS the build queue; **nothing could ever check it** → memory, and only as a declarative fact (*"Pawel prefers terse answers"*, never *"always be terse"*), so memory's facts-not-behaviours contract does not widen. `TestRetiredKeys`, `TestEnabledFlag`.
 
 Plain English imperatives, in the ESLint tradition (`no-console`, `prefer-const`): **a verb you must read documentation to understand is a bad verb** — and these words are read far more often than written, since they also appear in the prose the model is shown.
 
 **The test that actually catches bad ones is reading the file aloud.** Every naming defect found so far failed it and nothing else: *"prompt means like …"* is not English; you do not *credit* `show_image`, you show the picture it made; *"the answer must show what read_url produced"* is odd because "show" is visual and the verb takes any tool. The construction that survives is a key ending in a **preposition**, so the tool lands in a grammatical slot — `answer_from: <tool>`, `answer_must_include_result_of: <tool>`, `never_discard_result_of: <tool>`. One honest wrinkle: for `read_url` the thing shown is the URL that went *in* rather than the page text that came out, so "the result of read_url" is a mild stretch. It is the link to what was read, which is what a reader means by it.
+
+**A `<cap>` is a tool OR a skill.** *"For accommodation, use trippy"* names one capability to the owner; which side of aish's internal fence it lives on is not his concern, and the tool/skill distinction in `must_first:` was implementation leaking. That decision was recorded and **never reached the code** — `_known_capabilities` returned tools only, so `must_first: trippy_search` failed the lint as a missing tool and the design's own worked example for the verb could not be written. A skill is reached by reading it, so `read_skill(name: trippy_search)` *is* `trippy_search` having run; both halves are needed, because a lint that accepts a name Verify can never see satisfied produces a rule that asks forever — worse than one that refuses to compile.
+
+`answer_from:` is the exception and is refused by name: it means *the deliverable comes from HERE and everything else is refused*, and a skill produces no deliverable — it is guidance the model reads. Routing to one would prohibit every tool in favour of something that can never satisfy the route. The lint says so and points at `must_first`. `TestASkillIsACapability`.
 
 **`must_first` still carries two readings under one word.** At the gate it is a real ordering (*before this action*); at turn end it only means *ran at some point this turn*. Which one applies is resolved by the `when:` block rather than by the verb. Noted as the next name likely to mislead, not yet changed.
 

@@ -5279,6 +5279,101 @@ class TestRuleSeeding:
                     assert record["turn"] == turn
 
 
+HOLD_RULE = """\
+---
+name: confirm-searches
+description: Check with me before searching the web.
+when:
+  action:
+    tool: web_search
+then:
+  ask_me_first: true
+---
+
+Searching is cheap but it is not always what I want.
+"""
+
+
+class TestAskMeFirstReachesTheOwner:
+    """The verb only exists if the card actually appears. `ask_me_first` holds a
+    call that every other gate would have waved through, so the test that
+    matters is the end-to-end one."""
+
+    def _agent(self, tmp_path, approver, responses=None):
+        agent, _chat = rules_agent(
+            tmp_path,
+            responses or [
+                model_says(tool_calls=[tool_call("web_search", query="tar flags")]),
+                model_says("ok"),
+            ],
+            rule_texts=(HOLD_RULE,),
+            approve_tool=approver,
+        )
+        return agent
+
+    def test_the_owner_is_asked_before_it_runs(self, tmp_path):
+        asked, ran = [], []
+        agent = self._agent(
+            tmp_path, lambda name, args, preview: asked.append(preview) or True
+        )
+        agent_module.web.web_search = lambda *a, **k: ran.append(a) or "results"
+        agent.run_task(TASK)
+        assert len(asked) == 1
+        assert "confirm-searches" in asked[0]
+        assert "you decide this one" in asked[0]
+        assert len(ran) == 1, "approved, so it must actually have run"
+
+    def test_a_denial_stops_it(self, tmp_path):
+        ran = []
+        agent = self._agent(tmp_path, lambda name, args, preview: None)
+        agent_module.web.web_search = lambda *a, **k: ran.append(a) or "results"
+        agent.run_task(TASK)
+        assert ran == []
+        [result] = tool_messages(agent.messages)
+        assert result["content"].startswith("NOT EXECUTED")
+        assert "confirm-searches" in result["content"]
+
+    def test_it_asks_EVERY_time_rather_than_releasing_the_turn(self, tmp_path):
+        """The difference from an escalation override, and the whole meaning of
+        the words: "ask me first" is not "ask me once"."""
+        asked = []
+        agent = self._agent(
+            tmp_path,
+            lambda name, args, preview: asked.append(name) or True,
+            responses=[
+                model_says(tool_calls=[tool_call("web_search", query="one")]),
+                model_says(tool_calls=[tool_call("web_search", query="two")]),
+                model_says("ok"),
+            ],
+        )
+        agent_module.web.web_search = lambda *a, **k: "results"
+        agent.run_task(TASK)
+        assert len(asked) == 2
+
+    def test_one_call_produces_ONE_card(self, tmp_path):
+        """The gate re-passes bindings so an exception to one rule cannot
+        release a call a second rule forbids. A hold that is not remembered for
+        the call would put the same card up again on that re-pass."""
+        asked = []
+        agent = self._agent(
+            tmp_path, lambda name, args, preview: asked.append(preview) or True
+        )
+        agent_module.web.web_search = lambda *a, **k: "results"
+        agent.run_task(TASK)
+        assert len(asked) == 1
+
+    def test_unattended_it_fails_to_restriction(self, tmp_path):
+        """No one to answer the question, so it is not run — and the model is
+        told to carry on and say what it could not do."""
+        ran = []
+        agent = self._agent(tmp_path, None)
+        agent_module.web.web_search = lambda *a, **k: ran.append(a) or "results"
+        agent.run_task(TASK)
+        assert ran == []
+        [result] = tool_messages(agent.messages)
+        assert "did not approve" in result["content"]
+
+
 class TestRuleGate:
     """Membership against this turn's bindings. The engine slots in ALONGSIDE
     the existing gates: it can only ever add a restriction."""

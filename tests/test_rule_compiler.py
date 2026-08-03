@@ -45,7 +45,7 @@ class TestCompiling:
                                                scripted(GOOD), TOOLS)
         assert result and result.rounds == 1
         assert result.fields["when_has"] == "material"
-        rule, errors = rules.lint(rules.render(result.fields), known_tools=TOOLS)
+        rule, errors = rules.lint(rules.render(result.fields), capabilities=TOOLS)
         assert not errors and rule is not None
 
     def test_the_owners_words_reach_the_compiler_verbatim(self):
@@ -127,7 +127,7 @@ class TestTheCompilerCannotTouchTheLIFECYCLE:
         reply = json.dumps({**json.loads(GOOD), "enabled": False})
         result = rule_compiler.compile_request("x", scripted(reply), TOOLS)
         assert result and "enabled" not in result.fields
-        rule, _ = rules.lint(rules.render(result.fields), known_tools=TOOLS)
+        rule, _ = rules.lint(rules.render(result.fields), capabilities=TOOLS)
         assert rule is not None and rule.status == ""
 
     def test_the_prompt_never_asks_for_a_lifecycle_key(self):
@@ -295,6 +295,6 @@ class TestEditing:
         result = rule_compiler.compile_request("x", scripted(reply), TOOLS,
                                                existing=self.EXISTING)
         assert result
-        rule, _ = rules.lint(rules.render(result.fields), known_tools=TOOLS)
+        rule, _ = rules.lint(rules.render(result.fields), capabilities=TOOLS)
         assert rule is not None
         assert all(o["verb"] in rules.VERBS for o in rule.obligations)
