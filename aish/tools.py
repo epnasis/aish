@@ -1217,7 +1217,7 @@ TOOL_SCHEMAS = [
                         "carry — 'material' (a link, an attachment or a typed "
                         "path), 'link', 'attachment' or 'path'.",
                     },
-                    "when_sounds_like": {
+                    "when_like": {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "For when_subject='prompt': 3-5 EXAMPLE MESSAGES, "
@@ -1233,7 +1233,7 @@ TOOL_SCHEMAS = [
                         "literal string such as a domain. NEVER a list of words standing "
                         "in for a meaning — 'show|display|picture' fires on 'the Docker "
                         "image is broken' and misses the same sentence in Polish. aish "
-                        "refuses those. Use when_sounds_like instead.",
+                        "refuses those. Use when_like instead.",
                     },
                     "when_origin": {
                         "type": "string",
@@ -1319,7 +1319,7 @@ TOOL_SCHEMAS = [
                     "description": {"type": "string"},
                     "when_subject": {"type": "string", "description": _WHEN_SUBJECT},
                     "when_has": {"type": "string"},
-                    "when_sounds_like": {"type": "array", "items": {"type": "string"}},
+                    "when_like": {"type": "array", "items": {"type": "string"}},
                     "when_matches": {"type": "string"},
                     "when_origin": {"type": "string"},
                     "when_action": {"type": "object"},

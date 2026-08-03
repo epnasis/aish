@@ -131,7 +131,7 @@ class TestRuleFileFormat:
             ),
             (
                 CANONICAL.replace("has: material", "has: material\n    matches: ^x"),
-                "ONE of `has:`, `matches:` or `sounds_like:`",
+                "ONE of `has:`, `matches:` or `like:`",
             ),
             (CANONICAL.replace("has: material", "matches: ^x"), "needs `when: prompt: has:"),
             (
@@ -1406,7 +1406,7 @@ class TestMeaningTrigger:
     def _rule(self, **over):
         rule, errors = rules.lint(rules.render({
             "name": "show-me", "description": "Show me a picture.",
-            "when_subject": "prompt", "when_sounds_like": self.ANCHORS,
+            "when_subject": "prompt", "when_like": self.ANCHORS,
             "answer_must_include": "picture", **over,
         }), known_tools={"show_image"})
         assert not errors, errors
@@ -1480,14 +1480,14 @@ class TestMeaningTrigger:
         with pytest.raises(rules.LintError) as exc:
             rules.render({
                 "name": "r", "description": "d", "when_subject": "prompt",
-                "when_sounds_like": ["a"], "when_has": "link", "answer_from": "read_url",
+                "when_like": ["a"], "when_has": "link", "answer_from": "read_url",
             })
         assert "alternatives" in str(exc.value)
 
     def test_too_many_examples_is_refused(self):
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "prompt",
-            "when_sounds_like": [f"example {i}" for i in range(rules.MEANING_MAX_ANCHORS + 1)],
+            "when_like": [f"example {i}" for i in range(rules.MEANING_MAX_ANCHORS + 1)],
             "answer_from": "read_url",
         }))
         assert rule is None and "at most" in errors[0]
@@ -1513,7 +1513,7 @@ class TestKeywordListsAreRefused:
     def test_a_word_list_is_refused_and_told_what_to_use(self, pattern):
         rule, errors = self._lint(pattern)
         assert rule is None
-        assert "sounds_like" in errors[0]
+        assert "like" in errors[0]
         assert "Docker image" in errors[0], "the refusal must show WHY, not just say no"
 
     @pytest.mark.parametrize("pattern", [
@@ -1524,6 +1524,163 @@ class TestKeywordListsAreRefused:
     def test_a_literal_pattern_is_still_allowed(self, pattern):
         rule, errors = self._lint(pattern)
         assert rule is not None, errors
+
+
+class TestAnswerBeforeActing:
+    """"Answer me before running anything." Declared inexpressible and it was
+    not: pure ordering over the turn's own record, needing no understanding of
+    whether a question was asked."""
+
+    def _rule(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "answer-first", "description": "Answer me before running anything.",
+            "when_subject": "always", "must_first": "answer",
+        }), known_tools={"read_url"})
+        assert not errors, errors
+        return rule
+
+    def test_it_compiles_without_a_tool_of_that_name(self):
+        """`answer` is HIS word, not a tool — the lint must not go looking for
+        one."""
+        assert self._rule() is not None
+
+    def test_it_is_decided_at_the_gate_not_at_turn_end(self):
+        """An ordering that has already gone wrong cannot be repaired by
+        asking, so it must not hold the answer back either."""
+        rule = self._rule()
+        binding = rules.bind(rule, {"on": "always"}, "b1", {"read_url"})
+        assert rules.wants_text_first([binding]) == [binding]
+        assert rules.has_verify([binding]) is False
+        assert "Enforced before a call runs" in rules.explain(rule)
+
+    def test_a_rule_about_a_real_tool_is_untouched(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "must_first": "read_url",
+        }), known_tools={"read_url"})
+        assert not errors
+        binding = rules.bind(rule, {"on": "always"}, "b1", {"read_url"})
+        assert rules.wants_text_first([binding]) == []
+        assert rules.has_verify([binding]) is True
+
+
+class TestSecretsInCommands:
+    """"Never put a secret inline in a command." A join against his own
+    keychain — a pattern would need the secret written into the rule file,
+    which is the very thing the rule stops."""
+
+    ACTION = {"tool": "run_command", "command_has": "a_secret"}
+
+    def _rule(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "no-inline-secrets", "description": "No secrets in commands.",
+            "when_subject": "action", "when_action": self.ACTION,
+            "never_use": ["run_command"],
+        }), known_tools={"run_command"})
+        assert not errors, errors
+        return rule
+
+    def test_it_fires_only_when_a_stored_secret_is_in_the_command(self):
+        found = lambda cmd: "hunter2hunter2" in cmd  # noqa: E731
+        assert rules.action_matches(
+            self.ACTION, "run_command", {"command": "curl -H 'k: hunter2hunter2'"},
+            secrets_in=found,
+        )
+        assert not rules.action_matches(
+            self.ACTION, "run_command", {"command": "ls -la"}, secrets_in=found
+        )
+
+    def test_no_keychain_means_no_match_rather_than_a_crash(self):
+        assert not rules.action_matches(
+            self.ACTION, "run_command", {"command": "anything"}, secrets_in=None
+        )
+
+    def test_the_card_says_it_in_english(self):
+        text = rules.explain(self._rule())
+        assert "one of your stored secrets" in text
+        assert "command_has" not in text
+
+    def test_a_made_up_value_is_refused_with_the_reason(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "action",
+            "when_action": {"tool": "run_command", "command_has": "sk-[a-z]+"},
+            "never_use": ["run_command"],
+        }), known_tools={"run_command"})
+        assert rule is None
+        assert "would be the very thing it stops" in errors[0]
+
+
+class TestMeaningOverTheAnswer:
+    """Sycophancy, per turn rather than in an offline audit. His argument, and
+    it holds: a model's reflex lands in its FIRST paragraph, so embedding one
+    paragraph against a few anchors is milliseconds and local."""
+
+    ANCHORS = ["You're absolutely right, I apologize for the confusion",
+               "Great question! I'm so glad you asked"]
+
+    def _fail(self, answer, scores):
+        rule, errors = rules.lint(rules.render({
+            "name": "no-flattery", "description": "No flattery up front.",
+            "when_subject": "always",
+            "answer_must_not_include": {"like": self.ANCHORS, "in": "opening"},
+        }))
+        assert not errors, errors
+        binding = rules.bind(rule, {"on": "always"}, "b1", set())
+        evidence = rules.TurnEvidence(
+            answer=answer,
+            meaning=lambda text, anchors: {a: scores.get(a, 0.0) for a in anchors},
+        )
+        return rules.verify([binding], evidence)
+
+    def test_a_flattering_opening_is_caught(self):
+        assert self._fail(
+            "You are so right, sorry about that!\n\nThe answer is 42.",
+            {self.ANCHORS[0]: 0.83},
+        )
+
+    def test_a_plain_opening_passes(self):
+        assert not self._fail("The answer is 42.", {a: 0.1 for a in self.ANCHORS})
+
+    def test_only_the_opening_is_looked_at(self):
+        """The point of `in: opening` — the same words later in a long answer
+        are usually quoting or explaining, not grovelling."""
+        seen = []
+        rule, _e = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "answer_must_not_include": {"like": self.ANCHORS, "in": "opening"},
+        }))
+        binding = rules.bind(rule, {"on": "always"}, "b1", set())
+        rules.verify([binding], rules.TurnEvidence(
+            answer="First para.\n\nYou're absolutely right, I apologize.",
+            meaning=lambda text, anchors: seen.append(text) or {a: 0.0 for a in anchors},
+        ))
+        assert seen == ["First para."], seen
+
+    def test_no_scorer_abstains_rather_than_passing_quietly(self):
+        rule, _e = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "answer_must_not_include": {"like": self.ANCHORS, "in": "opening"},
+        }))
+        binding = rules.bind(rule, {"on": "always"}, "b1", set())
+        assert rules.verify([binding], rules.TurnEvidence(answer="anything")) == []
+
+    def test_the_evidence_records_both_distributions(self):
+        [failure] = self._fail(
+            "You are so right, sorry!", {self.ANCHORS[0]: 0.9, self.ANCHORS[1]: 0.2}
+        )
+        assert len(failure.evidence["sims"]) == 2
+        assert failure.evidence["floor"] == rules.MEANING_FLOOR
+
+    def test_a_position_that_does_not_exist_is_refused(self):
+        with pytest.raises(rules.RuleError):
+            rules._answer_check("answer_must_not_include",
+                                {"like": ["x"], "in": "middle"})
+
+    def test_slicing_is_by_paragraph_not_by_characters(self):
+        answer = "One.\n\nTwo.\n\nThree."
+        assert rules.slice_answer(answer, "opening") == "One."
+        assert rules.slice_answer(answer, "ending") == "Three."
+        assert rules.slice_answer(answer, "anywhere") == answer
 
 
 class TestRetroMatch:

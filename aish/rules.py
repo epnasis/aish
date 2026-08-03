@@ -71,6 +71,13 @@ VERB_ANSWER_FROM = "answer_from"
 VERB_NEVER_USE = "never_use"
 VERB_MUST_TELL_ME_WHEN = "must_tell_me_when"
 VERB_MUST_FIRST = "must_first"
+# `must_first: answer` — say something before you run anything. "Answer" is HIS
+# word, not a tool, and the check is pure ordering over the turn's own record:
+# was any assistant text produced before the first tool call. It needs no
+# understanding of whether he asked a question, which is why it was wrong to
+# call this inexpressible. Enforced at the GATE, never at turn end — an
+# ordering that has already gone wrong cannot be repaired by asking.
+FIRST_ANSWER = "answer"
 VERB_ANSWER_MUST_INCLUDE = "answer_must_include"
 VERB_ANSWER_MUST_NOT_INCLUDE = "answer_must_not_include"
 # Two general forms replacing the fixed list of named checks. Both name a TOOL.
@@ -132,6 +139,20 @@ ANSWER_KINDS = {
 # ever kind names, so it cannot grow into a tree.
 CHOICE_KEY = "any_of"
 CHOICE_MAX = 4
+
+# Where in the answer a check looks. TWO values, deliberately — not a coordinate
+# system. "Opening" exists because that is where a model's reflex lands: every
+# model reacts to what it was just told in its first breath, so an apology or a
+# flourish is there or nowhere. Checking one paragraph instead of the whole
+# answer is also what makes a meaning check per turn cheap enough to run.
+WHERE_ANYWHERE = "anywhere"
+WHERE_OPENING = "opening"
+WHERE_ENDING = "ending"
+WHERE_VALUES = (WHERE_ANYWHERE, WHERE_OPENING, WHERE_ENDING)
+
+# The same word as the trigger's, doing the same job on the other side: give
+# examples, match by meaning. One word to learn, not two.
+MEANING_KEY = "like"
 
 # What each kind is made of, in code, where the owner never has to look.
 #
@@ -377,7 +398,7 @@ class Rule:
     # verdict on a named rule rather than an exception inside the gate.
     pattern: re.Pattern | None = None
     contains: str = ""  # built-in message detector, e.g. `contains: url`
-    # `when: prompt: sounds_like:` — the owner's own example messages.
+    # `when: prompt: like:` — the owner's own example messages.
     anchors: tuple[str, ...] = ()
     field_name: str = ""
     equals: str = ""
@@ -401,7 +422,15 @@ class Rule:
 # What `when: action:` can examine about a call the model is ABOUT to make.
 # Every one is a fact the harness holds before dispatch, so the check is Tier 0
 # and the answer is known before anything runs.
-ACTION_FIELDS = ("tool", "path_under", "command_starts_with", "sends_to", "host")
+ACTION_FIELDS = (
+    "tool", "path_under", "command_starts_with", "command_has", "sends_to", "host",
+)
+
+# The one value `command_has:` takes. Not a pattern the owner has to write: it
+# asks the harness whether any secret he has STORED appears verbatim in the
+# command — a join against his own keychain, which no regex could match without
+# him pasting the secret into a rule file, defeating the purpose entirely.
+COMMAND_HAS_SECRET = "a_secret"
 
 
 @dataclass
@@ -593,6 +622,12 @@ def _compile(front: dict) -> _Compiled:
             fields = {"tool": fields.strip()}
         if not isinstance(fields, dict) or not fields:
             raise RuleError("`action:` needs a field under it — " + ", ".join(ACTION_FIELDS))
+        if (has := fields.get("command_has")) and str(has).strip() != COMMAND_HAS_SECRET:
+            raise RuleError(
+                f"`action: command_has:` takes only `{COMMAND_HAS_SECRET}` — it asks "
+                "whether one of your stored secrets appears in the command. Writing "
+                "the secret itself into a rule file would be the very thing it stops."
+            )
         unknown_fields = [key for key in fields if key not in ACTION_FIELDS]
         if unknown_fields:
             raise RuleError(
@@ -617,19 +652,19 @@ def _compile(front: dict) -> _Compiled:
         contains = str(fields.get("has", "") or "").strip().casefold()
         source = str(fields.get("matches", "") or "").strip()
         anchors = tuple(
-            line.strip() for line in _as_list(fields.get("sounds_like")) if line.strip()
+            line.strip() for line in _as_list(fields.get("like")) if line.strip()
         )
         chosen = [name for name, value in
-                  (("has", contains), ("matches", source), ("sounds_like", anchors))
+                  (("has", contains), ("matches", source), ("like", anchors))
                   if value]
         if len(chosen) > 1:
             raise RuleError(
-                "`prompt:` takes ONE of `has:`, `matches:` or `sounds_like:` — got "
+                "`prompt:` takes ONE of `has:`, `matches:` or `like:` — got "
                 + ", ".join(chosen)
             )
         if anchors and len(anchors) > MEANING_MAX_ANCHORS:
             raise RuleError(
-                f"`sounds_like:` takes at most {MEANING_MAX_ANCHORS} examples — "
+                f"`like:` takes at most {MEANING_MAX_ANCHORS} examples — "
                 "they all have to fit on the approval card, and past a handful "
                 "another example stops changing what matches"
             )
@@ -658,7 +693,7 @@ def _compile(front: dict) -> _Compiled:
         else:
             if not source:
                 raise RuleError(
-                    "`prompt:` needs `has:`, `sounds_like:` or `matches:`"
+                    "`prompt:` needs `has:`, `like:` or `matches:`"
                 )
             try:
                 pattern = re.compile(source)
@@ -732,6 +767,22 @@ def _compile(front: dict) -> _Compiled:
     )
 
 
+def _where(value: Any) -> str:
+    where = str((value or {}).get("in", WHERE_ANYWHERE) or WHERE_ANYWHERE).strip()
+    if where not in WHERE_VALUES:
+        raise RuleError("`in:` takes " + ", ".join(WHERE_VALUES) + f" — got {where!r}")
+    return where
+
+
+def slice_answer(answer: str, where: str) -> str:
+    """The part of an answer a check looks at. Paragraphs, because that is the
+    unit a person reads — not a character count, which would cut a sentence."""
+    blocks = [b for b in (answer or "").split("\n\n") if b.strip()]
+    if not blocks or where == WHERE_ANYWHERE:
+        return answer or ""
+    return blocks[0] if where == WHERE_OPENING else blocks[-1]
+
+
 def _answer_check(verb: str, value: Any) -> dict:
     """Compile an `answer_must_*` value into a declared, structural check.
 
@@ -739,6 +790,20 @@ def _answer_check(verb: str, value: Any) -> dict:
     `{pattern: <regex>}` for anything about the wording. Nothing else — a plain
     phrase is a judged question and that tier is not built.
     """
+    if isinstance(value, dict) and MEANING_KEY in value:
+        # The same machinery the `when: prompt: like:` trigger uses, pointed at
+        # the answer instead of the message. It is what makes "no sycophantic
+        # openings" a per-turn check rather than an offline audit: matching a
+        # first paragraph against a handful of anchors is milliseconds, local,
+        # and multilingual. Register is exactly what similarity measures.
+        anchors = [str(a).strip() for a in _as_list(value[MEANING_KEY]) if str(a).strip()]
+        if not anchors:
+            raise RuleError(f"`{verb}: {MEANING_KEY}:` needs at least one example")
+        if len(anchors) > MEANING_MAX_ANCHORS:
+            raise RuleError(
+                f"`{verb}: {MEANING_KEY}:` takes at most {MEANING_MAX_ANCHORS} examples"
+            )
+        return {MEANING_KEY: anchors, "in": _where(value)}
     if isinstance(value, dict) and CHOICE_KEY in value:
         names = [str(name).strip() for name in _as_list(value[CHOICE_KEY]) if str(name).strip()]
         if len(names) < 2:
@@ -757,7 +822,7 @@ def _answer_check(verb: str, value: Any) -> dict:
                 f"`{verb}: {CHOICE_KEY}:` takes {', '.join(sorted(ANSWER_KINDS))} — "
                 f"and {unknown[0]!r} is not one of them"
             )
-        return {"kinds": names}
+        return {"kinds": names, "in": _where(value)}
     if isinstance(value, dict):
         pattern = str(value.get("pattern", "") or "").strip()
         if not pattern:
@@ -769,10 +834,10 @@ def _answer_check(verb: str, value: Any) -> dict:
             re.compile(pattern)
         except re.error as exc:
             raise RuleError(f"unparseable `{verb}: pattern:` — {exc}") from exc
-        return {"pattern": pattern}
+        return {"pattern": pattern, "in": _where(value)}
     name = str(value).strip()
     if name in ANSWER_KINDS:
-        return {"kinds": [name]}
+        return {"kinds": [name], "in": WHERE_ANYWHERE}
     raise RuleError(
         f"`{verb}: {name!r}` is a plain phrase, which only a judge can check, and "
         f"the judged tier is not built. Name something the reader would SEE — "
@@ -994,7 +1059,7 @@ def _evaluate_meaning(rule: Rule, ctx: TurnContext, meaning) -> tuple[str, dict]
     task = (ctx.task or "").strip()
     base: dict = {
         "on": "task",
-        "sounds_like": list(rule.anchors),
+        "like": list(rule.anchors),
         "floor": MEANING_FLOOR,
         "origin": ctx.origin,
     }
@@ -1146,6 +1211,25 @@ def resolve_route(rule: Rule, evidence: dict) -> tuple[list[str], list[str]]:
     return readers, refs
 
 
+def wants_text_first(bindings: list[Binding]) -> list[Binding]:
+    """Bindings demanding a word before any tool runs."""
+    return [
+        binding for binding in bindings
+        if not binding.overridden
+        for obligation in binding.obligations
+        if obligation["verb"] == VERB_MUST_FIRST
+        and obligation["capability"] == FIRST_ANSWER
+    ]
+
+
+SPEAK_FIRST_REFUSAL = (
+    "The rule '{rule}' requires you to say something to the user BEFORE running "
+    "anything. {description}\n"
+    "Answer them in plain text first — even one line — then propose this call in "
+    "your next turn."
+)
+
+
 def unsatisfiable(rule: Rule, readers: list[str], known_tools: set[str] | None) -> list[str]:
     """Routed readers that are not exposed. Caught at BIND time so "the rule
     bound but its tool was gone" is a recorded fact rather than an inference
@@ -1155,7 +1239,9 @@ def unsatisfiable(rule: Rule, readers: list[str], known_tools: set[str] | None) 
         return []
     missing = [reader for reader in readers if reader not in known_tools]
     for obligation in rule.obligations:
-        if obligation["verb"] == VERB_MUST_FIRST and obligation["capability"] not in known_tools:
+        if (obligation["verb"] == VERB_MUST_FIRST
+                and obligation["capability"] != FIRST_ANSWER
+                and obligation["capability"] not in known_tools):
             missing.append(str(obligation["capability"]))
         # A KIND names something the reader sees, and every kind is made real
         # by a tool. If that tool is gone the rule can never be satisfied — so
@@ -1275,10 +1361,17 @@ def affects(bindings: list[Binding], tool: str) -> bool:
     return False
 
 
-def action_matches(conditions: dict, tool: str, args: dict, cwd: str = "") -> bool:
+def action_matches(
+    conditions: dict, tool: str, args: dict, cwd: str = "", secrets_in=None
+) -> bool:
     """Whether a proposed call satisfies an `action:` condition. Every field
     ANDs, matching the sibling-keys rule, and every one is a fact the harness
-    holds BEFORE dispatch — so the answer is known before anything runs."""
+    holds BEFORE dispatch — so the answer is known before anything runs.
+
+    `secrets_in` answers "does this command contain one of his stored secrets".
+    Injected rather than imported so this module stays pure and no test can
+    reach a real keychain.
+    """
     if not conditions:
         return False
     if (want := conditions.get("tool")) and tool != want:
@@ -1286,6 +1379,10 @@ def action_matches(conditions: dict, tool: str, args: dict, cwd: str = "") -> bo
     if prefix := conditions.get("command_starts_with"):
         command = str((args or {}).get("command", "")).strip()
         if not command.startswith(prefix):
+            return False
+    if conditions.get("command_has") == COMMAND_HAS_SECRET:
+        command = str((args or {}).get("command", ""))
+        if secrets_in is None or not secrets_in(command):
             return False
     if root := conditions.get("path_under"):
         if not _touches_path(args or {}, root, cwd):
@@ -1340,7 +1437,7 @@ def _touches_path(args: dict, root: str, cwd: str) -> bool:
 
 
 def gate(bindings: list[Binding], tool: str, args: dict | None = None,
-         cwd: str = "") -> list[GateVerdict]:
+         cwd: str = "", secrets_in=None) -> list[GateVerdict]:
     """Every active binding's verdict on one proposed call, in bind order.
 
     Set membership against precomputed obligations — Tier 0 by construction,
@@ -1352,17 +1449,19 @@ def gate(bindings: list[Binding], tool: str, args: dict | None = None,
     """
     verdicts: list[GateVerdict] = []
     for binding in bindings:
-        verdict = _gate_one(binding, tool, args or {}, cwd)
+        verdict = _gate_one(binding, tool, args or {}, cwd, secrets_in)
         verdicts.append(verdict)
         if verdict.verdict != "allowed":
             break
     return verdicts
 
 
-def _gate_one(binding: Binding, tool: str, args: dict, cwd: str) -> GateVerdict:
+def _gate_one(
+    binding: Binding, tool: str, args: dict, cwd: str, secrets_in=None
+) -> GateVerdict:
     rule = binding.rule
     if rule.trigger == TRIGGER_ACTION_SHAPE and not action_matches(
-        rule.action, tool, args, cwd
+        rule.action, tool, args, cwd, secrets_in
     ):
         # Armed, watching a different action. Not a verdict about this call.
         return GateVerdict("allowed", binding, {"obligation": None, "matched": None})
@@ -1441,6 +1540,9 @@ class TurnEvidence:
 
     answer: str = ""
     calls: tuple[dict, ...] = ()  # {"tool", "args", "status"} per call, in order
+    # Sentence-similarity, when a check needs meaning. None is a real answer:
+    # the check abstains rather than passing quietly.
+    meaning: Any = None
 
     def called(self, capability: str) -> bool:
         """Whether the capability actually RAN. A refused call is not a call:
@@ -1535,11 +1637,26 @@ KIND_HOW = {
 }
 
 
+def decides_at_verify(obligation: dict) -> bool:
+    """Whether this obligation is decided at turn END.
+
+    `must_first: answer` is the exception in its own family: an ordering that
+    has already gone wrong cannot be repaired by asking, so it is a gate
+    decision. Everything else in VERIFY_VERBS reads the finished answer.
+    """
+    if obligation["verb"] not in VERIFY_VERBS:
+        return False
+    return not (
+        obligation["verb"] == VERB_MUST_FIRST
+        and obligation.get("capability") == FIRST_ANSWER
+    )
+
+
 def has_verify(bindings: list[Binding]) -> bool:
     """Whether any active binding decides something at turn end. Only these
     turns pay the cost of holding their answer back from the stream."""
     return any(
-        obligation["verb"] in VERIFY_VERBS
+        decides_at_verify(obligation)
         for binding in bindings
         # An overridden binding decides nothing at turn end (`verify` skips it),
         # so counting it here would hold a turn's answer back from the stream to
@@ -1578,6 +1695,8 @@ def _verify_one(
 
     if verb == VERB_MUST_FIRST:
         capability = str(obligation["capability"])
+        if capability == FIRST_ANSWER:
+            return None  # decided at the gate; nothing left to check here
         if evidence.called(capability):
             return None
         # Two ways this can never be met, and neither is the model's fault:
@@ -1600,11 +1719,15 @@ def _verify_one(
             askable=not blocked,
         )
 
+    if anchors := obligation.get(MEANING_KEY):
+        return _verify_meaning(binding, obligation, evidence, list(anchors), common)
+
     if kinds := obligation.get("kinds"):
         return _verify_kinds(binding, obligation, evidence, list(kinds), common)
 
+    looked_at = slice_answer(evidence.answer or "", obligation.get("in", WHERE_ANYWHERE))
     pattern = re.compile(str(obligation["pattern"]))
-    hit = pattern.search(evidence.answer or "")
+    hit = pattern.search(looked_at)
     wanted = verb == VERB_ANSWER_MUST_INCLUDE
     if bool(hit) == wanted:
         return None
@@ -1643,6 +1766,45 @@ def _present(kind: str, evidence: TurnEvidence) -> tuple[bool, list[str]]:
                 wanted.append(value)
     wanted = list(dict.fromkeys(wanted))
     return (bool(wanted) and all(token in answer for token in wanted)), wanted
+
+
+def _verify_meaning(
+    binding: Binding, obligation: dict, evidence: TurnEvidence,
+    anchors: list[str], common: dict,
+) -> VerifyFailure | None:
+    """Does this part of the answer MEAN something like one of these examples?
+
+    Tier 1 on the answer side. It is here rather than in an offline audit
+    because the objection to a per-turn meaning check was cost, and that
+    objection dissolves when the thing being embedded is one paragraph: local,
+    milliseconds, multilingual. The failure direction is safe — a false hit
+    costs one bounded rework, then the answer ships with a note.
+    """
+    verb = obligation["verb"]
+    looked_at = slice_answer(evidence.answer or "", obligation.get("in", WHERE_ANYWHERE))
+    scores = evidence.meaning(looked_at, anchors) if evidence.meaning else None
+    if scores is None:
+        # No scorer is a THIRD answer everywhere else in this engine, and it is
+        # here too: the check abstains rather than passing quietly, and the
+        # `unmet` record says the model was unavailable.
+        return None
+    best = max(scores.values(), default=0.0)
+    hit = best >= MEANING_FLOOR
+    # Satisfied when the presence of the thing matches what the verb wanted.
+    if hit == (verb == VERB_ANSWER_MUST_INCLUDE):
+        return None
+    where = obligation.get("in", WHERE_ANYWHERE)
+    wording = f"anything like {anchors[0]!r}" + (
+        "" if where == WHERE_ANYWHERE else f" in its {where}"
+    )
+    template = MUST_INCLUDE_ASK if verb == VERB_ANSWER_MUST_INCLUDE else MUST_NOT_ASK
+    return VerifyFailure(
+        binding, obligation,
+        {MEANING_KEY: anchors, "in": where, "sim": round(float(best), 4),
+         "floor": MEANING_FLOOR,
+         "sims": {a: round(float(v), 4) for a, v in scores.items()}},
+        template.format(what=wording, **common),
+    )
 
 
 def _verify_kinds(
@@ -1745,9 +1907,24 @@ def _obligation_line(obligation: dict) -> str:
             "material as if it came from the source you were given."
         )
     if verb == VERB_MUST_FIRST:
+        if obligation["capability"] == FIRST_ANSWER:
+            return (
+                "· MUST say something to the user before running ANYTHING. Answer "
+                "in plain text first, then use tools in a later turn."
+            )
         return (
             f"· MUST call {obligation['capability']} before answering. The answer "
             "is checked for it, and held back until it has run."
+        )
+    if anchors := obligation.get(MEANING_KEY):
+        where = obligation.get("in", WHERE_ANYWHERE)
+        place = "" if where == WHERE_ANYWHERE else f" in its {where}"
+        shown = "; ".join(f"\"{a}\"" for a in anchors[:3])
+        if verb == VERB_ANSWER_MUST_INCLUDE:
+            return f"· MUST: the answer says something like{place} — {shown}."
+        return (
+            f"· MUST NOT: the answer says anything like{place} — {shown}. Judged by "
+            "MEANING, so rephrasing it does not get past this."
         )
     if kinds := obligation.get("kinds"):
         described = " or ".join(ANSWER_KINDS[kind] for kind in kinds)
@@ -1848,7 +2025,7 @@ LIFECYCLE_FIELDS = ("enabled", "expires")
 
 AUTHOR_FIELDS = (
     "name", "description", "prose", "enabled", "expires",
-    "when_subject", "when_has", "when_sounds_like", "when_matches",
+    "when_subject", "when_has", "when_like", "when_matches",
     "when_origin", "when_action",
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
     VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE, VERB_MUST_TELL_ME_WHEN,
@@ -1951,17 +2128,17 @@ def render(fields: dict) -> str:
     if subject == SUBJECT_ALWAYS:
         lines.append(f"when: {SUBJECT_ALWAYS}")
     elif subject == SUBJECT_PROMPT:
-        chosen = [name for name in ("when_has", "when_sounds_like", "when_matches")
+        chosen = [name for name in ("when_has", "when_like", "when_matches")
                   if fields.get(name)]
         if len(chosen) > 1:
             raise LintError(
-                "`when_has`, `when_sounds_like` and `when_matches` are alternatives — "
+                "`when_has`, `when_like` and `when_matches` are alternatives — "
                 "a message shape is one of the three. Dropping one silently would "
                 "have written a rule with a trigger the author did not choose."
             )
         lines += ["when:", f"  {SUBJECT_PROMPT}:"]
-        if examples := _as_list(fields.get("when_sounds_like")):
-            lines.append("    sounds_like:")
+        if examples := _as_list(fields.get("when_like")):
+            lines.append("    like:")
             lines += [f"      - {_yaml_scalar(example)}" for example in examples]
         else:
             key, value = ("has", fields.get("when_has")) if fields.get("when_has") \
@@ -2002,11 +2179,19 @@ def render(fields: dict) -> str:
                 f"{{'{CHOICE_KEY}': [...]}} — a bare list would read as 'all of "
                 "these', which is what it means everywhere else in a rule."
             )
-        if isinstance(value, dict) and CHOICE_KEY in value:
+        if isinstance(value, dict) and MEANING_KEY in value:
+            examples = _as_list(value[MEANING_KEY])
+            then += [f"  {verb}:", f"    {MEANING_KEY}:"]
+            then += [f"      - {_yaml_scalar(example)}" for example in examples]
+            if (where := value.get("in")) and where != WHERE_ANYWHERE:
+                then.append(f"    in: {_yaml_scalar(where)}")
+        elif isinstance(value, dict) and CHOICE_KEY in value:
             names = _as_list(value[CHOICE_KEY])
             then += [f"  {verb}:", f"    {CHOICE_KEY}: [{', '.join(names)}]"]
         elif isinstance(value, dict):
             then += [f"  {verb}:", f"    pattern: {_yaml_scalar(value.get('pattern', ''))}"]
+            if (where := value.get("in")) and where != WHERE_ANYWHERE:
+                then.append(f"    in: {_yaml_scalar(where)}")
         else:
             then.append(f"  {verb}: {_yaml_scalar(value)}")
     if not then:
@@ -2053,13 +2238,14 @@ def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, l
             f"(/{rule.pattern.pattern}/). It fires on the wrong sentences — "
             "\"image\" matches \"the Docker image is broken\" — and misses the "
             "right ones in another language. Adding more words makes both worse. "
-            "Use `sounds_like:` with 3-5 example messages instead; those are "
+            "Use `like:` with 3-5 example messages instead; those are "
             "matched by MEANING, so wording and language do not have to match."
         )
     if known_tools:
         readers = [o["to"] for o in rule.obligations
                    if o["verb"] == VERB_ANSWER_FROM and o["to"] != ROUTE_MATERIAL]
-        firsts = [o["capability"] for o in rule.obligations if o["verb"] == VERB_MUST_FIRST]
+        firsts = [o["capability"] for o in rule.obligations
+                  if o["verb"] == VERB_MUST_FIRST and o["capability"] != FIRST_ANSWER]
         # A kind names something the reader sees; a TOOL is what makes it
         # real. The rule file never mentions that tool, so if it is gone the
         # rule can never be satisfied and nothing in the file would say why.
@@ -2111,10 +2297,7 @@ def explain(rule: Rule) -> str:
             + "\n".join(f"    · {anchor}" for anchor in rule.anchors)
             + "\n  …judged by meaning, so wording and language do not have to match"
         ),
-        TRIGGER_ACTION_SHAPE: (
-            "Before any action where "
-            + ", ".join(f"{k} = {v}" for k, v in sorted(rule.action.items()))
-        ),
+        TRIGGER_ACTION_SHAPE: "Before " + _action_in_english(rule.action),
     }.get(rule.trigger, f"When {rule.trigger}")
 
     says = []
@@ -2129,9 +2312,22 @@ def explain(rule: Rule) -> str:
         elif verb == VERB_NEVER_USE:
             says.append("never use " + ", ".join(obligation["what"]))
         elif verb == VERB_MUST_FIRST:
-            says.append(f"call {obligation['capability']} before answering")
+            says.append(
+                "answer me before running anything"
+                if obligation["capability"] == FIRST_ANSWER
+                else f"call {obligation['capability']} before answering"
+            )
         elif verb == VERB_MUST_TELL_ME_WHEN:
             says.append(f"tell me when {obligation['state']}")
+        elif anchors := obligation.get(MEANING_KEY):
+            where = obligation.get("in", WHERE_ANYWHERE)
+            says.append(
+                ("the answer must say something like " if verb == VERB_ANSWER_MUST_INCLUDE
+                 else "the answer must never say anything like ")
+                + f"{anchors[0]!r}"
+                + ("" if len(anchors) == 1 else f" (or {len(anchors) - 1} more like it)")
+                + ("" if where == WHERE_ANYWHERE else f", in its {where}")
+            )
         elif kinds := obligation.get("kinds"):
             says.append(
                 ("the answer must include " if verb == VERB_ANSWER_MUST_INCLUDE
@@ -2146,8 +2342,8 @@ def explain(rule: Rule) -> str:
             )
     joined = "; ".join(says)
     lines = [f"{when}\n  → {joined}." if "\n" in when else f"{when}: {joined}."]
-    at_gate = [o for o in rule.obligations if o["verb"] not in VERIFY_VERBS]
-    at_verify = [o for o in rule.obligations if o["verb"] in VERIFY_VERBS]
+    at_gate = [o for o in rule.obligations if not decides_at_verify(o)]
+    at_verify = [o for o in rule.obligations if decides_at_verify(o)]
     if at_gate:
         lines.append("Enforced before a call runs: a call that violates this is refused.")
     if at_verify:
@@ -2168,6 +2364,21 @@ def explain(rule: Rule) -> str:
             else f"Expires on {rule.expires}; after that it binds nothing."
         )
     return "\n".join(lines)
+
+
+def _action_in_english(action: dict) -> str:
+    """The `action:` condition as a sentence. The keys are terse because they
+    are typed; this is the version he reads on the card."""
+    parts = []
+    if tool := action.get("tool"):
+        parts.append(f"aish uses {tool}")
+    if prefix := action.get("command_starts_with"):
+        parts.append(f"it runs a command starting `{prefix}`")
+    if action.get("command_has") == COMMAND_HAS_SECRET:
+        parts.append("a command would contain one of your stored secrets")
+    if root := action.get("path_under"):
+        parts.append(f"it touches anything under {root}")
+    return " and ".join(parts) or "any action"
 
 
 # Read by `explain` only. The trigger keys are terse because they are typed;
@@ -2344,8 +2555,8 @@ def author_fields(path: Path) -> dict:
             if subject == SUBJECT_PROMPT:
                 if has := str(block.get("has", "") or ""):
                     fields["when_has"] = has
-                if examples := _as_list(block.get("sounds_like")):
-                    fields["when_sounds_like"] = examples
+                if examples := _as_list(block.get("like")):
+                    fields["when_like"] = examples
                 if matches := str(block.get("matches", "") or ""):
                     fields["when_matches"] = matches
             elif subject == SUBJECT_SESSION:

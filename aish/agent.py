@@ -39,6 +39,7 @@ from . import (
     media,
     rule_compiler,
     rules,
+    secrets,
     skill_import,
     skills,
     tool_plugins,
@@ -245,6 +246,10 @@ NOT_EXECUTED = "(not executed — the user stopped the task)"
 # How much of a tool result this turn's record keeps. Enough for the line a
 # show_* tool hands back; far short of a page of fetched text.
 CALL_RESULT_CHARS = 600
+
+# Below this length a "secret" is too short to match a command without firing on
+# ordinary words. A four-character secret is not one worth protecting anyway.
+SECRET_MIN_MATCH = 8
 
 # Loop detection: the exact same tool call returning the exact same output is
 # not progress. At WARN repeats the model gets one nudge to change approach;
@@ -1110,6 +1115,9 @@ class Agent:
         # The model does not author this, which is the whole reason a verify
         # check can be trusted at all.
         self._turn_calls: list[dict] = []
+        # Has the model said anything to the user yet this task? The only input
+        # `must_first: answer` needs.
+        self._said_something = False
         # Tokens withheld from the client while a bound turn's answer is still
         # unverified. `None` means stream normally.
         self._held_answer: list[str] | None = None
@@ -1474,6 +1482,7 @@ class Agent:
         self._bindings = []
         self._binding_seq = itertools.count(1)
         self._turn_calls = []
+        self._said_something = False
         self._held_answer = None
         self._held_entry = None
         self._not_followed = []
@@ -1672,6 +1681,12 @@ class Agent:
             turn_secs = time.perf_counter() - turn_start
             tokens_in += usage[0]
             tokens_out += usage[1]
+            # The only fact `must_first: answer` needs: has the model said
+            # anything to the user yet. Set BEFORE this turn's tool calls are
+            # dispatched, so text emitted alongside them counts — a model that
+            # answers and acts in one breath has not made him wait.
+            if content.strip():
+                self._said_something = True
             entry: dict = {"role": "assistant", "content": content}
             if tool_calls:
                 entry["tool_calls"] = tool_calls
@@ -3114,7 +3129,10 @@ class Agent:
         """
         if not self._bindings:
             return None
-        evidence = rules.TurnEvidence(answer=answer, calls=tuple(self._turn_calls))
+        evidence = rules.TurnEvidence(
+            answer=answer, calls=tuple(self._turn_calls),
+            meaning=self._meaning_scorer(),
+        )
         failures = rules.verify(self._bindings, evidence)
         asks, unmet = [], []
         # ONE round per binding per pass, not one per failing obligation. A rule
@@ -3306,6 +3324,58 @@ class Agent:
             "result": str(result)[:CALL_RESULT_CHARS],
         })
 
+    def _command_has_a_secret(self, command: str) -> bool:
+        """Does this command carry one of HIS stored secrets, verbatim?
+
+        A join against his own keychain, not a pattern he has to write — the
+        alternative would have him paste the secret into a rule file, which is
+        exactly what the rule exists to stop. Values are read here and
+        discarded; nothing is logged, and the rule records only that a match
+        happened.
+        """
+        if not command.strip():
+            return False
+        try:
+            for name in secrets.names():
+                value = secrets.get(name)
+                if value and len(value) >= SECRET_MIN_MATCH and value in command:
+                    return True
+        except Exception:  # noqa: BLE001 — no keychain is "no match", never a crash
+            return False
+        return False
+
+    def _speak_first_gate(self, name: str) -> str | None:
+        """`must_first: answer` — say something before running anything.
+
+        Pure ordering over the turn's own record: has any assistant text been
+        produced yet this task. It needs no understanding of whether a question
+        was asked, which is why calling this inexpressible was wrong.
+
+        At the GATE and not at turn end: by the time an answer exists the
+        ordering has already happened, and no amount of asking repairs it.
+        Bounded like every other rule refusal — the model complies by writing a
+        line of text, which is entirely within its power (R7).
+        """
+        for binding in rules.wants_text_first(self._bindings):
+            if self._said_something:
+                continue
+            if binding.rounds >= binding.max_rounds:
+                continue  # bounded: it has had its say, let the turn proceed
+            binding.rounds += 1
+            message = rules.SPEAK_FIRST_REFUSAL.format(
+                rule=binding.name, description=binding.rule.description
+            )
+            verdict = rules.GateVerdict(
+                verdict="refused", binding=binding,
+                evidence={"obligation": rules.VERB_MUST_FIRST,
+                          "requires": rules.FIRST_ANSWER, "said_anything": False},
+                message=message, round=binding.rounds,
+            )
+            self._record_gate(verdict, name, {}, "refused")
+            self._note(f"⚖ {binding.name}: answer first, then act")
+            return message
+        return None
+
     def _rule_gate(self, name: str, args: dict) -> str | None:
         """Membership against this turn's bindings: None = proceed, else the
         refusal text. Runs AFTER the stop and skill gates and never in place of
@@ -3320,6 +3390,8 @@ class Agent:
         """
         if not self._bindings:
             return None
+        if speak_first := self._speak_first_gate(name):
+            return speak_first
         recorded: set[str] = set()
         # One pass per binding at most: an escalation either refuses (returns)
         # or marks that binding overridden, so it can never escalate twice. The
@@ -3328,7 +3400,9 @@ class Agent:
         for _ in range(len(self._bindings) + 1):
             refusal: str | None = None
             stopped = False
-            for verdict in rules.gate(self._bindings, name, args, self.cwd):
+            for verdict in rules.gate(
+                self._bindings, name, args, self.cwd, self._command_has_a_secret
+            ):
                 if verdict.verdict == "allowed":
                     if verdict.binding.id not in recorded:
                         recorded.add(verdict.binding.id)
@@ -3995,7 +4069,7 @@ class Agent:
 
     RULE_FIELD_ARGS = (
         "description", "prose", "enabled", "expires",
-        "when_subject", "when_has", "when_sounds_like", "when_matches",
+        "when_subject", "when_has", "when_like", "when_matches",
         "when_origin", "when_action",
         "answer_from", "never_use", "must_first",
         "answer_must_include", "answer_must_not_include", "must_tell_me_when",

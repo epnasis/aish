@@ -6208,6 +6208,66 @@ class TestVerify:
         assert agent.run_task("hello") == "plain answer"
 
 
+class TestAnswerFirstGate:
+    """"Answer me before running anything." Refused at the GATE, because by the
+    time an answer exists the ordering has already happened."""
+
+    RULE = """---
+name: answer-first
+description: Answer me before running anything.
+when: always
+then:
+  must_first: answer
+---
+"""
+
+    def test_a_tool_call_with_no_word_first_is_refused(self, tmp_path):
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="ls")]),
+                model_says("Here is what I found."),
+            ],
+            rule_texts=(self.RULE,),
+        )
+        result = agent.run_task("what does ls do?")
+        refusal = tool_messages(agent.messages)[0]["content"]
+        assert "BEFORE running anything" in refusal
+        assert "Here is what I found" in result
+
+    def test_text_alongside_the_call_is_enough(self, tmp_path, monkeypatch):
+        """A model that answers and acts in the same breath has not made him
+        wait — the rule is about being left in silence, not about turn count."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("Checking that now.",
+                           tool_calls=[tool_call("read_docs", command="ls")]),
+                model_says("done"),
+            ],
+            rule_texts=(self.RULE,),
+        )
+        monkeypatch.setattr(agent_module.tools, "read_docs", lambda *a, **k: "ok")
+        agent.run_task("what does ls do?")
+        assert "BEFORE running anything" not in tool_messages(agent.messages)[0]["content"]
+
+    def test_the_refusal_is_bounded_like_every_other(self, tmp_path, monkeypatch):
+        """A gate that refuses forever wedges a small model into a stall-out."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")])] * 6
+            + [model_says("fine")],
+            rule_texts=(self.RULE,),
+            step_log=steps.append,
+        )
+        monkeypatch.setattr(agent_module.tools, "read_docs", lambda *a, **k: "ok")
+        agent.run_task("go")
+        refusals = [m for m in tool_messages(agent.messages)
+                    if "BEFORE running anything" in m["content"]]
+        assert 0 < len(refusals) <= rules_module.RULE_MAX_REFUSALS
+
+
 class TestRuleAuthoring:
     """A rule is the artifact class that BINDS the model, so the model writing
     one silently would be the engine's own failure mode reappearing in its

@@ -40,7 +40,13 @@ A **rule** is the fourth artifact class: a deterministic *precondition → oblig
 
 ---
 
-**R8 · A rule names what the owner can SEE, never how aish produced it.** He is the reader of the answer, not of the pipeline. A rule expressed in mechanism forces him to learn aish's internals in order to state a preference, which inverts the point of an engine he is meant to own. His test, and it is decisive: **would a change of mechanism force a rule edit?** *"If tomorrow on top of YouTube we also have Vimeo, that's fine as well — the user doesn't care about the source."* A rule saying `video` keeps meaning what it meant; a rule naming a tool would have to be rewritten. This also settles the vocabulary's growth: tools grow forever, one per new API, while the kinds of thing a person notices in an answer are few and stay few. All of the "how" lives in code, as smart as it needs to be, and invisible.
+**R8 · A rule is written in the words the owner would use.** Not a ban on naming tools — a distortion I made of this law and then wrote into it. **A tool name is admissible exactly when it is HIS referent:** *"for booking.com hotels use trippy"* is his sentence, and `must_first: trippy` is transcription. *"Show me a picture"* is also his sentence, and `show_image` is nowhere in it — writing it would be translation into plumbing. The test is **whose sentence does the word come from.** The mechanism test still holds where he did not choose the mechanism: a rule saying `video` must survive Vimeo arriving, because he asked for a video, not for YouTube. This also settles the vocabulary's growth: what he never chose gets named by what he can see, and those kinds are few; what he did choose is already his own vocabulary and costs the engine nothing.
+
+**R8, second half · Do not answer every new want with a new word.** Told the vocabulary was too hardcoded, this design moved to naming tools, then to naming observable kinds — and then immediately proposed three more kinds. His objection: *"that would mean for everything I want to express, you need a code change so you can express it. No."* Much of what looks like new vocabulary is **structure already in the answer**: quick-reply chips have a fixed URI shape at the end of a message, a map embed is deterministic, an apology sits in the first paragraph, and "was anything said before a tool ran" is a fact in the log. **Reach for structure over the answer before reaching for a noun.**
+
+The vocabulary therefore has three axes with three different growth laws. **Structure** — pattern, position, ordering — never grows; it is closed. **Kinds** grow as one line of data, and only when a check must know *how* a thing was made to know it is real (a working picture versus a broken box). **Tools he named himself** grow with his world, not aish's.
+
+**The admission rule that ends the churn: nothing enters the vocabulary until a rule he actually tried to write fails to compile.** Every rewrite so far was supply-driven — imagining his future wishes and pre-building words. The engine already produces the demand signal in structured form (a failed compile is a feature request). The vocabulary is *done*, rather than merely paused, when failed compiles stop producing new categories and produce only table rows.
 
 ## The model: rule → binding → enforcement point
 
@@ -179,7 +185,7 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 
 | subject | fields | built |
 |---|---|---|
-| `prompt:` | `has: material \| link \| attachment \| path`, `sounds_like: [examples]`, `matches: <regex>` | **yes** |
+| `prompt:` | `has: material \| link \| attachment \| path`, `like: [examples]`, `matches: <regex>` | **yes** |
 | `session:` | `origin: owner \| automation \| email \| schedule` | **yes** |
 | `action:` | `tool:`, `path_under:`, `command_starts_with:` | **yes** |
 | `always` | no fields — every turn | **yes** |
@@ -284,7 +290,7 @@ Reported from a real session. *"Show me the difference between Ubud and the beac
 ```yaml
 when:
   prompt:
-    sounds_like:
+    like:
       - show me the difference between X and Y
       - pokaż mi jak to wygląda
 then:
@@ -327,6 +333,18 @@ Read aloud: *"the answer must include a picture or a video."* His sentence, with
 **A missing tool is still caught**, even though the rule never names one: a kind is made real by a tool, so if that tool is gone the rule can never be satisfied, and the lint says so in the tool's name. `TestShowAndCredit`.
 
 **And `show_video` had to exist at all.** A video previously appeared only if the model happened to paste a link, so nothing could require one — "the answer must include a video" would have been unsatisfiable. `show_video` validates a link against the same pattern the frontend plays and hands back the line to paste: the counterpart to `show_image`, minus the fetch, since the app embeds by id and the bytes never come near this machine.
+
+### Three things that were wrongly called impossible
+
+Each was declared inexpressible, and each was a failure of imagination — thinking only in nouns-that-appear-in-an-answer, when the harness holds far more than that.
+
+**"Answer me before you run anything."** `must_first: answer`. Pure ordering: was any assistant text produced before the first tool call. It needs no understanding of whether a question was asked, which is exactly why calling it impossible was wrong. `answer` is his word, not a tool, so the lint does not go looking for one. Decided at the **gate**, never at turn end — an ordering that has already gone wrong cannot be repaired by asking. Text emitted *alongside* the call counts: a model that answers and acts in one breath has not left him waiting. Bounded like every other refusal. Honest limit, stated rather than hidden: it enforces *said something first*, not *answered the question* — a preamble satisfies it. `TestAnswerBeforeActing`, `TestAnswerFirstGate`.
+
+**"Never put a secret inline in a command."** `action: {command_has: a_secret}`. Not a pattern he writes — a **join against his own keychain**: does any secret he has stored appear verbatim in the command. A regex alternative would require pasting the secret into a rule file, which is the very thing the rule exists to stop. The only accepted value is `a_secret`; anything else is refused with that reason. Values are read at the gate and discarded, and the record says only that a match happened. `TestSecretsInCommands`.
+
+**"No sycophantic openings."** `answer_must_not_include: {like: […], in: opening}` — the same examples-and-meaning machinery as the trigger, pointed at the answer. The cost objection that had sent this to the offline audit dissolves once the thing being embedded is **one paragraph**: local, milliseconds, multilingual. His observation is what makes it work — *"every model gives an immediate reaction in the first part"* — so a flourish is in the opening or nowhere. Register is precisely what similarity measures, and the failure direction is safe: a false hit costs one bounded rework, then the answer ships with a note. Both distributions are recorded. `TestMeaningOverTheAnswer`.
+
+`in:` takes **two** values, `opening` and `ending`, deliberately — a position qualifier, not a coordinate system. Slicing is by paragraph, because that is the unit a person reads.
 
 ### Retro-match — a rule is a function of logged facts
 

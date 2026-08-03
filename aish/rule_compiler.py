@@ -85,7 +85,7 @@ def _vocabulary() -> str:
     subjects = [
         "- prompt: what the owner typed, plus any attachments. Give ONE of: "
         "when_has (" + ", ".join(sorted(rules.CONTAINS_DETECTORS)) + ") when the "
-        "condition is about what the message CARRIES; when_sounds_like, a list of "
+        "condition is about what the message CARRIES; when_like, a list of "
         "3-5 example messages, when it is about what the message MEANS; "
         "when_matches with a regex ONLY when the thing being matched is a "
         "literal string such as a domain.",
@@ -140,7 +140,7 @@ which tool ran is an implementation detail they never see.
 fires on "the Docker image is broken" and misses the same sentence in another \
 language, and adding more words makes both worse. If the condition is about \
 what the message MEANS — "when I ask to be shown something", "when I am \
-planning a trip" — use when_sounds_like and write 3-5 whole example messages the \
+planning a trip" — use when_like and write 3-5 whole example messages the \
 way that person actually types, including in their other language if they use \
 one. Examples are matched by meaning, not by letters.
 
