@@ -187,7 +187,8 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 |---|---|---|
 | `prompt:` | `has: material \| link \| attachment \| path`, `like: [examples]`, `matches: <regex>` | **yes** |
 | `session:` | `origin: owner \| automation \| email \| schedule` | **yes** |
-| `action:` | `tool:`, `path_under:`, `command_starts_with:` | **yes** |
+| `action:` | `tool:`, `path_under:`, `command_starts_with:`, `command_has: a_secret` | **yes** |
+| `answer:` | `matches: <regex>`, `like: [examples]`, `in: opening \| ending \| anywhere` | **yes** |
 | `always` | no fields — every turn | **yes** |
 | `action:` | `sends_to:`, `host:` — need the recipient/host parse the egress gate owns | no |
 | `result:` | `of: <tool>`, `was: empty \| error` | no |
@@ -199,6 +200,22 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 **`action:` arms at seed and decides at the gate.** Its condition is about a call nobody has proposed yet, so binding it does not mean *"it applied"* — it means *"it is watching"*, the same shape the stop and skill gates already have, and the `gate` records say whether it ever fired. Every field is a fact the harness holds **before dispatch**, so the check is free and the answer is known before anything runs.
 
 `path_under:` is **resolved, never string-matched** — a condition that `../` steps around protects nothing, and the mirror matters just as much: a path that reaches *inside* the root through `..` must still match. Relative paths resolve against the session's cwd, which is where the model's own paths are interpreted, and paths named inside a shell command count, because `write_file` is not the only way to change a file. `TestActionSubject`.
+
+### `when: answer:` — the reframe could not express itself
+
+**This subject was missing, and its absence was invisible because the design's own worked example was never written down as a file.** The engine turns on *check the ANSWER, not the prompt*, and the example that justified cutting scored triggers is *the answer quotes a price → a read of the store's own domain must exist in this turn's trace*. Running the whole behaviour-shaped memory corpus through the lint is what surfaced it: an obligation could be attached to the answer, but nothing could be **conditioned** on it. Two rules were blocked by this and no other — the live-price rule, and *"if the answer ends with a question, add quick-reply chips."*
+
+`when: always` is not a substitute. Forcing a `read_url` onto every turn, or chips onto every answer, is a different and wrong rule.
+
+**It arms at seed and decides at Verify** — the same shape `action:` has at the gate, and for the same reason: the subject does not exist yet. Binding means *it is watching*, never *it applied*, and `answer_applies` settles it at turn end.
+
+**It carries only turn-end obligations, enforced at compile.** A `never_use:` under an answer condition would have to be decided at the gate, where the condition is unknowable, so it would silently never fire — and a restriction that never fires looks exactly like one that works. The lint names the verb and points at `prompt:` / `session:` / `action:` instead.
+
+**Its two forms are the answer obligations' two forms**, deliberately: `matches:` is structural, `like:` is scored, and `in:` slices by paragraph exactly as it does on the obligation side. Nothing new had to be learned to write a condition about the thing a rule could already constrain, and no new noun entered the vocabulary — which is the admission law holding: *nothing enters until a rule the owner actually tried to write fails to compile.* Two did.
+
+**A meaning condition with no scorer does NOT fire** — the opposite direction from the trigger side's `unevaluable`, and deliberately. An answer condition only ever *adds* obligations to a turn, so failing to evaluate it can never lift one; on the trigger side an unevaluable rule may need to hold. Same principle (fail toward restriction), opposite mechanics.
+
+**Armed-and-silent is recorded, not inferred.** The verify pass row carries the condition and whether it held, because *"the answer had no price in it"* and *"the rule never bound"* are different facts and only the log can separate them afterwards. And the ask names what provoked it — the model cannot see the condition, so a goad that does not state it is the uninstructive refusal R6 forbids. `TestAnswerSubject`.
 
 **`when: always`** is the bare literal for a rule with no condition. Style obligations apply to every turn, and spelling that out beats an empty block that reads like an oversight — but an always-on rule is prose in **every** turn's context, so they should be few and short. `TestAlwaysSubject`.
 

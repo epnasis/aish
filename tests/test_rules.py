@@ -1564,6 +1564,169 @@ class TestAnswerBeforeActing:
         assert rules.has_verify([binding]) is True
 
 
+class TestAnswerSubject:
+    """`when: answer:` — a condition on the DELIVERABLE.
+
+    The engine's central move is *check the answer, not the prompt*, and its
+    worked example — "the answer quotes a price, so a read of the store's own
+    domain must exist in this turn's trace" — could not be written: an
+    obligation could be attached to the answer, but never conditioned on it.
+    """
+
+    PRICE = r"[0-9][0-9., ]*\s?(zł|PLN|EUR|USD)"
+
+    def _price_rule(self, **over):
+        fields = {
+            "name": "live-price",
+            "description": "If you quote a price, you must have read the store page.",
+            "when_subject": "answer", "when_matches": self.PRICE,
+            "must_first": "read_url",
+        }
+        rule, errors = rules.lint(rules.render({**fields, **over}),
+                                  known_tools={"read_url", "web_search"})
+        assert not errors, errors
+        return rule
+
+    def _verify(self, rule, answer, calls=(), meaning=None):
+        binding = rules.bind(rule, {"on": "answer"}, "b1", {"read_url"})
+        evidence = rules.TurnEvidence(answer=answer, calls=tuple(calls),
+                                      meaning=meaning)
+        return binding, rules.verify([binding], evidence)
+
+    def test_the_flagship_example_now_compiles(self):
+        assert self._price_rule().trigger == rules.TRIGGER_ANSWER_SHAPE
+
+    def test_it_arms_at_seed_because_there_is_no_answer_yet(self):
+        """Same shape as `action:`: binding means "it is watching", never "it
+        applied". Evaluated against a turn with no answer in it at all."""
+        verdict, evidence = rules.evaluate(
+            self._price_rule(), rules.TurnContext(task="what does a Switch cost")
+        )
+        assert verdict == rules.VERDICT_BIND
+        assert evidence["on"] == "answer"
+
+    def test_an_answer_with_no_price_asks_for_nothing(self):
+        _b, failures = self._verify(self._price_rule(), "The capital is Paris.")
+        assert failures == []
+
+    def test_an_answer_quoting_a_price_with_no_fetch_fails(self):
+        _b, [failure] = self._verify(self._price_rule(), "It is 249 PLN at the store.")
+        assert failure.verb == "must_first"
+        assert failure.askable is True
+
+    def test_a_price_backed_by_a_real_read_passes(self):
+        _b, failures = self._verify(
+            self._price_rule(), "It is 249 PLN at the store.",
+            calls=[{"tool": "read_url", "args": {"url": "https://shop.example/x"},
+                    "status": "ok"}],
+        )
+        assert failures == []
+
+    def test_a_refused_read_does_not_satisfy_it(self):
+        """A call another gate stopped is not a call — and is never re-asked,
+        or the harness argues with itself."""
+        _b, [failure] = self._verify(
+            self._price_rule(), "It is 249 PLN.",
+            calls=[{"tool": "read_url", "args": {}, "decision": "denied"}],
+        )
+        assert failure.askable is False
+
+    def test_the_ask_says_what_provoked_it(self):
+        """R6: the model cannot see the condition, so a goad that does not name
+        it is not instructive."""
+        _b, [failure] = self._verify(self._price_rule(), "It is 249 PLN.")
+        assert "Your answer" in failure.ask
+        assert "read_url" in failure.ask
+        assert failure.evidence["condition"]["matched"] is True
+
+    def test_a_gate_verb_under_an_answer_condition_is_refused(self):
+        """The condition is unknowable before a call runs, so the restriction
+        would silently never fire — and one that never fires looks exactly like
+        one that works."""
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "answer",
+            "when_matches": "x", "never_use": ["web_search"],
+        }), known_tools={"web_search"})
+        assert rule is None
+        assert "cannot carry `never_use:`" in errors[0]
+
+    def test_a_plain_phrase_is_refused_by_name(self):
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({
+                "name": "r", "description": "d", "when_subject": "answer",
+            })
+        assert "judged question" in str(exc.value)
+
+    def test_the_condition_can_be_scoped_to_the_ending(self):
+        """"If the answer ends with a question, give me tap buttons" — the
+        second rule that had nowhere to live."""
+        rule, errors = rules.lint(rules.render({
+            "name": "chips", "description": "Questions get tap buttons.",
+            "when_subject": "answer", "when_matches": r"\?\s*$", "when_in": "ending",
+            "answer_must_include": {"pattern": "aish-reply://"},
+        }))
+        assert not errors, errors
+        assert rule.where == "ending"
+        # A question in the MIDDLE is not the answer ending in one.
+        _b, failures = self._verify(rule, "Is it raining?\n\nIt is not raining.")
+        assert failures == []
+        _b, [failure] = self._verify(rule, "It is raining.\n\nShall I book a taxi?")
+        assert failure.verb == "answer_must_include"
+
+    def test_an_examples_condition_is_scored_and_needs_no_threshold_authored(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "answer",
+            "when_like": ["here is a recipe you can cook"],
+            "answer_must_include": {"pattern": "ingredients"},
+        }))
+        assert not errors, errors
+        assert rule.tier == 1
+        _b, [failure] = self._verify(
+            rule, "A lovely dish to make tonight.",
+            meaning=lambda text, anchors: {a: 0.9 for a in anchors},
+        )
+        assert failure.verb == "answer_must_include"
+
+    def test_with_no_scorer_a_meaning_condition_does_not_fire(self):
+        """Opposite direction to the trigger side, deliberately: this condition
+        only ever ADDS obligations, so failing to evaluate it can never lift
+        one."""
+        rule, _e = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "answer",
+            "when_like": ["here is a recipe"],
+            "answer_must_include": {"pattern": "ingredients"},
+        }))
+        _b, failures = self._verify(rule, "A lovely dish.")
+        assert failures == []
+
+    def test_the_binding_records_why_it_stayed_quiet(self):
+        """Armed-and-silent and fired-and-passed are different facts, and only
+        the log can tell them apart afterwards."""
+        binding, failures = self._verify(self._price_rule(), "No prices here.")
+        assert failures == []
+        assert binding.answer_condition["matched"] is False
+        assert binding.answer_condition["on"] == "answer"
+
+    def test_it_holds_the_answer_back_from_the_stream(self):
+        rule = self._price_rule()
+        binding = rules.bind(rule, {"on": "answer"}, "b1", {"read_url"})
+        assert rules.has_verify([binding]) is True
+
+    def test_an_edit_round_trips_the_condition(self, tmp_path):
+        path = tmp_path / "live-price.md"
+        path.write_text(rules.render({
+            "name": "live-price", "description": "d", "when_subject": "answer",
+            "when_matches": self.PRICE, "when_in": "ending", "must_first": "read_url",
+        }), encoding="utf-8")
+        fields = rules.author_fields(path)
+        assert fields["when_subject"] == "answer"
+        assert fields["when_matches"] == self.PRICE
+        assert fields["when_in"] == "ending"
+        again, errors = rules.lint(rules.render(fields), known_tools={"read_url"})
+        assert not errors, errors
+        assert again.where == "ending"
+
+
 class TestSecretsInCommands:
     """"Never put a secret inline in a command." A join against his own
     keychain — a pattern would need the secret written into the rule file,

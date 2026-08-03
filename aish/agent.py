@@ -3267,10 +3267,19 @@ class Agent:
         """The abstention half: this binding was checked and had nothing to
         say. Without it, a satisfied rule and an unchecked one look identical
         in the log — and "why didn't this fire?" is #197's primary question."""
+        evidence: dict = {"checked": True}
+        # A `when: answer:` rule has TWO ways of being quiet, and they are
+        # different facts: its obligations were met, or its condition never held
+        # for this answer. Recording only the first would have every armed
+        # answer rule read as a rule that passed.
+        if binding.rule.trigger == rules.TRIGGER_ANSWER_SHAPE:
+            condition = binding.answer_condition or {}
+            evidence["condition"] = condition
+            evidence["applied"] = bool(condition.get("matched"))
         self._emit_record(
             kind="gate", call=0, at="verify", gate="rule.verify",
             binding=binding.id, rule=binding.name, tool="", action={},
-            verdict="allowed", tier=binding.rule.tier, evidence={"checked": True},
+            verdict="allowed", tier=binding.rule.tier, evidence=evidence,
             round=binding.asks, max_rounds=rules.RULE_MAX_ASKS, escalated=False,
         )
 

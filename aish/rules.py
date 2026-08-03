@@ -48,7 +48,24 @@ SUBJECT_PROMPT = "prompt"
 SUBJECT_SESSION = "session"
 SUBJECT_ACTION = "action"
 SUBJECT_ALWAYS = "always"
-SUBJECTS = frozenset({SUBJECT_PROMPT, SUBJECT_SESSION, SUBJECT_ACTION})
+# `when: answer:` — a condition on the DELIVERABLE, which is what makes the
+# engine's own central move expressible at all.
+#
+# The design turns on "check the answer, not the prompt", and its worked
+# example is *the answer contains a price -> a read of the store's own domain
+# must exist in this turn's trace*. That rule did not compile: there was
+# nowhere to put the "if". An obligation could be attached to the answer, but
+# only unconditionally (`when: always`), and "always fetch a price" is a
+# different and wrong rule. The reframe had produced a language that could not
+# express the reframe.
+#
+# It arms at seed and decides at Verify — the same shape `action:` has at the
+# gate. Binding is "it is watching", never "it applied"; the verify record says
+# whether the condition actually held.
+SUBJECT_ANSWER = "answer"
+SUBJECTS = frozenset(
+    {SUBJECT_PROMPT, SUBJECT_SESSION, SUBJECT_ACTION, SUBJECT_ANSWER}
+)
 SUBJECTS_DESIGNED = ("result",)
 
 # Internal trigger ids, kept because the trace records name them and #197 reads
@@ -61,6 +78,12 @@ TRIGGER_ALWAYS = "always"
 # The trigger that needs MEANING. Anchored on examples the owner writes, not on
 # a threshold he has to imagine: a miss is fixed by adding one more example.
 TRIGGER_MESSAGE_MEANING = "message_meaning"
+# The condition is read off the finished deliverable, so it can only be decided
+# at turn end. Structural when it is a pattern, scored when it is examples —
+# the same two forms the answer OBLIGATIONS already take, deliberately: trigger
+# and obligation speak one language, and nothing new had to be learned to write
+# a condition on the thing a rule was already allowed to constrain.
+TRIGGER_ANSWER_SHAPE = "answer_shape"
 
 # The VERBS a `then:` block can use. Every one is a RESTRICTION (see the module
 # docstring) and every one is a plain English imperative, in the ESLint
@@ -398,8 +421,11 @@ class Rule:
     # verdict on a named rule rather than an exception inside the gate.
     pattern: re.Pattern | None = None
     contains: str = ""  # built-in message detector, e.g. `contains: url`
-    # `when: prompt: like:` — the owner's own example messages.
+    # `when: prompt: like:` / `when: answer: like:` — the owner's own examples.
+    # One subject per rule, so the two never share a file.
     anchors: tuple[str, ...] = ()
+    # Which part of the answer a `when: answer:` condition reads.
+    where: str = ""
     field_name: str = ""
     equals: str = ""
     not_equals: str = ""
@@ -482,6 +508,10 @@ class Binding:
     overridden: bool = False  # the owner allowed the violation for this turn
     route_calls: int = 0
     route_status: str = ""  # #192's envelope status of the last routed call
+    # For a `when: answer:` rule: whether its condition held for the answer last
+    # checked, and what it was a function of. Written by `verify`, read by the
+    # record — so "armed and silent" and "fired and passed" stay distinguishable.
+    answer_condition: dict = field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -536,6 +566,7 @@ class _Compiled(NamedTuple):
     not_equals: str
     action: dict
     anchors: tuple[str, ...] = ()
+    where: str = ""
 
 
 def _as_list(value: Any) -> list[str]:
@@ -608,10 +639,36 @@ def _compile(front: dict) -> _Compiled:
 
     pattern: re.Pattern | None = None
     anchors: tuple[str, ...] = ()
-    contains = field_name = equals = not_equals = ""
+    contains = field_name = equals = not_equals = where = ""
     action: dict = {}
     if SUBJECT_ALWAYS in when:
         trigger = TRIGGER_ALWAYS
+    elif SUBJECT_ANSWER in when:
+        fields = when[SUBJECT_ANSWER]
+        if not isinstance(fields, dict):
+            raise RuleError("`answer:` needs `matches:` or `like:` under it")
+        source = str(fields.get("matches", "") or "").strip()
+        anchors = tuple(
+            line.strip() for line in _as_list(fields.get("like")) if line.strip()
+        )
+        if source and anchors:
+            raise RuleError("`answer:` takes ONE of `matches:` or `like:`")
+        if not source and not anchors:
+            raise RuleError(
+                "`answer:` needs `matches: <pattern>` or `like: [examples]` — a "
+                "plain phrase is a judged question and that tier is not built"
+            )
+        if anchors and len(anchors) > MEANING_MAX_ANCHORS:
+            raise RuleError(
+                f"`like:` takes at most {MEANING_MAX_ANCHORS} examples"
+            )
+        if source:
+            try:
+                pattern = re.compile(source)
+            except re.error as exc:
+                raise RuleError(f"unparseable `matches:` regex — {exc}") from exc
+        where = _where(fields)
+        trigger = TRIGGER_ANSWER_SHAPE
     elif SUBJECT_ACTION in when:
         # Scalar shorthand: `when: {action: remember}` is the common case and
         # `action: {tool: remember}` is ceremony for it. One subject per rule
@@ -761,9 +818,28 @@ def _compile(front: dict) -> _Compiled:
             "a rule with no obligation restricts nothing — a `then:` block needs "
             "at least one of: " + ", ".join(sorted(VERBS))
         )
+    if trigger == TRIGGER_ANSWER_SHAPE:
+        # A condition read off the finished answer cannot govern a call that
+        # ran long before it existed. Refusing this is not pedantry: a
+        # `never_use` under `when: answer:` would have to be decided at the gate,
+        # where the condition is unknowable, so it would silently never fire —
+        # and a restriction that never fires looks exactly like one that works.
+        early = [
+            obligation["verb"] for obligation in obligations
+            if not decides_at_verify(obligation)
+        ]
+        if early:
+            raise RuleError(
+                f"`when: answer:` cannot carry `{early[0]}:` — the condition is "
+                "read off the finished answer, and that verb is decided before a "
+                "call runs. Obligations here must be ones checked at turn end: "
+                + ", ".join(sorted(VERIFY_VERBS))
+                + ". For a rule about which tools may run, condition it on "
+                "`prompt:`, `session:` or `action:` instead."
+            )
     return _Compiled(
         trigger, tuple(obligations), pattern, contains, field_name, equals,
-        not_equals, action, anchors,
+        not_equals, action, anchors, where,
     )
 
 
@@ -915,12 +991,15 @@ def _parse(path: Path) -> Rule:
         # evaluated (a detector or a regex is structural; examples are scored).
         # No policy language asks the author to annotate the evaluation
         # strategy, and `tier: 1` means nothing to the owner.
-        tier=1 if compiled.trigger == TRIGGER_MESSAGE_MEANING else 0,
+        # An `answer:` condition is scored or structural by the same test as a
+        # prompt one: examples are meaning, a pattern is not.
+        tier=1 if compiled.anchors else 0,
         fail=fail,
         obligations=compiled.obligations,
         pattern=compiled.pattern,
         contains=compiled.contains,
         anchors=compiled.anchors,
+        where=compiled.where,
         field_name=compiled.field_name,
         equals=compiled.equals,
         not_equals=compiled.not_equals,
@@ -1005,6 +1084,18 @@ def evaluate(rule: Rule, ctx: TurnContext, meaning=None) -> tuple[str, dict]:
         # and skill gates already have. Binding here is not "it applied": it is
         # "it is watching", and the `gate` records say whether it ever fired.
         return VERDICT_BIND, {"on": "action", "conditions": dict(rule.action)}
+    if rule.trigger == TRIGGER_ANSWER_SHAPE:
+        # There is no answer at seed, so this ARMS exactly as `action:` does.
+        # `answer_applies` decides it at turn end, and the verify record carries
+        # whether the condition actually held — so an armed-but-silent rule is
+        # never mistaken for one that fired.
+        condition: dict = {"on": "answer", "in": rule.where or WHERE_ANYWHERE}
+        if rule.pattern is not None:
+            condition["pattern"] = rule.pattern.pattern
+        else:
+            condition[MEANING_KEY] = list(rule.anchors)
+            condition["floor"] = MEANING_FLOOR
+        return VERDICT_BIND, condition
     if rule.trigger == TRIGGER_MESSAGE_MEANING:
         return _evaluate_meaning(rule, ctx, meaning)
     if rule.trigger == TRIGGER_MESSAGE_SHAPE and rule.contains:
@@ -1666,6 +1757,45 @@ def has_verify(bindings: list[Binding]) -> bool:
     )
 
 
+def answer_applies(binding: Binding, evidence: TurnEvidence) -> tuple[bool, dict]:
+    """Does a `when: answer:` condition hold for the answer being proposed?
+
+    (holds, evidence). Every other trigger kind is settled at seed; this one
+    cannot be, because its subject does not exist yet. Returning the evidence
+    alongside the verdict is what lets the verify record say *why* an armed rule
+    stayed silent — "the answer had no price in it" is a different fact from
+    "the rule never bound", and only the log can tell them apart afterwards.
+
+    A rule whose condition needs meaning and has no scorer **does not fire**.
+    That is the safe direction here and the opposite of the trigger side's
+    `unevaluable`: this condition only ever ADDS obligations to a turn, so
+    failing to evaluate it can never lift one.
+    """
+    rule = binding.rule
+    if rule.trigger != TRIGGER_ANSWER_SHAPE:
+        return True, {}
+    where = rule.where or WHERE_ANYWHERE
+    looked_at = slice_answer(evidence.answer or "", where)
+    if rule.pattern is not None:
+        match = rule.pattern.search(looked_at)
+        return match is not None, {
+            "on": "answer", "in": where, "pattern": rule.pattern.pattern,
+            "matched": match is not None,
+        }
+    anchors = list(rule.anchors)
+    base = {"on": "answer", "in": where, MEANING_KEY: anchors, "floor": MEANING_FLOOR}
+    scores = evidence.meaning(looked_at, anchors) if evidence.meaning else None
+    if scores is None:
+        return False, {**base, "matched": False, "why": "no embedding model available"}
+    best = max(scores.values(), default=0.0)
+    return best >= MEANING_FLOOR, {
+        **base,
+        "matched": best >= MEANING_FLOOR,
+        "sim": round(float(best), 4),
+        "sims": {sentence: round(float(v), 4) for sentence, v in scores.items()},
+    }
+
+
 def verify(bindings: list[Binding], evidence: TurnEvidence) -> list[VerifyFailure]:
     """Every unmet verify obligation across the active bindings.
 
@@ -1677,13 +1807,42 @@ def verify(bindings: list[Binding], evidence: TurnEvidence) -> list[VerifyFailur
     for binding in bindings:
         if binding.overridden:
             continue
+        holds, condition = answer_applies(binding, evidence)
+        if not holds:
+            # Armed, and its condition did not hold for this answer. Its
+            # obligations are satisfied vacuously — there is nothing to ask for.
+            binding.answer_condition = condition
+            continue
+        binding.answer_condition = condition
         for obligation in binding.obligations:
             if obligation["verb"] not in VERIFY_VERBS:
                 continue
             failure = _verify_one(binding, obligation, evidence)
-            if failure is not None:
-                failures.append(failure)
+            if failure is None:
+                continue
+            if binding.rule.trigger == TRIGGER_ANSWER_SHAPE:
+                # R6: a refusal that does not say what provoked it is not
+                # instructive. The model cannot see the condition, and "why is
+                # this being asked NOW" is the whole of what it needs.
+                failure.ask = ANSWER_CONDITION_WHY.format(
+                    what=_condition_wording(binding.rule)
+                ) + failure.ask
+                failure.evidence = {**failure.evidence, "condition": condition}
+            failures.append(failure)
     return failures
+
+
+ANSWER_CONDITION_WHY = "Your answer {what}, so this rule applies to it. "
+
+
+def _condition_wording(rule: Rule) -> str:
+    """The condition in words, for the ask. Reads off the same fields the
+    verdict did, so the sentence cannot drift from what was actually checked."""
+    where = "" if (rule.where or WHERE_ANYWHERE) == WHERE_ANYWHERE else f" ({rule.where})"
+    if rule.pattern is not None:
+        return f"matches /{rule.pattern.pattern}/{where}"
+    first = rule.anchors[0] if rule.anchors else ""
+    return f"reads like {first!r}{where}"
 
 
 def _verify_one(
@@ -2025,7 +2184,7 @@ LIFECYCLE_FIELDS = ("enabled", "expires")
 
 AUTHOR_FIELDS = (
     "name", "description", "prose", "enabled", "expires",
-    "when_subject", "when_has", "when_like", "when_matches",
+    "when_subject", "when_has", "when_like", "when_matches", "when_in",
     "when_origin", "when_action",
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
     VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE, VERB_MUST_TELL_ME_WHEN,
@@ -2155,10 +2314,30 @@ def render(fields: dict) -> str:
             )
         lines += ["when:", f"  {SUBJECT_ACTION}:"]
         lines += [f"    {k}: {_yaml_scalar(v)}" for k, v in action.items()]
+    elif subject == SUBJECT_ANSWER:
+        if fields.get("when_like") and fields.get("when_matches"):
+            raise LintError(
+                "`when_like` and `when_matches` are alternatives — an answer "
+                "condition is one of the two."
+            )
+        lines += ["when:", f"  {SUBJECT_ANSWER}:"]
+        if examples := _as_list(fields.get("when_like")):
+            lines.append("    like:")
+            lines += [f"      - {_yaml_scalar(example)}" for example in examples]
+        elif pattern_text := str(fields.get("when_matches", "") or "").strip():
+            lines.append(f"    matches: {_yaml_scalar(pattern_text)}")
+        else:
+            raise LintError(
+                "`when_subject: answer` needs `when_matches` or `when_like` — a "
+                "plain phrase about the answer is a judged question, and that "
+                "tier is not built."
+            )
+        if position := str(fields.get("when_in", "") or "").strip():
+            lines.append(f"    in: {_yaml_scalar(position)}")
     else:
         raise LintError(
             f"`when_subject` must be one of {SUBJECT_PROMPT}, {SUBJECT_SESSION}, "
-            f"{SUBJECT_ACTION}, {SUBJECT_ALWAYS} — got {subject!r}"
+            f"{SUBJECT_ACTION}, {SUBJECT_ANSWER}, {SUBJECT_ALWAYS} — got {subject!r}"
         )
 
     then: list[str] = []
@@ -2298,6 +2477,20 @@ def explain(rule: Rule) -> str:
             + "\n  …judged by meaning, so wording and language do not have to match"
         ),
         TRIGGER_ACTION_SHAPE: "Before " + _action_in_english(rule.action),
+        # The owner is agreeing to a behaviour, so the card says what he would
+        # SEE. "answer_shape" is the engine's own word for it and has no place
+        # in front of him (R8).
+        TRIGGER_ANSWER_SHAPE: (
+            "When the answer"
+            + ("" if (rule.where or WHERE_ANYWHERE) == WHERE_ANYWHERE
+               else f"'s {rule.where}")
+            + (
+                f" matches /{rule.pattern.pattern}/" if rule.pattern is not None
+                else " means something like:\n"
+                + "\n".join(f"    · {anchor}" for anchor in rule.anchors)
+                + "\n  …judged by meaning, so wording and language do not have to match"
+            )
+        ),
     }.get(rule.trigger, f"When {rule.trigger}")
 
     says = []
@@ -2547,18 +2740,22 @@ def author_fields(path: Path) -> dict:
     if when == SUBJECT_ALWAYS or when is True:
         fields["when_subject"] = SUBJECT_ALWAYS
     elif isinstance(when, dict):
-        for subject in (SUBJECT_PROMPT, SUBJECT_SESSION, SUBJECT_ACTION):
+        for subject in (
+            SUBJECT_PROMPT, SUBJECT_SESSION, SUBJECT_ACTION, SUBJECT_ANSWER,
+        ):
             block = when.get(subject)
             if not isinstance(block, dict):
                 continue
             fields["when_subject"] = subject
-            if subject == SUBJECT_PROMPT:
+            if subject in (SUBJECT_PROMPT, SUBJECT_ANSWER):
                 if has := str(block.get("has", "") or ""):
                     fields["when_has"] = has
                 if examples := _as_list(block.get("like")):
                     fields["when_like"] = examples
                 if matches := str(block.get("matches", "") or ""):
                     fields["when_matches"] = matches
+                if where := str(block.get("in", "") or ""):
+                    fields["when_in"] = where
             elif subject == SUBJECT_SESSION:
                 fields["when_origin"] = str(block.get("origin", "") or "")
             else:

@@ -92,8 +92,15 @@ def _vocabulary() -> str:
         "- session: how the session started. Give when_origin: owner or automation.",
         "- action: the call about to run. Give when_action with any of "
         + ", ".join(rules.ACTION_FIELDS[:3]) + ".",
-        "- always: every turn. Correct whenever the condition is really about "
-        "the ANSWER rather than the request.",
+        "- answer: a condition on the FINISHED answer, for a rule whose 'if' is "
+        "about what came out rather than what went in — \"if you quote me a "
+        "price, you must have read the store page\". Give when_matches with a "
+        "regex, or when_like with example answers when it is about meaning; "
+        "when_in (opening, ending) narrows it to one paragraph. Only obligations "
+        "checked at turn end may go with it — never never_use or answer_from.",
+        "- always: every turn. Correct when the obligation is on the answer and "
+        "there is no 'if' at all. If there IS an 'if' about the answer, use the "
+        "answer subject instead of forcing it onto every turn.",
     ]
     return (
         "SUBJECTS (when_subject is exactly one of these):\n" + "\n".join(subjects)
@@ -118,8 +125,9 @@ TOOLS THAT EXIST (nothing else may be named):
 Reply with ONE JSON object and nothing else. Keys:
   name              short-kebab-case, e.g. "bounded-material"
   description       one line, in THEIR words, saying what is required
-  when_subject      one of: prompt, session, action, always
-  when_has / when_matches / when_origin / when_action   as the subject needs
+  when_subject      exactly one of the SUBJECTS above
+  when_has / when_like / when_matches / when_in / when_origin / when_action
+                    whichever that subject takes — see above
   plus at least one obligation key from the list above
   prose             two or three sentences on WHY this matters to them. Never \
 restate the obligation — the fields above are what is enforced.
