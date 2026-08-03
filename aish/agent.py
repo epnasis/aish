@@ -3973,6 +3973,12 @@ class Agent:
         here. This gates the MODEL's raw path, which is the one the system
         prompt could otherwise only advise against — and advice is the failure
         rules exist to abolish.
+
+        Known asymmetry: this RESOLVES the target while `load_rules` globs the
+        link, so a symlink inside the rules folder pointing outside it would
+        skip this check and still be loaded. Reaching that state needs an
+        approved `ln -s` first, so it is defence-in-depth rather than a door —
+        recorded here so the next reader does not have to rediscover it.
         """
         try:
             target = plan.target.resolve()

@@ -448,7 +448,9 @@ def colorize_diff(diff: str) -> str:
     return "\n".join(out)
 
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# C1 too (0x80–0x9f): 0x9b IS a CSI on a terminal reading 8-bit controls, so
+# stripping only C0 leaves the single-byte form of the escape it removes.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def _plain(text: str) -> str:
