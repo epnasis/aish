@@ -810,7 +810,7 @@ class TestTheWholeMaterialChannel:
             "  never_use: [web_search]", "  answer_must_not: be less annoying about it"
         ))
         assert "only a judge can check" in rule.error
-        assert "raw_image_links" in rule.error and "pattern" in rule.error
+        assert "answer_must_show" in rule.error and "pattern" in rule.error
 
 
 class TestEnabledFlag:
@@ -1226,92 +1226,133 @@ class TestRenderedMeaningMatchesTheFile:
         assert "alternatives" in str(exc.value)
 
 
-class TestShowsAPicture:
-    """A join, unfakeable in both directions. Its motivating turn: "show me the
-    difference between Ubud and the beach" came back as a text table, and the
-    owner wanted photographs."""
+class TestShowAndCredit:
+    """The two general forms that replaced a fixed list of named checks. Both
+    name a TOOL, so a rule can require something about what aish DID without
+    anyone coining a new check name in code first."""
 
-    def _fail(self, answer, calls):
+    PATH = "/media/a1b2c3.png"
+    VIDEO = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    TOOLS = {"show_image", "show_video", "read_url"}
+
+    def _call(self, tool, result, args=None):
+        return {"tool": tool, "args": args or {}, "status": "ok", "decision": "",
+                "result": result}
+
+    def _shown(self):
+        return self._call(
+            "show_image", f"Image ready. Include this EXACTLY:\n\n![ubud]({self.PATH})"
+        )
+
+    def _played(self):
+        return self._call("show_video", f"Video ready:\n\n[Watch]({self.VIDEO})")
+
+    def _fail(self, then, answer, calls=()):
         rule, errors = rules.lint(rules.render({
-            "name": "r", "description": "d", "when_subject": "always",
-            "answer_must_include": "shows_a_picture",
-        }), known_tools={"show_image"})
-        assert not errors
-        binding = rules.bind(rule, {"on": "always"}, "b1", {"show_image"})
-        return rules.verify([binding], rules.TurnEvidence(answer=answer, calls=calls))
-
-    RAN = ({"tool": "show_image", "args": {}, "status": "ok", "decision": ""},)
-
-    def test_a_picture_from_show_image_satisfies_it(self):
-        assert not self._fail("here ![ubud](/media/a1b2.png)", self.RAN)
-
-    def test_a_pasted_url_does_not(self):
-        """It renders as a broken box, which is the whole reason show_image
-        exists — so an image link nobody fetched is not a picture."""
-        assert self._fail("here ![ubud](https://example.com/a.jpg)", self.RAN)
-
-    def test_calling_show_image_and_not_using_it_does_not(self):
-        """A picture fetched and dropped is a picture the owner never saw."""
-        assert self._fail("Ubud is greener than the coast.", self.RAN)
-
-    def test_a_local_path_with_no_call_does_not(self):
-        """The trace is written by the harness, so this half cannot be faked."""
-        assert self._fail("here ![x](/media/a1b2.png)", ())
-
-    def test_the_ask_tells_the_model_exactly_what_to_do(self):
-        [failure] = self._fail("no picture here", ())
-        assert "show_image" in failure.ask and "paste the markdown" in failure.ask
-
-
-class TestVisualIsPictureOrVideo:
-    """"Something to look at" is ONE idea to the owner, not two joined by a
-    keyword. So the OR lives inside a named check rather than in an `any_of:`
-    combinator — a general expression language is what every surveyed policy
-    language is criticised for, and the grammar stays flat."""
-
-    RAN = ({"tool": "show_image", "args": {}, "status": "ok", "decision": ""},)
-    VIDEO = "Here it is: https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-    PICTURE = "Here it is: ![ubud](/media/a1b2.png)"
-
-    def _fail(self, detector, answer, calls=()):
-        rule, errors = rules.lint(rules.render({
-            "name": "r", "description": "d", "when_subject": "always",
-            "answer_must_include": detector,
-        }), known_tools={"show_image"})
+            "name": "r", "description": "d", "when_subject": "always", **then,
+        }), known_tools=self.TOOLS)
         assert not errors, errors
-        binding = rules.bind(rule, {"on": "always"}, "b1", {"show_image"})
+        binding = rules.bind(rule, {"on": "always"}, "b1", self.TOOLS)
         return rules.verify([binding], rules.TurnEvidence(answer=answer, calls=calls))
 
-    def test_a_video_satisfies_the_visual_check(self):
-        assert not self._fail("shows_something_visual", self.VIDEO)
+    def test_the_tools_own_output_in_the_answer_satisfies_it(self):
+        assert not self._fail(
+            {"answer_must_show": "show_image"},
+            f"Here it is ![ubud]({self.PATH})", (self._shown(),),
+        )
 
-    def test_a_picture_satisfies_the_visual_check(self):
-        assert not self._fail("shows_something_visual", self.PICTURE, self.RAN)
+    def test_a_picture_fetched_and_then_dropped_does_not(self):
+        """The failure the join exists for: the tool ran, the owner saw
+        nothing."""
+        assert self._fail(
+            {"answer_must_show": "show_image"},
+            "Ubud is greener than the coast.", (self._shown(),),
+        )
 
-    def test_plain_text_satisfies_neither(self):
-        assert self._fail("shows_something_visual", "Ubud is greener than the coast.")
+    def test_a_different_path_does_not_pass_for_it(self):
+        """An EQUALITY, not a guess about shape — the exact string the tool
+        handed over has to be there."""
+        assert self._fail(
+            {"answer_must_show": "show_image"},
+            "Here it is ![x](/media/something-else.png)", (self._shown(),),
+        )
 
-    def test_a_video_does_not_satisfy_a_picture_rule(self):
-        """The narrower check stays narrow — sometimes a map IS the answer."""
-        assert self._fail("shows_a_picture", self.VIDEO)
+    def test_never_calling_the_tool_does_not_satisfy_show(self):
+        assert self._fail({"answer_must_show": "show_image"}, "no picture", ())
 
-    def test_a_picture_does_not_satisfy_a_video_rule(self):
-        assert self._fail("shows_a_video", self.PICTURE, self.RAN)
+    def test_a_refused_call_cannot_satisfy_it(self):
+        refused = {**self._shown(), "decision": "denied", "status": "failed"}
+        assert self._fail(
+            {"answer_must_show": "show_image"},
+            f"Here it is ![ubud]({self.PATH})", (refused,),
+        )
 
-    def test_the_video_check_matches_what_the_app_actually_plays(self):
-        """If the check and the renderer disagreed, a rule would pass on a link
-        the owner cannot play — worse than no rule."""
-        for link in ("https://youtu.be/dQw4w9WgXcQ",
-                     "https://www.youtube.com/shorts/dQw4w9WgXcQ",
-                     "https://youtube.com/watch?list=x&v=dQw4w9WgXcQ"):
-            assert not self._fail("shows_a_video", f"see {link}"), link
+    def test_credit_passes_when_the_tool_never_ran(self):
+        """The difference between the two words: CREDIT is conditional. If
+        nothing was used there is nothing to credit."""
+        assert not self._fail({"answer_must_credit": "read_url"}, "an answer", ())
 
-    def test_a_page_about_a_video_is_not_a_video(self):
-        assert self._fail("shows_a_video", "read https://example.com/best-videos")
+    def test_credit_fails_when_what_ran_is_not_in_the_answer(self):
+        call = self._call("read_url", "page text", {"url": "https://shop.example/x"})
+        assert self._fail({"answer_must_credit": "read_url"}, "about 40 EUR", (call,))
 
-    def test_the_ask_offers_both_ways_out(self):
-        [failure] = self._fail("shows_something_visual", "nothing visual")
-        assert "show_image" in failure.ask and "YouTube" in failure.ask
+    def test_credit_passes_when_the_page_is_linked(self):
+        call = self._call("read_url", "page text", {"url": "https://shop.example/x"})
+        assert not self._fail(
+            {"answer_must_credit": "read_url"},
+            "about 40 EUR — see https://shop.example/x", (call,),
+        )
+
+    def test_the_ask_names_the_thing_that_is_missing(self):
+        call = self._call("read_url", "t", {"url": "https://shop.example/x"})
+        [failure] = self._fail({"answer_must_credit": "read_url"}, "40 EUR", (call,))
+        assert "shop.example" in failure.ask
+
+    def test_either_tool_satisfies_a_choice(self):
+        then = {"answer_must_show": {"any_of": ["show_image", "show_video"]}}
+        assert not self._fail(then, f"see [Watch]({self.VIDEO})", (self._played(),))
+        assert not self._fail(then, f"see ![x]({self.PATH})", (self._shown(),))
+
+    def test_neither_tool_fails_the_choice(self):
+        assert self._fail(
+            {"answer_must_show": {"any_of": ["show_image", "show_video"]}},
+            "Ubud is greener than the coast.", (),
+        )
+
+    def test_the_ask_names_both_ways_out(self):
+        [failure] = self._fail(
+            {"answer_must_show": {"any_of": ["show_image", "show_video"]}}, "text", ()
+        )
+        assert "show_image" in failure.ask and "show_video" in failure.ask
+
+    def test_a_bare_list_is_refused_rather_than_read_as_a_choice(self):
+        """`never_use: [a, b]` already means NONE OF THESE. Two lists in one
+        file meaning opposite things is the trap `any_of` exists to avoid."""
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({
+                "name": "r", "description": "d", "when_subject": "always",
+                "answer_must_show": ["show_image", "show_video"],
+            })
+        assert "any_of" in str(exc.value)
+
+    def test_a_choice_of_one_is_refused(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "answer_must_show": {"any_of": ["show_image"]},
+        }), known_tools=self.TOOLS)
+        assert rule is None and "at least two" in errors[0]
+
+    def test_a_tool_that_does_not_exist_is_caught_at_the_lint(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "answer_must_show": "show_hologram",
+        }), known_tools=self.TOOLS)
+        assert rule is None and "show_hologram" in errors[0]
+
+    def test_a_video_the_tool_validated_is_credited(self):
+        assert not self._fail(
+            {"answer_must_show": "show_video"}, f"see {self.VIDEO}", (self._played(),)
+        )
 
 
 class TestRetireWithoutCompiling:
@@ -1360,7 +1401,7 @@ class TestMeaningTrigger:
         rule, errors = rules.lint(rules.render({
             "name": "show-me", "description": "Show me a picture.",
             "when_subject": "prompt", "when_means_like": self.ANCHORS,
-            "answer_must_include": "shows_a_picture", **over,
+            "answer_must_show": "show_image", **over,
         }), known_tools={"show_image"})
         assert not errors, errors
         return rule

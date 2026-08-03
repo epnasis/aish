@@ -5856,8 +5856,8 @@ then:
 """
 
 # Two verify obligations that fail INDEPENDENTLY — the round-accounting case.
-# `links_to_what_you_read` cannot do it: with no reads there is nothing to link,
-# so it passes exactly when must_first fails.
+# `answer_must_credit: read_url` cannot do it: with no reads there is nothing to
+# credit, so it passes exactly when must_first fails.
 RULE_VERIFY_TWO = """---
 name: two-checks
 description: A price comes from the store, and never in EUR.
@@ -5875,7 +5875,7 @@ description: A price you quote comes from the store's page, this turn.
 when: always
 then:
   must_first: read_url
-  answer_must_include: links_to_what_you_read
+  answer_must_credit: read_url
 ---
 
 Quote prices only from the page you fetched this turn.
@@ -6387,7 +6387,7 @@ class TestRuleAuthoring:
         "name": "always-use-show-image",
         "description": "Pictures come from show_image.",
         "when_subject": "always",
-        "answer_must_not": "raw_image_links",
+        "answer_must_credit": "show_image",
         "prose": "An external image link does not render in the UI.",
     })
 

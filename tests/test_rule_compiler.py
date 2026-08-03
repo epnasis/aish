@@ -75,12 +75,12 @@ class TestCompiling:
         wordy = json.dumps({
             "name": "r", "description": "d", "when_subject": "prompt",
             "when_matches": "(?i)(show|display|picture|photo)",
-            "answer_must_include": "shows_a_picture",
+            "answer_must_show": "show_image",
         })
         good = json.dumps({
             "name": "r", "description": "d", "when_subject": "prompt",
             "when_means_like": ["show me the difference between X and Y"],
-            "answer_must_include": "shows_a_picture",
+            "answer_must_show": "show_image",
         })
         ask = scripted(wordy, good)
         result = rule_compiler.compile_request("show me things", ask, TOOLS)
@@ -93,8 +93,7 @@ class TestCompiling:
         ask = scripted(GOOD)
         rule_compiler.compile_request("x", ask, TOOLS)
         prompt = ask.prompts[0]
-        for detector in rules.ANSWER_DETECTORS:
-            assert detector in prompt
+        assert "answer_must_show" in prompt and "answer_must_credit" in prompt
         for verb in (rules.VERB_ANSWER_FROM, rules.VERB_MUST_FIRST):
             assert verb in prompt
 
@@ -253,8 +252,7 @@ class TestCannot:
 
     def test_what_aish_can_enforce_is_listed_from_the_code(self):
         result = rule_compiler.compile_request("x", scripted(self.REFUSAL), TOOLS)
-        for detector in rules.ANSWER_DETECTORS:
-            assert detector in result.problem
+        assert "credited" in result.problem
 
 
 class TestEditing:

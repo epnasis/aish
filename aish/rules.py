@@ -73,13 +73,22 @@ VERB_MUST_TELL_ME_WHEN = "must_tell_me_when"
 VERB_MUST_FIRST = "must_first"
 VERB_ANSWER_MUST_INCLUDE = "answer_must_include"
 VERB_ANSWER_MUST_NOT = "answer_must_not"
+# Two general forms replacing the fixed list of named checks. Both name a TOOL.
+VERB_ANSWER_MUST_SHOW = "answer_must_show"
+VERB_ANSWER_MUST_CREDIT = "answer_must_credit"
 VERBS = frozenset({
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_TELL_ME_WHEN,
     VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT,
+    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT,
 })
 # Verbs decided at the END of a turn, against the answer and the turn's own
 # record — not before a call. The gate cannot see either.
-VERIFY_VERBS = frozenset({VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT})
+VERIFY_VERBS = frozenset({
+    VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT,
+    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT,
+})
+# The verbs whose value is a tool name (or a choice of them), not a check name.
+TOOL_VERBS = frozenset({VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT})
 # Designed, unbuilt — named here so a lint failure can say what is MISSING
 # rather than merely that the file is wrong (#205).
 VERBS_DESIGNED = {
@@ -91,30 +100,42 @@ VERBS_DESIGNED = {
 # admission price: a verb ships only if it compiles to a declared check. A free
 # phrase ("be terser") is a judged question and is refused by name until that
 # tier exists, rather than shipping as a promise nothing keeps.
-DETECTOR_LINKS_READ = "links_to_what_you_read"
-DETECTOR_RAW_IMAGES = "raw_image_links"
-DETECTOR_SHOWS_PICTURE = "shows_a_picture"
-DETECTOR_SHOWS_VIDEO = "shows_a_video"
-DETECTOR_SHOWS_VISUAL = "shows_something_visual"
-ANSWER_DETECTORS = {
-    DETECTOR_LINKS_READ: "a link to every page you read",
-    DETECTOR_RAW_IMAGES: "a markdown image link that did not come from show_image",
-    DETECTOR_SHOWS_PICTURE: "a picture, fetched with show_image this turn",
-    DETECTOR_SHOWS_VIDEO: "a video the app can play",
-    DETECTOR_SHOWS_VISUAL: "something to look at — a picture or a video",
-}
-VISUAL_DETECTORS = frozenset(
-    {DETECTOR_SHOWS_PICTURE, DETECTOR_SHOWS_VIDEO, DETECTOR_SHOWS_VISUAL}
-)
+# What `answer_must_show:` / `answer_must_credit:` name: A TOOL. Not a check
+# invented per media type.
+#
+# The first version shipped a fixed list of named checks — shows_a_picture,
+# shows_a_video, links_to_what_you_read — and every new thing the owner wanted
+# meant coining another name in code. He called it hardcoded and he was right:
+# the rule LANGUAGE should be small and stable, and what he composes from it
+# should be his. Two general forms replace all four:
+#
+#   answer_must_show: <tool>     the answer must carry that tool's output
+#   answer_must_credit: <tool>   IF it ran, its output must be in the answer
+#   answer_must_include: {pattern: …}   anything about the text, written by him
+#
+# The per-tool knowledge that remains — how a given tool's work appears in an
+# answer — is a fact about the TOOL, not about his rules, so it lives beside
+# the tools and costs one line each rather than a new verb per idea.
+CHOICE_KEY = "any_of"
+CHOICE_MAX = 4
 
-# What the web UI actually turns into a playable card. Mirrored from app.js's
-# YOUTUBE_RE on purpose: if the check and the renderer disagreed, a rule would
-# pass on a link the owner cannot play, which is worse than no rule at all.
-_VIDEO_RE = re.compile(
-    r"https?://(?:www\.)?(?:youtube\.com/(?:watch\?(?:[^#\s]*&)?v=|shorts/)"
-    r"([\w-]{11})|youtu\.be/([\w-]{11}))",
-    re.IGNORECASE,
-)
+# How each tool's work shows up in a finished answer. `args` when the answer
+# should carry what went IN (the page you read), `result` when it should carry
+# what came OUT (the stored picture's path, the validated video link).
+CITE_FROM_ARGS = "args"
+CITE_FROM_RESULT = "result"
+CITATIONS: dict[str, tuple[str, str]] = {
+    # tool -> (where to look, which field)
+    "read_url": (CITE_FROM_ARGS, "url"),
+    "show_image": (CITE_FROM_RESULT, ""),
+    "show_video": (CITE_FROM_RESULT, ""),
+    "youtube_analyze": (CITE_FROM_ARGS, "url"),
+}
+
+# What a citation looks like in text, per tool. show_image hands back a LOCAL
+# path and show_video a video link; both are quoted verbatim into the answer,
+# so the check is presence of that exact string.
+_CITE_TOKEN_RE = re.compile(r"\((?P<inner>[^)\s]+)\)")
 
 _MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
 _MD_LINK_RE = re.compile(r"\]\(\s*(https?://[^)\s]+)|(?<![\w(])(https?://[^\s)<>\]]+)")
@@ -664,6 +685,10 @@ def _compile(front: dict) -> _Compiled:
         if (value := then.get(verb)) in (None, ""):
             continue
         obligations.append({"verb": verb, **_answer_check(verb, value)})
+    for verb in (VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT):
+        if (value := then.get(verb)) in (None, "", [], {}):
+            continue
+        obligations.append({"verb": verb, "tools": _tool_choice(verb, value)})
     if state := str(then.get(VERB_MUST_TELL_ME_WHEN, "") or "").strip():
         # Declared, seeded as prose, enforced at Verify — never at the gate.
         obligations.append({"verb": VERB_MUST_TELL_ME_WHEN, "state": state})
@@ -678,6 +703,44 @@ def _compile(front: dict) -> _Compiled:
     )
 
 
+def _tool_choice(verb: str, value: Any) -> list[str]:
+    """A tool name, or a CHOICE of them. Never a nested condition.
+
+    `any_of:` is the one place the grammar says "or", and it is named rather
+    than left as a bare list because `never_use: [a, b]` already means NONE OF
+    THESE — two lists in one file meaning opposite things is the readability
+    trap that made the first design coin a name per combination instead. What
+    goes inside is only ever tool names, so it cannot grow into a tree.
+    """
+    if isinstance(value, dict):
+        if set(value) != {CHOICE_KEY}:
+            raise RuleError(
+                f"`{verb}:` takes a tool name, or `{CHOICE_KEY}:` with a list of them"
+            )
+        names = [str(name).strip() for name in _as_list(value[CHOICE_KEY]) if str(name).strip()]
+        if len(names) < 2:
+            raise RuleError(
+                f"`{verb}: {CHOICE_KEY}:` is for a CHOICE — give at least two tools, "
+                "or name one directly"
+            )
+        if len(names) > CHOICE_MAX:
+            raise RuleError(
+                f"`{verb}: {CHOICE_KEY}:` takes at most {CHOICE_MAX} tools. Past a "
+                "handful, a rule that accepts almost anything restricts almost nothing"
+            )
+        return names
+    if isinstance(value, list):
+        raise RuleError(
+            f"`{verb}:` takes ONE tool. For a choice, say `{CHOICE_KEY}:` under it — "
+            "a bare list would read as 'all of these', which is what it means "
+            "everywhere else in a rule"
+        )
+    name = str(value).strip()
+    if not name:
+        raise RuleError(f"`{verb}:` needs a tool name")
+    return [name]
+
+
 def _answer_check(verb: str, value: Any) -> dict:
     """Compile an `answer_must_*` value into a declared, structural check."""
     if isinstance(value, dict):
@@ -690,13 +753,11 @@ def _answer_check(verb: str, value: Any) -> dict:
             raise RuleError(f"unparseable `{verb}: pattern:` — {exc}") from exc
         return {"pattern": pattern}
     name = str(value).strip()
-    if name in ANSWER_DETECTORS:
-        return {"detector": name}
     raise RuleError(
         f"`{verb}: {name!r}` is a plain phrase, which only a judge can check, and "
-        "the judged tier is not built. Use a detector — "
-        + ", ".join(sorted(ANSWER_DETECTORS))
-        + f" — or a structural check: `{verb}: {{pattern: <regex>}}`."
+        f"the judged tier is not built. Use `{verb}: {{pattern: <regex>}}` for "
+        f"something about the TEXT, or `{VERB_ANSWER_MUST_SHOW}: <tool>` / "
+        f"`{VERB_ANSWER_MUST_CREDIT}: <tool>` for something about what aish DID."
     )
 
 
@@ -935,54 +996,6 @@ def _evaluate_meaning(rule: Rule, ctx: TurnContext, meaning) -> tuple[str, dict]
     return (VERDICT_BIND if score >= MEANING_FLOOR else VERDICT_ABSTAIN), evidence
 
 
-def _verify_visual(
-    binding: Binding, obligation: dict, evidence: TurnEvidence, detector: str, common: dict
-) -> VerifyFailure | None:
-    """Picture, video, or either.
-
-    The picture half is a JOIN, unfakeable in both directions: show_image must
-    have RUN this turn (the harness wrote that, not the model), and its output
-    — a LOCAL path, never a URL — must appear in the answer. A call with no
-    image in the answer is a picture fetched and dropped; an image link with no
-    call is a URL the model pasted, which renders as a broken box.
-
-    "Either" lives in a NAMED detector rather than in an `any_of:` combinator.
-    "Something to look at" is one idea to the owner, not two joined by a
-    keyword — and a general expression language is what every surveyed policy
-    language is criticised for. The grammar stays flat; the OR sits inside a
-    check defined once, in code, and tested.
-
-    The tripwire, so this does not become a habit: if a THIRD combination is
-    ever asked for, the pattern is telling us the grammar wants a real OR, and
-    that is the moment to build one properly rather than name a fourth
-    detector.
-    """
-    answer = evidence.answer or ""
-    picture = [
-        url for url in _MD_IMAGE_RE.findall(answer)
-        if not url.lower().startswith(("http://", "https://"))
-    ] if evidence.called("show_image") else []
-    video = [match.group(0) for match in _VIDEO_RE.finditer(answer)]
-    satisfied = {
-        DETECTOR_SHOWS_PICTURE: bool(picture),
-        DETECTOR_SHOWS_VIDEO: bool(video),
-        DETECTOR_SHOWS_VISUAL: bool(picture or video),
-    }[detector]
-    if satisfied:
-        return None
-    how = {
-        DETECTOR_SHOWS_PICTURE: SHOW_PICTURE_HOW,
-        DETECTOR_SHOWS_VIDEO: SHOW_VIDEO_HOW,
-        DETECTOR_SHOWS_VISUAL: SHOW_PICTURE_HOW + " " + SHOW_VIDEO_HOW,
-    }[detector]
-    return VerifyFailure(
-        binding, obligation,
-        {"detector": detector, "picture": picture[:4], "video": video[:4],
-         "called_show_image": evidence.called("show_image")},
-        MUST_INCLUDE_ASK.format(what=ANSWER_DETECTORS[detector], **common) + "\n" + how,
-    )
-
-
 def find_urls(text: str) -> list[str]:
     """Every URL in a message, in order, de-duplicated. Parsing, not intent."""
     seen: list[str] = []
@@ -1124,6 +1137,8 @@ def unsatisfiable(rule: Rule, readers: list[str], known_tools: set[str] | None) 
     for obligation in rule.obligations:
         if obligation["verb"] == VERB_MUST_FIRST and obligation["capability"] not in known_tools:
             missing.append(str(obligation["capability"]))
+        if obligation["verb"] in TOOL_VERBS:
+            missing += [t for t in obligation["tools"] if t not in known_tools]
     return missing
 
 
@@ -1464,17 +1479,6 @@ MUST_FIRST_ASK = (
     "Call {capability} now and then answer from what it returns."
 )
 
-# How to satisfy each visual check, in the model's own terms. A refusal that
-# does not say what to do instead is the uninstructive refusal R6 forbids.
-SHOW_PICTURE_HOW = (
-    "Call show_image for the picture that belongs here, and paste the markdown "
-    "line it gives you back into the answer exactly as written."
-)
-SHOW_VIDEO_HOW = (
-    "Or include a YouTube link on its own line — the app turns one into a video "
-    "the user can play. A link to a page ABOUT a video is not a video."
-)
-
 MUST_INCLUDE_ASK = (
     "The rule '{rule}' requires the answer to include {what}, and it does not. "
     "{description}\n"
@@ -1487,10 +1491,17 @@ MUST_NOT_ASK = (
     "Rewrite the answer without it."
 )
 
-LINKS_READ_ASK = (
-    "The rule '{rule}' requires every page you read to appear as a link in the "
-    "answer. You read {missing} and did not link {missing}. {description}\n"
-    "Add the link and give the answer again."
+MUST_SHOW_ASK = (
+    "The rule '{rule}' requires the answer to carry what {tools} produced, and it "
+    "does not. {description}\n"
+    "Call it, then paste the line it hands back into the answer EXACTLY as "
+    "written — that line is what the app renders. Then give the answer again."
+)
+
+MUST_CREDIT_ASK = (
+    "The rule '{rule}' requires that whatever {tools} produced this turn appears "
+    "in the answer, and {missing} is missing. {description}\n"
+    "Add it and give the answer again."
 )
 
 
@@ -1559,8 +1570,8 @@ def _verify_one(
             askable=not blocked,
         )
 
-    if detector := obligation.get("detector"):
-        return _verify_detector(binding, obligation, evidence, detector, common)
+    if verb in TOOL_VERBS:
+        return _verify_tools(binding, obligation, evidence, common)
 
     pattern = re.compile(str(obligation["pattern"]))
     hit = pattern.search(evidence.answer or "")
@@ -1575,41 +1586,74 @@ def _verify_one(
     )
 
 
-def _verify_detector(
-    binding: Binding, obligation: dict, evidence: TurnEvidence, detector: str, common: dict
+def citations(call: dict) -> list[str]:
+    """The strings that must appear in an answer for this call to be credited.
+
+    Per-TOOL knowledge, and that is where it belongs: how a picture or a page
+    shows up in a finished answer is a fact about the tool, not about the
+    owner's rules. One line each in `CITATIONS`, rather than a new check name
+    every time he wants to require something.
+    """
+    where, key = CITATIONS.get(str(call.get("tool") or ""), ("", ""))
+    if where == CITE_FROM_ARGS:
+        value = str((call.get("args") or {}).get(key, "") or "").strip()
+        return [value] if value else []
+    if where == CITE_FROM_RESULT:
+        # Both show_* tools hand back a line containing the exact token to
+        # paste, in (parentheses). Reading it back out is what makes the check
+        # an equality rather than a guess about shape.
+        return list(dict.fromkeys(
+            match.group("inner")
+            for match in _CITE_TOKEN_RE.finditer(str(call.get("result") or ""))
+        ))
+    return []
+
+
+def _cited(answer: str, call: dict) -> bool:
+    tokens = citations(call)
+    return bool(tokens) and any(token in answer for token in tokens)
+
+
+def _verify_tools(
+    binding: Binding, obligation: dict, evidence: TurnEvidence, common: dict
 ) -> VerifyFailure | None:
+    """`answer_must_show` and `answer_must_credit`, over one tool or a choice.
+
+    The two differ in ONE way, and it is the difference between the words. SHOW
+    requires the tool to have run: no call means the rule is unmet. CREDIT is
+    conditional: if it never ran there is nothing to credit and the rule is
+    met. That is why they are two verbs rather than one with a flag — a reader
+    should not have to look up which way round it is.
+    """
+    verb = obligation["verb"]
+    tools = list(obligation["tools"])
     answer = evidence.answer or ""
-    if detector == DETECTOR_RAW_IMAGES:
-        # show_image hands back a LOCAL path; an http(s) image link in the
-        # answer therefore did not come from it. A join in the cheapest possible
-        # form — no judge, no list of phrases, just where the bytes came from.
-        external = [
-            url for url in _MD_IMAGE_RE.findall(answer)
-            if url.lower().startswith(("http://", "https://"))
-        ]
-        if not external:
+    calls = [c for c in evidence.calls if c.get("tool") in tools and _ran(c)]
+    cited = [c for c in calls if _cited(answer, c)]
+    wording = " or ".join(tools)
+    shared = {"tools": tools, "ran": [c.get("tool") for c in calls],
+              "cited": [c.get("tool") for c in cited]}
+
+    if verb == VERB_ANSWER_MUST_SHOW:
+        if cited:
             return None
         return VerifyFailure(
-            binding, obligation, {"detector": detector, "found": external[:4]},
-            MUST_NOT_ASK.format(what=ANSWER_DETECTORS[detector], **common)
-            + f"\nThese are external image links: {', '.join(external[:4])}. "
-            "Call show_image for each and use the markdown it returns.",
+            binding, obligation, shared,
+            MUST_SHOW_ASK.format(tools=wording, **common),
+            # Nothing to re-ask for when the harness itself blocked every one
+            # of them: the goad would argue with another gate.
+            askable=not all(evidence.refused(name) for name in tools),
         )
 
-    if detector in VISUAL_DETECTORS:
-        return _verify_visual(binding, obligation, evidence, detector, common)
-
-    # DETECTOR_LINKS_READ: every host fetched this turn appears in the answer.
-    read = evidence.hosts_read()
-    if not read:
+    uncredited = [c for c in calls if c not in cited]
+    if not uncredited:
         return None
-    linked = {host_of(u) for group in _MD_LINK_RE.findall(answer) for u in group if u}
-    missing = [host for host in read if host not in linked]
-    if not missing:
-        return None
+    missing = ", ".join(dict.fromkeys(
+        token for call in uncredited for token in citations(call)
+    )) or "what it produced"
     return VerifyFailure(
-        binding, obligation, {"detector": detector, "read": read, "missing": missing},
-        LINKS_READ_ASK.format(missing=", ".join(missing), **common),
+        binding, obligation, {**shared, "missing": missing[:EVIDENCE_CHARS]},
+        MUST_CREDIT_ASK.format(tools=wording, missing=missing[:200], **common),
     )
 
 
@@ -1683,8 +1727,19 @@ def _obligation_line(obligation: dict) -> str:
             f"· MUST call {obligation['capability']} before answering. The answer "
             "is checked for it, and held back until it has run."
         )
-    what = obligation.get("detector") or f"the pattern /{obligation.get('pattern')}/"
-    described = ANSWER_DETECTORS.get(str(what), what)
+    if verb == VERB_ANSWER_MUST_SHOW:
+        tools = " or ".join(obligation["tools"])
+        return (
+            f"· MUST: the answer carries what {tools} produced. Call it and paste the "
+            "line it hands back EXACTLY as written — that line is what renders."
+        )
+    if verb == VERB_ANSWER_MUST_CREDIT:
+        tools = " or ".join(obligation["tools"])
+        return (
+            f"· MUST: if {tools} runs this turn, what it produced appears in the "
+            "answer. Using something and not showing it is the failure here."
+        )
+    described = f"the pattern /{obligation.get('pattern')}/"
     if verb == VERB_ANSWER_MUST_INCLUDE:
         return f"· MUST: the answer includes {described}. It is checked before you see it."
     return f"· MUST NOT: the answer contains {described}. It is checked before delivery."
@@ -1781,6 +1836,7 @@ AUTHOR_FIELDS = (
     "when_origin", "when_action",
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
     VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT, VERB_MUST_TELL_ME_WHEN,
+    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT,
 )
 
 # The subset a prose compiler may propose. The prompt never asks for the
@@ -1926,6 +1982,23 @@ def render(fields: dict) -> str:
             then += [f"  {verb}:", f"    pattern: {_yaml_scalar(value.get('pattern', ''))}"]
         else:
             then.append(f"  {verb}: {_yaml_scalar(value)}")
+    for verb in (VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_CREDIT):
+        value = fields.get(verb)
+        if value in (None, "", {}, []):
+            continue
+        if isinstance(value, list):
+            # `never_use: [a, b]` already means NONE OF THESE, so a bare list
+            # here would have two lists in one file meaning opposite things.
+            raise LintError(
+                f"`{verb}` takes ONE tool. For a choice, pass "
+                f"{{'{CHOICE_KEY}': [...]}} — a bare list would read as 'all of "
+                "these', which is what it means everywhere else in a rule."
+            )
+        if isinstance(value, dict):
+            names = _as_list(value.get(CHOICE_KEY))
+            then += [f"  {verb}:", f"    {CHOICE_KEY}: [{', '.join(names)}]"]
+        else:
+            then.append(f"  {verb}: {_yaml_scalar(value)}")
     if not then:
         raise LintError(
             "a rule with no obligation restricts nothing — name at least one of: "
@@ -1977,7 +2050,9 @@ def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, l
         readers = [o["to"] for o in rule.obligations
                    if o["verb"] == VERB_ANSWER_FROM and o["to"] != ROUTE_SOURCE]
         firsts = [o["capability"] for o in rule.obligations if o["verb"] == VERB_MUST_FIRST]
-        for named in readers + firsts:
+        cited = [name for o in rule.obligations if o["verb"] in TOOL_VERBS
+                 for name in o["tools"]]
+        for named in readers + firsts + cited:
             if named not in known_tools:
                 errors.append(
                     f"names a tool that does not exist: {named!r}. A rule routing to "
@@ -2044,11 +2119,15 @@ def explain(rule: Rule) -> str:
             says.append(f"call {obligation['capability']} before answering")
         elif verb == VERB_MUST_TELL_ME_WHEN:
             says.append(f"tell me when {obligation['state']}")
-        elif detector := obligation.get("detector"):
+        elif verb == VERB_ANSWER_MUST_SHOW:
             says.append(
-                ("the answer must contain " if verb == VERB_ANSWER_MUST_INCLUDE
-                 else "the answer must never contain ")
-                + ANSWER_DETECTORS[detector]
+                "the answer must show what " + " or ".join(obligation["tools"])
+                + " produced"
+            )
+        elif verb == VERB_ANSWER_MUST_CREDIT:
+            says.append(
+                "if " + " or ".join(obligation["tools"])
+                + " is used, what it produced must be in the answer"
             )
         else:
             says.append(

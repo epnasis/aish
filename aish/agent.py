@@ -242,6 +242,10 @@ class TaskCancelled(Exception):
 CANCELLED_RESULT = "(task stopped by user — any partial work is above)"
 NOT_EXECUTED = "(not executed — the user stopped the task)"
 
+# How much of a tool result this turn's record keeps. Enough for the line a
+# show_* tool hands back; far short of a page of fetched text.
+CALL_RESULT_CHARS = 600
+
 # Loop detection: the exact same tool call returning the exact same output is
 # not progress. At WARN repeats the model gets one nudge to change approach;
 # at STOP repeats the task ends with a diagnostic wrap-up instead of burning
@@ -700,6 +704,9 @@ READ_ONLY_TOOLS = frozenset(
         "read_file",
         "recall",
         "show_image",
+        # Same argument as show_image, minus the fetch: it validates a link the
+        # app can play and hands back the line to paste. No egress at all.
+        "show_video",
         # Reads aish's OWN content-addressed output cache — no host, no user
         # state, no wrapper re-run (#192). Read-only by the same argument as
         # show_image's write into the media store.
@@ -2324,6 +2331,8 @@ class Agent:
             return str(a.get("url", ""))
         if name == "show_image":
             return str(a.get("source", ""))
+        if name == "show_video":
+            return str(a.get("url", ""))
         if name == "recall":
             return str(a.get("query") or a.get("name") or "")
         if name in ("read_file", "write_file", "edit_file"):
@@ -2491,6 +2500,11 @@ class Agent:
             topic = args.get("topic") or None
             label = f"→ read_url: {url}" + (f" (topic: {topic})" if topic else "")
             return label, partial(web.read_url, url, topic=str(topic) if topic else None)
+        if name == "show_video":
+            url = str(args.get("url", ""))
+            return f"→ show_video: {url}", partial(
+                self._show_video, url, str(args.get("caption", "") or "")
+            )
         if name == "show_image":
             source = str(args.get("source", ""))
             caption = str(args.get("caption", "") or "")
@@ -2633,6 +2647,37 @@ class Agent:
                 state_dir, q, session=session
             ),
             semantic=semantic,
+        )
+
+    def _show_video(self, url: str, caption: str) -> str:
+        """Put a playable video in the answer.
+
+        The counterpart to show_image, and it exists for the same reason: the
+        model should not be guessing what the app can render. It validates the
+        link against the SAME pattern the frontend plays, and hands back the
+        line to paste — so a rule can require "show me something" and there is
+        a tool that satisfies it. Without one, a video appeared only when the
+        model happened to paste a link, and nothing could require it.
+
+        No fetch, so no egress: the app embeds by id, and the bytes never come
+        near this machine. The honest limit is that a well-formed link to a
+        video that does not exist still passes — the owner then sees YouTube's
+        own error rather than a broken box, which is the failure we can afford.
+        """
+        url = url.strip()
+        if not url:
+            return "ERROR: show_video needs a video url."
+        if not web.video_id(url):
+            return (
+                f"ERROR: {url!r} is not a video the app can play. It plays YouTube "
+                "links (youtube.com/watch?v=…, youtu.be/…, youtube.com/shorts/…). "
+                "A link to a page ABOUT a video, a channel, or a playlist is not a "
+                "video. Use web_search to find the video itself."
+            )
+        label = re.sub(r"\s+", " ", caption).replace("[", "").replace("]", "").strip()
+        return (
+            "Video ready. Include this line in your answer EXACTLY as written "
+            f"(do not alter the link):\n\n[{label or 'Watch'}]({url})"
         )
 
     def _show_image(self, source: str, caption: str) -> str:
@@ -3254,6 +3299,11 @@ class Agent:
             "args": dict(args or {}),
             "status": status,
             "decision": decision,
+            # Capped, and kept only for THIS turn. `answer_must_credit` has to
+            # read back the exact line a show_* tool handed over — checking that
+            # it appears in the answer is an equality, where "does the answer
+            # contain something picture-shaped" would be a guess.
+            "result": str(result)[:CALL_RESULT_CHARS],
         })
 
     def _rule_gate(self, name: str, args: dict) -> str | None:
@@ -3555,6 +3605,11 @@ class Agent:
 
         if name == "import_skill":
             return self._import_skill(args)
+
+        if name == "show_video":
+            return self._show_video(
+                str(args.get("url", "")), str(args.get("caption", "") or "")
+            )
 
         if name == "create_rule":
             return self._create_rule(args)

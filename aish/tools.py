@@ -829,6 +829,37 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "show_video",
+            "description": (
+                "Show the user a video they can play. Call this whenever a video "
+                "answers the question better than text — how something looks, how "
+                "something is done, what a place is like. It checks the link is one "
+                "the app can actually play and returns the exact line to put in your "
+                "answer. NEVER paste a bare video link and hope: a link to a PAGE "
+                "about a video, a channel, or a playlist does not play. To find one, "
+                "web_search for it first and pass the video's own link here."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The video's own link — youtube.com/watch?v=…, "
+                        "youtu.be/… or youtube.com/shorts/…",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Short label for the link, e.g. 'Ubud rice "
+                        "terraces from above'.",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "show_image",
             "description": (
                 "Display a picture to the user. Call this WHENEVER the answer should "

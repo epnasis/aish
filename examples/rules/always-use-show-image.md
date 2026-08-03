@@ -3,7 +3,9 @@ name: always-use-show-image
 description: Any picture in an answer comes from show_image, never a raw markdown link.
 when: always
 then:
-  answer_must_not: raw_image_links
+  answer_must_credit: show_image
+  answer_must_not:
+    pattern: '!\[[^\]]*\]\(https?://'
 ---
 
 Whenever a picture belongs in the answer — a map, a Wikipedia photo, a video
@@ -17,6 +19,8 @@ whole reason this rule had to wait for the Verify point: at the gate there is
 nothing to check, because the mistake is not a call anyone made — it is a call
 nobody made.
 
-`raw_image_links` is a join, not a phrase match: show_image hands back a LOCAL
-path, so an http(s) image link in the answer demonstrably did not come from it.
-The model does not author that fact and cannot talk its way past it.
+Two halves, and both are needed. The credit half is a JOIN: show_image hands
+back a local path, and the check is that this exact path is in the answer — so
+a picture fetched and then dropped fails. The pattern half catches the opposite
+mistake, a remote image URL pasted straight into the answer, which renders as a
+dead box. Neither half is a phrase the model can talk its way past.

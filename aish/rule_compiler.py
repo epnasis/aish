@@ -73,8 +73,14 @@ def _vocabulary() -> str:
         "other source is then refused for that answer.",
         "- never_use: a list of tool names that must not run.",
         "- must_first: one tool that must have RUN before the answer is delivered.",
-        "- answer_must_include / answer_must_not: one of the named checks "
-        + ", ".join(sorted(rules.ANSWER_DETECTORS)) + ".",
+        "- answer_must_show: a TOOL whose output must appear in the answer — the "
+        "answer must carry what it produced. Use `{any_of: [tool, tool]}` when "
+        "either will do.",
+        "- answer_must_credit: a TOOL that, IF it runs this turn, must have its "
+        "work visible in the answer. Does not force it to run.",
+        "- answer_must_include / answer_must_not: `{pattern: <regex>}` for "
+        "anything about the answer's TEXT. Never a plain phrase — a check "
+        "nothing can evaluate is a promise nothing keeps.",
         "- must_tell_me_when: a failure the owner must be told about in plain "
         "words rather than quietly patched over.",
     ]
@@ -324,9 +330,10 @@ def _cannot(reason: str, request: str = "") -> str:
         reason=reason.rstrip("."),
         vocabulary_summary=(
             "answer from a named tool or from the material you gave it; never use "
-            "certain tools; call something before answering; a named check on the "
-            "finished answer (" + ", ".join(sorted(rules.ANSWER_DETECTORS))
-            + "); tell you when something failed"
+            "certain tools; call something before answering; require a tool's "
+            "output to appear in the answer, or require it to be credited when it "
+            "is used; a pattern check on the answer's text; tell you when "
+            "something failed"
         ),
     )
 

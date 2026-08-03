@@ -291,13 +291,27 @@ then:
 
 **A word list standing in for a meaning is now refused at the lint**, with the alternative named. Structural, so it does not depend on the compiler being persuaded: a pattern that is nothing but an alternation of ordinary words is the exact shape of the mistake, and punctuation separates it cleanly from the legitimate cases — `youtube\.com|youtu\.be` is a literal string and passes. `TestKeywordListsAreRefused`.
 
-**And the obligation his rule needed did not exist either.** `shows_a_picture` is a join, unfakeable in both directions: `show_image` must have RUN this turn (the harness wrote that, not the model), and its output — a LOCAL path, never a URL — must appear in the answer. A call with no image in the answer is a picture fetched and dropped; an image link with no call is a URL the model pasted, which renders as a broken box. `TestShowsAPicture`.
+**And the obligation his rule needed did not exist either.** The first attempt shipped a named check per media type — `shows_a_picture`, `shows_a_video`, and then `shows_something_visual` when he asked whether both could count. He called that hardcoded, and he was right: **the rule language should be small and stable, and what he composes from it should be his.** Every new thing he wanted meant coining another name in code, and I had even written down a tripwire predicting the third case — which is an admission the design does not scale.
 
-**"Picture or video" is one check, not a combinator.** His follow-up question: both are visual, can a rule say either? `shows_something_visual` says it. The OR lives inside a **named detector**, defined once in code and tested — never in an `any_of:` tree, because a general expression language is what every surveyed policy language is criticised for, and the flat grammar is the thing that makes these files readable without documentation. "Something to look at" is one idea to him, not two joined by a keyword.
+Two general forms replaced all four:
 
-The video half mirrors the frontend's own YouTube pattern deliberately: if the check and the renderer disagreed, a rule would pass on a link he cannot play, which is worse than no rule. The narrow checks stay narrow — sometimes a map *is* the answer, and a video does not satisfy `shows_a_picture`.
+```yaml
+answer_must_show: show_image          # the answer must carry what this tool produced
+answer_must_credit: read_url          # IF it ran, its work must be visible
+answer_must_include: {pattern: …}     # anything about the TEXT, written by him
+```
 
-**The tripwire, so this does not become a habit:** if a THIRD combination is ever asked for, the pattern is telling us the grammar wants a real OR, and that is the moment to build one properly rather than name a fourth detector. `TestVisualIsPictureOrVideo`.
+Both new verbs name a **tool**, not a check. So a rule can require something about what aish *did* without anyone adding a name first, and a tool that does not exist yet is covered the day it arrives.
+
+**The difference between the two words is the whole difference.** `show` requires the tool to have run — no call means unmet. `credit` is conditional — nothing used, nothing to credit, rule met. Two verbs rather than one with a flag, because a reader should not have to look up which way round it is.
+
+**The check is an equality, not a guess about shape.** Both `show_*` tools hand back a line containing the exact token to paste, and the check reads that token back out of the trace and looks for it in the answer. So a picture fetched and then dropped fails, and a *different* image passes for nothing.
+
+**What remains in code, and belongs there.** How a given tool's work appears in an answer — a picture by its stored path, a page by its link — is a fact about the **tool**, not about his rules. One line each in a table beside the tools, rather than a new verb per idea. A plugin tool can declare its own.
+
+**`any_of:` is the one place the grammar says "or".** Named rather than left as a bare list, because `never_use: [a, b]` already means *none of these* — two lists in one file meaning opposite things is exactly the readability trap that made the first design coin a name per combination instead. What goes inside is only ever tool names, so it cannot grow into a tree. `TestShowAndCredit`.
+
+**And `show_video` had to exist at all.** "Credit the tool you used" is meaningless when there is no tool to credit. A video previously appeared only if the model happened to paste a link, so nothing could require one. `show_video` validates a link against the same pattern the frontend plays and hands back the line to paste — the counterpart to `show_image`, minus the fetch, since the app embeds by id and the bytes never come near this machine.
 
 ### Retro-match — a rule is a function of logged facts
 
