@@ -3978,7 +3978,10 @@ class Agent:
         plan = files.plan_write(str(path), text, self.cwd)
         if plan.error:
             return f"ERROR: {plan.error}"
-        plan = dataclasses.replace(plan, note=self._rule_card(rule, text, verb))
+        plan = dataclasses.replace(
+            plan, note=self._rule_card(rule, text, verb),
+            rule=rule.name, rule_verb=verb,
+        )
         decision = self.approve_write(plan)
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)

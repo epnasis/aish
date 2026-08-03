@@ -103,6 +103,52 @@ check("an ordinary file write is unchanged — no empty note box", () => {
   assert(card.children.some((c) => c._class === "diff"), "the diff went missing");
 });
 
+check("a rule card is not called a file, and names the rule", () => {
+  // The owner read "Create file" + a YAML diff and concluded aish had
+  // bypassed its own rule tools to hand-write the file.
+  const card = build({
+    verb: "create", target: "/Users/x/.config/aish/rules/no-hedging.md",
+    diff: "+x", note: NOTE, rule: "no-hedging", rule_verb: "Created",
+  });
+  const head = card.children[0];
+  const texts = head.children.flatMap((c) => (c.children || []).map((k) => k.textContent));
+  assert(texts.includes("New rule"), `header said: ${texts.join(" | ")}`);
+  assert(texts.includes("no-hedging"), "the rule name is not on the card");
+  assert(!texts.some((t) => /file/i.test(t || "")), "the card still calls it a file");
+});
+
+check("a rule card folds the file away instead of leading with it", () => {
+  const card = build({
+    verb: "create", target: "rules/x.md", diff: "+x", note: NOTE,
+    rule: "x", rule_verb: "Created",
+  });
+  const noteAt = card.children.findIndex((c) => c._class === "card-note");
+  const fold = card.children.find((c) => c._class === "card-fold");
+  assert(fold, "no fold — the YAML is still the first thing shown");
+  assert(card.children.indexOf(fold) > noteAt, "the file precedes the meaning");
+  assert(!card.children.some((c) => c._class === "diff"), "the diff is not folded");
+  // Still reachable: the file is the truth, it is just the second thing.
+  assert(fold.children.some((c) => c._class === "diff"), "the diff went missing");
+});
+
+check("a rule card drops the line counts", () => {
+  // Nobody decides about a rule by how many lines it is.
+  const card = build({
+    verb: "create", target: "rules/x.md", diff: "+x", added: 9, removed: 0,
+    note: NOTE, rule: "x", rule_verb: "Created",
+  });
+  const head = card.children[0];
+  assert(!head.children.some((c) => /card-count/.test(c._class || "")),
+    "line counts are still on a rule card");
+});
+
+check("an ordinary write keeps its line counts and its plain diff", () => {
+  const card = build({ verb: "edit", target: "a.py", diff: "+1", added: 1, removed: 0 });
+  const head = card.children[0];
+  assert(head.children.some((c) => /card-count/.test(c._class || "")), "lost the counts");
+  assert(card.children.some((c) => c._class === "diff"), "the diff got folded away");
+});
+
 check("the note is set as TEXT, never as markup", () => {
   // A rule description is the owner's own words and reaches this unescaped.
   const card = build({

@@ -463,8 +463,14 @@ def _plain(text: str) -> str:
 def make_write_approver(log):
     def approve_write(plan) -> bool:
         verb = "create" if plan.is_new else "edit"
-        print(f"\n{YELLOW}{BOLD}▶ {verb} file?{RESET} {BOLD}{plan.target}{RESET} "
-              f"{DIM}(+{plan.added} -{plan.removed}){RESET}")
+        if plan.rule:
+            # A rule is not a file, to the person approving it.
+            head = {"Created": "new rule", "Updated": "rule change",
+                    "Retired": "retire rule"}.get(plan.rule_verb, "rule")
+            print(f"\n{YELLOW}{BOLD}▶ {head}?{RESET} {BOLD}{plan.rule}{RESET}")
+        else:
+            print(f"\n{YELLOW}{BOLD}▶ {verb} file?{RESET} {BOLD}{plan.target}{RESET} "
+                  f"{DIM}(+{plan.added} -{plan.removed}){RESET}")
         if plan.note:
             # Above the diff, because for a rule the diff is YAML the owner did
             # not write and the note is what he is actually agreeing to.
