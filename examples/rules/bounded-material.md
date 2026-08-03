@@ -7,7 +7,6 @@ when:
 then:
   answer_from: material
   never_use: [web_search]
-  must_tell_me_when: the material could not be read
 ---
 
 The user handed you material — a link, an attached file, a screenshot, a path

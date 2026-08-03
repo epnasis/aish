@@ -140,7 +140,7 @@ VERB_ANSWER_MUST_NOT_INCLUDE = "answer_must_not_include"
 VERB_ASK_ME_FIRST = "ask_me_first"
 # Two general forms replacing the fixed list of named checks. Both name a TOOL.
 VERBS = frozenset({
-    VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_TELL_ME_WHEN,
+    VERB_ANSWER_FROM, VERB_NEVER_USE,
     VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE,
     VERB_ASK_ME_FIRST,
 })
@@ -355,9 +355,9 @@ RETIRED_KEYS = {
     "route": f"now `then: {VERB_ANSWER_FROM}:`, and its `source` value is `{ROUTE_MATERIAL}`.",
     "prohibit": f"now `then: {VERB_NEVER_USE}:`.",
     "disclose": (
-        f"now `then: {VERB_MUST_TELL_ME_WHEN}:`, and it takes a plain phrase — "
-        "naming the audience is the point, since a mid-turn preamble is not what "
-        "the owner reads."
+        "now `then: answer_must_include: {like: [...]}` — a disclosure the "
+        "harness can actually check against the finished answer. `disclose:` "
+        "and its successor `must_tell_me_when:` both enforced nothing."
     ),
     "tier": "deleted — the trigger's own form says how it is evaluated.",
     "fail": "now `if_unsure: proceed | ask_me`.",
@@ -373,6 +373,16 @@ RETIRED_KEYS = {
         "deleted with the scored triggers it existed for. A condition phrased "
         "on the answer cannot fail to evaluate, so there was nothing left to "
         "direct. The harness asks the owner if it ever cannot tell."
+    ),
+    VERB_MUST_TELL_ME_WHEN: (
+        "deleted — it enforced NOTHING. It was seeded to the model as prose and "
+        "no check ever read the answer for it, which is the one thing this "
+        "engine forbids: a verb ships only if it compiles to a declared check. "
+        "Write what you would SEE instead, which is checked for real:\n"
+        "    answer_must_include:\n"
+        "      like:\n"
+        "        - the transcript came back empty so I could not read it\n"
+        "        - nie udalo sie pobrac transkrypcji"
     ),
     "status": "now `enabled: false` — `status:` reads like a field you cannot set.",
     "unless": (
@@ -783,7 +793,22 @@ def _compile(front: dict) -> _Compiled:
                     "recipient/host parse the egress gate owns. Express what you can "
                     "with tool, path_under or command_starts_with."
                 )
-        action = {k: str(v).strip() for k, v in fields.items() if str(v).strip()}
+        action = {}
+        for key, value in fields.items():
+            if key == "command_starts_with":
+                # The one field that takes several values, because one command
+                # has several spellings. A YAML LIST means any-of; a scalar is
+                # taken WHOLE and never split — `gh issue` is one prefix with a
+                # space in it, and splitting it on whitespace would silently
+                # widen the rule to every `gh` command there is.
+                if isinstance(value, (list, tuple)):
+                    prefixes = [str(v).strip() for v in value if str(v).strip()]
+                else:
+                    prefixes = [str(value).strip()] if str(value).strip() else []
+                if prefixes:
+                    action[key] = prefixes if len(prefixes) > 1 else prefixes[0]
+            elif str(value).strip():
+                action[key] = str(value).strip()
         if not action:
             raise RuleError("`action:` fields cannot be empty")
         trigger = TRIGGER_ACTION_SHAPE
@@ -911,9 +936,6 @@ def _compile(front: dict) -> _Compiled:
                 "Without that it would hold every call this turn."
             )
         obligations.append({"verb": VERB_ASK_ME_FIRST})
-    if state := str(then.get(VERB_MUST_TELL_ME_WHEN, "") or "").strip():
-        # Declared, seeded as prose, enforced at Verify — never at the gate.
-        obligations.append({"verb": VERB_MUST_TELL_ME_WHEN, "state": state})
     if not obligations:
         raise RuleError(
             "a rule with no obligation restricts nothing — a `then:` block needs "
@@ -1606,8 +1628,19 @@ def action_matches(
     if (want := conditions.get("tool")) and tool != want:
         return False
     if prefix := conditions.get("command_starts_with"):
+        # A LIST means any-of. One command has many spellings — `pip`,
+        # `pip3`, `python -m pip` are the same intent — and forcing one file
+        # per spelling makes the owner maintain the shape of a shell rather
+        # than state a policy. He asked for this twice; a rule that covers
+        # two thirds of a thing is the silent under-restriction the engine is
+        # supposed to make impossible.
+        #
+        # Consistent with the only other list in the grammar: `never_use:
+        # [a, b]` also means "match any of these", and both compose the same
+        # way. Neither can grow into a tree.
         command = str((args or {}).get("command", "")).strip()
-        if not command.startswith(prefix):
+        wanted = prefix if isinstance(prefix, (list, tuple)) else [prefix]
+        if not any(command.startswith(str(p)) for p in wanted):
             return False
     if conditions.get("command_has") == COMMAND_HAS_SECRET:
         command = str((args or {}).get("command", ""))
@@ -2189,6 +2222,17 @@ SEED_HEADER = (
 )
 
 
+def seeds_prose(binding: Binding) -> bool:
+    """Whether this binding's full explanation goes into context up front.
+
+    Only rules that can REFUSE something do. The pairing is *prose explains,
+    gate enforces*, and where there is no gate there is nothing to explain in
+    advance — the model cannot be ambushed by a check that simply asks it to
+    add a picture and try again.
+    """
+    return any(not decides_at_verify(o) for o in binding.obligations)
+
+
 def seed_text(bindings: list[Binding]) -> str:
     """The *prose explains* half of the pairing (#190): the model is told, in
     plain language, what constrains it and why — so it is never AMBUSHED by a
@@ -2199,6 +2243,21 @@ def seed_text(bindings: list[Binding]) -> str:
     lines = [SEED_HEADER]
     for binding in bindings:
         rule = binding.rule
+        if not seeds_prose(binding):
+            # Checked only AFTER the answer exists, so there is nothing to warn
+            # about in advance: the check runs whatever the model was told, and
+            # the question the harness asks on failure explains the rule at the
+            # moment it is relevant. Announcing it up front buys advice — the
+            # one thing #190 proved does not hold — at a cost paid on every
+            # turn, forever.
+            #
+            # Measured before this: an ordinary turn with nothing to do with
+            # prices, images or mail seeded 9,562 characters, and 4,609 of them
+            # were rules that could not fire until the answer existed. R5 (never
+            # ambush the model) is about GATES; nothing here refuses anything.
+            lines.append(f"\n• {rule.name} — {rule.description} (checked once "
+                         "your answer is written)")
+            continue
         lines.append(f"\n• {rule.name} — {rule.description}")
         if rule.trigger == TRIGGER_RESULT_STATE:
             # The whole reason this trigger exists. The failing memory said the
@@ -2213,7 +2272,7 @@ def seed_text(bindings: list[Binding]) -> str:
                 "then nothing here restricts you."
             )
         for obligation in binding.obligations:
-            lines.append("  " + _obligation_line(obligation))
+            lines.append("  " + _obligation_line(obligation, rule))
         if binding.unsatisfiable:
             lines.append(
                 "  · WARNING: "
@@ -2221,13 +2280,40 @@ def seed_text(bindings: list[Binding]) -> str:
                 + " is not available in this session — say so in your answer "
                 "instead of substituting another source silently."
             )
-        if rule.prose:
+        if rule.prose and not _merely_watching(binding):
             lines.append("  " + rule.prose.replace("\n", "\n  "))
     return "\n".join(lines)
 
 
-def _obligation_line(obligation: dict) -> str:
+def _merely_watching(binding: Binding) -> bool:
+    """An armed rule that has not fired: it is watching a call nobody has
+    proposed, or a result nothing has returned.
+
+    Its OBLIGATION still goes into context — "don't run pip" is what steers the
+    model away — but its full explanation does not. That text is written for the
+    moment of refusal, and the refusal already carries it, in full and uncapped.
+    Seeding it on every turn pays for a paragraph the model does not need
+    unless it is about to do the thing.
+    """
+    return binding.rule.trigger in (TRIGGER_ACTION_SHAPE, TRIGGER_RESULT_STATE)
+
+
+def _obligation_line(obligation: dict, rule: Rule | None = None) -> str:
     verb = obligation["verb"]
+    if verb == VERB_NEVER_USE and rule is not None and rule.action:
+        # An `action:` rule prohibits its tools ONLY when the condition holds,
+        # and the unconditional wording was a straight lie: the rule that keeps
+        # aish out of its own source read as "MUST NOT call write_file,
+        # edit_file, run_command for this turn" — which, believed, disables
+        # editing any file anywhere. The condition is the whole rule; leaving
+        # it out inverts a narrow guard into a blanket ban.
+        what = ", ".join(obligation["what"])
+        return (
+            f"· MUST NOT call {what} WHEN {_action_in_english(rule.action)}. "
+            "Everything else is untouched by this rule — it is a narrow guard, "
+            "not a general prohibition. If you genuinely need the blocked "
+            "action, ASK the user rather than working around it."
+        )
     if verb == VERB_ANSWER_FROM:
         if obligation["to"] == ROUTE_MATERIAL:
             sources = ", ".join(obligation.get("sources") or []) or "the message"
@@ -2255,12 +2341,6 @@ def _obligation_line(obligation: dict) -> str:
             "· The USER decides this one. It will be put to them when you "
             "propose it — expect to wait, and do not look for another way "
             "round it if they say no."
-        )
-    if verb == VERB_MUST_TELL_ME_WHEN:
-        return (
-            f"· MUST state it plainly if this happens: {obligation['state']} — never "
-            "patch over it with another source, and never present someone else's "
-            "material as if it came from the source you were given."
         )
     if verb == VERB_MUST_FIRST:
         if obligation["capability"] == FIRST_ANSWER:
@@ -2384,7 +2464,7 @@ AUTHOR_FIELDS = (
     "when_subject", "when_has", "when_like", "when_matches", "when_in",
     "when_origin", "when_action", "when_result_of", "when_result_was",
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
-    VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE, VERB_MUST_TELL_ME_WHEN,
+    VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE,
     VERB_ASK_ME_FIRST,
 )
 
@@ -2511,7 +2591,16 @@ def render(fields: dict) -> str:
                 "`when_action` needs at least one of: " + ", ".join(ACTION_FIELDS)
             )
         lines += ["when:", f"  {SUBJECT_ACTION}:"]
-        lines += [f"    {k}: {_yaml_scalar(v)}" for k, v in action.items()]
+        for key, value in action.items():
+            # `command_starts_with` is the one field that takes several values.
+            # A list has to be RENDERED as a list — stringifying it produced
+            # `command_starts_with: "['pip', 'pip3']"`, one absurd prefix that
+            # matches nothing, and the file linted clean while enforcing zero.
+            if isinstance(value, (list, tuple)):
+                lines.append(f"    {key}:")
+                lines += [f"      - {_yaml_scalar(str(v))}" for v in value]
+            else:
+                lines.append(f"    {key}: {_yaml_scalar(value)}")
     elif subject == SUBJECT_RESULT:
         of = str(fields.get("when_result_of", "") or "").strip()
         was = str(fields.get("when_result_was", "") or "").strip()
@@ -2549,7 +2638,7 @@ def render(fields: dict) -> str:
         )
 
     then: list[str] = []
-    for verb in (VERB_ANSWER_FROM, VERB_MUST_FIRST, VERB_MUST_TELL_ME_WHEN):
+    for verb in (VERB_ANSWER_FROM, VERB_MUST_FIRST):
         if value := str(fields.get(verb, "") or "").strip():
             then.append(f"  {verb}: {_yaml_scalar(value)}")
     if never := _as_list(fields.get(VERB_NEVER_USE)):
@@ -2750,8 +2839,6 @@ def explain(rule: Rule) -> str:
             )
         elif verb == VERB_ASK_ME_FIRST:
             says.append("ask me first")
-        elif verb == VERB_MUST_TELL_ME_WHEN:
-            says.append(f"tell me when {obligation['state']}")
         elif anchors := obligation.get(MEANING_KEY):
             where = obligation.get("in", WHERE_ANYWHERE)
             says.append(
@@ -2813,7 +2900,9 @@ def _action_in_english(action: dict) -> str:
     if tool := action.get("tool"):
         parts.append(f"aish uses {tool}")
     if prefix := action.get("command_starts_with"):
-        parts.append(f"it runs a command starting `{prefix}`")
+        shown = prefix if isinstance(prefix, (list, tuple)) else [prefix]
+        joined = " or ".join(f"`{p}`" for p in shown)
+        parts.append(f"it runs a command starting {joined}")
     if action.get("command_has") == COMMAND_HAS_SECRET:
         parts.append("a command would contain one of your stored secrets")
     if root := action.get("path_under"):

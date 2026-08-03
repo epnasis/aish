@@ -5127,7 +5127,6 @@ when:
 then:
   answer_from: material
   never_use: [web_search]
-  must_tell_me_when: the material could not be read
 ---
 
 Answer from the material the user gave you.
@@ -6449,14 +6448,14 @@ class TestRuleAuthoring:
         agent.approve_write = lambda plan: True
         agent._dispatch("create_rule", {**self.FIELDS, "never_use": ["web_search"]})
         agent._dispatch("edit_rule", {
-            "name": "bounded-material", "must_tell_me_when": "the material failed",
+            "name": "bounded-material", "must_first": "read_url",
         })
         [rule] = rules_module.load_rules([tmp_path / "rules"])
         verbs = {o["verb"] for o in rule.obligations}
         assert verbs == {
             rules_module.VERB_ANSWER_FROM,
             rules_module.VERB_NEVER_USE,
-            rules_module.VERB_MUST_TELL_ME_WHEN,
+            rules_module.VERB_MUST_FIRST,
         }
 
     def test_editing_a_rule_that_does_not_exist_says_so(self, tmp_path):

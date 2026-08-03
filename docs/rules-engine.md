@@ -165,7 +165,6 @@ when:
 then:
   answer_from: material
   never_use: [web_search]
-  must_tell_me_when: the material could not be read
 ---
 
 Prose the model is shown verbatim when this rule binds. Explain the intent —
@@ -253,7 +252,6 @@ Route, prohibit and sequence are things the model can comply with **by choosing 
 |---|---|---|
 | `answer_from: <tool> \| material` | the deliverable comes from here | **yes** |
 | `never_use: [tools]` | these tools are refused for the turn | **yes** |
-| `must_tell_me_when: <plain phrase>` | this failure must be stated to the owner | declared, seeded as prose; the structural half is not built (a plain phrase is a judged question) |
 | `must_first: <tool>` | this tool must have run before the answer | **yes** |
 | `answer_must_include:` / `answer_must_not_include:` | something the reader would SEE (`picture`, `video`, `sources`), `{any_of: […]}`, or `{pattern: <regex>}` over the wording | **yes** |
 | `ask_me_first: true` | the owner decides this one, every time | **yes** |
@@ -274,7 +272,6 @@ Plain English imperatives, in the ESLint tradition (`no-console`, `prefer-const`
 Three of the names carry an argument worth keeping:
 
 - **`material`, not `source`, on BOTH sides** (`has: material` / `answer_from: material`) — so a reader can see the trigger and the obligation refer to the same thing. The prose, the channel-separation text and the whole R1 analysis had already standardised on *material*; only the frontmatter hadn't.
-- **`must_tell_me_when` rather than a bare "must say" — name the audience.** "Say" is satisfiable by a mid-turn preamble, which is precisely the failure the word-list post-mortem documents: the preamble is not what the owner reads.
 - **`must_first` needs only one key**, because the "before B" half is the trigger: `when: action: {tool: gmail_send}` / `then: must_first: show_me_the_draft`. The when/then split absorbs half the verb's complexity — the structural argument in miniature.
 
 ### Disposition
@@ -395,6 +392,33 @@ Each was declared inexpressible, and each was a failure of imagination — think
 **"No sycophantic openings."** `answer_must_not_include: {like: […], in: opening}` — the same examples-and-meaning machinery as the trigger, pointed at the answer. The cost objection that had sent this to the offline audit dissolves once the thing being embedded is **one paragraph**: local, milliseconds, multilingual. His observation is what makes it work — *"every model gives an immediate reaction in the first part"* — so a flourish is in the opening or nowhere. Register is precisely what similarity measures, and the failure direction is safe: a false hit costs one bounded rework, then the answer ships with a note. Both distributions are recorded. `TestMeaningOverTheAnswer`.
 
 `in:` takes **two** values, `opening` and `ending`, deliberately — a position qualifier, not a coordinate system. Slicing is by paragraph, because that is the unit a person reads.
+
+### `must_tell_me_when` is RETIRED — it was the costume
+
+The engine's own admission line is *a verb ships only if it compiles to a declared check*, and `must_tell_me_when` never did. It was seeded to the model as prose and **nothing ever read the answer for it.** It sat in the canonical rule — the one this whole epic was written for — where the real enforcement was the `never_use` half and the "tell me" half was advice wearing a verb. The owner found it by asking, of a shipped rule, *"the transcript came back empty is a value — how would you check that?"* The answer was: we don't.
+
+It did not need a new tier. `answer_must_include: {like: […]}` says the same thing against the finished answer, with a real check behind it, in whatever language the answer is written in. Retired loudly, per `RETIRED_KEYS`, naming that replacement.
+
+**And the conversion is not mechanical, which is the trap worth recording.** `must_tell_me_when` was conditional in its own wording — *state it IF this happens*. `answer_must_include` is not: it applies whenever the rule binds. Copying it across on `bounded-material` produced a rule requiring **every** answer about a link to say the link could not be read. The disclosure had to move to a rule whose *trigger* is the failure (`when: result: {of: read_url, was: empty}`), which is what `say-when-the-link-failed` is. A verb that carries a hidden condition cannot be swapped for one that does not.
+
+### Seeding costs only what it buys
+
+Every trigger arms at seed; only a `prompt:` condition is decided there. So an ordinary turn — nothing to do with prices, images or mail — bound **15 of 21 rules and seeded 9,562 characters**, because the engine was conditional about *enforcement* and unconditional about *announcement*. That is precisely how a rules engine becomes the fatter system prompt the owner said he did not want, and two of the three arming trigger kinds were added the same day the measurement was taken.
+
+Two rules, both falling out of R5 rather than fighting it:
+
+- **A rule checked only at turn end does not seed its prose.** R5 is about *gates* — the model must never be ambushed by a refusal. Nothing at Verify refuses: it asks, and the question explains the rule at the moment it is relevant. Seeding it in advance buys advice, which is the one thing #190 proved does not hold, on every turn forever. One line still names it, so the corpus is never invisible.
+- **An armed `action:` or `result:` rule seeds its obligation but not its essay.** It is watching a call nobody has proposed. "Don't run pip" is what steers; the paragraph is written for the moment of refusal, and the refusal already carries it in full and uncapped.
+
+9,562 → 3,590 on that same turn. `TestSeedingCostsOnlyWhatItBuys`.
+
+**A defect found by reading the output rather than by any test:** an armed `action:` rule seeded its prohibition with no condition attached — *"MUST NOT call write_file, edit_file, run_command for this turn"* — for a rule that guards one directory. Believed, that disables editing any file anywhere. A narrow guard read as a blanket ban, in the rule that keeps aish out of its own source, live on main. The condition is now part of the sentence.
+
+### One command has many spellings
+
+`command_starts_with` takes a **list**, meaning any-of. `pip`, `pip3`, `python -m pip` and `python3 -m pip` are one intent, and forcing a file per spelling makes the owner maintain the shape of a shell instead of stating a policy — he asked for it twice before it was built. A rule covering two thirds of a thing is the silent under-restriction R1 is supposed to make impossible.
+
+A **scalar is taken whole and never split**: `gh issue` is one prefix containing a space, and splitting on whitespace would quietly widen that rule to every `gh` command there is. `TestOneCommandHasManySpellings`.
 
 ### Retro-match — a rule is a function of logged facts
 

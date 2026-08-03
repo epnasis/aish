@@ -86,8 +86,6 @@ def _vocabulary() -> str:
         "\"no flattery\", \"no apologies\", \"never promise\" get expressed. "
         "NEVER a bare plain phrase: a check nothing can evaluate is a promise "
         "nothing keeps.",
-        "- must_tell_me_when: a failure the owner must be told about in plain "
-        "words rather than quietly patched over.",
         "- ask_me_first: true — the owner decides this one, every time it comes "
         "up. Needs when_subject 'action', because it holds ONE kind of call. "
         "Use it when the point is that HE chooses, not that the assistant "
@@ -193,7 +191,8 @@ WORKED EXAMPLES — real rules, one per subject. Match these shapes.
   {"name": "transcript-failure", "when_subject": "result",
    "when_result_of": "youtube_analyze", "when_result_was": "empty",
    "never_use": ["web_search"],
-   "must_tell_me_when": "the transcript came back empty"}"""
+   "answer_must_include": {"like": ["the transcript came back empty so I could not read the video",
+   "nie udalo sie pobrac transkrypcji"]}}"""
 
 
 PROMPT = """\

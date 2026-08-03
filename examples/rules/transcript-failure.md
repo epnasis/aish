@@ -7,7 +7,11 @@ when:
     was: empty
 then:
   never_use: [web_search]
-  must_tell_me_when: the transcript came back empty
+  answer_must_include:
+    like:
+      - the transcript came back empty so I could not read the video
+      - I could not get the transcript, so I have not watched this
+      - nie udało się pobrać transkrypcji tego filmu
 ---
 
 This is the rule the whole rules engine was built for, and it is worth knowing
