@@ -2323,7 +2323,10 @@ def _verify_kinds(
 SEED_HEADER = (
     "RULES IN FORCE FOR THIS TURN — the harness enforces these. They are NOT "
     "advice: a call that violates one is refused before it runs, whatever you "
-    "decide about it."
+    "decide about it.\n"
+    "Each is NARROW: a rule saying MUST NOT ... WHEN ... restricts only that "
+    "case and nothing else. If one genuinely blocks what the user needs, ASK "
+    "them rather than working around it."
 )
 
 
@@ -2412,13 +2415,12 @@ def _obligation_line(obligation: dict, rule: Rule | None = None) -> str:
         # edit_file, run_command for this turn" — which, believed, disables
         # editing any file anywhere. The condition is the whole rule; leaving
         # it out inverts a narrow guard into a blanket ban.
+        # The CONDITION, and nothing else. The reassurance that it is a narrow
+        # guard is identical for every action rule, so it belongs in the header
+        # once — repeated per rule it was ~150 chars x 6 of pure duplication on
+        # every turn, which is the cost this whole pass exists to remove.
         what = ", ".join(obligation["what"])
-        return (
-            f"· MUST NOT call {what} WHEN {_action_in_english(rule.action)}. "
-            "Everything else is untouched by this rule — it is a narrow guard, "
-            "not a general prohibition. If you genuinely need the blocked "
-            "action, ASK the user rather than working around it."
-        )
+        return f"· MUST NOT call {what} WHEN {_action_in_english(rule.action)}."
     if verb == VERB_ANSWER_FROM:
         if obligation["to"] == ROUTE_MATERIAL:
             sources = ", ".join(obligation.get("sources") or []) or "the message"

@@ -2260,8 +2260,10 @@ class TestSeedingCostsOnlyWhatItBuys:
                                 never_use=["write_file", "run_command"])
         text = rules.seed_text([binding])
         assert "WHEN it touches anything under ~/dev/aish" in text
-        assert "narrow guard" in text
         assert "run_command for this turn" not in text
+        # Said ONCE in the header, not repeated per rule: identical for every
+        # action rule, and six copies of it is the cost this pass removes.
+        assert text.count("restricts only that case") == 1
 
 
 class TestOneCommandHasManySpellings:
