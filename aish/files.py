@@ -93,6 +93,16 @@ class WritePlan:
     new: str
     is_new: bool
     error: str | None = None
+    # Free text shown ABOVE the diff at approval time. A rule's diff is YAML
+    # the owner did not write; what he is agreeing to is the behaviour, so the
+    # compiled meaning goes here and the diff stays available underneath.
+    note: str = ""
+    # Set when this write IS a rule. The card then stops calling itself a file
+    # edit: the owner reported thinking aish had bypassed its own rule tools
+    # and hand-written the file, because the card said "Create file" and showed
+    # him YAML. The name and the verb are what he is actually deciding about.
+    rule: str = ""
+    rule_verb: str = ""
 
     @property
     def diff(self) -> str:

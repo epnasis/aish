@@ -6,6 +6,7 @@ run_command cannot be reached there unless the approve() callback returns
 the command to run (possibly edited by the user).
 """
 
+import dataclasses
 import datetime
 import getpass
 import itertools
@@ -32,7 +33,19 @@ from typing import Any
 import ollama
 
 from . import aliases as alias_map
-from . import backends, files, media, rules, skill_import, skills, tool_plugins, tools, web
+from . import (
+    backends,
+    files,
+    media,
+    rule_compiler,
+    rules,
+    secrets,
+    skill_import,
+    skills,
+    tool_plugins,
+    tools,
+    web,
+)
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
 from .session import SessionLog
 
@@ -120,11 +133,16 @@ Rules:
    the gate will keep refusing until you have said it. If you genuinely
    believe the rule should not apply here, say why in text and propose the
    call again — the user is asked after two refusals and can allow it.
-   Rules live in ~/.config/aish/rules/ and only the USER writes them: when
-   they state a standing rule that must be ENFORCED rather than merely
-   remembered ("if I paste only a link, analyse THAT and nothing else"),
-   tell them a rule file is where it belongs and offer to draft one for
-   their approval — do not save it as a memory and hope.
+   Rules live in ~/.config/aish/rules/. When the user states a standing rule
+   that must be ENFORCED rather than merely remembered ("if I paste only a
+   link, analyse THAT and nothing else", "always use show_image"), you MUST
+   call create_rule — do not save it as a memory and hope. You never write the
+   file and never write YAML: name the field values and aish renders, checks
+   and shows the user what it MEANS before anything is saved, so a rule cannot
+   land without their approval. Changing one: edit_rule, naming ONLY what
+   changes. Stopping one: retire_rule. If what they want cannot be expressed
+   in those fields, say exactly what could not be expressed — that is a gap in
+   aish worth reporting, not a reason to write vague prose.
 3. Every command is shown to the user for approval before it runs. The user
    may edit a command before approving; the edited form is what ran. A COMMENT
    the user attaches to a decision changes what you do next, and approve vs
@@ -224,6 +242,14 @@ class TaskCancelled(Exception):
 
 CANCELLED_RESULT = "(task stopped by user — any partial work is above)"
 NOT_EXECUTED = "(not executed — the user stopped the task)"
+
+# How much of a tool result this turn's record keeps. Enough for the line a
+# show_* tool hands back; far short of a page of fetched text.
+CALL_RESULT_CHARS = 600
+
+# Below this length a "secret" is too short to match a command without firing on
+# ordinary words. A four-character secret is not one worth protecting anyway.
+SECRET_MIN_MATCH = 8
 
 # Loop detection: the exact same tool call returning the exact same output is
 # not progress. At WARN repeats the model gets one nudge to change approach;
@@ -368,6 +394,34 @@ TOOL_HELD_FOR_ADJUSTMENT = (
 
 def _with_feedback(base: str, comment: str) -> str:
     return base + FEEDBACK_NOTE.format(comment=comment) if comment else base
+
+
+# Text that means THE ACTION DID NOT HAPPEN, for the paths that still return a
+# bare string. Structural carriers (`_gate_outcome`, `ToolOutcome.meta`) are
+# preferred and checked first; this is the floor under the ones that predate
+# them, and it is enumerated in ONE place so the eleventh refusal site inherits
+# it instead of being forgotten.
+REFUSAL_OPENINGS = (
+    "ERROR", "NOT EXECUTED", "(not executed", "USER DENIED", "NOT RUN", "BLOCKED",
+)
+
+
+def _call_facts(result: str, run_meta: dict | None) -> tuple[str, str]:
+    """(status, decision) for one finished call — the single reading of "did
+    this actually run?".
+
+    Two consumers with the same question were answering it differently:
+    `_observe_for_rules` had the fallback, `_note_turn_call` had only the
+    envelope, so a refusal carrying no envelope satisfied a `must_first` and
+    logged a verify PASS on the strength of a call the harness had stopped.
+    """
+    meta = getattr(result, "meta", None) or {}
+    decision = str(meta.get("decision") or (run_meta or {}).get("decision") or "")
+    status = meta.get("status")
+    if status is None:
+        failed = decision in REFUSED_DECISIONS or result.startswith(REFUSAL_OPENINGS)
+        status = tools.STATUS_FAILED if failed else tools.STATUS_OK
+    return str(status), decision
 
 
 def _gate_outcome(text: str, decision: str) -> tools.ToolOutcome:
@@ -655,6 +709,9 @@ READ_ONLY_TOOLS = frozenset(
         "read_file",
         "recall",
         "show_image",
+        # Same argument as show_image, minus the fetch: it validates a link the
+        # app can play and hands back the line to paste. No egress at all.
+        "show_video",
         # Reads aish's OWN content-addressed output cache — no host, no user
         # state, no wrapper re-run (#192). Read-only by the same argument as
         # show_image's write into the media store.
@@ -729,6 +786,15 @@ FORGET_PROHIBITED = (
 REMEMBER_DENIED = (
     "USER DENIED saving this memory — NOTHING was written. Do not retry it; "
     "state the fact in your report instead and let the owner decide."
+)
+
+# aish's own voice in the conversation (#171): `synthetic_kind` classifies a
+# user-role message opening with this as a NOTE, so replay renders it as the
+# harness speaking rather than as a blue bubble the owner never typed.
+AISH_NOTE = "[aish: "
+
+NOT_FOLLOWED_NOTE = (
+    "[aish] rule '{rule}' not followed: {detail}"
 )
 
 REMEMBER_NO_APPROVER = (
@@ -902,6 +968,10 @@ class Agent:
         lessons_path: os.PathLike | str | None = None,
         status: Any = None,
         state_dir: os.PathLike | str | None = None,
+        # The isolated prose→rule compiler (#205). Injected so a test scripts
+        # it exactly as it scripts the acting model, and so nothing here has to
+        # reach a backend to prove the authoring path works.
+        rule_compiler_ask: Callable[[str], str] | None = None,
         current_session: Callable[[], Path] | None = None,
         semantic: Any = None,
         on_step: Callable[[dict], None] | None = None,
@@ -974,6 +1044,7 @@ class Agent:
         # Session store for the search_sessions tool; current_session is
         # excluded from ranking (its content is already this conversation).
         self.state_dir = state_dir
+        self.rule_compiler = rule_compiler_ask
         self.current_session = current_session
         # Embedding-based preflight selection (issue #43); opt-in from the
         # entry points so tests and bare Agents stay network-free.
@@ -1040,6 +1111,20 @@ class Agent:
         # case and costs one set-membership test per dispatch.
         self._bindings: list[rules.Binding] = []
         self._binding_seq = itertools.count(1)
+        # What ran this turn, in order — the left side of every verify join.
+        # The model does not author this, which is the whole reason a verify
+        # check can be trusted at all.
+        self._turn_calls: list[dict] = []
+        # Has the model said anything to the user yet this task? The only input
+        # `must_first: answer` needs.
+        self._said_something = False
+        # Tokens withheld from the client while a bound turn's answer is still
+        # unverified. `None` means stream normally.
+        self._held_answer: list[str] | None = None
+        self._held_entry: dict | None = None
+        # Harness-written lines for rules that could not be satisfied — appended
+        # to the answer at delivery so a failure is never silent.
+        self._not_followed: list[str] = []
         # Rules already reported as broken. A rule file does not fix itself
         # between turns, so warning every turn is nagging, not information —
         # and a warning that is always there is one nobody reads. Session-
@@ -1396,6 +1481,11 @@ class Agent:
         # claude-max never enters. Both entry points re-seed immediately after.
         self._bindings = []
         self._binding_seq = itertools.count(1)
+        self._turn_calls = []
+        self._said_something = False
+        self._held_answer = None
+        self._held_entry = None
+        self._not_followed = []
         # Skill-read gates belong to the task that armed them; run_task re-arms
         # from its own preflight right after this reset.
         self._pending_skill_reads = {}
@@ -1511,6 +1601,13 @@ class Agent:
         )
         if rules_text:
             self.mark_rules_seeded()  # the prose reached context — record it
+        if rules.has_verify(self._bindings):
+            # Unconditional, not gated on `on_token`. The hold does two jobs —
+            # keep the answer off the stream AND keep a rejected proposal out
+            # of the log — and only the first one is about streaming. Tying
+            # both to a live token sink logged every rejected answer on any
+            # client that does not stream.
+            self._held_answer = []  # this turn's answer waits for its checks
         # What the model was TOLD (#208, contract §3.10). aish already records what
         # it did (`tool`/`gate`), what governed it (`rule_eval`/`binding`) and
         # what it stored (`admission`); the index — the largest input to
@@ -1567,6 +1664,12 @@ class Agent:
             # A live "Thinking…" row on the trace timeline; it finalizes to
             # "Thought for Xs" when the turn produced tools, or is dropped when
             # the turn was a plain answer (thinking_cancel below).
+            if self._held_answer is not None:
+                # Per TURN: preamble alongside a turn's tool calls is not part
+                # of the answer, and keeping it would glue a rejected turn's
+                # words onto the delivered one — making the streamed text
+                # differ from what is returned and logged.
+                self._held_answer = []
             self._emit_step(kind="thinking_start")
             self.status.start("thinking")
             try:
@@ -1578,6 +1681,12 @@ class Agent:
             turn_secs = time.perf_counter() - turn_start
             tokens_in += usage[0]
             tokens_out += usage[1]
+            # The only fact `must_first: answer` needs: has the model said
+            # anything to the user yet. Set BEFORE this turn's tool calls are
+            # dispatched, so text emitted alongside them counts — a model that
+            # answers and acts in one breath has not made him wait.
+            if content.strip():
+                self._said_something = True
             entry: dict = {"role": "assistant", "content": content}
             if tool_calls:
                 entry["tool_calls"] = tool_calls
@@ -1586,7 +1695,18 @@ class Agent:
                 # tool_use): the backend echoes these verbatim on the next
                 # request instead of reconstructing the turn.
                 entry["raw_blocks"] = raw_blocks
-            self._append(entry)
+            # A bound turn's finished answer is a PROPOSAL. It goes into the
+            # model's own history (the ask that may follow refers to it) but
+            # NOT into the log, or a rejected answer the owner never saw live
+            # would come back as an assistant bubble on the next page load —
+            # two answers for one turn, which is the thing the hold exists to
+            # prevent. It is logged, once, if and when it is released.
+            proposal = self._held_answer is not None and not tool_calls
+            if proposal:
+                self.messages.append(entry)
+                self._held_entry = entry
+            else:
+                self._append(entry)
 
             # Deny means STOP: only a TEXT-ONLY turn clears the stop gate.
             # Clearing on any content would be defeated by chatty preamble (or
@@ -1595,12 +1715,48 @@ class Agent:
             # holds until the model stops and replies with no tool call; that
             # turn also ends the task (normal loop semantics), so the user
             # steers before anything else runs.
+            # Captured BEFORE the clear: a denial's stop gate is lifted by this
+            # very turn, and Verify must not then use the turn to keep going.
+            was_stopped = self._pending_comment_response
             if content and not tool_calls:
                 self._pending_comment_response = False
 
             if not tool_calls:
                 result = content or EMPTY_RESPONSE
-                if not content and self.on_token:
+                # VERIFY (#191). A finished answer is a PROPOSAL until the
+                # turn's rules have been checked against it — so the check runs
+                # here, inside the loop, rather than after run_task returns.
+                # Outside it there is no way to continue the turn: the budget,
+                # the stop gate and the terminators all assume final text is
+                # final, and a second answer would be a second answer in an
+                # append-only log.
+                # Deny means STOP, and that outranks Verify (#81 over #191).
+                # Asking here would use the goad to drive the very tool call the
+                # owner just denied — proven live before this guard existed. The
+                # rules still get their say: the checks run, nothing is asked,
+                # and an unmet rule is still SAID, so a denial cannot silence a
+                # disclosure either.
+                unmet = self._verify_answer(result, ask=not was_stopped)
+                if unmet is not None:
+                    # Not delivered. The model is told what is missing and the
+                    # turn goes on — the ask provokes the work, the work lands
+                    # in the trace, and the trace is what the next check reads.
+                    self._release_held(discard=True)
+                    # Close the turn's live row: `continue` would otherwise skip
+                    # the cancel below and leave a Thinking… ticker running for
+                    # every rejected answer, live and on replay.
+                    self._emit_step(
+                        kind="thinking_cancel", secs=turn_secs, tokens=list(usage)
+                    )
+                    # Marked as aish's own words (#171), or replay renders the
+                    # harness's question as a blue bubble the owner never typed.
+                    self._append({"role": "user", "content": AISH_NOTE + unmet + "]"})
+                    continue
+                was_held = self._held_answer is not None
+                result = self._release_held(text=result)
+                self._log_held_entry(result)
+                # A released hold has already streamed itself, notes included.
+                if not content and not was_held and self.on_token:
                     self.on_token(result + "\n")
                 self._note(f"✓ answered in {format_secs(turn_secs)}{_tokens_note(usage)}")
                 total = time.perf_counter() - task_started
@@ -1685,13 +1841,19 @@ class Agent:
         arguments = repr(sorted((function.get("arguments") or {}).items()))
         return (function["name"], arguments, result)
 
-    def _finish_stopped(self, note: str, headline: str) -> str:
+    def _finish_stopped(self, note: str, headline: str) -> str:  # noqa: D401
         """Step budget exhausted or loop detected: one final no-tools turn so
         the model can judge completion and report state (what's done, what
         remains, why it's stuck) instead of the task cutting off with a bare
         error line. The step budget is never silently exceeded — continuing
         is the user's call."""
         self._append({"role": "user", "content": note})
+        if self._held_answer is not None:
+            # Per turn, like the loop's own reset — which this exit skips. The
+            # stuck turn's buffered preamble was still in there and got streamed
+            # glued in front of the wrap-up text, so the owner saw something the
+            # return value and the log did not contain.
+            self._held_answer = []
         self.status.start("wrapping up")
         turn_start = time.perf_counter()
         usage = (0, 0)
@@ -1714,7 +1876,21 @@ class Agent:
                 entry["tool_calls"] = tool_calls
             if raw_blocks:
                 entry["raw_blocks"] = raw_blocks
-            self._append(entry)
+            # Held on exactly the same terms as an ordinary answer, and for
+            # the same reason: the note is stamped a few lines below, and an
+            # entry already sent to the log carries the model's words without
+            # it. That left every loop/stall/ceiling exit with the note in the
+            # live stream only — gone on the next cold reload, and the rule
+            # reading as followed. Terminal only means it is never REJECTED;
+            # it still has to be released.
+            # Tool calls included: the entry stays in `self.messages` whole
+            # (every tool_use needs its pair), and it is the LOG copy that gets
+            # the delivered text.
+            if self._held_answer is not None:
+                self.messages.append(entry)
+                self._held_entry = entry
+            else:
+                self._append(entry)
             for call in tool_calls:  # every tool_use still needs a paired result
                 self._append(
                     {
@@ -1723,6 +1899,24 @@ class Agent:
                         "content": NOT_EXECUTED_LIMIT,
                     }
                 )
+        # A terminal answer is still an answer, so the rules still get their
+        # say — note-only, because there is no turn left to ask into and asking
+        # here would restart the very loop the terminator just concluded.
+        self._verify_answer(content, ask=False)
+        # Every exit releases the hold, or a bound turn that ends at the loop
+        # detector, the stall cap or the ceiling delivers NOTHING: the wrap-up
+        # text sits in the buffer and the client shows a dead turn. The note
+        # rides it too — a rule that was not followed must be said on the way
+        # out, whichever way the turn ends.
+        had_hold = self._held_answer is not None
+        content = self._release_held(text=content)
+        if self._held_entry is not None:
+            self._log_held_entry(content)
+        elif had_hold and content and self.on_message:
+            # The wrap-up said nothing at all, so there is no entry to stamp —
+            # but the note still has to reach the log, or the only record of a
+            # rule that was not followed is a token stream nobody kept.
+            self.on_message(_serialize({"role": "assistant", "content": content}))
         if not content and self.on_token:
             self.on_token(headline + "\n")
         return f"{headline}\n\n{content}" if content else headline
@@ -1801,9 +1995,16 @@ class Agent:
                 if message.content:
                     if not parts:
                         self.status.stop()  # erase the live timer line first
-                        self.on_token("\n")
+                        if self._held_answer is None:
+                            self.on_token("\n")
                     parts.append(message.content)
-                    self.on_token(message.content)
+                    if self._held_answer is None:
+                        self.on_token(message.content)
+                    else:
+                        # A bound turn's answer is a proposal until Verify has
+                        # seen it; streaming it would break the promise that a
+                        # rule is checked before the owner reads the answer.
+                        self._held_answer.append(message.content)
                 if message.tool_calls:
                     raw_calls.extend(message.tool_calls)
                 if getattr(message, "raw_blocks", None):
@@ -1812,7 +2013,7 @@ class Agent:
                     usage = _usage(chunk)
             content = "".join(parts)
             thinking = "".join(thinking_parts)
-            if content:
+            if content and self._held_answer is None:
                 self.on_token("\n")
         return content, [self._normalize_call(c) for c in raw_calls], usage, raw_blocks, thinking
 
@@ -2145,6 +2346,8 @@ class Agent:
             return str(a.get("url", ""))
         if name == "show_image":
             return str(a.get("source", ""))
+        if name == "show_video":
+            return str(a.get("url", ""))
         if name == "recall":
             return str(a.get("query") or a.get("name") or "")
         if name in ("read_file", "write_file", "edit_file"):
@@ -2224,11 +2427,15 @@ class Agent:
             )
             return result
         self._note(f"{mark} {name} {format_secs(elapsed)}")
-        self._emit_tool_step(name, args, result, elapsed, call_no)
         # The single funnel every tool call passes through, parallel path
         # included — so a binding's view of "was the routed tool tried, and did
         # it work?" cannot miss a call that took another branch (#191).
+        # BEFORE _emit_tool_step, which consumes `_run_meta`: that is where a
+        # denied, held or blocked run_command carries its verdict, and reading
+        # it afterwards saw nothing at all.
         self._observe_for_rules(name, result)
+        self._note_turn_call(name, args, result)
+        self._emit_tool_step(name, args, result, elapsed, call_no)
         return result
 
     def _emit_tool_step(
@@ -2308,6 +2515,11 @@ class Agent:
             topic = args.get("topic") or None
             label = f"→ read_url: {url}" + (f" (topic: {topic})" if topic else "")
             return label, partial(web.read_url, url, topic=str(topic) if topic else None)
+        if name == "show_video":
+            url = str(args.get("url", ""))
+            return f"→ show_video: {url}", partial(
+                self._show_video, url, str(args.get("caption", "") or "")
+            )
         if name == "show_image":
             source = str(args.get("source", ""))
             caption = str(args.get("caption", "") or "")
@@ -2450,6 +2662,37 @@ class Agent:
                 state_dir, q, session=session
             ),
             semantic=semantic,
+        )
+
+    def _show_video(self, url: str, caption: str) -> str:
+        """Put a playable video in the answer.
+
+        The counterpart to show_image, and it exists for the same reason: the
+        model should not be guessing what the app can render. It validates the
+        link against the SAME pattern the frontend plays, and hands back the
+        line to paste — so a rule can require "show me something" and there is
+        a tool that satisfies it. Without one, a video appeared only when the
+        model happened to paste a link, and nothing could require it.
+
+        No fetch, so no egress: the app embeds by id, and the bytes never come
+        near this machine. The honest limit is that a well-formed link to a
+        video that does not exist still passes — the owner then sees YouTube's
+        own error rather than a broken box, which is the failure we can afford.
+        """
+        url = url.strip()
+        if not url:
+            return "ERROR: show_video needs a video url."
+        if not web.video_id(url):
+            return (
+                f"ERROR: {url!r} is not a video the app can play. It plays YouTube "
+                "links (youtube.com/watch?v=…, youtu.be/…, youtube.com/shorts/…). "
+                "A link to a page ABOUT a video, a channel, or a playlist is not a "
+                "video. Use web_search to find the video itself."
+            )
+        label = re.sub(r"\s+", " ", caption).replace("[", "").replace("]", "").strip()
+        return (
+            "Video ready. Include this line in your answer EXACTLY as written "
+            f"(do not alter the link):\n\n[{label or 'Watch'}]({url})"
         )
 
     def _show_image(self, source: str, caption: str) -> str:
@@ -2754,7 +2997,8 @@ class Agent:
             started = time.perf_counter()
             try:
                 verdict, evidence = rules.evaluate(
-                    rule, self._turn_context(task, images, documents)
+                    rule, self._turn_context(task, images, documents),
+                    meaning=self._meaning_scorer(),
                 )
             except Exception as exc:  # noqa: BLE001 — a broken evaluator must not kill the turn
                 verdict, evidence = rules.VERDICT_UNEVALUABLE, {"error": repr(exc)[:200]}
@@ -2835,6 +3079,17 @@ class Agent:
             documents=tuple(documents or ()),
         )
 
+    def _meaning_scorer(self):
+        """The sentence-similarity callable a scored trigger needs, or None.
+
+        None is a real answer here, not a failure to hide: a rule that needs
+        meaning then records `unevaluable` rather than quietly abstaining. "The
+        embedding model was down" and "the rule did not apply" are different
+        facts, and a rule whose evaluation silently degrades looks exactly like
+        one that is working.
+        """
+        return self.semantic.sentence_scores if self.semantic is not None else None
+
     def _known_tool_names(self) -> set[str]:
         """Everything the model can call this turn, for the bind-time
         unsatisfiability check: a route to a tool that no longer exists must
@@ -2856,18 +3111,270 @@ class Agent:
         """
         if not self._bindings:
             return
-        meta = getattr(result, "meta", None) or {}
-        if meta.get("decision") in REFUSED_DECISIONS:
+        status, decision = _call_facts(result, self._run_meta)
+        if decision in REFUSED_DECISIONS:
             return
-        status = meta.get("status")
-        if status is None:
-            status = (
-                tools.STATUS_FAILED
-                if result.startswith(("ERROR", "NOT EXECUTED"))
-                else tools.STATUS_OK
-            )
         for binding in self._bindings:
             binding.note_tool_result(name, status)
+
+    def _verify_answer(self, answer: str, ask: bool = True) -> str | None:
+        """None when the answer may be delivered, else what to ask the model.
+
+        Bounded: RULE_MAX_ASKS per binding. Past that the answer IS delivered —
+        holding it hostage would trade one silent failure for a wedged turn —
+        carrying a line the HARNESS writes saying what was not followed. That
+        line is not requested of the model, so it cannot be skipped, and it
+        reads the same attended or not: a rule that was tried and failed must
+        be visible to the owner, not only to automation.
+        """
+        if not self._bindings:
+            return None
+        evidence = rules.TurnEvidence(
+            answer=answer, calls=tuple(self._turn_calls),
+            meaning=self._meaning_scorer(),
+        )
+        failures = rules.verify(self._bindings, evidence)
+        asks, unmet = [], []
+        # ONE round per binding per pass, not one per failing obligation. A rule
+        # with two obligations was burning both its asks in a single round and
+        # getting half the patience the design promises — and the corpus is
+        # built from exactly those.
+        spent: set[str] = set()
+        for failure in failures:
+            binding = failure.binding
+            # `spent` FIRST: on a binding's last round the increment below has
+            # already raised `asks` to the cap, and re-reading it here shunted
+            # that binding's second failing obligation to `unmet` mid-pass —
+            # recording an "answer shipped with a note" for an answer that was
+            # not shipped, and dropping the obligation from the goad.
+            fresh = binding.id not in spent
+            if not ask or not failure.askable or (
+                fresh and binding.asks >= rules.RULE_MAX_ASKS
+            ):
+                unmet.append(failure)
+                continue
+            if fresh:
+                spent.add(binding.id)
+                binding.asks += 1
+            asks.append(failure)
+        if asks:
+            # An asking pass records only what it asked. `advised` means "the
+            # answer shipped carrying a note", so writing one for an unaskable
+            # obligation while the turn is still going claimed a delivery that
+            # had not happened — and a binding mixing an askable obligation
+            # with an unaskable one did it on every round.
+            for failure in asks:
+                self._record_verify(failure, "asked")
+        else:
+            # The delivering pass. Every verdict for this turn is written here,
+            # exactly once — including the abstentions, so a satisfied rule and
+            # an unchecked one are distinguishable in the log (absence is never
+            # the evidence). Recording them on every pass instead would have
+            # §7's counters counting passes rather than turns.
+            for failure in unmet:
+                self._record_verify(failure, "not_followed")
+            for binding in self._bindings:
+                if rules.has_verify([binding]) and not any(
+                    f.binding is binding for f in failures
+                ):
+                    self._record_verify_pass(binding)
+        if not asks:
+            # Delivered, and SAID. Deduplicated: one line per rule, however
+            # many of its obligations went unmet.
+            seen: set[str] = set()
+            notes = []
+            for failure in unmet:
+                if failure.binding.id in seen:
+                    continue
+                seen.add(failure.binding.id)
+                notes.append(self._note_for(failure))
+            self._not_followed = notes
+            return None
+        self._note("⚖ " + asks[0].binding.name + ": answer held for rework")
+        return "\n\n".join(f.ask for f in asks)
+
+    @staticmethod
+    def _note_for(failure: "rules.VerifyFailure") -> str:
+        return NOT_FOLLOWED_NOTE.format(
+            rule=failure.binding.name, detail=failure.ask.split("\n")[0]
+        )
+
+    def verify_final(self, answer: str) -> str:
+        """Check a finished answer that CANNOT be reworked, and stamp what went
+        unmet onto it.
+
+        claude-max owns its own loop: there is no turn to ask into and the text
+        has already streamed, so the ask half of Verify is structurally
+        unavailable there. Skipping the checks entirely was the alternative,
+        and it is the worse one — a rule the model escapes by being asked on a
+        different backend is not a rule (the same reasoning that put seeding
+        and the gate on both paths). So the checks run, the verdicts are
+        recorded, and every unmet rule is SAID.
+        """
+        if not self._bindings:
+            return answer
+        self._verify_answer(answer, ask=False)
+        if not self._not_followed:
+            return answer
+        notes, self._not_followed = self._not_followed, []
+        return (answer + "\n\n" + "\n".join(notes)).strip()
+
+    def _log_held_entry(self, text: str = "") -> None:
+        """Deliver a released proposal to the log — the single point where a
+        held answer becomes THE answer. Rejected ones are simply never passed
+        here, so nothing has to be retracted.
+
+        `text` is the answer AS DELIVERED, note included. Logging the model's
+        original words instead would make a rule that was tried and failed
+        visible only in the live stream: after a restart or a cold reload the
+        note is gone and an unfollowed rule reads as followed — the exact
+        silence the note exists to break.
+        """
+        entry, self._held_entry = self._held_entry, None
+        if entry is None or not self.on_message:
+            return
+        # A COPY. `entry` is the model's own history entry and must keep the
+        # model's own words: the note is aish speaking to the owner, and
+        # feeding it back as something the model said would have it defend or
+        # repeat a line it never wrote.
+        self.on_message(_serialize({**entry, "content": text} if text else entry))
+
+    def _release_held(self, text: str = "", discard: bool = False) -> str:
+        """Hand the withheld answer to the client, or drop it.
+
+        A bound turn does not stream: the promise is that a rule is checked
+        BEFORE the owner reads the answer, and on a device that streams token
+        by token he has read it long before the check runs. The cost is his,
+        deliberately — "I'd rather have a verified answer than a faster one
+        that is wrong" — and it is paid only on turns a rule governs.
+        """
+        held, self._held_answer = self._held_answer, None
+        if held is not None and not discard and self.on_token:
+            # `text` covers the turn that answered with nothing: the buffer is
+            # empty, the caller's own stream is suppressed (it would double the
+            # notes), so the placeholder has to leave from here or not at all.
+            self.on_token("\n" + ("".join(held) or text) + "\n")
+        if discard and self._bindings:
+            self._held_answer = []  # keep holding: the next answer is bound too
+        if self._not_followed:
+            notes, self._not_followed = self._not_followed, []
+            text = (text + "\n\n" + "\n".join(notes)).strip()
+            if self.on_token:
+                self.on_token("\n\n" + "\n".join(notes) + "\n")
+        return text
+
+    def _record_verify_pass(self, binding: "rules.Binding") -> None:
+        """The abstention half: this binding was checked and had nothing to
+        say. Without it, a satisfied rule and an unchecked one look identical
+        in the log — and "why didn't this fire?" is #197's primary question."""
+        self._emit_record(
+            kind="gate", call=0, at="verify", gate="rule.verify",
+            binding=binding.id, rule=binding.name, tool="", action={},
+            verdict="allowed", tier=binding.rule.tier, evidence={"checked": True},
+            round=binding.asks, max_rounds=rules.RULE_MAX_ASKS, escalated=False,
+        )
+
+    def _record_verify(self, failure: "rules.VerifyFailure", verdict: str) -> None:
+        """A `gate` record at the verify point (contract §3.3)."""
+        binding = failure.binding
+        self._emit_record(
+            kind="gate",
+            call=0,
+            at="verify",
+            gate=f"rule.{failure.verb}",
+            binding=binding.id,
+            rule=binding.name,
+            tool="",
+            action={},
+            # `advised` rather than `stopped` when the answer ships anyway:
+            # the turn was not stopped, it was delivered with a caveat, and a
+            # ledger counting these as terminations would overstate the engine.
+            verdict="refused" if verdict == "asked" else "advised",
+            tier=binding.rule.tier,
+            evidence=failure.evidence,
+            round=binding.asks,
+            max_rounds=rules.RULE_MAX_ASKS,
+            # Never at Verify. §3.3 defines `escalated` as "reached Tier 3 —
+            # the OWNER had to decide", and the whole design of the bound is
+            # that he does NOT: the answer ships with a note and nobody is
+            # asked. Setting it on a bound-hit conflated "the rule gave up"
+            # with "the owner overrode it", which is the ledger's single most
+            # load-bearing lifecycle signal.
+            escalated=False,
+            message=failure.ask[: rules.GATE_MESSAGE_CHARS],
+        )
+
+    def _note_turn_call(self, name: str, args: dict, result: str) -> None:
+        """Append one call to this turn's record, for Verify to read.
+
+        A REFUSED call is recorded too, with its decision — "the reader was
+        proposed and the gate stopped it" is a different fact from "it was
+        never tried", and a verify check that conflated them would ask the
+        model to do something the harness had just forbidden."""
+        status, decision = _call_facts(result, self._run_meta)
+        self._turn_calls.append({
+            "tool": name,
+            "args": dict(args or {}),
+            "status": status,
+            "decision": decision,
+            # Capped, and kept only for THIS turn. Checking that the answer
+            # contains a picture means reading back the exact line the tool
+            # handed over — an equality, where "does the answer contain
+            # something picture-shaped" would be a guess.
+            "result": str(result)[:CALL_RESULT_CHARS],
+        })
+
+    def _command_has_a_secret(self, command: str) -> bool:
+        """Does this command carry one of HIS stored secrets, verbatim?
+
+        A join against his own keychain, not a pattern he has to write — the
+        alternative would have him paste the secret into a rule file, which is
+        exactly what the rule exists to stop. Values are read here and
+        discarded; nothing is logged, and the rule records only that a match
+        happened.
+        """
+        if not command.strip():
+            return False
+        try:
+            for name in secrets.names():
+                value = secrets.get(name)
+                if value and len(value) >= SECRET_MIN_MATCH and value in command:
+                    return True
+        except Exception:  # noqa: BLE001 — no keychain is "no match", never a crash
+            return False
+        return False
+
+    def _speak_first_gate(self, name: str) -> str | None:
+        """`must_first: answer` — say something before running anything.
+
+        Pure ordering over the turn's own record: has any assistant text been
+        produced yet this task. It needs no understanding of whether a question
+        was asked, which is why calling this inexpressible was wrong.
+
+        At the GATE and not at turn end: by the time an answer exists the
+        ordering has already happened, and no amount of asking repairs it.
+        Bounded like every other rule refusal — the model complies by writing a
+        line of text, which is entirely within its power (R7).
+        """
+        for binding in rules.wants_text_first(self._bindings):
+            if self._said_something:
+                continue
+            if binding.rounds >= binding.max_rounds:
+                continue  # bounded: it has had its say, let the turn proceed
+            binding.rounds += 1
+            message = rules.SPEAK_FIRST_REFUSAL.format(
+                rule=binding.name, description=binding.rule.description
+            )
+            verdict = rules.GateVerdict(
+                verdict="refused", binding=binding,
+                evidence={"obligation": rules.VERB_MUST_FIRST,
+                          "requires": rules.FIRST_ANSWER, "said_anything": False},
+                message=message, round=binding.rounds,
+            )
+            self._record_gate(verdict, name, {}, "refused")
+            self._note(f"⚖ {binding.name}: answer first, then act")
+            return message
+        return None
 
     def _rule_gate(self, name: str, args: dict) -> str | None:
         """Membership against this turn's bindings: None = proceed, else the
@@ -2883,6 +3390,8 @@ class Agent:
         """
         if not self._bindings:
             return None
+        if speak_first := self._speak_first_gate(name):
+            return speak_first
         recorded: set[str] = set()
         # One pass per binding at most: an escalation either refuses (returns)
         # or marks that binding overridden, so it can never escalate twice. The
@@ -2891,7 +3400,9 @@ class Agent:
         for _ in range(len(self._bindings) + 1):
             refusal: str | None = None
             stopped = False
-            for verdict in rules.gate(self._bindings, name, args, self.cwd):
+            for verdict in rules.gate(
+                self._bindings, name, args, self.cwd, self._command_has_a_secret
+            ):
                 if verdict.verdict == "allowed":
                     if verdict.binding.id not in recorded:
                         recorded.add(verdict.binding.id)
@@ -3033,7 +3544,15 @@ class Agent:
                 "output": "Held until you address the user's concern.",
             }
         self._note("✋ stopped until you address the user's concern")
-        return STOP_GATE_REFUSAL
+        # Carried structurally rather than sniffed: the stop gate fires on
+        # EVERY tool, parallel reads included, where an instance attribute
+        # would race between concurrent calls.
+        # `blocked`, NOT `held`: the frontend paints `held` as amber "Held —
+        # adjust", the approve-with-comment tag that tells the owner the model
+        # should rework and retry. Deny means STOP. It also matches what a
+        # stop-gated run_command already logged through `_run_meta`, so the one
+        # gate stops disagreeing with itself about what it did.
+        return _gate_outcome(STOP_GATE_REFUSAL, decision="blocked")
 
     def _skill_gate(self, name: str, args: dict) -> str | None:
         """Refusal text while a flagged oversized skill is unread, else None.
@@ -3055,7 +3574,9 @@ class Agent:
             if self._pending_skill_reads[key] <= 0:
                 del self._pending_skill_reads[key]
         self._note(f"✋ gated until read_skill: {names}")
-        return SKILL_GATE_REFUSAL.format(names=names, first=first)
+        return _gate_outcome(
+            SKILL_GATE_REFUSAL.format(names=names, first=first), decision="blocked"
+        )
 
     def _dispatch(self, name: str, args: dict) -> str:
         # The gates run before everything — a refusal must never reach an
@@ -3158,6 +3679,20 @@ class Agent:
 
         if name == "import_skill":
             return self._import_skill(args)
+
+        if name == "show_video":
+            return self._show_video(
+                str(args.get("url", "")), str(args.get("caption", "") or "")
+            )
+
+        if name == "create_rule":
+            return self._create_rule(args)
+
+        if name == "edit_rule":
+            return self._edit_rule(args)
+
+        if name == "retire_rule":
+            return self._retire_rule(args)
 
         if name == "run_command":
             # Expand any aish alias on the first word BEFORE the gate, so the
@@ -3530,6 +4065,277 @@ class Agent:
                 return f"ERROR: wrote {target} but could not make it executable: {exc}"
         return None
 
+    # ------------------------------------------------------- rule authoring
+
+    RULE_FIELD_ARGS = (
+        "description", "prose", "enabled", "expires",
+        "when_subject", "when_has", "when_like", "when_matches",
+        "when_origin", "when_action",
+        "answer_from", "never_use", "must_first",
+        "answer_must_include", "answer_must_not_include", "must_tell_me_when",
+    )
+
+    # How many matched turns the approval card lists before it summarises. The
+    # card has to fit on a phone; the count above it is the real number.
+    RULE_RETRO_SHOWN = 4
+
+    def _rules_dir(self) -> Path:
+        return rules.rule_dirs()[0]
+
+    def _rule_path(self, name: str) -> Path:
+        return self._rules_dir() / f"{name}.md"
+
+    def _rule_card(self, rule: "rules.Rule", text: str, verb: str) -> str:
+        """What the owner actually approves: the compiled MEANING plus the
+        turns this would have changed. Not a YAML diff — he is agreeing to a
+        behaviour, and the file is an implementation detail he did not write."""
+        parts = [f"{verb} rule '{rule.name}'", "", rules.explain(rule)]
+        history = rules.past_turns(Path(self.state_dir)) if self.state_dir else []
+        match = rules.retro_match(rule, history, meaning=self._meaning_scorer())
+        if match.per_call:
+            parts += ["", "This arms on every turn and fires only on a matching "
+                          "action — and past calls are not replayed here, so there "
+                          "is no history to show."]
+        elif match.checked:
+            parts += ["", f"Over your last {match.checked} turns this would have "
+                          f"bound on {len(match.bound)}."]
+            for turn in match.bound[:self.RULE_RETRO_SHOWN]:
+                parts.append(f"  · {turn['prompt'][:100]}")
+            if len(match.bound) > self.RULE_RETRO_SHOWN:
+                parts.append(f"  · … and {len(match.bound) - self.RULE_RETRO_SHOWN} more")
+            if not match.bound:
+                # Said plainly rather than left as an empty list: a rule that
+                # binds on nothing you have ever asked is either about the
+                # future or written wrong, and only the owner can tell which.
+                parts.append("  (nothing in your history — it may still be right.)")
+        return "\n".join(parts)
+
+    def _write_rule(self, path: Path, text: str, rule: "rules.Rule", verb: str) -> str:
+        """One write, through the SAME diff-approval gate as any other file. A
+        rule is the artifact class that binds the model, so the model creating
+        one silently would be the engine's own failure mode in its authoring
+        path."""
+        if self.approve_write is None:
+            return "ERROR: no write approver available; cannot change rules."
+        plan = files.plan_write(str(path), text, self.cwd)
+        if plan.error:
+            return f"ERROR: {plan.error}"
+        plan = dataclasses.replace(
+            plan, note=self._rule_card(rule, text, verb),
+            rule=rule.name, rule_verb=verb,
+        )
+        decision = self.approve_write(plan)
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            return _with_feedback(WRITE_DENIED, decision.comment)
+        if isinstance(decision, Approved):
+            return WRITE_HELD_FOR_ADJUSTMENT.format(comment=decision.comment)
+        if not decision:
+            return WRITE_DENIED
+        files.commit(plan)
+        return (
+            f"{verb} rule '{rule.name}'.\n\n{rules.explain(rule)}\n\n"
+            "It is in force from your next turn."
+        )
+
+    def _rule_fields(self, args: dict) -> dict:
+        return {
+            key: args[key] for key in self.RULE_FIELD_ARGS
+            if args.get(key) not in (None, "")
+        }
+
+    def _compiled_fields(self, args: dict, existing: dict | None = None) -> dict | str:
+        """Field values from the owner's own words, or the sentence to show him.
+
+        The acting model's job is to PASS THROUGH what he asked for — which
+        models are reliable at — and the grammar lives in one place, versioned
+        with the code, so changing the vocabulary does not require every model
+        on every backend to relearn it. Naming fields directly still works and
+        is what happens when no compiler is reachable; a rule the owner asked
+        for out loud must not depend on a second model being up.
+        """
+        request = str(args.get("request", "") or "").strip()
+        named = self._rule_fields(args)
+        if not request:
+            return named
+        try:
+            ask = self.rule_compiler or rule_compiler.make_compiler(self.model)
+        except Exception as exc:  # noqa: BLE001 — no backend is a fallback, not a crash
+            if named:
+                return named
+            return (
+                f"ERROR: could not reach a model to turn that into a rule ({exc}). "
+                "Call create_rule again naming the fields directly."
+            )
+        try:
+            compiled = rule_compiler.compile_request(
+                request, ask, self._known_tool_names(), existing=existing
+            )
+        except Exception as exc:  # noqa: BLE001 — a dead backend is a fallback
+            # `make_compiler` only CONSTRUCTS the callable; the connection
+            # happens on the first ask, so catching at construction covered
+            # half the failure. Without this the owner gets "tool 'create_rule'
+            # failed internally" for a model being down.
+            if named:
+                return named
+            return (
+                f"ERROR: could not reach a model to turn that into a rule ({exc}). "
+                "Call create_rule again naming the fields directly."
+            )
+        if compiled.problem:
+            # Handed back whole. It names WHAT could not be expressed and what
+            # the two options are, and the second option — "this becomes a
+            # request to extend aish" — is the point: a failed compile is a
+            # feature request in structured form.
+            # Marked as a failure even though the text is for a person: no rule
+            # was written, and a call that wrote nothing must not log green.
+            return "ERROR: " + compiled.problem
+        # Anything the acting model named itself wins: it heard the whole
+        # conversation and the compiler heard one sentence of it.
+        return {**compiled.fields, **named}
+
+    def _rule_file_lint(self, plan: "files.WritePlan") -> str | None:
+        """Refuse a raw write into the rules folder that would not lint.
+
+        Without this the "unskippable" claim is false by one hop: write_file
+        pointed at ~/.config/aish/rules/ lands whatever it likes, and the
+        approval card is raw YAML with no meaning and no retro-match. Load-time
+        parse still makes a BROKEN rule loud, and bind time catches a route to
+        a missing tool — but a `never_use` naming a misspelled tool is checked
+        on neither, and a restriction that never fires looks exactly like one
+        that works.
+
+        Hand-editing is untouched: the owner's editor does not come through
+        here. This gates the MODEL's raw path, which is the one the system
+        prompt could otherwise only advise against — and advice is the failure
+        rules exist to abolish.
+
+        Known asymmetry: this RESOLVES the target while `load_rules` globs the
+        link, so a symlink inside the rules folder pointing outside it would
+        skip this check and still be loaded. Reaching that state needs an
+        approved `ln -s` first, so it is defence-in-depth rather than a door —
+        recorded here so the next reader does not have to rediscover it.
+        """
+        try:
+            target = plan.target.resolve()
+            if not any(target.is_relative_to(d.resolve()) for d in rules.rule_dirs()):
+                return None
+        except OSError:
+            return None
+        if target.suffix != ".md":
+            return None
+        _rule, errors = rules.lint(plan.new, known_tools=self._known_tool_names())
+        if not errors:
+            return None
+        return (
+            f"ERROR: {_display_path(target)} is in the rules folder, which holds rule "
+            f"files and nothing else — and that would not load as one: "
+            f"{'; '.join(errors)} Use create_rule or edit_rule, which render the file "
+            "for you and show the user what it means before it is saved."
+        )
+
+    def _create_rule(self, args: dict) -> str:
+        """Author a rule (#205). The lint is UNSKIPPABLE — it runs here, before
+        the write, and a failing lint means no file lands. If editing a rule
+        were an ordinary file write then "run the linter" would be advice,
+        which is precisely the failure the rules engine exists to abolish,
+        reappearing inside its own authoring path."""
+        name = str(args.get("name", "") or "").strip()
+        path = self._rule_path(name) if rules.NAME_RE.match(name) else None
+        if path is not None and path.exists():
+            return (
+                f"ERROR: a rule named {name!r} already exists. Use edit_rule to change "
+                "it — that carries over everything you do not name, so a rule cannot "
+                "lose what it already did."
+            )
+        fields = self._compiled_fields(args)
+        if isinstance(fields, str):
+            return fields
+        fields = {**fields, "name": name or str(fields.get("name", "") or "")}
+        if not rules.NAME_RE.match(str(fields["name"])):
+            return (
+                f"ERROR: invalid rule name {fields['name']!r} — lowercase letters, "
+                "digits and hyphens, e.g. 'bounded-material'."
+            )
+        target = self._rule_path(str(fields["name"]))
+        if target.exists():
+            return (
+                f"ERROR: a rule named {fields['name']!r} already exists. Use edit_rule "
+                "to change it — that carries over everything you do not name, so a "
+                "rule cannot lose what it already did."
+            )
+        return self._compile_and_write(fields, verb="Created")
+
+    def _edit_rule(self, args: dict) -> str:
+        """Change named fields of an existing rule. A PATCH, never a rewrite:
+        whatever is not named is read from the file and written back unchanged.
+        Regenerating a working rule from one sentence of prose is #205's
+        sharpest risk, so "start over" is kept out of the input space."""
+        name = str(args.get("name", "") or "").strip()
+        path = self._rule_path(name) if rules.NAME_RE.match(name) else None
+        if path is None or not path.exists():
+            return f"ERROR: no rule named {name!r} in {_display_path(self._rules_dir())}."
+        try:
+            current = rules.author_fields(path)
+        except OSError as exc:
+            return f"ERROR: could not read {_display_path(path)} ({exc})."
+        changes = self._compiled_fields(args, existing=current)
+        if isinstance(changes, str):
+            return changes
+        if not changes:
+            return (
+                "ERROR: edit_rule needs either `request` (what should change, in the "
+                "user's words) or at least one field. Name only what changes — have: "
+                f"{', '.join(self.RULE_FIELD_ARGS)}."
+            )
+        # The compiler was already shown `current`, so its output is the merged
+        # rule; a field-only call still has to be merged here. Either way the
+        # name never moves: renaming through an edit would orphan the file.
+        fields = {**current, **changes, "name": name}
+        return self._compile_and_write(fields, verb="Updated")
+
+    def _retire_rule(self, args: dict) -> str:
+        """Stop a rule binding, reversibly. The file stays — retire, don't
+        delete (the knowledge layer's L4), which is also why there is no delete
+        verb here: the corpus is git-backed and removing a file is the owner's
+        own call, made with his own hands."""
+        name = str(args.get("name", "") or "").strip()
+        path = self._rule_path(name) if rules.NAME_RE.match(name) else None
+        if path is None or not path.exists():
+            return f"ERROR: no rule named {name!r} in {_display_path(self._rules_dir())}."
+        try:
+            text = rules.disable_text(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            return f"ERROR: could not read {_display_path(path)} ({exc})."
+        # A TEXT edit, deliberately: retiring must work on a rule that does not
+        # compile, and a broken rule shouting every session is exactly when the
+        # owner reaches for this. Rendering it afresh would refuse.
+        rule, _errors = rules.lint(text)
+        if rule is None:
+            rule = rules.Rule(
+                name=name, description="(this rule does not compile)", prose="",
+                trigger="unknown", tier=0, fail=rules.FAIL_DEFAULT, obligations=(),
+                status="disabled",
+            )
+        return self._write_rule(path, text, rule, verb="Retired")
+
+    def _compile_and_write(self, fields: dict, verb: str) -> str:
+        """Render → lint → card → write. The model never emits the file: it
+        names field values and this renders the YAML, which deletes an entire
+        failure class (quoting, indentation, key names) that no author, human
+        or model, was reliably getting right."""
+        try:
+            text = rules.render(fields)
+        except rules.LintError as exc:
+            return f"ERROR: {exc}"
+        rule, errors = rules.lint(text, known_tools=self._known_tool_names())
+        if rule is None:
+            return (
+                f"ERROR: that rule did not validate: {'; '.join(errors)} "
+                "Fix and call again."
+            )
+        return self._write_rule(self._rule_path(str(fields["name"])), text, rule, verb)
+
     def _import_skill(self, args: dict) -> str:
         """Import a skill (#139). Untrusted content — the whole skill is shown in
         ONE consolidated review (every file's contents, syntax-highlighted, plus
@@ -3610,6 +4416,8 @@ class Agent:
             )
         if plan.error:
             return f"ERROR: {plan.error}"
+        if refusal := self._rule_file_lint(plan):
+            return refusal
         # Writes into the ephemeral scratch workspace are auto-approved (issue
         # #70) — no diff card. Confined strictly inside the scratch dir;
         # anything resolving outside falls through to the normal approval gate.

@@ -6,6 +6,7 @@ developer's real phone."""
 import pytest
 
 from aish import notify as notify_module
+from aish import rule_compiler as rule_compiler_module
 from aish import rules as rules_module
 from aish import skills as skills_module
 from aish import tool_plugins as tool_plugins_module
@@ -59,3 +60,29 @@ def no_real_notifications(monkeypatch):
     """
     monkeypatch.setenv("AISH_NOTIFY", "0")
     assert not notify_module.enabled()
+
+
+@pytest.fixture(autouse=True)
+def no_real_rule_compiler(monkeypatch):
+    """The prose→rule compiler talks to a MODEL. Every test today injects
+    `rule_compiler_ask`, so nothing reaches a backend — but that is per-test
+    discipline, and the notification lesson in CLAUDE.md is that a module which
+    reaches outside the process needs a suite-wide guard instead. A test that
+    forgets to inject now fails loudly here rather than hanging on a connection
+    or, on a developer machine with ollama up, quietly consuming a real model.
+    """
+
+    class CompilerReached(BaseException):
+        """BaseException, not Exception: `_compiled_fields` treats any
+        Exception as "the backend is down" and falls back to named fields, so
+        an AssertionError here was swallowed on the request+fields shape and
+        the guard went quiet exactly where a test is most likely to be wrong.
+        An assertion is never an operational fallback condition."""
+
+    def refuse(model=None):
+        raise CompilerReached(
+            "a test tried to build the real prose→rule compiler — inject "
+            "Agent(rule_compiler_ask=...) or patch rule_compiler.make_compiler"
+        )
+
+    monkeypatch.setattr(rule_compiler_module, "make_compiler", refuse)

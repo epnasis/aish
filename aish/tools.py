@@ -536,6 +536,13 @@ def _filter_topic(text: str, topic: str) -> str:
     return "\n".join(out)
 
 
+_WHEN_SUBJECT = (
+    "Which subject the trigger examines: 'prompt' (what the user typed, plus their "
+    "attachments), 'session' (how this session was started), 'action' (the call "
+    "about to run), or 'always'. Pick the NARROWEST one that is true — a rule that "
+    "binds every turn costs every turn."
+)
+
 TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -813,6 +820,37 @@ TOOL_SCHEMAS = [
                             "Optional word or phrase: returns only matching lines "
                             "with context from the full page text."
                         ),
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_video",
+            "description": (
+                "Show the user a video they can play. Call this whenever a video "
+                "answers the question better than text — how something looks, how "
+                "something is done, what a place is like. It checks the link is one "
+                "the app can actually play and returns the exact line to put in your "
+                "answer. NEVER paste a bare video link and hope: a link to a PAGE "
+                "about a video, a channel, or a playlist does not play. To find one, "
+                "web_search for it first and pass the video's own link here."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The video's own link — youtube.com/watch?v=…, "
+                        "youtu.be/… or youtube.com/shorts/…",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Short label for the link, e.g. 'Ubud rice "
+                        "terraces from above'.",
                     },
                 },
                 "required": ["url"],
@@ -1128,6 +1166,196 @@ TOOL_SCHEMAS = [
                     },
                 },
                 "required": ["repo"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_rule",
+            "description": (
+                "Write a RULE — a standing instruction aish ENFORCES on you, unlike a "
+                "skill or a memory, which only inform you. Create one when the user says "
+                "something should ALWAYS or NEVER happen ('always use show_image', 'never "
+                "search the web when I give you a link'). For a one-off, just do it; for "
+                "a fact about them or their world, use remember instead. "
+                "USUALLY YOU JUST PASS THE REQUEST THROUGH: put what the user said, in "
+                "their own words, in 'request' and stop there. aish translates it, "
+                "checks it, and shows them what it MEANS before anything is saved — you "
+                "do not write the file, you do not write YAML, and you do not need to "
+                "know the rule grammar. Name the individual fields only if you already "
+                "know them exactly. If the request cannot be expressed as a rule, aish "
+                "says what could not be expressed and why; relay that to the user "
+                "verbatim — it is a feature request for aish, not a reason to write "
+                "vague prose. RULES ONLY RESTRICT: there is no verb that grants "
+                "permission or auto-approves anything, by design."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "request": {
+                        "type": "string",
+                        "description": "What the user asked for, in THEIR words — "
+                        "'always use show_image for pictures', 'never search the web "
+                        "when I give you a link'. The normal way to call this.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Short kebab-case name, e.g. 'bounded-material'. "
+                        "It is how the user will refer to the rule. Optional when you "
+                        "pass 'request' — aish names it.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "One line: what the rule requires, in the user's "
+                        "own terms. Shown whenever the rule binds.",
+                    },
+                    "when_subject": {"type": "string", "description": _WHEN_SUBJECT},
+                    "when_has": {
+                        "type": "string",
+                        "description": "For when_subject='prompt': what the message must "
+                        "carry — 'material' (a link, an attachment or a typed "
+                        "path), 'link', 'attachment' or 'path'.",
+                    },
+                    "when_like": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "For when_subject='prompt': 3-5 EXAMPLE MESSAGES, "
+                        "written the way the user actually types (include their other "
+                        "language if they use one). Matched by MEANING, not by words. "
+                        "Use this whenever the condition is about what a message means "
+                        "— 'when I ask to be shown something', 'when I'm planning a "
+                        "trip'. This is almost always what you want.",
+                    },
+                    "when_matches": {
+                        "type": "string",
+                        "description": "For when_subject='prompt': a regex. ONLY for a "
+                        "literal string such as a domain. NEVER a list of words standing "
+                        "in for a meaning — 'show|display|picture' fires on 'the Docker "
+                        "image is broken' and misses the same sentence in Polish. aish "
+                        "refuses those. Use when_like instead.",
+                    },
+                    "when_origin": {
+                        "type": "string",
+                        "description": "For when_subject='session': 'owner' (the user is "
+                        "there) or 'automation' (nobody is).",
+                    },
+                    "when_action": {
+                        "type": "object",
+                        "description": "For when_subject='action': any of tool, "
+                        "path_under, command_starts_with. All named conditions must hold.",
+                    },
+                    "answer_from": {
+                        "type": "string",
+                        "description": "A tool name, or 'material' meaning what the "
+                        "user handed over (aish picks the right reader for each kind). "
+                        "Everything else is then refused for this answer.",
+                    },
+                    "never_use": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tool names that must not run on a matching turn.",
+                    },
+                    "must_first": {
+                        "type": "string",
+                        "description": "A tool that must have RUN before the answer is "
+                        "delivered. Checked at the end of the turn against what actually "
+                        "happened, not against what you say happened.",
+                    },
+                    "answer_must_include": {
+                        "type": "string",
+                        "description": "What the finished answer must contain. Name "
+                        "something the USER would notice: 'picture', 'video', "
+                        "'sources' (links to whatever aish read). For 'either will "
+                        "do', pass {\"any_of\": [\"picture\", \"video\"]}. For "
+                        "something about the wording, pass {\"pattern\": \"<regex>\"}. "
+                        "A plain phrase is NOT accepted — a check nothing can evaluate "
+                        "is a promise nothing keeps. Never name a TOOL here: which "
+                        "tool ran is an implementation detail the user never sees.",
+                    },
+                    "answer_must_not_include": {
+                        "type": "string",
+                        "description": "A named check the answer must FAIL: "
+                        "'raw_image_links'. Same rule — named checks only.",
+                    },
+                    "must_tell_me_when": {
+                        "type": "string",
+                        "description": "A failure the user must be told about rather than "
+                        "quietly patched over, e.g. 'the material could not be read'.",
+                    },
+                    "prose": {
+                        "type": "string",
+                        "description": "The body: WHY this rule exists, in the user's "
+                        "words. Shown to you when the rule binds, so write what a reader "
+                        "needs in order to comply well — never the obligation itself, "
+                        "which the fields above already enforce.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_rule",
+            "description": (
+                "Change an existing rule. Put what should CHANGE — in the user's own "
+                "words — in 'request' ('also cover attachments'), or name the specific "
+                "fields. Either way everything you do not mention is carried over "
+                "unchanged, so a rule cannot silently lose what it already did. NEVER "
+                "re-state the whole rule: that is exactly how a working rule gets "
+                "quietly broken by one sentence of new prose."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The rule to change."},
+                    "request": {
+                        "type": "string",
+                        "description": "What should change, in the user's words. "
+                        "Describe the CHANGE, never the whole rule.",
+                    },
+                    "description": {"type": "string"},
+                    "when_subject": {"type": "string", "description": _WHEN_SUBJECT},
+                    "when_has": {"type": "string"},
+                    "when_like": {"type": "array", "items": {"type": "string"}},
+                    "when_matches": {"type": "string"},
+                    "when_origin": {"type": "string"},
+                    "when_action": {"type": "object"},
+                    "answer_from": {"type": "string"},
+                    "never_use": {"type": "array", "items": {"type": "string"}},
+                    "must_first": {"type": "string"},
+                    "answer_must_include": {"type": "string"},
+                    "answer_must_not_include": {"type": "string"},
+                    "must_tell_me_when": {"type": "string"},
+                    "prose": {"type": "string"},
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "false retires the rule; true brings it back.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "retire_rule",
+            "description": (
+                "Stop a rule binding, reversibly — the file stays and the user can bring "
+                "it back with edit_rule. Use when the user says a rule is wrong, "
+                "annoying, or no longer applies. There is no delete: the rules folder is "
+                "the user's own git-backed knowledge, and removing a file from it is "
+                "theirs to do."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The rule to retire."},
+                },
+                "required": ["name"],
             },
         },
     },

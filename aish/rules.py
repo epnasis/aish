@@ -19,7 +19,9 @@ wedges a small model into a stall-out).
 
 from __future__ import annotations
 
+import json
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -56,6 +58,9 @@ TRIGGER_MESSAGE_SHAPE = "message_shape"
 TRIGGER_SESSION_CONTEXT = "session_context"
 TRIGGER_ACTION_SHAPE = "action_shape"
 TRIGGER_ALWAYS = "always"
+# The trigger that needs MEANING. Anchored on examples the owner writes, not on
+# a threshold he has to imagine: a miss is fixed by adding one more example.
+TRIGGER_MESSAGE_MEANING = "message_meaning"
 
 # The VERBS a `then:` block can use. Every one is a RESTRICTION (see the module
 # docstring) and every one is a plain English imperative, in the ESLint
@@ -65,15 +70,111 @@ TRIGGER_ALWAYS = "always"
 VERB_ANSWER_FROM = "answer_from"
 VERB_NEVER_USE = "never_use"
 VERB_MUST_TELL_ME_WHEN = "must_tell_me_when"
-VERBS = frozenset({VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_TELL_ME_WHEN})
+VERB_MUST_FIRST = "must_first"
+# `must_first: answer` — say something before you run anything. "Answer" is HIS
+# word, not a tool, and the check is pure ordering over the turn's own record:
+# was any assistant text produced before the first tool call. It needs no
+# understanding of whether he asked a question, which is why it was wrong to
+# call this inexpressible. Enforced at the GATE, never at turn end — an
+# ordering that has already gone wrong cannot be repaired by asking.
+FIRST_ANSWER = "answer"
+VERB_ANSWER_MUST_INCLUDE = "answer_must_include"
+VERB_ANSWER_MUST_NOT_INCLUDE = "answer_must_not_include"
+# Two general forms replacing the fixed list of named checks. Both name a TOOL.
+VERBS = frozenset({
+    VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_TELL_ME_WHEN,
+    VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE,
+})
+# Verbs decided at the END of a turn, against the answer and the turn's own
+# record — not before a call. The gate cannot see either.
+VERIFY_VERBS = frozenset({
+    VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE,
+})
+# The verbs whose value is a tool name (or a choice of them), not a check name.
 # Designed, unbuilt — named here so a lint failure can say what is MISSING
 # rather than merely that the file is wrong (#205).
 VERBS_DESIGNED = {
-    "answer_must_include": "the answer must contain something — needs the Verify point",
-    "answer_must_not": "the answer must avoid something — needs the Verify point",
-    "must_first": "do A before B — needs the sequence check",
     "ask_me_first": "hold for the owner — needs the hold verb",
 }
+
+# What `answer_must_include:` / `answer_must_not_include:` accept. A named detector, or
+# `{pattern: <regex>}` for anything else — both are STRUCTURAL, which is the
+# admission price: a verb ships only if it compiles to a declared check. A free
+# phrase ("be terser") is a judged question and is refused by name until that
+# tier exists, rather than shipping as a promise nothing keeps.
+# What `answer_must_include:` names: A KIND OF THING A PERSON NOTICES in an
+# answer. Not a tool, and not a media-type-per-combination name.
+#
+# Three attempts got here. The first coined a name per combination
+# (shows_a_picture, shows_a_video, shows_something_visual) — hardcoded, and it
+# grew with every question asked. The second named the TOOL instead
+# (`answer_must_include_result_of: show_image`) — which was worse, because it
+# put the plumbing in the owner's sentence. His objection, and it settles it:
+#
+#   "I ask a question, I get something in return. All the things in between are
+#    implementation details… if I ask you to show me something, I would like you
+#    to actually show me something. Show means visual. Video or picture."
+#
+# So the vocabulary is what he can SEE in an answer. That list does not have
+# the growth problem tools have: tools grow forever, one per new API, while the
+# kinds of thing a person notices are few and stay few. It grows when human
+# perception changes, which is never.
+#
+# How a kind is CHECKED — which tool had to run, what token has to appear — is
+# code's problem, invisible in the rule file. That is the layering: he writes
+# the outcome, the code knows how to verify it.
+KIND_PICTURE = "picture"
+KIND_VIDEO = "video"
+KIND_SOURCES = "sources"
+ANSWER_KINDS = {
+    KIND_PICTURE: "a picture you can actually see",
+    KIND_VIDEO: "a video you can play",
+    KIND_SOURCES: "a link to whatever it read to answer",
+}
+
+# `any_of:` — the ONE place the grammar says "or". Named rather than left as a
+# bare list, because `never_use: [a, b]` already means NONE OF THESE, and two
+# lists in one file meaning opposite things is the trap that produced the
+# coined-per-combination names in the first place. What goes inside is only
+# ever kind names, so it cannot grow into a tree.
+CHOICE_KEY = "any_of"
+CHOICE_MAX = 4
+
+# Where in the answer a check looks. TWO values, deliberately — not a coordinate
+# system. "Opening" exists because that is where a model's reflex lands: every
+# model reacts to what it was just told in its first breath, so an apology or a
+# flourish is there or nowhere. Checking one paragraph instead of the whole
+# answer is also what makes a meaning check per turn cheap enough to run.
+WHERE_ANYWHERE = "anywhere"
+WHERE_OPENING = "opening"
+WHERE_ENDING = "ending"
+WHERE_VALUES = (WHERE_ANYWHERE, WHERE_OPENING, WHERE_ENDING)
+
+# The same word as the trigger's, doing the same job on the other side: give
+# examples, match by meaning. One word to learn, not two.
+MEANING_KEY = "like"
+
+# What each kind is made of, in code, where the owner never has to look.
+#
+# `needs` is the tool whose work makes the thing real: a picture is one aish
+# fetched and stored, not a URL pasted into the text — that renders as a broken
+# box, which is exactly the thing he WOULD notice. `conditional` marks a kind
+# that only exists when there was something to show: nothing read means no
+# sources, so the rule is met. That is why the second verb disappeared — the
+# condition belongs to the kind, not to a verb.
+KIND_SPECS: dict[str, dict] = {
+    KIND_PICTURE: {"needs": "show_image", "cite": "result", "conditional": False},
+    KIND_VIDEO: {"needs": "show_video", "cite": "result", "conditional": False},
+    KIND_SOURCES: {"needs": "read_url", "cite": "args:url", "conditional": True},
+}
+
+# Both show_* tools hand back a line containing the exact token to paste, in
+# (parentheses). Reading it back out is what makes the check an equality rather
+# than a guess about shape.
+_CITE_TOKEN_RE = re.compile(r"\((?P<inner>[^)\s]+)\)")
+
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
+_MD_LINK_RE = re.compile(r"\]\(\s*(https?://[^)\s]+)|(?<![\w(])(https?://[^\s)<>\]]+)")
 
 # `answer_from: material` — the obligation names THE MATERIAL THE OWNER HANDED
 # OVER, not a tool. The reader is resolved at bind time, so one rule covers
@@ -81,7 +182,23 @@ VERBS_DESIGNED = {
 # appears. `answer_from: <tool>` still works; this is a second form of the same
 # verb. The noun is `material` on BOTH sides of the rule — `has: material` /
 # `answer_from: material` — so a reader can see they refer to the same thing.
-ROUTE_SOURCE = "source"
+# How close a message has to be to one of a rule's examples before it binds.
+# A code-held constant, never authored: no owner can imagine what 0.62 means,
+# and a number in a rule file is a number nobody can maintain. What he sees
+# instead is which of his real past messages it would have caught.
+#
+# Safe to be approximate, and this is the whole argument for allowing a fuzzy
+# trigger at all: rules only ever RESTRICT, so a wrong match costs one refused
+# or one required tool call. It cannot widen anything. A trigger this loose
+# would be indefensible on a gate that GRANTED something — which is why the
+# restriction-only law is what makes meaning-matching affordable here.
+MEANING_FLOOR = 0.62
+
+# How many examples a meaning trigger may carry. Enough to cover a phrasing in
+# two languages; few enough that the owner can read them all on the card.
+MEANING_MAX_ANCHORS = 8
+
+ROUTE_MATERIAL = "material"
 
 # The sentence that keeps `route: source` from being a promotion. A rule is the
 # one artifact class that is NOT advice, so its seeded prose is the highest-
@@ -120,7 +237,7 @@ DEFAULT_READER = "read_url"
 # `material` is the whole channel; the narrow ones exist so a rule that really
 # does mean web pages only can say so. The noun matches the obligation's value
 # (`answer_from: material`), so both sides of a rule name the same thing.
-CONTAINS_SOURCE = "source"
+CONTAINS_MATERIAL = "material"
 CONTAINS_LINK = "link"
 CONTAINS_ATTACHMENT = "attachment"
 CONTAINS_PATH = "path"
@@ -156,7 +273,7 @@ SOURCE_PATH = "path"
 SOURCE_ATTACHMENT = "attachment"
 
 DETECTOR_KINDS: dict[str, frozenset[str]] = {
-    CONTAINS_SOURCE: frozenset({SOURCE_URL, SOURCE_ATTACHMENT, SOURCE_PATH}),
+    CONTAINS_MATERIAL: frozenset({SOURCE_URL, SOURCE_ATTACHMENT, SOURCE_PATH}),
     CONTAINS_LINK: frozenset({SOURCE_URL}),
     CONTAINS_ATTACHMENT: frozenset({SOURCE_ATTACHMENT}),
     CONTAINS_PATH: frozenset({SOURCE_PATH}),
@@ -178,7 +295,7 @@ RETIRED_KEYS = {
     "field": "the field is the key now — `when: session: origin:`.",
     "is": "now `when: session: origin: <value>`.",
     "is_not": "now `when: session: origin: automation` — a positive match, not a negation.",
-    "route": f"now `then: {VERB_ANSWER_FROM}:`, and its `source` value is `{ROUTE_SOURCE}`.",
+    "route": f"now `then: {VERB_ANSWER_FROM}:`, and its `source` value is `{ROUTE_MATERIAL}`.",
     "prohibit": f"now `then: {VERB_NEVER_USE}:`.",
     "disclose": (
         f"now `then: {VERB_MUST_TELL_ME_WHEN}:`, and it takes a plain phrase — "
@@ -239,6 +356,18 @@ FAIL_DEFAULT = FAIL_HOLD  # over-restriction is the safe direction (R1)
 # than GATE_MAX_REFUSALS so tuning the skill gate cannot silently retune this.
 RULE_MAX_REFUSALS = 2
 
+# How many times a rule may ASK for the answer to be reworked before it gives
+# up and lets it through with a note. Same family as the refusal bound, its own
+# constant so tuning one cannot silently retune the other. The owner is the
+# loop only at the bound, which is the point: he would rather aish did the
+# asking than do it himself.
+RULE_MAX_ASKS = 2
+
+# Decisions and statuses that mean the call did not deliver. Named here rather
+# than imported from agent.py, which imports this module.
+REFUSED_DECISIONS = frozenset({"denied", "held", "blocked", "rejected"})
+STATUS_FAILED = "failed"
+
 # Write-time caps (contract §8.5) — named, so a truncated record can say which
 # cap cut it.
 RULE_EVAL_MAX = 24  # evaluated[] rows; abstentions drop first, binds never
@@ -269,6 +398,8 @@ class Rule:
     # verdict on a named rule rather than an exception inside the gate.
     pattern: re.Pattern | None = None
     contains: str = ""  # built-in message detector, e.g. `contains: url`
+    # `when: prompt: like:` — the owner's own example messages.
+    anchors: tuple[str, ...] = ()
     field_name: str = ""
     equals: str = ""
     not_equals: str = ""
@@ -280,7 +411,7 @@ class Rule:
 
     @property
     def route_target(self) -> str:
-        """The tool name, or ROUTE_SOURCE when the rule routes to whatever
+        """The tool name, or ROUTE_MATERIAL when the rule routes to whatever
         source the message carried."""
         for obligation in self.obligations:
             if obligation["verb"] == VERB_ANSWER_FROM:
@@ -291,7 +422,15 @@ class Rule:
 # What `when: action:` can examine about a call the model is ABOUT to make.
 # Every one is a fact the harness holds before dispatch, so the check is Tier 0
 # and the answer is known before anything runs.
-ACTION_FIELDS = ("tool", "path_under", "command_starts_with", "sends_to", "host")
+ACTION_FIELDS = (
+    "tool", "path_under", "command_starts_with", "command_has", "sends_to", "host",
+)
+
+# The one value `command_has:` takes. Not a pattern the owner has to write: it
+# asks the harness whether any secret he has STORED appears verbatim in the
+# command — a join against his own keychain, which no regex could match without
+# him pasting the secret into a rule file, defeating the purpose entirely.
+COMMAND_HAS_SECRET = "a_secret"
 
 
 @dataclass
@@ -338,6 +477,7 @@ class Binding:
     present: tuple[str, ...] = ()  # material already in context; no reader to call
     # Turn state.
     rounds: int = 0  # refusals issued so far
+    asks: int = 0  # verify reworks requested so far
     max_rounds: int = RULE_MAX_REFUSALS
     overridden: bool = False  # the owner allowed the violation for this turn
     route_calls: int = 0
@@ -395,6 +535,7 @@ class _Compiled(NamedTuple):
     equals: str
     not_equals: str
     action: dict
+    anchors: tuple[str, ...] = ()
 
 
 def _as_list(value: Any) -> list[str]:
@@ -466,6 +607,7 @@ def _compile(front: dict) -> _Compiled:
         )
 
     pattern: re.Pattern | None = None
+    anchors: tuple[str, ...] = ()
     contains = field_name = equals = not_equals = ""
     action: dict = {}
     if SUBJECT_ALWAYS in when:
@@ -480,6 +622,12 @@ def _compile(front: dict) -> _Compiled:
             fields = {"tool": fields.strip()}
         if not isinstance(fields, dict) or not fields:
             raise RuleError("`action:` needs a field under it — " + ", ".join(ACTION_FIELDS))
+        if (has := fields.get("command_has")) and str(has).strip() != COMMAND_HAS_SECRET:
+            raise RuleError(
+                f"`action: command_has:` takes only `{COMMAND_HAS_SECRET}` — it asks "
+                "whether one of your stored secrets appears in the command. Writing "
+                "the secret itself into a rule file would be the very thing it stops."
+            )
         unknown_fields = [key for key in fields if key not in ACTION_FIELDS]
         if unknown_fields:
             raise RuleError(
@@ -503,21 +651,55 @@ def _compile(front: dict) -> _Compiled:
             raise RuleError("`prompt:` needs `has:` or `matches:` under it")
         contains = str(fields.get("has", "") or "").strip().casefold()
         source = str(fields.get("matches", "") or "").strip()
-        if contains and source:
-            raise RuleError("`prompt:` takes `has:` OR `matches:`, not both")
+        anchors = tuple(
+            line.strip() for line in _as_list(fields.get("like")) if line.strip()
+        )
+        chosen = [name for name, value in
+                  (("has", contains), ("matches", source), ("like", anchors))
+                  if value]
+        if len(chosen) > 1:
+            raise RuleError(
+                "`prompt:` takes ONE of `has:`, `matches:` or `like:` — got "
+                + ", ".join(chosen)
+            )
+        if anchors and len(anchors) > MEANING_MAX_ANCHORS:
+            raise RuleError(
+                f"`like:` takes at most {MEANING_MAX_ANCHORS} examples — "
+                "they all have to fit on the approval card, and past a handful "
+                "another example stops changing what matches"
+            )
+        if contains == "source":
+            # The doc, the seeded prose and the whole R1 analysis standardised
+            # on `material`; only the frontmatter still said `source`, so the
+            # documentation taught a spelling the compiler refused. Whichever
+            # word won had to win everywhere — and `material` is the one that
+            # reads: "the prompt has material" covers an attachment, where "the
+            # prompt has a source" flavours toward citations and collides with
+            # "source code" in the rule about not editing aish itself.
+            raise RuleError(
+                f"`has: source` was renamed — write `has: {CONTAINS_MATERIAL}`. "
+                "Same for `answer_from: source`. One noun on both sides of the "
+                "rule, so a reader can see they refer to the same thing."
+            )
         if contains and contains not in CONTAINS_DETECTORS:
             raise RuleError(
                 f"unknown `has:` value {contains!r} — have "
                 + ", ".join(sorted(CONTAINS_DETECTORS))
             )
-        if not contains:
+        if anchors:
+            trigger = TRIGGER_MESSAGE_MEANING
+        elif contains:
+            trigger = TRIGGER_MESSAGE_SHAPE
+        else:
             if not source:
-                raise RuleError("`prompt:` needs `has:` or `matches:`")
+                raise RuleError(
+                    "`prompt:` needs `has:`, `like:` or `matches:`"
+                )
             try:
                 pattern = re.compile(source)
             except re.error as exc:
                 raise RuleError(f"unparseable `matches:` regex — {exc}") from exc
-        trigger = TRIGGER_MESSAGE_SHAPE
+            trigger = TRIGGER_MESSAGE_SHAPE
     else:
         fields = when[SUBJECT_SESSION]
         if not isinstance(fields, dict) or "origin" not in fields:
@@ -550,9 +732,14 @@ def _compile(front: dict) -> _Compiled:
             )
         raise RuleError(f"unknown `then:` verb {verb!r} — have " + ", ".join(sorted(VERBS)))
     if route := str(then.get(VERB_ANSWER_FROM, "") or "").strip():
-        if route == ROUTE_SOURCE and contains not in DETECTOR_KINDS:
+        if route == "source":
             raise RuleError(
-                f"`{VERB_ANSWER_FROM}: {ROUTE_SOURCE}` needs `when: prompt: has: …` "
+                f"`{VERB_ANSWER_FROM}: source` was renamed — write "
+                f"`{VERB_ANSWER_FROM}: {ROUTE_MATERIAL}`."
+            )
+        if route == ROUTE_MATERIAL and contains not in DETECTOR_KINDS:
+            raise RuleError(
+                f"`{VERB_ANSWER_FROM}: {ROUTE_MATERIAL}` needs `when: prompt: has: …` "
                 "— otherwise there is no material to answer from"
             )
         obligations.append(
@@ -560,6 +747,12 @@ def _compile(front: dict) -> _Compiled:
         )
     if prohibited := _as_list(then.get(VERB_NEVER_USE)):
         obligations.append({"verb": VERB_NEVER_USE, "what": prohibited})
+    if first := str(then.get(VERB_MUST_FIRST, "") or "").strip():
+        obligations.append({"verb": VERB_MUST_FIRST, "capability": first})
+    for verb in (VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE):
+        if (value := then.get(verb)) in (None, ""):
+            continue
+        obligations.append({"verb": verb, **_answer_check(verb, value)})
     if state := str(then.get(VERB_MUST_TELL_ME_WHEN, "") or "").strip():
         # Declared, seeded as prose, enforced at Verify — never at the gate.
         obligations.append({"verb": VERB_MUST_TELL_ME_WHEN, "state": state})
@@ -570,7 +763,86 @@ def _compile(front: dict) -> _Compiled:
         )
     return _Compiled(
         trigger, tuple(obligations), pattern, contains, field_name, equals,
-        not_equals, action,
+        not_equals, action, anchors,
+    )
+
+
+def _where(value: Any) -> str:
+    where = str((value or {}).get("in", WHERE_ANYWHERE) or WHERE_ANYWHERE).strip()
+    if where not in WHERE_VALUES:
+        raise RuleError("`in:` takes " + ", ".join(WHERE_VALUES) + f" — got {where!r}")
+    return where
+
+
+def slice_answer(answer: str, where: str) -> str:
+    """The part of an answer a check looks at. Paragraphs, because that is the
+    unit a person reads — not a character count, which would cut a sentence."""
+    blocks = [b for b in (answer or "").split("\n\n") if b.strip()]
+    if not blocks or where == WHERE_ANYWHERE:
+        return answer or ""
+    return blocks[0] if where == WHERE_OPENING else blocks[-1]
+
+
+def _answer_check(verb: str, value: Any) -> dict:
+    """Compile an `answer_must_*` value into a declared, structural check.
+
+    A KIND (or a choice of kinds) for something the reader would notice; a
+    `{pattern: <regex>}` for anything about the wording. Nothing else — a plain
+    phrase is a judged question and that tier is not built.
+    """
+    if isinstance(value, dict) and MEANING_KEY in value:
+        # The same machinery the `when: prompt: like:` trigger uses, pointed at
+        # the answer instead of the message. It is what makes "no sycophantic
+        # openings" a per-turn check rather than an offline audit: matching a
+        # first paragraph against a handful of anchors is milliseconds, local,
+        # and multilingual. Register is exactly what similarity measures.
+        anchors = [str(a).strip() for a in _as_list(value[MEANING_KEY]) if str(a).strip()]
+        if not anchors:
+            raise RuleError(f"`{verb}: {MEANING_KEY}:` needs at least one example")
+        if len(anchors) > MEANING_MAX_ANCHORS:
+            raise RuleError(
+                f"`{verb}: {MEANING_KEY}:` takes at most {MEANING_MAX_ANCHORS} examples"
+            )
+        return {MEANING_KEY: anchors, "in": _where(value)}
+    if isinstance(value, dict) and CHOICE_KEY in value:
+        names = [str(name).strip() for name in _as_list(value[CHOICE_KEY]) if str(name).strip()]
+        if len(names) < 2:
+            raise RuleError(
+                f"`{verb}: {CHOICE_KEY}:` is for a CHOICE — give at least two, or "
+                "name one directly"
+            )
+        if len(names) > CHOICE_MAX:
+            raise RuleError(
+                f"`{verb}: {CHOICE_KEY}:` takes at most {CHOICE_MAX}. Past a handful, "
+                "a rule that accepts almost anything restricts almost nothing"
+            )
+        unknown = [name for name in names if name not in ANSWER_KINDS]
+        if unknown:
+            raise RuleError(
+                f"`{verb}: {CHOICE_KEY}:` takes {', '.join(sorted(ANSWER_KINDS))} — "
+                f"and {unknown[0]!r} is not one of them"
+            )
+        return {"kinds": names, "in": _where(value)}
+    if isinstance(value, dict):
+        pattern = str(value.get("pattern", "") or "").strip()
+        if not pattern:
+            raise RuleError(
+                f"`{verb}:` needs `pattern:` or `{CHOICE_KEY}:` under it, or the name "
+                "of something the reader would see: " + ", ".join(sorted(ANSWER_KINDS))
+            )
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise RuleError(f"unparseable `{verb}: pattern:` — {exc}") from exc
+        return {"pattern": pattern, "in": _where(value)}
+    name = str(value).strip()
+    if name in ANSWER_KINDS:
+        return {"kinds": [name], "in": WHERE_ANYWHERE}
+    raise RuleError(
+        f"`{verb}: {name!r}` is a plain phrase, which only a judge can check, and "
+        f"the judged tier is not built. Name something the reader would SEE — "
+        + ", ".join(sorted(ANSWER_KINDS))
+        + f" — or, for anything about the wording, `{verb}: {{pattern: <regex>}}`."
     )
 
 
@@ -585,12 +857,7 @@ def _parse(path: Path) -> Rule:
     """
     text = path.read_text(encoding="utf-8")
     front: dict = {}
-    body = text
-    header = ""
-    if text.startswith("---"):
-        parts = text.split("---", 2)
-        if len(parts) == 3:
-            _, header, body = parts
+    header, body = split_frontmatter(text)
     name = path.stem
     prose = body.strip()
     description = ""
@@ -645,14 +912,15 @@ def _parse(path: Path) -> Rule:
         path=path,
         trigger=compiled.trigger,
         # DERIVED, never declared: the trigger's own form says how it must be
-        # evaluated (a detector or a regex is structural; a semantic `about:`
-        # is scored). No policy language asks the author to annotate the
-        # evaluation strategy, and `tier: 1` means nothing to the owner.
-        tier=0,
+        # evaluated (a detector or a regex is structural; examples are scored).
+        # No policy language asks the author to annotate the evaluation
+        # strategy, and `tier: 1` means nothing to the owner.
+        tier=1 if compiled.trigger == TRIGGER_MESSAGE_MEANING else 0,
         fail=fail,
         obligations=compiled.obligations,
         pattern=compiled.pattern,
         contains=compiled.contains,
+        anchors=compiled.anchors,
         field_name=compiled.field_name,
         equals=compiled.equals,
         not_equals=compiled.not_equals,
@@ -714,12 +982,18 @@ def partition(rules: list[Rule], today: date | None = None) -> tuple[list[Rule],
 # ----------------------------------------------------------------- evaluate
 
 
-def evaluate(rule: Rule, ctx: TurnContext) -> tuple[str, dict]:
+def evaluate(rule: Rule, ctx: TurnContext, meaning=None) -> tuple[str, dict]:
     """(verdict, evidence) for one rule against one turn.
 
     Evidence is the INPUTS the verdict was a function of, never a rendering of
     the verdict (contract §4) — so a trigger can be re-examined after the file
     changes, and a corpus of them can be counted.
+
+    `meaning` is `SemanticIndex.sentence_scores` when a scored trigger can be
+    evaluated at all. Absent, a rule that needs meaning is `unevaluable` — a
+    THIRD answer, never a quiet yes or no. "The embedding model was down" and
+    "the rule did not apply" are different facts, and a rule whose evaluation
+    silently degrades to abstaining looks exactly like one that is working.
     """
     if rule.error:
         return VERDICT_ERROR, {"error": rule.error[:EVIDENCE_CHARS]}
@@ -731,6 +1005,8 @@ def evaluate(rule: Rule, ctx: TurnContext) -> tuple[str, dict]:
         # and skill gates already have. Binding here is not "it applied": it is
         # "it is watching", and the `gate` records say whether it ever fired.
         return VERDICT_BIND, {"on": "action", "conditions": dict(rule.action)}
+    if rule.trigger == TRIGGER_MESSAGE_MEANING:
+        return _evaluate_meaning(rule, ctx, meaning)
     if rule.trigger == TRIGGER_MESSAGE_SHAPE and rule.contains:
         sources = find_sources(ctx, rule.contains)
         evidence: dict = {
@@ -765,6 +1041,44 @@ def evaluate(rule: Rule, ctx: TurnContext) -> tuple[str, dict]:
     evidence = {"field": rule.field_name, "value": value, "required": required}
     hit = value == rule.equals if rule.equals else value != rule.not_equals
     return (VERDICT_BIND if hit else VERDICT_ABSTAIN), evidence
+
+
+def _evaluate_meaning(rule: Rule, ctx: TurnContext, meaning) -> tuple[str, dict]:
+    """Does this message MEAN something like one of the owner's examples?
+
+    The one place in the engine where a verdict is a number rather than a fact.
+    It exists because some rules really are about meaning — "when I ask to be
+    SHOWN something" is a property of the request, and it is gone by the time
+    there is an answer to check. A keyword list cannot express it: it fires on
+    "the Docker image is broken" and misses the same sentence in Polish.
+
+    Every input is recorded, and the floor in force is recorded WITH the
+    verdict (contract §4), so a threshold change later does not silently
+    rewrite what past turns meant.
+    """
+    task = (ctx.task or "").strip()
+    base: dict = {
+        "on": "task",
+        "like": list(rule.anchors),
+        "floor": MEANING_FLOOR,
+        "origin": ctx.origin,
+    }
+    if meaning is None:
+        return VERDICT_UNEVALUABLE, {**base, "why": "no embedding model available"}
+    scores = meaning(task, list(rule.anchors)) if task else None
+    if scores is None:
+        return VERDICT_UNEVALUABLE, {**base, "why": "the embedding model did not answer"}
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best, score = ranked[0] if ranked else ("", 0.0)
+    evidence = {
+        **base,
+        "closest": best,
+        "sim": round(float(score), 4),
+        # Both distributions, not only the hit: you cannot tell that a floor
+        # sits below the noise of a corpus from the matches alone.
+        "sims": {sentence: round(float(value), 4) for sentence, value in ranked},
+    }
+    return (VERDICT_BIND if score >= MEANING_FLOOR else VERDICT_ABSTAIN), evidence
 
 
 def find_urls(text: str) -> list[str]:
@@ -884,7 +1198,7 @@ def resolve_route(rule: Rule, evidence: dict) -> tuple[list[str], list[str]]:
     target = rule.route_target
     if not target:
         return [], []
-    if target != ROUTE_SOURCE:
+    if target != ROUTE_MATERIAL:
         return [target], []
     rows = list(evidence.get("sources") or [])
     readers: list[str] = []
@@ -897,14 +1211,47 @@ def resolve_route(rule: Rule, evidence: dict) -> tuple[list[str], list[str]]:
     return readers, refs
 
 
-def unsatisfiable(readers: list[str], known_tools: set[str] | None) -> list[str]:
+def wants_text_first(bindings: list[Binding]) -> list[Binding]:
+    """Bindings demanding a word before any tool runs."""
+    return [
+        binding for binding in bindings
+        if not binding.overridden
+        for obligation in binding.obligations
+        if obligation["verb"] == VERB_MUST_FIRST
+        and obligation["capability"] == FIRST_ANSWER
+    ]
+
+
+SPEAK_FIRST_REFUSAL = (
+    "The rule '{rule}' requires you to say something to the user BEFORE running "
+    "anything. {description}\n"
+    "Answer them in plain text first — even one line — then propose this call in "
+    "your next turn."
+)
+
+
+def unsatisfiable(rule: Rule, readers: list[str], known_tools: set[str] | None) -> list[str]:
     """Routed readers that are not exposed. Caught at BIND time so "the rule
     bound but its tool was gone" is a recorded fact rather than an inference
     from a later failure — a route to a missing tool would otherwise refuse
     every alternative and offer nothing."""
     if not known_tools:
         return []
-    return [reader for reader in readers if reader not in known_tools]
+    missing = [reader for reader in readers if reader not in known_tools]
+    for obligation in rule.obligations:
+        if (obligation["verb"] == VERB_MUST_FIRST
+                and obligation["capability"] != FIRST_ANSWER
+                and obligation["capability"] not in known_tools):
+            missing.append(str(obligation["capability"]))
+        # A KIND names something the reader sees, and every kind is made real
+        # by a tool. If that tool is gone the rule can never be satisfied — so
+        # it is caught here, in the tool's name, even though the rule file
+        # never mentions it.
+        for kind in obligation.get("kinds", ()):
+            needed = KIND_SPECS[kind]["needs"]
+            if needed not in known_tools:
+                missing.append(str(needed))
+    return missing
 
 
 def bind(
@@ -917,10 +1264,10 @@ def bind(
 ) -> Binding:
     readers, sources = resolve_route(rule, evidence)
     present = present_sources(evidence)
-    missing = unsatisfiable(readers, known_tools)
+    missing = unsatisfiable(rule, readers, known_tools)
     obligations = []
     for obligation in rule.obligations:
-        if obligation["verb"] == VERB_ANSWER_FROM and obligation["to"] == ROUTE_SOURCE:
+        if obligation["verb"] == VERB_ANSWER_FROM and obligation["to"] == ROUTE_MATERIAL:
             # Snapshot what "the source" meant for THIS turn (contract
             # corollary 1) — a record naming only "source" would send a later
             # reader back to guess which material was in the message. `present`
@@ -1014,10 +1361,17 @@ def affects(bindings: list[Binding], tool: str) -> bool:
     return False
 
 
-def action_matches(conditions: dict, tool: str, args: dict, cwd: str = "") -> bool:
+def action_matches(
+    conditions: dict, tool: str, args: dict, cwd: str = "", secrets_in=None
+) -> bool:
     """Whether a proposed call satisfies an `action:` condition. Every field
     ANDs, matching the sibling-keys rule, and every one is a fact the harness
-    holds BEFORE dispatch — so the answer is known before anything runs."""
+    holds BEFORE dispatch — so the answer is known before anything runs.
+
+    `secrets_in` answers "does this command contain one of his stored secrets".
+    Injected rather than imported so this module stays pure and no test can
+    reach a real keychain.
+    """
     if not conditions:
         return False
     if (want := conditions.get("tool")) and tool != want:
@@ -1025,6 +1379,10 @@ def action_matches(conditions: dict, tool: str, args: dict, cwd: str = "") -> bo
     if prefix := conditions.get("command_starts_with"):
         command = str((args or {}).get("command", "")).strip()
         if not command.startswith(prefix):
+            return False
+    if conditions.get("command_has") == COMMAND_HAS_SECRET:
+        command = str((args or {}).get("command", ""))
+        if secrets_in is None or not secrets_in(command):
             return False
     if root := conditions.get("path_under"):
         if not _touches_path(args or {}, root, cwd):
@@ -1079,7 +1437,7 @@ def _touches_path(args: dict, root: str, cwd: str) -> bool:
 
 
 def gate(bindings: list[Binding], tool: str, args: dict | None = None,
-         cwd: str = "") -> list[GateVerdict]:
+         cwd: str = "", secrets_in=None) -> list[GateVerdict]:
     """Every active binding's verdict on one proposed call, in bind order.
 
     Set membership against precomputed obligations — Tier 0 by construction,
@@ -1091,17 +1449,19 @@ def gate(bindings: list[Binding], tool: str, args: dict | None = None,
     """
     verdicts: list[GateVerdict] = []
     for binding in bindings:
-        verdict = _gate_one(binding, tool, args or {}, cwd)
+        verdict = _gate_one(binding, tool, args or {}, cwd, secrets_in)
         verdicts.append(verdict)
         if verdict.verdict != "allowed":
             break
     return verdicts
 
 
-def _gate_one(binding: Binding, tool: str, args: dict, cwd: str) -> GateVerdict:
+def _gate_one(
+    binding: Binding, tool: str, args: dict, cwd: str, secrets_in=None
+) -> GateVerdict:
     rule = binding.rule
     if rule.trigger == TRIGGER_ACTION_SHAPE and not action_matches(
-        rule.action, tool, args, cwd
+        rule.action, tool, args, cwd, secrets_in
     ):
         # Armed, watching a different action. Not a verdict about this call.
         return GateVerdict("allowed", binding, {"obligation": None, "matched": None})
@@ -1166,6 +1526,321 @@ def _refusal_text(binding: Binding, tool: str) -> str:
     )
 
 
+# ------------------------------------------------------------------ verify
+
+
+@dataclass
+class TurnEvidence:
+    """What a verify check is a function of: the answer the model proposes to
+    deliver, and the harness's own record of what ran this turn.
+
+    Both halves matter. A check over the answer ALONE can only be syntactic —
+    anything about whether the answer is grounded has to join it against what
+    actually happened, and the model does not author the trace."""
+
+    answer: str = ""
+    calls: tuple[dict, ...] = ()  # {"tool", "args", "status"} per call, in order
+    # Sentence-similarity, when a check needs meaning. None is a real answer:
+    # the check abstains rather than passing quietly.
+    meaning: Any = None
+
+    def called(self, capability: str) -> bool:
+        """Whether the capability actually RAN. A refused call is not a call:
+        conflating "the gate stopped it" with "it never happened" would have
+        verify ask for something the harness had just forbidden, and would let
+        a blocked reader satisfy a `must_first` with nothing behind it."""
+        return any(
+            call.get("tool") == capability and _ran(call) for call in self.calls
+        )
+
+    def refused(self, capability: str) -> bool:
+        """Proposed and stopped by a gate. Distinct from never tried, because
+        re-asking would goad the model against the harness's own refusal."""
+        return any(
+            call.get("tool") == capability and not _ran(call) for call in self.calls
+        )
+
+    def hosts_read(self) -> list[str]:
+        """Hosts actually FETCHED this turn, in order — the join's left side.
+        A refused or failed fetch is excluded, or the answer would be required
+        to link a page nobody read: an unsatisfiable ask that burns the bound."""
+        seen: list[str] = []
+        for call in self.calls:
+            if not _ran(call):
+                continue
+            url = str((call.get("args") or {}).get("url", "") or "")
+            host = host_of(url) if url else ""
+            if host and host not in seen:
+                seen.append(host)
+        return seen
+
+
+def _ran(call: dict) -> bool:
+    """A call that reached its implementation and did not come back failed."""
+    if call.get("decision") in REFUSED_DECISIONS:
+        return False
+    return call.get("status") != STATUS_FAILED
+
+
+@dataclass
+class VerifyFailure:
+    """One unmet obligation, and the question that will be put to the model.
+
+    `ask` is a GOAD, never a verdict: it provokes the work, the work lands in
+    the trace, and the trace is what the next check reads. Nothing the model
+    replies is ever an input to a verdict."""
+
+    binding: Binding
+    obligation: dict
+    evidence: dict
+    ask: str
+    askable: bool = True
+
+    @property
+    def verb(self) -> str:
+        return str(self.obligation["verb"])
+
+
+MUST_FIRST_ASK = (
+    "Before this answer can be delivered, the rule '{rule}' requires {capability} "
+    "to have run this turn, and it has not. {description}\n"
+    "Call {capability} now and then answer from what it returns."
+)
+
+MUST_INCLUDE_ASK = (
+    "The rule '{rule}' requires the answer to include {what}, and it does not. "
+    "{description}\n"
+    "Add it and give the answer again."
+)
+
+MUST_NOT_ASK = (
+    "The rule '{rule}' forbids the answer containing {what}, and it does. "
+    "{description}\n"
+    "Rewrite the answer without it."
+)
+
+# How to produce each kind, in the model's own terms. The rule file never says
+# a tool name; the ASK has to, because the model is the one who has to act.
+KIND_HOW = {
+    KIND_PICTURE: (
+        "Call show_image for the picture that belongs here, and paste the line it "
+        "hands back into the answer EXACTLY as written — that line is what renders."
+    ),
+    KIND_VIDEO: (
+        "Call show_video with the video's own link and paste the line it hands "
+        "back. A link to a page ABOUT a video is not a video."
+    ),
+    KIND_SOURCES: (
+        "Link the pages you read. An answer built on something the reader cannot "
+        "see is an answer they cannot check."
+    ),
+}
+
+
+def decides_at_verify(obligation: dict) -> bool:
+    """Whether this obligation is decided at turn END.
+
+    `must_first: answer` is the exception in its own family: an ordering that
+    has already gone wrong cannot be repaired by asking, so it is a gate
+    decision. Everything else in VERIFY_VERBS reads the finished answer.
+    """
+    if obligation["verb"] not in VERIFY_VERBS:
+        return False
+    return not (
+        obligation["verb"] == VERB_MUST_FIRST
+        and obligation.get("capability") == FIRST_ANSWER
+    )
+
+
+def has_verify(bindings: list[Binding]) -> bool:
+    """Whether any active binding decides something at turn end. Only these
+    turns pay the cost of holding their answer back from the stream."""
+    return any(
+        decides_at_verify(obligation)
+        for binding in bindings
+        # An overridden binding decides nothing at turn end (`verify` skips it),
+        # so counting it here would hold a turn's answer back from the stream to
+        # run no checks — paying the cost with none of the benefit.
+        if not binding.overridden
+        for obligation in binding.obligations
+    )
+
+
+def verify(bindings: list[Binding], evidence: TurnEvidence) -> list[VerifyFailure]:
+    """Every unmet verify obligation across the active bindings.
+
+    Structural throughout: a check either joins the answer against facts the
+    harness recorded, or is purely syntactic over the answer's text. A semantic
+    check over the model's own words is decoration and has no home here.
+    """
+    failures: list[VerifyFailure] = []
+    for binding in bindings:
+        if binding.overridden:
+            continue
+        for obligation in binding.obligations:
+            if obligation["verb"] not in VERIFY_VERBS:
+                continue
+            failure = _verify_one(binding, obligation, evidence)
+            if failure is not None:
+                failures.append(failure)
+    return failures
+
+
+def _verify_one(
+    binding: Binding, obligation: dict, evidence: TurnEvidence
+) -> VerifyFailure | None:
+    rule = binding.rule
+    common = {"rule": rule.name, "description": rule.description}
+    verb = obligation["verb"]
+
+    if verb == VERB_MUST_FIRST:
+        capability = str(obligation["capability"])
+        if capability == FIRST_ANSWER:
+            return None  # decided at the gate; nothing left to check here
+        if evidence.called(capability):
+            return None
+        # Two ways this can never be met, and neither is the model's fault:
+        # another gate stopped the call, or the capability is not exposed at
+        # all. Asking in either case spends the bound goading the model toward
+        # something that cannot happen — and the second one would do it on
+        # EVERY governed turn, forever, for a typo in the rule file.
+        blocked = evidence.refused(capability) or capability in binding.unsatisfiable
+        return VerifyFailure(
+            binding, obligation,
+            {
+                "capability": capability,
+                "called": [c.get("tool") for c in evidence.calls],
+                "refused": evidence.refused(capability),
+                "unavailable": capability in binding.unsatisfiable,
+            },
+            MUST_FIRST_ASK.format(capability=capability, **common),
+            # Asking would send the model back at a call another gate just
+            # stopped. Unmet, and said — never re-asked.
+            askable=not blocked,
+        )
+
+    if anchors := obligation.get(MEANING_KEY):
+        return _verify_meaning(binding, obligation, evidence, list(anchors), common)
+
+    if kinds := obligation.get("kinds"):
+        return _verify_kinds(binding, obligation, evidence, list(kinds), common)
+
+    looked_at = slice_answer(evidence.answer or "", obligation.get("in", WHERE_ANYWHERE))
+    pattern = re.compile(str(obligation["pattern"]))
+    hit = pattern.search(looked_at)
+    wanted = verb == VERB_ANSWER_MUST_INCLUDE
+    if bool(hit) == wanted:
+        return None
+    template = MUST_INCLUDE_ASK if wanted else MUST_NOT_ASK
+    return VerifyFailure(
+        binding, obligation,
+        {"pattern": obligation["pattern"], "matched": bool(hit)},
+        template.format(what=f"the pattern /{obligation['pattern']}/", **common),
+    )
+
+
+def _present(kind: str, evidence: TurnEvidence) -> tuple[bool, list[str]]:
+    """(is it there, what was expected). The whole of what a kind means.
+
+    A picture is one aish FETCHED and stored, not a URL pasted into the text —
+    that renders as a broken box, which is precisely what the reader notices.
+    So the check is a join: the tool ran (the harness wrote that, not the
+    model), and the exact token it handed back is in the answer. An equality,
+    never a guess about shape.
+    """
+    spec = KIND_SPECS[kind]
+    answer = evidence.answer or ""
+    wanted: list[str] = []
+    for call in evidence.calls:
+        if call.get("tool") != spec["needs"] or not _ran(call):
+            continue
+        if spec["cite"] == "result":
+            wanted += [
+                match.group("inner")
+                for match in _CITE_TOKEN_RE.finditer(str(call.get("result") or ""))
+            ]
+        else:
+            field = str(spec["cite"]).split(":", 1)[1]
+            value = str((call.get("args") or {}).get(field, "") or "").strip()
+            if value:
+                wanted.append(value)
+    wanted = list(dict.fromkeys(wanted))
+    return (bool(wanted) and all(token in answer for token in wanted)), wanted
+
+
+def _verify_meaning(
+    binding: Binding, obligation: dict, evidence: TurnEvidence,
+    anchors: list[str], common: dict,
+) -> VerifyFailure | None:
+    """Does this part of the answer MEAN something like one of these examples?
+
+    Tier 1 on the answer side. It is here rather than in an offline audit
+    because the objection to a per-turn meaning check was cost, and that
+    objection dissolves when the thing being embedded is one paragraph: local,
+    milliseconds, multilingual. The failure direction is safe — a false hit
+    costs one bounded rework, then the answer ships with a note.
+    """
+    verb = obligation["verb"]
+    looked_at = slice_answer(evidence.answer or "", obligation.get("in", WHERE_ANYWHERE))
+    scores = evidence.meaning(looked_at, anchors) if evidence.meaning else None
+    if scores is None:
+        # No scorer is a THIRD answer everywhere else in this engine, and it is
+        # here too: the check abstains rather than passing quietly, and the
+        # `unmet` record says the model was unavailable.
+        return None
+    best = max(scores.values(), default=0.0)
+    hit = best >= MEANING_FLOOR
+    # Satisfied when the presence of the thing matches what the verb wanted.
+    if hit == (verb == VERB_ANSWER_MUST_INCLUDE):
+        return None
+    where = obligation.get("in", WHERE_ANYWHERE)
+    wording = f"anything like {anchors[0]!r}" + (
+        "" if where == WHERE_ANYWHERE else f" in its {where}"
+    )
+    template = MUST_INCLUDE_ASK if verb == VERB_ANSWER_MUST_INCLUDE else MUST_NOT_ASK
+    return VerifyFailure(
+        binding, obligation,
+        {MEANING_KEY: anchors, "in": where, "sim": round(float(best), 4),
+         "floor": MEANING_FLOOR,
+         "sims": {a: round(float(v), 4) for a, v in scores.items()}},
+        template.format(what=wording, **common),
+    )
+
+
+def _verify_kinds(
+    binding: Binding, obligation: dict, evidence: TurnEvidence,
+    kinds: list[str], common: dict,
+) -> VerifyFailure | None:
+    """One kind, or any of several.
+
+    A CONDITIONAL kind — sources — is met when there was nothing to show:
+    nothing read means nothing to link. That condition belongs to the kind and
+    not to a second verb, which is why the verb that used to carry it is gone.
+    """
+    verb = obligation["verb"]
+    results = {kind: _present(kind, evidence) for kind in kinds}
+    hit = any(present for present, _ in results.values())
+    if not hit and verb == VERB_ANSWER_MUST_INCLUDE:
+        nothing_to_show = all(
+            KIND_SPECS[kind]["conditional"] and not wanted
+            for kind, (_p, wanted) in results.items()
+        )
+        if nothing_to_show:
+            return None
+    if hit == (verb == VERB_ANSWER_MUST_INCLUDE):
+        return None
+    wording = " or ".join(ANSWER_KINDS[kind] for kind in kinds)
+    template = MUST_INCLUDE_ASK if verb == VERB_ANSWER_MUST_INCLUDE else MUST_NOT_ASK
+    how = " ".join(dict.fromkeys(KIND_HOW[kind] for kind in kinds))
+    return VerifyFailure(
+        binding, obligation,
+        {"kinds": kinds,
+         "expected": {k: w for k, (_p, w) in results.items() if w},
+         "present": [k for k, (p, _w) in results.items() if p]},
+        template.format(what=wording, **common) + ("\n" + how if how else ""),
+    )
+
+
 # -------------------------------------------------------------------- seed
 
 
@@ -1204,7 +1879,7 @@ def seed_text(bindings: list[Binding]) -> str:
 def _obligation_line(obligation: dict) -> str:
     verb = obligation["verb"]
     if verb == VERB_ANSWER_FROM:
-        if obligation["to"] == ROUTE_SOURCE:
+        if obligation["to"] == ROUTE_MATERIAL:
             sources = ", ".join(obligation.get("sources") or []) or "the message"
             readers = ", ".join(obligation.get("readers") or [])
             present = ", ".join(obligation.get("present") or [])
@@ -1225,11 +1900,42 @@ def _obligation_line(obligation: dict) -> str:
             f"· MUST NOT call {what} for this turn. If you genuinely need another "
             "source, ASK the user — do not go and get one."
         )
-    return (
-        f"· MUST state it plainly if this happens: {obligation['state']} — never "
-        "patch over it with another source, and never present someone else's "
-        "material as if it came from the source you were given."
-    )
+    if verb == VERB_MUST_TELL_ME_WHEN:
+        return (
+            f"· MUST state it plainly if this happens: {obligation['state']} — never "
+            "patch over it with another source, and never present someone else's "
+            "material as if it came from the source you were given."
+        )
+    if verb == VERB_MUST_FIRST:
+        if obligation["capability"] == FIRST_ANSWER:
+            return (
+                "· MUST say something to the user before running ANYTHING. Answer "
+                "in plain text first, then use tools in a later turn."
+            )
+        return (
+            f"· MUST call {obligation['capability']} before answering. The answer "
+            "is checked for it, and held back until it has run."
+        )
+    if anchors := obligation.get(MEANING_KEY):
+        where = obligation.get("in", WHERE_ANYWHERE)
+        place = "" if where == WHERE_ANYWHERE else f" in its {where}"
+        shown = "; ".join(f"\"{a}\"" for a in anchors[:3])
+        if verb == VERB_ANSWER_MUST_INCLUDE:
+            return f"· MUST: the answer says something like{place} — {shown}."
+        return (
+            f"· MUST NOT: the answer says anything like{place} — {shown}. Judged by "
+            "MEANING, so rephrasing it does not get past this."
+        )
+    if kinds := obligation.get("kinds"):
+        described = " or ".join(ANSWER_KINDS[kind] for kind in kinds)
+        how = " ".join(dict.fromkeys(KIND_HOW[kind] for kind in kinds))
+        if verb == VERB_ANSWER_MUST_INCLUDE:
+            return f"· MUST: the answer includes {described}. {how}"
+        return f"· MUST NOT: the answer contains {described}. It is checked before delivery."
+    described = f"the pattern /{obligation.get('pattern')}/"
+    if verb == VERB_ANSWER_MUST_INCLUDE:
+        return f"· MUST: the answer includes {described}. It is checked before you see it."
+    return f"· MUST NOT: the answer contains {described}. It is checked before delivery."
 
 
 # ------------------------------------------------------------------ records
@@ -1300,3 +2006,568 @@ def cap_action(args: dict | None) -> dict:
         text = value if isinstance(value, str) else repr(value)
         shown[key] = text[:ACTION_ARGS_CHARS]
     return shown
+
+
+# --------------------------------------------------------------- authoring
+
+
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+# The fields an author supplies. The MODEL NEVER EMITS THE FILE — it names
+# values against this list and the renderer builds the YAML, which deletes an
+# entire failure class (quoting, indentation, key names) and is why the exhibit
+# in #205 could not have been written correctly by any author, human or model.
+# What a rule's LIFECYCLE is made of. Separated because these are the owner's
+# to set and nothing else's: a rule that binds nothing is indistinguishable
+# from a rule that is working unless someone reads the frontmatter, so they are
+# not part of what a compiler may propose.
+LIFECYCLE_FIELDS = ("enabled", "expires")
+
+AUTHOR_FIELDS = (
+    "name", "description", "prose", "enabled", "expires",
+    "when_subject", "when_has", "when_like", "when_matches",
+    "when_origin", "when_action",
+    VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
+    VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE, VERB_MUST_TELL_ME_WHEN,
+)
+
+
+# The subset a prose compiler may propose. The prompt never asks for the
+# lifecycle keys, so accepting them is pure attack surface: `expires:
+# "2020-01-01"` renders, lints and lands, is dropped at load, and the approval
+# card describes in full detail a rule that will never bind once.
+COMPILER_FIELDS = tuple(f for f in AUTHOR_FIELDS if f not in LIFECYCLE_FIELDS)
+
+
+class LintError(Exception):
+    """An authoring input that cannot become a rule file. Distinct from
+    RuleError, which is about a file that already exists."""
+
+
+# The frontmatter terminator, anchored to its OWN LINE. A naive `split("---")`
+# treats a `---` anywhere — including mid-sentence in a description — as the
+# end of the header, so every key below it becomes prose. The owner then
+# approves a diff that visibly contains `never_use: [web_search]` while the
+# compiled rule has no prohibition at all: the diff says one thing, the card
+# says another, and the file behaves like the card. Quoting cannot fix it
+# (`"a --- b"` still contains the marker), and "empty --- say so" is ordinary
+# writing rather than an attack.
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)(?:\r?\n)?^---[ \t]*\r?$\n?",
+                             re.DOTALL | re.MULTILINE)
+
+
+def split_frontmatter(text: str) -> tuple[str, str]:
+    """(header, body). ("", text) when there is no well-formed frontmatter."""
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return "", text
+    return match.group(1), text[match.end():]
+
+
+def _yaml_scalar(value: Any) -> str:
+    """A scalar YAML will read back as the SAME string. Always — the check is
+    a round trip through the parser, not a list of risky characters.
+
+    A denylist was the first attempt and it was wrong in the one direction
+    that matters. It missed colon-NEWLINE, so a description reading
+    `x\nenabled:\n false` rendered unquoted, YAML read the second line as a
+    real top-level key, and the rule landed DISABLED while the approval card
+    described a healthy one. Same shape with `expires:` lands a rule already
+    expired. The party this renderer serves is the model — the party rules
+    exist to bind — so "the file means something the card does not say" is the
+    adversarial case, not a curiosity. It also missed the YAML 1.1 resolutions
+    no first-character list will ever enumerate: `on`, `off`, `~`, `0x1A`,
+    `0755` (octal), `12:34` (sexagesimal).
+
+    Round-tripping through `yaml.safe_load` covers every one of them, and every
+    resolver surprise nobody has thought of yet.
+    """
+    text = str(value)
+    try:
+        if yaml.safe_load(f"k: {text}") == {"k": text}:
+            return text
+    except yaml.YAMLError:
+        pass
+    return json.dumps(text)  # JSON strings are valid YAML strings
+
+
+def render(fields: dict) -> str:
+    """Field values → a rule file. One direction only: there is no path where
+    an author hands over YAML text.
+
+    Fields not named are ABSENT, never defaulted to something plausible. A
+    guessed obligation is indistinguishable from an authored one once written,
+    and only one of them is what the owner asked for.
+    """
+    unknown = [key for key in fields if key not in AUTHOR_FIELDS]
+    if unknown:
+        raise LintError(
+            f"unknown field {unknown[0]!r} — have " + ", ".join(AUTHOR_FIELDS)
+        )
+    name = str(fields.get("name", "") or "").strip()
+    if not NAME_RE.match(name):
+        raise LintError(
+            f"invalid rule name {name!r} — lowercase letters, digits and hyphens, "
+            "starting with a letter or digit, e.g. 'bounded-material'"
+        )
+    description = str(fields.get("description", "") or "").strip()
+    if not description:
+        raise LintError(
+            "`description:` is required — it is the one line the owner reads in "
+            "the corpus listing and the model reads when the rule binds"
+        )
+
+    lines = ["---", f"name: {_yaml_scalar(name)}",
+             f"description: {_yaml_scalar(description)}"]
+    if fields.get("enabled") is False:
+        lines.append("enabled: false")
+    if expires := str(fields.get("expires", "") or "").strip():
+        lines.append(f"expires: {_yaml_scalar(expires)}")
+
+    subject = str(fields.get("when_subject", "") or "").strip()
+    if subject == SUBJECT_ALWAYS:
+        lines.append(f"when: {SUBJECT_ALWAYS}")
+    elif subject == SUBJECT_PROMPT:
+        chosen = [name for name in ("when_has", "when_like", "when_matches")
+                  if fields.get(name)]
+        if len(chosen) > 1:
+            raise LintError(
+                "`when_has`, `when_like` and `when_matches` are alternatives — "
+                "a message shape is one of the three. Dropping one silently would "
+                "have written a rule with a trigger the author did not choose."
+            )
+        lines += ["when:", f"  {SUBJECT_PROMPT}:"]
+        if examples := _as_list(fields.get("when_like")):
+            lines.append("    like:")
+            lines += [f"      - {_yaml_scalar(example)}" for example in examples]
+        else:
+            key, value = ("has", fields.get("when_has")) if fields.get("when_has") \
+                else ("matches", fields.get("when_matches"))
+            lines.append(f"    {key}: {_yaml_scalar(value or '')}")
+    elif subject == SUBJECT_SESSION:
+        lines += ["when:", f"  {SUBJECT_SESSION}:",
+                  f"    origin: {_yaml_scalar(fields.get('when_origin') or '')}"]
+    elif subject == SUBJECT_ACTION:
+        action = fields.get("when_action") or {}
+        if not isinstance(action, dict) or not action:
+            raise LintError(
+                "`when_action` needs at least one of: " + ", ".join(ACTION_FIELDS)
+            )
+        lines += ["when:", f"  {SUBJECT_ACTION}:"]
+        lines += [f"    {k}: {_yaml_scalar(v)}" for k, v in action.items()]
+    else:
+        raise LintError(
+            f"`when_subject` must be one of {SUBJECT_PROMPT}, {SUBJECT_SESSION}, "
+            f"{SUBJECT_ACTION}, {SUBJECT_ALWAYS} — got {subject!r}"
+        )
+
+    then: list[str] = []
+    for verb in (VERB_ANSWER_FROM, VERB_MUST_FIRST, VERB_MUST_TELL_ME_WHEN):
+        if value := str(fields.get(verb, "") or "").strip():
+            then.append(f"  {verb}: {_yaml_scalar(value)}")
+    if never := _as_list(fields.get(VERB_NEVER_USE)):
+        then.append(f"  {VERB_NEVER_USE}: [{', '.join(never)}]")
+    for verb in (VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE):
+        value = fields.get(verb)
+        if value in (None, "", {}, []):
+            continue
+        if isinstance(value, list):
+            # `never_use: [a, b]` already means NONE OF THESE, so a bare list
+            # here would have two lists in one file meaning opposite things.
+            raise LintError(
+                f"`{verb}` takes one thing. For a choice, pass "
+                f"{{'{CHOICE_KEY}': [...]}} — a bare list would read as 'all of "
+                "these', which is what it means everywhere else in a rule."
+            )
+        if isinstance(value, dict) and MEANING_KEY in value:
+            examples = _as_list(value[MEANING_KEY])
+            then += [f"  {verb}:", f"    {MEANING_KEY}:"]
+            then += [f"      - {_yaml_scalar(example)}" for example in examples]
+            if (where := value.get("in")) and where != WHERE_ANYWHERE:
+                then.append(f"    in: {_yaml_scalar(where)}")
+        elif isinstance(value, dict) and CHOICE_KEY in value:
+            names = _as_list(value[CHOICE_KEY])
+            then += [f"  {verb}:", f"    {CHOICE_KEY}: [{', '.join(names)}]"]
+        elif isinstance(value, dict):
+            then += [f"  {verb}:", f"    pattern: {_yaml_scalar(value.get('pattern', ''))}"]
+            if (where := value.get("in")) and where != WHERE_ANYWHERE:
+                then.append(f"    in: {_yaml_scalar(where)}")
+        else:
+            then.append(f"  {verb}: {_yaml_scalar(value)}")
+    if not then:
+        raise LintError(
+            "a rule with no obligation restricts nothing — name at least one of: "
+            + ", ".join(sorted(VERBS))
+        )
+    lines += ["then:", *then, "---", ""]
+
+    prose = str(fields.get("prose", "") or "").strip()
+    return "\n".join(lines) + (prose + "\n" if prose else "")
+
+
+# A regex that is nothing but an alternation of ordinary words. This is the
+# exact shape a compiler produces when it is asked for a MEANING and only has
+# literal matching to offer — and extending the list is the exact way it tries
+# to fix it. Domains and paths are excluded by the punctuation they carry, so
+# `youtube\.com|youtu\.be` is untouched.
+_WORD_LIST_RE = re.compile(r"^\(?(\?i\))?\(?[\w ]+(\|[\w ]+){2,}\)?$")
+
+
+def _is_a_keyword_list(pattern: str) -> bool:
+    return bool(_WORD_LIST_RE.match(pattern.strip()))
+
+
+def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, list[str]]:
+    """(rule, errors) for candidate file text. Nothing is written on an error.
+
+    Deterministic and instant — no model. This is the half #193 drew the line
+    at for tools: the lint checks that the rule COMPILES and that everything it
+    names exists. Whether it does what the owner meant is the retro-match's
+    question, and only he can answer it.
+    """
+    with tempfile.TemporaryDirectory(prefix="aish-rule-lint-") as tmp:
+        path = Path(tmp) / "candidate.md"
+        path.write_text(text, encoding="utf-8")
+        rule = _parse(path)
+    if rule.error:
+        return None, [rule.error]
+    errors = []
+    if rule.pattern is not None and _is_a_keyword_list(rule.pattern.pattern):
+        errors.append(
+            "that trigger is a list of words standing in for a meaning "
+            f"(/{rule.pattern.pattern}/). It fires on the wrong sentences — "
+            "\"image\" matches \"the Docker image is broken\" — and misses the "
+            "right ones in another language. Adding more words makes both worse. "
+            "Use `like:` with 3-5 example messages instead; those are "
+            "matched by MEANING, so wording and language do not have to match."
+        )
+    if known_tools:
+        readers = [o["to"] for o in rule.obligations
+                   if o["verb"] == VERB_ANSWER_FROM and o["to"] != ROUTE_MATERIAL]
+        firsts = [o["capability"] for o in rule.obligations
+                  if o["verb"] == VERB_MUST_FIRST and o["capability"] != FIRST_ANSWER]
+        # A kind names something the reader sees; a TOOL is what makes it
+        # real. The rule file never mentions that tool, so if it is gone the
+        # rule can never be satisfied and nothing in the file would say why.
+        kinds = [KIND_SPECS[k]["needs"] for o in rule.obligations
+                 for k in o.get("kinds", ())]
+        for named in readers + firsts + kinds:
+            if named not in known_tools:
+                errors.append(
+                    f"names a tool that does not exist: {named!r}. A rule routing to "
+                    "or requiring a missing tool refuses every alternative and offers "
+                    "nothing, on every turn it binds."
+                )
+        # The TRIGGER's tool too, not only the obligations'. A typo'd
+        # `action: tool:` arms every turn and fires on nothing, and it is the
+        # one trigger kind retro-match cannot replay — so neither honesty
+        # mechanism would catch it. Same argument as the two below.
+        if (named := rule.action.get("tool")) and named not in known_tools:
+            errors.append(
+                f"triggers on a tool that does not exist: {named!r}. The rule would "
+                "arm on every turn and fire on nothing. Check the spelling."
+            )
+        for prohibited in (o["what"] for o in rule.obligations if o["verb"] == VERB_NEVER_USE):
+            for tool_name in prohibited:
+                if tool_name not in known_tools:
+                    errors.append(
+                        f"forbids a tool that does not exist: {tool_name!r} — the "
+                        "restriction would never fire. Check the spelling."
+                    )
+    return (rule if not errors else None), errors
+
+
+def explain(rule: Rule) -> str:
+    """The compiled meaning, in English. What the owner approves is THIS, never
+    the YAML: he is agreeing to a behaviour, and the file is an implementation
+    detail he did not write and should not have to audit."""
+    when = {
+        TRIGGER_ALWAYS: "On every turn",
+        TRIGGER_SESSION_CONTEXT: (
+            "When this session was started by "
+            + ("anything but you" if rule.not_equals else f"{rule.equals or 'you'}")
+        ),
+        TRIGGER_MESSAGE_SHAPE: (
+            f"When your message carries {CONTAINS_LABELS.get(rule.contains, rule.contains)}"
+            if rule.contains else
+            f"When your message matches /{rule.pattern.pattern if rule.pattern else ''}/"
+        ),
+        TRIGGER_MESSAGE_MEANING: (
+            "When your message means something like:\n"
+            + "\n".join(f"    · {anchor}" for anchor in rule.anchors)
+            + "\n  …judged by meaning, so wording and language do not have to match"
+        ),
+        TRIGGER_ACTION_SHAPE: "Before " + _action_in_english(rule.action),
+    }.get(rule.trigger, f"When {rule.trigger}")
+
+    says = []
+    for obligation in rule.obligations:
+        verb = obligation["verb"]
+        if verb == VERB_ANSWER_FROM:
+            target = obligation["to"]
+            says.append(
+                "answer from the material I gave you, read with whichever tool fits it"
+                if target == ROUTE_MATERIAL else f"answer from {target}"
+            )
+        elif verb == VERB_NEVER_USE:
+            says.append("never use " + ", ".join(obligation["what"]))
+        elif verb == VERB_MUST_FIRST:
+            says.append(
+                "answer me before running anything"
+                if obligation["capability"] == FIRST_ANSWER
+                else f"call {obligation['capability']} before answering"
+            )
+        elif verb == VERB_MUST_TELL_ME_WHEN:
+            says.append(f"tell me when {obligation['state']}")
+        elif anchors := obligation.get(MEANING_KEY):
+            where = obligation.get("in", WHERE_ANYWHERE)
+            says.append(
+                ("the answer must say something like " if verb == VERB_ANSWER_MUST_INCLUDE
+                 else "the answer must never say anything like ")
+                + f"{anchors[0]!r}"
+                + ("" if len(anchors) == 1 else f" (or {len(anchors) - 1} more like it)")
+                + ("" if where == WHERE_ANYWHERE else f", in its {where}")
+            )
+        elif kinds := obligation.get("kinds"):
+            says.append(
+                ("the answer must include " if verb == VERB_ANSWER_MUST_INCLUDE
+                 else "the answer must never contain ")
+                + " or ".join(ANSWER_KINDS[kind] for kind in kinds)
+            )
+        else:
+            says.append(
+                ("the answer must match " if verb == VERB_ANSWER_MUST_INCLUDE
+                 else "the answer must not match ")
+                + f"/{obligation['pattern']}/"
+            )
+    joined = "; ".join(says)
+    lines = [f"{when}\n  → {joined}." if "\n" in when else f"{when}: {joined}."]
+    at_gate = [o for o in rule.obligations if not decides_at_verify(o)]
+    at_verify = [o for o in rule.obligations if decides_at_verify(o)]
+    if at_gate:
+        lines.append("Enforced before a call runs: a call that violates this is refused.")
+    if at_verify:
+        lines.append(
+            "Checked when the answer is finished, before you see it: aish asks for "
+            "the missing work, and says so on the answer if it never arrives."
+        )
+    if rule.status == "disabled":
+        lines.append("DISABLED — it will not bind until you enable it.")
+    if rule.expires:
+        # Silence here read as a healthy rule. A rule with a past expiry is
+        # dropped at load and binds NOTHING, so a card that describes what it
+        # would enforce while omitting that it never will is the same defect as
+        # a smuggled `enabled: false` — an inert rule that reads as working.
+        lines.append(
+            f"EXPIRED on {rule.expires} — it binds nothing."
+            if rule.expires < date.today()
+            else f"Expires on {rule.expires}; after that it binds nothing."
+        )
+    return "\n".join(lines)
+
+
+def _action_in_english(action: dict) -> str:
+    """The `action:` condition as a sentence. The keys are terse because they
+    are typed; this is the version he reads on the card."""
+    parts = []
+    if tool := action.get("tool"):
+        parts.append(f"aish uses {tool}")
+    if prefix := action.get("command_starts_with"):
+        parts.append(f"it runs a command starting `{prefix}`")
+    if action.get("command_has") == COMMAND_HAS_SECRET:
+        parts.append("a command would contain one of your stored secrets")
+    if root := action.get("path_under"):
+        parts.append(f"it touches anything under {root}")
+    return " and ".join(parts) or "any action"
+
+
+# Read by `explain` only. The trigger keys are terse because they are typed;
+# these are the words for the sentence the owner reads.
+CONTAINS_LABELS = {
+    CONTAINS_MATERIAL: "material — a link, an attached file, or a path you typed",
+    CONTAINS_LINK: "a link",
+    CONTAINS_ATTACHMENT: "an attached file or image",
+    CONTAINS_PATH: "a file path",
+}
+
+
+@dataclass
+class RetroMatch:
+    """What a candidate rule would have done to turns that already happened."""
+
+    checked: int = 0
+    bound: list[dict] = field(default_factory=list)
+    unevaluable: int = 0
+    # An `action:` rule binds every turn and decides per CALL — and the call
+    # history is not replayed here, only prompts. Counting its binds would read
+    # as "this fires constantly" for a rule that may never fire at all, on the
+    # one trigger kind where bound and fired are different things. The honest
+    # answer is to say what cannot be replayed rather than to answer anyway.
+    per_call: bool = False
+
+    @property
+    def rate(self) -> float:
+        return len(self.bound) / self.checked if self.checked else 0.0
+
+
+def past_turns(state_dir: Path, limit: int = 400) -> list[dict]:
+    """{turn, prompt, origin} for recent turns, newest sessions first.
+
+    Reads the session logs the owner already has. Nothing is synthesised: a
+    manufactured turn tests the harness, not the rule.
+    """
+    try:
+        paths = sorted(state_dir.glob("session-*.jsonl"), reverse=True)
+    except OSError:
+        return []
+    turns: list[dict] = []
+    for path in paths:
+        origin = ORIGIN_OWNER_VALUE
+        try:
+            handle = path.open(encoding="utf-8")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if record.get("kind") == "origin":
+                    origin = str(record.get("origin") or origin)
+                    continue
+                if record.get("kind") != "message" or record.get("role") != "user":
+                    continue
+                prompt = str(record.get("content") or "").strip()
+                # aish's own notes are addressed TO the owner and arrive in the
+                # user slot; counting them as prompts would have a rule appear
+                # to bind on turns nobody took.
+                if not prompt or prompt.startswith(AISH_NOTE_MARKERS):
+                    continue
+                turns.append({
+                    "turn": str(record.get("turn") or ""),
+                    "prompt": prompt,
+                    "origin": origin,
+                    "session": path.stem,
+                    # Attachments reach the agent as separate parameters and
+                    # appear in no message text, so a replay reading only
+                    # `content` would report "would never have fired" for the
+                    # canonical shipped rule — understating on the most common
+                    # trigger kind, which is the same dishonesty as the action
+                    # rule's overstating, pointed the other way.
+                    "images": tuple(record.get("images") or ()),
+                    "documents": tuple(record.get("documents") or ()),
+                })
+                if len(turns) >= limit:
+                    return turns
+    return turns
+
+
+# Text in the user slot that the OWNER did not type. Kept here rather than
+# imported from session.py, which imports nothing from this module by design.
+AISH_NOTE_MARKERS = ("[aish:", "[aish]", "[automatic resume]")
+
+
+def retro_match(rule: Rule, turns: list[dict], meaning=None) -> RetroMatch:
+    """Replay a candidate rule over turns that already happened.
+
+    The strongest evidence available at authoring time, and it costs nothing:
+    a rule is a function of logged facts, so "this would have bound on these
+    three turns, here they are" is a real answer where a synthetic run is a
+    test of the harness. The honest limit is stated where it is shown — a
+    trigger broadened in a way no logged turn exercises looks identical to one
+    that changed nothing.
+    """
+    result = RetroMatch(per_call=rule.trigger == TRIGGER_ACTION_SHAPE)
+    if result.per_call:
+        return result
+    for turn in turns:
+        ctx = TurnContext(
+            task=turn["prompt"],
+            origin=turn.get("origin", ORIGIN_OWNER_VALUE),
+            images=tuple(turn.get("images") or ()),
+            documents=tuple(turn.get("documents") or ()),
+        )
+        verdict, _evidence = evaluate(rule, ctx, meaning=meaning)
+        result.checked += 1
+        if verdict == VERDICT_BIND:
+            result.bound.append(turn)
+        elif verdict in (VERDICT_UNEVALUABLE, VERDICT_ERROR):
+            result.unevaluable += 1
+    return result
+
+
+def disable_text(text: str) -> str:
+    """The same file with `enabled: false` in its frontmatter.
+
+    A TEXT edit, not a re-render, because retiring must work on a rule that
+    does NOT compile — and the loud broken-rule warning is the exact moment an
+    owner reaches for retire. Requiring a valid rule in order to stop it would
+    leave the only unstoppable rules the broken ones.
+    """
+    header, body = split_frontmatter(text)
+    if not header.strip():
+        return "---\nenabled: false\n---\n\n" + text
+    # Anchored to column zero: `enabled:` is a top-level key, and stripping any
+    # line that merely *starts with* it after indentation would delete a nested
+    # one. No such key exists in today's grammar — but this is an unanchored
+    # text edit on a structured file, and that is how those go wrong.
+    kept = [
+        line for line in header.splitlines()
+        if not line.casefold().startswith("enabled:")
+    ]
+    return "---\n" + "\n".join([*kept, "enabled: false"]).strip("\n") + "\n---\n" + body
+
+
+def author_fields(path: Path) -> dict:
+    """A rule file, back in the shape `render` takes.
+
+    Needed so an EDIT is a patch. #205's sharpest risk is the compiler
+    regenerating a working rule from one sentence of prose and silently
+    dropping the four things it already did — so "start over" is kept out of
+    the input space entirely: the tool takes named field changes, everything
+    else is read from here and written back unchanged, and the prose body is
+    carried verbatim.
+    """
+    text = path.read_text(encoding="utf-8")
+    header, body = split_frontmatter(text)
+    loaded = yaml.safe_load(header) if header.strip() else {}
+    front: dict = loaded if isinstance(loaded, dict) else {}
+    fields: dict = {
+        "name": str(front.get("name") or path.stem),
+        "description": str(front.get("description", "") or ""),
+        "prose": body.strip(),
+    }
+    if front.get("enabled") is False:
+        fields["enabled"] = False
+    if expires := str(front.get("expires", "") or "").strip():
+        fields["expires"] = expires
+
+    when = front.get("when")
+    if when == SUBJECT_ALWAYS or when is True:
+        fields["when_subject"] = SUBJECT_ALWAYS
+    elif isinstance(when, dict):
+        for subject in (SUBJECT_PROMPT, SUBJECT_SESSION, SUBJECT_ACTION):
+            block = when.get(subject)
+            if not isinstance(block, dict):
+                continue
+            fields["when_subject"] = subject
+            if subject == SUBJECT_PROMPT:
+                if has := str(block.get("has", "") or ""):
+                    fields["when_has"] = has
+                if examples := _as_list(block.get("like")):
+                    fields["when_like"] = examples
+                if matches := str(block.get("matches", "") or ""):
+                    fields["when_matches"] = matches
+            elif subject == SUBJECT_SESSION:
+                fields["when_origin"] = str(block.get("origin", "") or "")
+            else:
+                fields["when_action"] = {k: str(v) for k, v in block.items()}
+            break
+
+    then = front.get("then")
+    if isinstance(then, dict):
+        for verb, value in then.items():
+            if verb in VERBS:
+                fields[verb] = value
+    return fields

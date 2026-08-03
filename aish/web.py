@@ -10,6 +10,7 @@ and on every redirect (SSRF guard, see _require_public).
 """
 
 import ipaddress
+import re
 import socket
 import ssl
 import urllib.error
@@ -298,3 +299,28 @@ def fetch_binary(url: str, max_bytes: int) -> tuple[bytes, str]:
         content_type = response.headers.get_content_type()
         data = response.read(max_bytes + 1)
     return data, content_type
+
+
+# --------------------------------------------------------------- video
+
+
+# What the web UI turns into a playable card. Mirrored from app.js's YOUTUBE_RE
+# on purpose: a tool that accepted links the app cannot play would hand the
+# owner a dead box and call it success.
+_YOUTUBE_RE = re.compile(
+    r"^https?://(?:www\.)?(?:youtube\.com/(?:watch\?(?:[^#\s]*&)?v=|shorts/)"
+    r"([\w-]{11})|youtu\.be/([\w-]{11}))(?:[#&?/]|$)",
+    re.IGNORECASE,
+)
+
+
+def video_id(url: str) -> str:
+    """The playable video's id, or "" when this link is not one.
+
+    Parsing, not judgement: a link to a page ABOUT a video, a channel, or a
+    playlist without a video id all return "".
+    """
+    match = _YOUTUBE_RE.match((url or "").strip())
+    if not match:
+        return ""
+    return match.group(1) or match.group(2) or ""

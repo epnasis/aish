@@ -95,6 +95,38 @@ class SemanticIndex:
         except OSError:
             pass
 
+    def sentence_scores(self, task: str, sentences: list[str]) -> dict[str, float] | None:
+        """sentence -> cosine similarity with `task`, or None when embedding
+        failed. Same cache and same model as entry scoring; the difference is
+        only that the things being compared are plain sentences.
+
+        A rule's meaning trigger is anchored on examples the OWNER wrote, so
+        there is no name/description/keywords shape to build a document line
+        from — the sentence IS the document.
+        """
+        if not sentences:
+            return {}
+        cache = self._load()
+        query_prefix, doc_prefix = _prefixes(self.model)
+        texts = {sentence: doc_prefix + sentence for sentence in sentences}
+        missing = list(dict.fromkeys(t for t in texts.values() if self._key(t) not in cache))
+        try:
+            if missing:
+                for text, vec in zip(missing, self._embed(self.model, missing), strict=False):
+                    cache[self._key(text)] = _normalize(vec)
+                self._save({self._key(t) for t in texts.values()})
+            task_vec = _normalize(self._embed(self.model, [query_prefix + task])[0])
+        except Exception as exc:  # ollama down, model not pulled, bad response
+            self.error = str(exc) or exc.__class__.__name__
+            return None
+        self.error = None
+        return {
+            sentence: sum(
+                a * b for a, b in zip(task_vec, cache[self._key(text)], strict=False)
+            )
+            for sentence, text in texts.items()
+        }
+
     def scores(self, task: str, entries) -> dict[int, float] | None:
         """id(entry) -> cosine similarity in [-1, 1], or None when embedding
         failed — the caller then falls back to lexical matching."""

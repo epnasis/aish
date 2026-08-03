@@ -52,7 +52,7 @@ Merge back to main after tests pass, then remove the worktree. Trivial fixes on 
 | `server.py`, `pty_session.py`, `email_poll.py` | `docs/web-server.md` |
 | `aish/static/` (`app.js`, `style.css`, `sw.js`) | `docs/web-frontend.md` |
 | `skills.py`, `embeddings.py`, `curate.py`, `skill_import.py` | `docs/knowledge-layer.md` |
-| `rules.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
+| `rules.py`, `rule_compiler.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
 | `tool_plugins.py`, `secrets.py` | `docs/tools-layer.md` |
 | `export.py` | `docs/export-pdf.md` |
 
@@ -90,6 +90,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`curate.py`** — the retrieval self-curation loop; the orchestration lives in the script, not in a model session. → `docs/knowledge-layer.md`
 - **`skill_import.py` + `import_skill`** — import a skill from a git repo or local path under ONE consolidated review. Safety is enforced in code, not by asking the model. → `docs/knowledge-layer.md`
 - **`rules.py`** — the rules engine (#191): owner-authored turn contracts the harness enforces. Rules only ever RESTRICT, so a bug over-restricts and can never under-restrict. → `docs/rules-engine.md`
+- **`rule_compiler.py`** — the owner's plain language → rule field values (#205). Isolated because it is more accurate; safe because code validates it and the owner approves it. The acting model never learns the grammar. → `docs/rules-engine.md`
 - **`tool_plugins.py`** — droppable `TOOL.md` plugin tools, indistinguishable from native ones to the model and gated by the same `_dispatch`. → `docs/tools-layer.md`
 - **`secrets.py`** — local secret store backed by the macOS login Keychain; structurally un-committable. → `docs/tools-layer.md`
 - **`export.py`** — local Markdown → PDF for the web UI; the text never leaves the machine. → `docs/export-pdf.md`

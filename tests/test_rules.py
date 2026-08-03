@@ -9,6 +9,8 @@ engine rests on.
 
 from __future__ import annotations
 
+import json
+import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -21,9 +23,9 @@ name: bounded-material
 description: Answer from the material I gave you.
 when:
   prompt:
-    has: source
+    has: material
 then:
-  answer_from: source
+  answer_from: material
   never_use: [web_search]
   must_tell_me_when: the material could not be read
 ---
@@ -80,7 +82,7 @@ class TestRuleFileFormat:
     def test_frontmatter_compiles_to_the_contract_obligation_shape(self, tmp_path):
         rule = load_one(tmp_path, CANONICAL)
         assert rule.obligations == (
-            {"verb": "answer_from", "to": "source", "of": "deliverable"},
+            {"verb": "answer_from", "to": "material", "of": "deliverable"},
             {"verb": "never_use", "what": ["web_search"]},
             {"verb": "must_tell_me_when", "state": "the material could not be read"},
         )
@@ -118,22 +120,22 @@ class TestRuleFileFormat:
     @pytest.mark.parametrize(
         "text,expected",
         [
-            (CANONICAL.replace("  prompt:\n    has: source\n", "  vibes: yes\n"),
+            (CANONICAL.replace("  prompt:\n    has: material\n", "  vibes: yes\n"),
              "unknown `when:` subject"),
-            (CANONICAL.replace("has: source", "has: vibes"), "unknown `has:` value"),
+            (CANONICAL.replace("has: material", "has: vibes"), "unknown `has:` value"),
             (
-                CANONICAL.replace("    has: source\n", "").replace(
-                    "  answer_from: source\n", ""
+                CANONICAL.replace("    has: material\n", "").replace(
+                    "  answer_from: material\n", ""
                 ),
                 "needs `has:` or `matches:`",
             ),
             (
-                CANONICAL.replace("has: source", "has: source\n    matches: ^x"),
-                "OR `matches:`, not both",
+                CANONICAL.replace("has: material", "has: material\n    matches: ^x"),
+                "ONE of `has:`, `matches:` or `like:`",
             ),
-            (CANONICAL.replace("has: source", "matches: ^x"), "needs `when: prompt: has:"),
+            (CANONICAL.replace("has: material", "matches: ^x"), "needs `when: prompt: has:"),
             (
-                CANONICAL.replace("  answer_from: source\n", "")
+                CANONICAL.replace("  answer_from: material\n", "")
                 .replace("  never_use: [web_search]\n", "")
                 .replace("  must_tell_me_when: the material could not be read\n", ""),
                 "no obligation",
@@ -260,7 +262,7 @@ class TestSourceRouting:
         recorded (contract corollary 1)."""
         binding = bind_canonical(tmp_path, "https://youtu.be/x")
         route = rules.binding_record(binding)["obligations"][0]
-        assert route["to"] == "source"
+        assert route["to"] == "material"
         assert route["readers"] == ["youtube_analyze"]
         assert route["sources"] == ["https://youtu.be/x"]
         assert "present" not in route  # a link is not already in context
@@ -472,9 +474,9 @@ class TestRecordShapes:
 
 
 class TestShippedExamples:
-    """The two files in examples/rules/ are the acceptance set — one per
-    trigger kind. They must stay loadable, because they are what the owner
-    copies into ~/.config/aish/rules/."""
+    """The files in examples/rules/ are the acceptance set — one per trigger
+    kind, plus one per enforcement point. They must stay loadable, because they
+    are what the owner copies into ~/.config/aish/rules/."""
 
     EXAMPLES = Path(__file__).resolve().parent.parent / "examples" / "rules"
 
@@ -484,6 +486,25 @@ class TestShippedExamples:
         loaded = rules.load_rules([self.EXAMPLES])
         assert loaded, "the examples went missing"
         assert not [f"{r.name}: {r.error}" for r in loaded if r.error]
+
+    def test_no_shipped_example_needs_a_verb_that_is_not_built(self):
+        """An example that does not run is an example that teaches the wrong
+        grammar. `always-use-show-image` shipped for months written against an
+        unbuilt verb, warning on every session start until it was parked — the
+        loudness was correct, having to park it was not."""
+        loaded = rules.load_rules([self.EXAMPLES])
+        parked = [r.name for r in loaded if r.status == "disabled"]
+        assert not parked, f"a shipped example is disabled: {parked}"
+
+    def test_the_examples_cover_every_enforcement_point(self):
+        """Gate and Verify are enforced by different machinery and fail in
+        different ways. The folder has to show both, or half the format is
+        learned only from the docs."""
+        obligations = {
+            o["verb"] for r in rules.load_rules([self.EXAMPLES]) for o in r.obligations
+        }
+        assert obligations & rules.VERIFY_VERBS, "no example decides anything at turn end"
+        assert obligations - rules.VERIFY_VERBS, "no example decides anything at the gate"
 
     def test_the_examples_cover_every_built_subject(self):
         """An example per subject is how the format is actually learned — by
@@ -716,7 +737,7 @@ class TestTheWholeMaterialChannel:
     def test_the_narrow_url_detector_still_ignores_attachments(self, tmp_path):
         """`contains: url` is the narrower detector, kept for a rule that
         really does mean web pages only. It must not silently widen."""
-        rule = load_one(tmp_path, CANONICAL.replace("has: source", "has: link"))
+        rule = load_one(tmp_path, CANONICAL.replace("has: material", "has: link"))
         verdict, _ = rules.evaluate(
             rule, self._ctx("summarize this", documents=("/tmp/report.pdf",))
         )
@@ -773,11 +794,23 @@ class TestTheWholeMaterialChannel:
         toward what exists, or to extend the engine. "Not expressible" alone
         gives him neither choice."""
         rule = load_one(tmp_path, CANONICAL.replace(
-            "  never_use: [web_search]", "  answer_must_not: a raw markdown image link"
+            "  never_use: [web_search]", "  ask_me_first: true"
         ))
         assert "designed but not built yet" in rule.error
-        assert "Verify point" in rule.error
+        assert "hold for the owner" in rule.error
         assert ", ".join(sorted(rules.VERBS)) in rule.error
+
+    def test_a_phrase_only_a_judge_could_check_is_refused_by_name(self, tmp_path):
+        """The admission line, at the one place it is tempting to bend: a verb
+        ships only if it compiles to a declared check. "be less annoying" is a
+        judged question, and the judged tier is not built — so it is refused
+        with the two structural forms that ARE available, rather than shipping
+        as a promise nothing keeps."""
+        rule = load_one(tmp_path, CANONICAL.replace(
+            "  never_use: [web_search]", "  answer_must_not_include: be less annoying about it"
+        ))
+        assert "only a judge can check" in rule.error
+        assert "picture" in rule.error and "pattern" in rule.error
 
 
 class TestEnabledFlag:
@@ -969,3 +1002,762 @@ class TestAlwaysSubject:
             verdict = rules.gate([binding], "run_command", {"command": command},
                                  cwd=str(tmp_path))[0]
             assert verdict.verdict == "refused", command
+
+
+class TestAuthoring:
+    """The model names field values; the TOOL renders the file. #205's exhibit
+    is a rule aish wrote itself that loaded as `error: a rule with no obligation
+    restricts nothing` and had been inert since the day it was written."""
+
+    BASE = {
+        "name": "bounded-material",
+        "description": "Answer from the material I gave you.",
+        "when_subject": "prompt",
+        "when_has": "material",
+        "answer_from": "material",
+        "never_use": ["web_search"],
+    }
+
+    def test_rendered_fields_round_trip_through_the_parser(self):
+        """The only claim that matters: what render() emits, _parse() reads
+        back as the rule that was asked for."""
+        rule, errors = rules.lint(rules.render(self.BASE))
+        assert not errors and rule is not None
+        assert rule.name == "bounded-material"
+        assert rule.trigger == rules.TRIGGER_MESSAGE_SHAPE
+        verbs = {o["verb"] for o in rule.obligations}
+        assert verbs == {rules.VERB_ANSWER_FROM, rules.VERB_NEVER_USE}
+
+    def test_a_value_that_would_break_yaml_is_quoted(self):
+        """The renderer exists so no author has to know which values need
+        quoting — a colon in a description is the ordinary case, not an edge."""
+        rule, errors = rules.lint(rules.render(
+            {**self.BASE, "description": "material: use it, don't widen it"}
+        ))
+        assert not errors and rule is not None
+        assert rule.description == "material: use it, don't widen it"
+
+    def test_a_rule_with_no_obligation_is_refused_at_render(self):
+        """#205's exhibit, caught before a file exists rather than months
+        after: it put the obligation in PROSE, which restricts nothing."""
+        fields = {k: v for k, v in self.BASE.items()
+                  if k not in ("answer_from", "never_use")}
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({**fields, "prose": "You MUST use show_image."})
+        assert "restricts nothing" in str(exc.value)
+
+    def test_an_unknown_field_names_what_is_available(self):
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({**self.BASE, "tier": 0})
+        assert "unknown field 'tier'" in str(exc.value)
+        assert "when_subject" in str(exc.value)
+
+    def test_a_rule_naming_a_missing_tool_does_not_pass_lint(self):
+        """A route to a tool that does not exist refuses every alternative and
+        offers nothing, on every turn it binds."""
+        text = rules.render({**self.BASE, "answer_from": "gws_gmial_send"})
+        rule, errors = rules.lint(text, known_tools={"read_url", "web_search"})
+        assert rule is None
+        assert "gws_gmial_send" in errors[0]
+
+    def test_a_prohibition_on_a_missing_tool_is_caught_too(self):
+        """It would never fire — and a rule that never fires looks exactly like
+        a rule that is working."""
+        text = rules.render({**self.BASE, "never_use": ["web_serch"]})
+        rule, errors = rules.lint(text, known_tools={"read_url", "web_search"})
+        assert rule is None and "web_serch" in errors[0]
+
+    def test_a_trigger_naming_a_missing_tool_is_caught_too(self):
+        """A typo'd `action: tool:` arms every turn and fires on nothing — and
+        it is the one trigger kind retro-match cannot replay, so neither
+        honesty mechanism would have caught it."""
+        text = rules.render({
+            "name": "r", "description": "d", "when_subject": "action",
+            "when_action": {"tool": "gws_gmial_send"}, "never_use": ["web_search"],
+        })
+        rule, errors = rules.lint(text, known_tools={"web_search", "read_url"})
+        assert rule is None and "gws_gmial_send" in errors[0]
+
+    def test_a_trigger_on_a_path_is_not_mistaken_for_a_tool(self):
+        text = rules.render({
+            "name": "r", "description": "d", "when_subject": "action",
+            "when_action": {"path_under": "~/dev/aish"}, "never_use": ["write_file"],
+        })
+        rule, errors = rules.lint(text, known_tools={"write_file"})
+        assert not errors and rule is not None
+
+    def test_editing_carries_over_everything_not_named(self):
+        """#205's sharpest risk: the compiler regenerating a working rule from
+        one sentence and silently dropping the four things it already did."""
+        original = rules.render(self.BASE)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bounded-material.md"
+            path.write_text(original, encoding="utf-8")
+            fields = {**rules.author_fields(path), "must_tell_me_when": "it failed"}
+        rule, errors = rules.lint(rules.render(fields))
+        assert not errors and rule is not None
+        verbs = {o["verb"] for o in rule.obligations}
+        assert verbs == {
+            rules.VERB_ANSWER_FROM, rules.VERB_NEVER_USE, rules.VERB_MUST_TELL_ME_WHEN,
+        }, "an edit dropped an obligation it was never asked to touch"
+
+    def test_the_prose_body_survives_an_edit_verbatim(self):
+        body = "Widening quietly costs them the ability to trust any answer."
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "r.md"
+            path.write_text(rules.render({**self.BASE, "prose": body}), encoding="utf-8")
+            fields = rules.author_fields(path)
+        assert body in rules.render({**fields, "description": "changed"})
+
+    def test_explain_says_when_and_what_without_naming_yaml(self):
+        """What the owner approves is the MEANING. He did not write the file
+        and should not have to audit it."""
+        rule, _ = rules.lint(rules.render(self.BASE))
+        text = rules.explain(rule)
+        assert "material" in text and "web_search" in text
+        assert "when:" not in text and "then:" not in text
+
+    def test_explain_names_the_moment_a_verify_rule_is_checked(self):
+        rule, _ = rules.lint(rules.render({
+            "name": "live-price", "description": "Prices come from the store.",
+            "when_subject": "always", "must_first": "read_url",
+        }))
+        assert "before you see it" in rules.explain(rule)
+
+    def test_a_retired_rule_says_so_in_its_own_card(self):
+        rule, _ = rules.lint(rules.render({**self.BASE, "enabled": False}))
+        assert "DISABLED" in rules.explain(rule)
+
+
+class TestRenderedMeaningMatchesTheFile:
+    """The card shows the compiled meaning; the file is what runs. Anything
+    that renders but parses back as something DIFFERENT is the worst bug
+    available here — and the party writing these values is the model, which is
+    the party rules exist to bind."""
+
+    BASE = {
+        "name": "r", "description": "d", "when_subject": "always",
+        "answer_from": "read_url",
+    }
+
+    @pytest.mark.parametrize("hostile", [
+        "x\nenabled:\n false",          # lands the rule DISABLED
+        "x\nexpires:\n 2020-01-01",     # lands it already expired
+        "x\nthen:\n  never_use: [x]",   # smuggles an obligation
+    ])
+    def test_a_value_cannot_smuggle_a_second_key(self, hostile):
+        rule, errors = rules.lint(rules.render({**self.BASE, "description": hostile}))
+        assert not errors and rule is not None
+        assert rule.description == hostile
+        assert rule.status == "", "a description turned the rule off"
+        assert rule.expires is None, "a description expired the rule"
+        assert {o["verb"] for o in rule.obligations} == {rules.VERB_ANSWER_FROM}
+
+    @pytest.mark.parametrize("value", [
+        "on", "off", "yes", "no", "~", "null", "0x1A", "0755", "12:34", "1_000",
+        "true", "material: use it", "#hash", "- dash", "a  b", "*star", "&amp;amp",
+    ])
+    def test_yaml_resolutions_survive_verbatim(self, value):
+        """No denylist of first characters enumerates YAML 1.1's resolver. The
+        renderer round-trips through the parser instead."""
+        rule, errors = rules.lint(rules.render({**self.BASE, "description": value}))
+        assert not errors and rule is not None
+        assert rule.description == value
+
+    def test_surrounding_whitespace_is_normalised_deliberately(self):
+        """The one value that does NOT survive verbatim, and on purpose: a
+        description is a sentence, and leading space in one is a typo."""
+        rule, _ = rules.lint(rules.render({**self.BASE, "description": "  spaced  "}))
+        assert rule is not None and rule.description == "spaced"
+
+    def test_a_value_containing_a_frontmatter_marker_keeps_every_key_below_it(self):
+        """The diff the owner approves visibly contained `never_use:` — and a
+        naive split made everything below the marker PROSE, so the compiled
+        rule had no prohibition. Quoting cannot fix it (`"a --- b"` still
+        contains the marker), and "empty --- say so" is ordinary writing."""
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_has": "material", "answer_from": "material",
+            "must_tell_me_when": "the source came back empty --- say so",
+            "never_use": ["web_search"],
+        }))
+        assert not errors and rule is not None
+        assert {o["verb"] for o in rule.obligations} == {
+            rules.VERB_ANSWER_FROM, rules.VERB_MUST_TELL_ME_WHEN, rules.VERB_NEVER_USE,
+        }, "an obligation below a --- was read as prose"
+        [told] = [o for o in rule.obligations if o["verb"] == rules.VERB_MUST_TELL_ME_WHEN]
+        assert told["state"] == "the source came back empty --- say so"
+
+    def test_a_frontmatter_marker_in_a_description_is_just_text(self):
+        """It used to fail with "a rule needs a `when:` block" — naming
+        something the author had in fact supplied, so a retry writes the same
+        rule again."""
+        rule, errors = rules.lint(rules.render({**self.BASE, "description": "a --- b"}))
+        assert not errors and rule is not None and rule.description == "a --- b"
+
+    @pytest.mark.parametrize("key", rules.LIFECYCLE_FIELDS)
+    def test_a_lifecycle_key_is_never_silently_absent_from_the_card(self, key):
+        """A rule that binds NOTHING must not read as one that works. Both keys
+        make a rule inert, and the card has to say so — this is parametrised
+        over the constant so a lifecycle key added later inherits the check
+        instead of being the fourth instance of this bug."""
+        value = {"enabled": False, "expires": "2020-01-01"}[key]
+        rule, errors = rules.lint(rules.render({**self.BASE, key: value}))
+        assert not errors and rule is not None
+        text = rules.explain(rule)
+        assert "DISABLED" in text or "EXPIRED" in text, text
+
+    def test_a_regex_with_backslashes_is_not_re_escaped(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_matches": r"\bhttps?://\S+", "answer_from": "read_url",
+        }))
+        assert not errors and rule is not None
+        assert rule.pattern is not None
+        assert rule.pattern.pattern == r"\bhttps?://\S+"
+
+    def test_two_trigger_forms_at_once_are_refused_not_dropped(self):
+        """Dropping one silently writes a rule with a trigger nobody chose."""
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({
+                "name": "r", "description": "d", "when_subject": "prompt",
+                "when_has": "link", "when_matches": "x", "answer_from": "read_url",
+            })
+        assert "alternatives" in str(exc.value)
+
+
+class TestShowAndCredit:
+    """The two general forms that replaced a fixed list of named checks. Both
+    name a TOOL, so a rule can require something about what aish DID without
+    anyone coining a new check name in code first."""
+
+    PATH = "/media/a1b2c3.png"
+    VIDEO = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    TOOLS = {"show_image", "show_video", "read_url"}
+
+    def _call(self, tool, result, args=None):
+        return {"tool": tool, "args": args or {}, "status": "ok", "decision": "",
+                "result": result}
+
+    def _shown(self):
+        return self._call(
+            "show_image", f"Image ready. Include this EXACTLY:\n\n![ubud]({self.PATH})"
+        )
+
+    def _played(self):
+        return self._call("show_video", f"Video ready:\n\n[Watch]({self.VIDEO})")
+
+    def _fail(self, then, answer, calls=()):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always", **then,
+        }), known_tools=self.TOOLS)
+        assert not errors, errors
+        binding = rules.bind(rule, {"on": "always"}, "b1", self.TOOLS)
+        return rules.verify([binding], rules.TurnEvidence(answer=answer, calls=calls))
+
+    def test_the_tools_own_output_in_the_answer_satisfies_it(self):
+        assert not self._fail(
+            {"answer_must_include": "picture"},
+            f"Here it is ![ubud]({self.PATH})", (self._shown(),),
+        )
+
+    def test_a_picture_fetched_and_then_dropped_does_not(self):
+        """The failure the join exists for: the tool ran, the owner saw
+        nothing."""
+        assert self._fail(
+            {"answer_must_include": "picture"},
+            "Ubud is greener than the coast.", (self._shown(),),
+        )
+
+    def test_a_different_path_does_not_pass_for_it(self):
+        """An EQUALITY, not a guess about shape — the exact string the tool
+        handed over has to be there."""
+        assert self._fail(
+            {"answer_must_include": "picture"},
+            "Here it is ![x](/media/something-else.png)", (self._shown(),),
+        )
+
+    def test_never_calling_the_tool_does_not_satisfy_show(self):
+        assert self._fail({"answer_must_include": "picture"}, "no picture", ())
+
+    def test_a_refused_call_cannot_satisfy_it(self):
+        refused = {**self._shown(), "decision": "denied", "status": "failed"}
+        assert self._fail(
+            {"answer_must_include": "picture"},
+            f"Here it is ![ubud]({self.PATH})", (refused,),
+        )
+
+    def test_credit_passes_when_the_tool_never_ran(self):
+        """The difference between the two words: CREDIT is conditional. If
+        nothing was used there is nothing to credit."""
+        assert not self._fail({"answer_must_include": "sources"}, "an answer", ())
+
+    def test_credit_fails_when_what_ran_is_not_in_the_answer(self):
+        call = self._call("read_url", "page text", {"url": "https://shop.example/x"})
+        assert self._fail({"answer_must_include": "sources"}, "about 40 EUR", (call,))
+
+    def test_credit_passes_when_the_page_is_linked(self):
+        call = self._call("read_url", "page text", {"url": "https://shop.example/x"})
+        assert not self._fail(
+            {"answer_must_include": "sources"},
+            "about 40 EUR — see https://shop.example/x", (call,),
+        )
+
+    def test_the_ask_tells_the_model_how_to_produce_it(self):
+        """The rule file never names a tool. The ASK has to — the model is the
+        one who has to act."""
+        call = self._call("read_url", "t", {"url": "https://shop.example/x"})
+        [failure] = self._fail({"answer_must_include": "sources"}, "40 EUR", (call,))
+        assert "Link the pages you read" in failure.ask
+        assert failure.evidence["expected"]["sources"] == ["https://shop.example/x"]
+
+    def test_either_tool_satisfies_a_choice(self):
+        then = {"answer_must_include": {"any_of": ["picture", "video"]}}
+        assert not self._fail(then, f"see [Watch]({self.VIDEO})", (self._played(),))
+        assert not self._fail(then, f"see ![x]({self.PATH})", (self._shown(),))
+
+    def test_neither_tool_fails_the_choice(self):
+        assert self._fail(
+            {"answer_must_include": {"any_of": ["picture", "video"]}},
+            "Ubud is greener than the coast.", (),
+        )
+
+    def test_the_ask_names_both_ways_out(self):
+        [failure] = self._fail(
+            {"answer_must_include": {"any_of": ["picture", "video"]}}, "text", ()
+        )
+        assert "show_image" in failure.ask and "show_video" in failure.ask
+
+    def test_a_bare_list_is_refused_rather_than_read_as_a_choice(self):
+        """`never_use: [a, b]` already means NONE OF THESE. Two lists in one
+        file meaning opposite things is the trap `any_of` exists to avoid."""
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({
+                "name": "r", "description": "d", "when_subject": "always",
+                "answer_must_include": ["picture", "video"],
+            })
+        assert "any_of" in str(exc.value)
+
+    def test_a_choice_of_one_is_refused(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "answer_must_include": {"any_of": ["picture"]},
+        }), known_tools=self.TOOLS)
+        assert rule is None and "at least two" in errors[0]
+
+    def test_the_tool_a_kind_needs_is_checked_even_though_it_is_unnamed(self):
+        """A kind is made real by a tool. If that tool is gone the rule can
+        never be satisfied — caught in the tool's name, though the rule file
+        never mentions it."""
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "answer_must_include": "picture",
+        }), known_tools={"read_url"})
+        assert rule is None and "show_image" in errors[0]
+
+    def test_a_video_the_tool_validated_is_credited(self):
+        assert not self._fail(
+            {"answer_must_include": "video"}, f"see {self.VIDEO}", (self._played(),)
+        )
+
+
+class TestRetireWithoutCompiling:
+    """The loud broken-rule warning is exactly when an owner reaches for
+    retire. If retiring required a valid rule, the only unstoppable rules
+    would be the broken ones."""
+
+    def test_a_rule_that_does_not_compile_can_still_be_retired(self):
+        broken = "---\nname: x\ndescription: d\nwhen: always\nthen: {}\n---\n\nbody\n"
+        disabled = rules.disable_text(broken)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "x.md"
+            path.write_text(disabled, encoding="utf-8")
+            rule = rules.load_rules([Path(tmp)])[0]
+        assert rule.status == "disabled"
+        assert rule.error, "the rule is still broken — retiring does not repair it"
+
+    def test_retiring_twice_does_not_stack_the_key(self):
+        text = "---\nname: x\ndescription: d\nenabled: true\nwhen: always\n---\n"
+        once = rules.disable_text(text)
+        assert once.count("enabled:") == 1
+        assert rules.disable_text(once).count("enabled:") == 1
+
+    def test_only_a_top_level_enabled_key_is_replaced(self):
+        """An unanchored text edit on a structured file deletes whatever
+        happens to share a prefix at any depth."""
+        text = ("---\nname: x\ndescription: d\nwhen:\n  prompt:\n"
+                "    enabled: keep-me\n---\n")
+        assert "enabled: keep-me" in rules.disable_text(text)
+
+    def test_the_body_survives_retiring(self):
+        text = "---\nname: x\ndescription: d\nwhen: always\n---\n\nWhy it exists.\n"
+        assert "Why it exists." in rules.disable_text(text)
+
+
+class TestMeaningTrigger:
+    """The trigger that needs MEANING. "When I ask to be SHOWN something" is a
+    fact about the request and it is gone by the time there is an answer to
+    check — the one case the answer-side reframe cannot reach. Anchored on the
+    owner's own examples, so a miss is fixed by adding one, not by tuning a
+    number he can never see."""
+
+    ANCHORS = ["show me the difference between X and Y", "pokaż mi jak to wygląda"]
+
+    def _rule(self, **over):
+        rule, errors = rules.lint(rules.render({
+            "name": "show-me", "description": "Show me a picture.",
+            "when_subject": "prompt", "when_like": self.ANCHORS,
+            "answer_must_include": "picture", **over,
+        }), known_tools={"show_image"})
+        assert not errors, errors
+        return rule
+
+    def _scores(self, mapping):
+        return lambda task, sentences: {s: mapping.get(s, 0.0) for s in sentences}
+
+    def test_a_close_message_binds(self):
+        rule = self._rule()
+        verdict, evidence = rules.evaluate(
+            rule, rules.TurnContext(task="show me difference between Ubud and the beach"),
+            meaning=self._scores({self.ANCHORS[0]: 0.81}),
+        )
+        assert verdict == rules.VERDICT_BIND
+        assert evidence["closest"] == self.ANCHORS[0]
+        assert evidence["floor"] == rules.MEANING_FLOOR
+
+    def test_an_unrelated_message_abstains(self):
+        verdict, evidence = rules.evaluate(
+            self._rule(), rules.TurnContext(task="what time is my flight"),
+            meaning=self._scores({a: 0.2 for a in self.ANCHORS}),
+        )
+        assert verdict == rules.VERDICT_ABSTAIN
+        # Both distributions, not only the hits: you cannot tell a floor sits
+        # below a corpus's noise from the matches alone.
+        assert len(evidence["sims"]) == len(self.ANCHORS)
+
+    def test_the_evidence_carries_the_floor_that_was_in_force(self):
+        """A threshold change later must not silently rewrite what past turns
+        meant (contract §4)."""
+        _v, evidence = rules.evaluate(
+            self._rule(), rules.TurnContext(task="x"), meaning=self._scores({})
+        )
+        assert evidence["floor"] == rules.MEANING_FLOOR
+
+    def test_no_embedding_model_is_a_third_answer_not_a_quiet_no(self):
+        """"The model was down" and "the rule did not apply" are different
+        facts. A rule whose evaluation silently degrades to abstaining looks
+        exactly like one that is working."""
+        verdict, evidence = rules.evaluate(
+            self._rule(), rules.TurnContext(task="show me"), meaning=None
+        )
+        assert verdict == rules.VERDICT_UNEVALUABLE
+        assert "embedding" in evidence["why"]
+
+    def test_an_embedding_failure_is_also_unevaluable(self):
+        verdict, _e = rules.evaluate(
+            self._rule(), rules.TurnContext(task="show me"),
+            meaning=lambda task, sentences: None,
+        )
+        assert verdict == rules.VERDICT_UNEVALUABLE
+
+    def test_the_tier_is_derived_from_the_trigger_not_declared(self):
+        """No policy language asks an author to annotate evaluation strategy,
+        and "tier: 1" means nothing to the owner."""
+        assert self._rule().tier == 1
+        structural, _e = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_has": "material", "answer_from": "material",
+        }))
+        assert structural.tier == 0
+
+    def test_the_examples_are_on_the_card_in_the_owners_own_words(self):
+        text = rules.explain(self._rule())
+        for anchor in self.ANCHORS:
+            assert anchor in text
+        assert "0.6" not in text, "the owner was shown a threshold"
+
+    def test_one_message_shape_per_rule(self):
+        with pytest.raises(rules.LintError) as exc:
+            rules.render({
+                "name": "r", "description": "d", "when_subject": "prompt",
+                "when_like": ["a"], "when_has": "link", "answer_from": "read_url",
+            })
+        assert "alternatives" in str(exc.value)
+
+    def test_too_many_examples_is_refused(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_like": [f"example {i}" for i in range(rules.MEANING_MAX_ANCHORS + 1)],
+            "answer_from": "read_url",
+        }))
+        assert rule is None and "at most" in errors[0]
+
+
+class TestKeywordListsAreRefused:
+    """The exact shape a compiler produces when asked for a MEANING with only
+    literal matching available — and extending the list is exactly how it tries
+    to fix it. Reported from a real session: three attempts, three longer word
+    lists, all wrong."""
+
+    def _lint(self, pattern):
+        return rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_matches": pattern, "answer_from": "read_url",
+        }), known_tools={"read_url"})
+
+    @pytest.mark.parametrize("pattern", [
+        "(?i)(show|display|view|picture)",
+        "(?i)(pokaż|show me|zobacz)",
+        "show|display|picture|photo",
+    ])
+    def test_a_word_list_is_refused_and_told_what_to_use(self, pattern):
+        rule, errors = self._lint(pattern)
+        assert rule is None
+        assert "like" in errors[0]
+        assert "Docker image" in errors[0], "the refusal must show WHY, not just say no"
+
+    @pytest.mark.parametrize("pattern", [
+        r"youtube\.com|youtu\.be",     # a domain list is a literal string
+        r"^\s*https?://\S+\s*$",        # structure, not vocabulary
+        "^show me",                     # anchored: a real string match
+    ])
+    def test_a_literal_pattern_is_still_allowed(self, pattern):
+        rule, errors = self._lint(pattern)
+        assert rule is not None, errors
+
+
+class TestAnswerBeforeActing:
+    """"Answer me before running anything." Declared inexpressible and it was
+    not: pure ordering over the turn's own record, needing no understanding of
+    whether a question was asked."""
+
+    def _rule(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "answer-first", "description": "Answer me before running anything.",
+            "when_subject": "always", "must_first": "answer",
+        }), known_tools={"read_url"})
+        assert not errors, errors
+        return rule
+
+    def test_it_compiles_without_a_tool_of_that_name(self):
+        """`answer` is HIS word, not a tool — the lint must not go looking for
+        one."""
+        assert self._rule() is not None
+
+    def test_it_is_decided_at_the_gate_not_at_turn_end(self):
+        """An ordering that has already gone wrong cannot be repaired by
+        asking, so it must not hold the answer back either."""
+        rule = self._rule()
+        binding = rules.bind(rule, {"on": "always"}, "b1", {"read_url"})
+        assert rules.wants_text_first([binding]) == [binding]
+        assert rules.has_verify([binding]) is False
+        assert "Enforced before a call runs" in rules.explain(rule)
+
+    def test_a_rule_about_a_real_tool_is_untouched(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "must_first": "read_url",
+        }), known_tools={"read_url"})
+        assert not errors
+        binding = rules.bind(rule, {"on": "always"}, "b1", {"read_url"})
+        assert rules.wants_text_first([binding]) == []
+        assert rules.has_verify([binding]) is True
+
+
+class TestSecretsInCommands:
+    """"Never put a secret inline in a command." A join against his own
+    keychain — a pattern would need the secret written into the rule file,
+    which is the very thing the rule stops."""
+
+    ACTION = {"tool": "run_command", "command_has": "a_secret"}
+
+    def _rule(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "no-inline-secrets", "description": "No secrets in commands.",
+            "when_subject": "action", "when_action": self.ACTION,
+            "never_use": ["run_command"],
+        }), known_tools={"run_command"})
+        assert not errors, errors
+        return rule
+
+    def test_it_fires_only_when_a_stored_secret_is_in_the_command(self):
+        found = lambda cmd: "hunter2hunter2" in cmd  # noqa: E731
+        assert rules.action_matches(
+            self.ACTION, "run_command", {"command": "curl -H 'k: hunter2hunter2'"},
+            secrets_in=found,
+        )
+        assert not rules.action_matches(
+            self.ACTION, "run_command", {"command": "ls -la"}, secrets_in=found
+        )
+
+    def test_no_keychain_means_no_match_rather_than_a_crash(self):
+        assert not rules.action_matches(
+            self.ACTION, "run_command", {"command": "anything"}, secrets_in=None
+        )
+
+    def test_the_card_says_it_in_english(self):
+        text = rules.explain(self._rule())
+        assert "one of your stored secrets" in text
+        assert "command_has" not in text
+
+    def test_a_made_up_value_is_refused_with_the_reason(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "action",
+            "when_action": {"tool": "run_command", "command_has": "sk-[a-z]+"},
+            "never_use": ["run_command"],
+        }), known_tools={"run_command"})
+        assert rule is None
+        assert "would be the very thing it stops" in errors[0]
+
+
+class TestMeaningOverTheAnswer:
+    """Sycophancy, per turn rather than in an offline audit. His argument, and
+    it holds: a model's reflex lands in its FIRST paragraph, so embedding one
+    paragraph against a few anchors is milliseconds and local."""
+
+    ANCHORS = ["You're absolutely right, I apologize for the confusion",
+               "Great question! I'm so glad you asked"]
+
+    def _fail(self, answer, scores):
+        rule, errors = rules.lint(rules.render({
+            "name": "no-flattery", "description": "No flattery up front.",
+            "when_subject": "always",
+            "answer_must_not_include": {"like": self.ANCHORS, "in": "opening"},
+        }))
+        assert not errors, errors
+        binding = rules.bind(rule, {"on": "always"}, "b1", set())
+        evidence = rules.TurnEvidence(
+            answer=answer,
+            meaning=lambda text, anchors: {a: scores.get(a, 0.0) for a in anchors},
+        )
+        return rules.verify([binding], evidence)
+
+    def test_a_flattering_opening_is_caught(self):
+        assert self._fail(
+            "You are so right, sorry about that!\n\nThe answer is 42.",
+            {self.ANCHORS[0]: 0.83},
+        )
+
+    def test_a_plain_opening_passes(self):
+        assert not self._fail("The answer is 42.", {a: 0.1 for a in self.ANCHORS})
+
+    def test_only_the_opening_is_looked_at(self):
+        """The point of `in: opening` — the same words later in a long answer
+        are usually quoting or explaining, not grovelling."""
+        seen = []
+        rule, _e = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "answer_must_not_include": {"like": self.ANCHORS, "in": "opening"},
+        }))
+        binding = rules.bind(rule, {"on": "always"}, "b1", set())
+        rules.verify([binding], rules.TurnEvidence(
+            answer="First para.\n\nYou're absolutely right, I apologize.",
+            meaning=lambda text, anchors: seen.append(text) or {a: 0.0 for a in anchors},
+        ))
+        assert seen == ["First para."], seen
+
+    def test_no_scorer_abstains_rather_than_passing_quietly(self):
+        rule, _e = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "always",
+            "answer_must_not_include": {"like": self.ANCHORS, "in": "opening"},
+        }))
+        binding = rules.bind(rule, {"on": "always"}, "b1", set())
+        assert rules.verify([binding], rules.TurnEvidence(answer="anything")) == []
+
+    def test_the_evidence_records_both_distributions(self):
+        [failure] = self._fail(
+            "You are so right, sorry!", {self.ANCHORS[0]: 0.9, self.ANCHORS[1]: 0.2}
+        )
+        assert len(failure.evidence["sims"]) == 2
+        assert failure.evidence["floor"] == rules.MEANING_FLOOR
+
+    def test_a_position_that_does_not_exist_is_refused(self):
+        with pytest.raises(rules.RuleError):
+            rules._answer_check("answer_must_not_include",
+                                {"like": ["x"], "in": "middle"})
+
+    def test_slicing_is_by_paragraph_not_by_characters(self):
+        answer = "One.\n\nTwo.\n\nThree."
+        assert rules.slice_answer(answer, "opening") == "One."
+        assert rules.slice_answer(answer, "ending") == "Three."
+        assert rules.slice_answer(answer, "anywhere") == answer
+
+
+class TestRetroMatch:
+    """Replay a candidate over turns that already happened. A manufactured turn
+    tests the harness; a real one tests the rule."""
+
+    TURNS = [
+        {"turn": "1", "prompt": "summarize https://example.com/post", "origin": "user"},
+        {"turn": "2", "prompt": "what is the capital of France", "origin": "user"},
+        {"turn": "3", "prompt": "read ~/notes/plan.md and tell me", "origin": "user"},
+    ]
+
+    def _rule(self, **over):
+        fields = {"name": "r", "description": "d", "when_subject": "prompt",
+                  "when_has": "material", "answer_from": "material", **over}
+        rule, _ = rules.lint(rules.render(fields))
+        return rule
+
+    def test_it_reports_which_real_turns_would_have_bound(self):
+        match = rules.retro_match(self._rule(), self.TURNS)
+        assert match.checked == 3
+        assert [t["turn"] for t in match.bound] == ["1", "3"]
+
+    def test_a_narrower_trigger_binds_strictly_fewer_turns(self):
+        """The behaviour diff the design asks for, in its simplest form: the
+        same history, two rules, a comparable answer."""
+        wide = rules.retro_match(self._rule(), self.TURNS)
+        narrow = rules.retro_match(
+            self._rule(when_has="link", answer_from="read_url"), self.TURNS
+        )
+        assert {t["turn"] for t in narrow.bound} < {t["turn"] for t in wide.bound}
+
+    def test_an_action_rule_reports_that_it_cannot_be_replayed(self):
+        """It arms every turn and fires per CALL, and calls are not replayed
+        here. Counting its binds would read as "this fires constantly" for a
+        rule that may never fire — on the one trigger kind where bound and
+        fired are different things."""
+        rule, errors = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "action",
+            "when_action": {"tool": "remember"}, "never_use": ["remember"],
+        }))
+        assert not errors and rule is not None
+        match = rules.retro_match(rule, self.TURNS)
+        assert match.per_call is True
+        assert match.checked == 0 and not match.bound
+
+    def test_a_rule_binding_nothing_is_visible_as_such(self):
+        """Not an error — it may be about the future. But the owner has to see
+        it, because the other explanation is that the rule is wrong."""
+        match = rules.retro_match(self._rule(when_has="attachment"), self.TURNS)
+        assert match.checked == 3 and not match.bound
+
+    def test_an_attachment_turn_is_replayed_as_carrying_material(self, tmp_path):
+        """Attachments reach the agent as separate parameters and appear in no
+        message text. Reading only `content` made the canonical shipped rule's
+        card say "would never have fired" — understating on the most common
+        trigger kind."""
+        log = tmp_path / "session-20260101-000000-000000.jsonl"
+        log.write_text(json.dumps({
+            "kind": "message", "role": "user", "turn": "a",
+            "content": "what does this say", "documents": ["/tmp/report.pdf"],
+        }) + "\n", encoding="utf-8")
+        turns = rules.past_turns(tmp_path)
+        rule, _ = rules.lint(rules.render({
+            "name": "r", "description": "d", "when_subject": "prompt",
+            "when_has": "attachment", "answer_from": "material",
+        }))
+        assert [t["turn"] for t in rules.retro_match(rule, turns).bound] == ["a"]
+
+    def test_past_turns_skips_text_the_owner_never_typed(self, tmp_path):
+        """aish's own notes arrive in the user slot. Counting them would have a
+        rule appear to bind on turns nobody took."""
+        log = tmp_path / "session-20260101-000000-000000.jsonl"
+        log.write_text("\n".join(json.dumps(r) for r in [
+            {"kind": "message", "role": "user", "content": "real question", "turn": "a"},
+            {"kind": "message", "role": "user", "content": "[aish: rework this]", "turn": "b"},
+            {"kind": "message", "role": "assistant", "content": "an answer"},
+        ]) + "\n", encoding="utf-8")
+        turns = rules.past_turns(tmp_path)
+        assert [t["prompt"] for t in turns] == ["real question"]

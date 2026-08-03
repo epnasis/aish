@@ -2377,6 +2377,9 @@ const TOOL_META = {
   edit_file: ["edit_file", "write", "--green"],
   remember: ["Saved to memory", "knowledge", "--yellow"],
   forget_memory: ["Forgot a memory", "knowledge", "--yellow"],
+  create_rule: ["Wrote a rule", "knowledge", "--orange"],
+  edit_rule: ["Changed a rule", "knowledge", "--orange"],
+  retire_rule: ["Retired a rule", "knowledge", "--orange"],
 };
 
 // [TRACE-TAIL-START]
@@ -6173,22 +6176,57 @@ function buildWriteCard(card, event) {
   htext.className = "card-htext";
   const htitle = document.createElement("span");
   htitle.className = "card-htitle";
-  htitle.textContent = event.verb === "create" ? "Create file" : "Edit file";
+  // A rule is not a file, to the person approving it. Calling it one made the
+  // owner think aish had bypassed its own rule tools and hand-written YAML —
+  // he was deciding about a behaviour and the card showed him a text edit.
+  const isRule = !!event.rule;
+  htitle.textContent = isRule
+    ? ({ Created: "New rule", Updated: "Rule change", Retired: "Retire rule" }[
+        event.rule_verb
+      ] || "Rule")
+    : event.verb === "create" ? "Create file" : "Edit file";
   const hsub = document.createElement("span");
-  hsub.className = "card-hsub mono";
-  hsub.textContent = relTarget(event.target);
+  hsub.className = isRule ? "card-hsub" : "card-hsub mono";
+  hsub.textContent = isRule ? event.rule : relTarget(event.target);
   hsub.title = event.target; // full path on hover
   htext.append(htitle, hsub);
-  const added = document.createElement("span");
-  added.className = "card-count add";
-  added.textContent = `+${event.added}`;
-  const removed = document.createElement("span");
-  removed.className = "card-count del";
-  removed.textContent = `−${event.removed}`;
-  head.append(ico, htext, added, removed);
+  head.append(ico, htext);
+  if (!isRule) {
+    // Line counts describe a text edit. For a rule they measure the wrong
+    // thing entirely — nobody decides about a rule by how many lines it is.
+    const added = document.createElement("span");
+    added.className = "card-count add";
+    added.textContent = `+${event.added}`;
+    const removed = document.createElement("span");
+    removed.className = "card-count del";
+    removed.textContent = `−${event.removed}`;
+    head.append(added, removed);
+  }
   card.appendChild(head);
 
-  card.appendChild(renderDiff(event.diff || ""));
+  // The compiled meaning, when the harness sent one (a rule write). It goes
+  // ABOVE the diff because the diff is YAML the owner did not write, and what
+  // he is agreeing to is the behaviour it describes.
+  if (event.note) {
+    const note = document.createElement("div");
+    note.className = "card-note";
+    note.textContent = event.note;
+    card.appendChild(note);
+  }
+
+  const diff = renderDiff(event.diff || "");
+  if (isRule) {
+    // Folded away, not removed. The file is still the truth and anyone who
+    // wants it is one tap from it — but it is the second thing, not the first.
+    const fold = document.createElement("details");
+    fold.className = "card-fold";
+    const label = document.createElement("summary");
+    label.textContent = "Show the file";
+    fold.append(label, diff);
+    card.appendChild(fold);
+  } else {
+    card.appendChild(diff);
+  }
 
   const feedback = feedbackField();
   card.appendChild(feedback);

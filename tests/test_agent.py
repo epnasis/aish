@@ -7,6 +7,7 @@ approval gate with no model, no network, and full determinism.
 
 import datetime
 import importlib
+import json
 import re
 import stat
 from pathlib import Path
@@ -50,7 +51,10 @@ class FakeChat:
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        # The streaming shape ollama yields, so a test that wires `on_token`
+        # exercises the same path the web server uses rather than a second one.
+        return iter([response]) if kwargs.get("stream") else response
 
 
 def make_agent(responses, approve=lambda _cmd: True, **kwargs):
@@ -5119,9 +5123,9 @@ name: bounded-material
 description: Answer from the material I gave you.
 when:
   prompt:
-    has: source
+    has: material
 then:
-  answer_from: source
+  answer_from: material
   never_use: [web_search]
   must_tell_me_when: the material could not be read
 ---
@@ -5175,6 +5179,13 @@ def records(logged, kind):
     return [r for r in logged if r.get("kind") == kind]
 
 
+def gates(logged):
+    """Gate verdicts at the DISPATCH point. Verify emits `gate` records too
+    (contract §7 maps `verify_pass` onto `gate{at:"verify"}`), and a test about
+    what the pre-dispatch gate decided must not see them."""
+    return [r for r in records(logged, "gate") if r.get("at") != "verify"]
+
+
 def _seeded_reminders(agent):
     """The per-task reminder carrying the rules block. messages[0] is excluded:
     the system prompt QUOTES the header (it tells the model what a rules block
@@ -5225,7 +5236,7 @@ class TestRuleSeeding:
         assert binding["rule"] == "bounded-material" and binding["seeded"] is True
         assert binding["obligations"][0] == {
             "verb": "answer_from",
-            "to": "source",
+            "to": "material",
             "of": "deliverable",
             "readers": ["read_url"],
             "sources": [SOURCE_URL],
@@ -5331,7 +5342,7 @@ class TestRuleGate:
             step_log=steps.append,
         )
         agent.run_task(TASK)
-        [gate] = records(steps, "gate")
+        [gate] = gates(steps)
         [tool_step] = [s for s in steps if s.get("kind") == "tool"]
         assert gate["call"] == tool_step["call"] and gate["call"] > 0
         assert gate["verdict"] == "refused" and gate["at"] == "gate"
@@ -5360,7 +5371,7 @@ class TestRuleGate:
             agent.run_task(TASK)
         finally:
             importlib.reload(agent_module.web)
-        [gate] = records(steps, "gate")
+        [gate] = gates(steps)
         assert gate["verdict"] == "allowed" and gate["tool"] == "read_url"
 
     def test_no_gate_record_when_no_rule_bound(self, tmp_path):
@@ -5558,16 +5569,16 @@ class TestBoundedRefusalAndEscalation:
         agent.run_task(TASK)
         last = tool_messages(agent.messages)[-1]["content"]
         assert "STOP retrying" in last
-        assert records(steps, "gate")[-1]["escalated"] is True
+        assert gates(steps)[-1]["escalated"] is True
 
     def test_the_escalation_records_the_round_it_escalated_on(self, tmp_path):
         steps = []
         agent, _ = rules_agent(tmp_path, self._responses(3), step_log=steps.append)
         agent.approve_tool = lambda name, args, preview: False
         agent.run_task(TASK)
-        gates = records(steps, "gate")
-        assert [g["round"] for g in gates] == [1, 2, 3]
-        assert [g["escalated"] for g in gates] == [False, False, True]
+        verdicts = gates(steps)
+        assert [g["round"] for g in verdicts] == [1, 2, 3]
+        assert [g["escalated"] for g in verdicts] == [False, False, True]
 
     def test_one_call_leaves_exactly_one_verdict_per_binding(self, tmp_path):
         """A per-gate tally must not count one allowance twice: the override
@@ -5618,7 +5629,7 @@ class TestARuleNeverLicenses:
         assert "elsewhere.example" in result and "NOT EXECUTED" in result
         # Both verdicts exist and they disagree, which is the point: the rule
         # permitted the TOOL, the egress gate withheld the HOST.
-        [gate] = records(steps, "gate")
+        [gate] = gates(steps)
         assert gate["verdict"] == "allowed" and gate["tool"] == "read_url"
         [tool_step] = [s for s in steps if s.get("kind") == "tool"]
         assert tool_step["ok"] is False and tool_step["decision"] == "blocked"
@@ -5768,7 +5779,7 @@ name: half-written
 description: The obligation is in the prose, where it enforces nothing.
 when:
   prompt:
-    has: source
+    has: material
 ---
 
 You MUST always use the show_image tool.
@@ -5832,6 +5843,792 @@ You MUST always use the show_image tool.
         assert len(warned) == 2
         assert {"half-written" in w for w in warned} == {True, False}
 
+
+# A verify rule whose obligation is met by any ordinary answer: the pass path.
+RULE_VERIFY_SATISFIED = """---
+name: no-hedging
+description: Answers do not hedge.
+when: always
+then:
+  answer_must_not_include:
+    pattern: "as an AI"
+---
+"""
+
+# Two verify obligations that fail INDEPENDENTLY — the round-accounting case.
+# `answer_must_include: sources` cannot do it: with no reads there is nothing to
+# credit, so it passes exactly when must_first fails.
+RULE_VERIFY_TWO = """---
+name: two-checks
+description: A price comes from the store, and never in EUR.
+when: always
+then:
+  must_first: read_url
+  answer_must_not_include:
+    pattern: "EUR"
+---
+"""
+
+RULE_VERIFY = """---
+name: live-price
+description: A price you quote comes from the store's page, this turn.
+when: always
+then:
+  must_first: read_url
+  answer_must_include: sources
+---
+
+Quote prices only from the page you fetched this turn.
+"""
+
+
+class TestVerify:
+    """The turn's answer is a PROPOSAL until the rules have seen it. Verify
+    runs inside the loop for that reason: outside it there is no way to
+    continue a turn — the budget, the stop gate and the terminators all assume
+    final text is final, and a second answer is a second answer in an
+    append-only log."""
+
+    def test_an_answer_that_satisfies_its_rules_is_delivered_untouched(self, tmp_path):
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("read_url", url="https://shop.test/a")]),
+                model_says("It costs 40 EUR — [shop](https://shop.test/a)."),
+            ],
+            rule_texts=(RULE_VERIFY,),
+        )
+        agent_module.web.read_url = lambda *a, **k: "the page says 40 EUR"
+        try:
+            answer = agent.run_task("what does the mouse cost")
+        finally:
+            importlib.reload(agent_module.web)
+        assert answer == "It costs 40 EUR — [shop](https://shop.test/a)."
+        assert "[aish]" not in answer
+
+    def test_an_unmet_rule_sends_the_turn_back_instead_of_delivering(self, tmp_path):
+        """The whole point: the answer is not the end of the turn."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("It costs about 40 EUR."),          # no page read
+                model_says(tool_calls=[tool_call("read_url", url="https://shop.test/a")]),
+                model_says("It costs 40 EUR — [shop](https://shop.test/a)."),
+            ],
+            rule_texts=(RULE_VERIFY,),
+        )
+        agent_module.web.read_url = lambda *a, **k: "the page says 40 EUR"
+        try:
+            answer = agent.run_task("what does the mouse cost")
+        finally:
+            importlib.reload(agent_module.web)
+        assert answer == "It costs 40 EUR — [shop](https://shop.test/a)."
+        asked = [m for m in agent.messages if m.get("role") == "user"
+                 and "live-price" in str(m.get("content"))]
+        assert asked, "the model was never told what was missing"
+        assert "read_url" in asked[0]["content"]
+
+    def test_the_ask_names_the_VALUE_not_a_yes_or_no(self, tmp_path):
+        """Asking for confirmation invites a yes; asking for the thing itself
+        requires having looked. The ask is a goad — it provokes the work, the
+        work lands in the trace, and the TRACE is what the next check reads."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("It costs about 40 EUR."),
+                model_says(tool_calls=[tool_call("read_url", url="https://shop.test/a")]),
+                model_says("It costs 40 EUR — [shop](https://shop.test/a)."),
+            ],
+            rule_texts=(RULE_VERIFY,),
+        )
+        agent_module.web.read_url = lambda *a, **k: "40 EUR"
+        try:
+            agent.run_task("price?")
+        finally:
+            importlib.reload(agent_module.web)
+        ask = [m["content"] for m in agent.messages if m.get("role") == "user"
+               and "live-price" in str(m.get("content"))][0]
+        assert "Call read_url now" in ask
+        assert "did you" not in ask.lower()
+
+    def test_the_model_saying_it_did_is_not_evidence(self, tmp_path):
+        """It answers again claiming it checked, without calling anything. The
+        verdict reads the trace, so the claim changes nothing."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("It costs about 40 EUR."),
+                model_says("I did check the live price. It is 40 EUR."),
+                model_says("Yes, definitely checked. 40 EUR."),
+            ],
+            rule_texts=(RULE_VERIFY,),
+        )
+        answer = agent.run_task("price?")
+        assert "[aish] rule 'live-price' not followed" in answer
+
+    def test_the_asks_are_bounded_and_the_answer_still_ships(self, tmp_path):
+        """Holding it hostage would trade a silent failure for a wedged turn."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(f"about 40 EUR ({i})") for i in range(4)],
+            rule_texts=(RULE_VERIFY,),
+        )
+        answer = agent.run_task("price?")
+        asked = [m for m in agent.messages if m.get("role") == "user"
+                 and "live-price" in str(m.get("content"))]
+        assert len(asked) == rules_module.RULE_MAX_ASKS
+        assert answer.startswith("about 40 EUR")
+        assert "[aish] rule 'live-price' not followed" in answer
+
+    def test_the_note_is_written_by_the_harness_not_asked_of_the_model(self, tmp_path):
+        """A disclosure the model is asked to make is one it can skip."""
+        agent, chat = rules_agent(
+            tmp_path,
+            [model_says(f"about 40 EUR ({i})") for i in range(4)],
+            rule_texts=(RULE_VERIFY,),
+        )
+        answer = agent.run_task("price?")
+        note = [line for line in answer.splitlines() if line.startswith("[aish]")]
+        assert note and "live-price" in note[0]
+        # The model never produced that text.
+        assert not any("[aish]" in str(m.get("content", "")) for m in agent.messages
+                       if m.get("role") == "assistant")
+
+    def test_verify_records_its_verdicts(self, tmp_path):
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(f"about 40 EUR ({i})") for i in range(4)],
+            rule_texts=(RULE_VERIFY,),
+            step_log=steps.append,
+        )
+        agent.run_task("price?")
+        verify_records = [g for g in records(steps, "gate") if g["at"] == "verify"]
+        assert verify_records, "verify decided and recorded nothing"
+        assert [g["round"] for g in verify_records][:2] == [1, 2]
+        # The answer SHIPPED with a note. Calling that "stopped" would have the
+        # ledger count delivered turns as terminations — and `escalated` means
+        # the OWNER had to decide, which at a bound hit is precisely what did
+        # not happen.
+        assert verify_records[-1]["verdict"] == "advised"
+        assert all(g["escalated"] is False for g in verify_records)
+        assert verify_records[0]["gate"] == "rule.must_first"
+
+    def test_a_refused_call_does_not_count_as_a_call_that_ran(self, tmp_path):
+        """Conflating "the gate stopped it" with "it never happened" would let a
+        blocked reader satisfy a must_first with nothing behind it."""
+        evidence = rules_module.TurnEvidence(
+            answer="about 40 EUR",
+            calls=({"tool": "read_url", "args": {"url": "https://shop.example/x"},
+                    "decision": "denied", "status": "failed"},),
+        )
+        assert evidence.called("read_url") is False
+        assert evidence.refused("read_url") is True
+        # …and the fetch it never made is not a host anyone read.
+        assert evidence.hosts_read() == []
+
+    def test_a_refused_capability_is_reported_and_never_re_asked(self, tmp_path):
+        """The goad must not send the model back at a call another gate just
+        stopped — that is the harness arguing with itself."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path, [], rule_texts=(RULE_VERIFY,), step_log=steps.append
+        )
+        agent.seed_rules("price?")
+        agent._note_turn_call(
+            "read_url", {"url": "https://shop.example/x"}, "USER DENIED"
+        )
+        agent._turn_calls[-1]["decision"] = "denied"
+        assert agent._verify_answer("about 40 EUR") is None, "a refused call was goaded"
+        assert any("not followed" in note for note in agent._not_followed)
+        assert all(g["verdict"] != "refused"
+                   for g in records(steps, "gate") if g["at"] == "verify")
+
+    def test_a_satisfied_rule_records_that_it_was_checked(self, tmp_path):
+        """A satisfied rule and an unchecked one must not look identical in the
+        log — absence is never the evidence."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says("hello")],
+            rule_texts=(RULE_VERIFY_SATISFIED,),
+            step_log=steps.append,
+        )
+        agent.run_task("hi")
+        passes = [g for g in records(steps, "gate")
+                  if g["at"] == "verify" and g["verdict"] == "allowed"]
+        assert passes and passes[0]["evidence"]["checked"] is True
+
+    def test_a_rule_deciding_nothing_at_turn_end_records_no_check(self, tmp_path):
+        """`checked: true` must mean something was checked."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path, [model_says("hello")], rule_texts=(RULE_SESSION,),
+            origin="automation", step_log=steps.append,
+        )
+        agent.run_task("hi")
+        assert not [g for g in records(steps, "gate") if g["at"] == "verify"]
+
+    def test_a_rejected_answer_never_reaches_the_log(self, tmp_path):
+        """The owner never saw it live; a page reload must not show it either,
+        or one turn has two answers."""
+        logged = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says("about 40 EUR")] * 4,
+            rule_texts=(RULE_VERIFY,),
+        )
+        agent.on_message = logged.append
+        answer = agent.run_task("price?")
+        answers = [m["content"] for m in logged if m.get("role") == "assistant"]
+        assert len(answers) == 1, (
+            f"a rejected proposal was logged as an answer: {answers}"
+        )
+        # And what is logged is the answer AS DELIVERED. Logging the model's
+        # original words would leave the note in the live stream only, so a
+        # cold reload would show an unfollowed rule as followed.
+        assert answers[0] == answer
+        assert "not followed" in answer
+
+    def test_an_empty_answer_streams_its_note_once(self, tmp_path):
+        """The hold streams itself, notes included. A caller that streams the
+        result again shows the owner every not-followed line twice."""
+        streamed = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says("")] * 4,
+            rule_texts=(RULE_VERIFY,),
+            on_token=streamed.append,
+        )
+        agent.run_task("price?")
+        assert "".join(streamed).count("not followed") == 1
+
+    def test_the_shipped_show_image_rule_catches_a_raw_link(self, tmp_path):
+        """The acceptance rule itself, driven through a real turn — not a
+        fixture shaped like it. It was inert for months; "it parses" is not
+        the claim that matters."""
+        example = (
+            Path(__file__).resolve().parent.parent
+            / "examples" / "rules" / "always-use-show-image.md"
+        )
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("here it is: ![map](https://tiles.example/x.png)"),
+                model_says("here it is: ![map](/tmp/aish-media/x.png)"),
+            ],
+            rule_texts=(example.read_text(encoding="utf-8"),),
+        )
+        answer = agent.run_task("show me the map")
+        # Asked, reworked, delivered clean — no note, because the rule was met.
+        assert "tiles.example" not in answer
+        assert "not followed" not in answer
+        ask = [m for m in agent.messages if str(m.get("content", "")).startswith("[aish:")]
+        assert ask and "show_image" in ask[0]["content"]
+
+    def test_a_denial_outranks_verify(self, tmp_path):
+        """#81 over #191. The stop gate is lifted BY the text-only turn Verify
+        is about to inspect, so without the guard the goad drives the very call
+        the owner just denied — the harness laundering a denial."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("run_command", command="curl shop")]),
+                model_says("about 40 EUR"),
+            ],
+            rule_texts=(RULE_VERIFY,),
+            approve=lambda _cmd: Denied("no, stop looking things up"),
+        )
+        answer = agent.run_task("price?")
+        asks = [m for m in agent.messages if str(m.get("content", "")).startswith("[aish:")]
+        assert not asks, "a denial was overridden by a rule's ask"
+        # The rules still get their say — a denial silences the ASK, not the
+        # disclosure.
+        assert "not followed" in answer
+
+    def test_a_gate_refused_call_does_not_satisfy_must_first(self, tmp_path):
+        """The stop and skill gates returned bare strings, so the evidence
+        funnel saw a call that "ran" — and a must_first was satisfied by a call
+        the harness had stopped, with a verify PASS recorded to prove it."""
+        agent, _ = rules_agent(tmp_path, [], rule_texts=(RULE_VERIFY,))
+        agent.seed_rules("price?")
+        agent._arm_stop_gate("stop")
+        result = agent._dispatch("read_url", {"url": "https://shop.example/x"})
+        agent._note_turn_call("read_url", {"url": "https://shop.example/x"}, result)
+        evidence = rules_module.TurnEvidence(answer="40 EUR", calls=tuple(agent._turn_calls))
+        assert evidence.called("read_url") is False
+        assert evidence.refused("read_url") is True
+
+    def test_the_last_ask_round_carries_every_obligation(self, tmp_path):
+        """The round guard read the counter the same pass had just raised, so
+        a two-obligation rule dropped its second obligation from the final goad
+        and logged an "answer shipped with a note" for an answer that was not
+        shipped."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(f"about 40 EUR ({i})") for i in range(4)],
+            rule_texts=(RULE_VERIFY_TWO,),
+            step_log=steps.append,
+        )
+        agent.run_task("price?")
+        verify = [g for g in records(steps, "gate") if g["at"] == "verify"]
+        rounds = [g["round"] for g in verify if g["verdict"] == "refused"]
+        assert rounds == [1, 1, 2, 2], f"an obligation was dropped mid-round: {rounds}"
+        # Exactly one delivery, carrying both unmet obligations.
+        assert len([g for g in verify if g["verdict"] == "advised"]) == 2
+
+    def test_a_terminal_turn_still_says_what_was_not_followed(self, tmp_path, monkeypatch):
+        """A stopped turn is still an answer the owner reads. Skipping the
+        checks there would make the loop detector a way past every rule — and
+        a text-only turn cannot reach that exit, so this drives the real one:
+        the same tool call, the same result, five times."""
+        logged = []
+        call = [tool_call("read_docs", command="ls")]
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(tool_calls=call) for _ in range(8)] + [model_says("about 40 EUR")],
+            rule_texts=(RULE_VERIFY,),
+        )
+        monkeypatch.setattr(
+            agent_module.tools, "read_docs", lambda *a, **k: "same output every time"
+        )
+        agent.on_message = logged.append
+        answer = agent.run_task("price?")
+        assert "not followed" in answer, answer
+        # And it SURVIVES: a note that lives only in the token stream is gone
+        # on the next cold reload, and the rule then reads as followed.
+        answers = [m["content"] for m in logged if m.get("role") == "assistant"]
+        assert any("not followed" in a for a in answers), answers
+
+    def test_a_turn_no_rule_governs_is_untouched(self, tmp_path):
+        agent, _ = rules_agent(
+            tmp_path, [model_says("plain answer")], rule_texts=()
+        )
+        assert agent.run_task("hello") == "plain answer"
+
+
+class TestAnswerFirstGate:
+    """"Answer me before running anything." Refused at the GATE, because by the
+    time an answer exists the ordering has already happened."""
+
+    RULE = """---
+name: answer-first
+description: Answer me before running anything.
+when: always
+then:
+  must_first: answer
+---
+"""
+
+    def test_a_tool_call_with_no_word_first_is_refused(self, tmp_path):
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="ls")]),
+                model_says("Here is what I found."),
+            ],
+            rule_texts=(self.RULE,),
+        )
+        result = agent.run_task("what does ls do?")
+        refusal = tool_messages(agent.messages)[0]["content"]
+        assert "BEFORE running anything" in refusal
+        assert "Here is what I found" in result
+
+    def test_text_alongside_the_call_is_enough(self, tmp_path, monkeypatch):
+        """A model that answers and acts in the same breath has not made him
+        wait — the rule is about being left in silence, not about turn count."""
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("Checking that now.",
+                           tool_calls=[tool_call("read_docs", command="ls")]),
+                model_says("done"),
+            ],
+            rule_texts=(self.RULE,),
+        )
+        monkeypatch.setattr(agent_module.tools, "read_docs", lambda *a, **k: "ok")
+        agent.run_task("what does ls do?")
+        assert "BEFORE running anything" not in tool_messages(agent.messages)[0]["content"]
+
+    def test_the_refusal_is_bounded_like_every_other(self, tmp_path, monkeypatch):
+        """A gate that refuses forever wedges a small model into a stall-out."""
+        steps = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")])] * 6
+            + [model_says("fine")],
+            rule_texts=(self.RULE,),
+            step_log=steps.append,
+        )
+        monkeypatch.setattr(agent_module.tools, "read_docs", lambda *a, **k: "ok")
+        agent.run_task("go")
+        refusals = [m for m in tool_messages(agent.messages)
+                    if "BEFORE running anything" in m["content"]]
+        assert 0 < len(refusals) <= rules_module.RULE_MAX_REFUSALS
+
+
+class TestRuleAuthoring:
+    """A rule is the artifact class that BINDS the model, so the model writing
+    one silently would be the engine's own failure mode reappearing in its
+    authoring path. Every write goes through the diff gate, and the lint runs
+    inside the tool where it cannot be skipped."""
+
+    FIELDS = {
+        "name": "bounded-material",
+        "description": "Answer from the material I gave you.",
+        "when_subject": "prompt",
+        "when_has": "material",
+        "answer_from": "material",
+    }
+
+    def _agent(self, tmp_path, responses=(), **kw):
+        agent, chat = rules_agent(tmp_path, list(responses), rule_texts=(), **kw)
+        agent._rules_monkeypatch.setattr(
+            rules_module, "GLOBAL_RULES_DIR", tmp_path / "rules"
+        )
+        (tmp_path / "rules").mkdir(exist_ok=True)
+        return agent
+
+    def test_an_invalid_rule_never_reaches_the_approver(self, tmp_path):
+        """The lint is the point. If it ran outside the tool it would be
+        advice — which is what rules exist to abolish."""
+        asked = []
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: asked.append(plan) or True
+        result = agent._dispatch("create_rule", {
+            "name": "no-obligation", "description": "d", "when_subject": "always",
+            "prose": "You MUST always use show_image.",
+        })
+        assert result.startswith("ERROR")
+        assert "restricts nothing" in result
+        assert asked == [], "an invalid rule was shown for approval"
+        assert not list((tmp_path / "rules").glob("*.md"))
+
+    def test_a_rule_naming_a_missing_tool_is_refused(self, tmp_path):
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", {
+            **self.FIELDS, "name": "typo", "answer_from": "gws_gmial_send",
+        })
+        assert result.startswith("ERROR") and "gws_gmial_send" in result
+        assert not list((tmp_path / "rules").glob("*.md"))
+
+    def test_the_card_carries_the_compiled_meaning_not_the_yaml(self, tmp_path):
+        """The owner did not write the file and should not have to audit it."""
+        seen = []
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: seen.append(plan) or True
+        agent._dispatch("create_rule", self.FIELDS)
+        assert seen and "material" in seen[0].note
+        assert "when:" not in seen[0].note
+
+    def test_a_denied_rule_is_not_written(self, tmp_path):
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: False
+        agent._dispatch("create_rule", self.FIELDS)
+        assert not list((tmp_path / "rules").glob("*.md"))
+
+    def test_an_approved_rule_lands_and_binds_the_next_turn(self, tmp_path):
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", self.FIELDS)
+        assert not result.startswith("ERROR"), result
+        written = (tmp_path / "rules" / "bounded-material.md")
+        assert written.exists()
+        loaded = rules_module.load_rules([tmp_path / "rules"])
+        assert [r.error for r in loaded] == [""]
+
+    def test_creating_over_an_existing_rule_is_refused(self, tmp_path):
+        """Silently overwriting is how a rule loses what it already did."""
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        agent._dispatch("create_rule", self.FIELDS)
+        again = agent._dispatch("create_rule", {**self.FIELDS, "answer_from": "read_url"})
+        assert again.startswith("ERROR") and "edit_rule" in again
+
+    def test_an_edit_keeps_every_obligation_it_was_not_asked_to_touch(self, tmp_path):
+        """The regression problem, end to end: one new sentence must not undo
+        the four things the rule already did."""
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        agent._dispatch("create_rule", {**self.FIELDS, "never_use": ["web_search"]})
+        agent._dispatch("edit_rule", {
+            "name": "bounded-material", "must_tell_me_when": "the material failed",
+        })
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        verbs = {o["verb"] for o in rule.obligations}
+        assert verbs == {
+            rules_module.VERB_ANSWER_FROM,
+            rules_module.VERB_NEVER_USE,
+            rules_module.VERB_MUST_TELL_ME_WHEN,
+        }
+
+    def test_editing_a_rule_that_does_not_exist_says_so(self, tmp_path):
+        agent = self._agent(tmp_path)
+        result = agent._dispatch("edit_rule", {"name": "ghost", "description": "d"})
+        assert result.startswith("ERROR") and "ghost" in result
+
+    def test_an_edit_naming_nothing_is_refused(self, tmp_path):
+        """"Change the rule" with no field named is a rewrite request, and a
+        rewrite is what the patch shape exists to make impossible."""
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        agent._dispatch("create_rule", self.FIELDS)
+        result = agent._dispatch("edit_rule", {"name": "bounded-material"})
+        assert result.startswith("ERROR") and "at least one field" in result
+
+    def test_retiring_keeps_the_file_and_stops_the_binding(self, tmp_path):
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        agent._dispatch("create_rule", self.FIELDS)
+        result = agent._dispatch("retire_rule", {"name": "bounded-material"})
+        assert not result.startswith("ERROR"), result
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        assert rule.status == "disabled"
+        assert (tmp_path / "rules" / "bounded-material.md").exists()
+
+    def test_a_raw_write_into_the_rules_folder_must_still_lint(self, tmp_path):
+        """Otherwise "unskippable" is false by one hop: write_file pointed at
+        the rules folder lands anything, and the card is raw YAML with no
+        meaning and no retro-match. A never_use naming a misspelled tool is
+        checked NOWHERE on that path — and a restriction that never fires
+        looks exactly like one that works."""
+        asked = []
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: asked.append(plan) or True
+        result = agent._dispatch("write_file", {
+            "path": str(tmp_path / "rules" / "sneaky.md"),
+            "content": "---\nname: sneaky\ndescription: d\nwhen: always\n"
+                       "then:\n  never_use: [web_serch]\n---\n",
+        })
+        assert result.startswith("ERROR") and "web_serch" in result
+        assert asked == [], "an unlinted rule was shown for approval"
+        assert not (tmp_path / "rules" / "sneaky.md").exists()
+
+    def test_an_ordinary_file_write_is_not_touched_by_the_rule_lint(self, tmp_path):
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("write_file", {
+            "path": str(tmp_path / "notes.md"), "content": "then: not a rule\n",
+        })
+        assert not result.startswith("ERROR"), result
+
+    def test_a_broken_rule_can_be_retired_even_though_it_cannot_compile(self, tmp_path):
+        """The loud broken-rule warning is exactly when the owner reaches for
+        this. Requiring a valid rule would leave the broken ones unstoppable."""
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        broken = tmp_path / "rules" / "broken.md"
+        broken.write_text(
+            "---\nname: broken\ndescription: d\nwhen: always\nthen: {}\n---\n",
+            encoding="utf-8",
+        )
+        result = agent._dispatch("retire_rule", {"name": "broken"})
+        assert not result.startswith("ERROR"), result
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        assert rule.status == "disabled" and rule.error
+
+    def test_an_action_rule_card_says_its_history_cannot_be_replayed(self, tmp_path):
+        """Overstating on the one trigger kind where bound and fired differ
+        would undermine the feature that exists to build trust."""
+        seen = []
+        agent = self._agent(tmp_path, state_dir=str(tmp_path))
+        agent.approve_write = lambda plan: seen.append(plan) or True
+        agent._dispatch("create_rule", {
+            "name": "no-edit", "description": "Not aish's own source.",
+            "when_subject": "action", "when_action": {"path_under": "~/dev/aish"},
+            "never_use": ["write_file"],
+        })
+        assert seen and "not replayed" in seen[0].note
+        assert "would have bound" not in seen[0].note
+
+    COMPILED = json.dumps({
+        "name": "always-use-show-image",
+        "description": "Pictures come from show_image.",
+        "when_subject": "always",
+        "answer_must_include": "picture",
+        "prose": "An external image link does not render in the UI.",
+    })
+
+    def test_the_owners_own_words_become_a_rule(self, tmp_path):
+        """The acting model passes the request through; the grammar lives in
+        one place, so changing the vocabulary does not make every model on
+        every backend relearn it."""
+        prompts = []
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = lambda p: prompts.append(p) or self.COMPILED
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", {
+            "request": "always use show_image for pictures",
+        })
+        assert not result.startswith("ERROR"), result
+        assert "always use show_image for pictures" in prompts[0]
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        assert rule.name == "always-use-show-image" and not rule.error
+
+    def test_a_request_the_grammar_cannot_express_is_relayed_verbatim(self, tmp_path):
+        """"Not expressible" is useless. What comes back names what could not
+        be expressed and offers extending aish as the second option — a failed
+        compile is a feature request in structured form."""
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = lambda p: json.dumps(
+            {"cannot": "'be terser' is about style, which nothing here can check"}
+        )
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", {"request": "be terser"})
+        # A failure envelope carrying a sentence for a PERSON: no rule was
+        # written, so the call must not log green — and what it says is what
+        # the owner needs to decide between rephrasing and extending aish.
+        assert result.startswith("ERROR")
+        # …and it hands the model a ready-made gap report to offer, so a rule
+        # the vocabulary cannot express becomes a feature request instead of
+        # evaporating.
+        assert "about style" in result and "GitHub issue" in result
+        assert "be terser" in result
+        assert not list((tmp_path / "rules").glob("*.md"))
+
+    def test_fields_the_model_named_itself_win_over_the_compiler(self, tmp_path):
+        """It heard the whole conversation; the compiler heard one sentence."""
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = lambda p: self.COMPILED
+        agent.approve_write = lambda plan: True
+        agent._dispatch("create_rule", {
+            "request": "always use show_image", "name": "pictures-via-show-image",
+        })
+        assert (tmp_path / "rules" / "pictures-via-show-image.md").exists()
+
+    def test_naming_fields_directly_needs_no_compiler_at_all(self, tmp_path):
+        """A rule the owner asked for out loud must not depend on a second
+        model being up."""
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = None
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", self.FIELDS)
+        assert not result.startswith("ERROR"), result
+
+    def test_an_edit_by_request_carries_over_what_it_did_not_mention(self, tmp_path):
+        """The regression problem through the prose path — the one the design
+        calls the sharpest risk in the whole layer."""
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        agent.rule_compiler = None
+        agent._dispatch("create_rule", {**self.FIELDS, "when_has": "link",
+                                        "never_use": ["web_search"]})
+        agent.rule_compiler = lambda p: json.dumps({"when_has": "material"})
+        result = agent._dispatch("edit_rule", {
+            "name": "bounded-material", "request": "also cover attachments",
+        })
+        assert not result.startswith("ERROR"), result
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        assert rule.contains == "material"
+        assert {o["verb"] for o in rule.obligations} == {
+            rules_module.VERB_ANSWER_FROM, rules_module.VERB_NEVER_USE,
+        }, "an edit dropped an obligation the request never mentioned"
+
+    def test_a_compiled_rule_still_goes_through_the_lint_and_the_card(self, tmp_path):
+        """The compiler proposes; code validates and the owner approves. An
+        isolated model is used because it is more ACCURATE — never because its
+        output is trusted."""
+        seen = []
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = lambda p: json.dumps({
+            "name": "typo", "description": "d", "when_subject": "always",
+            "answer_from": "gws_gmial_send",
+        })
+        agent.approve_write = lambda plan: seen.append(plan) or True
+        result = agent._dispatch("create_rule", {"request": "read my mail first"})
+        assert result.startswith("ERROR") and "gws_gmial_send" in result
+        assert seen == [], "an uncompilable rule reached the approver"
+
+    def test_a_compiler_cannot_land_a_rule_that_binds_nothing(self, tmp_path):
+        """The card described in full detail a rule that would never bind once:
+        #205's own exhibit, reproduced through the feature built to prevent
+        it. Reachable from `request` text, which on a triggered session came
+        from an email."""
+        seen = []
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = lambda p: json.dumps({
+            "name": "inert", "description": "Never search the web.",
+            "when_subject": "always", "never_use": ["web_search"],
+            "expires": "2020-01-01",
+        })
+        agent.approve_write = lambda plan: seen.append(plan) or True
+        result = agent._dispatch("create_rule", {"request": "never search the web"})
+        assert not result.startswith("ERROR"), result
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        assert rule.expires is None, "a compiled reply expired the rule it wrote"
+        assert "EXPIRED" not in seen[0].note
+
+    def test_an_unreachable_compiler_falls_back_instead_of_crashing(self, tmp_path):
+        """`make_compiler` only CONSTRUCTS the callable — the connection
+        happens on the first ask, so catching at construction covered half the
+        failure and the owner got "tool failed internally" for a model being
+        down."""
+        def dead(_prompt):
+            raise RuntimeError("connection refused")
+
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = dead
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", {"request": "never search the web"})
+        assert result.startswith("ERROR") and "naming the fields directly" in result
+        # …and a call that ALSO named fields just uses them.
+        assert not agent._dispatch(
+            "create_rule", {"request": "x", **self.FIELDS}
+        ).startswith("ERROR")
+
+    def test_the_card_shows_the_turns_this_would_have_bound(self, tmp_path):
+        """Retro-match: a rule is a function of logged facts, so real history
+        is better evidence than any synthetic run."""
+        state = tmp_path / "state"
+        state.mkdir()
+        (state / "session-20260101-000000-000000.jsonl").write_text(
+            json.dumps({"kind": "message", "role": "user",
+                        "content": "summarize https://example.com/x", "turn": "a"}) + chr(10),
+            encoding="utf-8",
+        )
+        seen = []
+        agent = self._agent(tmp_path, state_dir=str(state))
+        agent.approve_write = lambda plan: seen.append(plan) or True
+        agent._dispatch("create_rule", self.FIELDS)
+        assert seen and "would have bound on 1" in seen[0].note
+        assert "summarize https://example.com/x" in seen[0].note
+
+
+class TestHeldAnswer:
+    """A bound turn does not stream. The promise is that a rule is checked
+    BEFORE the owner reads the answer, and on a device that streams token by
+    token he has read it long before the check runs."""
+
+    def test_a_bound_turn_holds_its_answer_until_it_passes(self, tmp_path):
+        streamed = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("It costs about 40 EUR."),
+                model_says(tool_calls=[tool_call("read_url", url="https://shop.test/a")]),
+                model_says("It costs 40 EUR — [shop](https://shop.test/a)."),
+            ],
+            rule_texts=(RULE_VERIFY,),
+            on_token=streamed.append,
+        )
+        agent_module.web.read_url = lambda *a, **k: "40 EUR"
+        try:
+            agent.run_task("price?")
+        finally:
+            importlib.reload(agent_module.web)
+        out = "".join(streamed)
+        assert "40 EUR — [shop]" in out, "the accepted answer never reached the client"
+        assert "about 40 EUR" not in out, "the rejected answer was shown to the owner"
+
+    def test_an_unbound_turn_streams_as_before(self, tmp_path):
+        streamed = []
+        agent, _ = rules_agent(
+            tmp_path, [model_says("plain answer")], rule_texts=(), on_token=streamed.append
+        )
+        agent.run_task("hello")
+        assert "plain answer" in "".join(streamed)
 
 class TestContextRecord:
     """#208, docs/trace-contract.md §3.10.
