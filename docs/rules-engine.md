@@ -310,6 +310,20 @@ Beyond compiling, the lint checks that **everything the rule names exists** — 
 
 **What the owner approves is the compiled MEANING, not the diff.** He did not write the file and should not have to audit it, so the approval card carries an English sentence — *when this, then that* — plus which enforcement moment applies, above the diff rather than instead of it.
 
+### A rule has THREE parts, and the compiler only knew two
+
+The compiler could not write *"never edit the source, always open a GitHub issue instead"*, and reported the whole request inexpressible. The owner's reading is the correct one and it reframes the problem rather than relaxing it:
+
+> That is **one enforcement plus guidance**, not two enforcements. The guidance is what makes a refusal actionable — a good error says what went wrong *and* what to do instead — and the grammar already has a place for it: the prose body, which is shown to the model and quoted when it is refused.
+
+So the rule was **complete**, not half-written, and the compiler was misreading the shape of a rule. It is now told that a rule has three parts — condition, enforcement, guidance — and that every *"…instead"*, *"…rather than"*, *"use X for this"* is guidance rather than a second obligation.
+
+Where a clause genuinely cannot be expressed, **partial is acceptable but never silent**. `could_not_express` travels *alongside* the fields, is shown on the approval card next to what the rule does enforce, and the owner decides. That is not a relaxation of *"do not approximate"*: the law was written against **silent** approximation, and a card that names the missing half is the opposite of silent. `TestPartialIsAllowedButNeverSilent`.
+
+**Measured, and the measurement is noisier than it looks.** Against the 33-memory gold standard the compiler went 11 → 20 (prompt drift fixed) → 30 on one run. But the same four rules came back `CANNOT` on the next run of the identical input: **it is non-deterministic, and a single score is not a result.** What is stable across runs is that the three refusals the design *wants* — a permission grant, a memory-format rule, a language-selection rule — are refused every time, and `auto_approve` is refused for the right reason each time (R1).
+
+The remaining honest gap is quality rather than count: a rule can lint clean and still be weaker than the hand-written one, and on one run the compiler produced rules for four requests the gold standard deliberately refused. **Lint-clean is not correct**, which is what the card and retro-match exist for.
+
 ### The owner speaks prose; the compiler names fields
 
 `create_rule(request: "always use show_image for pictures")` is the normal call. **The acting model never learns the grammar** — its job is to pass through what the owner said, which models are reliable at — and an isolated compiler turns that one sentence into field values. The grammar then lives in exactly one place, versioned with the code, so adding a verb does not require every model on every backend to relearn anything. The prompt it reads is *generated from* the vocabulary constants rather than restating them, because the first thing that happens to a second copy of a vocabulary is that it drifts.

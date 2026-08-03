@@ -4187,11 +4187,21 @@ class Agent:
     def _rule_path(self, name: str) -> Path:
         return self._rules_dir() / f"{name}.md"
 
-    def _rule_card(self, rule: "rules.Rule", text: str, verb: str) -> str:
+    def _rule_card(self, rule: "rules.Rule", text: str, verb: str,
+                   could_not_express: str = "") -> str:
         """What the owner actually approves: the compiled MEANING plus the
         turns this would have changed. Not a YAML diff — he is agreeing to a
         behaviour, and the file is an implementation detail he did not write."""
         parts = [f"{verb} rule '{rule.name}'", "", rules.explain(rule)]
+        if could_not_express:
+            # The half that could not be written, next to the half that was.
+            # Partial compilation is allowed and silent partial compilation is
+            # not: a rule doing most of what he asked is useful when he can SEE
+            # which part is missing, and is the failure this layer exists to
+            # prevent when he cannot.
+            parts += ["", f"NOT ENFORCED by this rule: {could_not_express}",
+                      "Everything above IS enforced. Approve if that is worth "
+                      "having on its own."]
         history = rules.past_turns(Path(self.state_dir)) if self.state_dir else []
         match = rules.retro_match(rule, history, meaning=self._meaning_scorer())
         if match.per_call:
@@ -4212,7 +4222,8 @@ class Agent:
                 parts.append("  (nothing in your history — it may still be right.)")
         return "\n".join(parts)
 
-    def _write_rule(self, path: Path, text: str, rule: "rules.Rule", verb: str) -> str:
+    def _write_rule(self, path: Path, text: str, rule: "rules.Rule", verb: str,
+                    could_not_express: str = "") -> str:
         """One write, through the SAME diff-approval gate as any other file. A
         rule is the artifact class that binds the model, so the model creating
         one silently would be the engine's own failure mode in its authoring
@@ -4223,7 +4234,7 @@ class Agent:
         if plan.error:
             return f"ERROR: {plan.error}"
         plan = dataclasses.replace(
-            plan, note=self._rule_card(rule, text, verb),
+            plan, note=self._rule_card(rule, text, verb, could_not_express),
             rule=rule.name, rule_verb=verb,
         )
         decision = self.approve_write(plan)
@@ -4294,7 +4305,13 @@ class Agent:
             return "ERROR: " + compiled.problem
         # Anything the acting model named itself wins: it heard the whole
         # conversation and the compiler heard one sentence of it.
-        return {**compiled.fields, **named}
+        fields = {**compiled.fields, **named}
+        if compiled.dropped:
+            # Partial is allowed; SILENT partial is not. It rides on the fields
+            # so it reaches the approval card, where he decides whether a rule
+            # doing most of what he asked is worth having.
+            fields["_could_not_express"] = compiled.dropped
+        return fields
 
     def _rule_file_lint(self, plan: "files.WritePlan") -> str | None:
         """Refuse a raw write into the rules folder that would not lint.
@@ -4427,6 +4444,10 @@ class Agent:
         names field values and this renders the YAML, which deletes an entire
         failure class (quoting, indentation, key names) that no author, human
         or model, was reliably getting right."""
+        # Never a frontmatter key — it is a note for the card, not part of the
+        # rule, and rendering it would put a word into the file that no reader
+        # of the grammar knows.
+        could_not_express = str(fields.pop("_could_not_express", "") or "")
         try:
             text = rules.render(fields)
         except rules.LintError as exc:
@@ -4438,7 +4459,8 @@ class Agent:
                 f"ERROR: that rule did not validate: {'; '.join(errors)} "
                 "Fix and call again."
             )
-        return self._write_rule(self._rule_path(str(fields["name"])), text, rule, verb)
+        return self._write_rule(self._rule_path(str(fields["name"])), text, rule,
+                                verb, could_not_express)
 
     def _import_skill(self, args: dict) -> str:
         """Import a skill (#139). Untrusted content — the whole skill is shown in
