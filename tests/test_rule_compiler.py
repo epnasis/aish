@@ -298,3 +298,53 @@ class TestEditing:
         rule, _ = rules.lint(rules.render(result.fields), capabilities=TOOLS)
         assert rule is not None
         assert all(o["verb"] in rules.VERBS for o in rule.obligations)
+
+
+class TestThePromptCarriesTheWholeVocabulary:
+    """Measured, not assumed: 33 of the owner's own memories were compiled by
+    a real model, and three failures were the prompt describing a vocabulary
+    smaller than the one the engine has. The module's own docstring warns that
+    a second copy of a vocabulary drifts — and the parts that were hand-written
+    rather than generated are exactly the parts that drifted."""
+
+    def _prompt(self):
+        return rule_compiler.PROMPT.replace(
+            "{vocabulary}", rule_compiler._vocabulary()
+        )
+
+    def test_every_action_field_that_is_BUILT_is_offered(self):
+        """A literal `[:3]` slice dropped `command_has` the day it shipped, and
+        the compiler then reported that inline secrets could not be inspected —
+        about the one check built to inspect them."""
+        prompt = self._prompt()
+        for built in ("tool", "path_under", "command_starts_with", "command_has"):
+            assert built in prompt, built
+        for unbuilt in ("sends_to", "host"):
+            assert f"when_action with {unbuilt}" not in prompt
+
+    def test_every_subject_is_offered(self):
+        prompt = self._prompt()
+        for subject in rules.SUBJECTS | {rules.SUBJECT_ALWAYS}:
+            assert subject in prompt, subject
+
+    def test_every_verb_is_offered(self):
+        prompt = self._prompt()
+        for verb in rules.VERBS:
+            assert verb in prompt, verb
+
+    def test_the_forms_a_field_NAME_does_not_teach_are_shown(self):
+        """`must_first: answer` and the `like:` form on answer checks are both
+        legal and neither is guessable from a key name. Both were missing, and
+        both produced a "cannot" on a rule the language expresses."""
+        prompt = self._prompt()
+        assert rules.FIRST_ANSWER in prompt
+        assert "like" in prompt and "in" in prompt
+        for kind in rules.ANSWER_KINDS:
+            assert kind in prompt, kind
+
+    def test_a_worked_example_exists_for_every_subject(self):
+        """The prompt described fields and never showed a finished rule, so the
+        model had to infer the shape of what it was being asked for."""
+        examples = rule_compiler.WORKED_EXAMPLES
+        for subject in rules.SUBJECTS | {rules.SUBJECT_ALWAYS}:
+            assert f'"when_subject": "{subject}"' in examples, subject
