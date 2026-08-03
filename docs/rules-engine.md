@@ -359,6 +359,14 @@ then:
     any_of: [show_image, show_video]
 ```
 
+**Anchors must be written in HIS words, and this was measured the hard way.** The five meaning rules installed from his memory corpus were **completely inert**: across 400 real prompts, at the 0.62 floor, not one of them would ever have bound. Their true-positive cases scored 0.42–0.60 and the highest similarity anywhere in his history was 0.599 — the floor sat *above the entire distribution*.
+
+The floor was not the bug. **The anchors were.** They had been written as full, tidy sentences in the author's voice; his actual messages are terse and often Polish — *"Trasa do apteki"*, *"Show photos"*, *"Directions to Kima Surf Camp"*. Rewriting the anchors as his real past messages moved true positives to **0.70–0.81** while negatives stayed at 0.03–0.26, and a spot-check went from 4/9 to 11/12 correct. The 0.62 floor is right; a rule written in the wrong voice is not.
+
+**And the honesty mechanism that would have caught it on day one was skipped.** Retro-match answers exactly this question — *"this would have bound on 0 of your last 200 turns"* — and it runs when a rule is created through `create_rule`. These were hand-written as files, which is supported but bypasses the card. **A hand-written rule gets no retro-match, and an inert rule is indistinguishable from a working one without it.** That is the strongest practical argument for the authoring tool being the usual path.
+
+Residual limit, stated rather than smoothed over: the local multilingual model is not uniform across paraphrase. *"pokaż mi jak wygląda ten hotel"* scores 0.77 once that phrasing is an anchor, while *"pokaż mi jak wygląda ta plaża"* — the same sentence with a different noun — sits at 0.44. Most Polish anchors score fine (0.70–0.81); some do not, and the remedy is another example rather than a lower floor.
+
 **Examples, not a threshold.** The owner writes 3–5 whole messages the way he actually types them, in whichever languages he uses. A new message is compared to them by meaning — the same local multilingual embedding model that already finds his skills and memories, so this is existing plumbing pointed at a new job. A miss is fixed by adding one more example. **He never sets a number and never sees one**; what he sees is the retro-match, *"this would have caught these 6 of your last 200 messages"*, made of his own traffic.
 
 **Why a fuzzy trigger is affordable here, and only here.** Rules only ever RESTRICT, so a wrong match costs one refused or one required tool call. It cannot widen anything. That is the restriction-only law paying for itself: the same trigger would be indefensible on a gate that *granted* something, which is why autonomy grants stay Tier 0 forever. The tier is **derived** from the trigger's form — examples are scored, everything else is structural — because no policy language asks an author to annotate evaluation strategy and `tier: 1` means nothing to the owner.
