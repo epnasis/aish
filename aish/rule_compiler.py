@@ -92,6 +92,11 @@ def _vocabulary() -> str:
         "- session: how the session started. Give when_origin: owner or automation.",
         "- action: the call about to run. Give when_action with any of "
         + ", ".join(rules.ACTION_FIELDS[:3]) + ".",
+        "- result: a condition on what a TOOL came back with, for \"if X comes "
+        "back empty, tell me rather than quietly using something else\". Give "
+        "when_result_of (the tool) and when_result_was ("
+        + ", ".join(sorted(rules.RESULT_STATES)) + "). It restricts nothing "
+        "until that actually happens.",
         "- answer: a condition on the FINISHED answer, for a rule whose 'if' is "
         "about what came out rather than what went in — \"if you quote me a "
         "price, you must have read the store page\". Give when_matches with a "

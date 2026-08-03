@@ -1727,6 +1727,123 @@ class TestAnswerSubject:
         assert again.where == "ending"
 
 
+class TestResultSubject:
+    """`when: result:` — the condition #190 was founded on.
+
+    "If the transcript comes back empty, say so — do not go and get a news
+    article instead" is a fact about a TOOL RESULT. Retrieval keys on the
+    user's text, so no memory could ever be delivered on the turn it mattered:
+    a bare URL has no lexical or semantic surface to match. This is the trigger
+    kind that was structurally undeliverable by the knowledge layer.
+    """
+
+    def _rule(self, **over):
+        fields = {
+            "name": "transcript-failure",
+            "description": "If the transcript comes back empty, tell me — don't substitute.",
+            "when_subject": "result",
+            "when_result_of": "youtube_analyze", "when_result_was": "empty",
+            "never_use": ["web_search"],
+        }
+        return rules.lint(
+            rules.render({**fields, **over}),
+            capabilities={"youtube_analyze", "web_search"},
+        )
+
+    def _bound(self, **over):
+        rule, errors = self._rule(**over)
+        assert not errors, errors
+        return rules.bind(rule, {"on": "result", "of": rule.result_of,
+                                 "was": rule.result_was}, "b1", {"web_search"})
+
+    def test_the_founding_memory_now_compiles(self):
+        rule, errors = self._rule()
+        assert not errors, errors
+        assert rule.trigger == rules.TRIGGER_RESULT_STATE
+
+    def test_it_arms_at_seed_so_the_model_is_told_before_it_happens(self):
+        """The whole difference from the memory that failed. The condition is in
+        context BEFORE the tool runs, rather than arriving as a refusal for a
+        rule the model was never shown."""
+        binding = self._bound()
+        text = rules.seed_text([binding])
+        assert "CONDITIONAL" in text
+        assert "youtube_analyze" in text
+        assert "web_search" in text
+
+    def test_it_restricts_nothing_while_armed(self):
+        """Refusing a web search BEFORE the transcript failed is a different and
+        much worse rule than the one he wrote."""
+        binding = self._bound()
+        assert binding.active is False
+        [verdict] = rules.gate([binding], "web_search", {"query": "x"})
+        assert verdict.verdict == "allowed"
+
+    def test_a_healthy_result_does_not_fire_it(self):
+        binding = self._bound()
+        binding.note_tool_result("youtube_analyze", "ok")
+        assert binding.active is False
+        assert rules.gate([binding], "web_search", {})[0].verdict == "allowed"
+
+    def test_an_empty_result_fires_it_and_the_substitution_is_refused(self):
+        binding = self._bound()
+        binding.note_tool_result("youtube_analyze", "incomplete")
+        assert binding.active is True
+        [verdict] = rules.gate([binding], "web_search", {"query": "x"})
+        assert verdict.verdict == "refused"
+        assert "web_search" in verdict.message
+
+    def test_another_tool_failing_does_not_fire_it(self):
+        binding = self._bound()
+        binding.note_tool_result("read_url", "incomplete")
+        assert binding.active is False
+
+    def test_error_and_empty_are_different_states(self):
+        binding = self._bound(when_result_was="error")
+        binding.note_tool_result("youtube_analyze", "incomplete")
+        assert binding.active is False
+        binding.note_tool_result("youtube_analyze", "failed")
+        assert binding.active is True
+
+    def test_a_later_success_does_not_un_fire_it(self):
+        """Latched on purpose. A retry that works does not undo an answer built
+        partly on a source that failed — and nothing would say so."""
+        binding = self._bound()
+        binding.note_tool_result("youtube_analyze", "incomplete")
+        binding.note_tool_result("youtube_analyze", "ok")
+        assert binding.active is True
+
+    def test_a_typo_in_the_watched_tool_is_refused(self):
+        """The least visible typo in the vocabulary: the rule looks armed all
+        turn and simply never fires."""
+        _rule, errors = self._rule(when_result_of="youtube_analize")
+        assert errors and "waits on a tool that does not exist" in errors[0]
+
+    def test_an_unknown_state_is_refused_with_the_options(self):
+        _rule, errors = self._rule(when_result_was="truncated")
+        assert errors and "empty" in errors[0] and "error" in errors[0]
+
+    def test_verify_is_silent_while_it_is_armed(self):
+        binding = self._bound(never_use="", must_first="youtube_analyze")
+        assert rules.verify([binding], rules.TurnEvidence(answer="anything")) == []
+
+    def test_the_card_says_when_in_english(self):
+        rule, _e = self._rule()
+        assert "Once youtube_analyze has come back" in rules.explain(rule)
+
+    def test_it_round_trips_through_an_edit(self, tmp_path):
+        path = tmp_path / "r.md"
+        rule, _e = self._rule()
+        path.write_text(rules.render({
+            "name": "transcript-failure", "description": "d",
+            "when_subject": "result", "when_result_of": "youtube_analyze",
+            "when_result_was": "empty", "never_use": ["web_search"],
+        }), encoding="utf-8")
+        fields = rules.author_fields(path)
+        assert fields["when_result_of"] == "youtube_analyze"
+        assert fields["when_result_was"] == "empty"
+
+
 class TestASkillIsACapability:
     """"For accommodation use trippy" names ONE capability to the owner. Which
     side of aish's internal tool/skill fence it lives on is not his concern —

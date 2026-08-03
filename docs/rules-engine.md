@@ -189,9 +189,9 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 | `session:` | `origin: owner \| automation \| email \| schedule` | **yes** |
 | `action:` | `tool:`, `path_under:`, `command_starts_with:`, `command_has: a_secret` | **yes** |
 | `answer:` | `matches: <regex>`, `like: [examples]`, `in: opening \| ending \| anywhere` | **yes** |
+| `result:` | `of: <tool>`, `was: empty \| error` | **yes** |
 | `always` | no fields — every turn | **yes** |
 | `action:` | `sends_to:`, `host:` — need the recipient/host parse the egress gate owns | no |
-| `result:` | `of: <tool>`, `was: empty \| error` | no |
 
 **`prompt`, not `message` and not `request`.** Attachments reach the agent as separate parameters and appear in no message text at all, so "message" became false the moment attached material counted. It is DEFINED as text plus attachments plus the paths the owner typed — the definition that made `message` wrong survives the rename. `request:` was tried and rejected as ambiguous (a request can be a curl call).
 
@@ -200,6 +200,20 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 **`action:` arms at seed and decides at the gate.** Its condition is about a call nobody has proposed yet, so binding it does not mean *"it applied"* — it means *"it is watching"*, the same shape the stop and skill gates already have, and the `gate` records say whether it ever fired. Every field is a fact the harness holds **before dispatch**, so the check is free and the answer is known before anything runs.
 
 `path_under:` is **resolved, never string-matched** — a condition that `../` steps around protects nothing, and the mirror matters just as much: a path that reaches *inside* the root through `..` must still match. Relative paths resolve against the session's cwd, which is where the model's own paths are interpreted, and paths named inside a shell command count, because `write_file` is not the only way to change a file. `TestActionSubject`.
+
+### `when: result:` — the condition this whole epic was founded on
+
+*"If the transcript comes back empty, say so — do not go and get a news article instead."* That is a fact about a **tool result**, and retrieval keys on the user's text: a bare YouTube URL has no lexical or semantic surface to match, so the memory carrying this policy was **never injected on the triggering turn at all**. It is the proof that memory was the wrong channel, and it stayed unwritable until the result envelope existed to say what "came back empty" means.
+
+`was: empty` is the envelope's `incomplete`; `was: error` is `failed`. The distinction earns its keep on the founding incident exactly: `youtube_analyze` returned **exit 0** with `transcript: ""` and a populated `error_log`, so every prefix sniff in the codebase graded it green. Only a populated error channel tells them apart, and that is what `incomplete` is.
+
+**It arms at seed and fires when the result lands.** Arming is the point rather than a mechanism: the condition goes into the model's context *before* the tool runs, so the model knows what is expected of it the moment the transcript comes back empty — instead of being refused afterwards by a rule it was never shown. That is precisely what the memory could not do, and it is R5 (*the model must never be ambushed by a gate*) paying for itself.
+
+**While armed it restricts nothing.** A binding whose tool has not failed yet returns `allowed` from the gate, carrying `armed` in its evidence. Refusing a web search *before* the transcript failed would be a different and much worse rule.
+
+**Firing latches.** A later successful retry does not un-fire it: the answer would then be built partly on a source that failed, with nothing saying so — which is the substitution the rule exists to stop.
+
+**Every trigger now arms at seed; what differs is when it decides** — `prompt:` and `session:` at seed, `action:` at the gate, `result:` when a result lands, `answer:` at turn end. `Binding.active` is the one place that difference lives. `TestResultSubject`.
 
 ### `when: answer:` — the reframe could not express itself
 
