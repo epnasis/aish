@@ -47,9 +47,10 @@ const OWNED = {
   },
   seenAt: {
     owners: ["SEEN"],
-    instead: "call markSeen(name) / forgetSeen(name)",
+    instead: "call markSeen(name) — and note that nothing UNSEES a chat",
     why: "the seen map is what makes a chat unread, which is what puts it in the rail's"
-      + " attention band; a stray writer either hides activity or flags read chats forever",
+      + " attention band; a stray writer either hides activity or flags read chats forever"
+      + " — deleting a chat's stamp is how a chat you deleted came BACK under 'Needs you'",
   },
   viewFp: {
     owners: ["SESSION-ENTER", "REPLAY-LANDING"],
