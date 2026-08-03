@@ -2086,6 +2086,29 @@ class WebServer:
             pass
 
     async def _handle(self, client: Client, message: dict) -> None:
+        """Dispatch one client message, then RECEIPT it if it asked for one.
+
+        The receipt is a delivery fact, not a semantic one: "this arrived and
+        was handled", never "it succeeded" — what happened is already carried
+        by the events each feature emits. It exists because the client cannot
+        otherwise tell a request that was handled from one that was never
+        heard, and a WebSocket gives it no way to find out: a socket reports
+        OPEN long after it died, accepting everything and answering nothing
+        (a phone that has been asleep). Every action the client took on faith
+        was therefore indistinguishable from one that vanished (#210).
+
+        Stamped HERE rather than in each handler for one reason: a handler
+        that forgets is a silent hole, and this way a new message type is
+        receipted before anyone thinks about it. It is sent AFTER the handler
+        so a raise means no receipt — an action that blew up did not happen,
+        and the client must hear that as loudly as one that never arrived.
+        """
+        await self._dispatch_message(client, message)
+        rid = message.get("rid")
+        if rid:
+            await client.ws.send_json({"type": "ack", "rid": str(rid)})
+
+    async def _dispatch_message(self, client: Client, message: dict) -> None:
         # ACTION messages (#102) claim control of the client's viewed session
         # before executing (last-actor-drives); VIEW messages — switching which
         # session is shown, file/jobs queries, dequeue, reconnect — never do.
@@ -2266,11 +2289,11 @@ class WebServer:
     async def _refuse(self, client: Client, text: str, name: str = "") -> None:
         """Tell ONE client that the request it just made will not happen.
 
-        `name` is the session the refusal is ABOUT, when there is one. A client
-        waiting on an answer to a destructive request it sent has no other way
-        to tell "the delete you asked for was refused" from "some unrelated
-        request was", and a refusal it cannot match reads as silence — which is
-        the one thing the wait is there to catch (`[DELETE-ACK]` in app.js).
+        `name` is the session the refusal is ABOUT, when there is one. A
+        refusal that does not say what it refused is one the client can only
+        render as prose — it cannot tell "the delete you asked for" from "some
+        unrelated request", which is exactly the confusion #210 was reported
+        as. Every refusal that concerns one chat should carry it.
 
         An `error` event meant two unrelated things, and the client could only
         assume the worse one. "Your TURN failed" (the model died, the tool

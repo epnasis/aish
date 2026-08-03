@@ -116,10 +116,14 @@ function mount(sandbox, turn, kind) {
 
 function world() {
   const sent = [];
+  const acts = [];
   const sandbox = {
     document: { createElement: fakeElement },
     messagesEl: fakeElement("div"),
     send: (m) => { sent.push(m); return true; },
+    // A verdict is an ACT ([ACK-LEDGER]) — it carries what to put back if the
+    // server never confirms it.
+    act: (m, opts) => { sent.push(m); acts.push(opts || {}); return true; },
     CSS: { escape: (s) => s },
     // Defined elsewhere in app.js; the chip only needs it to return a node.
     svgIcon: () => fakeElement("svg"),
@@ -356,6 +360,20 @@ function world() {
   ok("and the tap still performs its own action", kinds[kinds.length - 1] === "up");
   ok("in that order — reason first, then the new verdict",
      sent.findIndex((m) => m.comment === "stale price") < kinds.lastIndexOf("up"));
+}
+
+// A verdict paints before the server has it ([ACK-LEDGER]). If it never lands,
+// the thumb must go back to what it was — a rating this device shows and the
+// ledger never recorded is an opinion the owner thinks he gave.
+{
+  const w = world();
+  w.sandbox.markRating("turn-abc", "up");
+  const before = w.sandbox.currentRating("turn-abc");
+  w.sandbox.markRating("turn-abc", "down");
+  ok("the new verdict is what shows", w.sandbox.currentRating("turn-abc") === "down");
+  w.sandbox.markRating("turn-abc", before);
+  ok("…and the repair puts the previous one back",
+    w.sandbox.currentRating("turn-abc") === "up");
 }
 
 console.log(`ok - rating chip (${checks} checks)`);

@@ -1048,10 +1048,10 @@ function reconnect() {
 function requestNewChat() {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     reconnect();
-    ws.addEventListener("open", () => send({ type: "new" }), { once: true });
+    ws.addEventListener("open", () => act({ type: "new" }, { label: "the new chat" }), { once: true });
     return;
   }
-  send({ type: "new" });
+  act({ type: "new" }, { label: "the new chat" });
 }
 
 let appVersion = null;
@@ -1085,6 +1085,105 @@ function send(message) {
   ws.send(JSON.stringify(message));
   return true;
 }
+
+// [ACK-LEDGER-START]
+// HANDING A REQUEST TO THE SOCKET IS NOT THE SAME AS IT HAPPENING, and in a
+// PWA that is not pedantry: the socket can report OPEN long after it died,
+// accepting everything and answering nothing, which is what a phone has after
+// a sleep. `send()` returning true means "the browser took the bytes" and
+// nothing more.
+//
+// The client used to treat it as "done" everywhere, and the UI said so — the
+// approval card greyed out, the queue chip vanished, the header said
+// "Stopping…", the title changed. Every one of those was a claim about the
+// SERVER made on the strength of a local function call, and when the socket
+// was a zombie every one of them was false: the gate stayed parked holding a
+// command, the message you cancelled ran anyway, the task went on. A delete
+// was how it surfaced (#210) — the log file was still there hours later.
+//
+// So: an ACT is a request that changes something over there, and it is
+// outstanding until the server RECEIPTS it. The receipt is generic — the
+// server stamps one for any message carrying a `rid`, at the dispatch point
+// rather than in each handler, so no request type can be forgotten and a new
+// one is covered before anyone thinks about it. It says "handled", never
+// "succeeded"; what happened is carried by the events each feature already
+// emits, and those still drive the UI.
+//
+// What an act owes the user when it goes unreceipted is a `lost` callback:
+// UNDO WHATEVER THE UI CLAIMED. A claim that cannot be undone must not be
+// made in the first place — that is the whole discipline, and it is why the
+// call sites below hand over their own repair rather than this block guessing.
+//
+// Deliberately NOT here: retrying. The request may well have arrived and had
+// its receipt die on the way back, so "unreceipted" means UNCONFIRMED, not
+// "did not happen" — the wording says so, and every act is one the user can
+// simply do again. Automatically re-issuing an approval, a stop or a delete
+// on a guess is a worse failure than the one being fixed.
+//
+// Reads (`sessions`, `files`, `models`, `jobs`, `peek`) are deliberately not
+// acts: a lost query paints nothing and asking again is free, so receipting
+// them would buy a toast nobody needs.
+const ACK_MS = 8000;         // how long a receipt may take before we speak up
+const ACK_SWEEP_MS = 1000;   // granularity of the check — one timer, not N
+let ackSeq = 0;
+const outstanding = new Map(); // rid -> { label, due, lost }
+let ackTimer = null;
+
+// Send a state-changing request and hold it open until the server receipts it.
+// `label` names the ACTION in the user's words ("the approval", "cancelling
+// that message") — it is what they read if it goes missing. `lost` undoes
+// whatever the UI claimed; omit it only when the UI claimed nothing.
+function act(message, { label, lost } = {}) {
+  const rid = `r${++ackSeq}`;
+  if (!send({ ...message, rid })) {
+    // Never even handed over. Say which action failed, not just that the
+    // socket is down — the user asked for a THING, and `send`'s own notice
+    // names the connection instead.
+    if (label) showToast(`${label} didn't happen — ${offlineMode ? "you are offline" : "not connected"}`);
+    if (lost) lost();
+    return false;
+  }
+  outstanding.set(rid, { label, due: Date.now() + ACK_MS, lost });
+  armAckSweep();
+  return true;
+}
+
+function onAck(rid) {
+  outstanding.delete(rid);
+  if (!outstanding.size) { clearTimeout(ackTimer); ackTimer = null; }
+}
+
+function armAckSweep() {
+  if (ackTimer) return;
+  ackTimer = setTimeout(sweepAcks, ACK_SWEEP_MS);
+}
+
+// One sweep for all of them: a dead socket strands everything at once, and N
+// toasts stomping each other in a single toast slot would tell the user less
+// than one honest sentence.
+function sweepAcks() {
+  ackTimer = null;
+  const now = Date.now();
+  const lost = [];
+  for (const [rid, item] of outstanding) {
+    if (item.due > now) continue;
+    outstanding.delete(rid);
+    lost.push(item);
+  }
+  if (lost.length) {
+    for (const item of lost) { if (item.lost) item.lost(); }
+    const labels = lost.map((i) => i.label).filter(Boolean);
+    const what = labels.length === 1 ? labels[0]
+      : labels.length ? `${labels.length} actions` : "that";
+    // "may not have" is the truth: the request could have arrived and had its
+    // receipt die on the way back. Overstating it would teach the user to
+    // distrust a message that is usually right.
+    showToast(`${what} may not have reached aish — reconnecting`);
+    reconnect(); // whatever it was, this socket is not carrying traffic
+  }
+  if (outstanding.size) armAckSweep();
+}
+// [ACK-LEDGER-END]
 
 // [WAKE-START]
 // Waking the app is the single most defect-dense moment in the client: the
@@ -1257,6 +1356,7 @@ function handle(event) {
     case "workspace": addWorkspaceNote(event.change, event.path); break;
     case "redacted": addRedactedMsg(); break;
     case "rating": markRating(event.turn, event.rating, event.comment); break;
+    case "ack": onAck(event.rid); break;
     case "error":
       // [ERROR-KIND-START]
       // An `error` says one of two unrelated things, and everything below the
@@ -1278,9 +1378,7 @@ function handle(event) {
       // toast: transient feedback about an action, like every other refused
       // action in this app.
       if (event.code === "no_such_session") { onSessionGone(event.name || ""); break; }
-      // A refusal NAMING a chat answers a request about that chat — the server
-      // stamps the name for exactly this reason ([DELETE-ACK]).
-      if (event.code) { resolveDelete(event.name || ""); showToast(event.text); break; }
+      if (event.code) { showToast(event.text); break; }
       // [ERROR-KIND-END]
       closeAnswer();
       finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
@@ -1547,7 +1645,7 @@ let viewDirty = true; // events arrived since that replay → a stash would be s
 // Event types that never touch the transcript DOM. Anything NOT listed marks
 // the view dirty — over-dirtying only costs a rebuild, never a stale screen.
 const VIEW_SAFE_EVENTS = new Set([
-  "hello", "replay", "session_list", "model_list", "role",
+  "hello", "replay", "session_list", "model_list", "role", "ack",
   "session_renamed", "session_deleted", "cmd_history", "jobs", "files", "dirs",
   "console_started", "console_out", "console_exit", "console_error",
   "console_shared", "peek",
@@ -2235,7 +2333,7 @@ function refreshStatusline() {
   document.body.classList.toggle("awaiting-approval", pendingCards > 0);
 }
 
-$("stop-btn").onclick = () => send({ type: "stop" });
+$("stop-btn").onclick = () => act({ type: "stop" }, { label: "the stop" });
 
 // ---- activity trace ------------------------------------------------------
 // One collapsible group per task, built from structured `step` events. Live
@@ -2386,8 +2484,12 @@ function ensureTrace() {
   };
   head.querySelector(".trace-stop").onclick = (e) => {
     e.stopPropagation();
-    send({ type: "stop" });
-    markStopping(currentTrace); // immediate "Stopping…" feedback in the header
+    // "Stopping…" says the task is coming down. Unreceipted it runs on behind
+    // a header that has given up asking, with the control disabled — so the
+    // claim is withdrawn and Stop becomes pressable again ([ACK-LEDGER]).
+    const t = currentTrace;
+    act({ type: "stop" }, { label: "the stop", lost: () => unmarkStopping(t) });
+    markStopping(t); // immediate "Stopping…" feedback in the header
   };
   messagesEl.appendChild(el);
   // Deliberately NOT the scroll anchor: the anchor is what gets pinned to the
@@ -2412,6 +2514,17 @@ function markStopping(t) {
   t.el.classList.add("stopping");
   const btn = t.el.querySelector(".trace-stop");
   if (btn) btn.disabled = true;
+  updateTraceHead(t);
+}
+
+// Withdraw that claim: the stop never reached the server, so the task is still
+// running and the control that asks for it must work again ([ACK-LEDGER]).
+function unmarkStopping(t) {
+  if (!t) return;
+  t.stopping = false;
+  t.el.classList.remove("stopping");
+  const btn = t.el.querySelector(".trace-stop");
+  if (btn) btn.disabled = false;
   updateTraceHead(t);
 }
 
@@ -3307,7 +3420,7 @@ const RERUN_SVG =
 function rerunPrompt(prompt) {
   if (!prompt) return;
   if (clientBusy) { showToast("can't rerun while working"); return; }
-  send({ type: "retry", text: prompt });
+  act({ type: "retry", text: prompt }, { label: "the retry" });
 }
 
 // An error message with a Retry button (resends the last prompt, Gemini-style).
@@ -3476,7 +3589,7 @@ function askDeleteTurn(turn) {
       "answer. Gone from this chat, from what the model remembers, and from " +
       "the offline copies on your devices. This cannot be undone.",
     verb: "Delete",
-    action: () => send({ type: "redact", turn }),
+    action: () => act({ type: "redact", turn }, { label: "deleting that exchange" }),
   });
 }
 
@@ -4494,7 +4607,10 @@ function issueDraftCard(inner) {
   createBtn.textContent = "Create the issue";
   createBtn.onclick = () => {
     if (createBtn.disabled) return;
-    if (send({ type: "create_issue" })) {
+    if (act({ type: "create_issue" }, {
+      label: "filing that issue",
+      lost: () => controls.classList.remove("spent"), // it can fire again — it never fired
+    })) {
       controls.classList.add("spent"); // one-shot: a filed draft can't refire
     }
   };
@@ -5014,12 +5130,14 @@ function ratingChip(turn, kind) {
     // append-only and the ledger's last-wins already does the right thing.
     const host = ratingHost(btn);
     const draft = ratingDraft(turn, host);
+    const previous = currentRating(turn); // to put back if the verdict never lands
     const next = btn.classList.contains("on") ? "none" : kind;
     if (next === "none") {
       // The words stay in memory — changing your mind back should not cost
       // you the sentence — but they are NOT written, because a comment with
       // no verdict attached is not a rating.
-      send({ type: "rate", turn, rating: next });
+      act({ type: "rate", turn, rating: next },
+        { label: "clearing that rating", lost: () => markRating(turn, previous) });
       markRating(turn, next);
       closeRatingComment(btn);
       showRatingComment(host, "");
@@ -5027,7 +5145,8 @@ function ratingChip(turn, kind) {
       // Selecting, or switching thumb. The reason carries over so the record
       // stays coherent — the latest one is always verdict + reason together —
       // and the box opens pre-filled so it can be edited to match.
-      send({ type: "rate", turn, rating: kind, ...(draft ? { comment: draft } : {}) });
+      act({ type: "rate", turn, rating: kind, ...(draft ? { comment: draft } : {}) },
+        { label: "that rating", lost: () => markRating(turn, previous) });
       markRating(turn, kind, draft);
       openRatingComment(btn, turn, kind, draft);
     }
@@ -5101,7 +5220,7 @@ function openRatingComment(btn, turn, kind, existing) {
     // Remembered either way, so withdrawing and reselecting restores it.
     if (comment) ratingDrafts.set(turn, comment);
     else ratingDrafts.delete(turn);
-    if (comment) send({ type: "rate", turn, rating: kind, comment });
+    if (comment) act({ type: "rate", turn, rating: kind, comment }, { label: "that reason" });
     note.remove();
     showRatingComment(ratingHost(btn), comment);
   };
@@ -5140,7 +5259,18 @@ function openRatingComment(btn, turn, kind, existing) {
 
 // Applied by turn id rather than by position: a rating can be written long
 // after the turn it names, and on replay they all arrive at the end.
+// What this device last PAINTED for a turn, remembered by the one function
+// that paints it — so reverting an unreceipted verdict ([ACK-LEDGER]) does not
+// have to read the answer back out of class names, which is a second authority
+// on the same fact and drifts the first time the markup is nudged.
+const ratingNow = new Map(); // turn -> "up" | "down" | "none"
+
+function currentRating(turn) {
+  return ratingNow.get(turn) || "none";
+}
+
 function markRating(turn, kind, comment) {
+  ratingNow.set(turn, kind);
   const el = messagesEl.querySelector(`[data-turn="${CSS.escape(turn)}"]`);
   if (!el) return;
   const tools = el.querySelector(".msg-tools");
@@ -5322,7 +5452,7 @@ function forkChip(ordinal) {
   btn.appendChild(forkIcon());
   btn.onclick = () => {
     if (clientBusy) { showToast("can't fork while working"); return; }
-    send({ type: "fork", after: ordinal });
+    act({ type: "fork", after: ordinal }, { label: "the fork" });
   };
   return btn;
 }
@@ -5785,11 +5915,19 @@ function buttonRow(card, specs) {
 }
 
 function answerCard(id, action, extra) {
-  send({ type: "approval", id, action, ...extra });
   const card = cards.get(id);
-  if (card) {
-    for (const b of card.querySelectorAll("button, input, textarea")) b.disabled = true;
-  }
+  const controls = card ? [...card.querySelectorAll("button, input, textarea")] : [];
+  // Greying the card is a claim that the GATE has your answer, and the gate is
+  // a worker thread parked on a slot that only this message fills. Unreceipted,
+  // that claim strands the agent holding a command with a card that looks
+  // answered and no way back to it — so the disabling is undone with it
+  // ([ACK-LEDGER]). Nothing here re-sends: `bridge.answer` drops a duplicate,
+  // but a second verdict the user did not give is not this layer's to invent.
+  act({ type: "approval", id, action, ...extra }, {
+    label: "your answer to the approval",
+    lost: () => { for (const c of controls) c.disabled = false; },
+  });
+  for (const c of controls) c.disabled = true;
   // Hand keyboard focus on: to the next still-pending card if one is stacked,
   // otherwise back to the composer (desktop only — mirrors the modal focus on
   // appear). activeApprovalCard() already skips this now-disabled card.
@@ -6957,11 +7095,11 @@ function handleSlash(text) {
   switch (command) {
     case "/model": openModelSheet(arg); return true;
     case "/resume": case "/delete": openSessionRail(arg); return true;
-    case "/new": case "/clear": return send({ type: "new" });
-    case "/fork": case "/branch": return send({ type: "fork" });
-    case "/cd": return arg ? send({ type: "cd", path: arg }) : (openDirSheet(), true);
+    case "/new": case "/clear": return act({ type: "new" }, { label: "the new chat" });
+    case "/fork": case "/branch": return act({ type: "fork" }, { label: "the fork" });
+    case "/cd": return arg ? act({ type: "cd", path: arg }, { label: "the directory change" }) : (openDirSheet(), true);
     case "/add-dir": case "/dir-add":
-      return arg ? send({ type: "add_dir", path: arg }) : (openSheet("workspace-sheet"), true);
+      return arg ? act({ type: "add_dir", path: arg }, { label: "adding that directory" }) : (openSheet("workspace-sheet"), true);
     case "/learn": case "/feedback": {
       // Run as a task: the server swaps the text for the expanded prompt
       // (cli.parse_learn / parse_feedback) while the transcript shows what was
@@ -8088,13 +8226,23 @@ function addQueueChip(text) {
     '<button class="queue-edit" type="button" aria-label="edit queued message"><svg viewBox="0 0 24 24"><path d="M12 19.5h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.2a1.7 1.7 0 0 1 2.4 2.4l-8.3 8.3-3.2.8.8-3.2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg></button>' +
     '<button class="queue-remove" type="button" aria-label="remove from queue"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></button>';
   chip.querySelector(".queue-text").textContent = text;
+  // Taking the chip away says the message will not be sent. Unreceipted that is
+  // the most expensive lie in this file: the queue belongs to an agent that
+  // runs shell commands, so a cancel that never landed means the thing you
+  // withdrew RUNS, with nothing on screen still naming it. The chip goes back
+  // ([ACK-LEDGER]) — and if the dequeue did land after all, the server's own
+  // queue repaint drops it again on the next replay.
+  const dequeue = () => act({ type: "dequeue", text }, {
+    label: "cancelling that queued message",
+    lost: () => addQueueChip(text),
+  });
   chip.querySelector(".queue-remove").onclick = () => {
-    send({ type: "dequeue", text });
+    dequeue();
     removeQueueChip(text);
   };
   // Edit: pull the message back into the composer to revise & resend (#14).
   chip.querySelector(".queue-edit").onclick = () => {
-    send({ type: "dequeue", text });
+    dequeue();
     removeQueueChip(text);
     input.value = input.value ? `${text}\n${input.value}` : text;
     resizeInput();
@@ -8149,7 +8297,11 @@ function addCwdChip(path) {
     // which overwrites pending_cwd and re-emits, updating this same card.
     chip.querySelector(".queue-edit").onclick = () => openDirSheet();
     chip.querySelector(".queue-remove").onclick = () => {
-      send({ type: "dequeue_cwd" });
+      // Same claim, and this one moves the APPROVAL ROOT when it applies.
+      act({ type: "dequeue_cwd" }, {
+        label: "cancelling that directory change",
+        lost: () => addCwdChip(path),
+      });
       removeCwdChip();
     };
     list.insertBefore(chip, list.firstChild); // pinned above message chips
@@ -8752,7 +8904,7 @@ for (const b of document.querySelectorAll("[data-close]")) {
 }
 $("backdrop").onclick = closeSheets;
 
-$("sessions-new").onclick = () => { send({ type: "new" }); closeSessionRail(); };
+$("sessions-new").onclick = () => { act({ type: "new" }, { label: "the new chat" }); closeSessionRail(); };
 // New chat is in TWO places on purpose: the rail's copy is in thumb reach but
 // unreachable until you know the rail exists, and the header's is the one you
 // find without being told. Same action, two discovery paths.
@@ -8821,7 +8973,7 @@ document.addEventListener("keydown", (e) => {
     const key = e.key.toLowerCase();
     if (key === "n" || (e.shiftKey && key === "o")) {
       e.preventDefault();
-      send({ type: "new" });
+      act({ type: "new" }, { label: "the new chat" });
       closeSheets();
       return;
     }
@@ -9160,7 +9312,6 @@ async function forgetSession(name) {
 // [FORGET-SESSION-END]
 
 function onSessionGone(name) {
-  resolveDelete(name); // asking to delete a chat that is already gone IS an answer
   forgetSession(name);
   showToast("that chat no longer exists");
   // We had already left for it ([PENDING-VIEW]) — don't leave the spinner
@@ -9173,7 +9324,6 @@ function onSessionGone(name) {
 // and tapping it opened a chat that no longer existed.
 async function onSessionDeleted(event) {
   rosterBaseline(event.seq);
-  resolveDelete(event.name);
   showToast("session deleted");
   // Repaint only AFTER the copy is gone: the rail reads the mirror, so a
   // render racing the eviction paints the chat straight back onto the list.
@@ -9181,45 +9331,6 @@ async function onSessionDeleted(event) {
   if (railIsOpen()) renderSessionsFromCache();
 }
 
-// [DELETE-ACK-START]
-// A DELETE IS A REQUEST, AND A REQUEST CAN BE LOST. Every outcome the server
-// has speaks — `session_deleted`, a refusal saying why, `no_such_session` — so
-// silence means the message never arrived, and the one way to send into silence
-// is the failure this app's own test harness models: a socket that reports OPEN
-// long after it died, accepting everything handed to it and answering nothing.
-// A phone that has been asleep is exactly where that happens.
-//
-// Nothing used to notice. The confirmation closed, the request went nowhere,
-// and the chat stayed on the server — while the client had ALREADY behaved as
-// if it were gone (it dropped the seen stamp, [FORGET-SESSION]), so the only
-// visible trace was the chat coming back looking new. A destructive action that
-// fails must not be indistinguishable from one that worked.
-//
-// So: wait for the answer, and if none comes, say so and rebuild the socket —
-// the next attempt then has something live to send on. NEVER RESEND. The first
-// request may well have arrived; a delete is not an action to issue twice on a
-// guess, and this is the same rule [PENDING-SEND] follows for a message.
-const DELETE_ACK_MS = 8000;
-let pendingDelete = null; // { name, timer } — one at a time; the modal is modal
-
-function awaitDelete(name) {
-  if (pendingDelete) clearTimeout(pendingDelete.timer);
-  pendingDelete = {
-    name,
-    timer: setTimeout(() => {
-      pendingDelete = null;
-      showToast("that chat was NOT deleted — reconnecting, try again in a moment");
-      reconnect();
-    }, DELETE_ACK_MS),
-  };
-}
-
-function resolveDelete(name) {
-  if (!pendingDelete || !name || pendingDelete.name !== name) return;
-  clearTimeout(pendingDelete.timer);
-  pendingDelete = null;
-}
-// [DELETE-ACK-END]
 
 // ---- opening the session rail by swiping the transcript ------------------
 // The gesture lives on the WHOLE transcript, not a left edge. An edge-only
@@ -9332,16 +9443,10 @@ function askDeleteChat() {
       "This cannot be undone.",
     verb: "Delete",
     // Answering "Delete" is not the same as the chat being deleted — the
-    // request still has to arrive and be answered ([DELETE-ACK]).
-    action: () => {
-      if (!send({ type: "delete_session", name })) {
-        showToast(offlineMode
-          ? "not deleted — you are offline"
-          : "not deleted — you are not connected");
-        return;
-      }
-      awaitDelete(name);
-    },
+    // request still has to arrive and be handled ([ACK-LEDGER]). Nothing to
+    // undo here: the list is the claim, and it only drops the chat when the
+    // server says it is gone ([FORGET-SESSION]).
+    action: () => act({ type: "delete_session", name }, { label: "deleting that chat" }),
   });
 }
 // [CONFIRM-END]
@@ -9393,7 +9498,14 @@ $("rename-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const title = $("rename-input").value.trim();
   if (!title) { $("rename-input").focus(); return; }
-  if (currentSession) send({ type: "rename_session", name: currentSession, title });
+  // The header takes the new name at once, so it has to give it back if the
+  // rename never lands — otherwise the chat answers to a name only this device
+  // believes in, until some later repaint quietly disagrees.
+  const previousTitle = $("session-title").textContent;
+  if (currentSession) {
+    act({ type: "rename_session", name: currentSession, title },
+      { label: "the rename", lost: () => setTitle(previousTitle === "New chat" ? "" : previousTitle) });
+  }
   setTitle(title); // optimistic; session_renamed reconfirms (and updates the drawer)
   closeSheets();
 });
@@ -10253,7 +10365,8 @@ function renderModels(event) {
     }
     row.onclick = () => {
       rememberModel(model.name);
-      send({ type: "set_model", spec: model.name, save: $("model-save").checked });
+      act({ type: "set_model", spec: model.name, save: $("model-save").checked },
+        { label: "the model switch" });
     };
     return row;
   };
@@ -10280,7 +10393,7 @@ function onModelChanged(event) {
 $("ws-cd-change").onclick = () => openDirSheet();
 $("root-add").onclick = () => {
   const path = $("root-input").value.trim();
-  if (path) { send({ type: "add_dir", path }); $("root-input").value = ""; }
+  if (path) { act({ type: "add_dir", path }, { label: "adding that directory" }); $("root-input").value = ""; }
 };
 $("jobs-refresh").onclick = () => send({ type: "jobs" });
 
@@ -10446,7 +10559,10 @@ function showDirRecents() {
 
 function selectDir(path) {
   rememberDir(path);
-  send({ type: "cd", path });
+  // Closing the sheet reads as acceptance, and a cd moves the APPROVAL ROOT —
+  // the one piece of state where a silent no-op is a safety question, not a
+  // papercut. The chip still only moves on the server's own cwd_changed.
+  act({ type: "cd", path }, { label: "the directory change" });
   closeSheets();
 }
 
@@ -10560,7 +10676,7 @@ $("dir-back").onclick = () => showDirRecents(); // back to step 1 (recents) from
 $("dir-use").onclick = () => {
   if (!dirPath) return;
   rememberDir(dirPath);
-  send({ type: "cd", path: dirPath });
+  act({ type: "cd", path: dirPath }, { label: "the directory change" });
   closeSheets();
 };
 // toast

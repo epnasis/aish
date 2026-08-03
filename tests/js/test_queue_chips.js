@@ -89,6 +89,7 @@ function world() {
   const list = node("div");
   list.className = "queue-list";
   const sent = [];
+  const acts = [];
   const input = { value: "" };
   const sandbox = {
     $: (id) => (id === "queue-list" ? list : node("div")),
@@ -101,6 +102,9 @@ function world() {
       },
     },
     send: (message) => { sent.push(message); return true; },
+    // Cancelling is an ACT ([ACK-LEDGER]): it carries the repair to run if the
+    // server never confirms. Captured so a scenario can run it.
+    act: (message, opts) => { sent.push(message); acts.push(opts || {}); return true; },
     scrollToEnd() {},
     resizeInput() {},
     abbreviatePath: (path) => path,
@@ -112,7 +116,7 @@ function world() {
   // Objects minted inside the vm carry a different prototype, so compare the
   // data rather than the identity.
   return {
-    sandbox, list, input,
+    sandbox, list, input, acts,
     sent: () => JSON.parse(JSON.stringify(sent)),
     texts: () => list.children.map((c) => c.dataset.text),
   };
@@ -134,6 +138,21 @@ scenario("cancelling a chip names the message, not a position", () => {
   w.list.children[1].querySelector(".queue-remove").onclick();
   assert.deepStrictEqual(w.sent(), [{ type: "dequeue", text: "second" }]);
   assert.deepStrictEqual(w.texts(), ["first"], "and only that one leaves the strip");
+});
+
+// The most expensive claim in this file: the chip going away says the message
+// will NOT be sent, and the queue belongs to an agent that runs shell commands.
+// If the cancel never reached the server the message runs — so the chip has to
+// come back, or nothing on screen names the thing that is about to happen.
+scenario("a cancel the server never confirmed puts the message back", () => {
+  const w = world();
+  w.sandbox.addQueueChip("deploy to prod");
+  w.list.children[0].querySelector(".queue-remove").onclick();
+  assert.deepStrictEqual(w.texts(), [], "it left the strip on the tap");
+  assert.strictEqual(typeof w.acts[0].lost, "function", "…carrying its own repair");
+  w.acts[0].lost(); // the receipt never came
+  assert.deepStrictEqual(w.texts(), ["deploy to prod"],
+    "a message that is still queued must still be on screen");
 });
 
 scenario("clearing takes the WHOLE strip, cd card included", () => {
