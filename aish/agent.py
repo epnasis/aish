@@ -1487,7 +1487,13 @@ class Agent:
     ) -> str:
         # Fresh scan every task: skills/memory created mid-session (or after
         # /cd) show up immediately, in every open session — no restart needed.
-        index = skills.knowledge_index(self.cwd, self.lessons_path)
+        # That freshness is exactly why the selection must be RECORDED: the
+        # index is a function of a mutable directory, so it cannot be
+        # recomputed after the fact. See the `context` emit below.
+        index_record: dict = {}
+        index = skills.knowledge_index(
+            self.cwd, self.lessons_path, on_index=index_record.update
+        )
         self.messages[0]["content"] = compose_system_content(
             self.base_context, self.cwd, self.lessons_path, index, scratch_dir=self.scratch_dir
         )
@@ -1586,6 +1592,25 @@ class Agent:
             # both to a live token sink logged every rejected answer on any
             # client that does not stream.
             self._held_answer = []  # this turn's answer waits for its checks
+        # What the model was TOLD (#208, contract §3.10). aish already records what
+        # it did (`tool`/`gate`), what governed it (`rule_eval`/`binding`) and
+        # what it stored (`admission`); the index — the largest input to
+        # messages[0] — had no record at all, so "how did it know that?" was
+        # answerable only by reading ~/.config/aish by hand, and only until the
+        # entry expired. UNCONDITIONAL: a task that reached here emits this
+        # even when nothing was selected, because §3.8(a)'s defect is that
+        # "selected nothing" and "never ran" must not share a log shape.
+        # `preload` rides along for that same reason — it makes the empty case
+        # provable without touching the `knowledge` record `curate` reads.
+        self._emit_record(
+            kind="context",
+            index=index_record,
+            preload={
+                "mode": preload.mode,
+                "count": len(preload.names),
+                "names": list(preload.names),
+            },
+        )
         if preload.names:
             self._note("⚑ preloaded knowledge: " + ", ".join(preload.names))
             # sim/rail/score diagnostics persist to the session log via the
