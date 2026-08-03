@@ -5123,9 +5123,9 @@ name: bounded-material
 description: Answer from the material I gave you.
 when:
   prompt:
-    has: source
+    has: material
 then:
-  answer_from: source
+  answer_from: material
   never_use: [web_search]
   must_tell_me_when: the material could not be read
 ---
@@ -5236,7 +5236,7 @@ class TestRuleSeeding:
         assert binding["rule"] == "bounded-material" and binding["seeded"] is True
         assert binding["obligations"][0] == {
             "verb": "answer_from",
-            "to": "source",
+            "to": "material",
             "of": "deliverable",
             "readers": ["read_url"],
             "sources": [SOURCE_URL],
@@ -5779,7 +5779,7 @@ name: half-written
 description: The obligation is in the prose, where it enforces nothing.
 when:
   prompt:
-    has: source
+    has: material
 ---
 
 You MUST always use the show_image tool.
@@ -5850,13 +5850,13 @@ name: no-hedging
 description: Answers do not hedge.
 when: always
 then:
-  answer_must_not:
+  answer_must_not_include:
     pattern: "as an AI"
 ---
 """
 
 # Two verify obligations that fail INDEPENDENTLY — the round-accounting case.
-# `answer_must_show_if_used: read_url` cannot do it: with no reads there is nothing to
+# `never_discard_result_of: read_url` cannot do it: with no reads there is nothing to
 # credit, so it passes exactly when must_first fails.
 RULE_VERIFY_TWO = """---
 name: two-checks
@@ -5864,7 +5864,7 @@ description: A price comes from the store, and never in EUR.
 when: always
 then:
   must_first: read_url
-  answer_must_not:
+  answer_must_not_include:
     pattern: "EUR"
 ---
 """
@@ -5875,7 +5875,7 @@ description: A price you quote comes from the store's page, this turn.
 when: always
 then:
   must_first: read_url
-  answer_must_show_if_used: read_url
+  never_discard_result_of: read_url
 ---
 
 Quote prices only from the page you fetched this turn.
@@ -6218,8 +6218,8 @@ class TestRuleAuthoring:
         "name": "bounded-material",
         "description": "Answer from the material I gave you.",
         "when_subject": "prompt",
-        "when_has": "source",
-        "answer_from": "source",
+        "when_has": "material",
+        "answer_from": "material",
     }
 
     def _agent(self, tmp_path, responses=(), **kw):
@@ -6387,7 +6387,7 @@ class TestRuleAuthoring:
         "name": "always-use-show-image",
         "description": "Pictures come from show_image.",
         "when_subject": "always",
-        "answer_must_show_if_used": "show_image",
+        "never_discard_result_of": "show_image",
         "prose": "An external image link does not render in the UI.",
     })
 
@@ -6455,13 +6455,13 @@ class TestRuleAuthoring:
         agent.rule_compiler = None
         agent._dispatch("create_rule", {**self.FIELDS, "when_has": "link",
                                         "never_use": ["web_search"]})
-        agent.rule_compiler = lambda p: json.dumps({"when_has": "source"})
+        agent.rule_compiler = lambda p: json.dumps({"when_has": "material"})
         result = agent._dispatch("edit_rule", {
             "name": "bounded-material", "request": "also cover attachments",
         })
         assert not result.startswith("ERROR"), result
         [rule] = rules_module.load_rules([tmp_path / "rules"])
-        assert rule.contains == "source"
+        assert rule.contains == "material"
         assert {o["verb"] for o in rule.obligations} == {
             rules_module.VERB_ANSWER_FROM, rules_module.VERB_NEVER_USE,
         }, "an edit dropped an obligation the request never mentioned"

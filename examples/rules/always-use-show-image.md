@@ -3,8 +3,8 @@ name: always-use-show-image
 description: Any picture in an answer comes from show_image, never a raw markdown link.
 when: always
 then:
-  answer_must_show_if_used: show_image
-  answer_must_not:
+  never_discard_result_of: show_image
+  answer_must_not_include:
     pattern: '!\[[^\]]*\]\(https?://'
 ---
 

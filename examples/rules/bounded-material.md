@@ -3,9 +3,9 @@ name: bounded-material
 description: Answer from the material I gave you; widening it needs my say-so.
 when:
   prompt:
-    has: source        # a link, an attached file, or a file path I handed over
+    has: material        # a link, an attached file, or a file path I handed over
 then:
-  answer_from: source
+  answer_from: material
   never_use: [web_search]
   must_tell_me_when: the material could not be read
 ---

@@ -3299,7 +3299,7 @@ class Agent:
             "args": dict(args or {}),
             "status": status,
             "decision": decision,
-            # Capped, and kept only for THIS turn. `answer_must_show_if_used` has to
+            # Capped, and kept only for THIS turn. `never_discard_result_of` has to
             # read back the exact line a show_* tool handed over — checking that
             # it appears in the answer is an equality, where "does the answer
             # contain something picture-shaped" would be a guess.
@@ -3998,7 +3998,7 @@ class Agent:
         "when_subject", "when_has", "when_sounds_like", "when_matches",
         "when_origin", "when_action",
         "answer_from", "never_use", "must_first",
-        "answer_must_include", "answer_must_not", "must_tell_me_when",
+        "answer_must_include", "answer_must_not_include", "must_tell_me_when",
     )
 
     # How many matched turns the approval card lists before it summarises. The

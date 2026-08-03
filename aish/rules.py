@@ -72,35 +72,35 @@ VERB_NEVER_USE = "never_use"
 VERB_MUST_TELL_ME_WHEN = "must_tell_me_when"
 VERB_MUST_FIRST = "must_first"
 VERB_ANSWER_MUST_INCLUDE = "answer_must_include"
-VERB_ANSWER_MUST_NOT = "answer_must_not"
+VERB_ANSWER_MUST_NOT_INCLUDE = "answer_must_not_include"
 # Two general forms replacing the fixed list of named checks. Both name a TOOL.
-VERB_ANSWER_MUST_SHOW = "answer_must_show"
-VERB_ANSWER_MUST_SHOW_IF_USED = "answer_must_show_if_used"
+VERB_MUST_INCLUDE_RESULT = "answer_must_include_result_of"
+VERB_NEVER_DISCARD = "never_discard_result_of"
 VERBS = frozenset({
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_TELL_ME_WHEN,
-    VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT,
-    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED,
+    VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE,
+    VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD,
 })
 # Verbs decided at the END of a turn, against the answer and the turn's own
 # record — not before a call. The gate cannot see either.
 VERIFY_VERBS = frozenset({
-    VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT,
-    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED,
+    VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE,
+    VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD,
 })
 # The verbs whose value is a tool name (or a choice of them), not a check name.
-TOOL_VERBS = frozenset({VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED})
+TOOL_VERBS = frozenset({VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD})
 # Designed, unbuilt — named here so a lint failure can say what is MISSING
 # rather than merely that the file is wrong (#205).
 VERBS_DESIGNED = {
     "ask_me_first": "hold for the owner — needs the hold verb",
 }
 
-# What `answer_must_include:` / `answer_must_not:` accept. A named detector, or
+# What `answer_must_include:` / `answer_must_not_include:` accept. A named detector, or
 # `{pattern: <regex>}` for anything else — both are STRUCTURAL, which is the
 # admission price: a verb ships only if it compiles to a declared check. A free
 # phrase ("be terser") is a judged question and is refused by name until that
 # tier exists, rather than shipping as a promise nothing keeps.
-# What `answer_must_show:` / `answer_must_show_if_used:` name: A TOOL. Not a check
+# What `answer_must_include_result_of:` / `never_discard_result_of:` name: A TOOL. Not a check
 # invented per media type.
 #
 # The first version shipped a fixed list of named checks — shows_a_picture,
@@ -109,8 +109,8 @@ VERBS_DESIGNED = {
 # the rule LANGUAGE should be small and stable, and what he composes from it
 # should be his. Two general forms replace all four:
 #
-#   answer_must_show: <tool>     the answer must carry that tool's output
-#   answer_must_show_if_used: <tool>   IF it ran, its output must be in the answer
+#   answer_must_include_result_of: <tool>     the answer must carry that tool's output
+#   never_discard_result_of: <tool>   IF it ran, its output must be in the answer
 #   answer_must_include: {pattern: …}   anything about the text, written by him
 #
 # The per-tool knowledge that remains — how a given tool's work appears in an
@@ -162,7 +162,7 @@ MEANING_FLOOR = 0.62
 # two languages; few enough that the owner can read them all on the card.
 MEANING_MAX_ANCHORS = 8
 
-ROUTE_SOURCE = "source"
+ROUTE_MATERIAL = "material"
 
 # The sentence that keeps `route: source` from being a promotion. A rule is the
 # one artifact class that is NOT advice, so its seeded prose is the highest-
@@ -201,7 +201,7 @@ DEFAULT_READER = "read_url"
 # `material` is the whole channel; the narrow ones exist so a rule that really
 # does mean web pages only can say so. The noun matches the obligation's value
 # (`answer_from: material`), so both sides of a rule name the same thing.
-CONTAINS_SOURCE = "source"
+CONTAINS_MATERIAL = "material"
 CONTAINS_LINK = "link"
 CONTAINS_ATTACHMENT = "attachment"
 CONTAINS_PATH = "path"
@@ -237,7 +237,7 @@ SOURCE_PATH = "path"
 SOURCE_ATTACHMENT = "attachment"
 
 DETECTOR_KINDS: dict[str, frozenset[str]] = {
-    CONTAINS_SOURCE: frozenset({SOURCE_URL, SOURCE_ATTACHMENT, SOURCE_PATH}),
+    CONTAINS_MATERIAL: frozenset({SOURCE_URL, SOURCE_ATTACHMENT, SOURCE_PATH}),
     CONTAINS_LINK: frozenset({SOURCE_URL}),
     CONTAINS_ATTACHMENT: frozenset({SOURCE_ATTACHMENT}),
     CONTAINS_PATH: frozenset({SOURCE_PATH}),
@@ -259,7 +259,7 @@ RETIRED_KEYS = {
     "field": "the field is the key now — `when: session: origin:`.",
     "is": "now `when: session: origin: <value>`.",
     "is_not": "now `when: session: origin: automation` — a positive match, not a negation.",
-    "route": f"now `then: {VERB_ANSWER_FROM}:`, and its `source` value is `{ROUTE_SOURCE}`.",
+    "route": f"now `then: {VERB_ANSWER_FROM}:`, and its `source` value is `{ROUTE_MATERIAL}`.",
     "prohibit": f"now `then: {VERB_NEVER_USE}:`.",
     "disclose": (
         f"now `then: {VERB_MUST_TELL_ME_WHEN}:`, and it takes a plain phrase — "
@@ -375,7 +375,7 @@ class Rule:
 
     @property
     def route_target(self) -> str:
-        """The tool name, or ROUTE_SOURCE when the rule routes to whatever
+        """The tool name, or ROUTE_MATERIAL when the rule routes to whatever
         source the message carried."""
         for obligation in self.obligations:
             if obligation["verb"] == VERB_ANSWER_FROM:
@@ -618,6 +618,19 @@ def _compile(front: dict) -> _Compiled:
                 "they all have to fit on the approval card, and past a handful "
                 "another example stops changing what matches"
             )
+        if contains == "source":
+            # The doc, the seeded prose and the whole R1 analysis standardised
+            # on `material`; only the frontmatter still said `source`, so the
+            # documentation taught a spelling the compiler refused. Whichever
+            # word won had to win everywhere — and `material` is the one that
+            # reads: "the prompt has material" covers an attachment, where "the
+            # prompt has a source" flavours toward citations and collides with
+            # "source code" in the rule about not editing aish itself.
+            raise RuleError(
+                f"`has: source` was renamed — write `has: {CONTAINS_MATERIAL}`. "
+                "Same for `answer_from: source`. One noun on both sides of the "
+                "rule, so a reader can see they refer to the same thing."
+            )
         if contains and contains not in CONTAINS_DETECTORS:
             raise RuleError(
                 f"unknown `has:` value {contains!r} — have "
@@ -669,9 +682,14 @@ def _compile(front: dict) -> _Compiled:
             )
         raise RuleError(f"unknown `then:` verb {verb!r} — have " + ", ".join(sorted(VERBS)))
     if route := str(then.get(VERB_ANSWER_FROM, "") or "").strip():
-        if route == ROUTE_SOURCE and contains not in DETECTOR_KINDS:
+        if route == "source":
             raise RuleError(
-                f"`{VERB_ANSWER_FROM}: {ROUTE_SOURCE}` needs `when: prompt: has: …` "
+                f"`{VERB_ANSWER_FROM}: source` was renamed — write "
+                f"`{VERB_ANSWER_FROM}: {ROUTE_MATERIAL}`."
+            )
+        if route == ROUTE_MATERIAL and contains not in DETECTOR_KINDS:
+            raise RuleError(
+                f"`{VERB_ANSWER_FROM}: {ROUTE_MATERIAL}` needs `when: prompt: has: …` "
                 "— otherwise there is no material to answer from"
             )
         obligations.append(
@@ -681,11 +699,11 @@ def _compile(front: dict) -> _Compiled:
         obligations.append({"verb": VERB_NEVER_USE, "what": prohibited})
     if first := str(then.get(VERB_MUST_FIRST, "") or "").strip():
         obligations.append({"verb": VERB_MUST_FIRST, "capability": first})
-    for verb in (VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT):
+    for verb in (VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE):
         if (value := then.get(verb)) in (None, ""):
             continue
         obligations.append({"verb": verb, **_answer_check(verb, value)})
-    for verb in (VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED):
+    for verb in (VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD):
         if (value := then.get(verb)) in (None, "", [], {}):
             continue
         obligations.append({"verb": verb, "tools": _tool_choice(verb, value)})
@@ -756,8 +774,8 @@ def _answer_check(verb: str, value: Any) -> dict:
     raise RuleError(
         f"`{verb}: {name!r}` is a plain phrase, which only a judge can check, and "
         f"the judged tier is not built. Use `{verb}: {{pattern: <regex>}}` for "
-        f"something about the TEXT, or `{VERB_ANSWER_MUST_SHOW}: <tool>` / "
-        f"`{VERB_ANSWER_MUST_SHOW_IF_USED}: <tool>` for something about what aish DID."
+        f"something about the TEXT, or `{VERB_MUST_INCLUDE_RESULT}: <tool>` / "
+        f"`{VERB_NEVER_DISCARD}: <tool>` for something about what aish DID."
     )
 
 
@@ -1113,7 +1131,7 @@ def resolve_route(rule: Rule, evidence: dict) -> tuple[list[str], list[str]]:
     target = rule.route_target
     if not target:
         return [], []
-    if target != ROUTE_SOURCE:
+    if target != ROUTE_MATERIAL:
         return [target], []
     rows = list(evidence.get("sources") or [])
     readers: list[str] = []
@@ -1155,7 +1173,7 @@ def bind(
     missing = unsatisfiable(rule, readers, known_tools)
     obligations = []
     for obligation in rule.obligations:
-        if obligation["verb"] == VERB_ANSWER_FROM and obligation["to"] == ROUTE_SOURCE:
+        if obligation["verb"] == VERB_ANSWER_FROM and obligation["to"] == ROUTE_MATERIAL:
             # Snapshot what "the source" meant for THIS turn (contract
             # corollary 1) — a record naming only "source" would send a later
             # reader back to guess which material was in the message. `present`
@@ -1491,14 +1509,14 @@ MUST_NOT_ASK = (
     "Rewrite the answer without it."
 )
 
-MUST_SHOW_ASK = (
+MUST_INCLUDE_RESULT_ASK = (
     "The rule '{rule}' requires the answer to carry what {tools} produced, and it "
     "does not. {description}\n"
     "Call it, then paste the line it hands back into the answer EXACTLY as "
     "written — that line is what the app renders. Then give the answer again."
 )
 
-SHOW_IF_USED_ASK = (
+NEVER_DISCARD_ASK = (
     "The rule '{rule}' requires that whatever {tools} produced this turn appears "
     "in the answer, and {missing} is missing. {description}\n"
     "You used it and then dropped it — add it and give the answer again."
@@ -1617,7 +1635,7 @@ def _cited(answer: str, call: dict) -> bool:
 def _verify_tools(
     binding: Binding, obligation: dict, evidence: TurnEvidence, common: dict
 ) -> VerifyFailure | None:
-    """`answer_must_show` and `answer_must_show_if_used`, over one tool or a choice.
+    """`answer_must_include_result_of` and `never_discard_result_of`, over one tool or a choice.
 
     One rule with a condition, and the names say so. The first pair was called
     `show` and `credit`, which stretched one metaphor over two different
@@ -1635,12 +1653,12 @@ def _verify_tools(
     shared = {"tools": tools, "ran": [c.get("tool") for c in calls],
               "cited": [c.get("tool") for c in cited]}
 
-    if verb == VERB_ANSWER_MUST_SHOW:
+    if verb == VERB_MUST_INCLUDE_RESULT:
         if cited:
             return None
         return VerifyFailure(
             binding, obligation, shared,
-            MUST_SHOW_ASK.format(tools=wording, **common),
+            MUST_INCLUDE_RESULT_ASK.format(tools=wording, **common),
             # Nothing to re-ask for when the harness itself blocked every one
             # of them: the goad would argue with another gate.
             askable=not all(evidence.refused(name) for name in tools),
@@ -1654,7 +1672,7 @@ def _verify_tools(
     )) or "what it produced"
     return VerifyFailure(
         binding, obligation, {**shared, "missing": missing[:EVIDENCE_CHARS]},
-        SHOW_IF_USED_ASK.format(tools=wording, missing=missing[:200], **common),
+        NEVER_DISCARD_ASK.format(tools=wording, missing=missing[:200], **common),
     )
 
 
@@ -1696,7 +1714,7 @@ def seed_text(bindings: list[Binding]) -> str:
 def _obligation_line(obligation: dict) -> str:
     verb = obligation["verb"]
     if verb == VERB_ANSWER_FROM:
-        if obligation["to"] == ROUTE_SOURCE:
+        if obligation["to"] == ROUTE_MATERIAL:
             sources = ", ".join(obligation.get("sources") or []) or "the message"
             readers = ", ".join(obligation.get("readers") or [])
             present = ", ".join(obligation.get("present") or [])
@@ -1728,13 +1746,13 @@ def _obligation_line(obligation: dict) -> str:
             f"· MUST call {obligation['capability']} before answering. The answer "
             "is checked for it, and held back until it has run."
         )
-    if verb == VERB_ANSWER_MUST_SHOW:
+    if verb == VERB_MUST_INCLUDE_RESULT:
         tools = " or ".join(obligation["tools"])
         return (
             f"· MUST: the answer carries what {tools} produced. Call it and paste the "
             "line it hands back EXACTLY as written — that line is what renders."
         )
-    if verb == VERB_ANSWER_MUST_SHOW_IF_USED:
+    if verb == VERB_NEVER_DISCARD:
         tools = " or ".join(obligation["tools"])
         return (
             f"· MUST: if you use {tools}, what it produced appears in the answer. "
@@ -1836,8 +1854,8 @@ AUTHOR_FIELDS = (
     "when_subject", "when_has", "when_sounds_like", "when_matches",
     "when_origin", "when_action",
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
-    VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT, VERB_MUST_TELL_ME_WHEN,
-    VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED,
+    VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE, VERB_MUST_TELL_ME_WHEN,
+    VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD,
 )
 
 # The subset a prose compiler may propose. The prompt never asks for the
@@ -1975,7 +1993,7 @@ def render(fields: dict) -> str:
             then.append(f"  {verb}: {_yaml_scalar(value)}")
     if never := _as_list(fields.get(VERB_NEVER_USE)):
         then.append(f"  {VERB_NEVER_USE}: [{', '.join(never)}]")
-    for verb in (VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT):
+    for verb in (VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE):
         value = fields.get(verb)
         if value in (None, "", {}):
             continue
@@ -1983,7 +2001,7 @@ def render(fields: dict) -> str:
             then += [f"  {verb}:", f"    pattern: {_yaml_scalar(value.get('pattern', ''))}"]
         else:
             then.append(f"  {verb}: {_yaml_scalar(value)}")
-    for verb in (VERB_ANSWER_MUST_SHOW, VERB_ANSWER_MUST_SHOW_IF_USED):
+    for verb in (VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD):
         value = fields.get(verb)
         if value in (None, "", {}, []):
             continue
@@ -2049,7 +2067,7 @@ def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, l
         )
     if known_tools:
         readers = [o["to"] for o in rule.obligations
-                   if o["verb"] == VERB_ANSWER_FROM and o["to"] != ROUTE_SOURCE]
+                   if o["verb"] == VERB_ANSWER_FROM and o["to"] != ROUTE_MATERIAL]
         firsts = [o["capability"] for o in rule.obligations if o["verb"] == VERB_MUST_FIRST]
         cited = [name for o in rule.obligations if o["verb"] in TOOL_VERBS
                  for name in o["tools"]]
@@ -2112,7 +2130,7 @@ def explain(rule: Rule) -> str:
             target = obligation["to"]
             says.append(
                 "answer from the material I gave you, read with whichever tool fits it"
-                if target == ROUTE_SOURCE else f"answer from {target}"
+                if target == ROUTE_MATERIAL else f"answer from {target}"
             )
         elif verb == VERB_NEVER_USE:
             says.append("never use " + ", ".join(obligation["what"]))
@@ -2120,12 +2138,12 @@ def explain(rule: Rule) -> str:
             says.append(f"call {obligation['capability']} before answering")
         elif verb == VERB_MUST_TELL_ME_WHEN:
             says.append(f"tell me when {obligation['state']}")
-        elif verb == VERB_ANSWER_MUST_SHOW:
+        elif verb == VERB_MUST_INCLUDE_RESULT:
             says.append(
                 "the answer must show what " + " or ".join(obligation["tools"])
                 + " produced"
             )
-        elif verb == VERB_ANSWER_MUST_SHOW_IF_USED:
+        elif verb == VERB_NEVER_DISCARD:
             says.append(
                 "if you use " + " or ".join(obligation["tools"])
                 + ", what it produced must be in the answer"
@@ -2165,7 +2183,7 @@ def explain(rule: Rule) -> str:
 # Read by `explain` only. The trigger keys are terse because they are typed;
 # these are the words for the sentence the owner reads.
 CONTAINS_LABELS = {
-    CONTAINS_SOURCE: "material — a link, an attached file, or a path you typed",
+    CONTAINS_MATERIAL: "material — a link, an attached file, or a path you typed",
     CONTAINS_LINK: "a link",
     CONTAINS_ATTACHMENT: "an attached file or image",
     CONTAINS_PATH: "a file path",

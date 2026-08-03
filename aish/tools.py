@@ -1214,7 +1214,7 @@ TOOL_SCHEMAS = [
                     "when_has": {
                         "type": "string",
                         "description": "For when_subject='prompt': what the message must "
-                        "carry — 'source' (any material: a link, an attachment or a typed "
+                        "carry — 'material' (a link, an attachment or a typed "
                         "path), 'link', 'attachment' or 'path'.",
                     },
                     "when_sounds_like": {
@@ -1247,7 +1247,7 @@ TOOL_SCHEMAS = [
                     },
                     "answer_from": {
                         "type": "string",
-                        "description": "A tool name, or 'source' meaning the material the "
+                        "description": "A tool name, or 'material' meaning what the "
                         "user handed over (aish picks the right reader for each kind). "
                         "Everything else is then refused for this answer.",
                     },
@@ -1262,14 +1262,14 @@ TOOL_SCHEMAS = [
                         "delivered. Checked at the end of the turn against what actually "
                         "happened, not against what you say happened.",
                     },
-                    "answer_must_show": {
+                    "answer_must_include_result_of": {
                         "type": "string",
                         "description": "A TOOL whose output the answer must carry — "
                         "e.g. 'show_image'. The tool has to run AND what it produced "
                         "has to appear in the answer. For 'either will do', pass "
                         "{\"any_of\": [\"show_image\", \"show_video\"]}.",
                     },
-                    "answer_must_show_if_used": {
+                    "never_discard_result_of": {
                         "type": "string",
                         "description": "Same, but CONDITIONAL: it does not force the "
                         "tool to run. If it does run, what it produced must appear in "
@@ -1285,7 +1285,7 @@ TOOL_SCHEMAS = [
                         "is NOT accepted — a check nothing can evaluate is a promise "
                         "nothing keeps.",
                     },
-                    "answer_must_not": {
+                    "answer_must_not_include": {
                         "type": "string",
                         "description": "A named check the answer must FAIL: "
                         "'raw_image_links'. Same rule — named checks only.",
@@ -1338,10 +1338,10 @@ TOOL_SCHEMAS = [
                     "answer_from": {"type": "string"},
                     "never_use": {"type": "array", "items": {"type": "string"}},
                     "must_first": {"type": "string"},
-                    "answer_must_show": {"type": "string"},
-                    "answer_must_show_if_used": {"type": "string"},
+                    "answer_must_include_result_of": {"type": "string"},
+                    "never_discard_result_of": {"type": "string"},
                     "answer_must_include": {"type": "string"},
-                    "answer_must_not": {"type": "string"},
+                    "answer_must_not_include": {"type": "string"},
                     "must_tell_me_when": {"type": "string"},
                     "prose": {"type": "string"},
                     "enabled": {

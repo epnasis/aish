@@ -23,9 +23,9 @@ name: bounded-material
 description: Answer from the material I gave you.
 when:
   prompt:
-    has: source
+    has: material
 then:
-  answer_from: source
+  answer_from: material
   never_use: [web_search]
   must_tell_me_when: the material could not be read
 ---
@@ -82,7 +82,7 @@ class TestRuleFileFormat:
     def test_frontmatter_compiles_to_the_contract_obligation_shape(self, tmp_path):
         rule = load_one(tmp_path, CANONICAL)
         assert rule.obligations == (
-            {"verb": "answer_from", "to": "source", "of": "deliverable"},
+            {"verb": "answer_from", "to": "material", "of": "deliverable"},
             {"verb": "never_use", "what": ["web_search"]},
             {"verb": "must_tell_me_when", "state": "the material could not be read"},
         )
@@ -120,22 +120,22 @@ class TestRuleFileFormat:
     @pytest.mark.parametrize(
         "text,expected",
         [
-            (CANONICAL.replace("  prompt:\n    has: source\n", "  vibes: yes\n"),
+            (CANONICAL.replace("  prompt:\n    has: material\n", "  vibes: yes\n"),
              "unknown `when:` subject"),
-            (CANONICAL.replace("has: source", "has: vibes"), "unknown `has:` value"),
+            (CANONICAL.replace("has: material", "has: vibes"), "unknown `has:` value"),
             (
-                CANONICAL.replace("    has: source\n", "").replace(
-                    "  answer_from: source\n", ""
+                CANONICAL.replace("    has: material\n", "").replace(
+                    "  answer_from: material\n", ""
                 ),
                 "needs `has:` or `matches:`",
             ),
             (
-                CANONICAL.replace("has: source", "has: source\n    matches: ^x"),
+                CANONICAL.replace("has: material", "has: material\n    matches: ^x"),
                 "ONE of `has:`, `matches:` or `sounds_like:`",
             ),
-            (CANONICAL.replace("has: source", "matches: ^x"), "needs `when: prompt: has:"),
+            (CANONICAL.replace("has: material", "matches: ^x"), "needs `when: prompt: has:"),
             (
-                CANONICAL.replace("  answer_from: source\n", "")
+                CANONICAL.replace("  answer_from: material\n", "")
                 .replace("  never_use: [web_search]\n", "")
                 .replace("  must_tell_me_when: the material could not be read\n", ""),
                 "no obligation",
@@ -262,7 +262,7 @@ class TestSourceRouting:
         recorded (contract corollary 1)."""
         binding = bind_canonical(tmp_path, "https://youtu.be/x")
         route = rules.binding_record(binding)["obligations"][0]
-        assert route["to"] == "source"
+        assert route["to"] == "material"
         assert route["readers"] == ["youtube_analyze"]
         assert route["sources"] == ["https://youtu.be/x"]
         assert "present" not in route  # a link is not already in context
@@ -737,7 +737,7 @@ class TestTheWholeMaterialChannel:
     def test_the_narrow_url_detector_still_ignores_attachments(self, tmp_path):
         """`contains: url` is the narrower detector, kept for a rule that
         really does mean web pages only. It must not silently widen."""
-        rule = load_one(tmp_path, CANONICAL.replace("has: source", "has: link"))
+        rule = load_one(tmp_path, CANONICAL.replace("has: material", "has: link"))
         verdict, _ = rules.evaluate(
             rule, self._ctx("summarize this", documents=("/tmp/report.pdf",))
         )
@@ -807,10 +807,10 @@ class TestTheWholeMaterialChannel:
         with the two structural forms that ARE available, rather than shipping
         as a promise nothing keeps."""
         rule = load_one(tmp_path, CANONICAL.replace(
-            "  never_use: [web_search]", "  answer_must_not: be less annoying about it"
+            "  never_use: [web_search]", "  answer_must_not_include: be less annoying about it"
         ))
         assert "only a judge can check" in rule.error
-        assert "answer_must_show" in rule.error and "pattern" in rule.error
+        assert "answer_must_include_result_of" in rule.error and "pattern" in rule.error
 
 
 class TestEnabledFlag:
@@ -1013,8 +1013,8 @@ class TestAuthoring:
         "name": "bounded-material",
         "description": "Answer from the material I gave you.",
         "when_subject": "prompt",
-        "when_has": "source",
-        "answer_from": "source",
+        "when_has": "material",
+        "answer_from": "material",
         "never_use": ["web_search"],
     }
 
@@ -1177,7 +1177,7 @@ class TestRenderedMeaningMatchesTheFile:
         contains the marker), and "empty --- say so" is ordinary writing."""
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "prompt",
-            "when_has": "source", "answer_from": "source",
+            "when_has": "material", "answer_from": "material",
             "must_tell_me_when": "the source came back empty --- say so",
             "never_use": ["web_search"],
         }))
@@ -1257,7 +1257,7 @@ class TestShowAndCredit:
 
     def test_the_tools_own_output_in_the_answer_satisfies_it(self):
         assert not self._fail(
-            {"answer_must_show": "show_image"},
+            {"answer_must_include_result_of": "show_image"},
             f"Here it is ![ubud]({self.PATH})", (self._shown(),),
         )
 
@@ -1265,7 +1265,7 @@ class TestShowAndCredit:
         """The failure the join exists for: the tool ran, the owner saw
         nothing."""
         assert self._fail(
-            {"answer_must_show": "show_image"},
+            {"answer_must_include_result_of": "show_image"},
             "Ubud is greener than the coast.", (self._shown(),),
         )
 
@@ -1273,55 +1273,55 @@ class TestShowAndCredit:
         """An EQUALITY, not a guess about shape — the exact string the tool
         handed over has to be there."""
         assert self._fail(
-            {"answer_must_show": "show_image"},
+            {"answer_must_include_result_of": "show_image"},
             "Here it is ![x](/media/something-else.png)", (self._shown(),),
         )
 
     def test_never_calling_the_tool_does_not_satisfy_show(self):
-        assert self._fail({"answer_must_show": "show_image"}, "no picture", ())
+        assert self._fail({"answer_must_include_result_of": "show_image"}, "no picture", ())
 
     def test_a_refused_call_cannot_satisfy_it(self):
         refused = {**self._shown(), "decision": "denied", "status": "failed"}
         assert self._fail(
-            {"answer_must_show": "show_image"},
+            {"answer_must_include_result_of": "show_image"},
             f"Here it is ![ubud]({self.PATH})", (refused,),
         )
 
     def test_credit_passes_when_the_tool_never_ran(self):
         """The difference between the two words: CREDIT is conditional. If
         nothing was used there is nothing to credit."""
-        assert not self._fail({"answer_must_show_if_used": "read_url"}, "an answer", ())
+        assert not self._fail({"never_discard_result_of": "read_url"}, "an answer", ())
 
     def test_credit_fails_when_what_ran_is_not_in_the_answer(self):
         call = self._call("read_url", "page text", {"url": "https://shop.example/x"})
-        assert self._fail({"answer_must_show_if_used": "read_url"}, "about 40 EUR", (call,))
+        assert self._fail({"never_discard_result_of": "read_url"}, "about 40 EUR", (call,))
 
     def test_credit_passes_when_the_page_is_linked(self):
         call = self._call("read_url", "page text", {"url": "https://shop.example/x"})
         assert not self._fail(
-            {"answer_must_show_if_used": "read_url"},
+            {"never_discard_result_of": "read_url"},
             "about 40 EUR — see https://shop.example/x", (call,),
         )
 
     def test_the_ask_names_the_thing_that_is_missing(self):
         call = self._call("read_url", "t", {"url": "https://shop.example/x"})
-        [failure] = self._fail({"answer_must_show_if_used": "read_url"}, "40 EUR", (call,))
+        [failure] = self._fail({"never_discard_result_of": "read_url"}, "40 EUR", (call,))
         assert "shop.example" in failure.ask
 
     def test_either_tool_satisfies_a_choice(self):
-        then = {"answer_must_show": {"any_of": ["show_image", "show_video"]}}
+        then = {"answer_must_include_result_of": {"any_of": ["show_image", "show_video"]}}
         assert not self._fail(then, f"see [Watch]({self.VIDEO})", (self._played(),))
         assert not self._fail(then, f"see ![x]({self.PATH})", (self._shown(),))
 
     def test_neither_tool_fails_the_choice(self):
         assert self._fail(
-            {"answer_must_show": {"any_of": ["show_image", "show_video"]}},
+            {"answer_must_include_result_of": {"any_of": ["show_image", "show_video"]}},
             "Ubud is greener than the coast.", (),
         )
 
     def test_the_ask_names_both_ways_out(self):
         [failure] = self._fail(
-            {"answer_must_show": {"any_of": ["show_image", "show_video"]}}, "text", ()
+            {"answer_must_include_result_of": {"any_of": ["show_image", "show_video"]}}, "text", ()
         )
         assert "show_image" in failure.ask and "show_video" in failure.ask
 
@@ -1331,27 +1331,27 @@ class TestShowAndCredit:
         with pytest.raises(rules.LintError) as exc:
             rules.render({
                 "name": "r", "description": "d", "when_subject": "always",
-                "answer_must_show": ["show_image", "show_video"],
+                "answer_must_include_result_of": ["show_image", "show_video"],
             })
         assert "any_of" in str(exc.value)
 
     def test_a_choice_of_one_is_refused(self):
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always",
-            "answer_must_show": {"any_of": ["show_image"]},
+            "answer_must_include_result_of": {"any_of": ["show_image"]},
         }), known_tools=self.TOOLS)
         assert rule is None and "at least two" in errors[0]
 
     def test_a_tool_that_does_not_exist_is_caught_at_the_lint(self):
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always",
-            "answer_must_show": "show_hologram",
+            "answer_must_include_result_of": "show_hologram",
         }), known_tools=self.TOOLS)
         assert rule is None and "show_hologram" in errors[0]
 
     def test_a_video_the_tool_validated_is_credited(self):
         assert not self._fail(
-            {"answer_must_show": "show_video"}, f"see {self.VIDEO}", (self._played(),)
+            {"answer_must_include_result_of": "show_video"}, f"see {self.VIDEO}", (self._played(),)
         )
 
 
@@ -1401,7 +1401,7 @@ class TestMeaningTrigger:
         rule, errors = rules.lint(rules.render({
             "name": "show-me", "description": "Show me a picture.",
             "when_subject": "prompt", "when_sounds_like": self.ANCHORS,
-            "answer_must_show": "show_image", **over,
+            "answer_must_include_result_of": "show_image", **over,
         }), known_tools={"show_image"})
         assert not errors, errors
         return rule
@@ -1460,7 +1460,7 @@ class TestMeaningTrigger:
         assert self._rule().tier == 1
         structural, _e = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "prompt",
-            "when_has": "source", "answer_from": "source",
+            "when_has": "material", "answer_from": "material",
         }))
         assert structural.tier == 0
 
@@ -1532,7 +1532,7 @@ class TestRetroMatch:
 
     def _rule(self, **over):
         fields = {"name": "r", "description": "d", "when_subject": "prompt",
-                  "when_has": "source", "answer_from": "source", **over}
+                  "when_has": "material", "answer_from": "material", **over}
         rule, _ = rules.lint(rules.render(fields))
         return rule
 
@@ -1583,7 +1583,7 @@ class TestRetroMatch:
         turns = rules.past_turns(tmp_path)
         rule, _ = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "prompt",
-            "when_has": "attachment", "answer_from": "source",
+            "when_has": "attachment", "answer_from": "material",
         }))
         assert [t["turn"] for t in rules.retro_match(rule, turns).bound] == ["a"]
 

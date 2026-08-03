@@ -32,8 +32,8 @@ GOOD = json.dumps({
     "name": "bounded-material",
     "description": "Answer from the material I gave you.",
     "when_subject": "prompt",
-    "when_has": "source",
-    "answer_from": "source",
+    "when_has": "material",
+    "answer_from": "material",
     "never_use": ["web_search"],
     "prose": "Widening quietly costs the ability to trust any answer.",
 })
@@ -44,7 +44,7 @@ class TestCompiling:
         result = rule_compiler.compile_request("answer from what I give you",
                                                scripted(GOOD), TOOLS)
         assert result and result.rounds == 1
-        assert result.fields["when_has"] == "source"
+        assert result.fields["when_has"] == "material"
         rule, errors = rules.lint(rules.render(result.fields), known_tools=TOOLS)
         assert not errors and rule is not None
 
@@ -75,12 +75,12 @@ class TestCompiling:
         wordy = json.dumps({
             "name": "r", "description": "d", "when_subject": "prompt",
             "when_matches": "(?i)(show|display|picture|photo)",
-            "answer_must_show": "show_image",
+            "answer_must_include_result_of": "show_image",
         })
         good = json.dumps({
             "name": "r", "description": "d", "when_subject": "prompt",
             "when_sounds_like": ["show me the difference between X and Y"],
-            "answer_must_show": "show_image",
+            "answer_must_include_result_of": "show_image",
         })
         ask = scripted(wordy, good)
         result = rule_compiler.compile_request("show me things", ask, TOOLS)
@@ -93,7 +93,7 @@ class TestCompiling:
         ask = scripted(GOOD)
         rule_compiler.compile_request("x", ask, TOOLS)
         prompt = ask.prompts[0]
-        assert "answer_must_show" in prompt and "answer_must_show_if_used" in prompt
+        assert "answer_must_include_result_of" in prompt and "never_discard_result_of" in prompt
         for verb in (rules.VERB_ANSWER_FROM, rules.VERB_MUST_FIRST):
             assert verb in prompt
 
@@ -168,7 +168,7 @@ class TestRetry:
         told what was wrong in the words the lint used."""
         broken = json.dumps({
             "name": "r", "description": "d", "when_subject": "prompt",
-            "when_has": "source", "answer_from": "gws_gmial_send",
+            "when_has": "material", "answer_from": "gws_gmial_send",
         })
         ask = scripted(broken, GOOD)
         result = rule_compiler.compile_request("x", ask, TOOLS)
@@ -265,27 +265,27 @@ class TestEditing:
         "description": "Answer from the material I gave you.",
         "when_subject": "prompt",
         "when_has": "link",
-        "answer_from": "source",
+        "answer_from": "material",
         "never_use": ["web_search"],
     }
 
     def test_the_current_rule_is_shown_to_the_compiler(self):
-        ask = scripted(json.dumps({"when_has": "source"}))
+        ask = scripted(json.dumps({"when_has": "material"}))
         rule_compiler.compile_request("also cover attachments", ask, TOOLS,
                                       existing=self.EXISTING)
         assert "never_use" in ask.prompts[0] and "ALREADY EXISTS" in ask.prompts[0]
 
     def test_omitted_fields_survive_the_edit(self):
         result = rule_compiler.compile_request(
-            "also cover attachments", scripted(json.dumps({"when_has": "source"})),
+            "also cover attachments", scripted(json.dumps({"when_has": "material"})),
             TOOLS, existing=self.EXISTING,
         )
         assert result
-        assert result.fields["when_has"] == "source"
+        assert result.fields["when_has"] == "material"
         assert result.fields["never_use"] == ["web_search"], (
             "an edit dropped an obligation the instruction never mentioned"
         )
-        assert result.fields["answer_from"] == "source"
+        assert result.fields["answer_from"] == "material"
 
     def test_a_reply_that_restates_everything_still_cannot_widen_the_rule(self):
         """Even a compiler that ignores the instruction and re-emits the whole

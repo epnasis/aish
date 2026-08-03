@@ -68,19 +68,19 @@ def _vocabulary() -> str:
     in the same commit.
     """
     verbs = [
-        "- answer_from: <tool name>, or the word 'source' meaning the material "
-        "the owner handed over (a link, an attachment, a typed path). Every "
-        "other source is then refused for that answer.",
+        "- answer_from: <tool name>, or the word 'material' meaning what the owner "
+        "handed over (a link, an attachment, a typed path). Everything else is "
+        "then refused for that answer.",
         "- never_use: a list of tool names that must not run.",
         "- must_first: one tool that must have RUN before the answer is delivered.",
-        "- answer_must_show: a TOOL whose output must appear in the answer — the "
+        "- answer_must_include_result_of: a TOOL whose output must appear in the answer — the "
         "answer must carry what it produced. Use `{any_of: [tool, tool]}` when "
         "either will do.",
-        "- answer_must_show_if_used: the same, but CONDITIONAL — it does not force "
+        "- never_discard_result_of: the same, but CONDITIONAL — it does not force "
         "the tool to run; it only says that if it does run, what it produced has "
         "to appear in the answer. Use this for 'don't fetch something and then "
         "drop it'.",
-        "- answer_must_include / answer_must_not: `{pattern: <regex>}` for "
+        "- answer_must_include / answer_must_not_include: `{pattern: <regex>}` for "
         "anything about the answer's TEXT. Never a plain phrase — a check "
         "nothing can evaluate is a promise nothing keeps.",
         "- must_tell_me_when: a failure the owner must be told about in plain "

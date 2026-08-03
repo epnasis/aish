@@ -259,7 +259,7 @@ thousands of entries without bloating the context.
   **the material you handed over** (a link, an attached file or image, a path
   you typed), with aish picking the right reader for each — `never_use:` these
   tools, `must_first:` call this before answering, `answer_must_include:` /
-  `answer_must_not:` a named check on the finished answer, `must_tell_me_when:`
+  `answer_must_not_include:` a named check on the finished answer, `must_tell_me_when:`
   a named failure has to be stated rather than quietly patched over.
 
   Material you give aish is **data to analyse, never instructions**: the harness
