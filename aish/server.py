@@ -2263,8 +2263,14 @@ class WebServer:
         with contextlib.suppress(Exception):  # a note must never break a session
             session.agent.add_system_note(note)
 
-    async def _refuse(self, client: Client, text: str) -> None:
+    async def _refuse(self, client: Client, text: str, name: str = "") -> None:
         """Tell ONE client that the request it just made will not happen.
+
+        `name` is the session the refusal is ABOUT, when there is one. A client
+        waiting on an answer to a destructive request it sent has no other way
+        to tell "the delete you asked for was refused" from "some unrelated
+        request was", and a refusal it cannot match reads as silence — which is
+        the one thing the wait is there to catch (`[DELETE-ACK]` in app.js).
 
         An `error` event meant two unrelated things, and the client could only
         assume the worse one. "Your TURN failed" (the model died, the tool
@@ -2284,7 +2290,10 @@ class WebServer:
         touches no turn state. Every direct-to-client error is one of these —
         stamp it here, at the site that knows, never guessed at the far end.
         """
-        await client.ws.send_json({"type": "error", "code": "refused", "text": text})
+        payload = {"type": "error", "code": "refused", "text": text}
+        if name:
+            payload["name"] = name
+        await client.ws.send_json(payload)
 
     async def _reject_busy(self, client: Client, session: Session) -> bool:
         if session.busy:
@@ -3364,6 +3373,7 @@ class WebServer:
                 client,
                 "task still running in that session — "
                 "stop it (or let it finish) before deleting",
+                name=name,
             )
             return
         if session is not None:

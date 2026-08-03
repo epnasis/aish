@@ -40,6 +40,7 @@ function ok(label, cond) { assert(cond, label); checks += 1; }
 
 function world() {
   const sent = [];
+  const awaited = [];
   const nodes = {};
   const el = (id) => (nodes[id] = nodes[id] || {
     id, textContent: "", hidden: true, focused: false,
@@ -50,13 +51,18 @@ function world() {
     currentSession: "session-20260731-115636-049572.jsonl",
     send: (m) => { sent.push(m); return true; },
     closeSheets() {},
+    // The confirm action hands a delete to the ack window ([DELETE-ACK]);
+    // whether it arrives is that block's subject, not this one's.
+    awaitDelete: (name) => awaited.push(name),
+    showToast() {},
+    offlineMode: false,
   };
   vm.createContext(sandbox);
   vm.runInContext(
     extract("// [CONFIRM-START]", "// [CONFIRM-END]").replace(/\blet\b|\bconst\b/g, "var"),
     sandbox,
   );
-  return { sandbox, sent, el };
+  return { sandbox, sent, el, awaited };
 }
 
 // 1. THE REGRESSION SHAPE: asking must not do anything.
@@ -127,6 +133,9 @@ for (const [name, dismiss] of [
   ok("confirming deletes", w.sent.length === 1 && w.sent[0].type === "delete_session");
   ok("…the chat the question was about",
     w.sent[0].name === "session-20260731-115636-049572.jsonl");
+  // Sending is not deleting: the answer still has to come back ([DELETE-ACK]).
+  ok("…and it starts waiting for the server's answer about that same chat",
+    w.awaited.length === 1 && w.awaited[0] === "session-20260731-115636-049572.jsonl");
 }
 
 // 6. Escape answers the question rather than dismissing whatever is behind it —

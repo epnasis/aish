@@ -1278,7 +1278,9 @@ function handle(event) {
       // toast: transient feedback about an action, like every other refused
       // action in this app.
       if (event.code === "no_such_session") { onSessionGone(event.name || ""); break; }
-      if (event.code) { showToast(event.text); break; }
+      // A refusal NAMING a chat answers a request about that chat — the server
+      // stamps the name for exactly this reason ([DELETE-ACK]).
+      if (event.code) { resolveDelete(event.name || ""); showToast(event.text); break; }
       // [ERROR-KIND-END]
       closeAnswer();
       finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
@@ -9158,6 +9160,7 @@ async function forgetSession(name) {
 // [FORGET-SESSION-END]
 
 function onSessionGone(name) {
+  resolveDelete(name); // asking to delete a chat that is already gone IS an answer
   forgetSession(name);
   showToast("that chat no longer exists");
   // We had already left for it ([PENDING-VIEW]) — don't leave the spinner
@@ -9170,12 +9173,53 @@ function onSessionGone(name) {
 // and tapping it opened a chat that no longer existed.
 async function onSessionDeleted(event) {
   rosterBaseline(event.seq);
+  resolveDelete(event.name);
   showToast("session deleted");
   // Repaint only AFTER the copy is gone: the rail reads the mirror, so a
   // render racing the eviction paints the chat straight back onto the list.
   await forgetSession(event.name);
   if (railIsOpen()) renderSessionsFromCache();
 }
+
+// [DELETE-ACK-START]
+// A DELETE IS A REQUEST, AND A REQUEST CAN BE LOST. Every outcome the server
+// has speaks — `session_deleted`, a refusal saying why, `no_such_session` — so
+// silence means the message never arrived, and the one way to send into silence
+// is the failure this app's own test harness models: a socket that reports OPEN
+// long after it died, accepting everything handed to it and answering nothing.
+// A phone that has been asleep is exactly where that happens.
+//
+// Nothing used to notice. The confirmation closed, the request went nowhere,
+// and the chat stayed on the server — while the client had ALREADY behaved as
+// if it were gone (it dropped the seen stamp, [FORGET-SESSION]), so the only
+// visible trace was the chat coming back looking new. A destructive action that
+// fails must not be indistinguishable from one that worked.
+//
+// So: wait for the answer, and if none comes, say so and rebuild the socket —
+// the next attempt then has something live to send on. NEVER RESEND. The first
+// request may well have arrived; a delete is not an action to issue twice on a
+// guess, and this is the same rule [PENDING-SEND] follows for a message.
+const DELETE_ACK_MS = 8000;
+let pendingDelete = null; // { name, timer } — one at a time; the modal is modal
+
+function awaitDelete(name) {
+  if (pendingDelete) clearTimeout(pendingDelete.timer);
+  pendingDelete = {
+    name,
+    timer: setTimeout(() => {
+      pendingDelete = null;
+      showToast("that chat was NOT deleted — reconnecting, try again in a moment");
+      reconnect();
+    }, DELETE_ACK_MS),
+  };
+}
+
+function resolveDelete(name) {
+  if (!pendingDelete || !name || pendingDelete.name !== name) return;
+  clearTimeout(pendingDelete.timer);
+  pendingDelete = null;
+}
+// [DELETE-ACK-END]
 
 // ---- opening the session rail by swiping the transcript ------------------
 // The gesture lives on the WHOLE transcript, not a left edge. An edge-only
@@ -9287,7 +9331,17 @@ function askDeleteChat() {
       "on the server. The copy on your devices is deleted at the next sync. " +
       "This cannot be undone.",
     verb: "Delete",
-    action: () => send({ type: "delete_session", name }),
+    // Answering "Delete" is not the same as the chat being deleted — the
+    // request still has to arrive and be answered ([DELETE-ACK]).
+    action: () => {
+      if (!send({ type: "delete_session", name })) {
+        showToast(offlineMode
+          ? "not deleted — you are offline"
+          : "not deleted — you are not connected");
+        return;
+      }
+      awaitDelete(name);
+    },
   });
 }
 // [CONFIRM-END]

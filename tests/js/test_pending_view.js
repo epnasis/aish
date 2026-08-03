@@ -107,6 +107,7 @@ function switchWorld({ cached = null, prefetch = null, loadPromise = null } = {}
       },
       reconnect: () => reconnects.push(true),
       forgetSession() {},
+      resolveDelete() {},
       freshPrefetch: () => prefetch,
       offlineLoad: () => loadPromise || Promise.resolve(cached),
       // What the real onReplay does FIRST — mirrored here so a scenario can see

@@ -2574,6 +2574,12 @@ class TestSessions:
             error = recv_until(ws, "error")
             assert error["type"] == "error"
             assert "still running" in error["text"]
+            # The refusal NAMES the chat. A client waiting for an answer to the
+            # delete it sent (app.js `[DELETE-ACK]`) cannot otherwise tell this
+            # from an unrelated failure, and an answer it cannot match reads as
+            # the silence that wait exists to catch (#210).
+            assert error["code"] == "refused"
+            assert error["name"] == name
             assert (app_env["state_dir"] / name).is_file()
 
             # The pending approval survived the refused delete untouched.
