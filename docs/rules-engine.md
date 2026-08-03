@@ -40,6 +40,8 @@ A **rule** is the fourth artifact class: a deterministic *precondition → oblig
 
 ---
 
+**R8 · A rule names what the owner can SEE, never how aish produced it.** He is the reader of the answer, not of the pipeline. A rule expressed in mechanism forces him to learn aish's internals in order to state a preference, which inverts the point of an engine he is meant to own. His test, and it is decisive: **would a change of mechanism force a rule edit?** *"If tomorrow on top of YouTube we also have Vimeo, that's fine as well — the user doesn't care about the source."* A rule saying `video` keeps meaning what it meant; a rule naming a tool would have to be rewritten. This also settles the vocabulary's growth: tools grow forever, one per new API, while the kinds of thing a person notices in an answer are few and stay few. All of the "how" lives in code, as smart as it needs to be, and invisible.
+
 ## The model: rule → binding → enforcement point
 
 A **rule** is a static, owner-authored file: trigger → obligations, plus declared tier, failure direction and evidence. **Rules are inert.**
