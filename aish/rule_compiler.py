@@ -81,6 +81,10 @@ def _vocabulary() -> str:
         "nothing keeps.",
         "- must_tell_me_when: a failure the owner must be told about in plain "
         "words rather than quietly patched over.",
+        "- ask_me_first: true — the owner decides this one, every time it comes "
+        "up. Needs when_subject 'action', because it holds ONE kind of call. "
+        "Use it when the point is that HE chooses, not that the assistant "
+        "should choose differently.",
     ]
     subjects = [
         "- prompt: what the owner typed, plus any attachments. Give ONE of: "

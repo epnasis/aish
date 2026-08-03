@@ -789,16 +789,33 @@ class TestTheWholeMaterialChannel:
         assert "compiles to a declared check" in rule.error
         assert "belongs in memory" in rule.error
 
-    def test_the_designed_verbs_say_what_is_MISSING_not_just_that_it_is_wrong(self, tmp_path):
+    def test_the_designed_verbs_say_what_is_MISSING_not_just_that_it_is_wrong(
+        self, tmp_path, monkeypatch
+    ):
         """A refused rule is a legible gap — the owner can decide to rephrase
         toward what exists, or to extend the engine. "Not expressible" alone
-        gives him neither choice."""
+        gives him neither choice.
+
+        `VERBS_DESIGNED` is EMPTY now: every verb the design named is built, and
+        `ask_me_first` — which used to be this test's example — was the last
+        one. The machinery is what is being pinned, not the entry, because the
+        next designed verb must arrive with this behaviour already working.
+        """
+        monkeypatch.setitem(rules.VERBS_DESIGNED, "answer_in_my_language",
+                            "match the language I wrote in — needs a judge")
         rule = load_one(tmp_path, CANONICAL.replace(
-            "  never_use: [web_search]", "  ask_me_first: true"
+            "  never_use: [web_search]", "  answer_in_my_language: true"
         ))
         assert "designed but not built yet" in rule.error
-        assert "hold for the owner" in rule.error
+        assert "match the language I wrote in" in rule.error
         assert ", ".join(sorted(rules.VERBS)) in rule.error
+
+    def test_every_designed_verb_is_now_built(self):
+        """The build queue, as a test. An entry here is a rule the owner can
+        write that will loudly fail to load — which is the intended behaviour,
+        but it should be a deliberate state rather than a forgotten one."""
+        assert rules.VERBS_DESIGNED == {}
+        assert rules.SUBJECTS_DESIGNED == ()
 
     def test_a_phrase_only_a_judge_could_check_is_refused_by_name(self, tmp_path):
         """The admission line, at the one place it is tempting to bend: a verb
@@ -1725,6 +1742,83 @@ class TestAnswerSubject:
         again, errors = rules.lint(rules.render(fields), capabilities={"read_url"})
         assert not errors, errors
         assert again.where == "ending"
+
+
+class TestAskMeFirst:
+    """The HOLD verb — R7's other half.
+
+    Route and prohibit are things the model can comply with by choosing
+    differently. "Check with me before you file that" is not addressed to the
+    model at all, so refusing it would be the harness arguing with someone who
+    cannot answer the question."""
+
+    def _rule(self, **over):
+        fields = {
+            "name": "confirm-issues",
+            "description": "Check with me before filing an issue.",
+            "when_subject": "action", "when_action": {"tool": "gh_issue_create"},
+            "ask_me_first": True,
+        }
+        rule, errors = rules.lint(rules.render({**fields, **over}),
+                                  capabilities={"gh_issue_create", "web_search"})
+        return rule, errors
+
+    def _bound(self):
+        rule, errors = self._rule()
+        assert not errors, errors
+        return rules.bind(rule, {"on": "action"}, "b1", {"gh_issue_create"})
+
+    def test_it_compiles(self):
+        rule, errors = self._rule()
+        assert not errors, errors
+        assert rule.obligations[0]["verb"] == "ask_me_first"
+
+    def test_it_holds_the_matching_call(self):
+        binding = self._bound()
+        [verdict] = rules.gate([binding], "gh_issue_create", {"title": "x"})
+        assert verdict.verdict == "hold"
+        assert "the owner decides this one" in verdict.message
+
+    def test_it_leaves_every_other_call_alone(self):
+        binding = self._bound()
+        assert rules.gate([binding], "web_search", {})[0].verdict == "allowed"
+
+    def test_it_does_NOT_refuse_first(self):
+        """The bounded refuse-first discipline is for obligations the model can
+        satisfy by choosing differently. This one it cannot."""
+        binding = self._bound()
+        for _ in range(rules.RULE_MAX_REFUSALS + 2):
+            assert rules.gate([binding], "gh_issue_create", {})[0].verdict == "hold"
+        assert binding.rounds == 0
+
+    def test_it_reaches_dispatch_rather_than_the_parallel_path(self):
+        """A held call that never reaches `_dispatch` is not held at all — the
+        read-only fan-out bypasses it, and holding an auto-approved read is
+        exactly what someone writes this verb for."""
+        binding = self._bound()
+        assert rules.affects([binding], "gh_issue_create") is True
+
+    def test_it_needs_an_action_subject(self):
+        """Without one there is nothing to hold: attached to a prompt condition
+        it would mean every call for the whole turn."""
+        _rule, errors = self._rule(when_subject="always", when_action=None)
+        assert errors and "needs `when: action:`" in errors[0]
+
+    def test_the_seed_tells_the_model_to_expect_it(self):
+        assert "The USER decides this one" in rules.seed_text([self._bound()])
+
+    def test_the_card_states_the_promise_it_makes(self):
+        rule, _e = self._rule()
+        card = rules.explain(rule)
+        assert "Put to you before it runs, every time" in card
+        assert "refused" not in card
+
+    def test_it_grants_nothing(self):
+        """R1: a rule restricts. This verb only ever ADDS a card — it can never
+        make a call that would have been approved into one that is not asked."""
+        binding = self._bound()
+        verdicts = rules.gate([binding], "gh_issue_create", {})
+        assert all(v.verdict != "allowed" for v in verdicts)
 
 
 class TestResultSubject:

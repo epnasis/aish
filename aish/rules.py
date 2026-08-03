@@ -129,10 +129,20 @@ VERB_MUST_FIRST = "must_first"
 FIRST_ANSWER = "answer"
 VERB_ANSWER_MUST_INCLUDE = "answer_must_include"
 VERB_ANSWER_MUST_NOT_INCLUDE = "answer_must_not_include"
+# `ask_me_first: true` — the HOLD verb, and the other half of R7. Route,
+# prohibit and sequence are things the model can comply with by choosing
+# differently; "check with me before you file that" is not addressed to the
+# model at all, so refusing it would be the harness arguing with someone who
+# cannot answer. It goes straight to the owner, with no bounded refusals first.
+#
+# It licenses NOTHING (R1). A denial refuses; an approval releases exactly the
+# one call that was shown, and never the turn — "ask me first" means each time.
+VERB_ASK_ME_FIRST = "ask_me_first"
 # Two general forms replacing the fixed list of named checks. Both name a TOOL.
 VERBS = frozenset({
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_TELL_ME_WHEN,
     VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE,
+    VERB_ASK_ME_FIRST,
 })
 # Verbs decided at the END of a turn, against the answer and the turn's own
 # record — not before a call. The gate cannot see either.
@@ -142,9 +152,7 @@ VERIFY_VERBS = frozenset({
 # The verbs whose value is a tool name (or a choice of them), not a check name.
 # Designed, unbuilt — named here so a lint failure can say what is MISSING
 # rather than merely that the file is wrong (#205).
-VERBS_DESIGNED = {
-    "ask_me_first": "hold for the owner — needs the hold verb",
-}
+VERBS_DESIGNED: dict[str, str] = {}
 
 # What `answer_must_include:` / `answer_must_not_include:` accept. A named detector, or
 # `{pattern: <regex>}` for anything else — both are STRUCTURAL, which is the
@@ -887,6 +895,22 @@ def _compile(front: dict) -> _Compiled:
         if (value := then.get(verb)) in (None, ""):
             continue
         obligations.append({"verb": verb, **_answer_check(verb, value)})
+    if then.get(VERB_ASK_ME_FIRST) is not None:
+        if then[VERB_ASK_ME_FIRST] is not True:
+            raise RuleError(
+                f"`{VERB_ASK_ME_FIRST}:` takes only `true` — it is not a "
+                "condition, it says the owner decides this one."
+            )
+        if trigger != TRIGGER_ACTION_SHAPE:
+            # Without an action subject there is nothing to hold. "Ask me first"
+            # attached to a prompt condition would mean every call for the whole
+            # turn, which is not a rule anyone wants and is not what it reads as.
+            raise RuleError(
+                f"`{VERB_ASK_ME_FIRST}:` needs `when: action:` — it holds ONE "
+                "kind of call for the owner, so the rule has to say which. "
+                "Without that it would hold every call this turn."
+            )
+        obligations.append({"verb": VERB_ASK_ME_FIRST})
     if state := str(then.get(VERB_MUST_TELL_ME_WHEN, "") or "").strip():
         # Declared, seeded as prose, enforced at Verify — never at the gate.
         obligations.append({"verb": VERB_MUST_TELL_ME_WHEN, "state": state})
@@ -1508,6 +1532,18 @@ UNSATISFIABLE_NOTE = (
     "proceed, rather than widening the material yourself."
 )
 
+HOLD_FOR_OWNER = (
+    "NOT EXECUTED — the rule '{rule}' says the owner decides this one: "
+    "{description}\nIt has been put to them. Wait for their answer; do not "
+    "retry {tool} and do not work around it."
+)
+
+OWNER_HELD = (
+    "NOT EXECUTED — the owner did not approve {tool}, which the rule '{rule}' "
+    "holds for them. Carry on with what you can do without it, and say plainly "
+    "in your answer what you did not do."
+)
+
 ESCALATION_REFUSAL = (
     "NOT EXECUTED — the rule '{rule}' still forbids {tool}, and the owner is "
     "not available to make an exception. STOP retrying: finish the task with "
@@ -1536,6 +1572,20 @@ def affects(bindings: list[Binding], tool: str) -> bool:
             return True
         for obligation in binding.obligations:
             if obligation["verb"] == VERB_NEVER_USE and tool in obligation["what"]:
+                return True
+            # A held call must reach `_dispatch` or the hold does not exist:
+            # the read-only fan-out bypasses dispatch entirely, and a rule
+            # holding an auto-approved read is exactly the case someone would
+            # write this verb for.
+            if obligation["verb"] == VERB_ASK_ME_FIRST and action_matches(
+                binding.rule.action, tool, {}, ""
+            ):
+                return True
+            if obligation["verb"] == VERB_ASK_ME_FIRST and not binding.rule.action.get(
+                "tool"
+            ):
+                # The condition is about paths or command text, which this
+                # function cannot see. Err toward the safe path, never speed.
                 return True
     return False
 
@@ -1671,6 +1721,19 @@ def _gate_one(
         if binding.rounds > binding.max_rounds:
             return GateVerdict("escalate", binding, evidence, message, binding.rounds)
         return GateVerdict("refused", binding, evidence, message, binding.rounds)
+    for obligation in binding.obligations:
+        if obligation["verb"] != VERB_ASK_ME_FIRST:
+            continue
+        # R7's other half: this decision is the owner's BY CONSTRUCTION, so it
+        # goes to him at once. Refusing first would be the harness arguing with
+        # someone who cannot answer the question — the model cannot comply its
+        # way out of "check with me", because it was never addressed to it.
+        return GateVerdict(
+            "hold", binding,
+            {"obligation": VERB_ASK_ME_FIRST, "matched": tool},
+            HOLD_FOR_OWNER.format(rule=rule.name, tool=tool,
+                                  description=rule.description),
+        )
     return GateVerdict("allowed", binding, {"obligation": None, "matched": None})
 
 
@@ -2187,6 +2250,12 @@ def _obligation_line(obligation: dict) -> str:
             f"· MUST NOT call {what} for this turn. If you genuinely need another "
             "source, ASK the user — do not go and get one."
         )
+    if verb == VERB_ASK_ME_FIRST:
+        return (
+            "· The USER decides this one. It will be put to them when you "
+            "propose it — expect to wait, and do not look for another way "
+            "round it if they say no."
+        )
     if verb == VERB_MUST_TELL_ME_WHEN:
         return (
             f"· MUST state it plainly if this happens: {obligation['state']} — never "
@@ -2316,6 +2385,7 @@ AUTHOR_FIELDS = (
     "when_origin", "when_action", "when_result_of", "when_result_was",
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
     VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE, VERB_MUST_TELL_ME_WHEN,
+    VERB_ASK_ME_FIRST,
 )
 
 
@@ -2484,6 +2554,8 @@ def render(fields: dict) -> str:
             then.append(f"  {verb}: {_yaml_scalar(value)}")
     if never := _as_list(fields.get(VERB_NEVER_USE)):
         then.append(f"  {VERB_NEVER_USE}: [{', '.join(never)}]")
+    if fields.get(VERB_ASK_ME_FIRST):
+        then.append(f"  {VERB_ASK_ME_FIRST}: true")
     for verb in (VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE):
         value = fields.get(verb)
         if value in (None, "", {}, []):
@@ -2676,6 +2748,8 @@ def explain(rule: Rule) -> str:
                 if obligation["capability"] == FIRST_ANSWER
                 else f"call {obligation['capability']} before answering"
             )
+        elif verb == VERB_ASK_ME_FIRST:
+            says.append("ask me first")
         elif verb == VERB_MUST_TELL_ME_WHEN:
             says.append(f"tell me when {obligation['state']}")
         elif anchors := obligation.get(MEANING_KEY):
@@ -2703,7 +2777,14 @@ def explain(rule: Rule) -> str:
     lines = [f"{when}\n  → {joined}." if "\n" in when else f"{when}: {joined}."]
     at_gate = [o for o in rule.obligations if not decides_at_verify(o)]
     at_verify = [o for o in rule.obligations if decides_at_verify(o)]
-    if at_gate:
+    if any(o["verb"] == VERB_ASK_ME_FIRST for o in rule.obligations):
+        # A different promise from the other gate verbs, and the author cannot
+        # predict which he gets unless the card says so: this one does not
+        # refuse, it puts the decision in front of him — every time.
+        lines.append(
+            "Put to you before it runs, every time: nothing happens until you answer."
+        )
+    elif at_gate:
         lines.append("Enforced before a call runs: a call that violates this is refused.")
     if at_verify:
         lines.append(

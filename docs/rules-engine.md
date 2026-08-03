@@ -201,6 +201,18 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 
 `path_under:` is **resolved, never string-matched** — a condition that `../` steps around protects nothing, and the mirror matters just as much: a path that reaches *inside* the root through `..` must still match. Relative paths resolve against the session's cwd, which is where the model's own paths are interpreted, and paths named inside a shell command count, because `write_file` is not the only way to change a file. `TestActionSubject`.
 
+### `ask_me_first` — the hold verb, and R7's other half
+
+Route, prohibit and sequence are things the model can comply with **by choosing differently**, which is why they refuse rather than escalate. *"Check with me before you file that"* is not addressed to the model at all — it cannot comply its way out of a question it was never asked. Refusing it first would be the harness arguing with someone who cannot answer, so it goes **straight to the owner, with no bounded refusals**.
+
+**It licenses nothing.** R1 holds without strain: the verb can only ever *add* a card. It cannot turn a call that would have been refused into one that runs, and it cannot make an unapproved call approved. Denial refuses; approval releases exactly the one call that was shown.
+
+**Approval releases the CALL, never the turn** — and this is the one place it deliberately differs from an escalation override. There, the owner is granting an exception to a rule the model kept pushing against, and re-prompting per call would be friction on a decision already made. Here, *"ask me first"* means each time; a rule that asks once and then waves through the next four is not the rule he wrote. The gate re-passes bindings so an exception to one rule cannot release a call a second rule forbids, so the hold is remembered **for that call** — otherwise the same card would appear again on the re-pass, for one action.
+
+**It requires `when: action:`.** Without one there is nothing to hold: attached to a prompt condition it would mean every call for the whole turn, which is not a rule anyone wants and is not what the words read as. Refused at compile.
+
+**And it must reach `_dispatch` at all.** `affects` returns true for a held tool, because the read-only fan-out bypasses dispatch entirely — and holding a call that is otherwise auto-approved is precisely what someone writes this verb for. Where the condition is about paths or command text, which `affects` cannot see, it errs toward the safe path. `TestAskMeFirst`, `TestAskMeFirstReachesTheOwner`.
+
 ### `when: result:` — the condition this whole epic was founded on
 
 *"If the transcript comes back empty, say so — do not go and get a news article instead."* That is a fact about a **tool result**, and retrieval keys on the user's text: a bare YouTube URL has no lexical or semantic surface to match, so the memory carrying this policy was **never injected on the triggering turn at all**. It is the proof that memory was the wrong channel, and it stayed unwritable until the result envelope existed to say what "came back empty" means.
@@ -244,9 +256,8 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 | `must_tell_me_when: <plain phrase>` | this failure must be stated to the owner | declared, seeded as prose; the structural half is not built (a plain phrase is a judged question) |
 | `must_first: <tool>` | this tool must have run before the answer | **yes** |
 | `answer_must_include:` / `answer_must_not_include:` | something the reader would SEE (`picture`, `video`, `sources`), `{any_of: […]}`, or `{pattern: <regex>}` over the wording | **yes** |
+| `ask_me_first: true` | the owner decides this one, every time | **yes** |
 | ~~`keep_in_mind:`~~ | **deleted** — see below | never |
-| `must_first: <action>` | do this before the triggering action | no |
-| `ask_me_first: true` | hold for the owner | no |
 
 **A verb ships only if it compiles to a declared check.** `keep_in_mind:` — seeded prose with a deterministic trigger and no enforcement — was proposed as a staging area for obligations no check could reach, and deleted on the owner's objection: *"if most rules end up as reminders, this is a nicer memory system wearing an enforcement engine's clothes."* The lint already refuses *a rule with no obligation restricts nothing*; a rule with an **unenforceable** obligation is the same thing wearing a verb. What it held goes to one of two places, never a third: **checkable in principle but not yet** → a rule file that loudly fails to load, which IS the build queue; **nothing could ever check it** → memory, and only as a declarative fact (*"Pawel prefers terse answers"*, never *"always be terse"*), so memory's facts-not-behaviours contract does not widen. `TestRetiredKeys`, `TestEnabledFlag`.
 

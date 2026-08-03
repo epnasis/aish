@@ -3428,6 +3428,11 @@ class Agent:
         if speak_first := self._speak_first_gate(name):
             return speak_first
         recorded: set[str] = set()
+        # Bindings whose hold the owner has already answered FOR THIS CALL.
+        # `ask_me_first` deliberately does not mark the binding overridden — it
+        # means each time — so without this the re-pass below would put the same
+        # card up again, once per binding, for one call.
+        released: set[str] = set()
         # One pass per binding at most: an escalation either refuses (returns)
         # or marks that binding overridden, so it can never escalate twice. The
         # re-pass matters — an owner exception to ONE rule must not silently
@@ -3438,6 +3443,8 @@ class Agent:
             for verdict in rules.gate(
                 self._bindings, name, args, self.cwd, self._command_has_a_secret
             ):
+                if verdict.verdict == "hold" and verdict.binding.id in released:
+                    continue
                 if verdict.verdict == "allowed":
                     if verdict.binding.id not in recorded:
                         recorded.add(verdict.binding.id)
@@ -3448,6 +3455,10 @@ class Agent:
                     self._note(f"⚖ {verdict.binding.name}: {name} refused")
                     self._record_gate(verdict, name, args, "refused")
                     refusal = _gate_outcome(verdict.message, decision="blocked")
+                elif verdict.verdict == "hold":
+                    refusal = self._hold_for_owner(verdict, name, args)
+                    recorded.add(verdict.binding.id)
+                    released.add(verdict.binding.id)
                 else:
                     refusal = self._escalate_rule(verdict, name, args)
                     # The escalation already wrote this binding's verdict for
@@ -3465,6 +3476,62 @@ class Agent:
                 return refusal
             if not stopped:
                 return None
+        return None
+
+    def _hold_for_owner(
+        self, verdict: "rules.GateVerdict", name: str, args: dict
+    ) -> str | None:
+        """`ask_me_first` — R7's other half. Straight to the owner, with no
+        refusals first, because the decision is his BY CONSTRUCTION: the model
+        cannot comply its way out of "check with me", since the question was
+        never addressed to it.
+
+        Returns the refusal text, or None when he approved this one call.
+
+        **Approval releases the CALL, never the turn.** The escalation path
+        marks the binding overridden — right there, where the owner is granting
+        an exception to a rule the model kept pushing against, and re-prompting
+        would be friction on a decision already made. Here it would be the
+        opposite: "ask me first" means each time, and a rule that asks once and
+        then waves through the next four is not the rule he wrote.
+        """
+        binding = verdict.binding
+        if self.approve_tool is None:
+            # Unattended, and the one person who could answer is not there. It
+            # fails to restriction and says so, rather than looping.
+            message = rules.OWNER_HELD.format(rule=binding.name, tool=name)
+            self._record_gate(verdict, name, args, "held", escalated=True,
+                              message=message)
+            return _gate_outcome(message, decision="held")
+        self._note(f"⚖ {binding.name}: {name} held for you")
+        preview = (
+            f"the rule '{binding.name}' says you decide this one "
+            f"({binding.rule.description})"
+        )
+        decision = self.approve_tool(name, args, preview)
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            message = _with_feedback(
+                rules.OWNER_DENIED.format(rule=binding.name, tool=name),
+                decision.comment,
+            )
+            self._record_gate(verdict, name, args, "refused", escalated=True,
+                              message=message)
+            return _gate_outcome(message, decision="denied")
+        if isinstance(decision, Approved):
+            message = TOOL_HELD_FOR_ADJUSTMENT.format(
+                name=name, comment=decision.comment
+            )
+            self._record_gate(verdict, name, args, "held", escalated=True,
+                              message=message)
+            return _gate_outcome(message, decision="held")
+        if decision is None or decision is False:
+            message = rules.OWNER_HELD.format(rule=binding.name, tool=name)
+            self._record_gate(verdict, name, args, "refused", escalated=True,
+                              message=message)
+            return _gate_outcome(message, decision="denied")
+        self._record_gate(verdict, name, args, "allowed", escalated=True,
+                          message="owner approved this call")
         return None
 
     def _escalate_rule(
