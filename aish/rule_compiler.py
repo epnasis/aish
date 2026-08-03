@@ -72,12 +72,19 @@ def _vocabulary() -> str:
         "handed over (a link, an attachment, a typed path). Everything else is "
         "then refused for that answer.",
         "- never_use: a list of tool names that must not run.",
-        "- must_first: one tool that must have RUN before the answer is delivered.",
+        "- must_first: one tool or skill that must have RUN before the answer is "
+        f"delivered — or the literal word '{rules.FIRST_ANSWER}', meaning the "
+        "assistant must say something to the person BEFORE it runs anything at "
+        "all. Use that for \"answer me before you go off and do things\".",
         "- answer_must_include / answer_must_not_include: what has to be (or not "
-        "be) in the finished answer. Either something the reader would SEE — "
-        + ", ".join(sorted(rules.ANSWER_KINDS)) + " — or `{pattern: <regex>}` for "
-        "anything about the wording. Use `{any_of: [picture, video]}` when either "
-        "will do. NEVER a plain phrase: a check nothing can evaluate is a promise "
+        "be) in the finished answer. THREE forms: something the reader would SEE "
+        "(" + ", ".join(sorted(rules.ANSWER_KINDS)) + "), or `{any_of: [picture, "
+        "video]}` when either will do; `{pattern: <regex>}` for anything literal "
+        "about the wording; or `{like: [3-5 example sentences], in: "
+        + " | ".join(rules.WHERE_VALUES) + "}` when it is about TONE or MEANING "
+        "rather than exact words — that one is matched by meaning, so it is how "
+        "\"no flattery\", \"no apologies\", \"never promise\" get expressed. "
+        "NEVER a bare plain phrase: a check nothing can evaluate is a promise "
         "nothing keeps.",
         "- must_tell_me_when: a failure the owner must be told about in plain "
         "words rather than quietly patched over.",
@@ -94,8 +101,29 @@ def _vocabulary() -> str:
         "when_matches with a regex ONLY when the thing being matched is a "
         "literal string such as a domain.",
         "- session: how the session started. Give when_origin: owner or automation.",
-        "- action: the call about to run. Give when_action with any of "
-        + ", ".join(rules.ACTION_FIELDS[:3]) + ".",
+        # Generated from the built fields, never a hand-kept slice. A literal
+        # `[:3]` here silently dropped `command_has` the day it was added, and
+        # the compiler then reported that inline secrets "cannot be inspected" —
+        # about the one check built to inspect them.
+        "- action: the call about to run, checked BEFORE it runs. Give "
+        "when_action as an object with any of: "
+        + "; ".join(
+            {
+                "tool": "tool: <name> — this exact tool",
+                "path_under": "path_under: <path> — it would touch anything "
+                "under there, including via a shell command",
+                "command_starts_with": "command_starts_with: <prefix> — the "
+                "shell command begins with this, e.g. 'pip' or 'gh issue'. THIS "
+                "is how \"use X instead of raw Y\" is expressed: trigger on the "
+                "raw command and never_use run_command",
+                "command_has": f"command_has: {rules.COMMAND_HAS_SECRET} — the "
+                "command contains one of their stored secrets (the only value "
+                "this takes; it is a lookup, not a pattern you write)",
+            }[f]
+            for f in rules.ACTION_FIELDS
+            if f in ("tool", "path_under", "command_starts_with", "command_has")
+        )
+        + ".",
         "- result: a condition on what a TOOL came back with, for \"if X comes "
         "back empty, tell me rather than quietly using something else\". Give "
         "when_result_of (the tool) and when_result_was ("
@@ -114,8 +142,58 @@ def _vocabulary() -> str:
     return (
         "SUBJECTS (when_subject is exactly one of these):\n" + "\n".join(subjects)
         + "\n\nOBLIGATIONS (at least one; they only ever RESTRICT — there is no "
-        "verb that grants permission or auto-approves anything):\n" + "\n".join(verbs)
+        "verb that grants permission or auto-approves anything):\n"
+        + "\n".join(verbs) + "\n\n" + WORKED_EXAMPLES
     )
+
+
+# Six finished rules, one per subject, covering the forms a description alone
+# does not teach. Every one is a real rule from the owner's own corpus.
+#
+# The prompt had none: it described the fields and never showed a whole rule, so
+# the model had to infer the shape of the thing it was being asked for. Adding
+# these is the cheapest fix in the layer — and the failures they address were
+# ones where the vocabulary already had exactly the right form and the compiler
+# reported it impossible.
+WORKED_EXAMPLES = """\
+WORKED EXAMPLES — real rules, one per subject. Match these shapes.
+
+"Answer me before you go running commands."
+  {"name": "answer-first", "when_subject": "always", "must_first": "answer"}
+
+"Use uv, never bare pip."
+  {"name": "python-via-uv", "when_subject": "action",
+   "when_action": {"command_starts_with": "pip"}, "never_use": ["run_command"]}
+
+"Never put one of my secrets straight into a command."
+  {"name": "no-inline-secrets", "when_subject": "action",
+   "when_action": {"command_has": "a_secret"}, "never_use": ["run_command"]}
+
+"No flattery and no apologies when I correct you."
+  {"name": "no-flattery", "when_subject": "always",
+   "answer_must_not_include": {"like": ["You are absolutely right, sorry about that",
+   "Great question! I am glad you asked", "I apologise for the confusion"],
+   "in": "opening"}}
+
+"If you quote me a price, you must have read the seller's page."
+  {"name": "live-price", "when_subject": "answer",
+   "when_matches": "[0-9][0-9., ]*\\\\s?(PLN|EUR|USD)", "must_first": "read_url"}
+
+"When I ask to be shown something, show me a picture or a video."
+  {"name": "show-me", "when_subject": "prompt",
+   "when_like": ["show me what it looks like", "pokaz mi jak to wyglada",
+   "what is the difference between these two places"],
+   "answer_must_include": {"any_of": ["picture", "video"]}}
+
+"When something else started the session, never delete my memories."
+  {"name": "no-forget-unattended", "when_subject": "session",
+   "when_origin": "automation", "never_use": ["forget_memory"]}
+
+"If the transcript comes back empty, tell me instead of using something else."
+  {"name": "transcript-failure", "when_subject": "result",
+   "when_result_of": "youtube_analyze", "when_result_was": "empty",
+   "never_use": ["web_search"],
+   "must_tell_me_when": "the transcript came back empty"}"""
 
 
 PROMPT = """\
