@@ -250,7 +250,7 @@ def _candidates(text: str):
 def compile_request(
     request: str,
     ask: Callable[[str], str],
-    known_tools: set[str],
+    capabilities: set[str],
     existing: dict | None = None,
 ) -> Compiled:
     """One prose instruction → validated field values, or a stated problem.
@@ -262,7 +262,7 @@ def compile_request(
     """
     prompt = PROMPT.format(
         request=request.strip(),
-        tools=", ".join(sorted(known_tools)) or "(none)",
+        tools=", ".join(sorted(capabilities)) or "(none)",
         vocabulary=_vocabulary(),
     )
     if existing:
@@ -309,7 +309,7 @@ def compile_request(
         except rules.LintError as exc:
             errors = [str(exc)]
             continue
-        rule, lint_errors = rules.lint(text, known_tools=known_tools)
+        rule, lint_errors = rules.lint(text, capabilities=capabilities)
         if rule is not None:
             return Compiled(fields=fields, rounds=attempt)
         errors = lint_errors

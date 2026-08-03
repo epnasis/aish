@@ -2991,7 +2991,7 @@ class Agent:
         """
         corpus = rules.load_rules()
         active, skipped = rules.partition(corpus)
-        known = self._known_tool_names()
+        known = self._known_capabilities()
         rows: list[dict] = []
         for rule in active:
             started = time.perf_counter()
@@ -3090,16 +3090,42 @@ class Agent:
         """
         return self.semantic.sentence_scores if self.semantic is not None else None
 
-    def _known_tool_names(self) -> set[str]:
-        """Everything the model can call this turn, for the bind-time
-        unsatisfiability check: a route to a tool that no longer exists must
-        surface when it fires, not months later."""
+    def _known_capabilities(self) -> set[str]:
+        """Everything the model can reach this turn, for the bind-time
+        unsatisfiability check: a rule requiring something that no longer exists
+        must surface when it fires, not months later.
+
+        **Skills count, and that is the point of the word "capability".** The
+        vocabulary decision was recorded — *a `<cap>` is a tool OR a skill; the
+        distinction was implementation leaking* — and never reached the code, so
+        `must_first: trippy_search` failed the lint as a missing tool. The
+        design's own worked example for this verb could not be written. To the
+        owner, "use trippy for accommodation" names one capability; which side of
+        aish's internal fence it lives on is not his concern.
+        """
         self._refresh_plugin_tools()
         names = set()
         for schema in [*tools.TOOL_SCHEMAS, *self._plugin_defs]:
             function: dict = schema["function"]
             names.add(str(function["name"]))
+        names |= self._known_skill_names()
         return names
+
+    def _known_skill_names(self) -> set[str]:
+        """Skill names, treated as capabilities a rule may require.
+
+        Best-effort by construction: a knowledge store that cannot be read must
+        never take the rule engine down with it, and an empty set only means the
+        unsatisfiability check has nothing to say — it can never invent a
+        restriction.
+        """
+        try:
+            return {
+                name for name, _description
+                in skills.list_skills(skills.skill_dirs(self.cwd))
+            }
+        except Exception:  # noqa: BLE001 — knowledge is best-effort here
+            return set()
 
     def _observe_for_rules(self, name: str, result: str) -> None:
         """Feed a completed tool call back into the bindings.
@@ -4178,7 +4204,7 @@ class Agent:
             )
         try:
             compiled = rule_compiler.compile_request(
-                request, ask, self._known_tool_names(), existing=existing
+                request, ask, self._known_capabilities(), existing=existing
             )
         except Exception as exc:  # noqa: BLE001 — a dead backend is a fallback
             # `make_compiler` only CONSTRUCTS the callable; the connection
@@ -4233,7 +4259,8 @@ class Agent:
             return None
         if target.suffix != ".md":
             return None
-        _rule, errors = rules.lint(plan.new, known_tools=self._known_tool_names())
+        _rule, errors = rules.lint(plan.new, capabilities=self._known_capabilities(),
+                                   skill_names=self._known_skill_names())
         if not errors:
             return None
         return (
@@ -4337,7 +4364,8 @@ class Agent:
             text = rules.render(fields)
         except rules.LintError as exc:
             return f"ERROR: {exc}"
-        rule, errors = rules.lint(text, known_tools=self._known_tool_names())
+        rule, errors = rules.lint(text, capabilities=self._known_capabilities(),
+                                  skill_names=self._known_skill_names())
         if rule is None:
             return (
                 f"ERROR: that rule did not validate: {'; '.join(errors)} "

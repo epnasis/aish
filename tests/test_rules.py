@@ -1056,7 +1056,7 @@ class TestAuthoring:
         """A route to a tool that does not exist refuses every alternative and
         offers nothing, on every turn it binds."""
         text = rules.render({**self.BASE, "answer_from": "gws_gmial_send"})
-        rule, errors = rules.lint(text, known_tools={"read_url", "web_search"})
+        rule, errors = rules.lint(text, capabilities={"read_url", "web_search"})
         assert rule is None
         assert "gws_gmial_send" in errors[0]
 
@@ -1064,7 +1064,7 @@ class TestAuthoring:
         """It would never fire — and a rule that never fires looks exactly like
         a rule that is working."""
         text = rules.render({**self.BASE, "never_use": ["web_serch"]})
-        rule, errors = rules.lint(text, known_tools={"read_url", "web_search"})
+        rule, errors = rules.lint(text, capabilities={"read_url", "web_search"})
         assert rule is None and "web_serch" in errors[0]
 
     def test_a_trigger_naming_a_missing_tool_is_caught_too(self):
@@ -1075,7 +1075,7 @@ class TestAuthoring:
             "name": "r", "description": "d", "when_subject": "action",
             "when_action": {"tool": "gws_gmial_send"}, "never_use": ["web_search"],
         })
-        rule, errors = rules.lint(text, known_tools={"web_search", "read_url"})
+        rule, errors = rules.lint(text, capabilities={"web_search", "read_url"})
         assert rule is None and "gws_gmial_send" in errors[0]
 
     def test_a_trigger_on_a_path_is_not_mistaken_for_a_tool(self):
@@ -1083,7 +1083,7 @@ class TestAuthoring:
             "name": "r", "description": "d", "when_subject": "action",
             "when_action": {"path_under": "~/dev/aish"}, "never_use": ["write_file"],
         })
-        rule, errors = rules.lint(text, known_tools={"write_file"})
+        rule, errors = rules.lint(text, capabilities={"write_file"})
         assert not errors and rule is not None
 
     def test_editing_carries_over_everything_not_named(self):
@@ -1250,7 +1250,7 @@ class TestShowAndCredit:
     def _fail(self, then, answer, calls=()):
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always", **then,
-        }), known_tools=self.TOOLS)
+        }), capabilities=self.TOOLS)
         assert not errors, errors
         binding = rules.bind(rule, {"on": "always"}, "b1", self.TOOLS)
         return rules.verify([binding], rules.TurnEvidence(answer=answer, calls=calls))
@@ -1342,7 +1342,7 @@ class TestShowAndCredit:
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always",
             "answer_must_include": {"any_of": ["picture"]},
-        }), known_tools=self.TOOLS)
+        }), capabilities=self.TOOLS)
         assert rule is None and "at least two" in errors[0]
 
     def test_the_tool_a_kind_needs_is_checked_even_though_it_is_unnamed(self):
@@ -1352,7 +1352,7 @@ class TestShowAndCredit:
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always",
             "answer_must_include": "picture",
-        }), known_tools={"read_url"})
+        }), capabilities={"read_url"})
         assert rule is None and "show_image" in errors[0]
 
     def test_a_video_the_tool_validated_is_credited(self):
@@ -1408,7 +1408,7 @@ class TestMeaningTrigger:
             "name": "show-me", "description": "Show me a picture.",
             "when_subject": "prompt", "when_like": self.ANCHORS,
             "answer_must_include": "picture", **over,
-        }), known_tools={"show_image"})
+        }), capabilities={"show_image"})
         assert not errors, errors
         return rule
 
@@ -1503,7 +1503,7 @@ class TestKeywordListsAreRefused:
         return rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "prompt",
             "when_matches": pattern, "answer_from": "read_url",
-        }), known_tools={"read_url"})
+        }), capabilities={"read_url"})
 
     @pytest.mark.parametrize("pattern", [
         "(?i)(show|display|view|picture)",
@@ -1535,7 +1535,7 @@ class TestAnswerBeforeActing:
         rule, errors = rules.lint(rules.render({
             "name": "answer-first", "description": "Answer me before running anything.",
             "when_subject": "always", "must_first": "answer",
-        }), known_tools={"read_url"})
+        }), capabilities={"read_url"})
         assert not errors, errors
         return rule
 
@@ -1557,7 +1557,7 @@ class TestAnswerBeforeActing:
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always",
             "must_first": "read_url",
-        }), known_tools={"read_url"})
+        }), capabilities={"read_url"})
         assert not errors
         binding = rules.bind(rule, {"on": "always"}, "b1", {"read_url"})
         assert rules.wants_text_first([binding]) == []
@@ -1583,7 +1583,7 @@ class TestAnswerSubject:
             "must_first": "read_url",
         }
         rule, errors = rules.lint(rules.render({**fields, **over}),
-                                  known_tools={"read_url", "web_search"})
+                                  capabilities={"read_url", "web_search"})
         assert not errors, errors
         return rule
 
@@ -1646,7 +1646,7 @@ class TestAnswerSubject:
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "answer",
             "when_matches": "x", "never_use": ["web_search"],
-        }), known_tools={"web_search"})
+        }), capabilities={"web_search"})
         assert rule is None
         assert "cannot carry `never_use:`" in errors[0]
 
@@ -1722,9 +1722,83 @@ class TestAnswerSubject:
         assert fields["when_subject"] == "answer"
         assert fields["when_matches"] == self.PRICE
         assert fields["when_in"] == "ending"
-        again, errors = rules.lint(rules.render(fields), known_tools={"read_url"})
+        again, errors = rules.lint(rules.render(fields), capabilities={"read_url"})
         assert not errors, errors
         assert again.where == "ending"
+
+
+class TestASkillIsACapability:
+    """"For accommodation use trippy" names ONE capability to the owner. Which
+    side of aish's internal tool/skill fence it lives on is not his concern —
+    the decision was recorded and never reached the code, so the design's own
+    worked example for `must_first` failed the lint as a missing tool."""
+
+    def _rule(self, **over):
+        fields = {
+            "name": "accommodation-via-trippy",
+            "description": "Accommodation searches go through trippy.",
+            "when_subject": "prompt",
+            "when_like": ["find me a villa in Uluwatu", "szukam noclegu w Warszawie"],
+            "must_first": "trippy_search",
+            "never_use": ["web_search"],
+        }
+        return rules.lint(
+            rules.render({**fields, **over}),
+            capabilities={"web_search", "read_url", "trippy_search"},
+            skill_names={"trippy_search"},
+        )
+
+    def test_a_rule_may_require_a_skill(self):
+        rule, errors = self._rule()
+        assert not errors, errors
+        assert rule is not None
+
+    def test_an_unknown_name_is_still_refused(self):
+        _rule, errors = self._rule(must_first="tripy_serch")
+        assert errors and "does not exist" in errors[0]
+
+    def test_reading_the_skill_satisfies_it(self):
+        """The other half. Without it the lint would accept a rule naming a
+        skill that Verify could never see satisfied — a rule that asks forever,
+        which is worse than one that refuses to compile."""
+        rule, _e = self._rule()
+        binding = rules.bind(rule, {"on": "task"}, "b1", {"trippy_search"})
+        evidence = rules.TurnEvidence(
+            answer="Two villas, both available.",
+            calls=({"tool": "read_skill", "args": {"name": "trippy_search"},
+                    "status": "ok"},),
+        )
+        assert rules.verify([binding], evidence) == []
+
+    def test_reading_a_DIFFERENT_skill_does_not(self):
+        rule, _e = self._rule()
+        binding = rules.bind(rule, {"on": "task"}, "b1", {"trippy_search"})
+        evidence = rules.TurnEvidence(
+            answer="Two villas.",
+            calls=({"tool": "read_skill", "args": {"name": "gh_issue"},
+                    "status": "ok"},),
+        )
+        assert len(rules.verify([binding], evidence)) == 1
+
+    def test_a_refused_skill_read_is_not_a_read(self):
+        rule, _e = self._rule()
+        binding = rules.bind(rule, {"on": "task"}, "b1", {"trippy_search"})
+        evidence = rules.TurnEvidence(
+            answer="Two villas.",
+            calls=({"tool": "read_skill", "args": {"name": "trippy_search"},
+                    "decision": "denied"},),
+        )
+        [failure] = rules.verify([binding], evidence)
+        assert failure.askable is False
+
+    def test_a_skill_cannot_be_routed_to(self):
+        """`answer_from` means "the deliverable comes from HERE and everything
+        else is refused". A skill is guidance; it produces no deliverable, so
+        routing to one prohibits every tool in favour of something that can
+        never satisfy the route."""
+        _rule, errors = self._rule(must_first="", answer_from="trippy_search")
+        assert errors and "names a skill" in errors[0]
+        assert "must_first" in errors[0]
 
 
 class TestSecretsInCommands:
@@ -1739,7 +1813,7 @@ class TestSecretsInCommands:
             "name": "no-inline-secrets", "description": "No secrets in commands.",
             "when_subject": "action", "when_action": self.ACTION,
             "never_use": ["run_command"],
-        }), known_tools={"run_command"})
+        }), capabilities={"run_command"})
         assert not errors, errors
         return rule
 
@@ -1768,7 +1842,7 @@ class TestSecretsInCommands:
             "name": "r", "description": "d", "when_subject": "action",
             "when_action": {"tool": "run_command", "command_has": "sk-[a-z]+"},
             "never_use": ["run_command"],
-        }), known_tools={"run_command"})
+        }), capabilities={"run_command"})
         assert rule is None
         assert "would be the very thing it stops" in errors[0]
 

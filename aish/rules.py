@@ -1321,18 +1321,18 @@ SPEAK_FIRST_REFUSAL = (
 )
 
 
-def unsatisfiable(rule: Rule, readers: list[str], known_tools: set[str] | None) -> list[str]:
+def unsatisfiable(rule: Rule, readers: list[str], capabilities: set[str] | None) -> list[str]:
     """Routed readers that are not exposed. Caught at BIND time so "the rule
     bound but its tool was gone" is a recorded fact rather than an inference
     from a later failure — a route to a missing tool would otherwise refuse
     every alternative and offer nothing."""
-    if not known_tools:
+    if not capabilities:
         return []
-    missing = [reader for reader in readers if reader not in known_tools]
+    missing = [reader for reader in readers if reader not in capabilities]
     for obligation in rule.obligations:
         if (obligation["verb"] == VERB_MUST_FIRST
                 and obligation["capability"] != FIRST_ANSWER
-                and obligation["capability"] not in known_tools):
+                and obligation["capability"] not in capabilities):
             missing.append(str(obligation["capability"]))
         # A KIND names something the reader sees, and every kind is made real
         # by a tool. If that tool is gone the rule can never be satisfied — so
@@ -1340,7 +1340,7 @@ def unsatisfiable(rule: Rule, readers: list[str], known_tools: set[str] | None) 
         # never mentions it.
         for kind in obligation.get("kinds", ()):
             needed = KIND_SPECS[kind]["needs"]
-            if needed not in known_tools:
+            if needed not in capabilities:
                 missing.append(str(needed))
     return missing
 
@@ -1349,13 +1349,13 @@ def bind(
     rule: Rule,
     evidence: dict,
     binding_id: str,
-    known_tools: set[str] | None = None,
+    capabilities: set[str] | None = None,
     at: str = "seed",
     max_rounds: int = RULE_MAX_REFUSALS,
 ) -> Binding:
     readers, sources = resolve_route(rule, evidence)
     present = present_sources(evidence)
-    missing = unsatisfiable(rule, readers, known_tools)
+    missing = unsatisfiable(rule, readers, capabilities)
     obligations = []
     for obligation in rule.obligations:
         if obligation["verb"] == VERB_ANSWER_FROM and obligation["to"] == ROUTE_MATERIAL:
@@ -1639,16 +1639,20 @@ class TurnEvidence:
         """Whether the capability actually RAN. A refused call is not a call:
         conflating "the gate stopped it" with "it never happened" would have
         verify ask for something the harness had just forbidden, and would let
-        a blocked reader satisfy a `must_first` with nothing behind it."""
-        return any(
-            call.get("tool") == capability and _ran(call) for call in self.calls
-        )
+        a blocked reader satisfy a `must_first` with nothing behind it.
+
+        A SKILL is reached by reading it, so `read_skill(name=trippy_search)` is
+        `trippy_search` having run. Without this the lint would accept a rule
+        naming a skill and Verify could never see it satisfied — a rule that
+        asks forever, which is worse than one that refuses to compile.
+        """
+        return any(_is_call_of(call, capability) and _ran(call) for call in self.calls)
 
     def refused(self, capability: str) -> bool:
         """Proposed and stopped by a gate. Distinct from never tried, because
         re-asking would goad the model against the harness's own refusal."""
         return any(
-            call.get("tool") == capability and not _ran(call) for call in self.calls
+            _is_call_of(call, capability) and not _ran(call) for call in self.calls
         )
 
     def hosts_read(self) -> list[str]:
@@ -1664,6 +1668,22 @@ class TurnEvidence:
             if host and host not in seen:
                 seen.append(host)
         return seen
+
+
+# How a skill is reached. One reader, so "did this capability run?" has a single
+# answer wherever it is asked.
+SKILL_READER = "read_skill"
+
+
+def _is_call_of(call: dict, capability: str) -> bool:
+    """Is this recorded call an invocation of that capability — tool or skill?"""
+    tool = call.get("tool")
+    if tool == capability:
+        return True
+    return (
+        tool == SKILL_READER
+        and str((call.get("args") or {}).get("name", "") or "").strip() == capability
+    )
 
 
 def _ran(call: dict) -> bool:
@@ -2396,7 +2416,11 @@ def _is_a_keyword_list(pattern: str) -> bool:
     return bool(_WORD_LIST_RE.match(pattern.strip()))
 
 
-def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, list[str]]:
+def lint(
+    text: str,
+    capabilities: set[str] | None = None,
+    skill_names: set[str] | None = None,
+) -> tuple[Rule | None, list[str]]:
     """(rule, errors) for candidate file text. Nothing is written on an error.
 
     Deterministic and instant — no model. This is the half #193 drew the line
@@ -2420,7 +2444,7 @@ def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, l
             "Use `like:` with 3-5 example messages instead; those are "
             "matched by MEANING, so wording and language do not have to match."
         )
-    if known_tools:
+    if capabilities:
         readers = [o["to"] for o in rule.obligations
                    if o["verb"] == VERB_ANSWER_FROM and o["to"] != ROUTE_MATERIAL]
         firsts = [o["capability"] for o in rule.obligations
@@ -2431,24 +2455,37 @@ def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, l
         kinds = [KIND_SPECS[k]["needs"] for o in rule.obligations
                  for k in o.get("kinds", ())]
         for named in readers + firsts + kinds:
-            if named not in known_tools:
+            if named not in capabilities:
                 errors.append(
-                    f"names a tool that does not exist: {named!r}. A rule routing to "
-                    "or requiring a missing tool refuses every alternative and offers "
-                    "nothing, on every turn it binds."
+                    f"names something that does not exist: {named!r}. A rule "
+                    "requiring a missing tool or skill refuses every alternative "
+                    "and offers nothing, on every turn it binds."
+                )
+        # `must_first` accepts a skill; `answer_from` cannot. Its meaning is
+        # "the deliverable comes from HERE, and everything else is refused" —
+        # and a skill produces no deliverable, it is instructions the model
+        # reads. Routing to one would prohibit every tool in favour of
+        # something that can never satisfy the route.
+        for named in readers:
+            if named in (skill_names or set()):
+                errors.append(
+                    f"`{VERB_ANSWER_FROM}: {named}` names a skill, and a skill is "
+                    "guidance rather than a source an answer can come from. Write "
+                    f"`{VERB_MUST_FIRST}: {named}` for \"read this before "
+                    "answering\", and add `never_use:` for anything it replaces."
                 )
         # The TRIGGER's tool too, not only the obligations'. A typo'd
         # `action: tool:` arms every turn and fires on nothing, and it is the
         # one trigger kind retro-match cannot replay — so neither honesty
         # mechanism would catch it. Same argument as the two below.
-        if (named := rule.action.get("tool")) and named not in known_tools:
+        if (named := rule.action.get("tool")) and named not in capabilities:
             errors.append(
                 f"triggers on a tool that does not exist: {named!r}. The rule would "
                 "arm on every turn and fire on nothing. Check the spelling."
             )
         for prohibited in (o["what"] for o in rule.obligations if o["verb"] == VERB_NEVER_USE):
             for tool_name in prohibited:
-                if tool_name not in known_tools:
+                if tool_name not in capabilities:
                     errors.append(
                         f"forbids a tool that does not exist: {tool_name!r} — the "
                         "restriction would never fire. Check the spelling."
