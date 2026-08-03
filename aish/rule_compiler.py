@@ -49,10 +49,21 @@ REQUEST_CHARS = 300
 
 @dataclass
 class Compiled:
-    """Either `fields` (ready for `rules.render`) or `problem` — never both."""
+    """Either `fields` (ready for `rules.render`) or `problem` — never both.
+
+    `dropped` is the third state, and it exists because refusing outright was
+    wrong. Five of the six rules the compiler could not write were requests
+    where ONE clause is inexpressible and the rest is fine, and the owner's
+    ruling is that partial is acceptable **but never silent**: say what will be
+    enforced, say what will not, and let him decide. So `dropped` travels
+    ALONGSIDE fields, is shown on the approval card, and never quietly
+    disappears — which is the difference between honest partial compilation and
+    the approximation the "do not approximate" law was written against.
+    """
 
     fields: dict = field(default_factory=dict)
     problem: str = ""
+    dropped: str = ""
     rounds: int = 0
 
     def __bool__(self) -> bool:
@@ -86,8 +97,6 @@ def _vocabulary() -> str:
         "\"no flattery\", \"no apologies\", \"never promise\" get expressed. "
         "NEVER a bare plain phrase: a check nothing can evaluate is a promise "
         "nothing keeps.",
-        "- must_tell_me_when: a failure the owner must be told about in plain "
-        "words rather than quietly patched over.",
         "- ask_me_first: true — the owner decides this one, every time it comes "
         "up. Needs when_subject 'action', because it holds ONE kind of call. "
         "Use it when the point is that HE chooses, not that the assistant "
@@ -193,7 +202,8 @@ WORKED EXAMPLES — real rules, one per subject. Match these shapes.
   {"name": "transcript-failure", "when_subject": "result",
    "when_result_of": "youtube_analyze", "when_result_was": "empty",
    "never_use": ["web_search"],
-   "must_tell_me_when": "the transcript came back empty"}"""
+   "answer_must_include": {"like": ["the transcript came back empty so I could not read the video",
+   "nie udalo sie pobrac transkrypcji"]}}"""
 
 
 PROMPT = """\
@@ -239,11 +249,29 @@ planning a trip" — use when_like and write 3-5 whole example messages the \
 way that person actually types, including in their other language if they use \
 one. Examples are matched by meaning, not by letters.
 
-If their instruction cannot be expressed with these fields, reply with a JSON \
-object of exactly one key, "cannot", whose value says WHAT could not be \
-expressed and WHY, in one sentence, in their terms. Do not approximate: a rule \
-that half-does what they asked is worse than no rule, because it looks like it \
-worked."""
+3. A RULE HAS THREE PARTS, NOT TWO. The condition, the thing that is \
+ENFORCED, and the GUIDANCE — what they should do instead when it is refused. \
+Guidance goes in `prose`. It is not a second obligation and its absence from \
+`then:` is not a failure to express the request.
+
+"Never edit the source code, always open a GitHub issue instead" is ONE \
+enforcement and one piece of guidance. The enforcement is when_action \
+path_under plus never_use. "Open an issue instead" is what makes the refusal \
+useful — a good error says what went wrong AND what to do about it — so it \
+belongs in `prose`, and the rule is COMPLETE, not half-written.
+
+Read every "…instead", "…rather than", "…use X for this" the same way: if it \
+tells the assistant what to do rather than what not to do, it is guidance.
+
+4. IF PART OF IT GENUINELY CANNOT BE EXPRESSED, SAY SO AND STILL WRITE THE \
+REST. Add a key "could_not_express" whose value names the part you had to \
+leave out, in one sentence, in their words. The person is shown that on the \
+approval card next to what the rule DOES do, and decides. Half a rule they can \
+see is useful; half a rule they cannot see is the thing this warns against.
+
+Only reply with a JSON object of exactly one key, "cannot", when NOTHING in \
+the instruction can be expressed at all. Its value says what could not be \
+expressed and why, in one sentence, in their terms."""
 
 
 RETRY = """\
@@ -398,7 +426,18 @@ def compile_request(
             continue
         rule, lint_errors = rules.lint(text, capabilities=capabilities)
         if rule is not None:
-            return Compiled(fields=fields, rounds=attempt)
+            # Carried alongside the rule, never instead of it, and shown on the
+            # card. Bounded like every other owner-facing sentence here.
+            # A STRING or nothing. `str()` on a dict put "{'a': 1}" straight
+            # onto the owner's approval card — the same leak already fixed for
+            # `cannot`, and the reason it is worth fixing twice is that this
+            # text is the only place a dropped clause is ever mentioned.
+            dropped = parsed.get("could_not_express")
+            return Compiled(
+                fields=fields, rounds=attempt,
+                dropped=(dropped.strip()[:CANNOT_CHARS]
+                         if isinstance(dropped, str) else ""),
+            )
         errors = lint_errors
 
     return Compiled(

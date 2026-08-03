@@ -27,7 +27,6 @@ when:
 then:
   answer_from: material
   never_use: [web_search]
-  must_tell_me_when: the material could not be read
 ---
 
 Answer from the material the user gave you.
@@ -84,7 +83,6 @@ class TestRuleFileFormat:
         assert rule.obligations == (
             {"verb": "answer_from", "to": "material", "of": "deliverable"},
             {"verb": "never_use", "what": ["web_search"]},
-            {"verb": "must_tell_me_when", "state": "the material could not be read"},
         )
         assert rule.tier == 0 and rule.fail == rules.FAIL_DEFAULT
         assert rule.prose.startswith("Answer from the material the user gave you.")
@@ -137,7 +135,7 @@ class TestRuleFileFormat:
             (
                 CANONICAL.replace("  answer_from: material\n", "")
                 .replace("  never_use: [web_search]\n", "")
-                .replace("  must_tell_me_when: the material could not be read\n", ""),
+                .replace("  never_use: [web_search]\n", ""),
                 "no obligation",
             ),
         ],
@@ -602,7 +600,7 @@ Prose.
             ("contains", "`when: prompt: has:`"),
             ("route", "`then: answer_from:`"),
             ("prohibit", "`then: never_use:`"),
-            ("disclose", "`then: must_tell_me_when:`"),
+            ("disclose", "answer_must_include"),
             ("tier", "the trigger's own form"),
             ("fail", "`if_unsure:"),
             ("unless", "only the owner can lift it"),
@@ -1110,12 +1108,12 @@ class TestAuthoring:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bounded-material.md"
             path.write_text(original, encoding="utf-8")
-            fields = {**rules.author_fields(path), "must_tell_me_when": "it failed"}
+            fields = {**rules.author_fields(path), "must_first": "read_url"}
         rule, errors = rules.lint(rules.render(fields))
         assert not errors and rule is not None
         verbs = {o["verb"] for o in rule.obligations}
         assert verbs == {
-            rules.VERB_ANSWER_FROM, rules.VERB_NEVER_USE, rules.VERB_MUST_TELL_ME_WHEN,
+            rules.VERB_ANSWER_FROM, rules.VERB_NEVER_USE, rules.VERB_MUST_FIRST,
         }, "an edit dropped an obligation it was never asked to touch"
 
     def test_the_prose_body_survives_an_edit_verbatim(self):
@@ -1193,17 +1191,16 @@ class TestRenderedMeaningMatchesTheFile:
         rule had no prohibition. Quoting cannot fix it (`"a --- b"` still
         contains the marker), and "empty --- say so" is ordinary writing."""
         rule, errors = rules.lint(rules.render({
-            "name": "r", "description": "d", "when_subject": "prompt",
+            "name": "r", "when_subject": "prompt",
             "when_has": "material", "answer_from": "material",
-            "must_tell_me_when": "the source came back empty --- say so",
+            "description": "the source came back empty --- say so",
             "never_use": ["web_search"],
         }))
         assert not errors and rule is not None
         assert {o["verb"] for o in rule.obligations} == {
-            rules.VERB_ANSWER_FROM, rules.VERB_MUST_TELL_ME_WHEN, rules.VERB_NEVER_USE,
+            rules.VERB_ANSWER_FROM, rules.VERB_NEVER_USE,
         }, "an obligation below a --- was read as prose"
-        [told] = [o for o in rule.obligations if o["verb"] == rules.VERB_MUST_TELL_ME_WHEN]
-        assert told["state"] == "the source came back empty --- say so"
+        assert rule.description == "the source came back empty --- say so"
 
     def test_a_frontmatter_marker_in_a_description_is_just_text(self):
         """It used to fail with "a rule needs a `when:` block" — naming
@@ -2209,3 +2206,188 @@ class TestRetroMatch:
         ]) + "\n", encoding="utf-8")
         turns = rules.past_turns(tmp_path)
         assert [t["prompt"] for t in turns] == ["real question"]
+
+
+class TestSeedingCostsOnlyWhatItBuys:
+    """An ordinary turn — nothing about prices, images or mail — seeded 9,562
+    characters across 15 bound rules, because everything except a `prompt:`
+    condition ARMS at seed. Conditional about enforcement, unconditional about
+    announcement. That is how a rules engine turns into a fatter system prompt,
+    which is the thing the owner said he did not want."""
+
+    def _binding(self, **over):
+        fields = {"name": "r", "description": "d", "when_subject": "always",
+                  "prose": "A paragraph of explanation that costs real context."}
+        fields.update(over)
+        caps = {"web_search", "read_url", "write_file", "run_command"}
+        rule, errors = rules.lint(rules.render(fields), capabilities=caps)
+        assert not errors, errors
+        return rules.bind(rule, {"on": "always"}, "b1", caps)
+
+    def test_a_rule_checked_only_at_the_end_does_not_seed_its_prose(self):
+        """There is nothing to warn about in advance: the check runs whatever
+        the model was told, and the question asked on failure explains it at the
+        moment it is relevant. R5 is about GATES — nothing here refuses."""
+        binding = self._binding(answer_must_include={"pattern": "x"})
+        assert rules.seeds_prose(binding) is False
+        text = rules.seed_text([binding])
+        assert "A paragraph of explanation" not in text
+        assert "checked once your answer is written" in text
+
+    def test_a_rule_that_can_REFUSE_still_explains_itself(self):
+        binding = self._binding(never_use=["web_search"])
+        assert rules.seeds_prose(binding) is True
+        assert "A paragraph of explanation" in rules.seed_text([binding])
+
+    def test_an_armed_action_rule_seeds_its_obligation_but_not_its_essay(self):
+        """It is watching a call nobody has proposed. The obligation steers; the
+        essay is written for the moment of refusal, and the refusal carries it
+        in full and uncapped."""
+        binding = self._binding(when_subject="action",
+                                when_action={"command_starts_with": "pip"},
+                                never_use=["run_command"])
+        text = rules.seed_text([binding])
+        assert "MUST NOT call run_command" in text
+        assert "A paragraph of explanation" not in text
+
+    def test_an_action_rule_states_its_CONDITION_or_it_is_a_lie(self):
+        """The unconditional wording said "MUST NOT call write_file, edit_file,
+        run_command for this turn" for a rule that only guards one directory.
+        Believed, that disables editing any file anywhere: a narrow guard read
+        as a blanket ban."""
+        binding = self._binding(when_subject="action",
+                                when_action={"path_under": "~/dev/aish"},
+                                never_use=["write_file", "run_command"])
+        text = rules.seed_text([binding])
+        assert "WHEN it touches anything under ~/dev/aish" in text
+        assert "narrow guard" in text
+        assert "run_command for this turn" not in text
+
+
+class TestOneCommandHasManySpellings:
+    """`pip`, `pip3`, `python -m pip` are one intent. Forcing a file per
+    spelling makes the owner maintain the shape of a shell instead of stating a
+    policy — and a rule covering two thirds of a thing is exactly the silent
+    under-restriction the engine exists to make impossible."""
+
+    def _rule(self, value):
+        rule, errors = rules.lint(rules.render({
+            "name": "uv-only", "description": "d", "when_subject": "action",
+            "when_action": {"command_starts_with": value},
+            "never_use": ["run_command"],
+        }), capabilities={"run_command"})
+        assert not errors, errors
+        return rule
+
+    def test_a_list_matches_any_of_them(self):
+        rule = self._rule(["pip", "pip3", "python -m pip"])
+        for command in ("pip install x", "pip3 install x", "python -m pip install x"):
+            assert rules.action_matches(rule.action, "run_command",
+                                        {"command": command}), command
+
+    def test_what_it_does_not_name_stays_allowed(self):
+        rule = self._rule(["pip", "python -m pip"])
+        for command in ("uv run x.py", "uv add requests", "uvx ruff"):
+            assert not rules.action_matches(rule.action, "run_command",
+                                            {"command": command}), command
+
+    def test_a_SCALAR_WITH_A_SPACE_is_one_prefix_and_is_never_split(self):
+        """`gh issue` is one prefix containing a space. Splitting it on
+        whitespace would silently widen the rule to every `gh` command there
+        is — a restriction quietly becoming a much bigger one."""
+        rule = self._rule("gh issue")
+        assert rules.action_matches(rule.action, "run_command",
+                                    {"command": "gh issue create -t x"})
+        assert not rules.action_matches(rule.action, "run_command",
+                                        {"command": "gh pr list"})
+
+    def test_the_card_reads_every_spelling_aloud(self):
+        card = rules.explain(self._rule(["pip", "python -m pip"]))
+        assert "`pip` or `python -m pip`" in card
+
+
+class TestLinksYouDidNotOpen:
+    """The general form of a rule the owner kept writing per topic.
+
+    His failure was never "visas": he asked about entry requirements, got
+    government URLs, and they were wrong because the site had changed. Written
+    as a topic rule it needs a list — travel, tax, health, legal — maintained
+    forever and wrong at the edges by construction. Written as a fact about the
+    ANSWER it needs no list at all."""
+
+    def _binding(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "opened-links-only", "description": "Only links you opened.",
+            "when_subject": "always",
+            "answer_must_not_include": "unverified_links",
+        }), capabilities={"read_url"})
+        assert not errors, errors
+        return rules.bind(rule, {"on": "always"}, "b1", {"read_url"})
+
+    def _check(self, answer, calls=()):
+        return rules.verify([self._binding()],
+                            rules.TurnEvidence(answer=answer, calls=tuple(calls)))
+
+    def test_an_answer_with_no_links_is_fine(self):
+        assert self._check("Mutexes are exclusive, semaphores count.") == []
+
+    def test_a_link_that_was_opened_passes(self):
+        assert self._check(
+            "See [the guide](https://example.com/guide).",
+            [{"tool": "read_url", "args": {"url": "https://example.com/guide"},
+              "status": "ok"}],
+        ) == []
+
+    def test_a_link_that_was_NEVER_opened_fails(self):
+        [failure] = self._check("See [the guide](https://example.com/guide).")
+        assert "example.com/guide" in failure.ask
+        assert failure.evidence["unverified"] == ["https://example.com/guide"]
+
+    def test_a_link_whose_FETCH_FAILED_does_not_count_as_opened(self):
+        """His addition, and it is the difference between "I tried" and "it
+        works": a 404 is not a link you can hand someone."""
+        [failure] = self._check(
+            "See [the guide](https://example.com/gone).",
+            [{"tool": "read_url", "args": {"url": "https://example.com/gone"},
+              "status": "failed"}],
+        )
+        assert "example.com/gone" in failure.ask
+
+    def test_seeing_a_url_in_a_search_RESULT_is_not_opening_it(self):
+        """The distinction the whole check rests on. Quoting a URL out of a
+        search snippet is precisely the move being stopped, and a snippet is
+        tool OUTPUT, never a target the harness acted on."""
+        [failure] = self._check(
+            "See [the shop](https://shop.example/item).",
+            [{"tool": "web_search", "args": {"query": "shop item"},
+              "result": "Top hit: https://shop.example/item — great prices",
+              "status": "ok"}],
+        )
+        assert failure.evidence["unverified"] == ["https://shop.example/item"]
+
+    def test_a_video_validated_by_show_video_counts(self):
+        """`show_video` takes the URL as an argument, so it was acted on. A
+        check that flagged it would make the video rules unsatisfiable."""
+        assert self._check(
+            "Here it is: [watch](https://youtu.be/abc123)",
+            [{"tool": "show_video", "args": {"url": "https://youtu.be/abc123"},
+              "status": "ok"}],
+        ) == []
+
+    def test_a_trailing_slash_or_anchor_is_the_same_page(self):
+        assert self._check(
+            "See [it](https://example.com/guide/#setup).",
+            [{"tool": "read_url", "args": {"url": "https://example.com/guide"},
+              "status": "ok"}],
+        ) == []
+
+    def test_it_reports_every_bad_link_not_only_the_first(self):
+        [failure] = self._check(
+            "[a](https://a.example/x) and [b](https://b.example/y)")
+        assert len(failure.evidence["unverified"]) == 2
+
+    def test_it_can_only_be_written_as_a_PROHIBITION(self):
+        """"Must include a link you never opened" is not a sentence anyone
+        means."""
+        with pytest.raises(rules.RuleError):
+            rules._answer_check("answer_must_include", "unverified_links")

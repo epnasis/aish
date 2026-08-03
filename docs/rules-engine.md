@@ -165,7 +165,6 @@ when:
 then:
   answer_from: material
   never_use: [web_search]
-  must_tell_me_when: the material could not be read
 ---
 
 Prose the model is shown verbatim when this rule binds. Explain the intent —
@@ -253,7 +252,6 @@ Route, prohibit and sequence are things the model can comply with **by choosing 
 |---|---|---|
 | `answer_from: <tool> \| material` | the deliverable comes from here | **yes** |
 | `never_use: [tools]` | these tools are refused for the turn | **yes** |
-| `must_tell_me_when: <plain phrase>` | this failure must be stated to the owner | declared, seeded as prose; the structural half is not built (a plain phrase is a judged question) |
 | `must_first: <tool>` | this tool must have run before the answer | **yes** |
 | `answer_must_include:` / `answer_must_not_include:` | something the reader would SEE (`picture`, `video`, `sources`), `{any_of: […]}`, or `{pattern: <regex>}` over the wording | **yes** |
 | `ask_me_first: true` | the owner decides this one, every time | **yes** |
@@ -274,7 +272,6 @@ Plain English imperatives, in the ESLint tradition (`no-console`, `prefer-const`
 Three of the names carry an argument worth keeping:
 
 - **`material`, not `source`, on BOTH sides** (`has: material` / `answer_from: material`) — so a reader can see the trigger and the obligation refer to the same thing. The prose, the channel-separation text and the whole R1 analysis had already standardised on *material*; only the frontmatter hadn't.
-- **`must_tell_me_when` rather than a bare "must say" — name the audience.** "Say" is satisfiable by a mid-turn preamble, which is precisely the failure the word-list post-mortem documents: the preamble is not what the owner reads.
 - **`must_first` needs only one key**, because the "before B" half is the trigger: `when: action: {tool: gmail_send}` / `then: must_first: show_me_the_draft`. The when/then split absorbs half the verb's complexity — the structural argument in miniature.
 
 ### Disposition
@@ -313,6 +310,20 @@ Beyond compiling, the lint checks that **everything the rule names exists** — 
 
 **What the owner approves is the compiled MEANING, not the diff.** He did not write the file and should not have to audit it, so the approval card carries an English sentence — *when this, then that* — plus which enforcement moment applies, above the diff rather than instead of it.
 
+### A rule has THREE parts, and the compiler only knew two
+
+The compiler could not write *"never edit the source, always open a GitHub issue instead"*, and reported the whole request inexpressible. The owner's reading is the correct one and it reframes the problem rather than relaxing it:
+
+> That is **one enforcement plus guidance**, not two enforcements. The guidance is what makes a refusal actionable — a good error says what went wrong *and* what to do instead — and the grammar already has a place for it: the prose body, which is shown to the model and quoted when it is refused.
+
+So the rule was **complete**, not half-written, and the compiler was misreading the shape of a rule. It is now told that a rule has three parts — condition, enforcement, guidance — and that every *"…instead"*, *"…rather than"*, *"use X for this"* is guidance rather than a second obligation.
+
+Where a clause genuinely cannot be expressed, **partial is acceptable but never silent**. `could_not_express` travels *alongside* the fields, is shown on the approval card next to what the rule does enforce, and the owner decides. That is not a relaxation of *"do not approximate"*: the law was written against **silent** approximation, and a card that names the missing half is the opposite of silent. `TestPartialIsAllowedButNeverSilent`.
+
+**Measured, and the measurement is noisier than it looks.** Against the 33-memory gold standard the compiler went 11 → 20 (prompt drift fixed) → 30 on one run. But the same four rules came back `CANNOT` on the next run of the identical input: **it is non-deterministic, and a single score is not a result.** What is stable across runs is that the three refusals the design *wants* — a permission grant, a memory-format rule, a language-selection rule — are refused every time, and `auto_approve` is refused for the right reason each time (R1).
+
+The remaining honest gap is quality rather than count: a rule can lint clean and still be weaker than the hand-written one, and on one run the compiler produced rules for four requests the gold standard deliberately refused. **Lint-clean is not correct**, which is what the card and retro-match exist for.
+
 ### The owner speaks prose; the compiler names fields
 
 `create_rule(request: "always use show_image for pictures")` is the normal call. **The acting model never learns the grammar** — its job is to pass through what the owner said, which models are reliable at — and an isolated compiler turns that one sentence into field values. The grammar then lives in exactly one place, versioned with the code, so adding a verb does not require every model on every backend to relearn anything. The prompt it reads is *generated from* the vocabulary constants rather than restating them, because the first thing that happens to a second copy of a vocabulary is that it drifts.
@@ -347,6 +358,14 @@ then:
   answer_must_include_result_of:
     any_of: [show_image, show_video]
 ```
+
+**Anchors must be written in HIS words, and this was measured the hard way.** The five meaning rules installed from his memory corpus were **completely inert**: across 400 real prompts, at the 0.62 floor, not one of them would ever have bound. Their true-positive cases scored 0.42–0.60 and the highest similarity anywhere in his history was 0.599 — the floor sat *above the entire distribution*.
+
+The floor was not the bug. **The anchors were.** They had been written as full, tidy sentences in the author's voice; his actual messages are terse and often Polish — *"Trasa do apteki"*, *"Show photos"*, *"Directions to Kima Surf Camp"*. Rewriting the anchors as his real past messages moved true positives to **0.70–0.81** while negatives stayed at 0.03–0.26, and a spot-check went from 4/9 to 11/12 correct. The 0.62 floor is right; a rule written in the wrong voice is not.
+
+**And the honesty mechanism that would have caught it on day one was skipped.** Retro-match answers exactly this question — *"this would have bound on 0 of your last 200 turns"* — and it runs when a rule is created through `create_rule`. These were hand-written as files, which is supported but bypasses the card. **A hand-written rule gets no retro-match, and an inert rule is indistinguishable from a working one without it.** That is the strongest practical argument for the authoring tool being the usual path.
+
+Residual limit, stated rather than smoothed over: the local multilingual model is not uniform across paraphrase. *"pokaż mi jak wygląda ten hotel"* scores 0.77 once that phrasing is an anchor, while *"pokaż mi jak wygląda ta plaża"* — the same sentence with a different noun — sits at 0.44. Most Polish anchors score fine (0.70–0.81); some do not, and the remedy is another example rather than a lower floor.
 
 **Examples, not a threshold.** The owner writes 3–5 whole messages the way he actually types them, in whichever languages he uses. A new message is compared to them by meaning — the same local multilingual embedding model that already finds his skills and memories, so this is existing plumbing pointed at a new job. A miss is fixed by adding one more example. **He never sets a number and never sees one**; what he sees is the retro-match, *"this would have caught these 6 of your last 200 messages"*, made of his own traffic.
 
@@ -395,6 +414,46 @@ Each was declared inexpressible, and each was a failure of imagination — think
 **"No sycophantic openings."** `answer_must_not_include: {like: […], in: opening}` — the same examples-and-meaning machinery as the trigger, pointed at the answer. The cost objection that had sent this to the offline audit dissolves once the thing being embedded is **one paragraph**: local, milliseconds, multilingual. His observation is what makes it work — *"every model gives an immediate reaction in the first part"* — so a flourish is in the opening or nowhere. Register is precisely what similarity measures, and the failure direction is safe: a false hit costs one bounded rework, then the answer ships with a note. Both distributions are recorded. `TestMeaningOverTheAnswer`.
 
 `in:` takes **two** values, `opening` and `ending`, deliberately — a position qualifier, not a coordinate system. Slicing is by paragraph, because that is the unit a person reads.
+
+### `must_tell_me_when` is RETIRED — it was the costume
+
+The engine's own admission line is *a verb ships only if it compiles to a declared check*, and `must_tell_me_when` never did. It was seeded to the model as prose and **nothing ever read the answer for it.** It sat in the canonical rule — the one this whole epic was written for — where the real enforcement was the `never_use` half and the "tell me" half was advice wearing a verb. The owner found it by asking, of a shipped rule, *"the transcript came back empty is a value — how would you check that?"* The answer was: we don't.
+
+It did not need a new tier. `answer_must_include: {like: […]}` says the same thing against the finished answer, with a real check behind it, in whatever language the answer is written in. Retired loudly, per `RETIRED_KEYS`, naming that replacement.
+
+**And the conversion is not mechanical, which is the trap worth recording.** `must_tell_me_when` was conditional in its own wording — *state it IF this happens*. `answer_must_include` is not: it applies whenever the rule binds. Copying it across on `bounded-material` produced a rule requiring **every** answer about a link to say the link could not be read. The disclosure had to move to a rule whose *trigger* is the failure (`when: result: {of: read_url, was: empty}`), which is what `say-when-the-link-failed` is. A verb that carries a hidden condition cannot be swapped for one that does not.
+
+### `unverified_links` — the general form of a rule he kept writing per topic
+
+The owner asked about entry requirements, was given government URLs, and they were wrong because the site had changed. The memory he wrote afterwards said *"check visa and government pages live"* — and that is the wrong shape. **The failure was never "visas". It was handing over links that had never been opened**, which happens in tax, health, shopping and everything else. A topic rule needs a list of topics maintained forever, and the list is wrong at the edges by construction.
+
+`answer_must_not_include: unverified_links` needs no list: **every http(s) link in an answer must be one aish opened this turn.** A join, so the model cannot argue with it — the harness writes the record of what was fetched.
+
+Two distinctions carry the whole check:
+
+- **A failed fetch is not an opened link.** A 404 is recorded as failed, so it does not count. The owner's own addition, and it is the difference between *"I tried"* and *"it works"*. Honest limit: a server returning HTTP 200 with a pretty "not found" page passes, because nothing in the response says otherwise.
+- **Seeing a URL in a tool's OUTPUT is not opening it.** Verified means the URL was the *target* of a successful call — `read_url`, `show_video`, `youtube_analyze` — never that it appeared in a search result's text. That is precisely the move being stopped: quoting a URL out of a snippet is how the wrong government link got handed over in the first place.
+
+It also repairs a rule that was overclaiming. `live-price` said *"you must have read the seller's own page"* while checking only that *some* URL was read — a description promising more than the file enforced, which is #205's own exhibit, in a hand-written rule held up as the gold standard. With this check in force, a price quoted alongside a link is a price behind a real fetch. `TestLinksYouDidNotOpen`.
+
+### Seeding costs only what it buys
+
+Every trigger arms at seed; only a `prompt:` condition is decided there. So an ordinary turn — nothing to do with prices, images or mail — bound **15 of 21 rules and seeded 9,562 characters**, because the engine was conditional about *enforcement* and unconditional about *announcement*. That is precisely how a rules engine becomes the fatter system prompt the owner said he did not want, and two of the three arming trigger kinds were added the same day the measurement was taken.
+
+Two rules, both falling out of R5 rather than fighting it:
+
+- **A rule checked only at turn end does not seed its prose.** R5 is about *gates* — the model must never be ambushed by a refusal. Nothing at Verify refuses: it asks, and the question explains the rule at the moment it is relevant. Seeding it in advance buys advice, which is the one thing #190 proved does not hold, on every turn forever. One line still names it, so the corpus is never invisible.
+- **An armed `action:` or `result:` rule seeds its obligation but not its essay.** It is watching a call nobody has proposed. "Don't run pip" is what steers; the paragraph is written for the moment of refusal, and the refusal already carries it in full and uncapped.
+
+9,562 → 3,590 on that same turn. `TestSeedingCostsOnlyWhatItBuys`.
+
+**A defect found by reading the output rather than by any test:** an armed `action:` rule seeded its prohibition with no condition attached — *"MUST NOT call write_file, edit_file, run_command for this turn"* — for a rule that guards one directory. Believed, that disables editing any file anywhere. A narrow guard read as a blanket ban, in the rule that keeps aish out of its own source, live on main. The condition is now part of the sentence.
+
+### One command has many spellings
+
+`command_starts_with` takes a **list**, meaning any-of. `pip`, `pip3`, `python -m pip` and `python3 -m pip` are one intent, and forcing a file per spelling makes the owner maintain the shape of a shell instead of stating a policy — he asked for it twice before it was built. A rule covering two thirds of a thing is the silent under-restriction R1 is supposed to make impossible.
+
+A **scalar is taken whole and never split**: `gh issue` is one prefix containing a space, and splitting on whitespace would quietly widen that rule to every `gh` command there is. `TestOneCommandHasManySpellings`.
 
 ### Retro-match — a rule is a function of logged facts
 

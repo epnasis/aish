@@ -348,3 +348,61 @@ class TestThePromptCarriesTheWholeVocabulary:
         examples = rule_compiler.WORKED_EXAMPLES
         for subject in rules.SUBJECTS | {rules.SUBJECT_ALWAYS}:
             assert f'"when_subject": "{subject}"' in examples, subject
+
+
+class TestPartialIsAllowedButNeverSilent:
+    """The owner's ruling, and it reframed the problem rather than relaxing it.
+
+    "Never edit the source, always open an issue instead" is ONE enforcement
+    plus GUIDANCE — the guidance is what makes a refusal actionable, and it
+    belongs in the prose body. Refusing the whole request because the guidance
+    half is not an obligation was the compiler misreading the shape of a rule.
+
+    Where something genuinely cannot be expressed, partial is acceptable **but
+    never silent**: the card names what is enforced and what is not, and he
+    decides."""
+
+    FIELDS = {
+        "name": "no-source-edits", "description": "Never edit aish's own source.",
+        "when_subject": "action", "when_action": {"path_under": "~/dev/aish"},
+        "never_use": ["write_file"],
+    }
+
+    def _compile(self, reply):
+        return rule_compiler.compile_request(
+            "never edit the source, open an issue instead",
+            lambda _p: json.dumps(reply),
+            {"write_file", "gh_issue_create"},
+        )
+
+    def test_a_dropped_clause_rides_ALONGSIDE_the_rule(self):
+        out = self._compile({**self.FIELDS,
+                             "could_not_express": "always opening an issue"})
+        assert out.fields, "the expressible half must still be written"
+        assert out.dropped == "always opening an issue"
+        assert not out.problem
+
+    def test_a_rule_with_nothing_dropped_says_nothing(self):
+        out = self._compile(self.FIELDS)
+        assert out.fields and out.dropped == ""
+
+    def test_it_is_capped_like_every_other_owner_facing_sentence(self):
+        out = self._compile({**self.FIELDS, "could_not_express": "x" * 5000})
+        assert len(out.dropped) <= rule_compiler.CANNOT_CHARS
+
+    def test_a_non_string_cannot_leak_into_the_card(self):
+        out = self._compile({**self.FIELDS, "could_not_express": {"a": 1}})
+        assert out.fields
+        assert "{" not in out.dropped or out.dropped == ""
+
+    def test_cannot_still_means_NOTHING_could_be_expressed(self):
+        """The all-or-nothing path is kept for the case it was written for."""
+        out = self._compile({"cannot": "none of this is about aish's behaviour"})
+        assert not out.fields and out.problem
+
+    def test_the_prompt_teaches_that_guidance_is_the_THIRD_part(self):
+        prompt = rule_compiler.PROMPT.replace(
+            "{vocabulary}", rule_compiler._vocabulary())
+        assert "THREE PARTS" in prompt
+        assert "prose" in prompt
+        assert "could_not_express" in prompt
