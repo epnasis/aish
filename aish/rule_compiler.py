@@ -73,16 +73,12 @@ def _vocabulary() -> str:
         "then refused for that answer.",
         "- never_use: a list of tool names that must not run.",
         "- must_first: one tool that must have RUN before the answer is delivered.",
-        "- answer_must_include_result_of: a TOOL whose output must appear in the answer — the "
-        "answer must carry what it produced. Use `{any_of: [tool, tool]}` when "
-        "either will do.",
-        "- never_discard_result_of: the same, but CONDITIONAL — it does not force "
-        "the tool to run; it only says that if it does run, what it produced has "
-        "to appear in the answer. Use this for 'don't fetch something and then "
-        "drop it'.",
-        "- answer_must_include / answer_must_not_include: `{pattern: <regex>}` for "
-        "anything about the answer's TEXT. Never a plain phrase — a check "
-        "nothing can evaluate is a promise nothing keeps.",
+        "- answer_must_include / answer_must_not_include: what has to be (or not "
+        "be) in the finished answer. Either something the reader would SEE — "
+        + ", ".join(sorted(rules.ANSWER_KINDS)) + " — or `{pattern: <regex>}` for "
+        "anything about the wording. Use `{any_of: [picture, video]}` when either "
+        "will do. NEVER a plain phrase: a check nothing can evaluate is a promise "
+        "nothing keeps.",
         "- must_tell_me_when: a failure the owner must be told about in plain "
         "words rather than quietly patched over.",
     ]
@@ -130,11 +126,15 @@ restate the obligation — the fields above are what is enforced.
 
 Two things decide whether this is right:
 
-1. CHECK THE ANSWER, NOT THE REQUEST, wherever you can. "Always show pictures \
-with show_image" is not a rule about messages that mention pictures — a wholly \
-ordinary request can still produce an answer that wants one. That is \
-when_subject "always" plus an obligation on the answer, and it is both cheaper \
-and more correct than any trigger.
+1. CHECK THE ANSWER, NOT THE REQUEST, wherever you can. "Always show pictures" \
+is not a rule about messages that mention pictures — a wholly ordinary request \
+can still produce an answer that wants one. That is when_subject "always" plus \
+an obligation on the answer, and it is both cheaper and more correct than any \
+trigger.
+
+Say what the PERSON would notice, never how aish produces it. "the answer must \
+include a picture", not "the answer must include the output of some tool" — \
+which tool ran is an implementation detail they never see.
 
 2. NEVER USE A WORD LIST FOR A MEANING. when_matches on "show|display|picture" \
 fires on "the Docker image is broken" and misses the same sentence in another \

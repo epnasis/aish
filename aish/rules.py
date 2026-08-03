@@ -74,21 +74,16 @@ VERB_MUST_FIRST = "must_first"
 VERB_ANSWER_MUST_INCLUDE = "answer_must_include"
 VERB_ANSWER_MUST_NOT_INCLUDE = "answer_must_not_include"
 # Two general forms replacing the fixed list of named checks. Both name a TOOL.
-VERB_MUST_INCLUDE_RESULT = "answer_must_include_result_of"
-VERB_NEVER_DISCARD = "never_discard_result_of"
 VERBS = frozenset({
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_TELL_ME_WHEN,
     VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE,
-    VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD,
 })
 # Verbs decided at the END of a turn, against the answer and the turn's own
 # record — not before a call. The gate cannot see either.
 VERIFY_VERBS = frozenset({
     VERB_MUST_FIRST, VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE,
-    VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD,
 })
 # The verbs whose value is a tool name (or a choice of them), not a check name.
-TOOL_VERBS = frozenset({VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD})
 # Designed, unbuilt — named here so a lint failure can say what is MISSING
 # rather than merely that the file is wrong (#205).
 VERBS_DESIGNED = {
@@ -100,41 +95,61 @@ VERBS_DESIGNED = {
 # admission price: a verb ships only if it compiles to a declared check. A free
 # phrase ("be terser") is a judged question and is refused by name until that
 # tier exists, rather than shipping as a promise nothing keeps.
-# What `answer_must_include_result_of:` / `never_discard_result_of:` name: A TOOL. Not a check
-# invented per media type.
+# What `answer_must_include:` names: A KIND OF THING A PERSON NOTICES in an
+# answer. Not a tool, and not a media-type-per-combination name.
 #
-# The first version shipped a fixed list of named checks — shows_a_picture,
-# shows_a_video, links_to_what_you_read — and every new thing the owner wanted
-# meant coining another name in code. He called it hardcoded and he was right:
-# the rule LANGUAGE should be small and stable, and what he composes from it
-# should be his. Two general forms replace all four:
+# Three attempts got here. The first coined a name per combination
+# (shows_a_picture, shows_a_video, shows_something_visual) — hardcoded, and it
+# grew with every question asked. The second named the TOOL instead
+# (`answer_must_include_result_of: show_image`) — which was worse, because it
+# put the plumbing in the owner's sentence. His objection, and it settles it:
 #
-#   answer_must_include_result_of: <tool>     the answer must carry that tool's output
-#   never_discard_result_of: <tool>   IF it ran, its output must be in the answer
-#   answer_must_include: {pattern: …}   anything about the text, written by him
+#   "I ask a question, I get something in return. All the things in between are
+#    implementation details… if I ask you to show me something, I would like you
+#    to actually show me something. Show means visual. Video or picture."
 #
-# The per-tool knowledge that remains — how a given tool's work appears in an
-# answer — is a fact about the TOOL, not about his rules, so it lives beside
-# the tools and costs one line each rather than a new verb per idea.
+# So the vocabulary is what he can SEE in an answer. That list does not have
+# the growth problem tools have: tools grow forever, one per new API, while the
+# kinds of thing a person notices are few and stay few. It grows when human
+# perception changes, which is never.
+#
+# How a kind is CHECKED — which tool had to run, what token has to appear — is
+# code's problem, invisible in the rule file. That is the layering: he writes
+# the outcome, the code knows how to verify it.
+KIND_PICTURE = "picture"
+KIND_VIDEO = "video"
+KIND_SOURCES = "sources"
+ANSWER_KINDS = {
+    KIND_PICTURE: "a picture you can actually see",
+    KIND_VIDEO: "a video you can play",
+    KIND_SOURCES: "a link to whatever it read to answer",
+}
+
+# `any_of:` — the ONE place the grammar says "or". Named rather than left as a
+# bare list, because `never_use: [a, b]` already means NONE OF THESE, and two
+# lists in one file meaning opposite things is the trap that produced the
+# coined-per-combination names in the first place. What goes inside is only
+# ever kind names, so it cannot grow into a tree.
 CHOICE_KEY = "any_of"
 CHOICE_MAX = 4
 
-# How each tool's work shows up in a finished answer. `args` when the answer
-# should carry what went IN (the page you read), `result` when it should carry
-# what came OUT (the stored picture's path, the validated video link).
-CITE_FROM_ARGS = "args"
-CITE_FROM_RESULT = "result"
-CITATIONS: dict[str, tuple[str, str]] = {
-    # tool -> (where to look, which field)
-    "read_url": (CITE_FROM_ARGS, "url"),
-    "show_image": (CITE_FROM_RESULT, ""),
-    "show_video": (CITE_FROM_RESULT, ""),
-    "youtube_analyze": (CITE_FROM_ARGS, "url"),
+# What each kind is made of, in code, where the owner never has to look.
+#
+# `needs` is the tool whose work makes the thing real: a picture is one aish
+# fetched and stored, not a URL pasted into the text — that renders as a broken
+# box, which is exactly the thing he WOULD notice. `conditional` marks a kind
+# that only exists when there was something to show: nothing read means no
+# sources, so the rule is met. That is why the second verb disappeared — the
+# condition belongs to the kind, not to a verb.
+KIND_SPECS: dict[str, dict] = {
+    KIND_PICTURE: {"needs": "show_image", "cite": "result", "conditional": False},
+    KIND_VIDEO: {"needs": "show_video", "cite": "result", "conditional": False},
+    KIND_SOURCES: {"needs": "read_url", "cite": "args:url", "conditional": True},
 }
 
-# What a citation looks like in text, per tool. show_image hands back a LOCAL
-# path and show_video a video link; both are quoted verbatim into the answer,
-# so the check is presence of that exact string.
+# Both show_* tools hand back a line containing the exact token to paste, in
+# (parentheses). Reading it back out is what makes the check an equality rather
+# than a guess about shape.
 _CITE_TOKEN_RE = re.compile(r"\((?P<inner>[^)\s]+)\)")
 
 _MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
@@ -703,10 +718,6 @@ def _compile(front: dict) -> _Compiled:
         if (value := then.get(verb)) in (None, ""):
             continue
         obligations.append({"verb": verb, **_answer_check(verb, value)})
-    for verb in (VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD):
-        if (value := then.get(verb)) in (None, "", [], {}):
-            continue
-        obligations.append({"verb": verb, "tools": _tool_choice(verb, value)})
     if state := str(then.get(VERB_MUST_TELL_ME_WHEN, "") or "").strip():
         # Declared, seeded as prose, enforced at Verify — never at the gate.
         obligations.append({"verb": VERB_MUST_TELL_ME_WHEN, "state": state})
@@ -721,61 +732,52 @@ def _compile(front: dict) -> _Compiled:
     )
 
 
-def _tool_choice(verb: str, value: Any) -> list[str]:
-    """A tool name, or a CHOICE of them. Never a nested condition.
+def _answer_check(verb: str, value: Any) -> dict:
+    """Compile an `answer_must_*` value into a declared, structural check.
 
-    `any_of:` is the one place the grammar says "or", and it is named rather
-    than left as a bare list because `never_use: [a, b]` already means NONE OF
-    THESE — two lists in one file meaning opposite things is the readability
-    trap that made the first design coin a name per combination instead. What
-    goes inside is only ever tool names, so it cannot grow into a tree.
+    A KIND (or a choice of kinds) for something the reader would notice; a
+    `{pattern: <regex>}` for anything about the wording. Nothing else — a plain
+    phrase is a judged question and that tier is not built.
     """
-    if isinstance(value, dict):
-        if set(value) != {CHOICE_KEY}:
-            raise RuleError(
-                f"`{verb}:` takes a tool name, or `{CHOICE_KEY}:` with a list of them"
-            )
+    if isinstance(value, dict) and CHOICE_KEY in value:
         names = [str(name).strip() for name in _as_list(value[CHOICE_KEY]) if str(name).strip()]
         if len(names) < 2:
             raise RuleError(
-                f"`{verb}: {CHOICE_KEY}:` is for a CHOICE — give at least two tools, "
-                "or name one directly"
+                f"`{verb}: {CHOICE_KEY}:` is for a CHOICE — give at least two, or "
+                "name one directly"
             )
         if len(names) > CHOICE_MAX:
             raise RuleError(
-                f"`{verb}: {CHOICE_KEY}:` takes at most {CHOICE_MAX} tools. Past a "
-                "handful, a rule that accepts almost anything restricts almost nothing"
+                f"`{verb}: {CHOICE_KEY}:` takes at most {CHOICE_MAX}. Past a handful, "
+                "a rule that accepts almost anything restricts almost nothing"
             )
-        return names
-    if isinstance(value, list):
-        raise RuleError(
-            f"`{verb}:` takes ONE tool. For a choice, say `{CHOICE_KEY}:` under it — "
-            "a bare list would read as 'all of these', which is what it means "
-            "everywhere else in a rule"
-        )
-    name = str(value).strip()
-    if not name:
-        raise RuleError(f"`{verb}:` needs a tool name")
-    return [name]
-
-
-def _answer_check(verb: str, value: Any) -> dict:
-    """Compile an `answer_must_*` value into a declared, structural check."""
+        unknown = [name for name in names if name not in ANSWER_KINDS]
+        if unknown:
+            raise RuleError(
+                f"`{verb}: {CHOICE_KEY}:` takes {', '.join(sorted(ANSWER_KINDS))} — "
+                f"and {unknown[0]!r} is not one of them"
+            )
+        return {"kinds": names}
     if isinstance(value, dict):
         pattern = str(value.get("pattern", "") or "").strip()
         if not pattern:
-            raise RuleError(f"`{verb}:` needs `pattern:` under it, or a detector name")
+            raise RuleError(
+                f"`{verb}:` needs `pattern:` or `{CHOICE_KEY}:` under it, or the name "
+                "of something the reader would see: " + ", ".join(sorted(ANSWER_KINDS))
+            )
         try:
             re.compile(pattern)
         except re.error as exc:
             raise RuleError(f"unparseable `{verb}: pattern:` — {exc}") from exc
         return {"pattern": pattern}
     name = str(value).strip()
+    if name in ANSWER_KINDS:
+        return {"kinds": [name]}
     raise RuleError(
         f"`{verb}: {name!r}` is a plain phrase, which only a judge can check, and "
-        f"the judged tier is not built. Use `{verb}: {{pattern: <regex>}}` for "
-        f"something about the TEXT, or `{VERB_MUST_INCLUDE_RESULT}: <tool>` / "
-        f"`{VERB_NEVER_DISCARD}: <tool>` for something about what aish DID."
+        f"the judged tier is not built. Name something the reader would SEE — "
+        + ", ".join(sorted(ANSWER_KINDS))
+        + f" — or, for anything about the wording, `{verb}: {{pattern: <regex>}}`."
     )
 
 
@@ -1155,8 +1157,14 @@ def unsatisfiable(rule: Rule, readers: list[str], known_tools: set[str] | None) 
     for obligation in rule.obligations:
         if obligation["verb"] == VERB_MUST_FIRST and obligation["capability"] not in known_tools:
             missing.append(str(obligation["capability"]))
-        if obligation["verb"] in TOOL_VERBS:
-            missing += [t for t in obligation["tools"] if t not in known_tools]
+        # A KIND names something the reader sees, and every kind is made real
+        # by a tool. If that tool is gone the rule can never be satisfied — so
+        # it is caught here, in the tool's name, even though the rule file
+        # never mentions it.
+        for kind in obligation.get("kinds", ()):
+            needed = KIND_SPECS[kind]["needs"]
+            if needed not in known_tools:
+                missing.append(str(needed))
     return missing
 
 
@@ -1509,18 +1517,22 @@ MUST_NOT_ASK = (
     "Rewrite the answer without it."
 )
 
-MUST_INCLUDE_RESULT_ASK = (
-    "The rule '{rule}' requires the answer to carry what {tools} produced, and it "
-    "does not. {description}\n"
-    "Call it, then paste the line it hands back into the answer EXACTLY as "
-    "written — that line is what the app renders. Then give the answer again."
-)
-
-NEVER_DISCARD_ASK = (
-    "The rule '{rule}' requires that whatever {tools} produced this turn appears "
-    "in the answer, and {missing} is missing. {description}\n"
-    "You used it and then dropped it — add it and give the answer again."
-)
+# How to produce each kind, in the model's own terms. The rule file never says
+# a tool name; the ASK has to, because the model is the one who has to act.
+KIND_HOW = {
+    KIND_PICTURE: (
+        "Call show_image for the picture that belongs here, and paste the line it "
+        "hands back into the answer EXACTLY as written — that line is what renders."
+    ),
+    KIND_VIDEO: (
+        "Call show_video with the video's own link and paste the line it hands "
+        "back. A link to a page ABOUT a video is not a video."
+    ),
+    KIND_SOURCES: (
+        "Link the pages you read. An answer built on something the reader cannot "
+        "see is an answer they cannot check."
+    ),
+}
 
 
 def has_verify(bindings: list[Binding]) -> bool:
@@ -1588,8 +1600,8 @@ def _verify_one(
             askable=not blocked,
         )
 
-    if verb in TOOL_VERBS:
-        return _verify_tools(binding, obligation, evidence, common)
+    if kinds := obligation.get("kinds"):
+        return _verify_kinds(binding, obligation, evidence, list(kinds), common)
 
     pattern = re.compile(str(obligation["pattern"]))
     hit = pattern.search(evidence.answer or "")
@@ -1604,75 +1616,66 @@ def _verify_one(
     )
 
 
-def citations(call: dict) -> list[str]:
-    """The strings that must appear in an answer for this call to be credited.
+def _present(kind: str, evidence: TurnEvidence) -> tuple[bool, list[str]]:
+    """(is it there, what was expected). The whole of what a kind means.
 
-    Per-TOOL knowledge, and that is where it belongs: how a picture or a page
-    shows up in a finished answer is a fact about the tool, not about the
-    owner's rules. One line each in `CITATIONS`, rather than a new check name
-    every time he wants to require something.
+    A picture is one aish FETCHED and stored, not a URL pasted into the text —
+    that renders as a broken box, which is precisely what the reader notices.
+    So the check is a join: the tool ran (the harness wrote that, not the
+    model), and the exact token it handed back is in the answer. An equality,
+    never a guess about shape.
     """
-    where, key = CITATIONS.get(str(call.get("tool") or ""), ("", ""))
-    if where == CITE_FROM_ARGS:
-        value = str((call.get("args") or {}).get(key, "") or "").strip()
-        return [value] if value else []
-    if where == CITE_FROM_RESULT:
-        # Both show_* tools hand back a line containing the exact token to
-        # paste, in (parentheses). Reading it back out is what makes the check
-        # an equality rather than a guess about shape.
-        return list(dict.fromkeys(
-            match.group("inner")
-            for match in _CITE_TOKEN_RE.finditer(str(call.get("result") or ""))
-        ))
-    return []
+    spec = KIND_SPECS[kind]
+    answer = evidence.answer or ""
+    wanted: list[str] = []
+    for call in evidence.calls:
+        if call.get("tool") != spec["needs"] or not _ran(call):
+            continue
+        if spec["cite"] == "result":
+            wanted += [
+                match.group("inner")
+                for match in _CITE_TOKEN_RE.finditer(str(call.get("result") or ""))
+            ]
+        else:
+            field = str(spec["cite"]).split(":", 1)[1]
+            value = str((call.get("args") or {}).get(field, "") or "").strip()
+            if value:
+                wanted.append(value)
+    wanted = list(dict.fromkeys(wanted))
+    return (bool(wanted) and all(token in answer for token in wanted)), wanted
 
 
-def _cited(answer: str, call: dict) -> bool:
-    tokens = citations(call)
-    return bool(tokens) and any(token in answer for token in tokens)
-
-
-def _verify_tools(
-    binding: Binding, obligation: dict, evidence: TurnEvidence, common: dict
+def _verify_kinds(
+    binding: Binding, obligation: dict, evidence: TurnEvidence,
+    kinds: list[str], common: dict,
 ) -> VerifyFailure | None:
-    """`answer_must_include_result_of` and `never_discard_result_of`, over one tool or a choice.
+    """One kind, or any of several.
 
-    One rule with a condition, and the names say so. The first pair was called
-    `show` and `credit`, which stretched one metaphor over two different
-    things: you cite the page you read, but you do not "credit" show_image, you
-    show the picture it made. Naming the CONDITION instead of inventing a
-    second metaphor also retires the comment that used to be needed here to say
-    which way round they were.
+    A CONDITIONAL kind — sources — is met when there was nothing to show:
+    nothing read means nothing to link. That condition belongs to the kind and
+    not to a second verb, which is why the verb that used to carry it is gone.
     """
     verb = obligation["verb"]
-    tools = list(obligation["tools"])
-    answer = evidence.answer or ""
-    calls = [c for c in evidence.calls if c.get("tool") in tools and _ran(c)]
-    cited = [c for c in calls if _cited(answer, c)]
-    wording = " or ".join(tools)
-    shared = {"tools": tools, "ran": [c.get("tool") for c in calls],
-              "cited": [c.get("tool") for c in cited]}
-
-    if verb == VERB_MUST_INCLUDE_RESULT:
-        if cited:
-            return None
-        return VerifyFailure(
-            binding, obligation, shared,
-            MUST_INCLUDE_RESULT_ASK.format(tools=wording, **common),
-            # Nothing to re-ask for when the harness itself blocked every one
-            # of them: the goad would argue with another gate.
-            askable=not all(evidence.refused(name) for name in tools),
+    results = {kind: _present(kind, evidence) for kind in kinds}
+    hit = any(present for present, _ in results.values())
+    if not hit and verb == VERB_ANSWER_MUST_INCLUDE:
+        nothing_to_show = all(
+            KIND_SPECS[kind]["conditional"] and not wanted
+            for kind, (_p, wanted) in results.items()
         )
-
-    uncredited = [c for c in calls if c not in cited]
-    if not uncredited:
+        if nothing_to_show:
+            return None
+    if hit == (verb == VERB_ANSWER_MUST_INCLUDE):
         return None
-    missing = ", ".join(dict.fromkeys(
-        token for call in uncredited for token in citations(call)
-    )) or "what it produced"
+    wording = " or ".join(ANSWER_KINDS[kind] for kind in kinds)
+    template = MUST_INCLUDE_ASK if verb == VERB_ANSWER_MUST_INCLUDE else MUST_NOT_ASK
+    how = " ".join(dict.fromkeys(KIND_HOW[kind] for kind in kinds))
     return VerifyFailure(
-        binding, obligation, {**shared, "missing": missing[:EVIDENCE_CHARS]},
-        NEVER_DISCARD_ASK.format(tools=wording, missing=missing[:200], **common),
+        binding, obligation,
+        {"kinds": kinds,
+         "expected": {k: w for k, (_p, w) in results.items() if w},
+         "present": [k for k, (p, _w) in results.items() if p]},
+        template.format(what=wording, **common) + ("\n" + how if how else ""),
     )
 
 
@@ -1746,18 +1749,12 @@ def _obligation_line(obligation: dict) -> str:
             f"· MUST call {obligation['capability']} before answering. The answer "
             "is checked for it, and held back until it has run."
         )
-    if verb == VERB_MUST_INCLUDE_RESULT:
-        tools = " or ".join(obligation["tools"])
-        return (
-            f"· MUST: the answer carries what {tools} produced. Call it and paste the "
-            "line it hands back EXACTLY as written — that line is what renders."
-        )
-    if verb == VERB_NEVER_DISCARD:
-        tools = " or ".join(obligation["tools"])
-        return (
-            f"· MUST: if you use {tools}, what it produced appears in the answer. "
-            "Using something and then dropping it is the failure here."
-        )
+    if kinds := obligation.get("kinds"):
+        described = " or ".join(ANSWER_KINDS[kind] for kind in kinds)
+        how = " ".join(dict.fromkeys(KIND_HOW[kind] for kind in kinds))
+        if verb == VERB_ANSWER_MUST_INCLUDE:
+            return f"· MUST: the answer includes {described}. {how}"
+        return f"· MUST NOT: the answer contains {described}. It is checked before delivery."
     described = f"the pattern /{obligation.get('pattern')}/"
     if verb == VERB_ANSWER_MUST_INCLUDE:
         return f"· MUST: the answer includes {described}. It is checked before you see it."
@@ -1855,8 +1852,8 @@ AUTHOR_FIELDS = (
     "when_origin", "when_action",
     VERB_ANSWER_FROM, VERB_NEVER_USE, VERB_MUST_FIRST,
     VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE, VERB_MUST_TELL_ME_WHEN,
-    VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD,
 )
+
 
 # The subset a prose compiler may propose. The prompt never asks for the
 # lifecycle keys, so accepting them is pure attack surface: `expires:
@@ -1995,27 +1992,21 @@ def render(fields: dict) -> str:
         then.append(f"  {VERB_NEVER_USE}: [{', '.join(never)}]")
     for verb in (VERB_ANSWER_MUST_INCLUDE, VERB_ANSWER_MUST_NOT_INCLUDE):
         value = fields.get(verb)
-        if value in (None, "", {}):
-            continue
-        if isinstance(value, dict):
-            then += [f"  {verb}:", f"    pattern: {_yaml_scalar(value.get('pattern', ''))}"]
-        else:
-            then.append(f"  {verb}: {_yaml_scalar(value)}")
-    for verb in (VERB_MUST_INCLUDE_RESULT, VERB_NEVER_DISCARD):
-        value = fields.get(verb)
         if value in (None, "", {}, []):
             continue
         if isinstance(value, list):
             # `never_use: [a, b]` already means NONE OF THESE, so a bare list
             # here would have two lists in one file meaning opposite things.
             raise LintError(
-                f"`{verb}` takes ONE tool. For a choice, pass "
+                f"`{verb}` takes one thing. For a choice, pass "
                 f"{{'{CHOICE_KEY}': [...]}} — a bare list would read as 'all of "
                 "these', which is what it means everywhere else in a rule."
             )
-        if isinstance(value, dict):
-            names = _as_list(value.get(CHOICE_KEY))
+        if isinstance(value, dict) and CHOICE_KEY in value:
+            names = _as_list(value[CHOICE_KEY])
             then += [f"  {verb}:", f"    {CHOICE_KEY}: [{', '.join(names)}]"]
+        elif isinstance(value, dict):
+            then += [f"  {verb}:", f"    pattern: {_yaml_scalar(value.get('pattern', ''))}"]
         else:
             then.append(f"  {verb}: {_yaml_scalar(value)}")
     if not then:
@@ -2069,9 +2060,12 @@ def lint(text: str, known_tools: set[str] | None = None) -> tuple[Rule | None, l
         readers = [o["to"] for o in rule.obligations
                    if o["verb"] == VERB_ANSWER_FROM and o["to"] != ROUTE_MATERIAL]
         firsts = [o["capability"] for o in rule.obligations if o["verb"] == VERB_MUST_FIRST]
-        cited = [name for o in rule.obligations if o["verb"] in TOOL_VERBS
-                 for name in o["tools"]]
-        for named in readers + firsts + cited:
+        # A kind names something the reader sees; a TOOL is what makes it
+        # real. The rule file never mentions that tool, so if it is gone the
+        # rule can never be satisfied and nothing in the file would say why.
+        kinds = [KIND_SPECS[k]["needs"] for o in rule.obligations
+                 for k in o.get("kinds", ())]
+        for named in readers + firsts + kinds:
             if named not in known_tools:
                 errors.append(
                     f"names a tool that does not exist: {named!r}. A rule routing to "
@@ -2138,15 +2132,11 @@ def explain(rule: Rule) -> str:
             says.append(f"call {obligation['capability']} before answering")
         elif verb == VERB_MUST_TELL_ME_WHEN:
             says.append(f"tell me when {obligation['state']}")
-        elif verb == VERB_MUST_INCLUDE_RESULT:
+        elif kinds := obligation.get("kinds"):
             says.append(
-                "the answer must show what " + " or ".join(obligation["tools"])
-                + " produced"
-            )
-        elif verb == VERB_NEVER_DISCARD:
-            says.append(
-                "if you use " + " or ".join(obligation["tools"])
-                + ", what it produced must be in the answer"
+                ("the answer must include " if verb == VERB_ANSWER_MUST_INCLUDE
+                 else "the answer must never contain ")
+                + " or ".join(ANSWER_KINDS[kind] for kind in kinds)
             )
         else:
             says.append(

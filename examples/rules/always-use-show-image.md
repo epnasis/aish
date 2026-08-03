@@ -3,7 +3,6 @@ name: always-use-show-image
 description: Any picture in an answer comes from show_image, never a raw markdown link.
 when: always
 then:
-  never_discard_result_of: show_image
   answer_must_not_include:
     pattern: '!\[[^\]]*\]\(https?://'
 ---
@@ -19,8 +18,8 @@ whole reason this rule had to wait for the Verify point: at the gate there is
 nothing to check, because the mistake is not a call anyone made — it is a call
 nobody made.
 
-Two halves, and both are needed. The credit half is a JOIN: show_image hands
-back a local path, and the check is that this exact path is in the answer — so
-a picture fetched and then dropped fails. The pattern half catches the opposite
-mistake, a remote image URL pasted straight into the answer, which renders as a
-dead box. Neither half is a phrase the model can talk its way past.
+This one is a pattern rather than a named thing, because it is about what must
+NOT be in the text: a remote image URL pasted straight into the answer, which
+renders as a dead box. The other half — "a picture actually got shown" — needs
+no rule at all. It is what the word "picture" means anywhere it is used: aish
+fetched it, and the reader can see it.

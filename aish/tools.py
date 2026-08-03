@@ -1262,28 +1262,16 @@ TOOL_SCHEMAS = [
                         "delivered. Checked at the end of the turn against what actually "
                         "happened, not against what you say happened.",
                     },
-                    "answer_must_include_result_of": {
-                        "type": "string",
-                        "description": "A TOOL whose output the answer must carry — "
-                        "e.g. 'show_image'. The tool has to run AND what it produced "
-                        "has to appear in the answer. For 'either will do', pass "
-                        "{\"any_of\": [\"show_image\", \"show_video\"]}.",
-                    },
-                    "never_discard_result_of": {
-                        "type": "string",
-                        "description": "Same, but CONDITIONAL: it does not force the "
-                        "tool to run. If it does run, what it produced must appear in "
-                        "the answer. Use for 'do not fetch something and then drop it'.",
-                    },
                     "answer_must_include": {
                         "type": "string",
-                        "description": "A named check on the finished answer. "
-                        "'shows_something_visual' (a picture OR a playable video — use "
-                        "this when the user says 'show me'), 'shows_a_picture' (a "
-                        "picture specifically, fetched with show_image this turn), "
-                        "'shows_a_video', or 'links_to_what_you_read'. A plain phrase "
-                        "is NOT accepted — a check nothing can evaluate is a promise "
-                        "nothing keeps.",
+                        "description": "What the finished answer must contain. Name "
+                        "something the USER would notice: 'picture', 'video', "
+                        "'sources' (links to whatever aish read). For 'either will "
+                        "do', pass {\"any_of\": [\"picture\", \"video\"]}. For "
+                        "something about the wording, pass {\"pattern\": \"<regex>\"}. "
+                        "A plain phrase is NOT accepted — a check nothing can evaluate "
+                        "is a promise nothing keeps. Never name a TOOL here: which "
+                        "tool ran is an implementation detail the user never sees.",
                     },
                     "answer_must_not_include": {
                         "type": "string",
@@ -1338,8 +1326,6 @@ TOOL_SCHEMAS = [
                     "answer_from": {"type": "string"},
                     "never_use": {"type": "array", "items": {"type": "string"}},
                     "must_first": {"type": "string"},
-                    "answer_must_include_result_of": {"type": "string"},
-                    "never_discard_result_of": {"type": "string"},
                     "answer_must_include": {"type": "string"},
                     "answer_must_not_include": {"type": "string"},
                     "must_tell_me_when": {"type": "string"},

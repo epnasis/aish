@@ -3299,10 +3299,10 @@ class Agent:
             "args": dict(args or {}),
             "status": status,
             "decision": decision,
-            # Capped, and kept only for THIS turn. `never_discard_result_of` has to
-            # read back the exact line a show_* tool handed over — checking that
-            # it appears in the answer is an equality, where "does the answer
-            # contain something picture-shaped" would be a guess.
+            # Capped, and kept only for THIS turn. Checking that the answer
+            # contains a picture means reading back the exact line the tool
+            # handed over — an equality, where "does the answer contain
+            # something picture-shaped" would be a guess.
             "result": str(result)[:CALL_RESULT_CHARS],
         })
 

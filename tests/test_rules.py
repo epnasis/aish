@@ -810,7 +810,7 @@ class TestTheWholeMaterialChannel:
             "  never_use: [web_search]", "  answer_must_not_include: be less annoying about it"
         ))
         assert "only a judge can check" in rule.error
-        assert "answer_must_include_result_of" in rule.error and "pattern" in rule.error
+        assert "picture" in rule.error and "pattern" in rule.error
 
 
 class TestEnabledFlag:
@@ -1257,7 +1257,7 @@ class TestShowAndCredit:
 
     def test_the_tools_own_output_in_the_answer_satisfies_it(self):
         assert not self._fail(
-            {"answer_must_include_result_of": "show_image"},
+            {"answer_must_include": "picture"},
             f"Here it is ![ubud]({self.PATH})", (self._shown(),),
         )
 
@@ -1265,7 +1265,7 @@ class TestShowAndCredit:
         """The failure the join exists for: the tool ran, the owner saw
         nothing."""
         assert self._fail(
-            {"answer_must_include_result_of": "show_image"},
+            {"answer_must_include": "picture"},
             "Ubud is greener than the coast.", (self._shown(),),
         )
 
@@ -1273,55 +1273,58 @@ class TestShowAndCredit:
         """An EQUALITY, not a guess about shape — the exact string the tool
         handed over has to be there."""
         assert self._fail(
-            {"answer_must_include_result_of": "show_image"},
+            {"answer_must_include": "picture"},
             "Here it is ![x](/media/something-else.png)", (self._shown(),),
         )
 
     def test_never_calling_the_tool_does_not_satisfy_show(self):
-        assert self._fail({"answer_must_include_result_of": "show_image"}, "no picture", ())
+        assert self._fail({"answer_must_include": "picture"}, "no picture", ())
 
     def test_a_refused_call_cannot_satisfy_it(self):
         refused = {**self._shown(), "decision": "denied", "status": "failed"}
         assert self._fail(
-            {"answer_must_include_result_of": "show_image"},
+            {"answer_must_include": "picture"},
             f"Here it is ![ubud]({self.PATH})", (refused,),
         )
 
     def test_credit_passes_when_the_tool_never_ran(self):
         """The difference between the two words: CREDIT is conditional. If
         nothing was used there is nothing to credit."""
-        assert not self._fail({"never_discard_result_of": "read_url"}, "an answer", ())
+        assert not self._fail({"answer_must_include": "sources"}, "an answer", ())
 
     def test_credit_fails_when_what_ran_is_not_in_the_answer(self):
         call = self._call("read_url", "page text", {"url": "https://shop.example/x"})
-        assert self._fail({"never_discard_result_of": "read_url"}, "about 40 EUR", (call,))
+        assert self._fail({"answer_must_include": "sources"}, "about 40 EUR", (call,))
 
     def test_credit_passes_when_the_page_is_linked(self):
         call = self._call("read_url", "page text", {"url": "https://shop.example/x"})
         assert not self._fail(
-            {"never_discard_result_of": "read_url"},
+            {"answer_must_include": "sources"},
             "about 40 EUR — see https://shop.example/x", (call,),
         )
 
-    def test_the_ask_names_the_thing_that_is_missing(self):
+    def test_the_ask_tells_the_model_how_to_produce_it(self):
+        """The rule file never names a tool. The ASK has to — the model is the
+        one who has to act."""
         call = self._call("read_url", "t", {"url": "https://shop.example/x"})
-        [failure] = self._fail({"never_discard_result_of": "read_url"}, "40 EUR", (call,))
-        assert "shop.example" in failure.ask
+        [failure] = self._fail({"answer_must_include": "sources"}, "40 EUR", (call,))
+        assert "Link the pages you read" in failure.ask
+        assert failure.evidence["expected"]["sources"] == ["https://shop.example/x"]
 
     def test_either_tool_satisfies_a_choice(self):
-        then = {"answer_must_include_result_of": {"any_of": ["show_image", "show_video"]}}
+        then = {"answer_must_include": {"any_of": ["picture", "video"]}}
         assert not self._fail(then, f"see [Watch]({self.VIDEO})", (self._played(),))
         assert not self._fail(then, f"see ![x]({self.PATH})", (self._shown(),))
 
     def test_neither_tool_fails_the_choice(self):
         assert self._fail(
-            {"answer_must_include_result_of": {"any_of": ["show_image", "show_video"]}},
+            {"answer_must_include": {"any_of": ["picture", "video"]}},
             "Ubud is greener than the coast.", (),
         )
 
     def test_the_ask_names_both_ways_out(self):
         [failure] = self._fail(
-            {"answer_must_include_result_of": {"any_of": ["show_image", "show_video"]}}, "text", ()
+            {"answer_must_include": {"any_of": ["picture", "video"]}}, "text", ()
         )
         assert "show_image" in failure.ask and "show_video" in failure.ask
 
@@ -1331,27 +1334,30 @@ class TestShowAndCredit:
         with pytest.raises(rules.LintError) as exc:
             rules.render({
                 "name": "r", "description": "d", "when_subject": "always",
-                "answer_must_include_result_of": ["show_image", "show_video"],
+                "answer_must_include": ["picture", "video"],
             })
         assert "any_of" in str(exc.value)
 
     def test_a_choice_of_one_is_refused(self):
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always",
-            "answer_must_include_result_of": {"any_of": ["show_image"]},
+            "answer_must_include": {"any_of": ["picture"]},
         }), known_tools=self.TOOLS)
         assert rule is None and "at least two" in errors[0]
 
-    def test_a_tool_that_does_not_exist_is_caught_at_the_lint(self):
+    def test_the_tool_a_kind_needs_is_checked_even_though_it_is_unnamed(self):
+        """A kind is made real by a tool. If that tool is gone the rule can
+        never be satisfied — caught in the tool's name, though the rule file
+        never mentions it."""
         rule, errors = rules.lint(rules.render({
             "name": "r", "description": "d", "when_subject": "always",
-            "answer_must_include_result_of": "show_hologram",
-        }), known_tools=self.TOOLS)
-        assert rule is None and "show_hologram" in errors[0]
+            "answer_must_include": "picture",
+        }), known_tools={"read_url"})
+        assert rule is None and "show_image" in errors[0]
 
     def test_a_video_the_tool_validated_is_credited(self):
         assert not self._fail(
-            {"answer_must_include_result_of": "show_video"}, f"see {self.VIDEO}", (self._played(),)
+            {"answer_must_include": "video"}, f"see {self.VIDEO}", (self._played(),)
         )
 
 
@@ -1401,7 +1407,7 @@ class TestMeaningTrigger:
         rule, errors = rules.lint(rules.render({
             "name": "show-me", "description": "Show me a picture.",
             "when_subject": "prompt", "when_sounds_like": self.ANCHORS,
-            "answer_must_include_result_of": "show_image", **over,
+            "answer_must_include": "picture", **over,
         }), known_tools={"show_image"})
         assert not errors, errors
         return rule

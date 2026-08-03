@@ -75,12 +75,12 @@ class TestCompiling:
         wordy = json.dumps({
             "name": "r", "description": "d", "when_subject": "prompt",
             "when_matches": "(?i)(show|display|picture|photo)",
-            "answer_must_include_result_of": "show_image",
+            "answer_must_include": "picture",
         })
         good = json.dumps({
             "name": "r", "description": "d", "when_subject": "prompt",
             "when_sounds_like": ["show me the difference between X and Y"],
-            "answer_must_include_result_of": "show_image",
+            "answer_must_include": "picture",
         })
         ask = scripted(wordy, good)
         result = rule_compiler.compile_request("show me things", ask, TOOLS)
@@ -93,7 +93,8 @@ class TestCompiling:
         ask = scripted(GOOD)
         rule_compiler.compile_request("x", ask, TOOLS)
         prompt = ask.prompts[0]
-        assert "answer_must_include_result_of" in prompt and "never_discard_result_of" in prompt
+        for kind in rules.ANSWER_KINDS:
+            assert kind in prompt
         for verb in (rules.VERB_ANSWER_FROM, rules.VERB_MUST_FIRST):
             assert verb in prompt
 

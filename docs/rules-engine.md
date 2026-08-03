@@ -72,7 +72,7 @@ The runtime object is the **binding**: when a trigger matches a turn, the harnes
 
 Moving the condition from *what the owner asked* to *what the model produced* is what turned most of the behaviour-shaped corpus from "unverifiable" into plain code — and it is why scored triggers are cut rather than deferred.
 
-**The sorting law.** A verify check either **joins the answer against harness-recorded facts** or is **purely syntactic**. A semantic check over the model's own text alone is decoration and has no home here. `links_to_what_you_read` is the strongest kind — the model does not author the trace, so it cannot fake having read a page.
+**The sorting law.** A verify check either **joins the answer against harness-recorded facts** or is **purely syntactic**. A semantic check over the model's own text alone is decoration and has no home here. A join is the strongest kind: *"the answer includes a picture"* means aish fetched one and the exact token it handed back is in the text — and the model does not author the trace, so it cannot fake having fetched anything.
 
 **It runs INSIDE the loop.** A finished answer becomes a proposal; the check happens before delivery. Outside the loop there is no way to continue a turn — the step budget, the stop gate and the terminators all assume final text is final, and a second answer would be a second answer in an append-only log. `TestVerify`.
 
@@ -204,9 +204,7 @@ Deliberately **refused as scale artefacts**: precedence and priority algebra, pa
 | `never_use: [tools]` | these tools are refused for the turn | **yes** |
 | `must_tell_me_when: <plain phrase>` | this failure must be stated to the owner | declared, seeded as prose; the structural half is not built (a plain phrase is a judged question) |
 | `must_first: <tool>` | this tool must have run before the answer | **yes** |
-| `answer_must_include_result_of: <tool>` | the answer must carry what that tool produced — it has to run | **yes** |
-| `never_discard_result_of: <tool>` | *if* it runs, what it produced must be in the answer | **yes** |
-| `answer_must_include:` / `answer_must_not_include:` | `{pattern: <regex>}` over the answer's text | **yes** |
+| `answer_must_include:` / `answer_must_not_include:` | something the reader would SEE (`picture`, `video`, `sources`), `{any_of: […]}`, or `{pattern: <regex>}` over the wording | **yes** |
 | ~~`keep_in_mind:`~~ | **deleted** — see below | never |
 | `must_first: <action>` | do this before the triggering action | no |
 | `ask_me_first: true` | hold for the owner | no |
@@ -300,29 +298,33 @@ then:
 
 **A word list standing in for a meaning is now refused at the lint**, with the alternative named. Structural, so it does not depend on the compiler being persuaded: a pattern that is nothing but an alternation of ordinary words is the exact shape of the mistake, and punctuation separates it cleanly from the legitimate cases — `youtube\.com|youtu\.be` is a literal string and passes. `TestKeywordListsAreRefused`.
 
-**And the obligation his rule needed did not exist either.** The first attempt shipped a named check per media type — `shows_a_picture`, `shows_a_video`, and then `shows_something_visual` when he asked whether both could count. He called that hardcoded, and he was right: **the rule language should be small and stable, and what he composes from it should be his.** Every new thing he wanted meant coining another name in code, and I had even written down a tripwire predicting the third case — which is an admission the design does not scale.
+**And the obligation his rule needed did not exist either.** Getting it right took three attempts, and the arc is the useful part.
 
-Two general forms replaced all four:
+**First: a name per combination.** `shows_a_picture`, then `shows_a_video`, then `shows_something_visual` when he asked whether both could count. He called it hardcoded, and he was right — the vocabulary grew every time he asked a question, and I had even written a tripwire predicting the third case, which is an admission the design does not scale.
+
+**Second, over-correcting: name the TOOL.** `answer_must_include_result_of: show_image`. That removed the growth problem and introduced a worse one — it put the plumbing in his sentence. His objection settles it:
+
+> *"I ask a question, I get something in return. All the things in between are implementation details… if I ask you to show me something, I would like you to actually show me something. Show means visual. Video or picture."*
+
+**Third, and right: name what a person would SEE.**
 
 ```yaml
-answer_must_include_result_of: show_image          # the answer must carry what this tool produced
-never_discard_result_of: read_url          # IF it ran, its work must be visible
-answer_must_include: {pattern: …}     # anything about the TEXT, written by him
+then:
+  answer_must_include:
+    any_of: [picture, video]
 ```
 
-Both new verbs name a **tool**, not a check. So a rule can require something about what aish *did* without anyone adding a name first, and a tool that does not exist yet is covered the day it arrives.
+Read aloud: *"the answer must include a picture or a video."* His sentence, with nothing of aish in it.
 
-**One rule with a condition, and the names say so.** The first pair was `show` and `credit`, which stretched one metaphor over two different things: you cite the page you read, but you do not "credit" `show_image` — you show the picture it made. Naming the *condition* instead of inventing a second metaphor also retired the comment that used to be needed to say which way round the two were. A name that needs a comment is the wrong name.
+**This has no growth problem, which is why it is not the first design wearing a new coat.** Tools grow forever — one per new API. The kinds of thing a person *notices in an answer* are few and stay few: a picture, a video, sources. That list grows when human perception changes, which is never. And a kind name reads correctly in the slot where a tool name did not — *"the answer must include picture"* is heard as "a picture", where *"must include show_image"* is heard as the literal string.
 
-The same correction applies to `sounds_like`, whose first name was "means_like". Its siblings are single verbs that complete the sentence — *prompt **has** source*, *prompt **matches** ^x* — and *prompt **means like** …* is not English. `sounds_like` is idiomatic, grammatical, and honest about being fuzzy; plain `means:` was the runner-up and was rejected for overstating, since the check says a message is close, not that it *is* the example.
+**How a kind is CHECKED is code's problem, and invisible in the file.** A picture is one aish fetched and stored — a URL pasted into the text renders as a broken box, which is exactly what the reader would notice — so the check is a join against the trace: the tool ran (the harness wrote that, not the model), and the exact token it handed back is in the answer. An equality, never a guess about shape. The rule file names none of that. The **ask** does, because the model is the one who has to act.
 
-**The check is an equality, not a guess about shape.** Both `show_*` tools hand back a line containing the exact token to paste, and the check reads that token back out of the trace and looks for it in the answer. So a picture fetched and then dropped fails, and a *different* image passes for nothing.
+**One verb, not three.** The conditional form disappeared with the tool naming, and that is the tell that this design is the right one: *"if you fetched a picture, do not throw it away"* is simply what **picture** means — something that did not get shown is not one. Same for sources: nothing read means nothing to link, so the rule is met. **The condition belongs to the noun, not to a verb.**
 
-**What remains in code, and belongs there.** How a given tool's work appears in an answer — a picture by its stored path, a page by its link — is a fact about the **tool**, not about his rules. One line each in a table beside the tools, rather than a new verb per idea. A plugin tool can declare its own.
+**A missing tool is still caught**, even though the rule never names one: a kind is made real by a tool, so if that tool is gone the rule can never be satisfied, and the lint says so in the tool's name. `TestShowAndCredit`.
 
-**`any_of:` is the one place the grammar says "or".** Named rather than left as a bare list, because `never_use: [a, b]` already means *none of these* — two lists in one file meaning opposite things is exactly the readability trap that made the first design coin a name per combination instead. What goes inside is only ever tool names, so it cannot grow into a tree. `TestShowAndCredit`.
-
-**And `show_video` had to exist at all.** "Credit the tool you used" is meaningless when there is no tool to credit. A video previously appeared only if the model happened to paste a link, so nothing could require one. `show_video` validates a link against the same pattern the frontend plays and hands back the line to paste — the counterpart to `show_image`, minus the fetch, since the app embeds by id and the bytes never come near this machine.
+**And `show_video` had to exist at all.** A video previously appeared only if the model happened to paste a link, so nothing could require one — "the answer must include a video" would have been unsatisfiable. `show_video` validates a link against the same pattern the frontend plays and hands back the line to paste: the counterpart to `show_image`, minus the fetch, since the app embeds by id and the bytes never come near this machine.
 
 ### Retro-match — a rule is a function of logged facts
 
