@@ -6383,6 +6383,100 @@ class TestRuleAuthoring:
         assert seen and "not replayed" in seen[0].note
         assert "would have bound" not in seen[0].note
 
+    COMPILED = json.dumps({
+        "name": "always-use-show-image",
+        "description": "Pictures come from show_image.",
+        "when_subject": "always",
+        "answer_must_not": "raw_image_links",
+        "prose": "An external image link does not render in the UI.",
+    })
+
+    def test_the_owners_own_words_become_a_rule(self, tmp_path):
+        """The acting model passes the request through; the grammar lives in
+        one place, so changing the vocabulary does not make every model on
+        every backend relearn it."""
+        prompts = []
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = lambda p: prompts.append(p) or self.COMPILED
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", {
+            "request": "always use show_image for pictures",
+        })
+        assert not result.startswith("ERROR"), result
+        assert "always use show_image for pictures" in prompts[0]
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        assert rule.name == "always-use-show-image" and not rule.error
+
+    def test_a_request_the_grammar_cannot_express_is_relayed_verbatim(self, tmp_path):
+        """"Not expressible" is useless. What comes back names what could not
+        be expressed and offers extending aish as the second option — a failed
+        compile is a feature request in structured form."""
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = lambda p: json.dumps(
+            {"cannot": "'be terser' is about style, which nothing here can check"}
+        )
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", {"request": "be terser"})
+        # A failure envelope carrying a sentence for a PERSON: no rule was
+        # written, so the call must not log green — and what it says is what
+        # the owner needs to decide between rephrasing and extending aish.
+        assert result.startswith("ERROR")
+        assert "about style" in result and "extend aish" in result
+        assert not list((tmp_path / "rules").glob("*.md"))
+
+    def test_fields_the_model_named_itself_win_over_the_compiler(self, tmp_path):
+        """It heard the whole conversation; the compiler heard one sentence."""
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = lambda p: self.COMPILED
+        agent.approve_write = lambda plan: True
+        agent._dispatch("create_rule", {
+            "request": "always use show_image", "name": "pictures-via-show-image",
+        })
+        assert (tmp_path / "rules" / "pictures-via-show-image.md").exists()
+
+    def test_naming_fields_directly_needs_no_compiler_at_all(self, tmp_path):
+        """A rule the owner asked for out loud must not depend on a second
+        model being up."""
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = None
+        agent.approve_write = lambda plan: True
+        result = agent._dispatch("create_rule", self.FIELDS)
+        assert not result.startswith("ERROR"), result
+
+    def test_an_edit_by_request_carries_over_what_it_did_not_mention(self, tmp_path):
+        """The regression problem through the prose path — the one the design
+        calls the sharpest risk in the whole layer."""
+        agent = self._agent(tmp_path)
+        agent.approve_write = lambda plan: True
+        agent.rule_compiler = None
+        agent._dispatch("create_rule", {**self.FIELDS, "when_has": "link",
+                                        "never_use": ["web_search"]})
+        agent.rule_compiler = lambda p: json.dumps({"when_has": "source"})
+        result = agent._dispatch("edit_rule", {
+            "name": "bounded-material", "request": "also cover attachments",
+        })
+        assert not result.startswith("ERROR"), result
+        [rule] = rules_module.load_rules([tmp_path / "rules"])
+        assert rule.contains == "source"
+        assert {o["verb"] for o in rule.obligations} == {
+            rules_module.VERB_ANSWER_FROM, rules_module.VERB_NEVER_USE,
+        }, "an edit dropped an obligation the request never mentioned"
+
+    def test_a_compiled_rule_still_goes_through_the_lint_and_the_card(self, tmp_path):
+        """The compiler proposes; code validates and the owner approves. An
+        isolated model is used because it is more ACCURATE — never because its
+        output is trusted."""
+        seen = []
+        agent = self._agent(tmp_path)
+        agent.rule_compiler = lambda p: json.dumps({
+            "name": "typo", "description": "d", "when_subject": "always",
+            "answer_from": "gws_gmial_send",
+        })
+        agent.approve_write = lambda plan: seen.append(plan) or True
+        result = agent._dispatch("create_rule", {"request": "read my mail first"})
+        assert result.startswith("ERROR") and "gws_gmial_send" in result
+        assert seen == [], "an uncompilable rule reached the approver"
+
     def test_the_card_shows_the_turns_this_would_have_bound(self, tmp_path):
         """Retro-match: a rule is a function of logged facts, so real history
         is better evidence than any synthetic run."""

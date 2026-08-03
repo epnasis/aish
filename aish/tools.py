@@ -1148,21 +1148,31 @@ TOOL_SCHEMAS = [
                 "something should ALWAYS or NEVER happen ('always use show_image', 'never "
                 "search the web when I give you a link'). For a one-off, just do it; for "
                 "a fact about them or their world, use remember instead. "
-                "You do NOT write the file and you do NOT write YAML: name the field "
-                "values below and aish renders, validates and shows the user what it "
-                "MEANS before anything is saved. If the rule cannot be expressed in these "
-                "fields, say so and tell the user exactly what could not be expressed — "
-                "that is a feature request for aish, not a reason to write vague prose. "
-                "RULES ONLY RESTRICT: there is no verb that grants permission or "
-                "auto-approves anything, by design."
+                "USUALLY YOU JUST PASS THE REQUEST THROUGH: put what the user said, in "
+                "their own words, in 'request' and stop there. aish translates it, "
+                "checks it, and shows them what it MEANS before anything is saved — you "
+                "do not write the file, you do not write YAML, and you do not need to "
+                "know the rule grammar. Name the individual fields only if you already "
+                "know them exactly. If the request cannot be expressed as a rule, aish "
+                "says what could not be expressed and why; relay that to the user "
+                "verbatim — it is a feature request for aish, not a reason to write "
+                "vague prose. RULES ONLY RESTRICT: there is no verb that grants "
+                "permission or auto-approves anything, by design."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "request": {
+                        "type": "string",
+                        "description": "What the user asked for, in THEIR words — "
+                        "'always use show_image for pictures', 'never search the web "
+                        "when I give you a link'. The normal way to call this.",
+                    },
                     "name": {
                         "type": "string",
                         "description": "Short kebab-case name, e.g. 'bounded-material'. "
-                        "It is how the user will refer to the rule.",
+                        "It is how the user will refer to the rule. Optional when you "
+                        "pass 'request' — aish names it.",
                     },
                     "description": {
                         "type": "string",
@@ -1234,7 +1244,7 @@ TOOL_SCHEMAS = [
                         "which the fields above already enforce.",
                     },
                 },
-                "required": ["name", "description", "when_subject"],
+                "required": [],
             },
         },
     },
@@ -1243,16 +1253,22 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "edit_rule",
             "description": (
-                "Change an existing rule. Name ONLY the fields that change — everything "
-                "else is carried over from the file unchanged, so a rule cannot silently "
-                "lose what it already did. Never re-state the whole rule: that is how a "
-                "working rule gets quietly broken by one sentence of new prose. Same "
-                "fields as create_rule."
+                "Change an existing rule. Put what should CHANGE — in the user's own "
+                "words — in 'request' ('also cover attachments'), or name the specific "
+                "fields. Either way everything you do not mention is carried over "
+                "unchanged, so a rule cannot silently lose what it already did. NEVER "
+                "re-state the whole rule: that is exactly how a working rule gets "
+                "quietly broken by one sentence of new prose."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "The rule to change."},
+                    "request": {
+                        "type": "string",
+                        "description": "What should change, in the user's words. "
+                        "Describe the CHANGE, never the whole rule.",
+                    },
                     "description": {"type": "string"},
                     "when_subject": {"type": "string", "description": _WHEN_SUBJECT},
                     "when_has": {"type": "string"},

@@ -33,7 +33,18 @@ from typing import Any
 import ollama
 
 from . import aliases as alias_map
-from . import backends, files, media, rules, skill_import, skills, tool_plugins, tools, web
+from . import (
+    backends,
+    files,
+    media,
+    rule_compiler,
+    rules,
+    skill_import,
+    skills,
+    tool_plugins,
+    tools,
+    web,
+)
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
 from .session import SessionLog
 
@@ -945,6 +956,10 @@ class Agent:
         lessons_path: os.PathLike | str | None = None,
         status: Any = None,
         state_dir: os.PathLike | str | None = None,
+        # The isolated prose→rule compiler (#205). Injected so a test scripts
+        # it exactly as it scripts the acting model, and so nothing here has to
+        # reach a backend to prove the authoring path works.
+        rule_compiler_ask: Callable[[str], str] | None = None,
         current_session: Callable[[], Path] | None = None,
         semantic: Any = None,
         on_step: Callable[[dict], None] | None = None,
@@ -1017,6 +1032,7 @@ class Agent:
         # Session store for the search_sessions tool; current_session is
         # excluded from ranking (its content is already this conversation).
         self.state_dir = state_dir
+        self.rule_compiler = rule_compiler_ask
         self.current_session = current_session
         # Embedding-based preflight selection (issue #43); opt-in from the
         # entry points so tests and bare Agents stay network-free.
@@ -3958,6 +3974,44 @@ class Agent:
             if args.get(key) not in (None, "")
         }
 
+    def _compiled_fields(self, args: dict, existing: dict | None = None) -> dict | str:
+        """Field values from the owner's own words, or the sentence to show him.
+
+        The acting model's job is to PASS THROUGH what he asked for — which
+        models are reliable at — and the grammar lives in one place, versioned
+        with the code, so changing the vocabulary does not require every model
+        on every backend to relearn it. Naming fields directly still works and
+        is what happens when no compiler is reachable; a rule the owner asked
+        for out loud must not depend on a second model being up.
+        """
+        request = str(args.get("request", "") or "").strip()
+        named = self._rule_fields(args)
+        if not request:
+            return named
+        try:
+            ask = self.rule_compiler or rule_compiler.make_compiler(self.model)
+        except Exception as exc:  # noqa: BLE001 — no backend is a fallback, not a crash
+            if named:
+                return named
+            return (
+                f"ERROR: could not reach a model to turn that into a rule ({exc}). "
+                "Call create_rule again naming the fields directly."
+            )
+        compiled = rule_compiler.compile_request(
+            request, ask, self._known_tool_names(), existing=existing
+        )
+        if compiled.problem:
+            # Handed back whole. It names WHAT could not be expressed and what
+            # the two options are, and the second option — "this becomes a
+            # request to extend aish" — is the point: a failed compile is a
+            # feature request in structured form.
+            # Marked as a failure even though the text is for a person: no rule
+            # was written, and a call that wrote nothing must not log green.
+            return "ERROR: " + compiled.problem
+        # Anything the acting model named itself wins: it heard the whole
+        # conversation and the compiler heard one sentence of it.
+        return {**compiled.fields, **named}
+
     def _rule_file_lint(self, plan: "files.WritePlan") -> str | None:
         """Refuse a raw write into the rules folder that would not lint.
 
@@ -4012,7 +4066,22 @@ class Agent:
                 "it — that carries over everything you do not name, so a rule cannot "
                 "lose what it already did."
             )
-        fields = {"name": name, **self._rule_fields(args)}
+        fields = self._compiled_fields(args)
+        if isinstance(fields, str):
+            return fields
+        fields = {**fields, "name": name or str(fields.get("name", "") or "")}
+        if not rules.NAME_RE.match(str(fields["name"])):
+            return (
+                f"ERROR: invalid rule name {fields['name']!r} — lowercase letters, "
+                "digits and hyphens, e.g. 'bounded-material'."
+            )
+        target = self._rule_path(str(fields["name"]))
+        if target.exists():
+            return (
+                f"ERROR: a rule named {fields['name']!r} already exists. Use edit_rule "
+                "to change it — that carries over everything you do not name, so a "
+                "rule cannot lose what it already did."
+            )
         return self._compile_and_write(fields, verb="Created")
 
     def _edit_rule(self, args: dict) -> str:
@@ -4024,16 +4093,23 @@ class Agent:
         path = self._rule_path(name) if rules.NAME_RE.match(name) else None
         if path is None or not path.exists():
             return f"ERROR: no rule named {name!r} in {_display_path(self._rules_dir())}."
-        changes = self._rule_fields(args)
-        if not changes:
-            return (
-                "ERROR: edit_rule needs at least one field to change. Name only what "
-                f"changes — have: {', '.join(self.RULE_FIELD_ARGS)}."
-            )
         try:
-            fields = {**rules.author_fields(path), **changes}
+            current = rules.author_fields(path)
         except OSError as exc:
             return f"ERROR: could not read {_display_path(path)} ({exc})."
+        changes = self._compiled_fields(args, existing=current)
+        if isinstance(changes, str):
+            return changes
+        if not changes:
+            return (
+                "ERROR: edit_rule needs either `request` (what should change, in the "
+                "user's words) or at least one field. Name only what changes — have: "
+                f"{', '.join(self.RULE_FIELD_ARGS)}."
+            )
+        # The compiler was already shown `current`, so its output is the merged
+        # rule; a field-only call still has to be merged here. Either way the
+        # name never moves: renaming through an edit would orphan the file.
+        fields = {**current, **changes, "name": name}
         return self._compile_and_write(fields, verb="Updated")
 
     def _retire_rule(self, args: dict) -> str:

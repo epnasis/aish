@@ -274,10 +274,13 @@ thousands of entries without bloating the context.
   and not by the model, so it cannot be skipped.
 
   You can write a rule by hand, or just say it: *"always use show_image"* is
-  enough. aish names the field values, renders the file itself, checks that
-  everything the rule mentions actually exists, and shows you what the rule
-  **means** — plus which of your recent turns it would have bound — before
-  anything is saved. Changing one only touches the fields you name, so a rule
+  enough. Your words go to a small isolated translator that turns them into
+  field values; aish renders the file itself, checks that everything the rule
+  mentions actually exists, and shows you what the rule **means** — plus which
+  of your recent turns it would have bound — before anything is saved. If what
+  you asked for cannot be expressed, it says exactly what could not be, and
+  offers you the choice between rephrasing it and treating it as something
+  aish should learn to enforce. Changing one only touches the fields you name, so a rule
   never quietly loses what it already did; retiring one leaves the file in
   place so you can bring it back.
 

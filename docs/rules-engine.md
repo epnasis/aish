@@ -253,6 +253,18 @@ Beyond compiling, the lint checks that **everything the rule names exists**. A r
 
 **What the owner approves is the compiled MEANING, not the diff.** He did not write the file and should not have to audit it, so the approval card carries an English sentence — *when this, then that* — plus which enforcement moment applies, above the diff rather than instead of it.
 
+### The owner speaks prose; the compiler names fields
+
+`create_rule(request: "always use show_image for pictures")` is the normal call. **The acting model never learns the grammar** — its job is to pass through what the owner said, which models are reliable at — and an isolated compiler turns that one sentence into field values. The grammar then lives in exactly one place, versioned with the code, so adding a verb does not require every model on every backend to relearn anything. The prompt it reads is *generated from* the vocabulary constants rather than restating them, because the first thing that happens to a second copy of a vocabulary is that it drifts.
+
+**Isolated because it is more accurate, not because isolation makes it safe.** The engine already argues this from the other direction: a narrow question with minimal evidence is something a small local model answers well, and the same question buried in a 40k-token transcript is not. A model mid-conversation about YouTube videos is context-switching into a grammar it half-remembers. And the precision matters — this is **generation, not a verdict**. The isolation invariant exists to stop a judge ratifying the actor's own justification; a compiler only proposes. What makes it *safe* is that code validates the output and the owner approves it, exactly as for a hand-named rule.
+
+**Compile → lint → feed the error back, bounded.** The instructive-refusal law applied to authoring: the retry is told what was wrong in the words the lint used. Fields the acting model named itself win over the compiler's, because it heard the whole conversation and the compiler heard one sentence of it. Naming fields directly still works with no compiler at all — a rule the owner asked for out loud must not depend on a second model being up. `TestCompiling`, `TestRetry`.
+
+**Editing through prose shows the compiler the rule as it stands**, and the instruction describes the CHANGE, so the fields it omits are the ones already there. Same law as the field path, enforced the same way: the merge happens in code, not in the model's head. `TestEditing`.
+
+**A stated impossibility is never argued with.** When the compiler answers `{"cannot": …}` it is taken at face value and not retried: asked again, a model told the request is inexpressible will invent something close, and something close is precisely the failure this layer exists to prevent, because it looks like it worked. What comes back names *what* could not be expressed, lists what aish can enforce today, and offers two ways forward — rephrase toward what exists, **or leave it and treat this as a request to extend aish itself**. That second option is the point: a failed compile is a feature request in structured form, which is the self-improvement loop of #190 working for once. `TestCannot`, `TestRuleAuthoring`.
+
 ### Retro-match — a rule is a function of logged facts
 
 The card also answers *"what would this have done?"* by replaying the candidate over the owner's own recent turns: **this would have bound on 3 of your last 200, here they are.** For a tool you must execute it to know; for a rule you must not — manufacturing a synthetic turn tests the harness, not the rule.
