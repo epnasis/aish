@@ -2,6 +2,7 @@
 no network. One opt-in live test (AISH_LIVE_WEB=1) exercises the real backend.
 """
 
+import email.message
 import os
 import ssl
 import sys
@@ -287,6 +288,117 @@ class TestSsrfGuard:
         result = web.read_url("http://127.0.0.1:8787/token")
         assert result.startswith("ERROR")
         assert "run_command" in result
+
+
+class TestWireUrl:
+    """A URL with non-ASCII in it must still be fetchable (#213).
+
+    Browsers show the decoded form and send the encoded one; urllib sends what
+    it is given, and http.client encodes the request line as ASCII and the Host
+    header as latin-1 — so a link a human copied out of the address bar died
+    with UnicodeEncodeError before a byte left the machine, and the model read
+    "could not fetch" as a dead source."""
+
+    def test_non_ascii_path_percent_encoded(self):
+        assert web._wire_url("https://www.filmweb.pl/film/Krzyżacy-1960-1204") == (
+            "https://www.filmweb.pl/film/Krzy%C5%BCacy-1960-1204"
+        )
+
+    def test_the_regression_url_is_now_ascii_and_requestable(self):
+        for url in (
+            "https://www.filmweb.pl/film/Krzyżacy-1960-1204",
+            "https://pl.wikipedia.org/wiki/Krzyżacy_(powieść)",
+        ):
+            wire = web._wire_url(url)
+            assert wire.isascii(), wire
+            urllib.request.Request(wire).full_url.encode("ascii")  # what http.client does
+
+    def test_parentheses_and_underscores_survive_wikipedia_style_paths(self):
+        assert web._wire_url("https://pl.wikipedia.org/wiki/Krzyżacy_(powieść)") == (
+            "https://pl.wikipedia.org/wiki/Krzy%C5%BCacy_(powie%C5%9B%C4%87)"
+        )
+
+    def test_already_encoded_url_unchanged(self):
+        """Idempotence: re-encoding %C5%BC into %25C5%25BC would 404 a URL that
+        works — and search results arrive already encoded."""
+        encoded = "https://www.filmweb.pl/film/Krzy%C5%BCacy-1960-1204"
+        assert web._wire_url(encoded) == encoded
+        assert web._wire_url(web._wire_url("https://x.example/Krzyżacy")) == (
+            web._wire_url("https://x.example/Krzyżacy")
+        )
+
+    def test_plain_ascii_url_passes_through_untouched(self):
+        for url in (
+            "https://example.com/",
+            "https://example.com/a/b?x=1&y=2#frag",
+            "https://example.com/path;p=1,2/@user!$&'()*+=~",
+            "http://user:pw@example.com:8080/x",
+            "https://api.example.com/v1?filter[]=a&filter[]=b",
+        ):
+            assert web._wire_url(url) == url, url
+
+    def test_space_encoded(self):
+        assert web._wire_url("https://example.com/my file.txt") == (
+            "https://example.com/my%20file.txt"
+        )
+
+    def test_query_and_fragment_encoded_without_breaking_separators(self):
+        assert web._wire_url("https://example.com/s?q=żółw&n=2#Ćma") == (
+            "https://example.com/s?q=%C5%BC%C3%B3%C5%82w&n=2#%C4%86ma"
+        )
+
+    def test_internationalized_host_punycoded(self):
+        assert web._wire_url("https://żółw.example/a") == (
+            "https://xn--w-uga1v8h.example/a"
+        )
+
+    def test_internationalized_host_keeps_port_and_credentials(self):
+        assert web._wire_url("https://user:pw@żółw.example:8443/a") == (
+            "https://user:pw@xn--w-uga1v8h.example:8443/a"
+        )
+
+    def test_unencodable_host_left_alone_rather_than_raising(self):
+        """An empty or over-long label is a broken host; failing with the
+        request's own error beats inventing one here."""
+        for url in ("https://ż..example/a", "https://" + "ż" * 300 + ".example/a"):
+            web._wire_url(url)  # must not raise
+
+    def test_fetch_checks_the_same_url_it_requests(self, monkeypatch):
+        """The SSRF guard and the request must see byte-for-byte the same URL —
+        encoding between them would leave a hop unchecked."""
+        checked, opened = [], []
+        monkeypatch.setattr(web, "_require_public", lambda url: checked.append(url))
+        monkeypatch.setattr(
+            web._opener, "open", lambda request, timeout=None: opened.append(request.full_url)
+            or _FakeTextResponse()
+        )
+        web._fetch("https://www.filmweb.pl/film/Krzyżacy-1960-1204")
+        assert checked == opened == ["https://www.filmweb.pl/film/Krzy%C5%BCacy-1960-1204"]
+
+    def test_binary_fetch_encodes_too(self, monkeypatch):
+        """show_image fetches remote images server-side; an image URL is as
+        likely to carry a non-ASCII filename as a page URL."""
+        checked, opened = [], []
+        monkeypatch.setattr(web, "_require_public", lambda url: checked.append(url))
+        monkeypatch.setattr(
+            web._opener, "open", lambda request, timeout=None: opened.append(request.full_url)
+            or _FakeTextResponse()
+        )
+        web.fetch_binary("https://example.com/zdjęcie.png", 1000)
+        assert checked == opened == ["https://example.com/zdj%C4%99cie.png"]
+
+
+class _FakeTextResponse:
+    headers = email.message.Message()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, size=None):
+        return b"ok"
 
 
 class TestTrustStore:

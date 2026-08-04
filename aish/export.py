@@ -438,6 +438,7 @@ def fetch_image(url: str) -> bytes | None:
     monkeypatch it; nothing else in this module opens a socket."""
     if not url.startswith(("http://", "https://")):
         return None
+    url = web._wire_url(url)  # an image URL may carry non-ASCII; HTTP may not
     try:
         web._require_public(url)
     except web.BlockedURLError:

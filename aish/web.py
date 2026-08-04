@@ -211,6 +211,63 @@ class BlockedURLError(Exception):
     """URL refused by the SSRF guard (non-public target)."""
 
 
+# RFC 3986's reserved set plus '%'. Everything already legal in a URL is left
+# literal, which is what makes _wire_url idempotent: an already-encoded %C5%BC
+# survives instead of becoming %25C5%25BC.
+_URL_SAFE = "!#$%&'()*+,/:;=?@[]~"
+
+
+def _wire_url(url: str) -> str:
+    """The ASCII form of a URL, as HTTP requires it on the wire.
+
+    A URL copied out of a browser's address bar can contain literal non-ASCII
+    — https://www.filmweb.pl/film/Krzyżacy-1960-1204 — because the browser
+    DISPLAYS the decoded form while sending the encoded one. urllib does no
+    such encoding: it hands the path straight to http.client, which encodes
+    the request line as ASCII and the Host header as latin-1, so the fetch
+    died with a UnicodeEncodeError before a byte left the machine. The model
+    saw "could not fetch … 'ascii' codec can't encode character" for a URL
+    that works fine in any browser, and (having no way to tell a client bug
+    from a dead link) moved on to a different source. Every Polish, Czech,
+    Greek, Cyrillic, CJK, or merely space-containing URL was unreadable.
+
+    So percent-encode path/query/fragment as UTF-8 and IDNA-encode the host.
+    Applied at the single fetch entry points, BEFORE the SSRF check, so the
+    URL that is checked is byte-for-byte the URL that is requested.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((
+        parsed.scheme,
+        _wire_netloc(parsed),
+        urllib.parse.quote(parsed.path, safe=_URL_SAFE),
+        urllib.parse.quote(parsed.query, safe=_URL_SAFE),
+        urllib.parse.quote(parsed.fragment, safe=_URL_SAFE),
+    ))
+
+
+def _wire_netloc(parsed: urllib.parse.SplitResult) -> str:
+    """netloc with an internationalized host punycoded, credentials kept.
+
+    Left untouched when it is already ASCII (the overwhelming case) or when
+    the idna codec refuses it — an over-long or empty label is a broken host,
+    and letting the request fail with its own error beats inventing one here.
+    """
+    if parsed.netloc.isascii():
+        return parsed.netloc
+    try:
+        host = (parsed.hostname or "").encode("idna").decode("ascii")
+        port = parsed.port
+    except (UnicodeError, ValueError):
+        return parsed.netloc
+    userinfo = ""
+    if parsed.username is not None:
+        userinfo = urllib.parse.quote(parsed.username, safe="")
+        if parsed.password is not None:
+            userinfo += ":" + urllib.parse.quote(parsed.password, safe="")
+        userinfo += "@"
+    return f"{userinfo}{host}{f':{port}' if port else ''}"
+
+
 def _require_public(url: str) -> None:
     """Raise BlockedURLError unless every address the host resolves to is public.
 
@@ -276,6 +333,7 @@ _opener = urllib.request.build_opener(
 
 def _fetch(url: str) -> tuple[str, str]:
     """Decoded body text and its content type, size-capped. Public hosts only."""
+    url = _wire_url(url)
     _require_public(url)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with _opener.open(request, timeout=FETCH_TIMEOUT) as response:
@@ -293,6 +351,7 @@ def fetch_binary(url: str, max_bytes: int) -> tuple[bytes, str]:
     Reads one byte past the cap so the caller can tell "at the limit" from
     "over it". Raises BlockedURLError / urllib.error.* / OSError — the caller
     turns those into a message the model can act on."""
+    url = _wire_url(url)
     _require_public(url)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with _opener.open(request, timeout=FETCH_TIMEOUT) as response:
