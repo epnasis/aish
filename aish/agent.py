@@ -155,6 +155,20 @@ Rules:
      or run anything else first.
    A plain deny with no comment: do not retry it — change approach or ask.
 4. After running commands, analyze the output and answer concisely.
+4b. SAY WHAT YOU FOUND AS YOU GO: text you write alongside a tool call is
+   shown to the user immediately, as a message, before the tool runs — it is
+   how they follow a long task and how they can redirect you before you finish
+   the wrong thing. So when you learn something that CHANGES what you are
+   about to do, say it in one or two plain sentences and act in the same reply
+   ("Looks like there are leaks about a folding model — let me dig into
+   that"). Write it as you would say it out loud to the person waiting.
+   Say NOTHING when there is nothing new: do not announce the tool you are
+   calling, do not restate the request, do not narrate every step, and never
+   pad ("Great question!", "Let me now proceed to…"). Silence is the correct
+   output for a routine step; a running commentary on every call is worse than
+   no commentary at all. None of this replaces your final answer — the last
+   reply is still the complete one, and a reader who skipped everything in
+   between must lose nothing.
 5. Prefer read-only commands. Never bundle destructive operations
    (rm, mv, overwrite redirects) into a command unless the user explicitly
    asked for that operation.
@@ -964,6 +978,11 @@ class Agent:
         context: str = "",
         on_message: Callable[[dict], None] | None = None,
         on_token: Callable[[str], None] | None = None,
+        # Narration (#212): one call per INTERIM delivery — the prose a turn
+        # emitted alongside its tool calls, complete rather than snipped. It
+        # closes the delivery the tokens streamed into, so a client can end
+        # that bubble and open a fresh one for the next thing said.
+        on_delivered: Callable[[str], None] | None = None,
         job_log_dir: os.PathLike | str | None = None,
         lessons_path: os.PathLike | str | None = None,
         status: Any = None,
@@ -1039,6 +1058,7 @@ class Agent:
         self.launch_cwd = self.cwd
         self.on_message = on_message
         self.on_token = on_token
+        self.on_delivered = on_delivered
         self.job_log_dir = job_log_dir
         self.lessons_path = lessons_path
         # Session store for the search_sessions tool; current_session is
@@ -1118,6 +1138,10 @@ class Agent:
         # Has the model said anything to the user yet this task? The only input
         # `must_first: answer` needs.
         self._said_something = False
+        # Everything the owner was TOLD this turn, in order (#212): the prose
+        # emitted alongside each step's tool calls, as delivered. Verify grades
+        # the whole of it — see _deliverable.
+        self._delivered: list[str] = []
         # Tokens withheld from the client while a bound turn's answer is still
         # unverified. `None` means stream normally.
         self._held_answer: list[str] | None = None
@@ -1483,6 +1507,7 @@ class Agent:
         self._binding_seq = itertools.count(1)
         self._turn_calls = []
         self._said_something = False
+        self._delivered = []
         self._held_answer = None
         self._held_entry = None
         self._not_followed = []
@@ -1770,6 +1795,15 @@ class Agent:
                 self._emit_step(kind="thinking_cancel", secs=turn_secs, tokens=list(usage))
                 return result
 
+            # NARRATION (#212). This turn has tool calls, so its prose is not
+            # the answer — it is what the model has to say on the way there,
+            # and it is delivered NOW rather than being cut to 120 characters
+            # for a status line and thrown away. Ahead of the cancel check
+            # below on purpose: the words were already streamed to a live
+            # client, so a stop must not leave a bubble nothing ever closed.
+            if content.strip():
+                self._deliver_interim(content)
+
             # Ollama buffers tool-call generation and streams nothing until it
             # is done, so live counts are impossible here — report per turn.
             self._note(f"✓ thought for {format_secs(turn_secs)}{_tokens_note(usage)}")
@@ -1783,8 +1817,6 @@ class Agent:
             if gist := _status_snippet(thinking_text):
                 thinking_step["gist"] = gist
             self._emit_step(**thinking_step)
-            if content and self.on_token is None:
-                self.echo(content)
 
             if self._cancel.is_set():
                 # Proposed calls must not run after a stop — but every
@@ -3156,7 +3188,8 @@ class Agent:
         if not self._bindings:
             return None
         evidence = rules.TurnEvidence(
-            answer=answer, calls=tuple(self._turn_calls),
+            # The whole turn, not the last message (#212) — see _deliverable.
+            answer=self._deliverable(answer), calls=tuple(self._turn_calls),
             meaning=self._meaning_scorer(),
         )
         failures = rules.verify(self._bindings, evidence)
@@ -3244,6 +3277,73 @@ class Agent:
             return answer
         notes, self._not_followed = self._not_followed, []
         return (answer + "\n\n" + "\n".join(notes)).strip()
+
+    def _deliver_interim(self, content: str) -> None:
+        """Close out one INTERIM delivery — the prose a turn said alongside its
+        tool calls (#212).
+
+        A long task used to be a spinner: the model's own running commentary
+        was captured, cut to the first sentence at 120 characters for the trace
+        header, and discarded. It is now delivered whole, as a message, every
+        step — which is also what finally gives mid-task steering (#95)
+        something to steer against.
+
+        Two paths reach the client, and the difference is the hold:
+
+        * **Unbound turn.** The tokens already streamed as they were generated
+          and this call only marks the end of the bubble; `on_delivered` hands
+          over the same text so a client that missed the stream can still paint
+          it (the shape `done` already uses with `sawAnswer`).
+        * **Bound turn.** Verify's hold buffers every token, because whether a
+          turn is the ANSWER is knowable only once its tool calls — or their
+          absence — arrive, and a token cannot be retracted. So narration
+          cannot stream there; it is released whole, per step, the moment the
+          turn proves itself interim. Silence for the whole task becomes
+          silence for one model turn, which is the trade #191 was actually
+          asking the owner to make.
+
+        An interim delivery is never a proposal and is never held: it is not
+        the deliverable, so it needs no verification of its own. It does join
+        `_delivered`, because the DELIVERABLE is the whole turn — see
+        `_deliverable`.
+        """
+        text = content.strip()
+        if self._held_answer is not None:
+            # Verify's buffer holds this turn's words. It is not the answer, so
+            # hand it over now and start the next turn empty — the loop's own
+            # per-turn reset would otherwise be the only thing clearing it, and
+            # a released buffer left in place is a delivery waiting to be made
+            # twice.
+            self._held_answer = []
+            if self.on_token:
+                self.on_token("\n" + text + "\n")
+        if self.on_token is None:
+            # The terminal's copy. Independent of the hold, NOT an `elif` on it:
+            # the hold arms whether or not a token sink is attached (it does two
+            # jobs and only one is about streaming), so a non-streaming CLI on a
+            # bound turn would otherwise be the one place narration vanished.
+            self.echo(text)
+        self._delivered.append(text)
+        if self.on_delivered:
+            self.on_delivered(text)
+
+    def _deliverable(self, answer: str) -> str:
+        """What the owner was told this turn, whole (#212).
+
+        Verify used to grade the LAST message. Once a turn delivers several
+        times that is the wrong text: a picture shown in delivery two of five
+        would fail `answer_must_include: picture` against delivery five, and a
+        rule would report a failure the owner can see is not one. So the
+        deliverable is the concatenation of every delivery plus the final
+        answer — which is exactly the definition every answer-side rule was
+        written against, back when a turn only ever said one thing.
+
+        It can only ever catch MORE, which is the direction R1 permits a
+        rule-engine change to be wrong in. Interim deliveries are still not
+        PROPOSALS: they were already shown and cannot be reworked, so only the
+        final answer is held, asked about and released.
+        """
+        return "\n\n".join([*self._delivered, answer.strip()]).strip()
 
     def _log_held_entry(self, text: str = "") -> None:
         """Deliver a released proposal to the log — the single point where a

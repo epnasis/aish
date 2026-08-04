@@ -105,6 +105,17 @@ pages they read. When the turn ends it settles under the answer as a "Worked for
 
 ![The activity trace expanded: a web search, a thinking step, and the page it read, each timed](docs/images/activity-trace.png)
 
+### It tells you what it found, as it finds it
+
+A long task is not a spinner. When aish learns something that changes what it
+is about to do, it says so straight away — *"looks like there are leaks about a
+folding model, let me dig into that"* — as an ordinary message, before the next
+tool runs, not as a status line you have to go looking for. So a turn arrives
+as several short messages and then the answer, and you can redirect it
+mid-task (anything you type while it works is handed over between steps)
+instead of finding out at the end that it went the wrong way. Routine steps
+stay quiet: it speaks when there is something to say.
+
 ### Answers, not just output
 
 Replies stream token-by-token and render as markdown — tables, code, links,
