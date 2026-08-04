@@ -355,7 +355,12 @@ class ClaudeMaxAgent:
         if not text:
             return
         self.inner._delivered.append(text)
-        self._record({"role": "assistant", "content": text})
+        # `interim` stamped explicitly: this path logs no tool-role records at
+        # all (the SDK's tool calls leave trace steps), so the adjacency rule
+        # every "was this the answer?" reader used cannot see it — each
+        # narration line would count as a final answer and walk the fork
+        # ordinal off by one per narrated turn.
+        self._record({"role": "assistant", "content": text, "interim": True})
         if self.on_delivered:
             self.on_delivered(text)
 
@@ -392,8 +397,24 @@ class ClaudeMaxAgent:
 
     async def _run(self, prompt: str) -> str:
         sdk = self._sdk
-        final = ""
+        # The last assistant text seen. It is only a CANDIDATE answer: what
+        # makes it a delivery is something happening after it (#212).
+        pending = ""
+        result_text = ""
         streamed = False
+        tool_use = getattr(sdk, "ToolUseBlock", None)
+
+        def close_pending() -> None:
+            """The pending text is now known to be interim — hand it over."""
+            nonlocal pending, streamed
+            if not pending:
+                return
+            self._deliver_interim(pending)
+            pending = ""
+            # The next tokens open a NEW bubble, so they lead with their own
+            # newline exactly as the first ones did.
+            streamed = False
+
         if self.status:
             self.status.start("thinking")
         try:
@@ -401,6 +422,14 @@ class ClaudeMaxAgent:
                 if isinstance(message, sdk.StreamEvent):
                     text = _delta_text(message)
                     if text and self.on_token:
+                        # A delta means a NEW message is being generated, so
+                        # anything still pending was not the answer. Closing it
+                        # HERE is what keeps the next message's tokens out of
+                        # the previous delivery's bubble — the SDK reports
+                        # partials for message N+1 after message N completes,
+                        # so a delivery closed one message late would glue two
+                        # messages together and paint the answer twice.
+                        close_pending()
                         if self.status:
                             self.status.stop()
                         if not streamed:
@@ -414,26 +443,31 @@ class ClaudeMaxAgent:
                 elif isinstance(message, sdk.AssistantMessage):
                     for block in message.content:
                         if isinstance(block, sdk.TextBlock) and block.text:
-                            # A later assistant text is what proves the
-                            # previous one was NOT the answer (#212). Until one
-                            # arrives, `final` is still a candidate answer, so
-                            # the delivery is closed one message late rather
-                            # than guessed at from tool_use blocks.
-                            self._deliver_interim(final)
-                            final = block.text
+                            close_pending()
+                            pending = block.text
                             if self.on_token is None:
                                 self.echo(block.text)
+                    if tool_use is not None and any(
+                        isinstance(block, tool_use) for block in message.content
+                    ):
+                        # This message ACTED, so its words were narration
+                        # whatever comes next. Closing on the message rather
+                        # than waiting for the following one also puts the log
+                        # record BEFORE the tool's trace steps, so a cold
+                        # reload replays the narration above the work it
+                        # announced instead of below it.
+                        close_pending()
                 elif isinstance(message, sdk.ResultMessage):
                     self._session_id = message.session_id or self._session_id
                     if message.result:
-                        final = message.result
+                        result_text = message.result
                     self._report(message)
         finally:
             if self.status:
                 self.status.stop()
         if streamed:
             self.on_token("\n")
-        return final or "(the model returned no text)"
+        return result_text or pending or "(the model returned no text)"
 
     def _report(self, result) -> None:
         note = f"∑ total {format_secs((result.duration_ms or 0) / 1000)}"

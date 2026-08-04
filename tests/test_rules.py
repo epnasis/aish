@@ -2412,3 +2412,82 @@ class TestLinksYouDidNotOpen:
         means."""
         with pytest.raises(rules.RuleError):
             rules._answer_check("answer_must_include", "unverified_links")
+
+
+class TestOpeningIsTheAnswers:
+    """#212 moved the window and nobody noticed. Once a turn narrates, the
+    deliverable Verify grades starts with the NARRATION — so `in: opening`,
+    which is a claim about how the ANSWER reads, silently began pointing at a
+    different paragraph. That is not a widening; it is a move, and it breaks R1
+    in the one direction R1 is supposed to make impossible.
+
+    `no-flattery` is the live rule this bites: `when: always`, so it binds on
+    every turn, and the post-correction turn — exactly what it was written for
+    — is exactly the kind that narrates first.
+    """
+
+    ANCHORS = ["You're absolutely right, I apologize for the confusion"]
+    GROVEL = "You are so right, sorry about that!"
+    ANSWER = "The cause is a stale cache key."
+
+    def _verify(self, deliverable, final, scores):
+        rule, errors = rules.lint(rules.render({
+            "name": "no-flattery", "description": "No flattery up front.",
+            "when_subject": "always",
+            "answer_must_not_include": {"like": self.ANCHORS, "in": "opening"},
+        }))
+        assert not errors, errors
+        binding = rules.bind(rule, {"on": "always"}, "b1", set())
+        evidence = rules.TurnEvidence(
+            answer=deliverable, final=final,
+            meaning=lambda text, anchors: (
+                {a: scores.get(a, 0.0) for a in anchors} if self.GROVEL in text
+                else {a: 0.05 for a in anchors}
+            ),
+        )
+        return rules.verify([binding], evidence)
+
+    def test_grovel_in_the_answer_is_caught_even_behind_narration(self):
+        """The under-restriction, and the reason this is a defect rather than a
+        judgement call: a rule that only ever RESTRICTS must not fall silent
+        because an unrelated feature landed."""
+        deliverable = f"Let me check the logs.\n\n{self.GROVEL}\n\n{self.ANSWER}"
+        final = f"{self.GROVEL}\n\n{self.ANSWER}"
+        assert self._verify(deliverable, final, {self.ANCHORS[0]: 0.83}), (
+            "a groveling ANSWER escaped because narration preceded it"
+        )
+
+    def test_grovel_in_the_narration_alone_does_not_fire(self):
+        """The mirror. Firing here would demand a rewrite of text that was
+        already delivered and can never be reworked — the harness burning its
+        bounded asks on something structurally impossible, which is the
+        uninstructive refusal R6 forbids."""
+        deliverable = f"{self.GROVEL}\n\n{self.ANSWER}"
+        assert not self._verify(deliverable, self.ANSWER, {self.ANCHORS[0]: 0.83})
+
+    def test_anywhere_still_reads_the_whole_turn(self):
+        """The widening is real — it just belongs to `anywhere`. Same words,
+        same turn, opposite verdict, and that asymmetry is the design."""
+        rule, errors = rules.lint(rules.render({
+            "name": "no-flattery-anywhere", "description": "No flattery at all.",
+            "when_subject": "always",
+            "answer_must_not_include": {"like": self.ANCHORS},
+        }))
+        assert not errors, errors
+        binding = rules.bind(rule, {"on": "always"}, "b1", set())
+        evidence = rules.TurnEvidence(
+            answer=f"{self.GROVEL}\n\n{self.ANSWER}", final=self.ANSWER,
+            meaning=lambda text, anchors: (
+                {a: 0.83 for a in anchors} if self.GROVEL in text
+                else {a: 0.05 for a in anchors}
+            ),
+        )
+        assert rules.verify([binding], evidence)
+
+    def test_a_caller_that_names_no_final_is_unchanged(self):
+        """Every pre-#212 caller passes `answer=` alone. `final=None` means
+        "these are the same text", so those keep grading exactly as before —
+        the fix must not need every call site to know about narration."""
+        evidence = rules.TurnEvidence(answer=f"{self.GROVEL}\n\n{self.ANSWER}")
+        assert evidence.looked_at("opening") == self.GROVEL
+        assert evidence.looked_at("ending") == self.ANSWER

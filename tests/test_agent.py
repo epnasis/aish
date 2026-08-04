@@ -6942,10 +6942,10 @@ def _recording_append(agent, sink):
     """Capture the user-slot text the harness writes back (Verify's goads)."""
     original = agent._append
 
-    def append(message):
+    def append(message, interim=False):
         if message.get("role") == "user":
             sink.append(str(message.get("content", "")))
-        return original(message)
+        return original(message, interim)
 
     return append
 

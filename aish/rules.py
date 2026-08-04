@@ -1864,10 +1864,40 @@ class TurnEvidence:
     actually happened, and the model does not author the trace."""
 
     answer: str = ""
+    # The final answer ALONE, where `answer` is the whole turn's deliverable
+    # (#212). None means "no separate final" — the two are the same text, which
+    # is what every caller predating narration passes.
+    final: str | None = None
     calls: tuple[dict, ...] = ()  # {"tool", "args", "status"} per call, in order
     # Sentence-similarity, when a check needs meaning. None is a real answer:
     # the check abstains rather than passing quietly.
     meaning: Any = None
+
+    def looked_at(self, where: str) -> str:
+        """The text a check with this position qualifier reads.
+
+        `anywhere` reads the whole DELIVERABLE — everything the owner was told
+        this turn. A POSITION reads the final answer alone, and the asymmetry
+        is the point: `opening` and `ending` are claims about how the ANSWER
+        reads, so widening them does not widen a check, it MOVES its window.
+
+        That move breaks R1 in the one direction R1 forbids. `no-flattery`
+        (`{like: […], in: opening}`, `when: always`) is the live case: with the
+        window on the deliverable, an answer opening "You're absolutely right,
+        I apologise…" escapes entirely whenever any narration preceded it —
+        and the post-correction turn is exactly the kind that narrates, so the
+        rule would go quiet on the turns it was written for. The mirror is no
+        better: grovel in the NARRATION would fire an ask demanding a rewrite
+        of text that was already delivered and can never be reworked, burning
+        the bound every time.
+
+        So the widening belongs to `anywhere`, and a position keeps its
+        referent. `TestOpeningIsTheAnswers` pins both directions.
+        """
+        if where == WHERE_ANYWHERE:
+            return self.answer or ""
+        text = self.answer if self.final is None else self.final
+        return slice_answer(text or "", where)
 
     def called(self, capability: str) -> bool:
         """Whether the capability actually RAN. A refused call is not a call:
@@ -2029,7 +2059,7 @@ def answer_applies(binding: Binding, evidence: TurnEvidence) -> tuple[bool, dict
     if rule.trigger != TRIGGER_ANSWER_SHAPE:
         return True, {}
     where = rule.where or WHERE_ANYWHERE
-    looked_at = slice_answer(evidence.answer or "", where)
+    looked_at = evidence.looked_at(where)
     if rule.pattern is not None:
         match = rule.pattern.search(looked_at)
         return match is not None, {
@@ -2141,7 +2171,7 @@ def _verify_one(
     if kinds := obligation.get("kinds"):
         return _verify_kinds(binding, obligation, evidence, list(kinds), common)
 
-    looked_at = slice_answer(evidence.answer or "", obligation.get("in", WHERE_ANYWHERE))
+    looked_at = evidence.looked_at(obligation.get("in", WHERE_ANYWHERE))
     pattern = re.compile(str(obligation["pattern"]))
     hit = pattern.search(looked_at)
     wanted = verb == VERB_ANSWER_MUST_INCLUDE
@@ -2230,7 +2260,7 @@ def _verify_links(
     writing per topic — the failure was never "visas", it was handing over URLs
     that were never opened, and that happens in every subject there is.
     """
-    answer = slice_answer(evidence.answer or "", obligation.get("in", WHERE_ANYWHERE))
+    answer = evidence.looked_at(obligation.get("in", WHERE_ANYWHERE))
     linked: list[str] = []
     for match in _MD_LINK_RE.finditer(answer):
         url = match.group(1) or match.group(2)
@@ -2267,7 +2297,7 @@ def _verify_meaning(
     costs one bounded rework, then the answer ships with a note.
     """
     verb = obligation["verb"]
-    looked_at = slice_answer(evidence.answer or "", obligation.get("in", WHERE_ANYWHERE))
+    looked_at = evidence.looked_at(obligation.get("in", WHERE_ANYWHERE))
     scores = evidence.meaning(looked_at, anchors) if evidence.meaning else None
     if scores is None:
         # No scorer is a THIRD answer everywhere else in this engine, and it is

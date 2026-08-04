@@ -255,6 +255,29 @@ def test_reconstruct_events_one_answer_replays_as_one_done(tmp_path):
     assert events[-1]["result"] == "hello"
 
 
+def test_reconstruct_events_a_failed_turn_keeps_everything_it_said(tmp_path):
+    """A turn ending in a recorded failure has no answer to promote, and the
+    failure branch throws `answer` away — so lifting the last delivery out of
+    the timeline DELETED it. The owner watched that narration arrive and then
+    saw the error; a cold reload showed the error with the words gone, on
+    exactly the long flaky turns narration exists for."""
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "what does it look like?"})
+    log.message({"role": "assistant", "content": "first thing said"})
+    log.step({"kind": "tool", "name": "web_search", "ok": True})
+    log.message({"role": "assistant", "content": "second thing said"})
+    log.task_end(status="failed", error="model unavailable: boom")
+
+    events = SessionLog.reconstruct_events(log.path)
+    assert [e["type"] for e in events] == [
+        "user", "token", "delivery", "step", "token", "delivery", "error",
+    ]
+    assert [e["text"] for e in events if e["type"] == "delivery"] == [
+        "first thing said", "second thing said",
+    ]
+    assert events[-1]["text"] == "model unavailable: boom"
+
+
 def test_reconstruct_events_deliveries_do_not_cross_turns(tmp_path):
     """The buffer is per turn: a delivery from turn one must not be lifted out
     as turn two's answer, nor left in turn two's timeline."""

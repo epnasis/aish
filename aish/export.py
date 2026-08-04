@@ -171,14 +171,22 @@ def safe_pdf_filename(title: str, fallback: str = "aish-export") -> str:
 def session_answers(messages: list[dict]) -> list[str]:
     """The FINAL answers from a session's logged messages, in order.
 
-    An assistant message counts as a final answer only when the next message
-    is not a tool result — every tool-calling (working) turn is followed by a
-    `tool` message, so those, and any thinking, are excluded. Empty answers
-    (a turn that produced no visible text) are dropped.
+    A record stamped `interim` is a delivery — something said on the way to the
+    answer (#212) — and never a final answer. Otherwise an assistant message
+    counts as one only when the next message is not a tool result: every
+    tool-calling (working) turn is followed by a `tool` message, so those, and
+    any thinking, are excluded. Empty answers (a turn that produced no visible
+    text) are dropped.
+
+    The stamp is checked FIRST because the adjacency rule cannot see a turn
+    that logged no tool message — which is every claude-max turn, since the
+    SDK's tool calls leave trace steps rather than tool-role records. Logs
+    written before the stamp existed carry no `interim` key and fall through to
+    the adjacency rule exactly as they always did.
     """
     answers: list[str] = []
     for i, message in enumerate(messages):
-        if message.get("role") != "assistant":
+        if message.get("role") != "assistant" or message.get("interim"):
             continue
         content = (message.get("content") or "").strip()
         if not content:

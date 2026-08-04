@@ -9,6 +9,7 @@ runs a scripted async turn against them.
 """
 
 import asyncio
+import json
 import stat
 import threading
 import time
@@ -42,6 +43,13 @@ class FakeSDK:
     class AssistantMessage:
         def __init__(self, content):
             self.content = content
+
+    class ToolUseBlock:
+        """What tells a delivery it was narration on the message that produced
+        it, rather than one message later (#212)."""
+
+        def __init__(self, name):
+            self.name = name
 
     class ResultMessage:
         def __init__(self, result="done", session_id="sess-1"):
@@ -425,3 +433,128 @@ class TestNarration:
         agent, delivered, result = self._run(monkeypatch, tmp_path, ["It folds."])
         assert delivered == []
         assert result == "It folds."
+
+
+class TestNarrationOrdering:
+    """The SDK reports partial messages for message N+1 AFTER message N's
+    complete AssistantMessage lands. So closing a delivery when the NEXT
+    assistant message arrives is one message too late: the next message's
+    tokens stream into the bubble the previous delivery was still holding, and
+    `done` then paints the answer a second time. A delivery closes on the
+    message that produced it."""
+
+    def _drive(self, monkeypatch, tmp_path, texts, **kwargs):
+        """One AssistantMessage per text, each but the last carrying a
+        tool_use block — the shape a narrating agentic turn actually has."""
+        events, delivered = [], []
+        agent, fake = make_max_agent(
+            monkeypatch, tmp_path,
+            on_token=lambda t: events.append(("token", t)),
+            on_delivered=lambda t: (delivered.append(t), events.append(("delivery", t))),
+            **kwargs,
+        )
+        stream = []
+        for i, text in enumerate(texts):
+            last = i == len(texts) - 1
+            # Partials first, then the complete message — the SDK's order.
+            stream.append(_text_delta(text))
+            blocks = [FakeSDK.TextBlock(text)]
+            if not last:
+                blocks.append(FakeSDK.ToolUseBlock("web_search"))
+            stream.append(FakeSDK.AssistantMessage(blocks))
+        fake.streams.append(stream)
+
+        async def script(_sdk):
+            return texts[-1]
+
+        fake.scripts.append(script)
+        result = agent.run_task("what does it look like?")
+        return agent, delivered, events, result, texts
+
+    def test_a_delivery_closes_before_the_next_message_streams(
+        self, monkeypatch, tmp_path
+    ):
+        _agent, delivered, events, result, texts = self._drive(
+            monkeypatch, tmp_path,
+            ["Let me search.", "There are leaks — digging in.", "It folds."],
+        )
+        assert delivered == ["Let me search.", "There are leaks — digging in."]
+        assert result == "It folds."
+        # The load-bearing assertion: every delivery lands BEFORE the tokens of
+        # the message that follows it. Reversed, those tokens append to the
+        # bubble the delivery was about to close, and `done` repaints the
+        # answer as a second bubble.
+        # Matched on the (kind, text) PAIR, not the text: a delivery's own
+        # tokens stream before it, so looking the text up by value finds the
+        # token event and the assertion passes against any ordering at all.
+        seen = [(kind, text) for kind, text in events if text.strip()]
+        for i, text in enumerate(delivered):
+            closed = seen.index(("delivery", text))
+            next_streamed = seen.index(("token", texts[i + 1]))
+            assert closed < next_streamed, (
+                f"delivery {text!r} closed after the next message had streamed: "
+                f"its tokens append to the bubble this delivery was holding, "
+                f"and `done` then paints the answer twice"
+            )
+
+    def test_the_answer_is_never_delivered_as_narration(self, monkeypatch, tmp_path):
+        _agent, delivered, _events, result, _texts = self._drive(
+            monkeypatch, tmp_path, ["Let me search.", "It folds."]
+        )
+        assert result == "It folds."
+        assert "It folds." not in delivered
+
+
+def _text_delta(text):
+    return FakeSDK.StreamEvent({
+        "type": "content_block_delta",
+        "delta": {"type": "text_delta", "text": text},
+    })
+
+
+class TestDeliveriesAreNotFinalAnswers:
+    """This path logs no tool-role records — the SDK's tool calls leave trace
+    steps — so the adjacency rule every "was this the answer?" reader uses is
+    blind here. Each narration line counted as a final answer, walking the fork
+    ordinal off by one per narrated turn."""
+
+    def test_an_interim_record_is_stamped(self, monkeypatch, tmp_path):
+        logged: list[dict] = []
+        agent, fake = make_max_agent(
+            monkeypatch, tmp_path, on_message=logged.append
+        )
+        fake.streams.append([
+            FakeSDK.AssistantMessage([FakeSDK.TextBlock("narrating")]),
+            FakeSDK.AssistantMessage([FakeSDK.TextBlock("the answer")]),
+        ])
+
+        async def script(_sdk):
+            return "the answer"
+
+        fake.scripts.append(script)
+        agent.run_task("go")
+
+        said = [m for m in logged if m.get("role") == "assistant"]
+        assert [(m["content"], m.get("interim", False)) for m in said] == [
+            ("narrating", True), ("the answer", False),
+        ]
+
+    def test_fork_and_export_skip_the_narration(self, monkeypatch, tmp_path):
+        from aish.export import session_answers
+        from aish.session import SessionLog
+
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "first"})
+        log.message({"role": "assistant", "content": "narrating", "interim": True})
+        log.message({"role": "assistant", "content": "answer one"})
+        log.message({"role": "user", "content": "second"})
+        log.message({"role": "assistant", "content": "answer two"})
+
+        text = log.path.read_text(encoding="utf-8")
+        # The UI counts answer bubbles, and narration gets none — so "the 2nd
+        # answer" must be `answer two`, not `answer one`.
+        assert "answer two" in SessionLog.truncate_at_answer(text, 2)
+        assert SessionLog.truncate_at_answer(text, 3) is None
+        assert session_answers(
+            [json.loads(line) for line in text.splitlines()]
+        ) == ["answer one", "answer two"]

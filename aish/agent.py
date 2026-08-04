@@ -957,7 +957,7 @@ def _remove_scratch(path: Path) -> None:
 
 
 def _serialize(message: dict) -> dict:
-    keys = ("role", "content", "tool_name", "images", "documents")
+    keys = ("role", "content", "tool_name", "images", "documents", "interim")
     return {k: message[k] for k in keys if k in message}
 
 
@@ -1294,10 +1294,23 @@ class Agent:
             return True
         return False
 
-    def _append(self, message: dict) -> None:
+    def _append(self, message: dict, interim: bool = False) -> None:
+        """`interim` stamps the LOG record as a delivery — something said on
+        the way to the answer (#212) — without touching the message dict the
+        backends receive, which must carry no key they did not ask for.
+
+        Readers that need "was this the turn's answer?" (the fork ordinal, the
+        exporter) had only one signal: an interim turn is followed by a
+        tool-role record. That holds on this loop and nowhere else, so the fact
+        is now stamped where it is known rather than re-derived downstream (the
+        provenance rule in docs/web-server.md L5).
+        """
         self.messages.append(message)
         if self.on_message:
-            self.on_message(_serialize(message))
+            record = _serialize(message)
+            if interim:
+                record["interim"] = True
+            self.on_message(record)
 
     def _note(self, text: str) -> None:
         """Terminal progress chatter (✓ ran X, → read Y, ✓ thought for …).
@@ -1731,7 +1744,11 @@ class Agent:
                 self.messages.append(entry)
                 self._held_entry = entry
             else:
-                self._append(entry)
+                # Tool calls mean this turn ACTED, so its words were a delivery
+                # and not the answer (#212). Stamped only here: the wrap-up
+                # turn in _finish_stopped may also carry tool calls, and that
+                # text IS the answer.
+                self._append(entry, interim=bool(tool_calls))
 
             # Deny means STOP: only a TEXT-ONLY turn clears the stop gate.
             # Clearing on any content would be defeated by chatty preamble (or
@@ -3189,8 +3206,12 @@ class Agent:
             return None
         evidence = rules.TurnEvidence(
             # The whole turn, not the last message (#212) — see _deliverable.
-            answer=self._deliverable(answer), calls=tuple(self._turn_calls),
-            meaning=self._meaning_scorer(),
+            # `final` rides alongside because a POSITION check (`in: opening`)
+            # is a claim about how the ANSWER reads: widening it would move its
+            # window onto the narration rather than widen it. See
+            # TurnEvidence.looked_at.
+            answer=self._deliverable(answer), final=answer.strip(),
+            calls=tuple(self._turn_calls), meaning=self._meaning_scorer(),
         )
         failures = rules.verify(self._bindings, evidence)
         asks, unmet = [], []
@@ -3336,12 +3357,21 @@ class Agent:
         rule would report a failure the owner can see is not one. So the
         deliverable is the concatenation of every delivery plus the final
         answer — which is exactly the definition every answer-side rule was
-        written against, back when a turn only ever said one thing.
+        written against, back when a turn only ever said one thing. That is the
+        whole argument: the deliverable is what "the answer" always referred
+        to, and a turn that says several things is what made the two diverge.
 
-        It can only ever catch MORE, which is the direction R1 permits a
-        rule-engine change to be wrong in. Interim deliveries are still not
-        PROPOSALS: they were already shown and cannot be reworked, so only the
-        final answer is held, asked about and released.
+        It is NOT that a wider text can only catch more. That is true of
+        `answer_must_not_include`, and false of `answer_must_include`, which a
+        wider haystack makes strictly EASIER to satisfy — the picture in
+        delivery two is the case this exists for, so the exception is the
+        point rather than an oversight. Position checks are a third shape
+        again: see `rules.TurnEvidence.looked_at`, which keeps their window on
+        the final answer because widening one MOVES it.
+
+        Interim deliveries are still not PROPOSALS: they were already shown and
+        cannot be reworked, so only the final answer is held, asked about and
+        released.
         """
         return "\n\n".join([*self._delivered, answer.strip()]).strip()
 

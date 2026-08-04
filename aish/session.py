@@ -642,12 +642,20 @@ class SessionLog:
             nonlocal steps, answer, open_turn, running_steps, failure, deliveries
             if not open_turn:
                 return
-            if deliveries:
+            if deliveries and not failure:
                 # The LAST thing said is the turn's answer and leaves the
                 # timeline to become `done`; everything before it stays where
                 # it was said, between the steps it interleaved with. Live
                 # those arrived as tokens closed by a `delivery`, which is
                 # exactly what is replayed here (L1).
+                #
+                # `not failure` is load-bearing: a turn that ENDED IN A FAILURE
+                # has no answer to promote, and the failure branch below throws
+                # `answer` away — so lifting the last delivery out deleted it
+                # from the record entirely. The owner watched that narration
+                # arrive and then saw the error; a cold reload showed the error
+                # with the words gone, on exactly the long flaky turns
+                # narration exists for. A failed turn keeps ALL of them.
                 last = deliveries[-1]
                 answer = steps[last]["text"]
                 del steps[last : last + 2]
@@ -886,7 +894,14 @@ class SessionLog:
         fork replays identically up to that point. Returns None if `after` is
         out of range."""
         lines = text.splitlines()
-        msgs: list[tuple[int, str]] = []  # (line index, role) for message records
+        # (line index, role, interim) for message records. `interim` marks a
+        # DELIVERY — something said on the way to the answer (#212) — and is
+        # checked before the adjacency rule below, because that rule cannot see
+        # a turn which logged no tool message. Every claude-max turn is one:
+        # the SDK's tool calls leave trace steps, not tool-role records, so
+        # without the stamp each narration line counted as a final answer and
+        # the fork ordinal drifted off by one per narrated turn.
+        msgs: list[tuple[int, str, bool]] = []
         for i, line in enumerate(lines):
             try:
                 record = json.loads(line)
@@ -895,11 +910,12 @@ class SessionLog:
             if record.get("kind") == "message" and record.get("role") in (
                 "user", "assistant", "tool",
             ):
-                msgs.append((i, record["role"]))
+                msgs.append((i, record["role"], bool(record.get("interim"))))
         finals = [
             line_idx
-            for j, (line_idx, role) in enumerate(msgs)
+            for j, (line_idx, role, interim) in enumerate(msgs)
             if role == "assistant"
+            and not interim
             and (j + 1 >= len(msgs) or msgs[j + 1][1] != "tool")
         ]
         if after < 1 or after > len(finals):
