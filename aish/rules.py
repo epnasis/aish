@@ -1479,11 +1479,21 @@ def wants_text_first(bindings: list[Binding]) -> list[Binding]:
     ]
 
 
+# Both halves of this rule's prose — the seed line and this refusal — used to
+# tell the model to speak in one turn and act in "the next" one. There is no
+# next one: a reply with no tool call IS the loop's terminator, so the model
+# complied by announcing the work and ending the task, and the user had to ask
+# again to get anything done. Text ALONGSIDE the call is what satisfies this,
+# which is what the mechanism has always checked and what the owner's own rule
+# body says; only the generated words disagreed. So they name the same turn,
+# and they name the consequence of splitting — a gate must never be the thing
+# that talks a model into stopping.
 SPEAK_FIRST_REFUSAL = (
     "The rule '{rule}' requires you to say something to the user BEFORE running "
     "anything. {description}\n"
-    "Answer them in plain text first — even one line — then propose this call in "
-    "your next turn."
+    "Re-propose this call with a line of plain text alongside it, in the SAME "
+    "turn — text and call together. Replying with text alone would end the task "
+    "here and leave the work undone."
 )
 
 
@@ -2452,8 +2462,10 @@ def _obligation_line(obligation: dict, rule: Rule | None = None) -> str:
     if verb == VERB_MUST_FIRST:
         if obligation["capability"] == FIRST_ANSWER:
             return (
-                "· MUST say something to the user before running ANYTHING. Answer "
-                "in plain text first, then use tools in a later turn."
+                "· MUST say something to the user before running ANYTHING — in "
+                "the SAME turn as the call. Text alongside a tool call satisfies "
+                "this. A reply with NO tool call ends the task, so announcing the "
+                "work and stopping leaves it undone."
             )
         return (
             f"· MUST call {obligation['capability']} before answering. The answer "

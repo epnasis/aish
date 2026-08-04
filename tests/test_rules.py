@@ -1577,6 +1577,25 @@ class TestAnswerBeforeActing:
         assert rules.wants_text_first([binding]) == []
         assert rules.has_verify([binding]) is True
 
+    def test_neither_half_of_the_prose_defers_the_call_to_another_turn(self):
+        """The gate must not talk the model into ENDING the task.
+
+        Both strings once said "then use tools in a later turn" / "propose this
+        call in your next turn". There is no next turn: a reply with no tool
+        call is the loop's terminator, so a model that complied announced the
+        work and stopped, twice in a row, and the owner had to ask again. The
+        mechanism was always right — text alongside a call counts — and so was
+        the owner's own rule body; only the generated words disagreed.
+        """
+        rule = self._rule()
+        binding = rules.bind(rule, {"on": "always"}, "b1", {"read_url"})
+        both = rules.seed_text([binding]) + rules.SPEAK_FIRST_REFUSAL
+        assert "later turn" not in both
+        assert "next turn" not in both
+        # And each says, positively, the thing that DOES satisfy it.
+        assert "SAME turn" in rules.seed_text([binding])
+        assert "SAME turn" in rules.SPEAK_FIRST_REFUSAL
+
 
 class TestAnswerSubject:
     """`when: answer:` — a condition on the DELIVERABLE.
