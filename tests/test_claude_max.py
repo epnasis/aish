@@ -396,14 +396,15 @@ class TestNarration:
         result = agent.run_task("what does it look like?")
         return agent, delivered, result
 
-    def test_each_assistant_message_but_the_last_is_a_delivery(
+    def test_only_the_opening_acknowledgement_is_delivered(
         self, monkeypatch, tmp_path
     ):
+        """Same cap as the native loop: one per task, not one per message."""
         agent, delivered, result = self._run(
             monkeypatch, tmp_path,
             ["Let me search.", "There are leaks — digging in.", "It folds."],
         )
-        assert delivered == ["Let me search.", "There are leaks — digging in."]
+        assert delivered == ["Let me search."]
         assert result == "It folds."
 
     def test_narration_is_recorded_so_a_cold_reload_replays_it(
@@ -478,7 +479,7 @@ class TestNarrationOrdering:
             monkeypatch, tmp_path,
             ["Let me search.", "There are leaks — digging in.", "It folds."],
         )
-        assert delivered == ["Let me search.", "There are leaks — digging in."]
+        assert delivered == ["Let me search."]
         assert result == "It folds."
         # The load-bearing assertion: every delivery lands BEFORE the tokens of
         # the message that follows it. Reversed, those tokens append to the

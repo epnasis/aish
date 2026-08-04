@@ -3286,14 +3286,28 @@ class Agent:
         return (answer + "\n\n" + "\n".join(notes)).strip()
 
     def _deliver_interim(self, content: str) -> None:
-        """Close out one INTERIM delivery — the prose a turn said alongside its
-        tool calls (#212).
+        """Close out the turn's ONE interim delivery — the prose it said
+        alongside its first tool calls (#212).
 
         A long task used to be a spinner: the model's own running commentary
         was captured, cut to the first sentence at 120 characters for the trace
-        header, and discarded. It is now delivered whole, as a message, every
-        step — which is also what finally gives mid-task steering (#95)
-        something to steer against.
+        header, and discarded. It is delivered whole instead — which is also
+        what finally gives mid-task steering (#95) something to steer against.
+
+        **Only the first one is shown, and that cap is the feature.** Delivering
+        every step produced nineteen bubbles on one question, each announcing
+        the next tool — *"I will search…", "I will read…", "I will fetch…"* —
+        which buries the answer and reads as a machine reporting to itself. The
+        owner's own framing is the spec: delegate something to a person and
+        they say "I'm on it, I'll do X, back to you" ONCE, then come back with
+        the result. So the opening acknowledgement is delivered and the
+        play-by-play is dropped.
+
+        The model keeps saying it — the words stay in `self.messages`, so its
+        own plan is intact and nothing about the loop changes. What is capped
+        is what reaches the OWNER. Dropped prose is not graded either: only
+        what he was actually told joins `_delivered`, so the deliverable stays
+        honest (see `_deliverable`).
 
         Two paths reach the client, and the difference is the hold:
 
@@ -3314,6 +3328,11 @@ class Agent:
         `_delivered`, because the DELIVERABLE is the whole turn — see
         `_deliverable`.
         """
+        if self._delivered:
+            # Already acknowledged this task. Everything after it is the
+            # play-by-play, and the owner asked for a colleague's "on it",
+            # not a machine's progress log.
+            return
         text = content.strip()
         if self._held_answer is not None:
             # Verify's buffer holds this turn's words. It is not the answer, so

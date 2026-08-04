@@ -352,7 +352,9 @@ class ClaudeMaxAgent:
         deliverable so `verify_final` grades everything the owner was told.
         """
         text = (text or "").strip()
-        if not text:
+        if not text or self.inner._delivered:
+            # One acknowledgement per task, the same cap as the native loop:
+            # the owner asked for a colleague's "I'm on it", not a progress log.
             return
         self.inner._delivered.append(text)
         # `interim` stamped explicitly: this path logs no tool-role records at

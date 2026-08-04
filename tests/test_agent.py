@@ -6776,7 +6776,7 @@ class TestNarration:
         assert thinking["say"].startswith("Looks like there are leaks")
         assert len(thinking["say"]) <= agent_module.STATUS_SNIPPET_CHARS
 
-    def test_every_step_is_its_own_delivery_and_the_answer_is_not_one(self, tmp_path):
+    def test_only_the_opening_acknowledgement_is_delivered(self, tmp_path):
         _agent, delivered, result = self._run(
             tmp_path,
             [
@@ -6787,11 +6787,14 @@ class TestNarration:
                 model_says("It is a folding phone."),
             ],
         )
-        assert delivered == [
-            "Let me search for the iPhone 18.",
-            "There will be a new fold — looking into that.",
-        ], "the deliveries are per STEP, and the answer is not one of them"
-        assert result == "It is a folding phone."
+        # ONE per task. Delivering every step produced nineteen bubbles on a
+        # single question, each announcing the next tool ("I will search…",
+        # "I will read…"), which buries the answer. The owner's spec is what a
+        # person does when you delegate: "I'm on it, I'll do X" — once.
+        assert delivered == ["Let me search for the iPhone 18."], (
+            "the play-by-play was delivered, or the acknowledgement was not"
+        )
+        assert result == "It is a folding phone.", "the answer is never a delivery"
 
     def test_a_silent_step_delivers_nothing(self, tmp_path):
         """Silence is the correct output for a routine step; the sink must not

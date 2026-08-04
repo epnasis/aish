@@ -211,13 +211,12 @@ def test_reconstruct_events_old_logs_are_byte_identical(tmp_path):
     assert events[-1]["result"] == "hello"
 
 
-def test_reconstruct_events_replays_every_delivery(tmp_path):
-    """#212. A turn says several things on its way to the answer, and replay
-    used to collapse all of them into the last one — so a chat the owner had
-    watched say three things came back cold as a chat that said one. Each
-    interim delivery replays as the token + `delivery` pair a live client
-    receives (L1), IN PLACE between the steps it interleaved with, and only the
-    last one becomes `done`."""
+def test_reconstruct_events_replays_the_one_delivery(tmp_path):
+    """#212. A turn says several things on its way to the answer; the harness
+    delivers only the FIRST (the acknowledgement) and drops the play-by-play,
+    so replay shows one too — L1 is about matching what the owner SAW, not what
+    the model said. The log still holds every interim message; this is the
+    reader choosing. The last message still becomes `done`."""
     log = SessionLog.new(tmp_path)
     log.message({"role": "user", "content": "what does it look like?"})
     log.step({"kind": "thinking_start"})
@@ -234,11 +233,11 @@ def test_reconstruct_events_replays_every_delivery(tmp_path):
     assert [e["type"] for e in events] == [
         "user",
         "step", "token", "delivery", "step", "step",
-        "step", "token", "delivery", "step", "step",
+        "step", "step", "step",
         "done",
     ]
     said = [e["text"] for e in events if e["type"] == "delivery"]
-    assert said == ["Let me search for that.", "There are leaks — digging in."]
+    assert said == ["Let me search for that."], "the play-by-play came back"
     assert events[-1]["result"] == "It folds."
 
 
@@ -270,10 +269,10 @@ def test_reconstruct_events_a_failed_turn_keeps_everything_it_said(tmp_path):
 
     events = SessionLog.reconstruct_events(log.path)
     assert [e["type"] for e in events] == [
-        "user", "token", "delivery", "step", "token", "delivery", "error",
+        "user", "token", "delivery", "step", "error",
     ]
     assert [e["text"] for e in events if e["type"] == "delivery"] == [
-        "first thing said", "second thing said",
+        "first thing said",
     ]
     assert events[-1]["text"] == "model unavailable: boom"
 

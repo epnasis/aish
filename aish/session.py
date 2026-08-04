@@ -659,6 +659,15 @@ class SessionLog:
                 last = deliveries[-1]
                 answer = steps[last]["text"]
                 del steps[last : last + 2]
+                deliveries = deliveries[:-1]
+            # ONE acknowledgement per turn reaches the owner, so replay shows
+            # one too (L1). The log still records every interim message — that
+            # is the honest record of what the model said — but the harness
+            # delivers only the first, and a cold reload that replayed all of
+            # them would show a play-by-play the live turn never did. Dropped
+            # highest-index first, or removing one pair shifts the next.
+            for start in reversed(deliveries[1:]):
+                del steps[start : start + 2]
             events.extend(steps)
             deliveries = []
             if failure:
