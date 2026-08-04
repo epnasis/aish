@@ -50,6 +50,9 @@ function turnWorld() {
       turnAnchorEl: null,
       lastUserPrompt: "",
       currentTrace: null,
+      // A replay settles any send held for this chat ([PENDING-SEND]); which
+      // ones is that block's subject, not this one's.
+      adjudicateHeldSends() {},
       // collaborators that would need a real browser
       renderMarkdown: (text) => ({ md: text }),
       stripAttachmentNotes: (text) => text,
