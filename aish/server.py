@@ -4432,6 +4432,12 @@ def create_app(
             aliases=aliases,
             on_message=logref.message,
             on_token=lambda text: bridge.emit({"type": "token", "text": text}),
+            # Narration (#212): the turn said something on its way to the
+            # answer, and this closes that delivery so it gets its own bubble
+            # instead of being glued onto whatever is said next. The text
+            # rides along for a client whose stream it missed — the same shape
+            # `done` uses, and the shape reconstruct_events replays.
+            on_delivered=lambda text: bridge.emit({"type": "delivery", "text": text}),
             # Structured activity-trace steps; recorded so a resumed/switched
             # session replays the whole trace like every other event.
             on_step=lambda step: bridge.emit({"type": "step", **step}),

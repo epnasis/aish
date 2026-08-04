@@ -1341,6 +1341,7 @@ function handle(event) {
     case "cwd_queued": addCwdChip(event.path); break;
     case "cwd_dequeued": removeCwdChip(); break;
     case "token": onToken(event.text); break;
+    case "delivery": onDelivery(event); break;
     case "echo":
       // The activity trace already shows a run_command's approval + result and
       // its own Stop/Stopping state, so drop the approver's redundant
@@ -2203,18 +2204,53 @@ function stableBoundary(text) {
 // The orderly end of a bubble: flush, decorate, release. resetLiveTurn is the
 // DISORDERLY one (the transcript is being replaced under it) — between them they
 // are the only writers of answerEl besides the token path that opens it.
-function closeAnswer() {
+//
+// `interim` closes a NARRATION delivery (#212) instead of an answer. The tool
+// row is the deliverable's row — copy, export, fork, regenerate, 👍/👎 — and
+// every one of those names the turn's ANSWER: the fork ordinal counts final
+// answers (`truncate_at_answer` defines them the same way), regenerate re-runs
+// the prompt, and a rating must bind to the turn rather than fragment across
+// however many times the model spoke on the way there. So an interim bubble
+// gets no row at all; it is marked instead, and reads as progress.
+function closeAnswer(interim) {
   // A finished answer (streaming ends, or something else interrupts the
   // block) gets its copy/read-aloud row; mid-stream re-renders would clobber it.
   if (answerEl) {
     renderAnswerNow(); // flush any tokens still waiting on the next frame
     highlightFences(answerEl); // the answer is settled now — safe to tokenize fences once
-    if (answerText.trim()) attachAnswerTools(answerEl, answerText, lastUserPrompt);
+    if (interim) answerEl.classList.add("interim");
+    else if (answerText.trim()) attachAnswerTools(answerEl, answerText, lastUserPrompt);
   }
   answerEl = null;
   answerText = "";
 }
 // [ANSWER-CLOSE-END]
+
+// [DELIVERY-START]
+// One thing said on the way to the answer (#212) is over: close its bubble so
+// the next thing said gets its own, instead of a whole task arriving as one
+// paragraph that grew for four minutes.
+//
+// The text rides the event for the same reason `done` carries `result`: the
+// tokens may never have arrived. A bound turn cannot stream them at all (Verify
+// buffers every token, and whether a turn is the ANSWER is only knowable once
+// its tool calls arrive), and a mid-stream replay drops the stale live tail —
+// in both cases `sawAnswer` is false and this is the only copy there is.
+function onDelivery(event) {
+  if (!sawAnswer && event.text) {
+    // Complete and authoritative, so it paints even over an abandoned turn —
+    // unlike a lone live token, which would be a truncated fragment. Clearing
+    // the flag first is what lets it through onToken's own drop guard.
+    answerAbandoned = false;
+    onToken(event.text);
+  }
+  closeAnswer(true); // flushes whatever is still queued for the next frame
+  // The turn goes on: the next delivery, and the answer itself, are fresh
+  // bubbles. Both flags describe the bubble just closed, not the turn.
+  sawAnswer = false;
+  answerAbandoned = false;
+}
+// [DELIVERY-END]
 
 function onDone(event) {
   // How long THIS answer took, for the readout under it — a wall-clock measure,

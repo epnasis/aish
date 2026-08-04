@@ -624,6 +624,11 @@ class SessionLog:
         ratings: list[dict] = []
         steps: list[dict] = []
         answer = ""
+        # Where in `steps` each of this turn's deliveries sits (#212). A turn
+        # says things on its way to the answer, and which of them WAS the
+        # answer is only knowable at the end — so they are all buffered in
+        # place, and `flush` lifts the last one out to become `done`.
+        deliveries: list[int] = []
         open_turn = False
         has_trace = False
         running_steps = 0  # started (thinking/tool) but not finished — a cut-off turn
@@ -634,10 +639,20 @@ class SessionLog:
         first_user = True  # the opening turn of a triggered session is its trigger
 
         def flush() -> None:
-            nonlocal steps, answer, open_turn, running_steps, failure
+            nonlocal steps, answer, open_turn, running_steps, failure, deliveries
             if not open_turn:
                 return
+            if deliveries:
+                # The LAST thing said is the turn's answer and leaves the
+                # timeline to become `done`; everything before it stays where
+                # it was said, between the steps it interleaved with. Live
+                # those arrived as tokens closed by a `delivery`, which is
+                # exactly what is replayed here (L1).
+                last = deliveries[-1]
+                answer = steps[last]["text"]
+                del steps[last : last + 2]
             events.extend(steps)
+            deliveries = []
             if failure:
                 # The turn's own recorded failure, replayed as the `error` event
                 # a live viewer saw (#203). It outranks the inference below: the
@@ -843,11 +858,17 @@ class SessionLog:
                     events.append(event)
                     open_turn = True
             elif kind == "message" and record.get("role") == "assistant":
-                # The task's answer is its last non-empty assistant text;
-                # intermediate tool-calling turns carry no visible content.
+                # Every non-empty assistant text is a DELIVERY (#212): the
+                # prose a step said alongside its tool calls was already shown
+                # to the owner live, so a replay that collapsed the turn to its
+                # last message rendered a chat he had watched say four things
+                # as one that said one. Buffered in position; `flush` decides
+                # which of them is the answer.
                 content = (record.get("content") or "").strip()
                 if content:
-                    answer = content
+                    deliveries.append(len(steps))
+                    steps.append({"type": "token", "text": content})
+                    steps.append({"type": "delivery", "text": content})
         flush()
         # Decorations last: every turn they name now exists in the stream.
         events.extend(ratings)

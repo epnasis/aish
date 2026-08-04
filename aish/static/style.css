@@ -518,6 +518,20 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   padding: 2px 0;
   font-size: calc(18.4px * var(--fs)); /* scale the conversation (#118) */
 }
+/* Something said on the way to the answer (#212): the same voice as the answer,
+   set one step back. A rule on the leading edge is what separates four of these
+   from four answers — the reader has to be able to tell progress from the
+   deliverable at a glance, and dimming the text alone would say "less
+   important" about the sentence that is meant to make him steer. Deliberately
+   NOT a second bubble colour: blue is the user, and a third one would read as a
+   third speaker. */
+.msg.answer.interim {
+  border-left: 2px solid var(--bg-elev3);
+  padding-left: 10px;
+  font-size: calc(16.5px * var(--fs));
+  color: var(--dim);
+}
+
 /* command output / agent status: monospace, no wrapping — scroll sideways
    like the diff view so structure survives */
 .msg.echo, .msg.stream {

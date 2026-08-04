@@ -104,6 +104,15 @@ A write approval card renders the plan's diff. For a rule that diff is YAML **th
 
 — `test_choreo_midstream_replay.js`
 
+### `[DELIVERY]` — narration is its own bubble (#212)
+**L1/L2.** A turn says several things: what it found, what it is going to do next, and finally the answer. Each of those is a **delivery**, and `delivery` closes one — so they land as separate bubbles instead of a single paragraph that grew for four minutes. Three decisions live here.
+
+**The event carries the text as well as ending the bubble**, the same shape `done` uses with `sawAnswer`, because the tokens may never have arrived: a rule-bound turn cannot stream them at all (Verify buffers every token, and whether a turn is the *answer* is knowable only once its tool calls arrive — a token cannot be retracted), and a mid-stream replay drops the stale live tail. In both cases `sawAnswer` is false and the event is the only copy. It clears `answerAbandoned` before painting, because unlike a lone live token this text is **complete**, so the guard that exists to stop a truncated fragment does not apply to it.
+
+**An interim bubble gets no tool row.** That row belongs to the deliverable: the fork ordinal counts *final* answers (`truncate_at_answer` defines them the same way, by not being followed by a tool message), regenerate re-runs the prompt, and a rating must bind to the **turn** — spreading 👍/👎 across however many times the model spoke would fragment the one corpus #207 exists to build. So `closeAnswer(true)` marks the bubble and attaches nothing.
+
+**Both flags it resets describe the bubble, not the turn.** `sawAnswer` and `answerAbandoned` go back to false so the next delivery — and the answer itself — stream into fresh bubbles. `resetLiveTurn` still closes mid-stream bubbles the ordinary way: whether an open bubble is interim is unknowable until the delivery boundary arrives, so there is nothing better to do there. — `test_delivery_bubble.js`
+
 ### `[ANSWER-OPEN]` / `[ANSWER-CLOSE]` — the answer bubble's lifecycle
 **L1.** One region per stage; with `[TURN-RESET]` (the disorderly end) these are the only writers of `answerEl`. Open claims `turnAnchorEl` — **the anchor is the ANSWER, never the trace card**, which is what used to pin the progress box to the top of the screen for a whole turn. "Scroll while it fills, then stop" is a CONSEQUENCE of `anchorAnswer`'s clamp, not a mode: the target clamps to the bottom while the turn is shorter than a screen, then stops moving once the answer's top can reach the top of the viewport, and content only ever appends below it. Hence no follow flag. The forced `anchorAnswer(true)` is gated on `!replaying`, read at SCHEDULE time (inside the rAF the loop has already reset the flag), or a reload lands at the top of the last answer. Close flushes pending tokens, highlights fences once (safe only when settled), and attaches the copy/read-aloud row. — `test_choreo_midstream_replay.js`, `test_trace_tail.js`
 

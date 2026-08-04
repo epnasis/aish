@@ -49,6 +49,7 @@ class ClaudeMaxAgent:
         context: str = "",
         on_message=None,
         on_token=None,
+        on_delivered=None,
         on_step=None,
         on_command_start=None,
         on_command_end=None,
@@ -133,6 +134,11 @@ class ClaudeMaxAgent:
         self.max_steps = max_steps
         self.on_message = on_message
         self.on_token = on_token
+        # Narration (#212) is emitted by whichever loop is running, and here
+        # that is the SDK's — so this sink stays on the wrapper, like
+        # on_message and on_token, rather than being forwarded to an inner
+        # run_task that never runs.
+        self.on_delivered = on_delivered
         self.status = status
         self.base_context = context
         self.messages: list[dict] = []  # display-only history (replay/logs)
@@ -336,6 +342,23 @@ class ClaudeMaxAgent:
         self._record({"role": "assistant", "content": result})
         return result
 
+    def _deliver_interim(self, text: str) -> None:
+        """Close out one interim delivery on the SDK path (#212).
+
+        The tokens have already streamed (the SDK reports partial messages when
+        on_token is wired), so this marks the END of that message and hands the
+        complete text over: recorded like any assistant turn, so a cold reload
+        replays the narration instead of losing it, and joined to the turn's
+        deliverable so `verify_final` grades everything the owner was told.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        self.inner._delivered.append(text)
+        self._record({"role": "assistant", "content": text})
+        if self.on_delivered:
+            self.on_delivered(text)
+
     def _record(self, message: dict) -> None:
         self.messages.append(message)
         if self.on_message:
@@ -391,6 +414,12 @@ class ClaudeMaxAgent:
                 elif isinstance(message, sdk.AssistantMessage):
                     for block in message.content:
                         if isinstance(block, sdk.TextBlock) and block.text:
+                            # A later assistant text is what proves the
+                            # previous one was NOT the answer (#212). Until one
+                            # arrives, `final` is still a candidate answer, so
+                            # the delivery is closed one message late rather
+                            # than guessed at from tool_use blocks.
+                            self._deliver_interim(final)
                             final = block.text
                             if self.on_token is None:
                                 self.echo(block.text)

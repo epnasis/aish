@@ -211,6 +211,70 @@ def test_reconstruct_events_old_logs_are_byte_identical(tmp_path):
     assert events[-1]["result"] == "hello"
 
 
+def test_reconstruct_events_replays_every_delivery(tmp_path):
+    """#212. A turn says several things on its way to the answer, and replay
+    used to collapse all of them into the last one — so a chat the owner had
+    watched say three things came back cold as a chat that said one. Each
+    interim delivery replays as the token + `delivery` pair a live client
+    receives (L1), IN PLACE between the steps it interleaved with, and only the
+    last one becomes `done`."""
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "what does it look like?"})
+    log.step({"kind": "thinking_start"})
+    log.message({"role": "assistant", "content": "Let me search for that."})
+    log.step({"kind": "thinking", "secs": 0.1})
+    log.step({"kind": "tool", "name": "web_search", "ok": True})
+    log.step({"kind": "thinking_start"})
+    log.message({"role": "assistant", "content": "There are leaks — digging in."})
+    log.step({"kind": "thinking", "secs": 0.1})
+    log.step({"kind": "tool", "name": "read_url", "ok": True})
+    log.message({"role": "assistant", "content": "It folds."})
+
+    events = SessionLog.reconstruct_events(log.path)
+    assert [e["type"] for e in events] == [
+        "user",
+        "step", "token", "delivery", "step", "step",
+        "step", "token", "delivery", "step", "step",
+        "done",
+    ]
+    said = [e["text"] for e in events if e["type"] == "delivery"]
+    assert said == ["Let me search for that.", "There are leaks — digging in."]
+    assert events[-1]["result"] == "It folds."
+
+
+def test_reconstruct_events_one_answer_replays_as_one_done(tmp_path):
+    """The control: a turn that only ever said one thing is untouched — no
+    token, no delivery, just the `done` every old log has always replayed."""
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "hi"})
+    log.step({"kind": "tool", "name": "read_file", "ok": True})
+    log.message({"role": "assistant", "content": "hello"})
+
+    events = SessionLog.reconstruct_events(log.path)
+    assert [e["type"] for e in events] == ["user", "step", "done"]
+    assert events[-1]["result"] == "hello"
+
+
+def test_reconstruct_events_deliveries_do_not_cross_turns(tmp_path):
+    """The buffer is per turn: a delivery from turn one must not be lifted out
+    as turn two's answer, nor left in turn two's timeline."""
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": "first"})
+    log.message({"role": "assistant", "content": "narrating"})
+    log.step({"kind": "tool", "name": "web_search", "ok": True})
+    log.message({"role": "assistant", "content": "first answer"})
+    log.message({"role": "user", "content": "second"})
+    log.message({"role": "assistant", "content": "second answer"})
+
+    events = SessionLog.reconstruct_events(log.path)
+    assert [e["type"] for e in events] == [
+        "user", "token", "delivery", "step", "done", "user", "done",
+    ]
+    assert [e["result"] for e in events if e["type"] == "done"] == [
+        "first answer", "second answer",
+    ]
+
+
 def test_reconstruct_events_finished_tool_is_not_interrupted(tmp_path):
     # The control: a tool_start WITH its matching finish closes normally (done).
     log = SessionLog.new(tmp_path)

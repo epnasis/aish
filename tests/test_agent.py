@@ -20,7 +20,7 @@ from aish import rules as rules_module
 from aish import session as session_module
 from aish import skills as skills_module
 from aish import tool_plugins
-from aish.agent import DENIED_RESULT, Agent
+from aish.agent import AISH_NOTE, DENIED_RESULT, Agent
 from aish.approval import Approved, Blocked, Denied
 from aish.session import SessionLog
 
@@ -6723,6 +6723,232 @@ class TestHeldAnswer:
         )
         agent.run_task("hello")
         assert "plain answer" in "".join(streamed)
+
+
+# Two sentences and well over STATUS_SNIPPET_CHARS, so a snipped copy is
+# recognisably not the whole thing.
+NARRATION = (
+    "Looks like there are leaks about a folding model. Let me dig into the "
+    "supply-chain reports before I say anything about the screen, because the "
+    "renders going around are fan-made and I do not want to hand you one."
+)
+
+
+class TestNarration:
+    """#212. A long task used to be a spinner: the model's own commentary was
+    captured, cut to one sentence at 120 characters for the trace header, and
+    thrown away. It is delivered instead — and because a turn now says several
+    things, the DELIVERABLE Verify grades is all of them, not the last one."""
+
+    def _run(self, tmp_path, responses, rule_texts=(), **kwargs):
+        delivered: list[str] = []
+        agent, _ = rules_agent(
+            tmp_path, responses, rule_texts=rule_texts,
+            on_delivered=delivered.append, **kwargs,
+        )
+        result = agent.run_task("what does the new phone look like?")
+        return agent, delivered, result
+
+    def test_prose_alongside_a_tool_call_is_delivered_whole(self, tmp_path):
+        _agent, delivered, _ = self._run(
+            tmp_path,
+            [
+                model_says(NARRATION, tool_calls=[tool_call("web_search", query="phone")]),
+                model_says("Here is the answer."),
+            ],
+        )
+        assert delivered == [NARRATION], "narration was snipped or dropped"
+
+    def test_the_trace_header_still_gets_its_one_line(self, tmp_path):
+        """The status line and the delivery are different surfaces. The header
+        is one line by construction — it must not grow a paragraph now that the
+        paragraph has somewhere else to go."""
+        steps: list[dict] = []
+        self._run(
+            tmp_path,
+            [
+                model_says(NARRATION, tool_calls=[tool_call("web_search", query="phone")]),
+                model_says("Here is the answer."),
+            ],
+            step_log=steps.append,
+        )
+        [thinking] = [s for s in steps if s.get("kind") == "thinking"]
+        assert thinking["say"].startswith("Looks like there are leaks")
+        assert len(thinking["say"]) <= agent_module.STATUS_SNIPPET_CHARS
+
+    def test_every_step_is_its_own_delivery_and_the_answer_is_not_one(self, tmp_path):
+        _agent, delivered, result = self._run(
+            tmp_path,
+            [
+                model_says("Let me search for the iPhone 18.",
+                           tool_calls=[tool_call("web_search", query="iphone 18")]),
+                model_says("There will be a new fold — looking into that.",
+                           tool_calls=[tool_call("web_search", query="iphone fold")]),
+                model_says("It is a folding phone."),
+            ],
+        )
+        assert delivered == [
+            "Let me search for the iPhone 18.",
+            "There will be a new fold — looking into that.",
+        ], "the deliveries are per STEP, and the answer is not one of them"
+        assert result == "It is a folding phone."
+
+    def test_a_silent_step_delivers_nothing(self, tmp_path):
+        """Silence is the correct output for a routine step; the sink must not
+        fire on an empty string or the client draws an empty bubble."""
+        _agent, delivered, _ = self._run(
+            tmp_path,
+            [
+                model_says("", tool_calls=[tool_call("web_search", query="x")]),
+                model_says("done"),
+            ],
+        )
+        assert delivered == []
+
+    def test_a_bound_turn_delivers_its_narration_even_though_it_cannot_stream(
+        self, tmp_path
+    ):
+        """Verify's hold buffers every token, because whether a turn is the
+        ANSWER is knowable only once its tool calls arrive. So narration cannot
+        stream on a bound turn — it is released WHOLE the moment the turn
+        proves itself interim. Silence for the whole task becomes silence for
+        one model turn, which is the trade #191 was actually asking for."""
+        streamed: list[str] = []
+        delivered: list[str] = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says(NARRATION,
+                           tool_calls=[tool_call("read_url", url="https://shop.test/a")]),
+                model_says("It costs 40 EUR — [shop](https://shop.test/a)."),
+            ],
+            rule_texts=(RULE_VERIFY,),
+            on_token=streamed.append,
+            on_delivered=delivered.append,
+        )
+        agent_module.web.read_url = lambda *a, **k: "40 EUR"
+        try:
+            agent.run_task("price?")
+        finally:
+            importlib.reload(agent_module.web)
+        assert delivered == [NARRATION]
+        out = "".join(streamed)
+        assert NARRATION in out, "the bound turn's narration never reached the client"
+        assert out.index(NARRATION) < out.index("40 EUR — [shop]"), (
+            "narration must land as the step happens, not glued onto the answer"
+        )
+
+    def test_a_terminal_with_no_token_sink_still_hears_it(self, tmp_path):
+        """The CLI's copy is independent of the hold, not an else-branch on it.
+        Verify arms the hold whether or not a token sink is attached — it does
+        two jobs and only one of them is about streaming — so a non-streaming
+        terminal on a BOUND turn was the one place narration could vanish."""
+        for rule_texts in ((), (RULE_VERIFY_SATISFIED,)):
+            echoed: list[str] = []
+            agent, _ = rules_agent(
+                tmp_path,
+                [
+                    model_says(NARRATION,
+                               tool_calls=[tool_call("web_search", query="x")]),
+                    model_says("done"),
+                ],
+                rule_texts=rule_texts,
+                echo=echoed.append,      # no on_token: the terminal's shape
+            )
+            agent.run_task("go")
+            assert NARRATION in "\n".join(echoed), (
+                f"narration never reached the terminal (rules={len(rule_texts)})"
+            )
+
+    def test_deliveries_do_not_leak_across_tasks(self, tmp_path):
+        agent, delivered, _ = self._run(
+            tmp_path,
+            [
+                model_says("first task talking",
+                           tool_calls=[tool_call("web_search", query="x")]),
+                model_says("first answer"),
+                model_says("second answer"),
+            ],
+        )
+        del delivered[:]
+        agent.run_task("and now something else")
+        assert agent._delivered == [], "a turn's deliveries must not outlive it"
+        assert delivered == []
+
+    def test_verify_grades_everything_delivered_this_turn(self, tmp_path):
+        """The design change (#212 item 4). A rule satisfied in delivery two of
+        five used to fail against delivery five, because "the answer" meant the
+        last message. It means the whole turn now."""
+        rule = """---
+name: says-what-it-found
+description: The turn states what it found.
+when: always
+then:
+  answer_must_include:
+    pattern: "FOUND IT"
+---
+"""
+        asked: list[str] = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("FOUND IT — a folding screen.",
+                           tool_calls=[tool_call("web_search", query="fold")]),
+                model_says("It folds."),
+            ],
+            rule_texts=(rule,),
+        )
+        agent._append = _recording_append(agent, asked)
+        result = agent.run_task("what is it?")
+        assert result == "It folds.", "the answer was reworked over a rule it met"
+        assert not any(AISH_NOTE in text for text in asked), (
+            "the harness goaded the model about something it had already said"
+        )
+
+    def test_a_rule_broken_in_narration_is_still_broken(self, tmp_path):
+        """The same reframe, pointed the other way — and the reason it is safe:
+        widening the deliverable can only ever catch MORE, which is the
+        direction R1 says a rule-engine change is allowed to be wrong in."""
+        rule = """---
+name: no-eur
+description: Prices are never quoted in EUR.
+when: always
+then:
+  answer_must_not_include:
+    pattern: "EUR"
+---
+"""
+        asked: list[str] = []
+        agent, _ = rules_agent(
+            tmp_path,
+            [
+                model_says("It is about 40 EUR.",
+                           tool_calls=[tool_call("web_search", query="price")]),
+                model_says("It is affordable."),
+                model_says("It is cheap."),
+                model_says("It is cheap."),
+            ],
+            rule_texts=(rule,),
+        )
+        agent._append = _recording_append(agent, asked)
+        agent.run_task("price?")
+        assert any(AISH_NOTE in text for text in asked), (
+            "a rule broken in narration went unnoticed because only the last "
+            "message was graded"
+        )
+
+
+def _recording_append(agent, sink):
+    """Capture the user-slot text the harness writes back (Verify's goads)."""
+    original = agent._append
+
+    def append(message):
+        if message.get("role") == "user":
+            sink.append(str(message.get("content", "")))
+        return original(message)
+
+    return append
+
 
 class TestContextRecord:
     """#208, docs/trace-contract.md §3.10.

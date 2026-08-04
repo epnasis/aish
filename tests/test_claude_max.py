@@ -56,6 +56,7 @@ class FakeSDK:
         self.servers = []
         self.queries = []  # (prompt, options) per task
         self.scripts = []  # per-task `async def script(sdk) -> str` turn drivers
+        self.streams = []  # per-task messages yielded BEFORE the result
 
     def tool(self, name, description, schema):
         def deco(fn):
@@ -85,7 +86,11 @@ class FakeSDK:
         script = self.scripts.pop(0) if self.scripts else None
         sdk = self
 
+        stream = self.streams.pop(0) if self.streams else []
+
         async def gen():
+            for message in stream:
+                yield message
             text = "done"
             if script is not None:
                 text = await script(sdk)
@@ -355,3 +360,68 @@ class TestBackendSizedCaps:
         window, _ = backends.context_window("ollama", agent.inner.num_ctx)
         assert source == "backend:claude-max:200000"
         assert sum(caps) > sum(tool_plugins.output_caps(window))
+
+
+class TestNarration:
+    """#212 on the backend that owns its own loop.
+
+    The SDK reports each assistant message as it lands, and a LATER one is what
+    proves the previous was not the answer — so a delivery is closed one
+    message late rather than guessed at from the presence of tool_use blocks.
+    Without this the narration streamed live and was never recorded, so a cold
+    reload showed a chat that had said four things saying one.
+    """
+
+    def _run(self, monkeypatch, tmp_path, texts, **kwargs):
+        delivered: list[str] = []
+        agent, fake = make_max_agent(
+            monkeypatch, tmp_path, on_delivered=delivered.append, **kwargs
+        )
+        fake.streams.append(
+            [FakeSDK.AssistantMessage([FakeSDK.TextBlock(t)]) for t in texts]
+        )
+
+        async def script(_sdk):
+            return texts[-1]
+
+        fake.scripts.append(script)
+        result = agent.run_task("what does it look like?")
+        return agent, delivered, result
+
+    def test_each_assistant_message_but_the_last_is_a_delivery(
+        self, monkeypatch, tmp_path
+    ):
+        agent, delivered, result = self._run(
+            monkeypatch, tmp_path,
+            ["Let me search.", "There are leaks — digging in.", "It folds."],
+        )
+        assert delivered == ["Let me search.", "There are leaks — digging in."]
+        assert result == "It folds."
+
+    def test_narration_is_recorded_so_a_cold_reload_replays_it(
+        self, monkeypatch, tmp_path
+    ):
+        logged: list[dict] = []
+        agent, _delivered, _ = self._run(
+            monkeypatch, tmp_path,
+            ["Let me search.", "It folds."],
+            on_message=logged.append,
+        )
+        said = [m["content"] for m in logged if m.get("role") == "assistant"]
+        assert said == ["Let me search.", "It folds."], (
+            "an interim delivery never reached the log, so it exists only in a "
+            "token stream nobody kept"
+        )
+
+    def test_the_deliverable_verify_grades_is_the_whole_turn(
+        self, monkeypatch, tmp_path
+    ):
+        agent, _delivered, _ = self._run(
+            monkeypatch, tmp_path, ["Let me search.", "It folds."]
+        )
+        assert agent.inner._delivered == ["Let me search."]
+
+    def test_a_single_message_turn_delivers_nothing(self, monkeypatch, tmp_path):
+        agent, delivered, result = self._run(monkeypatch, tmp_path, ["It folds."])
+        assert delivered == []
+        assert result == "It folds."
