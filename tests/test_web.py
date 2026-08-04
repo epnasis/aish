@@ -47,7 +47,7 @@ class TestHtmlToText:
 
     def test_title_extracted_not_in_body_text(self):
         html = "<html><head><title>  My   Page </title></head><body><p>body</p></body></html>"
-        text, title = web._extract(html)
+        text, title, _images = web._extract(html)
         assert title == "My Page"
         assert "My Page" not in text
         assert "body" in text
@@ -466,3 +466,63 @@ class TestLive:
         )
         assert content_type.startswith("image/") and len(data) > 1000
 
+
+
+class TestPageImages:
+    """#212 follow-up. A rule requires a picture; `read_url` returned the
+    article's text with every image URL stripped out; so the model had nothing
+    to hand `show_image` but a GUESS — a filename invented from the headline
+    that matched the site's URL pattern. It 404'd, and show_image's own advice
+    ("read_url the page again for a working one") sent it back to the reader
+    that had removed them. Seven of eight show_image calls failed that way in
+    one real session, and the tail of that run is the loop.
+
+    Measured on the two live pages behind it: the real URLs were there and
+    returned HTTP 200, one of them behind a hashed CDN path
+    (`/t/GEiBu2iaA9GrrmRRMXVC3ULLfZo=/2500x/…`) that no model could ever guess.
+    """
+
+    PAGE = (
+        '<html><head><title>Leak</title>'
+        '<meta property="og:image" content="/img/hero.jpg">'
+        '<meta name="twitter:image" content="https://cdn.test/t/HASH=/2500x/a.jpg">'
+        "</head><body><p>The phone folds.</p>"
+        '<img src="https://cdn.test/logo.svg"></body></html>'
+    )
+
+    def test_declared_images_are_returned_and_absolutised(self):
+        text, title, images = web._extract(self.PAGE, base_url="https://site.test/a/b")
+        assert title == "Leak"
+        assert "The phone folds." in text
+        # og:image is site-relative on a great many sites; a relative URL is
+        # exactly as useless to show_image as no URL at all.
+        assert images == [
+            "https://site.test/img/hero.jpg",
+            "https://cdn.test/t/HASH=/2500x/a.jpg",
+        ]
+
+    def test_the_img_soup_is_not_offered(self):
+        """Only what the page DECLARES as its subject. The raw <img> list is
+        logos, avatars and tracking pixels — 44 and 26 of them on the two real
+        articles, both led by the site logo."""
+        _text, _title, images = web._extract(self.PAGE, base_url="https://site.test/")
+        assert not any("logo" in u for u in images)
+
+    def test_a_page_with_no_declared_image_says_nothing(self):
+        _t, _ti, images = web._extract("<html><body><p>hi</p></body></html>", base_url="https://x.test/")
+        assert images == []
+        assert web.image_note(images) == ""
+
+    def test_the_note_names_the_urls_and_forbids_inventing_one(self):
+        note = web.image_note(["https://cdn.test/a.jpg"])
+        assert "https://cdn.test/a.jpg" in note
+        assert "VERBATIM" in note and "invent" in note
+
+    def test_read_url_appends_the_note_after_truncation(self, monkeypatch):
+        """The image URLs are the POINT of the read on a "show me" task, so the
+        page cap must not be able to cut the one thing that ends the guessing."""
+        big = self.PAGE.replace("The phone folds.", "x " * 200_000)
+        monkeypatch.setattr(web, "_fetch", lambda _u: (big, "text/html"))
+        out = web.read_url("https://site.test/a")
+        assert "[page truncated" in out, "expected this fixture to exceed the cap"
+        assert "https://site.test/img/hero.jpg" in out

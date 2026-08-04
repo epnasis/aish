@@ -2777,9 +2777,20 @@ class Agent:
         except web.BlockedURLError as exc:
             return b"", f"blocked: {exc}. Use a normal public image URL."
         except urllib.error.HTTPError as exc:
+            # A 404 here is almost always a GUESSED url — a filename invented
+            # from the headline that matches the site's pattern. The old advice
+            # ("read_url the page again for a working one") described a
+            # capability read_url did not have: it stripped every image URL out
+            # of the page, so re-reading returned text again and the model
+            # guessed a second time. Seven of eight calls failed that way in one
+            # session. read_url now lists the page's declared images, so this
+            # says where they actually come from.
             return b"", (
-                f"the server answered HTTP {exc.code} for that URL. "
-                "Find a different image, or read_url the page again for a working one."
+                f"the server answered HTTP {exc.code} for that URL. Do NOT guess "
+                "another image URL — a filename built from the headline will 404 "
+                "the same way. read_url the page and use a URL from its "
+                "'images on this page' list VERBATIM; if there is none, say you "
+                "could not find a usable picture."
             )
         except Exception as exc:  # transport, DNS, timeout, TLS — all recoverable
             return b"", f"could not fetch that URL ({type(exc).__name__}: {exc})."
