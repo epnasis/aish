@@ -16,9 +16,13 @@
 //     server actually took them;
 //   - the fallback still resolves when the server's text differs from ours
 //     (it appends attachment notes);
-//   - a bubble destroyed while un-acknowledged hands its TEXT back to the
-//     composer — the one thing that must never happen is losing what you typed
-//     — and never duplicates text the composer already holds;
+//   - a bubble destroyed while un-acknowledged HOLDS its text rather than
+//     handing it straight back: "the DOM is going away" is not "it did not
+//     arrive", and a rebuild is usually a reconnect whose replay is about to
+//     say which. The replay adjudicates; a deadline releases anything no
+//     replay ever settled, because losing what you typed is the one
+//     unacceptable outcome — and recovery never duplicates text the composer
+//     already holds;
 //   - a resolved send hands nothing back;
 //   - a socket that reports OPEN and is not stops claiming "Sending…".
 //
@@ -27,7 +31,7 @@
 
 const assert = require("assert");
 const vm = require("vm");
-const { appSource, checks } = require("./harness");
+const { appSource, checks, surface } = require("./harness");
 
 const { ok, report } = checks();
 const src = appSource();
@@ -108,7 +112,10 @@ function world() {
   // The real code: the block under test plus the two helpers it leans on.
   vm.runInContext(slice("function addMsg(kind, text) {", "// The prompt that started"), sandbox);
   vm.runInContext(slice("function stripAttachmentNotes(text) {", "function rememberPrompt("), sandbox);
-  vm.runInContext(slice("// [PENDING-SEND-START]", "// [PENDING-SEND-END]"), sandbox);
+  // surface(): a vm context hides top-level const/let, and this block's held
+  // store is one — the scenarios below read it to tell "held" from "handed
+  // back", which is the whole distinction the duplicate came from.
+  vm.runInContext(surface(slice("// [PENDING-SEND-START]", "// [PENDING-SEND-END]")), sandbox);
 
   return {
     sandbox,
@@ -191,14 +198,75 @@ scenario("an unrelated echo still clears the oldest rather than stranding it", (
   assert.deepStrictEqual(w.bubbles(), []);
 });
 
-scenario("a bubble destroyed un-acknowledged hands its text back to the composer", () => {
+scenario("a bubble destroyed un-acknowledged HOLDS its text — it does not hand it back yet", () => {
   const w = world();
   w.sandbox.addPendingSend("a long message worth not losing");
   w.sandbox.clearPendingSends();
   assert.deepStrictEqual(w.bubbles(), [], "the bubble goes with the DOM");
-  assert.strictEqual(w.input.value, "a long message worth not losing");
+  assert.strictEqual(w.input.value, "", "the words are held, not returned on a guess");
+  assert.strictEqual(w.toasts.length, 0, "nothing to say until something knows");
+  assert.strictEqual(w.sandbox.heldSends.length, 1, "…but they are kept");
+});
+
+// THE REGRESSION. A reconnect rebuilds the transcript and then replays it, so
+// the recovery used to fire one moment before the answer arrived — and the
+// answer was "I have your message". The owner saw a toast saying it was not
+// confirmed, with the words back under the cursor, and sent it again.
+scenario("a replay that CONTAINS the message proves it arrived — nothing comes back", () => {
+  const w = world();
+  w.sandbox.addPendingSend("adjust the rule");
+  w.sandbox.clearPendingSends();               // the reconnect rebuild
+  w.sandbox.adjudicateHeldSends("session-under-test.jsonl", [
+    { type: "user", text: "something older" },
+    { type: "user", text: "adjust the rule" }, // the server has it
+  ]);
+  assert.strictEqual(w.input.value, "", "recovering it would duplicate the instruction");
+  assert.strictEqual(w.toasts.length, 0, "and there is nothing to warn about");
+  assert.strictEqual(w.sandbox.heldSends.length, 0, "the question is settled");
+});
+
+scenario("a replay WITHOUT the message hands it back, and says so", () => {
+  const w = world();
+  w.sandbox.addPendingSend("never arrived");
+  w.sandbox.clearPendingSends();
+  w.sandbox.adjudicateHeldSends("session-under-test.jsonl", [
+    { type: "user", text: "something else entirely" },
+  ]);
+  assert.strictEqual(w.input.value, "never arrived");
   assert.strictEqual(w.toasts.length, 1);
   assert(/composer/.test(w.toasts[0]), "and the user is told where it went");
+});
+
+scenario("another chat's replay cannot settle a send made in this one", () => {
+  const w = world();
+  w.sandbox.addPendingSend("belongs to this chat");
+  w.sandbox.clearPendingSends();
+  w.sandbox.adjudicateHeldSends("some-other-session.jsonl", [{ type: "user", text: "unrelated" }]);
+  assert.strictEqual(w.input.value, "", "it has no opinion about this chat");
+  assert.strictEqual(w.sandbox.heldSends.length, 1, "still waiting for one that does");
+});
+
+scenario("a replay is matched on exact text, never on position", () => {
+  const w = world();
+  w.sandbox.addPendingSend("the one I just sent");
+  w.sandbox.clearPendingSends();
+  // A replay carries every message the chat ever had. Resolving positionally
+  // against those would "confirm" this send using something written last week.
+  w.sandbox.adjudicateHeldSends("session-under-test.jsonl", [
+    { type: "user", text: "last week's question" },
+    { type: "done", text: "the one I just sent" }, // not a user turn
+  ]);
+  assert.strictEqual(w.input.value, "the one I just sent");
+});
+
+scenario("nothing ever settles it, so the deadline hands it back", () => {
+  const w = world();
+  w.sandbox.addPendingSend("still offline");
+  w.sandbox.clearPendingSends();
+  assert.strictEqual(w.input.value, "", "held while an answer might still come");
+  w.fire(); // the release deadline
+  assert.strictEqual(w.input.value, "still offline", "holding forever is losing it slowly");
+  assert(/composer/.test(w.toasts[w.toasts.length - 1]));
 });
 
 scenario("recovered text is prepended to whatever the composer already holds", () => {
@@ -206,6 +274,7 @@ scenario("recovered text is prepended to whatever the composer already holds", (
   w.input.value = "half a thought";
   w.sandbox.addPendingSend("the sent one");
   w.sandbox.clearPendingSends();
+  w.fire();
   assert.strictEqual(w.input.value, "the sent one\n\nhalf a thought");
 });
 
@@ -214,6 +283,7 @@ scenario("recovery never duplicates text the composer already holds", () => {
   w.sandbox.addPendingSend("say it once");
   w.input.value = "say it once";
   w.sandbox.clearPendingSends();
+  w.fire();
   assert.strictEqual(w.input.value, "say it once");
   assert.strictEqual(w.toasts.length, 0, "nothing was recovered, so say nothing");
 });
@@ -223,6 +293,7 @@ scenario("a resolved send hands nothing back", () => {
   w.sandbox.addPendingSend("acknowledged");
   w.sandbox.resolvePendingSend("acknowledged");
   w.sandbox.clearPendingSends();
+  w.fire();
   assert.strictEqual(w.input.value, "", "the server has it — recovering would duplicate");
   assert.strictEqual(w.toasts.length, 0);
 });

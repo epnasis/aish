@@ -59,6 +59,7 @@ function traceWorld() {
   const w = sessionWorld({
     visible: true,
     globals: {
+      adjudicateHeldSends() {}, // [PENDING-SEND]; not this test's subject
       document: document_,
       FINE_POINTER: false,
       replaying: false,

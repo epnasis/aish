@@ -1935,6 +1935,10 @@ function onReplay(event) {
   // Whatever this replay decides below, the transcript is no longer waiting to
   // be painted for the first time ([PENDING-VIEW]).
   paintLanded();
+  // The server's own account of this chat settles anything held for it
+  // ([PENDING-SEND]) — BEFORE the landing is decided, because a `noop` landing
+  // returns early and is just as authoritative about what arrived.
+  adjudicateHeldSends(currentSession, event.events);
   // A repaint the server flags `seen` follows an edit made from a viewer's own
   // hands (removing an exchange, #202) and reaches only clients VIEWING this
   // chat, so what they are being handed is its current state. Without it the
@@ -3669,11 +3673,54 @@ function addUserMsg(text, at, turn) {
 // reconciliation, different resolution (the queue chip takes over).
 //
 // If the bubble's DOM is destroyed while still un-acknowledged — a reconnect
-// rebuild, a chat switch, a socket that died — the TEXT goes back to the
-// composer. Deliberately not an automatic resend: the send may well have
-// arrived, and a duplicated instruction to an agent that runs shell commands is
-// a worse outcome than a message you have to send again by hand.
-const pendingSends = []; // oldest first — {el, tools, status, text}
+// rebuild, a chat switch, a socket that died — the TEXT is not lost. Never an
+// automatic resend: the send may well have arrived, and a duplicated
+// instruction to an agent that runs shell commands is a worse outcome than a
+// message you have to send again by hand.
+//
+// BUT "the DOM is going away" IS NOT "the message did not arrive", and
+// conflating the two is what shipped a duplicate. The text went straight back
+// to the composer on every rebuild — and a rebuild is exactly what a RECONNECT
+// does, whose very next act is to replay the transcript the server holds. So
+// the recovery fired one moment before the definitive answer arrived, the
+// answer said "I have your message", and the owner — looking at a toast that
+// said it had not been confirmed, with the words back under the cursor — sent
+// it again. Two identical instructions, one of them nobody asked for.
+//
+// So a detached send is HELD, not handed back, and the replay ADJUDICATES it:
+// a transcript that contains the message proves it arrived, and only one that
+// does not puts the words in the composer. Held text is persisted, so the
+// window costs nothing if the tab dies; and if no replay ever comes to settle
+// it (still offline), a deadline hands it back rather than holding forever —
+// losing what you typed remains the one unacceptable outcome.
+const pendingSends = []; // oldest first — {el, tools, status, text, session}
+
+// Detached, unadjudicated sends: [{ text, session }]. Persisted under their own
+// key rather than merged into the draft, because a draft is text you are
+// WRITING and this is text you already pressed send on — only one of them may
+// be silently dropped when it turns out to have arrived.
+const HELD_KEY = "aish-held-sends";
+let heldSends = [];
+let heldTimer = null;
+
+function loadHeldSends() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(HELD_KEY));
+    heldSends = Array.isArray(raw) ? raw.filter((h) => h && h.text) : [];
+  } catch { heldSends = []; }
+  // A tab that died holding them left the question open, not answered: this
+  // one is about to connect and be replayed the same chat, which can still
+  // settle them. Give that its chance — the deadline is what guarantees the
+  // words come back if it never comes.
+  if (heldSends.length) armHeldRelease();
+}
+
+function saveHeldSends() {
+  try {
+    if (heldSends.length) localStorage.setItem(HELD_KEY, JSON.stringify(heldSends));
+    else localStorage.removeItem(HELD_KEY);
+  } catch { /* private mode: held in memory only, same as the draft */ }
+}
 
 function addPendingSend(text) {
   const el = addMsg("user", text);
@@ -3685,7 +3732,7 @@ function addPendingSend(text) {
   status.textContent = "Sending…";
   tools.appendChild(status);
   messagesEl.appendChild(tools);
-  pendingSends.push({ el, tools, status, text });
+  pendingSends.push({ el, tools, status, text, session: currentSession });
   // SENDING IS SEEING. Your own message is output (it is a message in the
   // chat), so the seen stamp has to move past it or the chat you just typed
   // into flags itself unread the moment you leave — for a sentence you wrote
@@ -3712,18 +3759,67 @@ function resolvePendingSend(text) {
   if (!pendingSends.length) { clearTimeout(pendingSendTimer); pendingSendTimer = null; }
 }
 
-// Their DOM is going away while they are still un-acknowledged: hand the text
-// back so the one thing that must never happen — losing what you typed —
-// cannot. Prepended, so it is the next thing you would send.
+// Their DOM is going away while they are still un-acknowledged. The bubbles go
+// with it; the TEXT is held, not handed back, until something says whether the
+// server has it. Nothing is shown and nothing is said here — a rebuild is
+// usually a reconnect, and a reconnect is about to answer the question.
 function clearPendingSends() {
   if (!pendingSends.length) return;
   clearTimeout(pendingSendTimer);
   pendingSendTimer = null;
-  const lost = pendingSends.splice(0).map((item) => {
+  for (const item of pendingSends.splice(0)) {
     item.el.remove();
     item.tools.remove();
-    return item.text;
-  }).filter((text) => text && !input.value.includes(text));
+    if (item.text) heldSends.push({ text: item.text, session: item.session });
+  }
+  saveHeldSends();
+  armHeldRelease();
+}
+
+// A replay is the server's own account of a chat, so it settles every send held
+// for that chat: present means it arrived (drop it silently — the transcript
+// already shows it), absent means it did not (the words go back to the
+// composer). Matched on EXACT text only, never the oldest-pending fallback
+// `resolvePendingSend` may use live: a replay carries every message the chat
+// ever had, and a positional match against those would "confirm" a send using
+// something the user wrote last week.
+function adjudicateHeldSends(session, events) {
+  if (!heldSends.length) return;
+  const arrived = new Set(
+    (events || [])
+      .filter((e) => e && e.type === "user" && typeof e.text === "string")
+      .map((e) => stripAttachmentNotes(e.text))
+  );
+  const mine = (h) => !h.session || h.session === session;
+  const unsent = heldSends.filter((h) => mine(h) && !arrived.has(h.text));
+  heldSends = heldSends.filter((h) => !mine(h));
+  saveHeldSends();
+  returnToComposer(unsent.map((h) => h.text));
+  if (!heldSends.length) { clearTimeout(heldTimer); heldTimer = null; }
+}
+
+// Nothing came to settle them — still offline, or the reconnect never landed.
+// Holding forever would be losing what you typed by a slower route.
+const HELD_RELEASE_MS = 12000;
+
+function armHeldRelease() {
+  clearTimeout(heldTimer);
+  heldTimer = setTimeout(releaseHeldSends, HELD_RELEASE_MS);
+}
+
+function releaseHeldSends() {
+  clearTimeout(heldTimer);
+  heldTimer = null;
+  const texts = heldSends.map((h) => h.text);
+  heldSends = [];
+  saveHeldSends();
+  returnToComposer(texts);
+}
+
+// Prepended, so it is the next thing you would send. Skips anything already
+// sitting there — a release racing an adjudication must not double the words.
+function returnToComposer(texts) {
+  const lost = (texts || []).filter((text) => text && !input.value.includes(text));
   if (!lost.length) return;
   input.value = [...lost, input.value].filter(Boolean).join("\n\n");
   saveDraft();
@@ -6652,6 +6748,7 @@ let input = $("input");
 // history recall) that don't fire input events; cleared once the text is
 // actually sent.
 input.value = localStorage.getItem("aish-draft") || "";
+loadHeldSends(); // anything a dead tab was holding ([PENDING-SEND])
 if (input.value) requestAnimationFrame(() => resizeInput()); // grow to fit a multi-line draft
 function saveDraft() {
   if (input.value) localStorage.setItem("aish-draft", input.value);
