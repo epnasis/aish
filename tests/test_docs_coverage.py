@@ -79,7 +79,12 @@ _SPEC_DOCS = {"trace-contract.md"}
 # Symbols that legitimately live outside this repo. Kept empty on purpose —
 # add a name here only when it is genuinely a third-party symbol the docs must
 # mention, never to silence a rename.
-_EXTERNAL_SYMBOLS: set[str] = set()
+_EXTERNAL_SYMBOLS: set[str] = {
+    # urllib.request.HTTPRedirectHandler.http_error_302 — #213 names it to
+    # record WHY redirect targets need no URL encoding of ours: the stdlib
+    # already quotes them there. Naming the method is the evidence.
+    "http_error_302",
+}
 
 # The trailing `()` is optional because docs spell a function both ways, and
 # skipping the `foo()` form silently exempted most function references — the

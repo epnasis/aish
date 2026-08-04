@@ -315,6 +315,26 @@ def test_fetch_image_still_fetches_public_hosts(monkeypatch):
     assert opened == ["https://example.com/x.png"]
 
 
+def test_fetch_image_encodes_a_non_ascii_url(monkeypatch):
+    """An image filename may be non-ASCII; HTTP request lines may not (#213),
+    so without encoding the export silently degraded to a link card."""
+    monkeypatch.setattr(
+        export.web.socket,
+        "getaddrinfo",
+        lambda host, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
+    png = _tiny_png()
+    opened = []
+
+    def fake_open(request, timeout=None):
+        opened.append(request.full_url)
+        return _FakeResponse(png)
+
+    monkeypatch.setattr(export.web._opener, "open", fake_open)
+    assert export.fetch_image("https://example.com/zdjęcie.png") == png
+    assert opened == ["https://example.com/zdj%C4%99cie.png"]
+
+
 def test_blocked_image_degrades_to_link_card_not_a_crash(monkeypatch):
     _no_network(monkeypatch)
     html = '<img src="http://169.254.169.254/latest/meta-data/" alt="diagram" />'
