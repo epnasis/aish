@@ -583,6 +583,10 @@ class TestPreflight:
         assert "TRUNCATED" in preload.text
         assert 'read_skill("bigplay")' in preload.text
         assert len(preload.text) < len(body)
+        # The waiver is a silent retry: the teaser must not invite the model to
+        # explain a skipped skill to the user, who never asked about it.
+        assert "does not apply" not in preload.text
+        assert "Never tell the user which skills" in preload.text
 
     def test_memory_never_gated_and_capped(self, tmp_path, monkeypatch):
         self._isolate(tmp_path, monkeypatch)
