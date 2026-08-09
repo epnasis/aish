@@ -75,9 +75,12 @@ Rules:
    relevant skills and memories are preloaded into your context each task;
    follow them over your built-in approach (they encode what actually worked
    on THIS machine). A preloaded skill marked TRUNCATED must be loaded in
-   full with read_skill (or explicitly waived with a reason) before other
-   tools run; if a skill in the index matches but was not preloaded, read
-   it FIRST;
+   full with read_skill before other tools run, unless it plainly does not
+   fit the task; if a skill in the index matches but was not preloaded, read
+   it FIRST. Retrieval is YOUR bookkeeping: never tell the user which skills
+   or memories you did or did not use — no "the preloaded skill X does not
+   apply here because …" note, in your opening acknowledgement or anywhere
+   else. Answer what they asked;
    when unsure whether something was solved before, call recall. And capture
    learnings as you go: when the user corrects you, when a skill's
    instructions proved wrong (update THAT skill — append the gotcha with
@@ -280,11 +283,18 @@ HARD_STEP_CEILING = 60  # effective cap = max(self.max_steps, HARD_STEP_CEILING)
 # gate itself.
 GATE_MAX_REFUSALS = 2
 
+# The waiver is a RETRY, not a speech. The gate never read the justification it
+# used to ask for — it lifts on the refusal counter alone — so the only thing
+# that requirement produced was a paragraph in the user's chat explaining why a
+# skill he never asked about was not used ("the preloaded skill X does not apply
+# here because …"). Retrieval near-misses are the harness's bookkeeping; the
+# owner asked a question and wants its answer.
 SKILL_GATE_REFUSAL = (
     "NOT EXECUTED — required reading first: the preloaded skill(s) {names} "
     "are truncated in your context. Call read_skill({first!r}) to load the "
-    "full playbook, or state explicitly why it does not apply and retry — "
-    "the call will then proceed."
+    "full playbook. If it plainly does not fit this task, retry this call "
+    "and it will proceed — but say nothing about it to the user: never "
+    "explain which skills you did or did not use."
 )
 
 # Stop gate (issue #81): deny + comment means STOP — the system prompt and the
@@ -503,10 +513,11 @@ TASK_REMINDER = (
 PRELOAD_REMINDER = (
     "<system-reminder>Saved knowledge relevant to this task, preloaded for "
     "you — follow it over your training data:\n\n{knowledge}\n\n"
-    "If a block above is marked TRUNCATED you MUST read_skill it in full, "
-    "or state why it does not apply, before doing anything else. Also scan "
-    "the Skills index in your system prompt for other "
-    "matches.</system-reminder>"
+    "If a block above is marked TRUNCATED you MUST read_skill it in full "
+    "before doing anything else, unless it plainly does not fit this task. "
+    "Also scan the Skills index in your system prompt for other matches. "
+    "None of this is for the user: never tell them which skills you did or "
+    "did not use.</system-reminder>"
 )
 
 
@@ -3807,8 +3818,10 @@ class Agent:
 
         read_skill/recall targeting a flagged skill lifts its gate; any other
         call decrements every counter so a model that ignores the directive
-        (or states why the skill does not apply and retries) is only held for
-        GATE_MAX_REFUSALS rounds — enforcement, not a wedge."""
+        (or judges the skill irrelevant and simply retries) is only held for
+        GATE_MAX_REFUSALS rounds — enforcement, not a wedge. The retry IS the
+        waiver: nothing here ever read a justification, which is why the
+        prompts no longer ask for one out loud (see SKILL_GATE_REFUSAL)."""
         if not self._pending_skill_reads:
             return None
         target = str(args.get("name", "") or "")

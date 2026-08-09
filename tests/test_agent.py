@@ -2410,6 +2410,18 @@ class TestSkillGate:
         assert results[1].startswith("NOT EXECUTED")
         assert "pushy" in results[2]  # third try executes: the model waived it
 
+    def test_waiver_is_a_retry_never_a_speech_to_the_user(self):
+        """The gate reads no justification — it lifts on the refusal counter
+        alone — so no surface may ask for one, because the model's only channel
+        is the user's chat and the note landed there: "(Note: the preloaded
+        skill X does not apply here because …)" on top of an answer about
+        something else entirely."""
+        from aish.agent import PRELOAD_REMINDER, SKILL_GATE_REFUSAL, SYSTEM_PROMPT_TEMPLATE
+
+        for surface in (SKILL_GATE_REFUSAL, PRELOAD_REMINDER, SYSTEM_PROMPT_TEMPLATE):
+            assert "why it does not apply" not in surface  # no invitation to justify
+            assert "did or did not use" in surface  # the silence order
+
     def test_gate_resets_per_task(self, tmp_path):
         self._write_big_skill(tmp_path)
         agent, _ = make_agent(

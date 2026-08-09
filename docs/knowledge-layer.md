@@ -58,6 +58,8 @@ The live rescan two paragraphs up is exactly why this cannot be left to reconstr
 
 `skills.preflight` picks the top entries for a task and `run_task` injects their bodies into the per-task reminder up front, capped by the `PREFLIGHT_*` constants. Oversized bodies get a teaser plus a **read gate** armed until `read_skill` loads them — lifted after bounded refusals so it can never wedge a task (`TestPreflight`, `TestSkillGate`, `TestPreflightInjection`).
 
+**The waiver is a silent retry, not a speech.** Every surface used to tell the model that it could skip a truncated skill by *stating why it does not apply* — and the model's only channel for stating anything is the owner's chat, so a question about sharing PDFs into Obsidian came back with the plan plus *"(Note: the preloaded skill `ios-ssh-terminal-architecture` does not apply here because …)"*. That note bought nothing: nothing ever read the justification, the gate lifts on the refusal counter alone, so the retry always WAS the waiver. The prompts now say so and add the missing half — retrieval is the harness's bookkeeping, and which skills were or were not used is never reported to the owner (`test_waiver_is_a_retry_never_a_speech_to_the_user`, pinning all four surfaces: the teaser, `SKILL_GATE_REFUSAL`, `PRELOAD_REMINDER`, the system prompt). Positive transparency stays where it belongs — the `knowledge` trace record already shows what was preloaded.
+
 The thresholds, all calibrated on the #183 audit (`TestPreflightPrecision`):
 
 - **`PREFLIGHT_MIN_SIM` = 0.35** for unsolicited injection — relevant median 0.458 versus irrelevant 0.290.
