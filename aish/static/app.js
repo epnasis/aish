@@ -8849,11 +8849,16 @@ function takeSharedText(item) {
 }
 
 function composerAppend(text) {
-  const current = input.value;
-  const gap = !current || /\s$/.test(current) ? "" : " ";
+  // On its OWN LINE, not after a space: a shared link is somebody else's words
+  // arriving in the middle of yours, and a line of its own is what makes the
+  // two tellable apart at a glance in a long prompt. Trailing spaces are taken
+  // with it, or the line you were writing keeps an invisible tail.
+  const current = input.value.replace(/[ \t]+$/, "");
+  const gap = !current || current.endsWith("\n") ? "" : "\n";
   input.value = current + gap + text;
-  // The input event is what saves the draft, re-measures the box and updates
-  // the suggestion popover — everything a keystroke would have done.
+  // The input event is what saves the draft, re-measures the box (a second line
+  // makes it taller) and updates the suggestion popover — everything a
+  // keystroke would have done.
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 

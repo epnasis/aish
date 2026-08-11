@@ -108,18 +108,35 @@ const textShare = (over = {}) =>
 
 {
   // The reason it appends rather than inserting at the cursor: it is an
-  // ARRIVAL, not something the owner just asked for with a keystroke.
+  // ARRIVAL, not something the owner just asked for with a keystroke. And on
+  // its own LINE, because it is somebody else's words arriving in the middle
+  // of yours — a long prompt with a URL spliced in at the end of a sentence is
+  // hard to read back.
   const w = world({ draft: "summarise this for me" });
   w.s.renderShares([textShare()]);
   ok("a live arrival never destroys what was already typed",
-    w.composer() === `summarise this for me ${LINK}`, w.composer());
+    w.composer() === `summarise this for me\n${LINK}`, JSON.stringify(w.composer()));
 }
 
 {
   const w = world({ draft: "look at " });
   w.s.renderShares([textShare()]);
-  ok("…and does not double the separator when one is already there",
-    w.composer() === `look at ${LINK}`, w.composer());
+  ok("…and the trailing space goes with it, leaving no invisible tail",
+    w.composer() === `look at\n${LINK}`, JSON.stringify(w.composer()));
+}
+
+{
+  const w = world({ draft: "notes:\n" });
+  w.s.renderShares([textShare()]);
+  ok("…and a line break already there is not doubled",
+    w.composer() === `notes:\n${LINK}`, JSON.stringify(w.composer()));
+}
+
+{
+  const w = world();
+  w.s.renderShares([textShare()]);
+  ok("an empty composer gets the link with no leading blank line",
+    w.composer() === LINK, JSON.stringify(w.composer()));
 }
 
 {

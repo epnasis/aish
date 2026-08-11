@@ -493,7 +493,7 @@ only the outbound half — so no amount of work inside aish can put it in the
 share sheet on its own. A Shortcut can be there, and can post to aish.
 
 **A shared item is parked, not run.** Next time you open aish it is already in
-the composer — a file attached (✕ takes it back out), a link or note appended to
+the composer — a file attached (✕ takes it back out), a link or note on a new line under
 whatever you had typed. Write your prompt and send. Nothing starts an agent,
 which is the point: the share sheet is reachable from every app on the phone,
 and it stages work rather than dispatching it. A file you never send stays
