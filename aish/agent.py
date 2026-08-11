@@ -49,7 +49,7 @@ from . import (
     web,
 )
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
-from .session import SessionLog
+from .session import NOTE_MARKER, SessionLog
 
 _PLATFORM_NOTES = {
     "darwin": (
@@ -193,6 +193,13 @@ Rules:
    a promising page, then pass an image URL from it to show_image. If
    show_image reports a problem, try another source — do not paste the URL
    into your answer anyway.
+7ba. SEEING A PICTURE: show_image also ATTACHES what it fetched to the
+   conversation, so you can see it. When the question is about what is IN a
+   picture you only have a link to — who is in a photo, what a chart says,
+   whether it is even the right image — call show_image on it and answer from
+   what you SEE. Never answer that kind of question from the filename, the
+   caption or the surrounding page text. The same applies to a scanned PDF
+   page: read_pdf attaches it as a picture and you read it from there.
 7bb. PDFs: whenever a PDF is attached, sitting on disk, or linked, you MUST
    read it with read_pdf. NEVER run pdftotext, pdftoppm, python, strings or
    any other command on a PDF — read_pdf needs no approval and keeps columns,
@@ -773,6 +780,35 @@ PDF_MAX_BYTES = 50 * 1024 * 1024
 # far more context than a page of text, and a 200-page scan asked for in one go
 # would blow the window; the cap is always STATED, never silent.
 PDF_MAX_PAGE_IMAGES = 5
+
+# Pictures a TOOL produced, delivered to the model in one turn. A tool result
+# is text on every provider aish speaks to, so an image a tool made reaches the
+# model only if it is handed over separately (`Agent._deliver_tool_media`) —
+# and every one of them is re-encoded into each later request, so the cap is
+# real and, like the PDF one, always STATED.
+TOOL_IMAGES_PER_TURN = 8
+
+# All four notes open with the `[aish: …]` marker session.py classifies as a
+# synthetic note (#171): they are the turn's input for the model and must never
+# render as a user bubble, live or on replay.
+TOOL_MEDIA_DELIVERED = (
+    "[aish: {count} picture(s) produced by {tools} are attached to THIS message. "
+    "Look at them and answer from what you SEE. The file paths in the tool "
+    "result are for showing the user, not for reading.]"
+)
+TOOL_MEDIA_CAPPED = (
+    " [aish: {dropped} further picture(s) were NOT attached — at most "
+    "{cap} come back in one turn. Ask for the rest in a smaller range.]"
+)
+TOOL_MEDIA_UNDELIVERABLE = (
+    "[aish: {tools} produced {count} picture(s), but this model cannot see "
+    "images, so they were NOT delivered and you have not looked at them. Say so "
+    "rather than describing what you cannot see.]"
+)
+TOOL_MEDIA_EXPIRED = (
+    "[aish: picture(s) from an earlier task were dropped from view to save "
+    "context. Call the tool again if you need to look at them.]"
+)
 
 SHOW_IMAGE_NO_CURL = (
     "Do NOT fall back to curl or wget — a file fetched that way cannot be "
@@ -1912,6 +1948,9 @@ class Agent:
                     stuck = True
                 elif count == LOOP_WARN_REPEATS:
                     warn = True  # injected below: never between a turn's results
+            # After every result is appended, never between two of them: the
+            # pictures belong to the turn, not to one call in it.
+            self._deliver_tool_media(tool_calls, results)
             if stuck:
                 self.echo("✕ loop detected: identical call, identical output — stopping")
                 return self._finish_stopped(LOOP_STOP_NOTE, STOPPED_LOOP)
@@ -2133,7 +2172,66 @@ class Agent:
             normalized["extra_content"] = extra
         return normalized
 
+    def _deliver_tool_media(self, tool_calls: list[dict], results: list[str]) -> None:
+        """Hand pictures a tool produced to the model as native image parts.
+
+        A tool result is TEXT on every provider aish speaks to, so a picture a
+        tool made — a fetched image, a rasterised scan page — reaches the model
+        only as a file path unless it is delivered separately. It rides one
+        follow-up user message, which is the single message shape all four
+        backends already encode as native media (`_openai_media_parts`,
+        `_anthropic_media_blocks`, ollama's own `images` key): the tool-result
+        slot itself is a string on two of the three APIs, so putting it there
+        would work on one provider and silently vanish on the others.
+
+        The picture is carried by the ToolOutcome envelope (L7) rather than
+        parsed back out of the result text — a markdown path in prose is
+        exactly the guess the envelope exists to replace.
+        """
+        paths: list[str] = []
+        names: list[str] = []
+        for call, result in zip(tool_calls, results, strict=True):
+            for path in getattr(result, "meta", {}).get("images") or ():
+                if path in paths:
+                    continue  # two calls returning one content-addressed file
+                paths.append(str(path))
+                names.append(call["function"]["name"])
+        if not paths:
+            return
+        tools_named = ", ".join(dict.fromkeys(names))
+        if "image" not in backends.media_support(self.provider):
+            # An honest dead end beats a fluent guess (the same rule as an
+            # unreadable scan page): the model must know it is answering
+            # without having looked.
+            self._append(
+                {
+                    "role": "user",
+                    "content": TOOL_MEDIA_UNDELIVERABLE.format(
+                        tools=tools_named, count=len(paths)
+                    ),
+                }
+            )
+            return
+        shown = paths[:TOOL_IMAGES_PER_TURN]
+        note = TOOL_MEDIA_DELIVERED.format(count=len(shown), tools=tools_named)
+        if dropped := len(paths) - len(shown):
+            note += TOOL_MEDIA_CAPPED.format(dropped=dropped, cap=TOOL_IMAGES_PER_TURN)
+        self._append({"role": "user", "content": note, "images": shown})
+
     def _trim_tool_message(self, message: dict) -> bool:
+        # Delivered pictures are dropped WHOLE rather than shortened, and by
+        # the same trim as an old tool result because they are the same thing:
+        # a past task's output still riding every request. Images are the
+        # costlier half — each one is re-encoded into every later call — and
+        # the note stays behind, so the model can tell it once looked and ask
+        # again (the store is content-addressed, so a second look is free).
+        # The owner's OWN attachment is deliberately untouched: it is not a
+        # tool output, they may refer back to it tasks later, and only aish's
+        # deliveries carry the `[aish: …]` marker that identifies one.
+        if message.get("images") and str(message.get("content", "")).startswith(NOTE_MARKER):
+            del message["images"]
+            message["content"] = TOOL_MEDIA_EXPIRED
+            return True
         if message.get("role") != "tool":
             return False
         content = message["content"]
@@ -2857,9 +2955,17 @@ class Agent:
         # bracket or a newline in it silently breaks the markdown image parser,
         # which used to be worked around by a memory (#188 layer 3).
         alt = re.sub(r"\s+", " ", caption).replace("[", "").replace("]", "").strip()
-        return (
-            "Image ready. Include this line in your answer EXACTLY as written "
-            f"(do not alter the path):\n\n![{alt or 'image'}]({path})"
+        # The envelope carries the picture itself, so the model SEES what it
+        # just fetched instead of only holding its path (#215). This is what
+        # makes the tool's own failure modes visible to the one deciding what
+        # to do about them: a hotlink block, a login wall and the wrong photo
+        # all sniff as valid images and are only distinguishable by looking.
+        return tools.ToolOutcome(
+            "Image ready — it is attached to this turn, so look at it and make "
+            "sure it really shows what the user asked for. Include this line in "
+            "your answer EXACTLY as written (do not alter the path):\n\n"
+            f"![{alt or 'image'}]({path})",
+            images=(str(path),),
         )
 
     # --------------------------------------------------------------- PDFs (#213)
@@ -2900,8 +3006,11 @@ class Agent:
             except documents.DocumentError as exc:
                 return f"ERROR: {exc}"
             body = documents.pages_text(rendition, numbers)
-            images = self._pdf_page_images(path, rendition, numbers)
-            return "\n\n".join(header + [body] + images)
+            lines, page_images = self._pdf_page_images(path, rendition, numbers)
+            text = "\n\n".join(header + [body] + lines)
+            # Built LAST: ToolOutcome is a str subclass, so the join above would
+            # have dropped the envelope carrying the pages.
+            return tools.ToolOutcome(text, images=tuple(page_images)) if page_images else text
         return "\n\n".join(header + [self._pdf_opening(rendition)])
 
     def _resolve_pdf(self, source: str) -> tuple[Path, str | None]:
@@ -3002,17 +3111,25 @@ class Agent:
 
     def _pdf_page_images(
         self, path: Path, rendition: "documents.Rendition", numbers: list[int]
-    ) -> list[str]:
-        """Markdown image lines for the requested pages that cannot be read as
-        text. This is the escalation the whole design turns on: a page with no
-        text layer is not silence, it is a picture, and aish already has a store
-        and three renderers for pictures. Capped, and the cap is stated — a
-        50-page scan must not silently become 50 images."""
+    ) -> tuple[list[str], list[str]]:
+        """(markdown lines, stored paths) for the requested pages that cannot be
+        read as text. This is the escalation the whole design turns on: a page
+        with no text layer is not silence, it is a picture, and aish already has
+        a store and three renderers for pictures. Capped, and the cap is stated
+        — a 50-page scan must not silently become 50 images.
+
+        The paths are returned as well as embedded, because a markdown line in
+        a tool result is something the model can only PASTE. Until #215 that
+        was the whole escalation: the page was rasterised, stored, described as
+        readable — and delivered to the model as a file path, which no model
+        can read. It is delivered now (`_deliver_tool_media`), and the second
+        return value is what carries it."""
         facts = {page.number: page for page in rendition.pages}
         wanted = [n for n in numbers if n in facts and facts[n].is_scan]
         if not wanted:
-            return []
+            return [], []
         out: list[str] = []
+        stored_paths: list[str] = []
         for number in wanted[:PDF_MAX_PAGE_IMAGES]:
             try:
                 data = documents.page_png(path, number)
@@ -3020,10 +3137,11 @@ class Agent:
             except (documents.DocumentError, ValueError, OSError) as exc:
                 out.append(f"*(page {number} could not be rendered as an image: {exc})*")
                 continue
+            stored_paths.append(str(stored))
             out.append(
-                f"Page {number} has no text layer. It is rendered below — read it from "
-                "the image, and include this line in your answer if the user should "
-                f"see it too:\n\n![{rendition.source} page {number}]({stored})"
+                f"Page {number} has no text layer. It is rendered as a picture attached "
+                "to this turn — read it from there, and include this line in your answer "
+                f"if the user should see it too:\n\n![{rendition.source} page {number}]({stored})"
             )
         if len(wanted) > PDF_MAX_PAGE_IMAGES:
             rest = ", ".join(str(n) for n in wanted[PDF_MAX_PAGE_IMAGES:])
@@ -3031,7 +3149,7 @@ class Agent:
                 f"*(pages {rest} are also scans; ask for them in a smaller pages= "
                 f"range — at most {PDF_MAX_PAGE_IMAGES} page images come back at once.)*"
             )
-        return out
+        return out, stored_paths
 
     def _fetch_image_bytes(self, url: str) -> tuple[bytes, str | None]:
         """(bytes, None) or (b"", problem). Server-side so the browser never
