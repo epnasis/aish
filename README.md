@@ -676,11 +676,17 @@ another's.
 uv run pytest       # full suite — no model, network, or real commands needed
 uv run ruff check .
 uv run mypy
+make ship           # reinstall the local build and restart aish-web
 ```
 
 Tests script the *model* side (a fake chat client returns canned tool-call
 responses), so the whole suite runs offline with nothing executed for real. See
 `CLAUDE.md` for architecture notes.
+
+`make ship` refuses on a dirty tree. `uv tool install` builds the wheel from the
+**working tree, not from HEAD**, so uncommitted files ship without a word —
+`make ship-check` shows exactly what would go out, and `--dirty` overrides when
+that is what you want.
 
 ---
 

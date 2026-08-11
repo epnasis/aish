@@ -17,11 +17,18 @@ uv run mypy                            # type check (CI-gated; config in pyproje
 uv run aish                            # run from source
 ```
 
-After changing code, the user's installed `aish` does NOT pick it up — uv freezes the wheel and caches it at the same version. Reinstall with:
+## Shipping
+
+After changing code, the user's installed `aish` does NOT pick it up — uv freezes the wheel and caches it at the same version. Ship with:
 
 ```sh
-uv tool install --force --reinstall --no-cache /path/to/aish
+make ship          # guard → lint → tests → reinstall → restart → health-check
+make ship-check    # the preflight alone: what would ship, and whether it may
 ```
+
+**Never run `uv tool install` by hand.** It builds the wheel from the **WORKING TREE, not from HEAD**, so anything uncommitted — including another session's half-finished work in a checkout you did not inspect — ships silently. `make ship` refuses on a dirty tree for exactly this; `--dirty` overrides it when you mean it. On 2026-08-11 a bare install came within one command of shipping 129 uncommitted frontend lines that were also failing two doc-gate tests, and nothing about the command would have said so. `scripts/ship.sh`, `tests/test_ship_guard.py`.
+
+The remote equivalent is `scripts/deploy-web.sh <host>`, which ships the working tree ON PURPOSE (that is the remote dev loop) but asks first when the tree is dirty — and, with no tty to ask on, refuses rather than assuming consent.
 
 ## Workflow: when to use a worktree
 
@@ -30,7 +37,7 @@ Before editing code, check `git status`. Work in a git worktree on a feature bra
 - the change is **non-trivial** — a multi-file feature or refactor, not a small fix; or
 - the tree is **not clean with changes you didn't make** — the user or another session is mid-work in this checkout.
 
-Merge back to main after tests pass, then remove the worktree. Trivial fixes on a clean tree go directly in this checkout. The reinstall/ship step (`uv tool install ...`) always runs from this main checkout after merge — never from a worktree path.
+Merge back to main after tests pass, then remove the worktree. Trivial fixes on a clean tree go directly in this checkout. `make ship` always runs from this main checkout after merge — never from a worktree path, and never as a bare `uv tool install` (see Shipping).
 
 ## Never type into a chat you did not create
 
