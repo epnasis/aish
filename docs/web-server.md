@@ -172,6 +172,24 @@ The resumed turn is `RESUME_NOTE`, **not** the original prompt: the request and 
 
 ---
 
+## Shipping a new build (#214)
+
+`make ship` (`scripts/ship.sh`) is the ONE local path from a checkout to the running service: guard → lint → tests → `uv tool install` → `launchctl kickstart` → health-check. `scripts/deploy-web.sh <host>` is the remote equivalent.
+
+**The guard is the reason it is a script at all.** `uv tool install` builds the wheel from the **WORKING TREE, not from HEAD** — verified, not assumed: an uncommitted line in `aish/static/app.js` was found inside a freshly built wheel. So a bare install silently ships whatever happens to be uncommitted, and there is nowhere to put a check when the ship step is a command pasted from a doc.
+
+That is not hypothetical. On 2026-08-11 the installed `app.js` hash matched a **dirty** checkout rather than any commit — another session had installed its in-progress frontend to test it live. A routine reinstall from that tree would have shipped 129 uncommitted lines that were simultaneously failing two doc-gate tests, and reverted the live UI under the session driving it. The near-miss was caught by comparing hashes by hand, which is exactly the check a machine should be doing.
+
+So: a dirty tree **refuses**, naming the files and separating those that land in the wheel (`aish/`, `pyproject.toml`) from those that do not — a refusal that cannot tell a stray README from a modified module just teaches people to reach for `--dirty`. Untracked files count, and are the sharper case: hatchling packages off disk, so a new uncommitted module ships like any other while `git diff` shows nothing. A non-`main` branch warns but does not block. `--dirty` is the deliberate override.
+
+The remote script keeps working-tree shipping as its normal mode — that is the point of a remote dev loop — but prompts when the tree is dirty, and with **no tty to prompt on** it refuses rather than treating silence as consent. That non-interactive branch is the one that matters: the failure above happened while nobody was watching a terminal.
+
+`--check` runs the preflight and stops before anything is installed or restarted, which is what makes the guard testable — `TestShipGuard` drives the REAL script against throwaway git repos, never a Python restatement of its logic.
+
+Health-checking probes whatever address the kernel says is listening rather than assuming loopback: this service binds the LAN address, so a `127.0.0.1` probe reports a false failure on a perfectly healthy restart.
+
+---
+
 ## The global console
 
 **ONE** persistent interactive pseudo-terminal for the WHOLE server — not per-session — for TTY-reading programs (`gcloud auth`, `ssh`, `sudo`) the non-interactive `!` path cannot drive. It floats above whatever chat is shown and is untouched by chat switches. Held on `WebServer.console` with a global `console_viewers` set — never on a Session, never on the agent.
