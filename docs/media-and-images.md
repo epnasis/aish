@@ -1,6 +1,6 @@
 # Media and images — `show_image`, the store, the one boundary
 
-`media.py`, `Agent._show_image`, `Agent.image_roots()`, `term_image.py`.
+`media.py`, `Agent._show_image`, `Agent.workspace_roots()`, `term_image.py`.
 
 ---
 
@@ -32,7 +32,7 @@ Orchestrates the above and returns a **ready-built markdown line** — aish comp
 
 ## One boundary, three renderers
 
-`Agent.image_roots()` = `roots` + the media store + the scratch dir. Consumed by `/file` (`WebServer._image_roots`), the PDF exporter, and the CLI's `term_image`.
+`Agent.workspace_roots()` = `roots` + the directories the process owns (media store, scratch, tool-output cache, document store). Consumed by `/file` (`WebServer._workspace_roots`), the PDF exporter, the CLI's `term_image`, `read_file`'s prompt rule, and the approver's path scoping — see the workspace-boundary section of `docs/documents-and-pdf.md` for why the read side was added (#212).
 
 They disagreed before #188: the exporter trusted the scratch dir and `/file` did not, so a file the model wrote **where it is told to write throwaway files** printed fine in a PDF and 403'd in the chat with nothing saying why. `TestImageRoots`, `TestImageRootsAgreement`.
 
@@ -42,7 +42,7 @@ It is deliberately DISTINCT from `roots`, which is the auto-approval scope and i
 
 ## The terminal renderer — `term_image.py`
 
-The CLI's half of the same capability: `supports_images()` detects an inline-image-capable terminal, local paths are resolved against the same `image_roots()` boundary, and `emit()` writes the terminal's own image protocol. `TestSupportsImages`, `TestLocalImagePaths`, `TestEmit`.
+The CLI's half of the same capability: `supports_images()` detects an inline-image-capable terminal, local paths are resolved against the same `workspace_roots()` boundary, and `emit()` writes the terminal's own image protocol. `TestSupportsImages`, `TestLocalImagePaths`, `TestEmit`.
 
 ---
 

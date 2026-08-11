@@ -20,6 +20,7 @@ dependencies = [
     # Rule frontmatter is nested YAML (#205's when:/then: blocks), parsed with
     # safe_load so a rule file can never construct an object. Already present
     # transitively; declared because we import it — same reasoning as certifi.
+    "pymupdf>=1.28.2",
     "pyyaml>=6.0",
     "starlette>=0.40",
     "uvicorn[standard]>=0.30",

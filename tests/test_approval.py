@@ -616,6 +616,52 @@ class TestScratchWorkspace:
         (scratch / "link").symlink_to(outside)
         assert not path_within(str(scratch / "link" / "x.txt"), str(scratch), scratch)
 
+    # --- reading back what we wrote (#212) ---
+
+    @pytest.mark.parametrize("verb", ["grep -n hello", "cat", "wc -l", "head -20", "file"])
+    def test_read_only_command_on_a_scratch_file_auto_approves(self, tmp_path, scratch, verb):
+        """The session that motivated #212: `grep -i folder <scratch>/x.txt`
+        prompted, even though grep is a known-safe command and the model had
+        just written that file there unprompted. The path scoping consulted
+        `roots` alone, so aish's own workspace read as "somewhere else"."""
+        target = scratch / "converted.txt"
+        target.write_text("hello folder\n")
+        project = tmp_path / "project"
+        project.mkdir()
+        boundary = [project, scratch]
+        assert is_auto_approvable(f"{verb} {target}", (), cwd=str(project), roots=boundary)
+
+    def test_the_boundary_is_what_widens_it_not_the_command(self, tmp_path, scratch):
+        """Same command, same file — auto-approved only because the scratch dir
+        is in the boundary. Without it, this is the prompt the user saw."""
+        target = scratch / "converted.txt"
+        target.write_text("hello\n")
+        project = tmp_path / "project"
+        project.mkdir()
+        command = f"grep -n hello {target}"
+        assert not is_auto_approvable(command, (), cwd=str(project), roots=[project])
+        assert is_auto_approvable(command, (), cwd=str(project), roots=[project, scratch])
+
+    def test_a_widened_boundary_still_refuses_everywhere_else(self, tmp_path, scratch):
+        outside = tmp_path / "elsewhere.txt"
+        outside.write_text("private\n")
+        project = tmp_path / "project"
+        project.mkdir()
+        boundary = [project, scratch]
+        assert not is_auto_approvable(f"cat {outside}", (), cwd=str(project), roots=boundary)
+        assert not is_auto_approvable("cat /etc/passwd", (), cwd=str(project), roots=boundary)
+
+    def test_a_widened_boundary_does_not_make_a_mutating_verb_safe(self, tmp_path, scratch):
+        """Reading is what widened. A command that is not read-only still
+        prompts wherever it points — the boundary decides WHERE a safe verb may
+        look, never WHICH verbs are safe."""
+        project = tmp_path / "project"
+        project.mkdir()
+        boundary = [project, scratch]
+        assert not is_auto_approvable(
+            f"curl -o {scratch / 'x'} http://example.com", (), cwd=str(project), roots=boundary
+        )
+
     # --- is_scratch_delete (rm scoping) ---
 
     def test_rm_inside_scratch_auto_approves(self, scratch):

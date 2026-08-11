@@ -157,10 +157,19 @@ class TestReadUrl:
         assert '"ok"' in web.read_url("https://api.example.com/status")
 
     def test_binary_content_refused(self, monkeypatch):
+        monkeypatch.setattr(web, "_fetch", lambda url: (b"\x00\x01", "application/zip"))
+        result = web.read_url("https://example.com/bundle.zip")
+        assert result.startswith("ERROR")
+        assert "application/zip" in result
+
+    def test_a_pdf_names_the_tool_that_can_read_it(self, monkeypatch):
+        """#213: this was the one content type aish routinely met on the web and
+        could do nothing at all with. A refusal that names no alternative is
+        where the model starts improvising with curl."""
         monkeypatch.setattr(web, "_fetch", lambda url: ("%PDF-1.4", "application/pdf"))
         result = web.read_url("https://example.com/paper.pdf")
         assert result.startswith("ERROR")
-        assert "application/pdf" in result
+        assert 'read_pdf(source="https://example.com/paper.pdf")' in result
 
     def test_fetch_failure_reported_not_raised(self, monkeypatch):
         def boom(url):

@@ -9,6 +9,7 @@ the command to run (possibly edited by the user).
 import dataclasses
 import datetime
 import getpass
+import hashlib
 import itertools
 import json
 import os
@@ -35,6 +36,7 @@ import ollama
 from . import aliases as alias_map
 from . import (
     backends,
+    documents,
     files,
     media,
     rule_compiler,
@@ -191,6 +193,17 @@ Rules:
    a promising page, then pass an image URL from it to show_image. If
    show_image reports a problem, try another source — do not paste the URL
    into your answer anyway.
+7bb. PDFs: whenever a PDF is attached, sitting on disk, or linked, you MUST
+   read it with read_pdf. NEVER run pdftotext, pdftoppm, python, strings or
+   any other command on a PDF — read_pdf needs no approval and keeps columns,
+   tables and page numbers intact where a shell command shreds them. It
+   converts the document once and caches it, so asking again for another page
+   (pages="7") or a phrase (search="total") is cheap: do that instead of
+   trying to hold a long document in your head. Its first line tells you what
+   the document IS — how many pages, which have tables, which are SCANS. A
+   scanned page's words are NOT in the text; ask for it with pages= and it
+   comes back as an image. NEVER answer from a scanned page you have not been
+   shown, and never let one pass silently — say which pages you could not read.
 7c. TOOL RESULTS THAT FAILED OR WERE CUT: a result may carry an
    "[aish: … reported status=…]" note. That means the tool did NOT produce
    what it was asked for, even if it looks like it returned something. You
@@ -720,6 +733,10 @@ READ_ONLY_TOOLS = frozenset(
         "read_file",
         "recall",
         "show_image",
+        # Converts a PDF into aish's OWN document store and reads it back —
+        # same argument as show_image's write into the media store, and the
+        # rendition is content-addressed, so it is thread-safe too.
+        "read_pdf",
         # Same argument as show_image, minus the fetch: it validates a link the
         # app can play and hands back the line to paste. No egress at all.
         "show_video",
@@ -737,8 +754,9 @@ READ_ONLY_TOOLS = frozenset(
 # user session (all CLI sessions, every hand-started web chat) nothing changes.
 # show_image is here too: its URL form is an outbound GET at a host the model
 # chose, which is exactly what this gate exists for. Its local-path form reaches
-# no host and is never gated (see _egress_novel_hosts).
-EGRESS_TOOLS = frozenset({"web_search", "read_url", "show_image"})
+# no host and is never gated (see _egress_novel_hosts). read_pdf takes the same
+# two shapes and is gated on the same terms.
+EGRESS_TOOLS = frozenset({"web_search", "read_url", "show_image", "read_pdf"})
 
 # URL or bare-domain-looking tokens in owner text. Deliberately generous
 # (matches "setup.py"-shaped tokens too): over-inclusion only ever widens
@@ -747,6 +765,14 @@ EGRESS_TOOLS = frozenset({"web_search", "read_url", "show_image"})
 _HOST_TOKEN_RE = re.compile(
     r"(?i)(?:https?://([^\s/\"'<>]+)|\b((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})\b)"
 )
+
+# One PDF, fetched or local. Generous — a scanned manual is routinely tens of
+# megabytes and the conversion is bounded by page count, not file size.
+PDF_MAX_BYTES = 50 * 1024 * 1024
+# How many unreadable pages come back as images in one call. A page image costs
+# far more context than a page of text, and a 200-page scan asked for in one go
+# would blow the window; the cap is always STATED, never silent.
+PDF_MAX_PAGE_IMAGES = 5
 
 SHOW_IMAGE_NO_CURL = (
     "Do NOT fall back to curl or wget — a file fetched that way cannot be "
@@ -1198,6 +1224,15 @@ class Agent:
             Path(state_dir) / "tool-output"
             if state_dir is not None
             else self.scratch_dir / "tool-output"
+        )
+        # Text renditions of documents read with read_pdf (#213), keyed by the
+        # SOURCE file's hash. Outside the scratch dir for the same reason as the
+        # two above, plus one of its own: converting is the expensive half, and
+        # a rendition keyed on content is still valid in next week's session.
+        self.documents_dir = (
+            Path(state_dir) / "documents"
+            if state_dir is not None
+            else self.scratch_dir / "documents"
         )
         content = compose_system_content(
             context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir
@@ -2270,22 +2305,39 @@ class Agent:
         self._emit_workspace("trust", str(path))
         return f"[trusted for this session: {path}]"
 
-    def image_roots(self) -> list[Path]:
-        """Directories a picture in an answer may be DISPLAYED from (#188).
+    def workspace_roots(self) -> list[Path]:
+        """The workspace boundary: everywhere aish may READ without asking.
 
-        The session roots plus the two directories aish itself owns: the media
-        store (where show_image puts everything) and the scratch workspace
-        (which the model may already write to unprompted, so serving from it
-        grants nothing new). ONE definition, consumed by every renderer — the
-        web /file endpoint, the PDF exporter, and the terminal's inline images.
-        They disagreed before: the exporter trusted the scratch dir and /file
+        The session roots plus the directories aish itself owns — the media
+        store (where show_image puts everything), the scratch workspace, and
+        the tool-output cache. Reading back what the process already wrote
+        unprompted grants nothing new, which is what makes the widening safe.
+
+        ONE definition, consumed by everything that reads or displays: the web
+        /file endpoint, the PDF exporter, the terminal's inline images,
+        read_file's prompt rule, and the approver's path scoping. They
+        disagreed before #188: the exporter trusted the scratch dir and /file
         did not, so the same file printed in a PDF and 403'd in the chat.
 
-        Distinct from `roots` on purpose: `roots` is the AUTO-APPROVAL scope and
+        It disagreed with itself again until #212: the process-owned dirs were
+        write-and-delete-approved but not READ-approved, so the model could
+        create a scratch file unprompted, delete it unprompted, and then need a
+        tap to grep the thing it had just written. Every read-side consumer now
+        takes this list, so a fourth asymmetry cannot open quietly.
+
+        Distinct from `roots` on purpose: `roots` is what the USER granted and
         is rebuilt authoritatively per session (restore_workspace), which the
-        process-owned directories here must not be dragged into.
+        process-owned directories must not be dragged into. Widening the read
+        boundary never widens the write gate — writes and mutations are gated
+        by the approval path, which consults `roots`, not this.
         """
-        return [*self.roots, self.media_dir, self.scratch_dir]
+        return [
+            *self.roots,
+            self.media_dir,
+            self.scratch_dir,
+            self.tool_output_dir,
+            self.documents_dir,
+        ]
 
     def _execute_tool_calls(self, tool_calls: list[dict]) -> list[str]:
         """Run one model turn's tool calls; results keep the call order.
@@ -2570,6 +2622,20 @@ class Agent:
             source = str(args.get("source", ""))
             caption = str(args.get("caption", "") or "")
             return f"→ show_image: {source}", partial(self._show_image, source, caption)
+        if name == "read_pdf":
+            source = str(args.get("source", ""))
+            pages_spec = str(args.get("pages", "") or "").strip()
+            query = str(args.get("search", "") or "").strip()
+            detail = ", ".join(
+                part
+                for part in (
+                    f"pages {pages_spec}" if pages_spec else "",
+                    f"search {query!r}" if query else "",
+                )
+                if part
+            )
+            label = f"→ read_pdf: {source}" + (f" ({detail})" if detail else "")
+            return label, partial(self._read_pdf, source, pages_spec, query)
         if name == "recall":
             query = str(args.get("query", "") or "")
             entry = str(args.get("name", "") or "").strip() or None
@@ -2780,6 +2846,177 @@ class Agent:
             f"(do not alter the path):\n\n![{alt or 'image'}]({path})"
         )
 
+    # --------------------------------------------------------------- PDFs (#213)
+
+    def _read_pdf(self, source: str, pages_spec: str, query: str) -> str:
+        """Read a PDF as text, with what the document IS stated before any of it.
+
+        The result always leads with the structural map, because the failure
+        this tool exists to prevent is a confident answer built on a hollow
+        extraction — a shredded table or a scanned page that read as silence.
+        The map is what lets both the model and the user tell a complete read
+        from a partial one.
+        """
+        source = source.strip()
+        if not source:
+            return "ERROR: read_pdf needs a source (a path to a PDF, or its URL)."
+        path, problem = self._resolve_pdf(source)
+        if problem is not None:
+            return f"ERROR: {problem}"
+        try:
+            rendition = documents.convert(path, self.documents_dir)
+        except documents.DocumentError as exc:
+            return f"ERROR: {exc}"
+        except Exception as exc:  # a corrupt PDF must not end the task
+            return f"ERROR: {Path(path).name} could not be converted ({type(exc).__name__}: {exc})."
+
+        header = [
+            documents.summary(rendition),
+            f"Full text: {rendition.path}\n"
+            "(read_file it for any page, or grep it — it needs no approval, and "
+            "re-calling read_pdf for another page or search is free.)",
+        ]
+        if query:
+            return "\n\n".join(header + [self._pdf_search(rendition, query)])
+        if pages_spec:
+            try:
+                numbers = documents.parse_pages(pages_spec, rendition.total_pages)
+            except documents.DocumentError as exc:
+                return f"ERROR: {exc}"
+            body = documents.pages_text(rendition, numbers)
+            images = self._pdf_page_images(path, rendition, numbers)
+            return "\n\n".join(header + [body] + images)
+        return "\n\n".join(header + [self._pdf_opening(rendition)])
+
+    def _resolve_pdf(self, source: str) -> tuple[Path, str | None]:
+        """A local PDF path for `source`, fetching it first when it is a URL.
+
+        A fetched PDF lands in aish's own document store rather than a temp
+        file: it is then inside the workspace boundary, so the model can go
+        back to it without a second download and without an approval.
+        """
+        if source.lower().startswith(("http://", "https://")):
+            try:
+                data, content_type = web.fetch_binary(source, PDF_MAX_BYTES)
+            except web.BlockedURLError as exc:
+                return Path(), f"blocked: {exc}. Use a normal public URL."
+            except Exception as exc:
+                return Path(), f"could not fetch that URL ({type(exc).__name__}: {exc})."
+            if len(data) > PDF_MAX_BYTES:
+                return Path(), (
+                    f"that PDF is larger than {PDF_MAX_BYTES // (1024 * 1024)} MB."
+                )
+            if not data.startswith(b"%PDF"):
+                # Same failure show_image guards against: the extension agrees
+                # and the bytes do not. Usually a login wall or a landing page.
+                return Path(), (
+                    f"that URL returned {content_type}, not a PDF — it is probably the "
+                    "page the PDF is linked from. Use read_url on it to find the real "
+                    "file, or say you could not reach the document."
+                )
+            try:
+                self.documents_dir.mkdir(parents=True, exist_ok=True)
+                digest = hashlib.sha256(data).hexdigest()[:16]
+                stem = documents.slug(source.rsplit("/", 1)[-1]) or "download"
+                target = self.documents_dir / f"{digest}-{stem}.pdf"
+                if not target.exists():
+                    target.write_bytes(data)
+            except OSError as exc:
+                return Path(), f"could not save the downloaded PDF ({exc})."
+            return target, None
+
+        path = Path(os.path.expanduser(source))
+        if not path.is_absolute():
+            path = Path(self.cwd) / path
+        try:
+            path = path.resolve()
+        except OSError as exc:
+            return Path(), f"could not resolve {source!r} ({exc})."
+        roots = [Path(r).resolve() for r in self.workspace_roots()]
+        if not any(path.is_relative_to(root) for root in roots):
+            return Path(), (
+                f"{path} is outside this session's directories. Ask the user to "
+                "/add-dir its folder."
+            )
+        if not path.is_file():
+            return Path(), f"no such file: {path}"
+        return path, None
+
+    def _pdf_search(self, rendition: "documents.Rendition", query: str) -> str:
+        hits = documents.search(rendition, query)
+        if not hits:
+            unread = rendition.scans
+            note = (
+                f" Pages {', '.join(str(n) for n in unread)} are scans and were NOT "
+                "searched — their text does not exist. Ask for them with pages= to "
+                "look at them."
+                if unread
+                else ""
+            )
+            return f"No line contains {query!r}.{note}"
+        lines = [f"Lines containing {query!r}:"]
+        lines.extend(f"  p{page}: {text}" for page, text in hits)
+        return "\n".join(lines)
+
+    def _pdf_opening(self, rendition: "documents.Rendition") -> str:
+        """As much of the document as fits the backend's real output budget.
+
+        Truncation names the exact next call rather than dead-ending: the
+        rendition is page-addressed on disk, so "there is more" is always
+        actionable (#192's continuation lesson, with the file as the cache).
+        """
+        (head, _tail), _source = self._output_caps()
+        text = rendition.text().strip()
+        if len(text) <= head:
+            return text
+        chunks: list[str] = []
+        used = 0
+        for number in range(1, rendition.total_pages + 1):
+            chunk = documents.pages_text(rendition, [number])
+            if used + len(chunk) > head and chunks:
+                break
+            chunks.append(chunk)
+            used += len(chunk)
+        shown = len(chunks)
+        return "\n\n".join(chunks) + (
+            f"\n\n[aish: pages 1-{shown} of {rendition.total_pages} shown. Read on with "
+            f'read_pdf(source=…, pages="{shown + 1}-{rendition.total_pages}"), or jump '
+            "straight to what you need with search=.]"
+        )
+
+    def _pdf_page_images(
+        self, path: Path, rendition: "documents.Rendition", numbers: list[int]
+    ) -> list[str]:
+        """Markdown image lines for the requested pages that cannot be read as
+        text. This is the escalation the whole design turns on: a page with no
+        text layer is not silence, it is a picture, and aish already has a store
+        and three renderers for pictures. Capped, and the cap is stated — a
+        50-page scan must not silently become 50 images."""
+        facts = {page.number: page for page in rendition.pages}
+        wanted = [n for n in numbers if n in facts and facts[n].is_scan]
+        if not wanted:
+            return []
+        out: list[str] = []
+        for number in wanted[:PDF_MAX_PAGE_IMAGES]:
+            try:
+                data = documents.page_png(path, number)
+                stored = media.store(data, self.media_dir, f"{rendition.source} p{number}")
+            except (documents.DocumentError, ValueError, OSError) as exc:
+                out.append(f"*(page {number} could not be rendered as an image: {exc})*")
+                continue
+            out.append(
+                f"Page {number} has no text layer. It is rendered below — read it from "
+                "the image, and include this line in your answer if the user should "
+                f"see it too:\n\n![{rendition.source} page {number}]({stored})"
+            )
+        if len(wanted) > PDF_MAX_PAGE_IMAGES:
+            rest = ", ".join(str(n) for n in wanted[PDF_MAX_PAGE_IMAGES:])
+            out.append(
+                f"*(pages {rest} are also scans; ask for them in a smaller pages= "
+                f"range — at most {PDF_MAX_PAGE_IMAGES} page images come back at once.)*"
+            )
+        return out
+
     def _fetch_image_bytes(self, url: str) -> tuple[bytes, str | None]:
         """(bytes, None) or (b"", problem). Server-side so the browser never
         fetches a model-chosen URL — see media.py's module docstring."""
@@ -2832,7 +3069,7 @@ class Agent:
             path = path.resolve()
         except OSError as exc:
             return b"", f"could not resolve {source!r} ({exc})."
-        roots = [Path(r).resolve() for r in self.image_roots()]
+        roots = [Path(r).resolve() for r in self.workspace_roots()]
         if not any(path.is_relative_to(root) for root in roots):
             return b"", (
                 f"{path} is outside this session's directories, so it could not be "
@@ -2892,11 +3129,14 @@ class Agent:
         exactly what an injected instruction controls."""
         if self.origin == "user" or name not in EGRESS_TOOLS:
             return None
-        if name in ("read_url", "show_image"):
+        if name in ("read_url", "show_image", "read_pdf"):
             url = str(args.get("url") or args.get("source") or "")
-            # show_image also takes a local path, which leaves the machine not
-            # at all — nothing to gate. Anything http(s)-shaped is an egress.
-            if name == "show_image" and not url.lower().startswith(("http://", "https://")):
+            # show_image and read_pdf also take a local path, which leaves the
+            # machine not at all — nothing to gate. Anything http(s)-shaped is
+            # an egress.
+            if name in ("show_image", "read_pdf") and not url.lower().startswith(
+                ("http://", "https://")
+            ):
                 return None
             try:
                 host = (urllib.parse.urlsplit(url).hostname or "").lower()
@@ -2996,10 +3236,16 @@ class Agent:
             self._owner_hosts |= _hosts_in_text(text)
 
     def _read_prompt_reason(self, path: str) -> str | None:
-        """Why an otherwise auto-approved read_file must prompt, or None."""
+        """Why an otherwise auto-approved read_file must prompt, or None.
+
+        Scoped to the WORKSPACE boundary, not `roots`: aish's own scratch,
+        media and document stores are readable without a tap, because the
+        model already writes and deletes there without one. Sensitivity is
+        checked first and is never widened by this — a credential file inside
+        a session root still prompts."""
         if files.is_sensitive_path(path, self.cwd):
             return "sensitive"
-        if files.is_outside_roots(path, self.cwd, self.roots):
+        if files.is_outside_roots(path, self.cwd, self.workspace_roots()):
             return "outside"
         return None
 

@@ -3255,7 +3255,12 @@ class TestUpload:
             assert response.status_code == 200
             assert response.json()["path"].endswith("uploads/evil.txt")
 
-    def test_attached_image_goes_native_pdf_falls_back(self, app_env):
+    def test_attached_image_goes_native_pdf_is_readable_either_way(self, app_env):
+        """The test provider is "ollama", which has no document channel — so
+        the PDF is NOT delivered natively. It is still announced as readable
+        (#213): read_pdf reads the same file on every backend, and only the
+        DELIVERY is conditional. Before, a PDF attached to a local model was
+        announced as an inert path and the model went hunting for pdftotext."""
         client, chat = make_client(app_env, [model_says("I see it")])
         with client:
             image = client.post("/upload?name=photo.png", content=b"\x89PNG-fake").json()
@@ -3270,12 +3275,12 @@ class TestUpload:
                 )
                 user = recv_until(ws, "user")
                 assert "you can see it" in user["text"]  # image went native
-                assert f"[attached file: {pdf['path']}]" in user["text"]  # pdf fell back
+                assert f"[document attached: paper.pdf — you can read it; " \
+                       f"file at {pdf['path']}]" in user["text"]
                 recv_until(ws, "done")
             sent = [m for m in chat.calls[0]["messages"] if m["role"] == "user"][-1]
-            # test provider is "ollama": images native, pdf stays a path note
             assert sent.get("images") == [image["path"]]
-            assert "documents" not in sent
+            assert "documents" not in sent  # not native on this backend
 
     def test_attachment_outside_uploads_never_goes_native(self, app_env, tmp_path):
         secret = tmp_path / "secret.png"
@@ -3606,7 +3611,7 @@ class TestImageRootsAgreement:
             with connected(client):
                 server = client.app.state.server
                 agent = server.active.agent
-                roots = server._image_roots()
+                roots = server._workspace_roots()
                 for own in (agent.media_dir, agent.scratch_dir):
                     assert any(Path(own).resolve().is_relative_to(r) for r in roots)
 

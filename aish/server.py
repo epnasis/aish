@@ -1467,7 +1467,11 @@ they do. Images (and PDFs, when your \
 backend supports them) are delivered to you NATIVELY — a "[image attached: \
 … — you can see it]" note means the image itself is in the message: look at \
 it directly (describe it, read text in it, use what you see to search the \
-web); do NOT write scripts to parse it. Files that arrive as plain \
+web); do NOT write scripts to parse it. A "[document attached: … — you can \
+read it]" note is a PDF: if it was delivered natively you already have it, \
+and either way you can ALWAYS read it with read_pdf(source="<the path in \
+the note>") — which is also how you get a specific page, search it, or see \
+a scanned page. Files that arrive as plain \
 "[attached file: <path>]" lines were NOT delivered natively: read text \
 files with read_file, process binaries with shell tools — in that mode you \
 cannot see image contents, and should say so if asked to describe one."""
@@ -2383,7 +2387,14 @@ class WebServer:
         the uploads dir qualify for native delivery — an arbitrary client
         path must never be silently base64'd off the machine. Everything
         else (unsupported type/backend, oversized, outside uploads) becomes
-        a path note the agent handles through the normal gated tools."""
+        a path note the agent handles through the normal gated tools.
+
+        A PDF is announced as readable whatever the backend (#213): native
+        delivery is still the best fidelity and is preferred where it exists,
+        but where it does not, `read_pdf` reads the same file. Only the
+        DELIVERY is conditional now, not the claim — before, an attached PDF on
+        a local model was announced as an inert path and the model went looking
+        for pdftotext."""
         support = backends.media_support(getattr(agent, "provider", "ollama"))
         uploads = self.uploads_dir.resolve()
         images: list[str] = []
@@ -2402,8 +2413,13 @@ class WebServer:
                 # Full path (not just the name) so /feedback's classic flow can
                 # upload the file, not only see it (#152).
                 notes.append(f"[image attached: {path.name} — you can see it; file at {path}]")
-            elif in_uploads and size_ok and suffix == ".pdf" and "pdf" in support:
-                documents.append(str(path))
+            elif in_uploads and suffix == ".pdf":
+                # Native delivery keeps the size cap (it is a base64 payload in
+                # every request from here on); the NOTE does not, because
+                # read_pdf reads from disk and a big scan is exactly the
+                # document that most needs reading.
+                if size_ok and "pdf" in support:
+                    documents.append(str(path))
                 notes.append(f"[document attached: {path.name} — you can read it; file at {path}]")
             else:
                 notes.append(f"[attached file: {path}]")
@@ -4006,7 +4022,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         if media_type is None:
             return JSONResponse({"error": "unsupported file type"}, status_code=415)
         path = path.resolve()
-        if not any(path.is_relative_to(r) for r in self._image_roots()):
+        if not any(path.is_relative_to(r) for r in self._workspace_roots()):
             return JSONResponse({"error": "outside session roots"}, status_code=403)
         if not path.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
@@ -4026,11 +4042,11 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             },
         )
 
-    def _image_roots(self) -> list[Path]:
+    def _workspace_roots(self) -> list[Path]:
         """The ONE boundary a local image may be displayed from — used by both
         /file (the chat) and the PDF exporter (issue #133). Each open session's
-        own definition (`Agent.image_roots`: its roots, its media store, its
-        scratch workspace) plus the uploads dir.
+        own definition (`Agent.workspace_roots`: its roots plus the directories
+        the process owns) plus the uploads dir.
 
         These two callers disagreed until #188: the exporter trusted the scratch
         workspace and /file did not, so an image the model wrote where it is
@@ -4043,7 +4059,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         `![](path)` renders as a link card and is never read."""
         roots = [self.uploads_dir.resolve()]
         for session in self.sessions.values():
-            roots.extend(Path(r).resolve() for r in session.agent.image_roots())
+            roots.extend(Path(r).resolve() for r in session.agent.workspace_roots())
         return roots
 
     def _model_title(self, session: Session, markdown_text: str) -> str | None:
@@ -4213,7 +4229,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return JSONResponse({"error": "answer too large to export"}, status_code=413)
         markdown_text = raw.decode("utf-8", errors="replace")
         title = await self._answer_title(request.query_params.get("session", ""), markdown_text)
-        image_roots = self._image_roots()
+        image_roots = self._workspace_roots()
 
         def build() -> bytes:
             return export.render_answer_pdf(markdown_text, title, image_roots)
@@ -4236,7 +4252,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         path = self.state_dir / name
         if not safe or ".." in name or not path.is_file():
             return JSONResponse({"error": f"no such session: {name}"}, status_code=404)
-        image_roots = self._image_roots()
+        image_roots = self._workspace_roots()
 
         def build() -> tuple[bytes, str]:
             messages, _, custom_title, *_ = SessionLog._parse(path)
@@ -4507,8 +4523,11 @@ def create_app(
         bridge.on_wait = notify_hold
 
         def get_scope():
+            # The WORKSPACE boundary, not `roots`: a read-only command touching
+            # aish's own scratch/media/document stores must auto-approve, the
+            # same as writing and deleting there already does (#212).
             if agent_holder:
-                return agent_holder[0].cwd, agent_holder[0].roots
+                return agent_holder[0].cwd, agent_holder[0].workspace_roots()
             return cwd, [Path(cwd).resolve()]
 
         def check_pending_cwd() -> str | None:

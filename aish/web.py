@@ -239,6 +239,16 @@ def read_url(url: str, topic: str | None = None) -> str:
             if len(PAGE_TITLES) >= PAGE_TITLES_MAX:
                 PAGE_TITLES.clear()
             PAGE_TITLES[url] = title
+    elif content_type == "application/pdf":
+        # Not a dead end any more (#213): this was the one content type aish
+        # routinely meets on the web and could do nothing at all with, so the
+        # refusal names the tool that CAN read it rather than the fact that
+        # this one cannot.
+        return (
+            f"ERROR: {url} is a PDF, not a text page. Read it with "
+            f'read_pdf(source="{url}") — that keeps its columns, tables and page '
+            "numbers intact. Do NOT download it with curl."
+        )
     elif not (content_type.startswith("text/") or content_type.endswith(("json", "xml"))):
         return f"ERROR: {url} is {content_type}, not a text page — cannot read it"
     if not text.strip():
