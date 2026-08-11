@@ -297,6 +297,19 @@ class RuleStats:
     complied: int = 0  # a refusal was followed by the routed reader, same turn
     origins: dict[str, int] = field(default_factory=dict)
     verbs: set[str] = field(default_factory=set)  # as COMPILED, from the bindings
+    # A count alone reports a fixed file in the present tense: "29 turns could
+    # not compile it" reads identically whether the breakage was this morning or
+    # nine days ago and long since repaired. Both timestamps, because it is
+    # their ORDER that answers it — the corpus's real errors were a grammar
+    # migration passing through, every one of them clean on every turn since.
+    last_error: str = ""
+    last_clean: str = ""
+
+    @property
+    def still_broken(self) -> bool:
+        """No clean evaluation SINCE the last error. A rule that never
+        evaluated cleanly at all is broken too — "" sorts below any timestamp."""
+        return bool(self.last_error) and self.last_clean <= self.last_error
 
     @property
     def arming(self) -> bool:
@@ -324,6 +337,11 @@ class RuleStats:
 class RuleLedger:
     rules: dict[str, RuleStats] = field(default_factory=dict)
     turns: int = 0  # turns that reached the rule engine at all
+    # When the scan ran. Carried rather than passed, because "3 days ago" must
+    # be relative to the window the counts came from and not to whenever
+    # someone got round to formatting them — and a caller that has to remember
+    # to thread a clock through is a caller that will forget.
+    scanned_at: datetime | None = None
 
     def stat(self, name: str) -> RuleStats:
         return self.rules.setdefault(name, RuleStats(name))
@@ -391,10 +409,16 @@ def _rule_turns(path: Path):
         if not isinstance(turn, int):
             continue
         entry = turns.setdefault(
-            turn, {"turn": turn, "eval": None, "bindings": {}, "gates": [], "tools": []}
+            turn,
+            {"turn": turn, "eval": None, "ts": "", "bindings": {}, "gates": [],
+             "tools": []},
         )
         if kind == "rule_eval":
             entry["eval"] = step
+            # The record's own timestamp, not the step's — a verdict has no
+            # clock of its own, and "when" is the difference between a file
+            # that is broken and one that WAS.
+            entry["ts"] = str(rec.get("ts") or "")
         elif kind == "binding":
             entry["bindings"][str(step.get("id"))] = step
         elif kind == "gate":
@@ -418,7 +442,7 @@ def scan_rules(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None) 
     """Per-rule counters over the recent session logs. Pure code, no model."""
     now = now or datetime.now()
     floor = f"session-{(now - timedelta(days=days)):%Y%m%d}"
-    ledger = RuleLedger()
+    ledger = RuleLedger(scanned_at=now)
     for path in sorted(Path(state_dir).glob("session-*.jsonl")):
         if path.name < floor:
             continue
@@ -432,6 +456,11 @@ def scan_rules(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None) 
                     stat.evaluated += 1
                     stat.trigger = str(row.get("trigger") or "") or stat.trigger
                     verdict = row.get("verdict")
+                    stamp = str(turn["ts"])
+                    if verdict == "error":
+                        stat.last_error = max(stat.last_error, stamp)
+                    else:
+                        stat.last_clean = max(stat.last_clean, stamp)
                     if verdict == "bind":
                         stat.binds += 1
                         # A trigger decided at seed has already fired by the
@@ -510,16 +539,44 @@ def _score_gates(ledger: RuleLedger, turn: dict) -> None:
             ledger.stat(str(binding.get("rule") or "")).complied += 1
 
 
-def rule_signals(ledger: RuleLedger) -> list[tuple[str, str]]:
+def _ago(stamp: str, now: datetime) -> str:
+    """How long ago, in the words a person uses. Never a bare date: the reader
+    is deciding whether to go and look at a file right now."""
+    try:
+        when = datetime.fromisoformat(stamp)
+    except ValueError:
+        return "at an unrecorded time"
+    days = (now.date() - when.date()).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    return f"{days} days ago"
+
+
+def rule_signals(ledger: RuleLedger, now: datetime | None = None) -> list[tuple[str, str]]:
     """(rule, proposal) pairs for the owner to act on or ignore. Deliberately
     NOT actions: a rule is owner property, and every one of these is a
     judgement about intent that a counter can only prompt."""
+    now = now or ledger.scanned_at or datetime.now()
     out: list[tuple[str, str]] = []
     for stat in sorted(ledger.rules.values(), key=lambda s: s.name):
         if stat.evaluated >= RULE_MIN_FIRES and stat.binds == 0:
             out.append((stat.name, f"never bound in {stat.evaluated} turns — dead weight?"))
         if stat.errors:
-            out.append((stat.name, f"{stat.errors} turns could not compile it — broken file"))
+            # Whether to go and open the file is the whole decision this line
+            # exists to inform, and a count cannot answer it. The corpus's real
+            # errors were a grammar migration passing through in early August:
+            # reported as "broken file", nine days after the last one and clean
+            # on every turn since, which is a fortnight of chasing a fixed bug.
+            when = _ago(stat.last_error, now)
+            out.append((
+                stat.name,
+                f"{stat.errors} turns could not compile it — still broken, last {when}"
+                if stat.still_broken
+                else f"{stat.errors} turns could not compile it — last {when}, "
+                     "clean on every evaluation since",
+            ))
         # The `never bound` line above cannot see an arming rule: it binds every
         # turn by construction. This is the same question asked where the answer
         # lives — and only of a rule that DEMANDS something, since a prohibition
@@ -961,7 +1018,7 @@ def run_curate(
     # nobody reads are the failure this epic is about, so the scan needed a
     # CALLER more than it needed more counters (#205).
     rule_ledger = scan_rules(state_dir, now=now)
-    proposals = rule_signals(rule_ledger)
+    proposals = rule_signals(rule_ledger, now=now)
     for rule_name, proposal in proposals:
         log(f"rule {rule_name}: {proposal}")
     if rule_ledger.rules and not proposals:

@@ -763,10 +763,48 @@ class TestRuleSignals:
 
     def test_a_broken_rule_file_is_surfaced(self, tmp_path):
         write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
-            rule_eval(1, [eval_row("r", "error")]),
+            rule_eval(1, [eval_row("r", "error")], ts="2026-07-28T10:00:00"),
         ])
         signals = dict(rule_signals(scan_rules(tmp_path, now=NOW)))
-        assert "broken file" in signals["r"]
+        assert "could not compile it" in signals["r"]
+        assert "still broken" in signals["r"]
+
+    def test_a_file_that_was_FIXED_says_so(self, tmp_path):
+        """The whole decision this line informs is whether to go and open the
+        file. A count reads identically for a rule broken this morning and one
+        repaired nine days ago — which is what the live corpus was: a grammar
+        migration passing through, reported in the present tense for a
+        fortnight after every rule was clean again."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "error")], ts="2026-07-26T10:00:00"),
+            rule_eval(2, [eval_row("r", "error")], ts="2026-07-26T11:00:00"),
+            rule_eval(3, [eval_row("r", "bind", "b1")], ts="2026-07-28T09:00:00"),
+        ])
+        signals = dict(rule_signals(scan_rules(tmp_path, now=NOW)))
+        assert "2 turns could not compile it" in signals["r"]
+        assert "last 3 days ago, clean on every evaluation since" in signals["r"]
+
+    def test_the_ledger_carries_the_clock_the_counts_came_from(self, tmp_path):
+        """"yesterday" has to mean yesterday relative to the SCAN, not to
+        whenever someone got round to formatting the result. Passing the clock
+        separately is a footgun and this test is that mistake, pinned: no `now`
+        reaches rule_signals here, and the answer must still be right."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "error")], ts="2026-07-28T10:00:00"),
+        ])
+        signals = dict(rule_signals(scan_rules(tmp_path, now=NOW)))
+        assert "last yesterday" in signals["r"]
+
+    def test_broken_again_after_a_clean_run_is_still_broken(self, tmp_path):
+        """It is the ORDER of the two stamps that decides, not the presence of
+        a clean evaluation — a rule that compiled last week and broke today has
+        both, and calling it fixed would be the worst reading of the pair."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "bind", "b1")], ts="2026-07-20T10:00:00"),
+            rule_eval(2, [eval_row("r", "error")], ts="2026-07-29T08:00:00"),
+        ])
+        signals = dict(rule_signals(scan_rules(tmp_path, now=NOW)))
+        assert "still broken, last today" in signals["r"]
 
     def test_a_small_sample_proposes_nothing(self, tmp_path):
         """Every rate below RULE_MIN_FIRES is noise, and a proposal made from
