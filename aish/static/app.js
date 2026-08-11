@@ -8790,65 +8790,71 @@ async function uploadFile(file) {
 let sharesPainted = false; // a later arrival is news; the first paint is not
 
 function renderShares(items) {
-  const box = $("shares");
-  if (!box) return;
-
   // The server's list is the truth, including "the other device used it".
   const live = new Set(items.map((item) => item.id));
   const kept = attachments.filter((a) => !a.share || live.has(a.share));
   let touched = kept.length !== attachments.length;
   attachments = kept;
 
-  const waiting = [];
   for (const item of items) {
-    // A share carrying text is a chip even when it also has a file: the text
-    // half has to be placed by hand.
-    if (!item.path || item.text) {
-      waiting.push(item);
-      continue;
+    if (item.path && !attachments.some((a) => a.share === item.id)) {
+      attachments.push({
+        name: item.name || item.path.split("/").pop(),
+        path: item.path,
+        share: item.id, // what makes it releasable on send, and revocable above
+      });
+      touched = true;
+      if (sharesPainted) {
+        showToast(`${item.name} attached — shared from ${item.source || "your phone"}`);
+      }
     }
-    if (attachments.some((a) => a.share === item.id)) continue;
-    attachments.push({
-      name: item.name || item.path.split("/").pop(),
-      path: item.path,
-      share: item.id, // what makes it releasable on send, and revocable above
-    });
-    touched = true;
-    if (sharesPainted) {
-      showToast(`${item.name} attached — shared from ${item.source || "your phone"}`);
-    }
+    if (item.text) takeSharedText(item);
   }
   if (touched) renderAttachments();
   sharesPainted = true;
   openChatForFreshShares(items);
+}
 
-  box.replaceChildren();
-  box.hidden = !waiting.length;
-  for (const item of waiting) {
-    const chip = document.createElement("div");
-    chip.className = "share-chip";
+// Shared TEXT goes into the composer, appended at the END with a separator.
+//
+// Not at the cursor, and without stealing focus: this is not something the
+// owner just asked for with a keystroke, it is an arrival, and inserting at the
+// cursor could split a word while focusing would throw the keyboard up on a
+// phone unasked. Appending cannot destroy anything — whatever was already there
+// is still there, with the link after it.
+//
+// It is consumed IMMEDIATELY, unlike a file. The asymmetry is not an oversight:
+// a file lives in an attachment chip that is NOT persisted, so it has to stay
+// in the inbox until the message is actually sent or a reload would lose it,
+// while text lands in the draft, which IS persisted. One principle — consume it
+// once it is somewhere it cannot be lost — and two answers.
+//
+// The ledger is what keeps a repaint from appending the same link twice: `hello`
+// repeats the inbox on every connect, and a `share_drop` that never lands leaves
+// the item exactly where it was.
+const textTaken = new Set();
 
-    const take = document.createElement("button");
-    take.type = "button";
-    take.className = "share-take";
-    take.title = `attach ${item.name || "shared item"}`;
-    const label = item.name || (item.text || "").slice(0, 60) || "shared item";
-    take.innerHTML =
-      '<span class="share-from"></span><span class="share-name"></span>';
-    take.querySelector(".share-from").textContent = `Shared from ${item.source || "your phone"}`;
-    take.querySelector(".share-name").textContent = label;
-    take.onclick = () => claimShare(item);
-
-    const bin = document.createElement("button");
-    bin.type = "button";
-    bin.className = "share-dismiss";
-    bin.setAttribute("aria-label", `dismiss ${label}`);
-    bin.textContent = "✕";
-    bin.onclick = () => dropShare(item.id);
-
-    chip.append(take, bin);
-    box.appendChild(chip);
+function takeSharedText(item) {
+  if (textTaken.has(item.id)) return;
+  // Terminal mode's composer is a shell command line; a URL appended to it
+  // would be nonsense. Leave the item in the inbox — the next repaint, or the
+  // next time the app is opened, finds it again.
+  if (cmdMode) return;
+  textTaken.add(item.id);
+  composerAppend(item.text);
+  if (sharesPainted) {
+    showToast(`link from ${item.source || "your phone"} added`);
   }
+  dropShare(item.id);
+}
+
+function composerAppend(text) {
+  const current = input.value;
+  const gap = !current || /\s$/.test(current) ? "" : " ";
+  input.value = current + gap + text;
+  // The input event is what saves the draft, re-measures the box and updates
+  // the suggestion popover — everything a keystroke would have done.
+  input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 // A share posted with `chat=new` wants its own conversation instead of landing
@@ -8876,26 +8882,6 @@ function openChatForFreshShares(items) {
   // an empty row in the rail and looks like the button misfired.
   if (transcriptIsEmpty()) return;
   requestNewChat();
-}
-
-// Take a parked share into the composer by hand — the path for the ones that
-// are not auto-attached above. Shared TEXT (a URL from Safari, a note) is
-// inserted as text: that is what it is, and making the owner open a file to
-// read a link they shared would be absurd. Both can be present on one share.
-function claimShare(item) {
-  if (item.path) {
-    attachments.push({ name: item.name || item.path.split("/").pop(), path: item.path });
-    renderAttachments();
-  }
-  if (item.text) composerInsert(item.text);
-  // If the claim never lands the item is still in the inbox, so the composer
-  // must not go on holding it — otherwise it comes back on the next repaint and
-  // is attached twice.
-  dropShare(item.id, () => {
-    attachments = attachments.filter((a) => a.path !== item.path);
-    renderAttachments();
-  });
-  input.focus();
 }
 
 // The server owns the inbox, so removal is a request, not a local splice. The
