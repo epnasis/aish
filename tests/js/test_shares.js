@@ -275,4 +275,15 @@ const textShare = (over = {}) =>
   ok("…and the share is attached right here", w.attachments().length === 1);
 }
 
+{
+  // The Shortcut's other branch: a LINK, marked chat=new. It opens a chat of
+  // its own like a file does, and still waits as a chip inside it — text has
+  // to be placed by hand wherever it lands.
+  const w = world();
+  w.s.renderShares([textShare({ fresh: true })]);
+  ok("a shared link marked chat=new opens a chat too", w.newChats.length === 1);
+  ok("…and waits there as a chip rather than typing itself in",
+    !w.box.hidden && w.inserted.length === 0);
+}
+
 report("test_shares.js");
