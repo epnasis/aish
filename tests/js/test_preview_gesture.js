@@ -182,4 +182,28 @@ function lands(before, after, p, size) {
     .scale === s.PREVIEW_MAX_ZOOM);
 }
 
+// ---- the trap the maths above CANNOT catch --------------------------------
+// Every function here is handed a `view`. The bug that let the picture escape
+// was in the code that MEASURES it: getBoundingClientRect() on the image
+// reports the box AFTER the transform, so at 6x the bounds were six times too
+// generous and a pinch could fling the photo off screen, leaving a screen of
+// black. No unit test over the model can see that — the model was never wrong —
+// and it reads as the obvious way to get an element's size.
+//
+// So this is a source check: the measurement must come from LAYOUT geometry.
+{
+  const src = appSource();
+  const from = src.indexOf("function previewBox()");
+  const body = src.slice(from, src.indexOf("\n}", from));
+  ok("previewBox measures the image with offsetWidth/offsetHeight",
+    /offsetWidth/.test(body) && /offsetHeight/.test(body));
+  // Whatever the image is bound to, its rect must never be asked for.
+  const imageVar = /(?:const|let|var)\s+(\w+)\s*=\s*\$\("preview-img"\)/.exec(body);
+  ok("previewBox binds the image to a variable", !!imageVar);
+  ok("…and never asks THAT for its rect, which is post-transform",
+    !new RegExp(`\\b${imageVar[1]}\\.getBoundingClientRect`).test(body));
+  ok("…taking its origin from the untransformed overlay instead",
+    /\$\("preview"\)/.test(body) && /getBoundingClientRect/.test(body));
+}
+
 report("test_preview_gesture.js");

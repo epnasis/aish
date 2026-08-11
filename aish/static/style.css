@@ -1479,23 +1479,33 @@ body.offline #composer { opacity: 0.55; }
   position: fixed;
   inset: 0;
   z-index: 120;
-  display: flex;
-  flex-direction: column;
   /* Solid, not a wash: at 94% the app read through it and the header's text
      collided with the file name. A picture is also simply easier to look at
      against black than against a faint copy of the chat behind it. */
   background: #000;
-  /* The safe areas matter here — this covers the notch and the home bar. */
-  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
 }
 #preview[hidden] { display: none; }
+/* The bar FLOATS over the picture rather than taking a strip out of the top.
+   A photo viewer should give the whole screen to the photo — and a bar that
+   owns its own band leaves a black stripe you can pan the picture away from,
+   which reads as the picture escaping. The gradient keeps the name and the ✕
+   readable over a bright photo. */
 #preview-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
-  color: var(--fg);
+  padding: calc(env(safe-area-inset-top) + 10px) 14px 22px;
+  color: #fff;
+  background: linear-gradient(rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
+  pointer-events: none; /* the picture below stays draggable through it */
 }
+#preview-name { text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9); }
+#preview-close { pointer-events: auto; } /* …except the button itself */
 /* The full name, wrapping if it must: this overlay is where a name that was
    too long for a chip is finally readable, so it must not be cut here too. */
 #preview-name {
@@ -1508,15 +1518,16 @@ body.offline #composer { opacity: 0.55; }
 #preview-close {
   background: none;
   border: none;
-  color: var(--fg);
+  color: #fff;
   padding: 6px;
   cursor: pointer;
 }
 #preview-close svg { width: 24px; height: 24px; display: block; }
 #preview-img {
-  flex: 1;
-  min-height: 0;
+  position: absolute;
+  inset: 0;
   width: 100%;
+  height: 100%;
   /* contain, so a tall photo is whole rather than cropped — the point of a
      preview is seeing all of it. */
   object-fit: contain;

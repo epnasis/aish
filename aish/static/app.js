@@ -9133,14 +9133,32 @@ let previewPinchFrom = null;  // {dist, state} while two are
 let previewLastTap = 0;
 let previewLastTapAt = { x: 0, y: 0 };
 
+// The element's LAYOUT box, in viewport coordinates — deliberately NOT
+// getBoundingClientRect(), which reports the box AFTER the transform. Reading
+// it there is the bug that let the picture escape: every clamp was measured
+// against a "screen" that grew with the zoom, so at 6x the bounds were six
+// times too generous and the photo could be flung right off, leaving a screen
+// of black. It cannot be caught by the transform tests — they are handed a
+// correct view — and it looks perfectly reasonable in the source.
+//
+// #preview is `position: fixed` and untransformed, so it is both a trustworthy
+// origin and the image's offsetParent.
 function previewBox() {
   const el = $("preview-img");
-  if (!el || !el.getBoundingClientRect) return null;
-  const rect = el.getBoundingClientRect();
+  const outerEl = $("preview");
+  if (!el || !outerEl || !outerEl.getBoundingClientRect) return null;
+  const outer = outerEl.getBoundingClientRect();
+  const width = el.offsetWidth || outer.width;
+  const height = el.offsetHeight || outer.height;
   return {
-    view: { w: rect.width, h: rect.height },
+    view: { w: width, h: height },
     natural: { w: el.naturalWidth || 0, h: el.naturalHeight || 0 },
-    rect,
+    rect: {
+      left: outer.left + (el.offsetLeft || 0),
+      top: outer.top + (el.offsetTop || 0),
+      width,
+      height,
+    },
   };
 }
 
