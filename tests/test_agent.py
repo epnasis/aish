@@ -5080,6 +5080,30 @@ class TestTurnAndCallIdentity:
         assert len(calls) == 3
         assert len(set(calls)) == 3, f"call ids collided across parallel reads: {calls}"
 
+    def test_a_reopened_session_carries_on_numbering(self, tmp_path):
+        """`_turn` is AGENT state and a reopened chat gets a fresh agent — on
+        the web, every restart of aish-web. Restarting the count writes a second
+        `turn: 1`, and the ledger buckets governance records BY that id, so the
+        new turn's gate verdicts land on the old turn's bindings."""
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("run_command", command="echo a")]),
+             model_says("one")],
+            step_log=steps.append,
+        )
+        agent.resume_turns(7)  # what the log says this chat already used
+        agent.run_task("after the restart")
+        assert [s["turn"] for s in steps if s.get("kind") == "tool"] == [8]
+
+    def test_resuming_never_winds_the_counter_backwards(self):
+        """A stale or truncated log must not hand out ids the live agent has
+        already stamped — that is the same collision from the other side."""
+        agent, _ = make_agent([model_says("a"), model_says("b")])
+        agent.run_task("first")
+        agent.run_task("second")
+        agent.resume_turns(1)
+        assert agent._turn == 2
+
     def test_thinking_steps_are_not_stamped(self):
         """Design fork 1 = option (b): the high-volume kind is left alone."""
         steps: list[dict] = []

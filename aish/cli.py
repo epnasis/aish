@@ -1186,6 +1186,7 @@ def handle_slash(
         # the previous chat's /add-dir grants left behind.
         restored_cwd, trusted = SessionLog.restore_state(selected.path)
         agent.restore_workspace(restored_cwd, trusted)
+        agent.resume_turns(SessionLog.last_turn(selected.path))
         print(f"{DIM}resumed {len(messages)} messages from {selected.path.name}:{RESET}")
         chips = replay_history(messages)
         if chips_out is not None:
@@ -1915,6 +1916,7 @@ def main() -> int:
         # rather than reverting to the launch dir (issue #94).
         restored_cwd, trusted = SessionLog.restore_state(log.path)
         agent.restore_workspace(restored_cwd, trusted)
+        agent.resume_turns(SessionLog.last_turn(log.path))
         print(f"{DIM}resumed {len(history)} messages from {log.path.name}"
               f" · model {model_spec(agent)} · /help:{RESET}")
         resumed_chips = replay_history(history)

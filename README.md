@@ -514,9 +514,13 @@ than minting another.
 Useful as a second Home Screen icon: in Safari, go to `…/?new&token=YOUR_TOKEN`,
 then **Share → Add to Home Screen** and name it "New aish chat". Include the
 token — an installed web app has its own storage and will not inherit the one
-your existing icon holds. It also pairs with the share sheet: end the Shortcut
-with **Open URL** on that address and each shared item starts its own chat with
-the file already attached.
+your existing icon holds.
+
+**It does not work from a Shortcut.** iOS has no supported way to open an
+installed web app at an address of your choosing: `webapp://your-aish-host/?new`
+launches the app but drops the query, and an `https://` URL opens Safari rather
+than the installed app. To put a *shared* item in its own chat, mark the share
+instead — see below.
 
 ### Share to aish from iOS
 
@@ -526,13 +530,12 @@ destination — the Web Share Target API is Chromium-only, and Safari implements
 only the outbound half — so no amount of work inside aish can put it in the
 share sheet on its own. A Shortcut can be there, and can post to aish.
 
-**A shared item is parked, not run.** Next time you open aish, a shared file is
-already attached to the composer — write your prompt and send, or take it back
-out with ✕. Nothing starts an agent, which is the point: the share sheet is
-reachable from every app on the phone, and it stages work rather than
-dispatching it. A shared *link or note* waits as a tappable chip instead, since
-text would otherwise land in the middle of whatever you were writing. An item
-you never send stays waiting; it is consumed when the message goes.
+**A shared item is parked, not run.** Next time you open aish it is already in
+the composer — a file attached (✕ takes it back out), a link or note on a new line under
+whatever you had typed. Write your prompt and send. Nothing starts an agent,
+which is the point: the share sheet is reachable from every app on the phone,
+and it stages work rather than dispatching it. A file you never send stays
+waiting for next time; it is consumed when the message goes.
 
 In the **Shortcuts** app: new shortcut → in its settings turn on **Show in Share
 Sheet** and accept Images, Files, URLs and Text → add one **Get Contents of URL**
@@ -550,6 +553,12 @@ Two refinements worth making:
 
 - **Photos.** iOS shares photos as HEIC, which vision models do not read. Put a
   **Convert Image** action (to JPEG) before the POST, and set `name=shared.jpg`.
+- **A chat of its own.** Add `&chat=new` to the URL and that shared item opens
+  a fresh chat when you next open aish, instead of landing on top of the last
+  conversation. This is the one that works from a Shortcut, because the intent
+  travels with the item rather than with a URL iOS will not honour. A batch
+  shared together opens one chat between them, and an already-empty chat is
+  reused rather than left behind.
 - **Links and text.** Safari shares a URL, not a file. Drop the `name=` from the
   URL and a body with no name is read as text — so one **If** action inside the
   shortcut (POST to `…/share?token=…&source=Safari` for a link, to the `name=`

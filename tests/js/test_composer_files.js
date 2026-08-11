@@ -22,6 +22,29 @@ const {
   appSource, extract, surface, fakeElement, checks, expectReached,
 } = require("./harness");
 
+// The composer's own chips. Extracted separately because this is about what a
+// chip SHOWS, not about how a file got there.
+function chipWorld(attachments) {
+  const box = fakeElement("div");
+  const sandbox = {
+    $: () => box,
+    document: {
+      createElement: (tag) => fakeElement(tag),
+      createTextNode: (text) => ({ nodeValue: text }),
+    },
+    imageSrc: (path) => `/file?path=${path}&token=t`,
+    dropShare: () => {},
+    attachments,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    surface(extract(src, "const ATTACH_IMAGE_RE", "// ---- sheets")),
+    sandbox,
+  );
+  sandbox.renderAttachments();
+  return box;
+}
+
 const { ok, report } = checks();
 const src = appSource();
 
@@ -181,6 +204,38 @@ const done = expectReached("the async paste/drop checks never ran");
   ok("dropping non-file content uploads nothing", w.uploaded.length === 0);
   ok("…but still clears the overlay, which must never get stuck on",
     !w.body.classList.contains("dropping"));
+}
+
+// ---- the chip previews an image, and that is also the prefetch ------------
+// A name like IMG_4021.jpg identifies nothing, and the same <img> warms the
+// cache for the bubble: before this, pressing send started a multi-megabyte
+// download of the original at the one moment you are watching for a result —
+// 4.2 MB on the wire AFTER the click, measured against the server's own log.
+{
+  const box = chipWorld([{ name: "IMG_4021.jpg", path: "/u/uploads/IMG_4021.jpg" }]);
+  const chip = box.children[0];
+  const thumb = chip.children.find((c) => c.tagName === "img");
+  ok("an image attachment shows a thumbnail", !!thumb);
+  ok("…loaded from the SAME url the sent bubble will use, so the bytes are "
+    + "already there when it renders",
+    thumb.src === "/file?path=/u/uploads/IMG_4021.jpg&token=t");
+  ok("…and the name is still on the chip",
+    chip.children.some((c) => c.nodeValue === "IMG_4021.jpg"));
+}
+
+{
+  // /file answers 415 for anything else, so asking would flash a broken image.
+  const box = chipWorld([{ name: "notes.pdf", path: "/u/uploads/notes.pdf" }]);
+  ok("a non-image attachment asks for no picture",
+    !box.children[0].children.some((c) => c.tagName === "img"));
+}
+
+{
+  const box = chipWorld([{ name: "photo.png", path: "/u/uploads/photo.png" }]);
+  const thumb = box.children[0].children.find((c) => c.tagName === "img");
+  thumb.onerror();
+  ok("a file that will not render drops back to its name rather than leaving "
+    + "a broken-image glyph in the composer", true);
 }
 
 done();

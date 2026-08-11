@@ -1473,6 +1473,22 @@ class Agent:
             ):
                 self.roots.append(resolved)
 
+    def resume_turns(self, last: int) -> None:
+        """Continue a reopened session's turn numbering instead of restarting.
+
+        `_turn` is agent state and a reopened chat gets a fresh agent, so
+        without this the first turn after a restart is `turn: 1` again — and
+        `turn` is the join key every governance record is stamped with. Two
+        turns sharing an id do not merely look odd in the log: `curate`'s rule
+        ledger buckets records BY that id, so the second turn's gate verdicts
+        get attributed to the first turn's bindings.
+
+        Deliberately monotonic (`max`) rather than an assignment: this runs
+        before any turn of this agent's own, but a stale or truncated log must
+        never be able to wind the counter BACKWARDS into ids already used.
+        """
+        self._turn = max(self._turn, int(last))
+
     def _apply_pending_cwd(self) -> None:
         """Apply a /cd the UI queued while this task runs (issue #95), between
         steps instead of only after the whole task. rebase() moves cwd,

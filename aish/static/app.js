@@ -4029,6 +4029,17 @@ function scrollToEnd(force) {
   updateEmptyHint(); // every content-adding path funnels through here
 }
 
+// Is this chat still unused? Workspace notes (a UI /cd, a dir-trust marker) are
+// system metadata, not turns — a chat is "fresh" after one. Named separately
+// from updateEmptyHint because [SHARES] asks the same question for a different
+// reason: whether opening ANOTHER new chat would just leave an empty one behind.
+function transcriptIsEmpty() {
+  return (
+    messagesEl.childElementCount <= 4 &&
+    [...messagesEl.children].every((c) => c.classList.contains("workspace-note"))
+  );
+}
+
 // Empty-state welcome hero (#123): shown only while the transcript is empty.
 function updateEmptyHint() {
   // A workspace-note (a UI /cd or dir-trust marker) is system metadata, not a
@@ -4038,10 +4049,7 @@ function updateEmptyHint() {
   // and a populated transcript can only be "empty" if it holds nothing but
   // workspace notes — with more than a handful of children it never is, so
   // skip the per-append array spread over hundreds of nodes.
-  const empty =
-    messagesEl.childElementCount <= 4 &&
-    [...messagesEl.children].every((c) => c.classList.contains("workspace-note"));
-  $("welcome").hidden = !empty; // brand hero on a fresh/empty chat (#123)
+  $("welcome").hidden = !transcriptIsEmpty(); // brand hero on a fresh chat (#123)
 }
 
 // iOS Safari settles keyboard-driven layout changes a beat after the gesture;
@@ -8782,84 +8790,103 @@ async function uploadFile(file) {
 let sharesPainted = false; // a later arrival is news; the first paint is not
 
 function renderShares(items) {
-  const box = $("shares");
-  if (!box) return;
-
   // The server's list is the truth, including "the other device used it".
   const live = new Set(items.map((item) => item.id));
   const kept = attachments.filter((a) => !a.share || live.has(a.share));
   let touched = kept.length !== attachments.length;
   attachments = kept;
 
-  const waiting = [];
   for (const item of items) {
-    // A share carrying text is a chip even when it also has a file: the text
-    // half has to be placed by hand.
-    if (!item.path || item.text) {
-      waiting.push(item);
-      continue;
+    if (item.path && !attachments.some((a) => a.share === item.id)) {
+      attachments.push({
+        name: item.name || item.path.split("/").pop(),
+        path: item.path,
+        share: item.id, // what makes it releasable on send, and revocable above
+      });
+      touched = true;
+      if (sharesPainted) {
+        showToast(`${item.name} attached — shared from ${item.source || "your phone"}`);
+      }
     }
-    if (attachments.some((a) => a.share === item.id)) continue;
-    attachments.push({
-      name: item.name || item.path.split("/").pop(),
-      path: item.path,
-      share: item.id, // what makes it releasable on send, and revocable above
-    });
-    touched = true;
-    if (sharesPainted) {
-      showToast(`${item.name} attached — shared from ${item.source || "your phone"}`);
-    }
+    if (item.text) takeSharedText(item);
   }
   if (touched) renderAttachments();
   sharesPainted = true;
-
-  box.replaceChildren();
-  box.hidden = !waiting.length;
-  for (const item of waiting) {
-    const chip = document.createElement("div");
-    chip.className = "share-chip";
-
-    const take = document.createElement("button");
-    take.type = "button";
-    take.className = "share-take";
-    take.title = `attach ${item.name || "shared item"}`;
-    const label = item.name || (item.text || "").slice(0, 60) || "shared item";
-    take.innerHTML =
-      '<span class="share-from"></span><span class="share-name"></span>';
-    take.querySelector(".share-from").textContent = `Shared from ${item.source || "your phone"}`;
-    take.querySelector(".share-name").textContent = label;
-    take.onclick = () => claimShare(item);
-
-    const bin = document.createElement("button");
-    bin.type = "button";
-    bin.className = "share-dismiss";
-    bin.setAttribute("aria-label", `dismiss ${label}`);
-    bin.textContent = "✕";
-    bin.onclick = () => dropShare(item.id);
-
-    chip.append(take, bin);
-    box.appendChild(chip);
-  }
+  openChatForFreshShares(items);
 }
 
-// Take a parked share into the composer by hand — the path for the ones that
-// are not auto-attached above. Shared TEXT (a URL from Safari, a note) is
-// inserted as text: that is what it is, and making the owner open a file to
-// read a link they shared would be absurd. Both can be present on one share.
-function claimShare(item) {
-  if (item.path) {
-    attachments.push({ name: item.name || item.path.split("/").pop(), path: item.path });
-    renderAttachments();
+// Shared TEXT goes into the composer, appended at the END with a separator.
+//
+// Not at the cursor, and without stealing focus: this is not something the
+// owner just asked for with a keystroke, it is an arrival, and inserting at the
+// cursor could split a word while focusing would throw the keyboard up on a
+// phone unasked. Appending cannot destroy anything — whatever was already there
+// is still there, with the link after it.
+//
+// It is consumed IMMEDIATELY, unlike a file. The asymmetry is not an oversight:
+// a file lives in an attachment chip that is NOT persisted, so it has to stay
+// in the inbox until the message is actually sent or a reload would lose it,
+// while text lands in the draft, which IS persisted. One principle — consume it
+// once it is somewhere it cannot be lost — and two answers.
+//
+// The ledger is what keeps a repaint from appending the same link twice: `hello`
+// repeats the inbox on every connect, and a `share_drop` that never lands leaves
+// the item exactly where it was.
+const textTaken = new Set();
+
+function takeSharedText(item) {
+  if (textTaken.has(item.id)) return;
+  // Terminal mode's composer is a shell command line; a URL appended to it
+  // would be nonsense. Leave the item in the inbox — the next repaint, or the
+  // next time the app is opened, finds it again.
+  if (cmdMode) return;
+  textTaken.add(item.id);
+  composerAppend(item.text);
+  if (sharesPainted) {
+    showToast(`link from ${item.source || "your phone"} added`);
   }
-  if (item.text) composerInsert(item.text);
-  // If the claim never lands the item is still in the inbox, so the composer
-  // must not go on holding it — otherwise it comes back on the next repaint and
-  // is attached twice.
-  dropShare(item.id, () => {
-    attachments = attachments.filter((a) => a.path !== item.path);
-    renderAttachments();
-  });
-  input.focus();
+  dropShare(item.id);
+}
+
+function composerAppend(text) {
+  // On its OWN LINE, not after a space: a shared link is somebody else's words
+  // arriving in the middle of yours, and a line of its own is what makes the
+  // two tellable apart at a glance in a long prompt. Trailing spaces are taken
+  // with it, or the line you were writing keeps an invisible tail.
+  const current = input.value.replace(/[ \t]+$/, "");
+  const gap = !current || current.endsWith("\n") ? "" : "\n";
+  input.value = current + gap + text;
+  // The input event is what saves the draft, re-measures the box (a second line
+  // makes it taller) and updates the suggestion popover — everything a
+  // keystroke would have done.
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+// A share posted with `chat=new` wants its own conversation instead of landing
+// on top of whatever was last open. It rides on the ITEM rather than on the
+// launch URL because iOS will not open an installed web app at an address of
+// your choosing — `webapp://…/?new` starts the app and drops the query — so
+// `?new` ([OPEN-NEW]) can only ever work for a browser tab or a second Home
+// Screen icon. This works however the app was opened.
+//
+// The attachment is NOT re-done afterwards: attachments deliberately survive a
+// session switch, so whatever was just attached rides into the new chat. That
+// also makes this failure-tolerant — if the new chat never arrives, the file is
+// still attached to the chat you are in, which is the old behaviour and not a
+// loss.
+const freshHonoured = new Set(); // ids already acted on — a hello repeats them
+
+function openChatForFreshShares(items) {
+  const fresh = items.filter((item) => item.fresh && !freshHonoured.has(item.id));
+  if (!fresh.length) return;
+  // ALL of them are marked, and at most ONE chat is opened: sharing three
+  // photos then opening aish means one new chat holding three, not three chats
+  // holding one each and two of them empty.
+  for (const item of fresh) freshHonoured.add(item.id);
+  // Nothing to leave behind: opening a new chat from an unused one just leaves
+  // an empty row in the rail and looks like the button misfired.
+  if (transcriptIsEmpty()) return;
+  requestNewChat();
 }
 
 // The server owns the inbox, so removal is a request, not a local splice. The
@@ -8881,6 +8908,11 @@ function releaseSentShares(sent) {
 }
 // [SHARES-END]
 
+// Which attachments can be shown as a picture. Deliberately the same set the
+// server will deliver natively (backends.IMAGE_SUFFIXES) — /file answers 415
+// for anything else, and a chip that asked for one would flash a broken image.
+const ATTACH_IMAGE_RE = /\.(png|jpe?g|gif|webp)$/i;
+
 function renderAttachments() {
   const box = $("attachments");
   box.replaceChildren();
@@ -8888,7 +8920,26 @@ function renderAttachments() {
   attachments.forEach((attachment, i) => {
     const chip = document.createElement("span");
     chip.className = "attach-chip";
-    chip.textContent = attachment.name;
+    // A thumbnail, not just a filename — and it does two jobs. You can see
+    // WHICH photo is about to go (a name like IMG_4021.jpg identifies nothing),
+    // and the bytes are fetched NOW, while you are still typing, through the
+    // same /file URL the sent bubble will use. That second job is why the photo
+    // appears the instant you press send: on a phone over a tunnel a
+    // multi-megabyte original took seconds to arrive when the bubble asked for
+    // it for the first time, and there is no reason for that wait to land on
+    // the one moment you are watching for a result.
+    const src = ATTACH_IMAGE_RE.test(attachment.path || "") ? imageSrc(attachment.path) : null;
+    if (src) {
+      const thumb = document.createElement("img");
+      thumb.className = "attach-thumb";
+      thumb.src = src;
+      thumb.alt = "";
+      // A file that will not render must not leave a broken-image glyph in the
+      // composer: drop back to the name, which is still true.
+      thumb.onerror = () => thumb.remove();
+      chip.appendChild(thumb);
+    }
+    chip.appendChild(document.createTextNode(attachment.name));
     const remove = document.createElement("button");
     remove.type = "button";
     remove.textContent = "✕";

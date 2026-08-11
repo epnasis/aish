@@ -1,28 +1,29 @@
 // Node-only, dependency-free checks for [SHARES] — what the iPhone share sheet
 // handed over, and how it reaches a message.
 //
-// The defect this file exists to stop coming back, reported from a phone:
-// "I can see 'shared from iPhone' on the composer but adding a prompt and
-// pressing send does not send the attachment, just the prompt."
+// This file has been rewritten twice by the same defect, reported from a phone
+// both times: a shared item sat in a strip above the composer, looking attached,
+// and pressing send left it behind. First for files ("adding a prompt and
+// pressing send does not send the attachment, just the prompt"), then for links.
 //
-// It did exactly that. A shared file was a chip you had to TAP first, on the
-// theory that a share landing mid-sentence must not join a message you were
-// already writing. But the strip sits in the composer's attachment zone, so it
-// READS as already attached — and the file stayed in the inbox, correctly, and
-// completely uselessly, while the words went on their own.
+// The chip was the mistake, not the wiring. Every app that shares INTO a compose
+// surface — Messages, Mail, WhatsApp, Slack — pre-fills the field; nobody taps a
+// chip first. So there is no strip any more:
+//
+//   - a shared FILE is attached to the composer, and
+//   - shared TEXT is appended to it, at the END, without stealing focus.
 //
 // The safety property was never the tap. It is that a share starts NOTHING —
-// no session, no model call — which is enforced on the server. So a shared FILE
-// is attached to the next message straight away; shared TEXT stays a chip,
-// because there is no equivalent of ✕ for text that has appended itself to a
-// half-written sentence.
+// no session, no model call — which is enforced on the server.
 //
-// The other rules pinned here:
+// The rest of what is pinned here:
 //   - the server owns the inbox; this reconciles against its list and keeps no
 //     copy, because two devices claim from one inbox;
-//   - a share is consumed on SEND, not on attach — a tab closed without sending
-//     leaves it waiting rather than silently spent;
-//   - ✕ tells the server, or the next repaint puts it straight back.
+//   - a FILE is consumed on send and TEXT on arrival — one principle (consume it
+//     once it is somewhere it cannot be lost), two answers, because the draft is
+//     persisted and an attachment chip is not;
+//   - ✕ on an attachment tells the server, or the next repaint puts it back;
+//   - `chat=new` opens one chat for the batch, once, never from an empty one.
 //
 // Run manually: node tests/js/test_shares.js
 "use strict";
@@ -33,31 +34,26 @@ const { appSource, extract, surface, fakeElement, checks } = require("./harness"
 
 const { ok, report } = checks();
 
-function world() {
-  const box = fakeElement("div");
+function world({ emptyChat = false, draft = "", cmdMode = false } = {}) {
+  const newChats = [];
+  const empty = { value: emptyChat };
   const acts = [];
   const sent = [];
-  const inserted = [];
   const toasts = [];
   const sandbox = {
-    $: (id) => (id === "shares" ? box : null),
-    document: {
-      createElement: (tag) => {
-        const el = fakeElement(tag);
-        const parts = { "share-from": fakeElement("span"), "share-name": fakeElement("span") };
-        el.querySelector = (sel) => parts[sel.replace(/^\./, "")] || null;
-        el._parts = parts;
-        el.append = (...nodes) => el.children.push(...nodes);
-        el.setAttribute = (k, v) => { el[k] = v; };
-        return el;
-      },
-    },
+    $: () => fakeElement("div"),
+    document: { createElement: (tag) => fakeElement(tag) },
     act: (message, opts) => { acts.push({ message, opts: opts || {} }); return true; },
     send: (message) => { sent.push(message); return true; },
-    composerInsert: (text) => inserted.push(text),
     showToast: (text) => toasts.push(text),
     renderAttachments: () => {},
-    input: { focus() {} },
+    requestNewChat: () => newChats.push(1),
+    transcriptIsEmpty: () => empty.value,
+    cmdMode,
+    // The real composer is a <textarea>; the input event is what saves the
+    // draft and re-measures it, so the code only needs value + dispatchEvent.
+    input: { value: draft, dispatchEvent() {} },
+    Event: class { constructor(type) { this.type = type; } },
     attachments: [],
     Set,
   };
@@ -68,11 +64,10 @@ function world() {
   );
   return {
     s: sandbox,
-    box,
     acts,
-    inserted,
+    newChats,
     toasts,
-    chips: () => box.children,
+    composer: () => sandbox.input.value,
     sent: () => JSON.parse(JSON.stringify(sent)),
     attachments: () => JSON.parse(JSON.stringify(sandbox.attachments)),
   };
@@ -86,10 +81,11 @@ const fileShare = (over = {}) => ({
   source: "iPhone",
   ...over,
 });
+const LINK = "https://example.com/x?a=1&b=2";
 const textShare = (over = {}) =>
-  fileShare({ id: "t1", name: "https://example.com/a", path: "", text: "https://example.com/a", ...over });
+  fileShare({ id: "t1", name: LINK, path: "", text: LINK, source: "Safari", ...over });
 
-// ---- the reported bug ------------------------------------------------------
+// ---- files: attached, no tap ----------------------------------------------
 {
   const w = world();
   w.s.renderShares([fileShare()]);
@@ -97,26 +93,94 @@ const textShare = (over = {}) =>
     { name: "IMG_4021.jpg", path: "/u/uploads/IMG_4021.jpg", share: "s1" },
   ]);
   ok("a waiting shared FILE is attached to the composer with no tap at all", true);
-  ok("…and does not also sit in the strip, which would be the same thing twice",
-    w.box.hidden === true && w.chips().length === 0);
   ok("…and nothing is consumed yet: send has not happened", w.sent().length === 0);
 }
 
-// ---- consumed on SEND, not on attach --------------------------------------
+// ---- text: appended, no tap ------------------------------------------------
+{
+  const w = world();
+  w.s.renderShares([textShare()]);
+  ok("a shared LINK is put into the composer with no tap either",
+    w.composer() === LINK, w.composer());
+  ok("…and is consumed immediately, because the draft is persisted",
+    w.acts.some((a) => a.message.type === "share_drop" && a.message.id === "t1"));
+}
+
+{
+  // The reason it appends rather than inserting at the cursor: it is an
+  // ARRIVAL, not something the owner just asked for with a keystroke. And on
+  // its own LINE, because it is somebody else's words arriving in the middle
+  // of yours — a long prompt with a URL spliced in at the end of a sentence is
+  // hard to read back.
+  const w = world({ draft: "summarise this for me" });
+  w.s.renderShares([textShare()]);
+  ok("a live arrival never destroys what was already typed",
+    w.composer() === `summarise this for me\n${LINK}`, JSON.stringify(w.composer()));
+}
+
+{
+  const w = world({ draft: "look at " });
+  w.s.renderShares([textShare()]);
+  ok("…and the trailing space goes with it, leaving no invisible tail",
+    w.composer() === `look at\n${LINK}`, JSON.stringify(w.composer()));
+}
+
+{
+  const w = world({ draft: "notes:\n" });
+  w.s.renderShares([textShare()]);
+  ok("…and a line break already there is not doubled",
+    w.composer() === `notes:\n${LINK}`, JSON.stringify(w.composer()));
+}
+
+{
+  const w = world();
+  w.s.renderShares([textShare()]);
+  ok("an empty composer gets the link with no leading blank line",
+    w.composer() === LINK, JSON.stringify(w.composer()));
+}
+
+{
+  // hello repeats the inbox on every connect, and a lost share_drop leaves the
+  // item exactly where it was. Without the ledger the link appends twice.
+  const w = world();
+  w.s.renderShares([textShare()]);
+  w.s.renderShares([textShare()]);
+  w.s.renderShares([textShare()]);
+  ok("three repaints of the same link append it once", w.composer() === LINK, w.composer());
+}
+
+{
+  // Terminal mode's composer is a shell command line.
+  const w = world({ cmdMode: true });
+  w.s.renderShares([textShare()]);
+  ok("a link is not appended to a shell command line", w.composer() === "");
+  ok("…and is left in the inbox rather than swallowed",
+    !w.acts.some((a) => a.message.type === "share_drop"));
+}
+
+{
+  // Both halves of one share.
+  const w = world();
+  w.s.renderShares([fileShare({ text: LINK })]);
+  ok("a share with a file AND text delivers both",
+    w.attachments().length === 1 && w.composer() === LINK);
+}
+
+// ---- consumed on SEND, for files ------------------------------------------
 {
   const w = world();
   w.s.renderShares([fileShare()]);
   w.s.releaseSentShares(w.s.attachments);
   assert.deepStrictEqual(w.sent(), [{ type: "share_drop", id: "s1" }]);
-  ok("sending the message is what spends the share", true);
+  ok("sending the message is what spends a shared FILE", true);
 }
 
 {
   const w = world();
   w.s.renderShares([fileShare()]);
   // The tab goes away without sending: nothing was released, so the server
-  // still has it and offers it again.
-  ok("a share attached but never sent is never dropped", w.sent().length === 0);
+  // still has it and offers it again. An attachment chip is not persisted.
+  ok("a file attached but never sent is never dropped", w.sent().length === 0);
 }
 
 {
@@ -132,8 +196,7 @@ const textShare = (over = {}) =>
 {
   const w = world();
   w.s.renderShares([fileShare()]);
-  // Claimed on the phone, or dismissed there: it leaves this composer too.
-  w.s.renderShares([]);
+  w.s.renderShares([]); // claimed or dismissed on the phone
   ok("an item the server no longer lists leaves the composer", !w.attachments().length);
 }
 
@@ -150,7 +213,7 @@ const textShare = (over = {}) =>
   const w = world();
   w.s.renderShares([fileShare()]);
   w.s.renderShares([fileShare()]); // a repaint for an unrelated arrival
-  ok("a repeated repaint does not attach the same share twice",
+  ok("a repeated repaint does not attach the same file twice",
     w.attachments().length === 1);
 }
 
@@ -161,63 +224,69 @@ const textShare = (over = {}) =>
   ok("the first paint is silent — a reload must not toast what was already there",
     w.toasts.length === 0);
   w.s.renderShares([fileShare(), fileShare({ id: "s2", name: "b.png", path: "/u/b.png" })]);
-  ok("a share arriving while you are looking says so",
+  ok("a file arriving while you are looking says so",
     w.toasts.length === 1 && /b\.png/.test(w.toasts[0]) && /iPhone/.test(w.toasts[0]));
 }
 
-// ---- shared TEXT stays a chip ---------------------------------------------
 {
   const w = world();
-  w.s.renderShares([textShare()]);
-  ok("shared text does NOT type itself into the composer", w.inserted.length === 0);
-  ok("…it waits as a chip", !w.box.hidden && w.chips().length === 1);
-  ok("…which says where it came from",
-    w.chips()[0].children[0]._parts["share-from"].textContent === "Shared from iPhone");
+  w.s.renderShares([]);            // first paint, empty inbox
+  w.s.renderShares([textShare()]); // then a link arrives
+  ok("a link arriving while you are looking says where it came from",
+    w.toasts.some((t) => /Safari/.test(t)), w.toasts.join(" | "));
+}
 
-  w.chips()[0].children[0].onclick();
-  assert.deepStrictEqual(w.inserted, ["https://example.com/a"]);
-  ok("tapping it inserts the text where the cursor is", true);
-  assert.deepStrictEqual(
-    JSON.parse(JSON.stringify(w.acts.map((a) => a.message))),
-    [{ type: "share_drop", id: "t1" }],
-  );
-  ok("…and asks the server to clear it", true);
+// ---- `chat=new`: a share that wants its own conversation -------------------
+// It rides on the ITEM, not on the launch URL, because iOS will not open an
+// installed web app at an address of your choosing — `webapp://…/?new` starts
+// the app and drops the query. This has to work however the app was opened.
+{
+  const w = world();
+  w.s.renderShares([fileShare({ fresh: true })]);
+  ok("a share marked chat=new opens a chat for itself", w.newChats.length === 1);
+  ok("…and is still attached, because attachments survive the switch",
+    w.attachments().length === 1);
 }
 
 {
-  // A share carrying BOTH is a chip: the text half has to be placed by hand.
   const w = world();
-  w.s.renderShares([fileShare({ text: "https://example.com/a" })]);
-  ok("a share with text AND a file waits rather than half-attaching",
-    !w.box.hidden && w.attachments().length === 0);
-  w.chips()[0].children[0].onclick();
-  ok("…and tapping takes both halves",
-    w.attachments().length === 1 && w.inserted.length === 1);
+  w.s.renderShares([textShare({ fresh: true })]);
+  ok("a shared link marked chat=new opens a chat too", w.newChats.length === 1);
+  ok("…and the link is in the composer there", w.composer() === LINK);
 }
 
-// ---- dismissing ------------------------------------------------------------
 {
   const w = world();
-  w.s.renderShares([textShare()]);
-  w.chips()[0].children[1].onclick();
-  assert.deepStrictEqual(
-    JSON.parse(JSON.stringify(w.acts.map((a) => a.message))),
-    [{ type: "share_drop", id: "t1" }],
-  );
-  ok("dismissing a chip is the same server-side operation as claiming it", true);
-  ok("…and attaches nothing on the way out", !w.attachments().length);
+  w.s.renderShares([fileShare()]);
+  ok("an ordinary share never moves you", w.newChats.length === 0);
 }
 
-// ---- the claim that never lands -------------------------------------------
 {
-  // [ACK-LEDGER]: the item is still in the inbox, so the composer must not go
-  // on holding it — the next repaint would re-offer it and attach it twice.
+  // hello repeats the inbox on every connect — and the new chat itself causes
+  // one. Without the ledger this loops.
   const w = world();
-  w.s.renderShares([fileShare({ text: "note" })]);
-  w.chips()[0].children[0].onclick();
-  ok("the claim carries a repair", typeof w.acts[0].opts.lost === "function");
-  w.acts[0].opts.lost();
-  ok("a lost claim takes the attachment back out", !w.attachments().length);
+  w.s.renderShares([fileShare({ fresh: true })]);
+  w.s.renderShares([fileShare({ fresh: true })]);
+  w.s.renderShares([fileShare({ fresh: true })]);
+  ok("three repaints of the same item open ONE chat", w.newChats.length === 1);
+}
+
+{
+  const w = world();
+  w.s.renderShares([
+    fileShare({ id: "a", name: "a.png", path: "/u/a.png", fresh: true }),
+    fileShare({ id: "b", name: "b.png", path: "/u/b.png", fresh: true }),
+  ]);
+  ok("photos shared together mean one new chat, not one each", w.newChats.length === 1);
+  ok("…holding all of them", w.attachments().length === 2);
+}
+
+{
+  const w = world({ emptyChat: true });
+  w.s.renderShares([fileShare({ fresh: true })]);
+  ok("a chat with nothing in it is not worth leaving — no spare empty chat",
+    w.newChats.length === 0);
+  ok("…and the share is attached right here", w.attachments().length === 1);
 }
 
 report("test_shares.js");

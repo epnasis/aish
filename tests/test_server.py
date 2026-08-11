@@ -3355,6 +3355,22 @@ class TestShareInbox:
             assert item["text"] == "https://example.com/thing"
             assert item["name"] == "https://example.com/thing"  # what the chip shows
 
+    def test_chat_new_marks_the_item_not_the_launch_url(self, app_env):
+        """iOS will not open an installed web app at an address of your
+        choosing — `webapp://…/?new` launches the app and drops the query — so
+        "put this in its own chat" has to ride on the ITEM, where the client
+        will still find it however the app was opened. Advisory: the server
+        opens nothing, it only records the intent."""
+        client, chat = make_client(app_env, [model_says("never runs")])
+        with client:
+            client.post("/share?name=a.png&chat=new", content=b"\x89PNG")
+            client.post("/share?name=b.png", content=b"\x89PNG")
+            fresh, plain = client.app.state.server.shares
+            assert fresh["fresh"] is True
+            assert plain["fresh"] is False
+            # Still inert: recording the intent must not start anything.
+            assert chat.calls == []
+
     def test_a_body_with_no_name_is_text(self, app_env):
         """Safari shares a URL, and percent-encoding one into a query string
         inside Shortcuts works right up until the link contains an `&`. So the
@@ -3572,6 +3588,50 @@ class TestFileEndpoint:
             assert client.get("/file", params={"path": str(chart)}).status_code == 403
             ok = client.get("/file", params={"path": str(chart), "token": "s3cret"})
             assert ok.status_code == 200
+
+
+class TestFileCaching:
+    """An upload is fetched twice: once into the composer chip, once by the
+    bubble the send produces. The second must cost nothing.
+
+    Before this, pressing send began a multi-megabyte download of the original
+    at the exact moment the owner was watching for a result — measured at
+    4.2 MB on the wire AFTER the click, which on a phone over a tunnel is the
+    reported "3-5 seconds for the image to show".
+    """
+
+    def test_an_upload_may_be_cached_hard(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            path = client.post("/upload?name=photo.png", content=b"\x89PNG").json()["path"]
+            response = client.get(f"/file?path={path}")
+            assert response.status_code == 200
+            cache = response.headers["cache-control"]
+            assert "immutable" in cache and "max-age=31536000" in cache
+            # One owner's files behind a token check: no shared proxy may hold it.
+            assert "private" in cache
+
+    def test_model_output_still_revalidates(self, app_env, tmp_path):
+        """The opposite case, and the reason this is not a blanket header: a
+        regenerated chart.png at the SAME path is exactly what a long max-age
+        would leave stale on screen."""
+        client, _ = make_client(app_env, [])
+        with client:
+            chart = Path(app_env["cwd"]) / "chart.png"
+            chart.write_bytes(b"\x89PNG-v1")
+            response = client.get(f"/file?path={chart}")
+            assert response.status_code == 200
+            assert "cache-control" not in response.headers
+            assert response.headers.get("etag")  # revalidation, not blind reuse
+
+    def test_the_immutability_claim_is_true(self, app_env):
+        """The header is only honest because _store_upload never overwrites."""
+        client, _ = make_client(app_env, [])
+        with client:
+            first = client.post("/upload?name=photo.png", content=b"one").json()["path"]
+            second = client.post("/upload?name=photo.png", content=b"two").json()["path"]
+            assert first != second
+            assert Path(first).read_bytes() == b"one"  # untouched by the second
 
 
 class TestImageRootsAgreement:
