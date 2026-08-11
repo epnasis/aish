@@ -69,6 +69,30 @@ const urlToken = new URLSearchParams(location.search).get("token");
 if (urlToken) localStorage.setItem("aish-token", urlToken);
 const token = localStorage.getItem("aish-token");
 
+// [OPEN-NEW-START]
+// `?new` opens a FRESH chat instead of resuming the last one — for a Home
+// Screen icon, or a Shortcut, that should always start clean (a shared photo
+// landing in its own chat rather than on top of yesterday's conversation).
+//
+// It is consumed ONCE, here, and stripped from the URL before anything else
+// reads it. That is the whole load-bearing part: a launch parameter that
+// survived in the address bar would open a new chat on every reload, every
+// rev-mismatch reload the app performs on itself, and every relaunch of a PWA
+// that restores its last URL — turning one intent into an endless drip of
+// empty chats. Stripping it also means a RECONNECT (which re-reads nothing but
+// still calls connect()) cannot re-trigger it.
+//
+// It beats `?session=` if both are somehow given, and suppresses the remembered
+// session on this one load: resuming a chat we are about to leave would paint
+// it for a moment and then switch, which reads as a glitch.
+let openNewOnLoad = new URLSearchParams(location.search).has("new");
+if (openNewOnLoad) {
+  const url = new URL(location.href);
+  url.searchParams.delete("new");
+  history.replaceState(null, "", url.pathname + url.search + url.hash);
+}
+// [OPEN-NEW-END]
+
 // The shareable URL carries a PUBLIC session id WITHOUT the .jsonl storage
 // extension, so the link doesn't leak the file-based store — a move to a DB
 // would only change these two functions (or push the mapping server-side).
@@ -753,6 +777,9 @@ function knownTitle(name) {
 // what makes it fast online. A server hello/replay overwrites it moments later.
 async function offlineFirstPaint() {
   try {
+    // Nothing to pre-paint when a fresh chat was asked for ([OPEN-NEW]): the
+    // last conversation would flash up and be replaced a moment later.
+    if (openNewOnLoad) return;
     const urlSession = new URLSearchParams(location.search).get("session");
     const remembered = storeSession(urlSession) || localStorage.getItem("aish-session");
     let cached = remembered ? await offlineLoad(remembered) : null;
@@ -947,7 +974,12 @@ function connect() {
   // load, else resume the last session this device was on. Map the public id
   // back to the store name for the server.
   const urlSession = new URLSearchParams(location.search).get("session");
-  const lastSession = urlSession || localStorage.getItem("aish-session");
+  // `?new` ([OPEN-NEW]) names no session at all: we are about to ask for a
+  // fresh one, and landing on the old chat first only to leave it reads as a
+  // glitch.
+  const lastSession = openNewOnLoad
+    ? null
+    : urlSession || localStorage.getItem("aish-session");
   if (lastSession) params.set("session", storeSession(lastSession));
   const query = params.size ? `?${params}` : "";
   ws = new WebSocket(`${proto}//${location.host}${BASE}ws${query}`);
@@ -961,6 +993,13 @@ function connect() {
     setOfflineMode(false);
     offlineSyncSoon(); // catch the mirror up on whatever happened while away
     checkAppVersion(); // server restarts are when the UI code changes
+    if (openNewOnLoad) {
+      // Cleared BEFORE the send, not after: this runs again on every
+      // reconnect, and a flag still set there would open a chat each time the
+      // phone woke up ([OPEN-NEW]).
+      openNewOnLoad = false;
+      act({ type: "new" }, { label: "the new chat" });
+    }
   };
   ws.onmessage = (raw) => {
     const event = JSON.parse(raw.data);

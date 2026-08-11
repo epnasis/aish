@@ -457,6 +457,11 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       // The share inbox rides in on hello ([SHARES]); test_shares.js drives the
       // real one.
       renderShares: spy("renderShares"),
+      // `?new` is consumed at load, long before any of these paths run
+      // ([OPEN-NEW]). It must be DEFINED, not merely falsy: offlineFirstPaint
+      // reads it inside its own try/catch, so an undeclared name there does not
+      // throw — it silently skips the first paint. test_open_new.js owns it.
+      openNewOnLoad: false,
       renderWorkspace: spy("renderWorkspace"),
       schedulePeeks: spy("schedulePeeks"),
       markSeen: spy("markSeen"),

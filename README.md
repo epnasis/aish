@@ -466,6 +466,20 @@ Bulk command output is trimmed in the local copy (the conversation itself is
 kept verbatim), which is what lets a whole archive fit on a phone. Storage is
 capped, and least-recently-useful unpinned chats are dropped first.
 
+### Opening straight into a new chat
+
+Add `?new` to the URL and aish opens a fresh chat instead of resuming the last
+one — `https://your-aish-host/?new`. The parameter is consumed on load and
+removed from the address bar, so reloading afterwards stays in that chat rather
+than minting another.
+
+Useful as a second Home Screen icon: in Safari, go to `…/?new&token=YOUR_TOKEN`,
+then **Share → Add to Home Screen** and name it "New aish chat". Include the
+token — an installed web app has its own storage and will not inherit the one
+your existing icon holds. It also pairs with the share sheet: end the Shortcut
+with **Open URL** on that address and each shared item starts its own chat with
+the file already attached.
+
 ### Share to aish from iOS
 
 Share a photo, a PDF or a link from any iOS app straight to aish. It takes one
