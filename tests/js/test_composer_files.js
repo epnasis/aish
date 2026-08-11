@@ -220,7 +220,46 @@ const done = expectReached("the async paste/drop checks never ran");
     + "already there when it renders",
     thumb.src === "/file?path=/u/uploads/IMG_4021.jpg&token=t");
   ok("…and the name is still on the chip",
-    chip.children.some((c) => c.nodeValue === "IMG_4021.jpg"));
+    chip.children.some((c) => c.textContent === "IMG_4021.jpg"));
+  ok("…and tapping it opens the preview rather than doing nothing",
+    typeof chip.onclick === "function");
+}
+
+// ---- names are shortened from the MIDDLE ---------------------------------
+// "file names are cut so I can't distinguish some of them": the END of a name
+// is where it differs — IMG_4021 vs IMG_4022, "-final" vs "-final-2", and the
+// extension — so a trailing ellipsis removes precisely the part that tells two
+// files apart.
+{
+  const box = chipWorld([{
+    name: "IMG_20260811_073045_beach_sunset_final.jpg",
+    path: "/u/uploads/IMG_20260811_073045_beach_sunset_final.jpg",
+  }]);
+  const chip = box.children[0];
+  const shown = chip.children.find((c) => c.className === "attach-name").textContent;
+  ok(`a long name keeps its tail: ${shown}`, shown.endsWith("_final.jpg"));
+  ok("…and its head", shown.startsWith("IMG_2026"));
+  ok("…and says it was shortened", shown.includes("…"));
+  ok("…while the full name stays available on the chip itself",
+    chip.title === "IMG_20260811_073045_beach_sunset_final.jpg");
+}
+
+{
+  const short = "cat.png";
+  const box = chipWorld([{ name: short, path: `/u/uploads/${short}` }]);
+  const shown = box.children[0].children.find((c) => c.className === "attach-name");
+  ok("a name that fits is left exactly alone", shown.textContent === short);
+}
+
+{
+  // Two files that differ only at the end must still be tellable apart — the
+  // whole point.
+  const a = "Screenshot 2026-08-11 at 09.14.21 — draft one.png";
+  const b = "Screenshot 2026-08-11 at 09.14.21 — draft two.png";
+  const nameOf = (n) => chipWorld([{ name: n, path: `/u/uploads/${n}` }])
+    .children[0].children.find((c) => c.className === "attach-name").textContent;
+  ok(`two near-identical names stay distinguishable: ${nameOf(a)} / ${nameOf(b)}`,
+    nameOf(a) !== nameOf(b));
 }
 
 {

@@ -3741,7 +3741,7 @@ function attachmentStrip(notes) {
       // A file that has since been deleted must not leave a broken-image glyph
       // where a photo was: fall back to naming it, which is still true.
       thumb.onerror = () => thumb.replaceWith(attachmentChip(note));
-      thumb.onclick = () => window.open(src, "_blank", "noopener");
+      thumb.onclick = () => openPreview(src, note.name);
       strip.appendChild(thumb);
     } else {
       strip.appendChild(attachmentChip(note));
@@ -3753,8 +3753,9 @@ function attachmentStrip(notes) {
 function attachmentChip(note) {
   const chip = document.createElement("span");
   chip.className = "msg-attachment-chip";
-  chip.textContent = note.name;
-  chip.title = note.path; // the path stays available, just not shouted
+  // Shortened from the MIDDLE: the end of a file name is where it differs.
+  chip.textContent = shortName(note.name);
+  chip.title = note.path; // the full name and path stay one hover away
   return chip;
 }
 
@@ -4742,8 +4743,16 @@ function inlineImage(alt, target) {
     broken.textContent = `🖼 ${alt || target} (not embedded)`;
     return broken;
   }
-  const link = externalAnchor(src);
+  // A LOCAL image (rewritten to /file) previews in place: opening a new tab to
+  // look at a chart aish just drew means leaving an installed PWA for Safari.
+  // A REMOTE one keeps its anchor — reaching the real URL by an explicit tap is
+  // exactly what that link is for.
+  const local = !/^https?:\/\//.test(target);
+  const link = local ? document.createElement("span") : externalAnchor(src);
   link.className = "img-link";
+  if (local) {
+    link.onclick = () => openPreview(src, alt || target.split("/").pop());
+  }
   link.appendChild(
     markdownImg(alt, src, target, live, () => {
       link.textContent = `🖼 ${alt || target} (unavailable)`;
@@ -7218,6 +7227,13 @@ function attachInputListeners(el) {
 attachInputListeners(input);
 installFileDrop(window, document.body);
 
+// Closing the preview: the ✕, or the surround. Not the image itself — that is
+// where iOS long-press offers Save Image ([PREVIEW]).
+$("preview-close").onclick = closePreview;
+$("preview").onclick = (event) => {
+  if (event.target.id !== "preview-img") closePreview();
+};
+
 function atFragment(text) {
   const at = text.lastIndexOf("@");
   if (at < 0 || (at > 0 && !/\s/.test(text[at - 1]))) return null;
@@ -8939,7 +8955,18 @@ function renderAttachments() {
       thumb.onerror = () => thumb.remove();
       chip.appendChild(thumb);
     }
-    chip.appendChild(document.createTextNode(attachment.name));
+    const label = document.createElement("span");
+    label.className = "attach-name";
+    label.textContent = shortName(attachment.name);
+    chip.appendChild(label);
+    chip.title = attachment.name; // the full name is always one hover away
+    if (src) {
+      chip.classList.add("attach-openable");
+      chip.onclick = (event) => {
+        if (event.target.closest("button")) return; // ✕ is not "open it"
+        openPreview(src, attachment.name);
+      };
+    }
     const remove = document.createElement("button");
     remove.type = "button";
     remove.textContent = "✕";
@@ -8954,6 +8981,56 @@ function renderAttachments() {
     chip.appendChild(remove);
     box.appendChild(chip);
   });
+}
+
+// [PREVIEW-START]
+// Tap a picture, see the picture. It opens from three places — a composer
+// attachment chip, an attachment on a sent message, and an inline image the
+// model produced — and all three used to do something else or nothing: the
+// composer chip was inert, and a thumbnail opened a NEW TAB, which from an
+// installed PWA means leaving the app for Safari to look at your own photo.
+//
+// Deliberately NOT a dismiss-on-tap-the-image overlay: long-press on the image
+// is how iOS offers Save Image, and a tap handler there makes that fiddly. The
+// backdrop, the ✕ and Escape all close it.
+function openPreview(src, name) {
+  const box = $("preview");
+  if (!box) return;
+  $("preview-img").src = src;
+  $("preview-img").alt = name || "";
+  $("preview-name").textContent = name || "";
+  box.hidden = false;
+}
+
+function closePreview() {
+  const box = $("preview");
+  if (!box || box.hidden) return false;
+  box.hidden = true;
+  // Drop the bytes' claim on memory, and make sure a stale picture can never
+  // flash when the next one is opened.
+  $("preview-img").removeAttribute("src");
+  return true;
+}
+
+function previewIsOpen() {
+  const box = $("preview");
+  return !!box && !box.hidden;
+}
+// [PREVIEW-END]
+
+// A file name a chip cannot show in full, shortened from the MIDDLE. The end of
+// a name is where it differs — IMG_4021 vs IMG_4022, "-final" vs "-final-2",
+// and the extension — so a plain trailing ellipsis cuts off exactly what tells
+// two files apart, which is what "the names are cut so I can't distinguish
+// some of them" was about.
+const NAME_MAX = 30;
+
+function shortName(name, max = NAME_MAX) {
+  name = String(name || "");
+  if (name.length <= max) return name;
+  const head = Math.ceil((max - 1) * 0.45);
+  const tail = max - 1 - head;
+  return `${name.slice(0, head)}…${name.slice(-tail)}`;
 }
 
 // ---- sheets --------------------------------------------------------------
@@ -9543,6 +9620,10 @@ document.addEventListener("keydown", (e) => {
   // A confirmation modal is asking a question and owns Escape while it is up —
   // ahead of everything, since it can be raised over any of them, and Escape
   // must always answer "no" rather than dismiss something behind it (#202).
+  // The preview sits over every other layer (it is opened FROM them), so it
+  // takes Escape first — ahead even of the confirm modal, which cannot be
+  // raised over it.
+  if (e.key === "Escape" && closePreview()) { e.preventDefault(); return; }
   if (e.key === "Escape" && confirmIsOpen()) { e.preventDefault(); closeConfirm(); return; }
   // Esc leaves terminal mode / the PTY overlay first (#143); only if neither is
   // active does it fall through to dismissing an open sheet.

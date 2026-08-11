@@ -257,6 +257,21 @@
   </button>
 </form>
 
+<!-- Image preview ([PREVIEW]). Its own layer above everything, including the
+     backdrop and the sheets: it is opened FROM those surfaces (a composer chip,
+     a message attachment, an inline image) and must sit over whatever raised
+     it. Static markup rather than built on demand so its styling and its
+     Escape handling have one home. -->
+<div id="preview" hidden>
+  <div id="preview-bar">
+    <span id="preview-name"></span>
+    <button id="preview-close" type="button" aria-label="close preview">
+      <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <img id="preview-img" alt="">
+</div>
+
 <div id="backdrop" hidden></div>
 
 <!-- global console overlay (#148 follow-up): ONE persistent "Quake console" for

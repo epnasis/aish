@@ -1453,6 +1453,10 @@ body.offline #composer { opacity: 0.55; }
 }
 /* Small enough that the composer does not become a gallery, big enough to tell
    two photos apart — which is the whole reason it is here rather than a name. */
+/* Openable chips say so by responding to the touch, not with a label. */
+.attach-chip.attach-openable { cursor: pointer; }
+.attach-chip.attach-openable:active { background: var(--bg-elev3); }
+.attach-name { overflow-wrap: anywhere; }
 .attach-thumb {
   width: 26px;
   height: 26px;
@@ -1467,6 +1471,57 @@ body.offline #composer { opacity: 0.55; }
   color: var(--dim);
   font-size: 15px;
   padding-left: 4px;
+}
+
+/* ---- image preview ([PREVIEW]) ---- */
+/* Above the rail, the sheets and the backdrop: it is opened from them. */
+#preview {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  /* Solid, not a wash: at 94% the app read through it and the header's text
+     collided with the file name. A picture is also simply easier to look at
+     against black than against a faint copy of the chat behind it. */
+  background: #000;
+  /* The safe areas matter here — this covers the notch and the home bar. */
+  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+}
+#preview[hidden] { display: none; }
+#preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  color: var(--fg);
+}
+/* The full name, wrapping if it must: this overlay is where a name that was
+   too long for a chip is finally readable, so it must not be cut here too. */
+#preview-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14.5px;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+#preview-close {
+  background: none;
+  border: none;
+  color: var(--fg);
+  padding: 6px;
+  cursor: pointer;
+}
+#preview-close svg { width: 24px; height: 24px; display: block; }
+#preview-img {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  /* contain, so a tall photo is whole rather than cropped — the point of a
+     preview is seeing all of it. */
+  object-fit: contain;
+  /* Long-press still offers Save Image on iOS, which is why the image itself
+     is not a dismiss target. */
 }
 
 /* Dragging a file over the window. The whole window is the drop target, so the
