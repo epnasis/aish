@@ -2396,7 +2396,7 @@ class TestLinksYouDidNotOpen:
         ) == []
 
     def test_one_video_is_one_video_however_it_was_written(self):
-        """#219. The owner shares from his phone, so the URL he hands over carries
+        """#217. The owner shares from his phone, so the URL he hands over carries
         `&si=…`; the card an answer shows is built from the video's ID, so it is
         the canonical form. Compared as strings those are two links, and the rule
         reported the video he had just opened as one aish had never opened —

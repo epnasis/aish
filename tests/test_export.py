@@ -230,7 +230,7 @@ def test_youtube_shorts_url_renders_embed_card(monkeypatch):
 
 
 def test_a_posters_own_picture_is_the_card_and_is_not_fetched_again(monkeypatch, tmp_path):
-    """#219, the PDF half. The composed `[![still](file)](video)` form reached the
+    """#217, the PDF half. The composed `[![still](file)](video)` form reached the
     link pass as an <a> whose LABEL was an <img>, and that label went out as the
     card's CAPTION — where the image pass then inlined it — beside a freshly
     fetched copy of the same still. Two pictures in the PDF and a network fetch

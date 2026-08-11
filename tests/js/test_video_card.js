@@ -1,4 +1,4 @@
-// Node-only, dependency-free check for the YouTube card (#219). Pulls the REAL
+// Node-only, dependency-free check for the YouTube card (#217). Pulls the REAL
 // youtubeEmbed / embedForLink / imageLink / claimVideoCard out of app.js by
 // marker and runs them against a minimal fake DOM with controllable timers.
 //

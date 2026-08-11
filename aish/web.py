@@ -470,7 +470,7 @@ def thumbnail_video_id(url: str) -> str:
     Provenance the FETCHER knows and no later reader can recover: once the
     bytes are stored under a content hash, nothing about the file says it is a
     video's thumbnail. It is what lets `show_image` hand back a picture that is
-    also the player instead of a picture beside a link to it (#219).
+    also the player instead of a picture beside a link to it (#217).
     """
     match = _YOUTUBE_THUMB_RE.match((url or "").strip())
     return match.group(1) if match else ""

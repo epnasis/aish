@@ -4349,7 +4349,7 @@ class TestShowImage:
         assert f"![a phone]({stored[0]})" in result
 
     def test_a_video_thumbnail_comes_back_as_the_player(self, tmp_path, monkeypatch):
-        """#219: a video's still and a link to that video are ONE thing on screen.
+        """#217: a video's still and a link to that video are ONE thing on screen.
         Two constructs became two cards — the same picture twice, once playable —
         and only the fetcher knows the stored bytes ARE that video's thumbnail, so
         the composed line has to be built here."""

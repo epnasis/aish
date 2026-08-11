@@ -2234,7 +2234,7 @@ def _normalise_url(url: str) -> str:
     The owner opens the shared form and the answer shows the canonical one (the
     card `show_image` composes for a video still is built from the id), so
     comparing them as strings reported his own video as a link he never opened —
-    noise about the one thing he definitely had opened (#219).
+    noise about the one thing he definitely had opened (#217).
     """
     url = str(url or "").strip().split("#", 1)[0]
     if video := web.video_id(url):

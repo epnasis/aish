@@ -2967,7 +2967,7 @@ class Agent:
             # place that knows the stored file IS that video's thumbnail; a
             # content-addressed path cannot say so afterwards. Without it the
             # model wrote the picture and the link separately and the answer
-            # opened with the same image twice, once playable (#219).
+            # opened with the same image twice, once playable (#217).
             return tools.ToolOutcome(
                 "Video still ready — it is attached to this turn, so look at it and "
                 "make sure it really is the video the user meant. The line below is "

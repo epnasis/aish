@@ -4957,7 +4957,7 @@ const YT_PLAY_SVG =
 // still AND a link to it — `show_image` on the thumbnail, then "here is a
 // summary of [the video](…)" in the prose — and each of those used to become
 // its own card, so the answer opened with the same picture twice, once with a
-// play button on it (the state of the transcript in issue #219).
+// play button on it (the state of the transcript in issue #217).
 //
 // The FIRST occurrence wins and every later one degrades to a plain hyperlink,
 // so a duplicate costs a link and never a second copy of the picture. Order is

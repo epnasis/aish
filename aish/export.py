@@ -582,7 +582,7 @@ class _MediaEmbedder:
         the label was used verbatim as the CAPTION (so the caption contained an
         `<img>` tag, which the image pass then inlined) beside a freshly fetched
         copy of the same still: the same duplication the web UI had, in the PDF,
-        plus a network fetch for bytes already on disk (#219). The caption falls
+        plus a network fetch for bytes already on disk (#217). The caption falls
         back to the image's alt text, which is what the poster form puts its
         words in.
         """
