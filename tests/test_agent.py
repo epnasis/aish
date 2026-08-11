@@ -4536,6 +4536,154 @@ class TestShowImage:
         assert "needs a source" in tool_messages(agent.messages)[-1]["content"]
 
 
+class TestToolMedia:
+    """#215: a picture a TOOL produced reaches the model only if it is
+    DELIVERED. A tool result is text on every provider aish speaks to, so
+    before this the model was handed a file path and told to read it — which
+    no model can do, and which the scanned-PDF escalation had been quietly
+    depending on since #213."""
+
+    def _delivered(self, agent):
+        """The media messages aish added to this conversation."""
+        return [
+            m
+            for m in agent.messages
+            if m.get("role") == "user" and str(m.get("content", "")).startswith("[aish: ")
+        ]
+
+    def _fetching_agent(self, tmp_path, monkeypatch, calls=1, **kwargs):
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(
+            agent_module.web, "fetch_binary", lambda url, max_bytes: (PNG_BYTES, "image/png")
+        )
+        # A distinct caption per call, so the store's content addressing does
+        # not collapse them into one file and hide a cap bug.
+        shows = [
+            model_says(
+                tool_calls=[
+                    tool_call("show_image", source=f"https://ex.com/{i}.jpg", caption=f"pic {i}")
+                ]
+            )
+            for i in range(calls)
+        ]
+        agent, _ = make_agent([*shows, model_says("done")], state_dir=tmp_path, **kwargs)
+        return agent
+
+    def test_a_fetched_picture_is_attached_to_the_conversation(self, tmp_path, monkeypatch):
+        """The capability itself: show_image's bytes reach the model, not just
+        its path. This is what lets it check that the thing it fetched is the
+        thing that was asked for."""
+        agent = self._fetching_agent(tmp_path, monkeypatch)
+        agent.run_task("show me")
+        stored = next((tmp_path / "media").iterdir())
+        delivered = self._delivered(agent)
+        assert len(delivered) == 1
+        assert delivered[0]["images"] == [str(stored)]
+
+    def test_the_delivery_is_a_note_not_a_user_bubble(self, tmp_path, monkeypatch):
+        """It is written as role:user because that is the only shape the APIs
+        take media on — but the owner never typed it, so it must carry the
+        marker that keeps it out of the transcript (#171)."""
+        import aish.session as session_module
+
+        agent = self._fetching_agent(tmp_path, monkeypatch)
+        agent.run_task("show me")
+        content = self._delivered(agent)[0]["content"]
+        assert content.startswith(session_module.NOTE_MARKER)
+        # The marker is only worth writing if the classifier still honours it.
+        assert session_module.NOTE_MARKER in session_module._NOTE_MARKERS
+
+    def test_the_delivery_lands_after_every_result_of_its_turn(self, tmp_path, monkeypatch):
+        """Never between two tool results: on Anthropic the results of one
+        assistant turn share a single message, and a media message spliced into
+        the middle would break that pairing."""
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(
+            agent_module.web, "fetch_binary", lambda url, max_bytes: (PNG_BYTES, "image/png")
+        )
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("show_image", source="https://ex.com/a.jpg", caption="a"),
+                        tool_call("show_image", source="https://ex.com/b.jpg", caption="b"),
+                    ]
+                ),
+                model_says("done"),
+            ],
+            state_dir=tmp_path,
+        )
+        agent.run_task("show me two")
+        roles = [m.get("role") for m in agent.messages]
+        media_at = roles.index("user", roles.index("tool"))
+        assert roles[media_at - 2 : media_at] == ["tool", "tool"]
+        assert len(self._delivered(agent)[0]["images"]) == 2
+
+    def test_a_model_that_cannot_see_is_told_so_and_gets_no_images(self, tmp_path, monkeypatch):
+        """An honest dead end beats a fluent guess — the same rule the
+        unreadable scan page follows. The failure this prevents is a confident
+        description of a picture that was never delivered."""
+        agent = self._fetching_agent(tmp_path, monkeypatch)
+        agent.provider = "no-vision-backend"
+        agent.run_task("show me")
+        note = self._delivered(agent)[0]
+        assert "images" not in note
+        assert "cannot see images" in note["content"]
+
+    def test_the_per_turn_cap_is_enforced_and_stated(self, tmp_path, monkeypatch):
+        """Every delivered image is re-encoded into every later request, so the
+        cap is real; a silent one would read as 'you have seen everything'."""
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(
+            agent_module.web, "fetch_binary", lambda url, max_bytes: (PNG_BYTES, "image/png")
+        )
+        over = agent_module.TOOL_IMAGES_PER_TURN + 2
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("show_image", source=f"https://ex.com/{i}.jpg", caption=f"p{i}")
+                        for i in range(over)
+                    ]
+                ),
+                model_says("done"),
+            ],
+            state_dir=tmp_path,
+        )
+        agent.run_task("show me lots")
+        note = self._delivered(agent)[0]
+        assert len(note["images"]) == agent_module.TOOL_IMAGES_PER_TURN
+        assert "2 further picture(s) were NOT attached" in note["content"]
+
+    def test_an_earlier_tasks_pictures_are_dropped_from_view(self, tmp_path, monkeypatch):
+        """Pixels ride EVERY subsequent request, so a session that looked at a
+        dozen frames would pay for all of them until it ended. The note stays,
+        so the model can tell it once looked and ask again."""
+        agent = self._fetching_agent(tmp_path, monkeypatch)
+        agent.run_task("show me")
+        agent.chat = FakeChat([model_says("nothing to do")])
+        agent.run_task("something else")
+        note = self._delivered(agent)[0]
+        assert "images" not in note
+        assert "no longer in view" not in note["content"]  # phrasing pinned below
+        assert "dropped from view" in note["content"]
+
+    def test_the_owners_own_attachment_is_never_dropped(self, tmp_path, monkeypatch):
+        """It is not a tool output: they may refer back to the photo they
+        attached several tasks later, and re-sending it is the point."""
+        photo = tmp_path / "photo.png"
+        photo.write_bytes(PNG_BYTES)
+        agent, chat = make_agent([model_says("nice photo")], state_dir=tmp_path)
+        agent.run_task("what is this", images=[str(photo)])
+        agent.chat = FakeChat([model_says("still here")])
+        agent.run_task("and now something else")
+        attached = [m for m in agent.messages if m.get("images")]
+        assert attached and attached[0]["images"] == [str(photo)]
+
+
 class TestImageRoots:
     """One definition of "where aish may read from without asking", consumed by
     /file, the PDF exporter, the terminal renderer, read_file and the approver's
@@ -7226,6 +7374,16 @@ class TestReadPdf:
         agent, result = self._run(tmp_path, {"source": str(path), "pages": "2"})
         assert "no text layer" in result
         assert "![" in result and str(agent.media_dir) in result
+
+    def test_a_scanned_page_is_delivered_so_the_model_can_actually_read_it(self, tmp_path):
+        """#215: rasterising the page was only ever half the escalation. It was
+        documented as 'the model simply sees them' while what reached the model
+        was a file path in prose — the one thing a model cannot read."""
+        path = self._pdf(tmp_path, scan_page=True)
+        agent, _ = self._run(tmp_path, {"source": str(path), "pages": "2"})
+        delivered = [m for m in agent.messages if m.get("images")]
+        assert len(delivered) == 1
+        assert Path(delivered[0]["images"][0]).parent == agent.media_dir
 
     def test_a_scan_is_declared_even_when_not_asked_for(self, tmp_path):
         """It must be impossible to summarise this document without learning

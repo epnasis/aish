@@ -64,7 +64,9 @@ They are deliberately **not merged into one table**: merging across the page mar
 
 ## The escalation: a scan is a picture
 
-A page that cannot be read as text is not silence, it is an image — and aish already has a content-addressed store and three renderers for images. So `Agent._read_pdf` rasterises the requested unreadable pages into the media store and returns the markdown lines, and on a vision-capable backend the model simply **sees** them. No new pipeline, no OCR dependency: a modern vision model reads a rasterised page better than Tesseract does, for zero extra install.
+A page that cannot be read as text is not silence, it is an image — and aish already has a content-addressed store and three renderers for images. So `Agent._read_pdf` rasterises the requested unreadable pages into the media store, returns the markdown lines for display, and **delivers the pages themselves** to the model. No OCR dependency: a modern vision model reads a rasterised page better than Tesseract does, for zero extra install.
+
+**The delivery half was missing until #215, and this doc asserted it anyway.** "On a vision-capable backend the model simply sees them" was the design; what shipped rasterised the page, stored it, described it as readable, and handed the model a **file path**, because a tool result is text on every provider. The escalation therefore turned a page that read as silence into a page that read as a filename — arguably worse, since the first is visibly empty and the second looks like an answer. The pages now ride the result envelope and are delivered as native image parts; the mechanism, its cap and its one gap are in `docs/media-and-images.md`. A doc that describes an intended pipeline in the present tense is how a hole stays invisible for five months.
 
 Capped at `PDF_MAX_PAGE_IMAGES`, and **the cap is always stated** — a 200-page scan must not silently become a partial answer. On a text-only local backend the escalation cannot complete, and the result says which pages could not be read. An honest dead end beats a fluent hallucination.
 

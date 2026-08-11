@@ -30,6 +30,28 @@ Orchestrates the above and returns a **ready-built markdown line** — aish comp
 
 ---
 
+## Delivery — the model looks at it too (#215)
+
+**Vision used to be one-way.** A picture the OWNER attached reached the model natively (`_classify_attachments` → `images` on the user message → each backend's encoder). A picture a **tool** made reached it as a *file path in prose*, because a tool result is a string on every provider aish speaks to. So aish could fetch a photo, verify it, store it, hand back a line to display it — and not see it. `read_pdf`'s scan escalation had been quietly resting on the same hole since #213: the page was rasterised and described as readable, and what arrived was its filename.
+
+That is the shape of gap that produces confident nonsense rather than an error. Nothing failed; the model simply answered about a picture it never saw — from the caption, the filename, or the page it came from.
+
+**A tool now returns its pictures in the `ToolOutcome` envelope** (`images=(path, …)`), and `Agent._deliver_tool_media` hands them over. Three properties carry it:
+
+**1 · The envelope, not the text.** The paths ride the result's metadata (L7), never a markdown line parsed back out of prose — re-deriving structure from a rendered string is exactly the guess the envelope exists to replace.
+
+**2 · One follow-up user message per turn, after every result.** It is the only shape all four backends already encode as native media, and the tool-result slot itself is a plain string on two of the three cloud APIs — putting the pixels there would work on one provider and vanish on the others. It lands *after the whole turn's results*, never between two of them: on Anthropic one assistant turn's results share a single message, so a media message spliced into the middle would break the pairing. The converter there **joins** the media into that same open user entry rather than opening a second one, since consecutive user entries are not a shape the API takes.
+
+**3 · It is written as `role:"user"` and must never look like one.** Every note opens with `session.NOTE_MARKER` (`[aish: …]`), the #171 marker that keeps a synthetic turn out of the transcript live *and* on replay. `NOTE_MARKER` is public for exactly this reason: a producer has to be able to **build** a note that classifies, not be recognized by luck.
+
+**Capped, stated, and expiring.** At most `TOOL_IMAGES_PER_TURN` (8) images per turn, with the overflow named — a silent cap reads as "you have seen everything". And because pixels are re-encoded into **every later request**, an earlier task's delivery is dropped whole by the same trim that stubs old tool output (`_trim_tool_message`), leaving the note behind so the model can tell it once looked and ask again — the store is content-addressed, so a second look costs nothing. The owner's own attachment is deliberately exempt: it is not a tool output, they may refer back to it tasks later, and the marker is what tells the two apart.
+
+**A backend with no vision gets a sentence, not silence** — it must know it is answering without having looked, the same rule the unreadable scan page follows. **claude-max is the known gap**: the SDK owns that conversation, so a delivery has nowhere to go and the model still gets only the path.
+
+`TestToolMedia`, and the converter half in `tests/test_backends.py`.
+
+---
+
 ## One boundary, three renderers
 
 `Agent.workspace_roots()` = `roots` + the directories the process owns (media store, scratch, tool-output cache, document store). Consumed by `/file` (`WebServer._workspace_roots`), the PDF exporter, the CLI's `term_image`, `read_file`'s prompt rule, and the approver's path scoping — see the workspace-boundary section of `docs/documents-and-pdf.md` for why the read side was added (#212).

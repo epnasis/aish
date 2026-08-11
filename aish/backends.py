@@ -694,7 +694,18 @@ def convert_messages_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
                 name = message.get("tool_name", "tool")
                 out.append({"role": "user", "content": f"[{name} result]\n{content}"})
         elif role == "user" and (message.get("images") or message.get("documents")):
-            out.append({"role": "user", "content": _anthropic_media_blocks(message)})
+            blocks = _anthropic_media_blocks(message)
+            # A tool-produced picture arrives as a user message immediately
+            # after the tool results it belongs to (agent._deliver_tool_media),
+            # and those results are themselves a user message here. Two user
+            # entries in a row is not a shape this API takes, so the media
+            # joins the entry that is already open rather than opening a second
+            # one — which is also the truthful shape: same turn, same input.
+            last = out[-1] if out else None
+            if last and last["role"] == "user" and isinstance(last["content"], list):
+                last["content"].extend(blocks)
+            else:
+                out.append({"role": "user", "content": blocks})
         elif content:  # user turns; skip empty messages — the API rejects them
             out.append({"role": role, "content": content})
     return "\n".join(system_parts), out

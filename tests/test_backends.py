@@ -509,6 +509,30 @@ def test_anthropic_user_media_becomes_blocks(tmp_path):
     assert blocks[2] == {"type": "text", "text": "look"}
 
 
+def test_anthropic_tool_media_joins_the_message_holding_the_results(tmp_path):
+    """#215: a tool-produced picture arrives as a user message right after the
+    tool results it belongs to, and on this API those results ARE a user
+    message. Two user entries in a row is not a shape the API takes, so the
+    media joins the open one — which is also the truthful shape: one turn, one
+    input."""
+    image = tmp_path / "page.png"
+    image.write_bytes(b"\x89PNGfake")
+    _, out = convert_messages_anthropic(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "read_pdf", "arguments": {}}}],
+            },
+            {"role": "tool", "tool_name": "read_pdf", "content": "page 2 is a scan"},
+            {"role": "user", "content": "[aish: 1 picture(s) …]", "images": [str(image)]},
+        ]
+    )
+    assert [entry["role"] for entry in out] == ["assistant", "user"]
+    kinds = [block["type"] for block in out[1]["content"]]
+    assert kinds == ["tool_result", "image", "text"]
+
+
 def test_media_support_map():
     assert "image" in backends.media_support("ollama")
     assert "pdf" in backends.media_support("claude")

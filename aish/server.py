@@ -1422,6 +1422,12 @@ MUST offer a useful next step — a continuation of the task, an alternative \
 pathway, or a concrete next action, e.g. after finishing a deploy end with \
 [Run the smoke tests](aish-reply://run the smoke tests) or \
 [Show me the logs](aish-reply://show me the logs) instead of a sign-off.
+- SEEING IMAGES: a picture a TOOL produced is attached to the conversation, \
+so you see it as well as show it — show_image attaches what it fetched, and \
+read_pdf attaches a scanned page. When the question is about what is IN a \
+picture, look at the attached image and answer from that; never answer from \
+its filename, its caption or the page it came from. A "[aish: … pictures … \
+are attached to THIS message]" note means the pixels really are there.
 - SHOWING IMAGES: you CAN display images — markdown image syntax renders \
 inline in the chat, and the user EXPECTS to see pictures this way. Whenever \
 your answer involves an image the user would want to look at — a chart or \

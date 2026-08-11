@@ -36,8 +36,12 @@ RESUME_MARKER = "[automatic resume]"  # server.RESUME_NOTE — a real turn, syst
 # those as workspace markers), and console text shared into context (#148).
 # Live they never reach the transcript, so a replay must not invent a bubble —
 # and one landing mid-turn would also split that turn in two.
+# Public because a producer must be able to BUILD a note that classifies here,
+# not just be recognized by luck — agent.py's media deliveries (#215) open with
+# it, and the trim that later drops their pixels identifies them by it too.
+NOTE_MARKER = "[aish: "
 _NOTE_MARKERS = (
-    "[aish: ",  # agent.LOOP_WARNING / STEP_LIMIT_NOTE / LOOP_STOP_NOTE / STALL_NOTE
+    NOTE_MARKER,  # agent.LOOP_WARNING / STEP_LIMIT_NOTE / LOOP_STOP_NOTE / STALL_NOTE
     "[I moved the session to ",  # Agent.rebase announce (/cd)
     "[I added ",  # Agent.add_root announce (/add-dir)
     "[Shared from my interactive terminal:]",  # console share
