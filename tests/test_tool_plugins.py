@@ -557,10 +557,17 @@ class TestResultEnvelope:
         """The exact Session B shape: exit 0, JSON, the field that mattered
         empty, the error channel populated. Nothing about it is an ERROR
         prefix, so the old sniff called it a success."""
+        # A quoted heredoc, not printf: `\"` is an undefined printf escape, so
+        # bash collapses it while dash keeps the backslash. Emitted by printf
+        # this JSON parsed on macOS and was malformed on CI's dash, where the
+        # unreadable error_log made the runtime verdict the very shape this
+        # test pins as `ok`. Nothing here may depend on /bin/sh's identity.
         script = (
             "#!/bin/sh\n"
-            'printf \'{"transcript": "", "error_log": ["No module named '
-            "'youtube_transcript_api'\\\"]}'\n"
+            "cat <<'JSON'\n"
+            '{"transcript": "", "error_log": ["No module named '
+            "'youtube_transcript_api'\"]}\n"
+            "JSON\n"
         )
         tool, _ = _parse_tool(
             write_tool(tmp_path / "yt", VALID.replace("echoer", "yt"), script=script)
