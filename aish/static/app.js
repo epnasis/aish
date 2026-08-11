@@ -4137,13 +4137,38 @@ function reportViewport(label) {
     ` bodyTop=${document.body.style.top || "-"} bodyH=${document.body.style.height || "-"}` +
     ` kbOpen=${document.body.classList.contains("kb-open")}` +
     ` active=${(document.activeElement || {}).id || "none"}` +
-    ` standalone=${matchMedia("(display-mode: standalone)").matches} rev=${PAGE_REV}`;
+    ` standalone=${matchMedia("(display-mode: standalone)").matches} rev=${PAGE_REV}` +
+    // The preview's own state, when it is up. A misplaced picture is otherwise
+    // only describable in words ("it goes off the screen"), and the numbers
+    // that would settle it — the scale, the offset, the measured box, and
+    // whether the image had even loaded — live only on the device it happened
+    // on. `rev` above is in the same line, so a report also says which build
+    // produced it.
+    previewReport();
   // Pure telemetry: drop it silently when there is no socket. Routing it
   // through send() would toast "not connected" at the user on every offline
   // replay, for a message they never asked to send (#165).
   if (ws && ws.readyState === WebSocket.OPEN) {
     try { send({ type: "client_debug", text }); } catch { /* socket died mid-send */ }
   }
+}
+
+function previewReport() {
+  if (!previewIsOpen()) return "";
+  const box = previewBox();
+  const el = $("preview-img");
+  const rect = el.getBoundingClientRect();
+  const content = box ? previewContent(box.view, box.natural) : null;
+  return (
+    ` preview=${JSON.stringify(previewState)}` +
+    ` view=${box ? `${Math.round(box.view.w)}x${Math.round(box.view.h)}` : "n/a"}` +
+    ` natural=${el.naturalWidth}x${el.naturalHeight}` +
+    ` content=${content ? `${Math.round(content.w)}x${Math.round(content.h)}` : "n/a"}` +
+    // Where the element ACTUALLY is after the transform: if this does not
+    // cover the screen, the picture is visibly off it, whatever the state says.
+    ` painted=${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)}` +
+    ` complete=${el.complete}`
+  );
 }
 
 let lastVvReport = 0;
@@ -7240,6 +7265,15 @@ $("preview").addEventListener("wheel", previewWheel, { passive: false });
 $("preview").addEventListener("gesturestart", previewGestureStart, { passive: false });
 $("preview").addEventListener("gesturechange", previewGestureChange, { passive: false });
 $("preview").addEventListener("gestureend", previewGestureEnd, { passive: false });
+// Until the bytes arrive, naturalWidth is 0 and previewBox falls back to the
+// element's own shape — so any pinch in that window is bounded against the
+// WRONG picture. On a desktop the image is there before a finger can move; on
+// a phone fetching a 3 MB photo it is not. Re-clamp when the truth arrives,
+// and again whenever the window changes shape under it (rotation, the URL bar
+// sliding away), where yesterday's bounds are simply wrong.
+$("preview-img").addEventListener("load", () => { if (previewIsOpen()) previewPaint(false); });
+addEventListener("resize", () => { if (previewIsOpen()) previewPaint(false); });
+addEventListener("orientationchange", () => { if (previewIsOpen()) previewPaint(false); });
 
 function atFragment(text) {
   const at = text.lastIndexOf("@");
@@ -9176,6 +9210,19 @@ function previewPaint(settle, dismissing = 0) {
   const el = $("preview-img");
   const box = $("preview");
   if (!el || !box) return;
+  // THE enforcement point. Every gesture path already clamps its own result,
+  // and that was not enough: it makes "the picture stays on screen" a property
+  // of five call sites agreeing, so one new path — or one that runs before the
+  // image has loaded and knows its shape — puts the photo somewhere it cannot
+  // be recovered from. Clamping HERE makes an out-of-bounds transform
+  // unwritable rather than merely unwritten.
+  //
+  // The dismissal drag is the one deliberate exception: it is *supposed* to
+  // carry the picture off the bottom of the screen.
+  if (!dismissing) {
+    const measured = previewBox();
+    if (measured) previewState = previewClamp(previewState, measured.view, measured.natural);
+  }
   if (el.classList) el.classList.toggle("settling", !!settle);
   if (el.style) {
     el.style.transform =
