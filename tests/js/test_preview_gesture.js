@@ -166,20 +166,65 @@ function lands(before, after, p, size) {
 }
 
 // ---- pinch -----------------------------------------------------------------
+// Two fingers do TWO things at once and both must be honoured: they scale by
+// their spread AND carry the picture by the pair's travel.
 {
   const mid = { x: 200, y: 400 };
-  const out = s.previewPinch(FIT, FIT, 2, mid, VIEW, WIDE);
+  const out = s.previewPinch(FIT, 2, mid, mid, VIEW, TALL);
   ok("spreading two fingers scales by how far they spread", out.scale === 2);
-  const back = s.previewPinch(out, FIT, 0.5, mid, VIEW, WIDE);
+  const back = s.previewPinch(out, 0.5, mid, mid, VIEW, TALL);
   ok("…and pinching in scales back down, measured from where the pinch STARTED "
     + "rather than compounding every frame", back.scale === 1);
 }
 
 {
   ok("a pinch cannot go below fit — the picture never shrinks into the middle",
-    s.previewPinch(FIT, FIT, 0.2, { x: 200, y: 400 }, VIEW, WIDE).scale === 1);
-  ok("…nor past the ceiling", s.previewPinch(FIT, FIT, 99, { x: 200, y: 400 }, VIEW, WIDE)
-    .scale === s.PREVIEW_MAX_ZOOM);
+    s.previewPinch(FIT, 0.2, { x: 200, y: 400 }, { x: 200, y: 400 }, VIEW, WIDE).scale === 1);
+  ok("…nor past the ceiling",
+    s.previewPinch(FIT, 99, { x: 200, y: 400 }, { x: 200, y: 400 }, VIEW, WIDE)
+      .scale === s.PREVIEW_MAX_ZOOM);
+}
+
+{
+  // THE REVERSED PAN. Anchoring on the current midpoint alone makes the
+  // correction (to - centre)(1 - ratio), which is negative once you are zooming
+  // in — so the picture slid the opposite way to the hands moving it. Utterly
+  // obvious in the hand, and invisible to a symmetric pinch test where the
+  // midpoint never moves, which is exactly why it shipped.
+  const start = { scale: 3, x: 0, y: 0 };
+  const from = { x: 200, y: 400 };
+  const moved = s.previewPinch(start, 1, from, { x: 260, y: 400 }, VIEW, TALL);
+  ok(`two fingers moving RIGHT carry the picture right (x ${moved.x})`, moved.x > 0);
+  ok("…by exactly how far they travelled, when they are not also spreading",
+    moved.x === 60);
+}
+
+{
+  const start = { scale: 3, x: 0, y: 0 };
+  const from = { x: 200, y: 400 };
+  const down = s.previewPinch(start, 1, from, { x: 200, y: 520 }, VIEW, TALL);
+  ok("…and moving DOWN carries it down, not up", down.y > 0);
+}
+
+{
+  // Travelling and spreading at once: still the same direction of travel.
+  const start = { scale: 2, x: 0, y: 0 };
+  const from = { x: 200, y: 400 };
+  const both = s.previewPinch(start, 1.5, from, { x: 300, y: 400 }, VIEW, TALL);
+  ok("a pinch that also travels still moves WITH the fingers", both.x > 0);
+}
+
+{
+  // And the anchor still holds: the content under the fingers when they landed
+  // is under them when they stop.
+  const start = { scale: 2, x: 30, y: 0 };
+  const from = { x: 150, y: 400 };
+  const to = { x: 260, y: 400 };
+  const after = s.previewPinch(start, 1.8, from, to, VIEW, TALL);
+  const q = (from.x - VIEW.w / 2 - start.x) / start.scale;
+  const landed = VIEW.w / 2 + after.x + after.scale * q;
+  ok(`what was under the fingers is still under them (x ${Math.round(landed)} ≈ ${to.x})`,
+    near(landed, to.x, 1));
 }
 
 // ---- the trap the maths above CANNOT catch --------------------------------

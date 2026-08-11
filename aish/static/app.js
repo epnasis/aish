@@ -4153,8 +4153,22 @@ function reportViewport(label) {
   }
 }
 
+// The last state a gesture left the preview in, kept AFTER it closes. The
+// report is reached by typing /debug in the composer — which the preview
+// covers, and which closing resets — so a live-only reading could never be
+// taken for the one case it exists for. Snapshotted at the end of each
+// gesture, so "reproduce it, close, /debug" works.
+let previewLastReport = "";
+
+function previewSnapshot() {
+  if (!previewIsOpen()) return;
+  previewLastReport = previewReport().trim();
+}
+
 function previewReport() {
-  if (!previewIsOpen()) return "";
+  if (!previewIsOpen()) {
+    return previewLastReport ? ` preview-was={${previewLastReport}}` : "";
+  }
   const box = previewBox();
   const el = $("preview-img");
   const rect = el.getBoundingClientRect();
@@ -9049,6 +9063,7 @@ function openPreview(src, name) {
 function closePreview() {
   const box = $("preview");
   if (!box || box.hidden) return false;
+  previewSnapshot(); // before the reset below wipes what /debug would report
   box.hidden = true;
   // Drop the bytes' claim on memory, and make sure a stale picture can never
   // flash when the next one is opened.
@@ -9149,9 +9164,34 @@ function previewDragEnds(state) {
   return state.scale <= 1.01 && state.y >= PREVIEW_DISMISS_PX;
 }
 
-// Two fingers: scale by how much they spread, about the point between them.
-function previewPinch(state, startState, ratio, point, view, natural) {
-  return previewZoomAt(startState, startState.scale * ratio, point, view, natural);
+// Two fingers do TWO things at once, and both have to be honoured: they scale
+// by how far apart they have moved, and they carry the picture by how far the
+// pair as a whole has travelled. `from` is the midpoint where the pinch began,
+// `to` is where it is now.
+//
+// The bit of picture under the fingers when they landed stays under them: find
+// its content coordinate against the state at the START of the pinch, then put
+// that coordinate under the CURRENT midpoint. A pure two-finger drag (ratio 1)
+// therefore moves the picture exactly with the fingers.
+//
+// Anchoring on `to` alone — as this did — gives a REVERSED two-finger pan. The
+// correction (to - centre)(1 - scale ratio) is negative once you are zooming
+// in, so the picture slides the opposite way to the hands moving it, which is
+// unmistakable to use and entirely invisible in a symmetric pinch test where
+// the midpoint never moves.
+function previewPinch(startState, ratio, from, to, view, natural) {
+  const scale = Math.min(PREVIEW_MAX_ZOOM, Math.max(1, startState.scale * ratio));
+  // The content coordinate under the fingers when they landed (unscaled,
+  // relative to the centre, which is what the transform scales about).
+  const anchor = {
+    x: (from.x - view.w / 2 - startState.x) / startState.scale,
+    y: (from.y - view.h / 2 - startState.y) / startState.scale,
+  };
+  return previewClamp({
+    scale,
+    x: to.x - view.w / 2 - scale * anchor.x,
+    y: to.y - view.h / 2 - scale * anchor.y,
+  }, view, natural);
 }
 // [PREVIEW-GESTURE-END]
 
@@ -9252,7 +9292,15 @@ function previewDown(event) {
   // escape to and capture buys nothing.
   if (previewPointers.size === 2) {
     const [a, b] = [...previewPointers.values()];
-    previewPinchFrom = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, state: previewState };
+    previewPinchFrom = {
+      dist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+      state: previewState,
+      // Where the pair began, so the picture can follow them as they travel.
+      mid: {
+        x: (a.x + b.x) / 2 - box.rect.left,
+        y: (a.y + b.y) / 2 - box.rect.top,
+      },
+    };
     previewDragFrom = null;
     return;
   }
@@ -9270,8 +9318,8 @@ function previewMove(event) {
     const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
     const mid = { x: (a.x + b.x) / 2 - box.rect.left, y: (a.y + b.y) / 2 - box.rect.top };
     previewState = previewPinch(
-      previewState, previewPinchFrom.state, dist / previewPinchFrom.dist,
-      mid, box.view, box.natural,
+      previewPinchFrom.state, dist / previewPinchFrom.dist,
+      previewPinchFrom.mid, mid, box.view, box.natural,
     );
     previewPaint(false);
     return;
@@ -9297,6 +9345,7 @@ function previewUp(event) {
   if (previewPointers.size) return; // still pinching with the other finger
 
   if (drag.moved) {
+    previewSnapshot();
     if (previewDragEnds(previewState)) { closePreview(); return; }
     // Not far enough: the picture goes back where it was, which is the answer
     // to "did that do anything?" — it visibly did not.
@@ -9343,7 +9392,9 @@ function previewGestureStart(event) {
   event.preventDefault();
   previewGestureFrom = {
     state: previewState,
-    point: previewPoint(event, box.rect),
+    // Where the fingers landed. gesturechange reports the CURRENT midpoint as
+    // clientX/clientY, so the pair's travel is carried the same way as above.
+    from: previewPoint(event, box.rect),
   };
 }
 
@@ -9352,8 +9403,8 @@ function previewGestureChange(event) {
   if (!box || !previewGestureFrom) return;
   event.preventDefault();
   previewState = previewPinch(
-    previewState, previewGestureFrom.state, event.scale || 1,
-    previewGestureFrom.point, box.view, box.natural,
+    previewGestureFrom.state, event.scale || 1,
+    previewGestureFrom.from, previewPoint(event, box.rect), box.view, box.natural,
   );
   previewPaint(false);
 }
@@ -9361,6 +9412,7 @@ function previewGestureChange(event) {
 function previewGestureEnd(event) {
   if (event.preventDefault) event.preventDefault();
   previewGestureFrom = null;
+  previewSnapshot();
   // A pinch that ended below fit springs back to it, the way letting go of an
   // over-pinched photo does everywhere else.
   const box = previewBox();

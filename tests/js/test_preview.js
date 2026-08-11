@@ -33,13 +33,20 @@ function world() {
   // The gesture layer resets the transform on open/close; its own maths is
   // test_preview_gesture.js's business, so it is recorded here, not run.
   const resets = [];
-  const sandbox = { $: (id) => els[id] || null, previewReset: () => resets.push(1) };
+  const snapshots = [];
+  const sandbox = {
+    $: (id) => els[id] || null,
+    previewReset: () => resets.push(1),
+    // The /debug snapshot is taken on the way out; its own content is
+    // reportViewport's business.
+    previewSnapshot: () => snapshots.push(1),
+  };
   vm.createContext(sandbox);
   vm.runInContext(
     surface(extract(appSource(), "// [PREVIEW-START]", "// [PREVIEW-END]")),
     sandbox,
   );
-  return { s: sandbox, els, resets };
+  return { s: sandbox, els, resets, snapshots };
 }
 
 // ---- opening ---------------------------------------------------------------
@@ -67,6 +74,10 @@ function world() {
   ok("…and hides the overlay", w.els.preview.hidden === true);
   ok("…and drops the src, or the next open flashes the previous picture",
     w.els["preview-img"].src === undefined);
+  // /debug is reached by typing in the composer, which the preview covers and
+  // closing resets — so the state has to be kept on the way out or the hook is
+  // useless for the one case it exists for.
+  ok("…having first kept the state /debug would report", w.snapshots.length === 1);
   ok("previewIsOpen agrees", w.s.previewIsOpen() === false);
 }
 
@@ -91,7 +102,7 @@ function world() {
 {
   // The offline shell and the tests both build partial DOMs; a preview that
   // throws would take the caller (a chip's onclick) with it.
-  const sandbox = { $: () => null, previewReset: () => {} };
+  const sandbox = { $: () => null, previewReset: () => {}, previewSnapshot: () => {} };
   vm.createContext(sandbox);
   vm.runInContext(
     surface(extract(appSource(), "// [PREVIEW-START]", "// [PREVIEW-END]")),
