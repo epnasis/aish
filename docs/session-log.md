@@ -41,6 +41,8 @@ Written by `_write_line`, each stamped with an ISO timestamp — since the first
 
 `_parse` returns a **`ParsedLog` NamedTuple**, not a bare tuple, so log metadata can grow without rewriting every unpacking call site.
 
+**The turn counter is session state living on the agent, so reopening has to restore it** — `SessionLog.last_turn` beside `restore_state`, applied by `Agent.resume_turns` at all three resume sites. `turn` is the join key the whole trace contract rests on (`docs/trace-contract.md` §2): the rule ledger buckets `rule_eval`, `binding` and `gate` records by it, "joined by id, never by position". But `_turn` starts at 0 on a fresh `Agent`, and a chat gets a fresh one every time it is reopened — on the web that is every restart of `aish-web`, which is every ship. So a conversation spanning a restart wrote a second `turn: 1` and the ledger silently merged two turns into one, attributing the later turn's gate verdicts to the earlier turn's bindings. Found in a live log: two tasks a day apart, both stamped `turn: 1`. Restoring is monotonic (`max`) rather than an assignment — a stale or truncated log must not be able to wind the counter back into ids already handed out. **Two different things are called `turn` in this file**, and only the isinstance check keeps them apart: the counter lives at `step.turn` and is an int, while `message` and `rating` records carry a top-level `turn` that is the client's minted event id, a string. `TestLastTurn`.
+
 ---
 
 ## Replay (L1)

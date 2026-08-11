@@ -580,6 +580,37 @@ class SessionLog:
         return cwd, trusted
 
     @staticmethod
+    def last_turn(path: Path) -> int:
+        """The highest turn counter this log has already used (0 for a log
+        written before the trace contract, or by a session that never reached
+        the rule engine).
+
+        `Agent._turn` lives on the AGENT, and a chat gets a fresh agent every
+        time it is reopened — on the web, every restart of aish-web, which is
+        every ship. So a conversation spanning a restart used to start counting
+        at 1 again and two different turns answered to the same id. `turn` is
+        the join key the whole trace contract rests on: curate's rule ledger
+        pairs a `rule_eval` with the `gate` rows sharing its turn, explicitly
+        "joined by id, never by position", and a collision silently merges two
+        turns into one — losing exactly the property the id was introduced for.
+
+        Read from `step.turn` only. Ratings carry a top-level `turn` that is the
+        CLIENT's event id, a string naming a different thing; the isinstance
+        check is what keeps the two namespaces apart.
+        """
+        last = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            step = record.get("step")
+            turn = step.get("turn") if isinstance(step, dict) else None
+            if isinstance(turn, int) and turn > last:
+                last = turn
+        return last
+
+    @staticmethod
     def pending_task(path: Path) -> dict | None:
         """The task this session was still running when its process died, or
         None when the last task finished normally (#164). A `task_start` record

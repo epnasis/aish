@@ -245,14 +245,49 @@ RULE_MIN_FIRES = 3  # below this, every rate is noise
 RULE_BROAD_BIND_RATE = 0.33  # binding on a third of turns is a cost to accept deliberately
 RULE_OVERRIDE_WRONG_RATE = 0.5  # overridden more often than not = the rule is wrong
 
+# BINDING IS NOT FIRING, and counting only binds made the ledger unreadable.
+# Three trigger kinds bind at seed and decide LATER — `action:` at the gate,
+# `answer:` at turn end, `result:` when a result lands — so for them a bind
+# means "it is watching" and their bind count is a constant, one per turn.
+# Measured on the live corpus: 17 of 23 rules read `binds on 100% of turns`,
+# every one of them advising the owner to narrow a trigger that binds by
+# construction and cannot be narrowed. The signal that exists to catch an
+# over-broad pattern cannot see one here, and the signal that exists to catch a
+# dead rule (`never bound`) is blind to this whole family, because they always
+# bind. `applied` is the count that answers the question either signal was
+# asking, and the gate records already carry it.
+ARMING_TRIGGERS = frozenset({"action_shape", "answer_shape", "result_state"})
+# Triggers whose bind rate is a property of the grammar rather than of the
+# pattern the owner wrote. `always` is here for the same reason as the arming
+# three: "narrow the trigger" is not advice about a rule that has none.
+STRUCTURAL_BIND_TRIGGERS = ARMING_TRIGGERS | {"always"}
+# An obligation that DEMANDS something of the turn. Never applying makes one of
+# these inert — the condition is not matching what the owner actually says. The
+# purely prohibitive verbs are the opposite case: `never_use` that never fires
+# is the rule DETERRING, which is the rule working, and flagging it as dead
+# weight would propose retiring the rules that are earning their keep silently.
+DEMANDING_VERBS = frozenset({"answer_from", "must_first", "answer_must_include"})
+# Never-applied means something different for each of the three, and so does
+# the repair. One sentence for all of them would name the wrong thing twice.
+NEVER_APPLIED = {
+    "answer_shape": "its condition never matched an answer",
+    "action_shape": "nothing ever proposed the action it watches",
+    "result_state": "the tool it watches never came back that way",
+}
+
 
 @dataclass
 class RuleStats:
     """Per-rule ledger row. One turn contributes at most one bind."""
 
     name: str
+    trigger: str = ""  # a rule has exactly one; the last one the window saw
     evaluated: int = 0
     binds: int = 0
+    # Turns the rule actually CONSTRAINED something, as opposed to merely
+    # arming. For a trigger decided at seed the two are the same number; for
+    # the arming three they are not, and the difference is the whole signal.
+    applied: int = 0
     abstains: int = 0
     unevaluable: int = 0
     errors: int = 0
@@ -261,10 +296,20 @@ class RuleStats:
     overrides: int = 0  # the owner allowed the violation
     complied: int = 0  # a refusal was followed by the routed reader, same turn
     origins: dict[str, int] = field(default_factory=dict)
+    verbs: set[str] = field(default_factory=set)  # as COMPILED, from the bindings
+
+    @property
+    def arming(self) -> bool:
+        """Binds at seed, decides later — so `binds` counts watching, not firing."""
+        return self.trigger in ARMING_TRIGGERS
 
     @property
     def bind_rate(self) -> float:
         return self.binds / self.evaluated if self.evaluated else 0.0
+
+    @property
+    def applied_rate(self) -> float:
+        return self.applied / self.binds if self.binds else 0.0
 
     @property
     def override_rate(self) -> float:
@@ -385,9 +430,15 @@ def scan_rules(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None) 
                 for row in turn["eval"].get("evaluated") or []:
                     stat = ledger.stat(str(row.get("rule", "")))
                     stat.evaluated += 1
+                    stat.trigger = str(row.get("trigger") or "") or stat.trigger
                     verdict = row.get("verdict")
                     if verdict == "bind":
                         stat.binds += 1
+                        # A trigger decided at seed has already fired by the
+                        # time it binds; only the arming three have to wait for
+                        # a gate or a verify row to say whether they ever did.
+                        if not stat.arming:
+                            stat.applied += 1
                         origin = str((row.get("evidence") or {}).get("origin") or "")
                         if origin:
                             stat.origins[origin] = stat.origins.get(origin, 0) + 1
@@ -403,6 +454,24 @@ def scan_rules(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None) 
     return ledger
 
 
+def _applied(gate: dict) -> bool:
+    """Did this gate row show the rule actually CONSTRAINING the turn, rather
+    than watching it? One reader for all three arming triggers, because the
+    three record their firing in three different places and a caller that had
+    to know which is which would be re-deriving the engine from source."""
+    evidence = gate.get("evidence") or {}
+    if gate.get("verdict") != "allowed":
+        # refused / held / advised — a decision was taken against this turn.
+        return True
+    if gate.get("at") == "verify":
+        # An `answer:` rule that passed. `applied` says whether its condition
+        # held at all: the pass row is written for armed-and-silent too, and
+        # "the answer had no price in it" is not "the price was verified".
+        return bool(evidence.get("applied"))
+    # `result:` latched — the named tool came back in the named state.
+    return bool((evidence.get("armed") or {}).get("fired"))
+
+
 def _score_gates(ledger: RuleLedger, turn: dict) -> None:
     """Refusals, escalations, overrides — and compliance, which is the only
     one that needs the turn's tool steps: a refusal was COMPLIED WITH when the
@@ -410,11 +479,14 @@ def _score_gates(ledger: RuleLedger, turn: dict) -> None:
     turn. 'No further refusal' would count giving up as compliance."""
     called = {str(step.get("name")) for step in turn["tools"]}
     refused_bindings: set[str] = set()
+    applied: set[str] = set()  # one turn contributes at most one, per rule
     for gate in turn["gates"]:
         name = str(gate.get("rule") or "")
         if not name:
             continue
         stat = ledger.stat(name)
+        if stat.arming and _applied(gate):
+            applied.add(name)
         if gate.get("verdict") == "refused":
             stat.refusals += 1
             refused_bindings.add(str(gate.get("binding")))
@@ -422,6 +494,16 @@ def _score_gates(ledger: RuleLedger, turn: dict) -> None:
             stat.escalations += 1
             if gate.get("verdict") == "allowed":
                 stat.overrides += 1
+    for name in applied:
+        ledger.stat(name).applied += 1
+    # The compiled obligations, snapshotted from the binding rather than read
+    # off today's rule file — the contract's corollary 1. `verbs` is what tells
+    # a never-applied DEMAND (inert) from a never-fired PROHIBITION (working).
+    for binding in turn["bindings"].values():
+        stat = ledger.stat(str(binding.get("rule") or ""))
+        stat.verbs.update(
+            str(o.get("verb")) for o in binding.get("obligations") or [] if o.get("verb")
+        )
     for binding_id in refused_bindings:
         binding = turn["bindings"].get(binding_id)
         if binding and (_readers_of(binding) & called):
@@ -438,7 +520,29 @@ def rule_signals(ledger: RuleLedger) -> list[tuple[str, str]]:
             out.append((stat.name, f"never bound in {stat.evaluated} turns — dead weight?"))
         if stat.errors:
             out.append((stat.name, f"{stat.errors} turns could not compile it — broken file"))
-        if stat.binds >= RULE_MIN_FIRES and stat.bind_rate >= RULE_BROAD_BIND_RATE:
+        # The `never bound` line above cannot see an arming rule: it binds every
+        # turn by construction. This is the same question asked where the answer
+        # lives — and only of a rule that DEMANDS something, since a prohibition
+        # that never fires is deterrence, not death.
+        if (
+            stat.arming
+            and stat.binds >= RULE_MIN_FIRES
+            and stat.applied == 0
+            and stat.verbs & DEMANDING_VERBS
+        ):
+            out.append((
+                stat.name,
+                f"armed on {stat.binds} turns and never once applied — "
+                + NEVER_APPLIED[stat.trigger],
+            ))
+        # Only where narrowing is a thing the owner could do. A trigger that
+        # binds by construction reads as 100% forever, and telling him to narrow
+        # it every week is how a ledger loses his attention.
+        if (
+            stat.trigger not in STRUCTURAL_BIND_TRIGGERS
+            and stat.binds >= RULE_MIN_FIRES
+            and stat.bind_rate >= RULE_BROAD_BIND_RATE
+        ):
             out.append((
                 stat.name,
                 f"binds on {stat.bind_rate:.0%} of turns — narrow the trigger, "

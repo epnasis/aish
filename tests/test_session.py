@@ -1143,6 +1143,35 @@ def test_user_command_history_reflects_commands_run_after_a_cached_scan(tmp_path
     assert set(SessionLog.user_command_history(tmp_path)) == {"ls", "git status"}
 
 
+class TestLastTurn:
+    """The turn counter is the trace contract's join key, and it lives on the
+    agent — so a reopened chat has to be told where its own log left off."""
+
+    def test_it_reports_the_highest_turn_the_log_used(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.step({"kind": "tool", "turn": 1, "name": "run_command"})
+        log.step({"kind": "rule_eval", "turn": 4, "evaluated": []})
+        log.step({"kind": "tool", "turn": 2, "name": "read_url"})
+        assert SessionLog.last_turn(log.path) == 4
+
+    def test_a_pre_contract_log_reports_zero(self, tmp_path):
+        """Old logs carry no stamps at all; the resumed agent then starts at 1
+        exactly as it does today, which is right — nothing to collide with."""
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "hello"})
+        log.step({"kind": "tool", "name": "run_command"})
+        assert SessionLog.last_turn(log.path) == 0
+
+    def test_a_ratings_turn_id_is_a_different_namespace(self, tmp_path):
+        """`rating` records carry a top-level `turn` that is the CLIENT's event
+        id — a string naming a different thing. Reading it as the counter would
+        make the high-water mark depend on whether the owner tapped a thumb."""
+        log = SessionLog.new(tmp_path)
+        log.step({"kind": "tool", "turn": 2, "name": "run_command"})
+        log._record("rating", turn="t-abc123", rating="up")
+        assert SessionLog.last_turn(log.path) == 2
+
+
 class TestWriteLock:
     """SessionLog._record is reached from more than one thread (the agent
     worker logs the conversation while the event loop writes a rename or a
