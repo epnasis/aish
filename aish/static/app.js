@@ -3730,6 +3730,11 @@ function addRedactedMsg() {
 function attachmentStrip(notes) {
   const strip = document.createElement("div");
   strip.className = "msg-attachments";
+  // The pictures in THIS message are what a swipe moves between — the set the
+  // owner can see in front of them, not everything the chat ever carried.
+  const group = notes
+    .filter((n) => n.kind === "image" && imageSrc(n.path))
+    .map((n) => ({ src: imageSrc(n.path), name: n.name }));
   for (const note of notes) {
     const src = note.kind === "image" ? imageSrc(note.path) : null;
     if (src) {
@@ -3741,7 +3746,8 @@ function attachmentStrip(notes) {
       // A file that has since been deleted must not leave a broken-image glyph
       // where a photo was: fall back to naming it, which is still true.
       thumb.onerror = () => thumb.replaceWith(attachmentChip(note));
-      thumb.onclick = () => openPreview(src, note.name);
+      thumb.onclick = () =>
+        openPreview(src, note.name, group, group.findIndex((g) => g.src === src));
       strip.appendChild(thumb);
     } else {
       strip.appendChild(attachmentChip(note));
@@ -9019,7 +9025,10 @@ function renderAttachments() {
       chip.classList.add("attach-openable");
       chip.onclick = (event) => {
         if (event.target.closest("button")) return; // ✕ is not "open it"
-        openPreview(src, attachment.name);
+        const group = attachments
+          .filter((a) => ATTACH_IMAGE_RE.test(a.path || ""))
+          .map((a) => ({ src: imageSrc(a.path), name: a.name }));
+        openPreview(src, attachment.name, group, group.findIndex((g) => g.src === src));
       };
     }
     const remove = document.createElement("button");
@@ -9048,17 +9057,71 @@ function renderAttachments() {
 // Deliberately NOT a dismiss-on-tap-the-image overlay: long-press on the image
 // is how iOS offers Save Image, and a tap handler there makes that fiddly. The
 // backdrop, the ✕ and Escape all close it.
-function openPreview(src, name) {
+// `group` is the pictures this one belongs to — the images in the same message,
+// or the ones waiting in the composer — so a swipe can move between them.
+// Opening a lone picture passes nothing and the paging simply never engages.
+let previewGroup = [];
+let previewIndex = 0;
+
+function openPreview(src, name, group, index) {
   const box = $("preview");
   if (!box) return;
-  $("preview-img").src = src;
-  $("preview-img").alt = name || "";
-  $("preview-name").textContent = name || "";
+  previewGroup = Array.isArray(group) && group.length ? group : [{ src, name }];
+  previewIndex = Math.max(0, Math.min(previewGroup.length - 1, index || 0));
+  previewShow(previewIndex);
   box.hidden = false;
   // Every picture opens at fit. Inheriting the last one's zoom would show a
   // new photo already halfway into a corner ([PREVIEW-GESTURE]).
   previewReset();
 }
+
+// Put picture `i` on screen. The ONE writer of what the preview is showing —
+// the src, the name, the counter and the index all move together, and a
+// half-applied step (new picture, old name) is the kind of thing nobody
+// notices until they are trying to tell two photos apart.
+function previewShow(i) {
+  const item = previewGroup[i];
+  if (!item) return;
+  previewIndex = i;
+  $("preview-img").src = item.src;
+  $("preview-img").alt = item.name || "";
+  $("preview-name").textContent = item.name || "";
+  const counter = $("preview-count");
+  if (counter) {
+    // Only when there IS a set: "1 / 1" on a single photo is noise that also
+    // implies a swipe would do something.
+    counter.textContent = previewGroup.length > 1 ? `${i + 1} / ${previewGroup.length}` : "";
+    counter.hidden = previewGroup.length < 2;
+  }
+}
+
+function previewGroupState() {
+  return { count: previewGroup.length, index: previewIndex };
+}
+
+// Step to the next/previous picture: the current one slides out the way it was
+// pushed, the new one comes in from the other side. Done on the single <img>
+// rather than two elements — a viewer that keeps both loaded is a memory
+// problem on a phone for a nicety nobody asked for.
+function previewStep(direction) {
+  const box = previewBox();
+  const next = previewIndex + direction;
+  if (!box || !previewGroup[next]) return false;
+  previewState = { scale: 1, x: -direction * box.view.w, y: 0 };
+  previewPaint(true, 0, true);
+  setTimeout(() => {
+    previewShow(next);
+    previewState = { scale: 1, x: direction * box.view.w, y: 0 };
+    previewPaint(false, 0, true);      // placed off-screen with no animation…
+    requestAnimationFrame(() => {
+      previewState = { scale: 1, x: 0, y: 0 };
+      previewPaint(true);              // …then animated home
+    });
+  }, PREVIEW_SLIDE_MS);
+  return true;
+}
+
+const PREVIEW_SLIDE_MS = 200;
 
 function closePreview() {
   const box = $("preview");
@@ -9160,6 +9223,40 @@ function previewDrag(state, delta, view, natural) {
   return { scale: 1, x: 0, y: down, dismissing: down / PREVIEW_DISMISS_PX };
 }
 
+// Paging between the pictures in one message. Horizontal only at FIT — zoomed,
+// a sideways drag is a pan, and stealing it to change picture would make a
+// close look impossible to examine.
+//
+// No wrap: the ends resist instead. Wrapping saves a swipe and costs you the
+// knowledge of where you are in a set of three, which is the wrong trade for a
+// handful of photos.
+const PREVIEW_SWIPE_PX = 70;   // past this on release, the picture changes
+const PREVIEW_END_DRAG = 0.35; // how much the ends give, so they feel like ends
+
+function previewSwipe(delta, group) {
+  const atEnd =
+    (delta.x > 0 && group.index === 0) ||
+    (delta.x < 0 && group.index >= group.count - 1);
+  return { scale: 1, x: atEnd ? delta.x * PREVIEW_END_DRAG : delta.x, y: 0, swiping: true };
+}
+
+// Which way to step on release: -1 back, +1 on, 0 stay. A short drag stays,
+// and so does one against an end — the rubber-band already said so.
+function previewSwipeStep(x, group) {
+  if (Math.abs(x) < PREVIEW_SWIPE_PX) return 0;
+  if (x < 0 && group.index < group.count - 1) return 1;
+  if (x > 0 && group.index > 0) return -1;
+  return 0;
+}
+
+// Which axis a drag is committed to. Decided once, from the first movement
+// worth calling a direction, and then kept: a swipe that re-decides mid-drag
+// wobbles between paging and dismissing and does neither cleanly.
+function previewAxis(delta) {
+  if (Math.hypot(delta.x, delta.y) < 8) return null;
+  return Math.abs(delta.x) > Math.abs(delta.y) ? "x" : "y";
+}
+
 function previewDragEnds(state) {
   return state.scale <= 1.01 && state.y >= PREVIEW_DISMISS_PX;
 }
@@ -9246,7 +9343,7 @@ function previewReset() {
 // The one writer of what the preview looks like. `settle` animates — used when
 // letting go, never while a finger is down, where the picture must track it
 // exactly or the whole thing feels like it is lagging.
-function previewPaint(settle, dismissing = 0) {
+function previewPaint(settle, dismissing = 0, free = false) {
   const el = $("preview-img");
   const box = $("preview");
   if (!el || !box) return;
@@ -9259,7 +9356,7 @@ function previewPaint(settle, dismissing = 0) {
   //
   // The dismissal drag is the one deliberate exception: it is *supposed* to
   // carry the picture off the bottom of the screen.
-  if (!dismissing) {
+  if (!dismissing && !free) {
     const measured = previewBox();
     if (measured) previewState = previewClamp(previewState, measured.view, measured.natural);
   }
@@ -9327,6 +9424,20 @@ function previewMove(event) {
   if (!previewDragFrom) return;
   const delta = { x: event.clientX - previewDragFrom.x, y: event.clientY - previewDragFrom.y };
   if (Math.hypot(delta.x, delta.y) > 6) previewDragFrom.moved = true;
+  // At FIT with a set to move through, a sideways drag pages instead of
+  // dismissing. The axis is committed once ([PREVIEW-GESTURE]).
+  previewDragFrom.axis = previewDragFrom.axis || previewAxis(delta);
+  const paging =
+    previewDragFrom.state.scale <= 1.01 &&
+    previewGroup.length > 1 &&
+    previewDragFrom.axis === "x";
+  if (paging) {
+    const swipe = previewSwipe(delta, previewGroupState());
+    previewState = { scale: 1, x: swipe.x, y: 0 };
+    previewDragFrom.paging = true;
+    previewPaint(false, 0, true);
+    return;
+  }
   const next = previewDrag(
     { ...previewDragFrom.state, x: previewDragFrom.state.x, y: previewDragFrom.state.y },
     delta, box.view, box.natural,
@@ -9346,6 +9457,16 @@ function previewUp(event) {
 
   if (drag.moved) {
     previewSnapshot();
+    if (drag.paging) {
+      const step = previewSwipeStep(previewState.x, previewGroupState());
+      // Not far enough, or against an end: the picture goes back, which is the
+      // answer to "was that a swipe?" — visibly, it was not.
+      if (!step || !previewStep(step)) {
+        previewState = { scale: 1, x: 0, y: 0 };
+        previewPaint(true);
+      }
+      return;
+    }
     if (previewDragEnds(previewState)) { closePreview(); return; }
     // Not far enough: the picture goes back where it was, which is the answer
     // to "did that do anything?" — it visibly did not.

@@ -265,6 +265,9 @@
 <div id="preview" hidden>
   <div id="preview-bar">
     <span id="preview-name"></span>
+    <!-- "2 / 3" while there is a set to move through; silent for a lone
+         picture, where it would imply a swipe does something. -->
+    <span id="preview-count" hidden></span>
     <button id="preview-close" type="button" aria-label="close preview">
       <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
     </button>

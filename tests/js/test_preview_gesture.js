@@ -227,6 +227,40 @@ function lands(before, after, p, size) {
     near(landed, to.x, 1));
 }
 
+// ---- paging between the pictures in one message ---------------------------
+{
+  const mid = { count: 3, index: 1 };
+  ok("a sideways drag carries the picture with the finger",
+    s.previewSwipe({ x: -90, y: 4 }, mid).x === -90);
+  ok("…and past the threshold it steps on", s.previewSwipeStep(-90, mid) === 1);
+  ok("…the other way, back", s.previewSwipeStep(90, mid) === -1);
+  ok("a short drag is not a swipe", s.previewSwipeStep(-40, mid) === 0);
+}
+
+{
+  // No wrap: the ends resist instead. Wrapping saves a swipe and costs you the
+  // knowledge of where you are in a set of three.
+  const first = { count: 3, index: 0 };
+  const last = { count: 3, index: 2 };
+  ok("the first picture resists being pulled backwards",
+    Math.abs(s.previewSwipe({ x: 100, y: 0 }, first).x) < 100);
+  ok("…and does not step", s.previewSwipeStep(100, first) === 0);
+  ok("the last resists being pulled onwards",
+    Math.abs(s.previewSwipe({ x: -100, y: 0 }, last).x) < 100);
+  ok("…and does not step", s.previewSwipeStep(-100, last) === 0);
+  ok("but a middle one gives the full travel, so the ends FEEL like ends",
+    s.previewSwipe({ x: 100, y: 0 }, { count: 3, index: 1 }).x === 100);
+}
+
+{
+  // The axis is committed once. A drag that re-decides mid-gesture wobbles
+  // between paging and dismissing and does neither cleanly.
+  ok("a mostly-sideways drag is a page", s.previewAxis({ x: 40, y: 9 }) === "x");
+  ok("a mostly-downward one is a dismissal", s.previewAxis({ x: 9, y: 40 }) === "y");
+  ok("and a touch that has barely moved commits to neither yet",
+    s.previewAxis({ x: 3, y: 3 }) === null);
+}
+
 // ---- the trap the maths above CANNOT catch --------------------------------
 // Every function here is handed a `view`. The bug that let the picture escape
 // was in the code that MEASURES it: getBoundingClientRect() on the image
