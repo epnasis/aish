@@ -116,7 +116,11 @@ echo "→ restarted ${LABEL}"
 # probing 127.0.0.1 reports a false failure) — ask the kernel what it listens
 # on, retrying while it comes back up.
 for _ in $(seq 1 10); do
-    addr="$(netstat -an | awk "/\.${PORT}.*LISTEN/{print \$4; exit}" | sed "s/\.${PORT}\$//")"
+    # `awk … {exit}` closed the pipe while netstat was still writing, so netstat
+    # died of SIGPIPE and `pipefail` made that 141 the SCRIPT's exit status: a
+    # successful ship reported as a failed one, intermittently, depending on how
+    # much netstat had buffered. Take the first match without closing the pipe.
+    addr="$(netstat -an | awk "/\.${PORT}.*LISTEN/ && !seen++{print \$4}" | sed "s/\.${PORT}\$//")"
     if [ -n "$addr" ]; then
         [ "$addr" = "*" ] && addr=127.0.0.1
         code="$(curl -s -o /dev/null --connect-timeout 5 -w '%{http_code}' "http://${addr}:${PORT}/")"
