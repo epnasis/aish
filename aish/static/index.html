@@ -269,7 +269,11 @@
       <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
     </button>
   </div>
-  <img id="preview-img" alt="">
+  <!-- draggable=false is load-bearing, not tidiness: dragging an <img> starts
+       the browser's native image drag-and-drop, which fires pointercancel and
+       ENDS the gesture — exactly one move was applied and a 220px drag
+       registered as 18px. -->
+  <img id="preview-img" alt="" draggable="false">
 </div>
 
 <div id="backdrop" hidden></div>

@@ -30,13 +30,16 @@ function world() {
   };
   els.preview.hidden = true;
   els["preview-img"].removeAttribute = function (attr) { delete this[attr]; };
-  const sandbox = { $: (id) => els[id] || null };
+  // The gesture layer resets the transform on open/close; its own maths is
+  // test_preview_gesture.js's business, so it is recorded here, not run.
+  const resets = [];
+  const sandbox = { $: (id) => els[id] || null, previewReset: () => resets.push(1) };
   vm.createContext(sandbox);
   vm.runInContext(
     surface(extract(appSource(), "// [PREVIEW-START]", "// [PREVIEW-END]")),
     sandbox,
   );
-  return { s: sandbox, els };
+  return { s: sandbox, els, resets };
 }
 
 // ---- opening ---------------------------------------------------------------
@@ -51,6 +54,8 @@ function world() {
   ok("…and an alt for anyone not looking at it",
     w.els["preview-img"].alt === "IMG_4021.jpg");
   ok("previewIsOpen agrees", w.s.previewIsOpen() === true);
+  ok("…and the zoom is reset, or a new picture opens halfway into a corner",
+    w.resets.length === 1);
 }
 
 // ---- closing ---------------------------------------------------------------
@@ -86,7 +91,7 @@ function world() {
 {
   // The offline shell and the tests both build partial DOMs; a preview that
   // throws would take the caller (a chip's onclick) with it.
-  const sandbox = { $: () => null };
+  const sandbox = { $: () => null, previewReset: () => {} };
   vm.createContext(sandbox);
   vm.runInContext(
     surface(extract(appSource(), "// [PREVIEW-START]", "// [PREVIEW-END]")),

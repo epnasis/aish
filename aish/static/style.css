@@ -1520,9 +1520,23 @@ body.offline #composer { opacity: 0.55; }
   /* contain, so a tall photo is whole rather than cropped — the point of a
      preview is seeing all of it. */
   object-fit: contain;
-  /* Long-press still offers Save Image on iOS, which is why the image itself
-     is not a dismiss target. */
+  /* The browser must not claim the gestures: no page pan, no double-tap zoom
+     of its own, no long-press callout stealing the drag. Save Image on a real
+     long-press still works — that is a system menu, not a web callout. */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  /* Same reason as draggable=false in the markup: a native image drag cancels
+     the pointer and the gesture dies after one frame. */
+  -webkit-user-drag: none;
+  will-change: transform;
 }
+/* Only while LETTING GO. A transition during the drag makes the picture lag
+   behind the finger, which reads as the app being slow rather than smooth. */
+#preview-img.settling {
+  transition: transform 0.22s cubic-bezier(0.2, 0.7, 0.3, 1), opacity 0.22s ease;
+}
+#preview { touch-action: none; }
 
 /* Dragging a file over the window. The whole window is the drop target, so the
    feedback has to be at that scale too — a highlight on the composer alone

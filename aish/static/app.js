@@ -7227,12 +7227,15 @@ function attachInputListeners(el) {
 attachInputListeners(input);
 installFileDrop(window, document.body);
 
-// Closing the preview: the ✕, or the surround. Not the image itself — that is
-// where iOS long-press offers Save Image ([PREVIEW]).
+// The preview's own input. The ✕ is a plain button; everything else is
+// pointer-driven ([PREVIEW-GESTURE]) — a click handler alongside it would fire
+// a second time at the end of every drag and tap.
 $("preview-close").onclick = closePreview;
-$("preview").onclick = (event) => {
-  if (event.target.id !== "preview-img") closePreview();
-};
+$("preview").addEventListener("pointerdown", previewDown);
+$("preview").addEventListener("pointermove", previewMove, { passive: false });
+$("preview").addEventListener("pointerup", previewUp);
+$("preview").addEventListener("pointercancel", previewUp);
+$("preview").addEventListener("wheel", previewWheel, { passive: false });
 
 function atFragment(text) {
   const at = text.lastIndexOf("@");
@@ -9000,6 +9003,9 @@ function openPreview(src, name) {
   $("preview-img").alt = name || "";
   $("preview-name").textContent = name || "";
   box.hidden = false;
+  // Every picture opens at fit. Inheriting the last one's zoom would show a
+  // new photo already halfway into a corner ([PREVIEW-GESTURE]).
+  previewReset();
 }
 
 function closePreview() {
@@ -9009,6 +9015,7 @@ function closePreview() {
   // Drop the bytes' claim on memory, and make sure a stale picture can never
   // flash when the next one is opened.
   $("preview-img").removeAttribute("src");
+  previewReset();
   return true;
 }
 
@@ -9017,6 +9024,249 @@ function previewIsOpen() {
   return !!box && !box.hidden;
 }
 // [PREVIEW-END]
+
+// [PREVIEW-GESTURE-START]
+// The gestures every photo viewer has, and which one without them is judged
+// against: double-tap to zoom (and again to fit), drag to pan while zoomed,
+// pinch to zoom by hand, and — at fit — a drag DOWN that carries the picture
+// with your finger and lets go of it.
+//
+// The transform is modelled as pure functions over {scale, x, y} so the maths
+// can be checked without a browser: the interesting failures here are not
+// "does it move" but "does it move to the RIGHT place" — a zoom that does not
+// keep the tapped detail under the finger, or a pan that lets the picture
+// wander off into the black.
+//
+// Coordinates are relative to the IMG's own box (not the viewport), and the
+// origin is its centre, which is where a CSS transform scales from.
+const PREVIEW_ZOOM = 2.5;      // what a double-tap goes to; Photos-ish
+const PREVIEW_MAX_ZOOM = 6;
+const PREVIEW_DISMISS_PX = 100; // drag further than this at fit and it closes
+const PREVIEW_TAP_MS = 300;     // two taps inside this are a double-tap
+const PREVIEW_TAP_SLOP = 24;    // …and within this distance of each other
+
+// The picture as actually drawn at scale 1. `object-fit: contain` letterboxes
+// it, and panning must be bounded by the PICTURE rather than by the element —
+// bounding by the element lets you drag the image off into the empty margin,
+// which feels broken in a way that is hard to name.
+function previewContent(view, natural) {
+  if (!natural.w || !natural.h || !view.w || !view.h) return { w: view.w, h: view.h };
+  const ratio = natural.w / natural.h;
+  const w = Math.min(view.w, view.h * ratio);
+  return { w, h: w / ratio };
+}
+
+// Keep the picture covering the screen: no offset that would show black where
+// the picture could be. Below fit scale there is nothing to pan, so it centres.
+function previewClamp(state, view, natural) {
+  const content = previewContent(view, natural);
+  const maxX = Math.max(0, (content.w * state.scale - view.w) / 2);
+  const maxY = Math.max(0, (content.h * state.scale - view.h) / 2);
+  return {
+    scale: state.scale,
+    x: Math.min(maxX, Math.max(-maxX, state.x)),
+    y: Math.min(maxY, Math.max(-maxY, state.y)),
+  };
+}
+
+// Scale about `point`, leaving whatever is under it exactly where it is. This
+// is the difference between "zoom" and "zoom to the middle and hunt for the bit
+// you wanted": double-tapping a face should enlarge THAT face.
+function previewZoomAt(state, scale, point, view, natural) {
+  scale = Math.min(PREVIEW_MAX_ZOOM, Math.max(1, scale));
+  const k = scale / state.scale;
+  return previewClamp({
+    scale,
+    x: (point.x - view.w / 2) * (1 - k) + state.x * k,
+    y: (point.y - view.h / 2) * (1 - k) + state.y * k,
+  }, view, natural);
+}
+
+// A double-tap toggles: zoomed in anywhere goes back to fit, which is what
+// every viewer does and saves a pinch-out to escape.
+function previewToggleZoom(state, point, view, natural) {
+  const target = state.scale > 1.01 ? 1 : PREVIEW_ZOOM;
+  return previewZoomAt(state, target, point, view, natural);
+}
+
+// A drag at fit scale is a dismissal in progress: the picture follows the
+// finger and the background fades, so it is obvious what letting go will do.
+// Once ZOOMED the same drag is a pan instead — a picture you are examining
+// must not fall out of the window because you looked at its bottom edge.
+function previewDrag(state, delta, view, natural) {
+  if (state.scale > 1.01) {
+    return {
+      ...previewClamp({ scale: state.scale, x: state.x + delta.x, y: state.y + delta.y },
+        view, natural),
+      dismissing: 0,
+    };
+  }
+  // Only downward carries the picture: sideways at fit does nothing (there is
+  // no next photo to page to), and upward is left alone.
+  const down = Math.max(0, delta.y);
+  return { scale: 1, x: 0, y: down, dismissing: down / PREVIEW_DISMISS_PX };
+}
+
+function previewDragEnds(state) {
+  return state.scale <= 1.01 && state.y >= PREVIEW_DISMISS_PX;
+}
+
+// Two fingers: scale by how much they spread, about the point between them.
+function previewPinch(state, startState, ratio, point, view, natural) {
+  return previewZoomAt(startState, startState.scale * ratio, point, view, natural);
+}
+// [PREVIEW-GESTURE-END]
+
+// The DOM half of the preview gestures. Everything above is arithmetic; this
+// is the part that has to know about fingers. Pointer events rather than touch
+// events so a mouse gets the same behaviour for free (double-CLICK to zoom,
+// drag to pan, wheel to scale) — and so two fingers are just two pointer ids
+// instead of a second event family.
+let previewState = { scale: 1, x: 0, y: 0 };
+const previewPointers = new Map();
+let previewDragFrom = null;   // {x, y, state, moved} while one finger is down
+let previewPinchFrom = null;  // {dist, state} while two are
+let previewLastTap = 0;
+let previewLastTapAt = { x: 0, y: 0 };
+
+function previewBox() {
+  const el = $("preview-img");
+  if (!el || !el.getBoundingClientRect) return null;
+  const rect = el.getBoundingClientRect();
+  return {
+    view: { w: rect.width, h: rect.height },
+    natural: { w: el.naturalWidth || 0, h: el.naturalHeight || 0 },
+    rect,
+  };
+}
+
+function previewReset() {
+  previewState = { scale: 1, x: 0, y: 0 };
+  previewPointers.clear();
+  previewDragFrom = previewPinchFrom = null;
+  previewPaint(false);
+}
+
+// The one writer of what the preview looks like. `settle` animates — used when
+// letting go, never while a finger is down, where the picture must track it
+// exactly or the whole thing feels like it is lagging.
+function previewPaint(settle, dismissing = 0) {
+  const el = $("preview-img");
+  const box = $("preview");
+  if (!el || !box) return;
+  if (el.classList) el.classList.toggle("settling", !!settle);
+  if (el.style) {
+    el.style.transform =
+      `translate(${previewState.x}px, ${previewState.y}px) scale(${previewState.scale})`;
+    // Fading the surround as it is dragged away is what says "let go and this
+    // closes" without a word of instruction.
+    el.style.opacity = String(Math.max(0.3, 1 - dismissing * 0.6));
+  }
+  if (box.style) box.style.background = `rgba(0, 0, 0, ${Math.max(0.35, 1 - dismissing * 0.7)})`;
+}
+
+function previewPoint(event, rect) {
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
+
+function previewDown(event) {
+  if (event.target.closest && event.target.closest("#preview-bar")) return; // the ✕
+  const box = previewBox();
+  if (!box) return;
+  previewPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  // Deliberately NO setPointerCapture. Capturing on the <img> looked like the
+  // careful thing to do and silently broke every drag: the capture was lost a
+  // frame later (a transformed capture target), the lostpointercapture came
+  // with a pointercancel, and that ended the gesture — so exactly ONE move was
+  // ever applied and a 220px drag registered as 18px. The overlay is
+  // full-screen and the listeners are on it, so the pointer has nowhere to
+  // escape to and capture buys nothing.
+  if (previewPointers.size === 2) {
+    const [a, b] = [...previewPointers.values()];
+    previewPinchFrom = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, state: previewState };
+    previewDragFrom = null;
+    return;
+  }
+  previewDragFrom = { x: event.clientX, y: event.clientY, state: previewState, moved: false };
+}
+
+function previewMove(event) {
+  const box = previewBox();
+  if (!box || !previewPointers.has(event.pointerId)) return;
+  previewPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  event.preventDefault();
+
+  if (previewPointers.size >= 2 && previewPinchFrom) {
+    const [a, b] = [...previewPointers.values()];
+    const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+    const mid = { x: (a.x + b.x) / 2 - box.rect.left, y: (a.y + b.y) / 2 - box.rect.top };
+    previewState = previewPinch(
+      previewState, previewPinchFrom.state, dist / previewPinchFrom.dist,
+      mid, box.view, box.natural,
+    );
+    previewPaint(false);
+    return;
+  }
+  if (!previewDragFrom) return;
+  const delta = { x: event.clientX - previewDragFrom.x, y: event.clientY - previewDragFrom.y };
+  if (Math.hypot(delta.x, delta.y) > 6) previewDragFrom.moved = true;
+  const next = previewDrag(
+    { ...previewDragFrom.state, x: previewDragFrom.state.x, y: previewDragFrom.state.y },
+    delta, box.view, box.natural,
+  );
+  previewState = { scale: next.scale, x: next.x, y: next.y };
+  previewPaint(false, next.dismissing || 0);
+}
+
+function previewUp(event) {
+  const box = previewBox();
+  previewPointers.delete(event.pointerId);
+  if (previewPointers.size < 2) previewPinchFrom = null;
+  if (!box || !previewDragFrom) return;
+  const drag = previewDragFrom;
+  previewDragFrom = null;
+  if (previewPointers.size) return; // still pinching with the other finger
+
+  if (drag.moved) {
+    if (previewDragEnds(previewState)) { closePreview(); return; }
+    // Not far enough: the picture goes back where it was, which is the answer
+    // to "did that do anything?" — it visibly did not.
+    previewState = previewClamp(previewState, box.view, box.natural);
+    if (previewState.scale <= 1.01) previewState = { scale: 1, x: 0, y: 0 };
+    previewPaint(true);
+    return;
+  }
+
+  // A tap. Two in quick succession, close together, toggle the zoom.
+  const now = Date.now();
+  const near = Math.hypot(event.clientX - previewLastTapAt.x, event.clientY - previewLastTapAt.y);
+  if (now - previewLastTap < PREVIEW_TAP_MS && near < PREVIEW_TAP_SLOP) {
+    previewLastTap = 0;
+    previewState = previewToggleZoom(
+      previewState, previewPoint(event, box.rect), box.view, box.natural,
+    );
+    previewPaint(true);
+    return;
+  }
+  previewLastTap = now;
+  previewLastTapAt = { x: event.clientX, y: event.clientY };
+  // A single tap on the SURROUND closes; on the picture it does nothing, so
+  // long-press there still offers Save Image ([PREVIEW]).
+  if (event.target && event.target.id !== "preview-img" && previewState.scale <= 1.01) {
+    setTimeout(() => { if (previewLastTap === now) closePreview(); }, PREVIEW_TAP_MS);
+  }
+}
+
+function previewWheel(event) {
+  const box = previewBox();
+  if (!box) return;
+  event.preventDefault();
+  const scale = previewState.scale * (event.deltaY < 0 ? 1.15 : 1 / 1.15);
+  previewState = previewZoomAt(
+    previewState, scale, previewPoint(event, box.rect), box.view, box.natural,
+  );
+  previewPaint(false);
+}
 
 // A file name a chip cannot show in full, shortened from the MIDDLE. The end of
 // a name is where it differs — IMG_4021 vs IMG_4022, "-final" vs "-final-2",
