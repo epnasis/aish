@@ -26,7 +26,7 @@
 
 `/learn` and `/feedback` are parsed into flow prompts by `parse_learn` and `parse_feedback` (`TestParseLearn`, `TestParseFeedback`). `parse_feedback` takes `block_flow`/`attachments` flags that the CLI always passes as neither — the block flow is web-only, because the classic flow's `gh issue create` has to upload assets. See `docs/web-server.md`.
 
-**Rendering.** `stream_line` and `echo` handle live output, `colorize_diff` the write cards, `print_sources` the citations a `read_url` turn accumulated, `print_answer_images` the inline images (through `term_image`, see `docs/media-and-images.md`), and `replay_history` reprints a resumed session. Quick-reply chips are parsed by `parse_reply_chips` and offered as a numbered menu rather than tappable buttons. `TestLiveTimer`.
+**Rendering.** `stream_line` and `echo` handle live output, `colorize_diff` the write cards, `print_sources` the citations a `read_url` turn accumulated, `print_answer_images` the inline images (through `term_image`, see `docs/media-and-images.md`), and `replay_history` reprints a resumed session — through `strip_attachment_notes`/`attachment_names`, since a session started on the web carries per-file notes addressed to the model, and reprinting those verbatim showed them as if the user had typed them (`docs/session-log.md`). Quick-reply chips are parsed by `parse_reply_chips` and offered as a numbered menu rather than tappable buttons. `TestLiveTimer`.
 
 ---
 

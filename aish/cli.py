@@ -37,7 +37,7 @@ from .approval import (
     unvetted_segments,
 )
 from .embeddings import SemanticIndex
-from .session import SessionInfo, SessionLog
+from .session import SessionInfo, SessionLog, attachment_names, strip_attachment_notes
 from .skills import GLOBAL_SKILLS_DIR
 
 if TYPE_CHECKING:
@@ -747,7 +747,16 @@ def replay_history(messages: list[dict]) -> list[tuple[str, str]]:
             continue
         if role == "user":
             pending = []
-            print(f"\n{BOLD}❯{RESET} {content}")
+            # A turn that carried attachments has a line per file appended to it
+            # FOR THE MODEL. Resuming a web session in the terminal printed those
+            # back as if the user had typed them, absolute uploads path and all —
+            # so show what was typed, and name the files as files.
+            typed = strip_attachment_notes(content)
+            files = attachment_names(content)
+            if files:
+                typed = f"{typed} {DIM}[{', '.join(files)}]{RESET}" if typed \
+                    else f"{DIM}[{', '.join(files)}]{RESET}"
+            print(f"\n{BOLD}❯{RESET} {typed}")
         elif role == "assistant":
             content, pending = parse_reply_chips(content)
             print(f"{GREEN}{content}{RESET}")

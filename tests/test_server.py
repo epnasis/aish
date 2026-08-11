@@ -3301,6 +3301,218 @@ class TestUpload:
             )
 
 
+class TestShareInbox:
+    """POST /share (#213) — the iPhone share sheet's way in.
+
+    iOS cannot register a PWA as a share target, so this is what an iOS
+    Shortcut posts to. The property every test here defends is that a share
+    is PARKED: it stores a file and announces it, and starts nothing. If a
+    change ever makes a share run something, `test_a_share_starts_nothing`
+    is the one that should stop it.
+    """
+
+    def test_share_parks_a_file_and_announces_it(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            assert hello["shares"] == []  # nothing shared yet
+            response = client.post("/share?name=photo.png&source=iPhone", content=b"\x89PNG")
+            assert response.status_code == 200
+            announced = recv_until(ws, "shared")
+            assert len(announced["items"]) == 1
+            item = announced["items"][0]
+            assert item["name"] == "photo.png"
+            assert item["source"] == "iPhone"
+            # Stored where an uploaded file goes, so it is already inside a
+            # session root and classifies identically.
+            server = client.app.state.server
+            assert Path(item["path"]).parent == server.uploads_dir
+            assert Path(item["path"]).read_bytes() == b"\x89PNG"
+
+    def test_a_share_starts_nothing(self, app_env):
+        """The security property: the share sheet stages work, it does not
+        become a way for any app on the phone to run an agent."""
+        client, chat = make_client(app_env, [model_says("should never run")])
+        with client:
+            before = list(client.app.state.server.sessions)
+            client.post("/share?name=photo.png", content=b"\x89PNG")
+            client.post("/share?text=https://example.com/article")
+            assert list(client.app.state.server.sessions) == before  # no new session
+            assert chat.calls == []  # and no model call
+
+    def test_shared_text_needs_no_file(self, app_env):
+        """iOS shares a URL far more often than a file."""
+        client, _ = make_client(app_env, [])
+        with client:
+            response = client.post("/share?text=https://example.com/thing")
+            assert response.status_code == 200
+            assert response.json()["path"] == ""
+            item = client.app.state.server.shares[0]
+            assert item["text"] == "https://example.com/thing"
+            assert item["name"] == "https://example.com/thing"  # what the chip shows
+
+    def test_a_body_with_no_name_is_text(self, app_env):
+        """Safari shares a URL, and percent-encoding one into a query string
+        inside Shortcuts works right up until the link contains an `&`. So the
+        body carries it, and `name` is what says whether a body is a file."""
+        client, _ = make_client(app_env, [])
+        with client:
+            link = "https://example.com/x?a=1&b=2"
+            response = client.post("/share?source=Safari", content=link.encode())
+            assert response.status_code == 200
+            assert response.json()["path"] == ""  # nothing was stored as a file
+            item = client.app.state.server.shares[0]
+            assert item["text"] == link  # the `&` survived intact
+
+    def test_oversized_shared_text_says_it_was_cut(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            client.post("/share", content=b"x" * (server_module.SHARE_TEXT_MAX + 500))
+            text = client.app.state.server.shares[0]["text"]
+            assert len(text) < server_module.SHARE_TEXT_MAX + 100
+            assert text.endswith("… (truncated by aish)")  # never a silent cut
+
+    def test_share_rejects_empty_bad_name_and_bad_token(self, app_env):
+        client, _ = make_client(app_env, [], token="s3cret")
+        with client:
+            assert client.post("/share?name=a.txt", content=b"x").status_code == 403
+            assert client.post("/share?token=s3cret").status_code == 400  # nothing in it
+            assert (
+                client.post("/share?token=s3cret&name=.hidden", content=b"x").status_code
+                == 400
+            )
+            # A name is data from the network: components are stripped, never walked.
+            response = client.post(
+                "/share?token=s3cret&name=../../evil.txt", content=b"x"
+            )
+            assert response.status_code == 200
+            assert response.json()["path"].endswith("uploads/evil.txt")
+
+    def test_hello_carries_unclaimed_shares(self, app_env):
+        """The normal case is a share arriving with nothing connected, so the
+        broadcast alone would only ever reach a tab that happened to be open."""
+        client, _ = make_client(app_env, [])
+        with client:
+            client.post("/share?name=note.txt", content=b"hi")
+            with connected(client) as (_, hello, _):
+                assert [s["name"] for s in hello["shares"]] == ["note.txt"]
+
+    def test_drop_clears_it_for_every_device(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            client.post("/share?name=note.txt", content=b"hi")
+            item = recv_until(ws, "shared")["items"][0]
+            with client.websocket_connect(f"/ws?token={TEST_TOKEN}") as other:
+                other.receive_json(), other.receive_json()  # hello + replay
+                ws.send_json({"type": "share_drop", "id": item["id"]})
+                assert recv_until(ws, "shared")["items"] == []
+                # The other device's chip has to go too — one inbox, two viewers.
+                assert recv_until(other, "shared")["items"] == []
+            assert client.app.state.server.shares == []
+            # The file stays: a claimed share is now an attachment the composer
+            # holds by path, and a dismissed one is just a file in uploads.
+            assert Path(item["path"]).exists()
+
+    def test_share_drop_never_claims_control(self, app_env):
+        """A VIEW message: it acts on the server's inbox, not on any chat."""
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            client.post("/share?name=note.txt", content=b"hi")
+            item = recv_until(ws, "shared")["items"][0]
+            session = client.app.state.server.active
+            session.controller = None
+            ws.send_json({"type": "share_drop", "id": item["id"]})
+            recv_until(ws, "shared")
+            assert session.controller is None
+
+    def test_inbox_survives_a_restart(self, app_env):
+        """aish-web is a launchd job; a share made at lunchtime is claimed in
+        the evening, with a restart in between."""
+        client, _ = make_client(app_env, [])
+        with client:
+            client.post("/share?name=note.txt", content=b"hi")
+        again, _ = make_client(app_env, [])
+        with again, connected(again) as (_, hello, _):
+            assert [s["name"] for s in hello["shares"]] == ["note.txt"]
+
+    def test_a_corrupt_inbox_does_not_stop_the_server(self, app_env):
+        state = app_env["state_dir"]
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "shares.json").write_text("{not json at all")
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (_, hello, _):
+            assert hello["shares"] == []
+
+    def test_old_and_excess_shares_are_pruned(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            server = client.app.state.server
+            expired = time.time() - server_module.SHARE_TTL_S - 1
+            server.shares = [
+                {"id": "ancient", "name": "old.txt", "at": expired},
+                {"id": "fresh", "name": "new.txt", "at": time.time()},
+            ]
+            assert [s["id"] for s in server.shares_snapshot()] == ["fresh"]
+            server.shares = [
+                {"id": str(i), "name": f"{i}.txt", "at": time.time()}
+                for i in range(server_module.SHARE_MAX_ITEMS + 5)
+            ]
+            server._prune_shares()
+            assert len(server.shares) == server_module.SHARE_MAX_ITEMS
+            assert server.shares[0]["id"] == "5"  # oldest dropped, newest kept
+
+    def test_a_shared_image_is_attachable_like_any_upload(self, app_env):
+        """The point of storing shares in the uploads dir: once claimed, a
+        shared photo goes native exactly as a picked one does."""
+        client, chat = make_client(app_env, [model_says("I see it")])
+        with client:
+            shared = client.post("/share?name=photo.png", content=b"\x89PNG-fake").json()
+            with connected(client) as (ws, _, _):
+                ws.send_json(
+                    {"type": "task", "text": "what is this?", "attachments": [shared["path"]]}
+                )
+                assert "you can see it" in recv_until(ws, "user")["text"]
+                recv_until(ws, "done")
+            sent = [m for m in chat.calls[0]["messages"] if m["role"] == "user"][-1]
+            assert sent.get("images") == [shared["path"]]
+
+
+class TestAttachmentNoteFormat:
+    """The note the server appends to a turn carrying attachments.
+
+    It is written for the MODEL, but the frontend has to render the turn
+    without it (`[ATTACHMENT-NOTES]` in docs/web-frontend.md) and parses these
+    exact strings to do it. That makes the format a cross-language contract
+    with no shared code to enforce it, so it is pinned from both sides: here,
+    and in tests/js/test_attachment_notes.js. Change one and this fails.
+    """
+
+    NATIVE_IMAGE = "[image attached: {name} — you can see it; file at {path}]"
+    NATIVE_DOC = "[document attached: {name} — you can read it; file at {path}]"
+    PLAIN = "[attached file: {path}]"
+
+    def test_notes_match_the_shapes_the_frontend_parses(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            server = client.app.state.server
+            image = Path(client.post("/upload?name=cat.png", content=b"\x89PNG").json()["path"])
+            outside = Path(app_env["cwd"]) / "elsewhere.txt"
+            outside.write_text("x")
+            _, _, notes = server._classify_attachments(server.active.agent, [
+                str(image), str(outside),
+            ])
+            assert notes == [
+                self.NATIVE_IMAGE.format(name=image.name, path=image),
+                self.PLAIN.format(path=outside),
+            ]
+
+    def test_the_document_note_shape_is_pinned_too(self, app_env):
+        """The test provider has no pdf support, so the shape is asserted
+        against the string the code builds rather than through a live turn —
+        the frontend parses it either way."""
+        source = Path(server_module.__file__).read_text()
+        assert self.NATIVE_DOC.replace("{name}", "{path.name}") in source
+
+
 class TestFileEndpoint:
     """GET /file (issue #9): images the model generated render inline in the
     transcript — scoped to the active session's roots, like approval."""

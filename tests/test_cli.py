@@ -401,6 +401,28 @@ def test_replay_history_shows_roles_and_truncates_tools(capsys):
     assert "more lines" in out
 
 
+def test_replay_names_attachments_instead_of_printing_the_models_note(capsys):
+    """Resuming a web session in the terminal printed the note aish wrote to
+    the model as if the user had typed it, uploads path and all."""
+    from aish.cli import replay_history
+
+    replay_history(
+        [
+            {
+                "role": "user",
+                "content": "what is this?\n\n"
+                "[image attached: cat.png — you can see it; file at /u/uploads/cat.png]",
+            },
+            {"role": "assistant", "content": "a cat"},
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "what is this?" in out
+    assert "cat.png" in out  # the file is still accounted for…
+    assert "you can see it" not in out  # …but not the sentence about it
+    assert "/uploads/" not in out
+
+
 def test_resume_skips_empty_sessions(tmp_path, capsys):
     from aish.agent import Agent
     from aish.cli import LogRef, handle_slash

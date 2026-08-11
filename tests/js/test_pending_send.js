@@ -111,7 +111,9 @@ function world() {
   vm.createContext(sandbox);
   // The real code: the block under test plus the two helpers it leans on.
   vm.runInContext(slice("function addMsg(kind, text) {", "// The prompt that started"), sandbox);
-  vm.runInContext(slice("function stripAttachmentNotes(text) {", "function rememberPrompt("), sandbox);
+  // The whole [ATTACHMENT-NOTES] block: stripAttachmentNotes is a wrapper over
+  // splitAttachmentNotes, and reconciliation matches on the stripped body.
+  vm.runInContext(slice("// [ATTACHMENT-NOTES-START]", "function rememberPrompt("), sandbox);
   // surface(): a vm context hides top-level const/let, and this block's held
   // store is one — the scenarios below read it to tell "held" from "handed
   // back", which is the whole distinction the duplicate came from.

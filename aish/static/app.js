@@ -1313,7 +1313,11 @@ function handle(event) {
       // A synthetic turn is aish's own text (a resume note, an automation's
       // trigger prompt), so it must not seed the chat title or the composer's
       // prompt history — both are records of what YOU asked (#171).
-      if (!sessionTitled && event.synthetic !== "resume") setTitle(event.text.split("\n")[0]);
+      // Stripped first: a photo sent with no words would otherwise title the
+      // chat with the note aish wrote to itself, path and all.
+      if (!sessionTitled && event.synthetic !== "resume") {
+        setTitle((stripAttachmentNotes(event.text) || event.text).split("\n")[0]);
+      }
       if (!event.synthetic) rememberPrompt(stripAttachmentNotes(event.text));
       lastUserPrompt = stripAttachmentNotes(event.text); // for error Retry
       // A user-direct `!` command is already fully shown by the terminal block
@@ -1338,6 +1342,9 @@ function handle(event) {
       addQueueChip(event.text);
       break;
     case "dequeued": removeQueueChip(event.text); break;
+    // The share inbox is server-owned and not per-chat: every repaint is the
+    // full list, so a claim on the phone clears the chip on the laptop too.
+    case "shared": renderShares(event.items || []); break;
     case "cwd_queued": addCwdChip(event.path); break;
     case "cwd_dequeued": removeCwdChip(); break;
     case "token": onToken(event.text); break;
@@ -1909,6 +1916,9 @@ function onHello(event) {
   // hide the indicator — this tab is the presumed driver.
   setRolePill(false);
   updateEmptyHint();
+  // A share almost always arrives with nothing connected, so hello — not the
+  // broadcast — is how it is normally first seen (#213).
+  renderShares(event.shares || []);
   hideBootLoader(); // connected and about to replay — drop the first-paint spinner
   schedulePeeks(); // warm the swipe neighbors once this view settles
 }
@@ -3674,11 +3684,55 @@ function addRedactedMsg() {
 }
 // [REDACT-END]
 
+// What you attached, shown as what it is: a thumbnail for an image, a named
+// chip for anything else. Tapping an image opens it full size through the same
+// token-gated /file endpoint the transcript's inline images use — no second
+// policy for where a local path may be loaded from.
+function attachmentStrip(notes) {
+  const strip = document.createElement("div");
+  strip.className = "msg-attachments";
+  for (const note of notes) {
+    const src = note.kind === "image" ? imageSrc(note.path) : null;
+    if (src) {
+      const thumb = document.createElement("img");
+      thumb.className = "msg-attachment-thumb";
+      thumb.src = src;
+      thumb.alt = note.name;
+      thumb.title = note.name;
+      // A file that has since been deleted must not leave a broken-image glyph
+      // where a photo was: fall back to naming it, which is still true.
+      thumb.onerror = () => thumb.replaceWith(attachmentChip(note));
+      thumb.onclick = () => window.open(src, "_blank", "noopener");
+      strip.appendChild(thumb);
+    } else {
+      strip.appendChild(attachmentChip(note));
+    }
+  }
+  return strip;
+}
+
+function attachmentChip(note) {
+  const chip = document.createElement("span");
+  chip.className = "msg-attachment-chip";
+  chip.textContent = note.name;
+  chip.title = note.path; // the path stays available, just not shouted
+  return chip;
+}
+
 function addUserMsg(text, at, turn) {
-  const el = addMsg("user", text);
+  // The note lines are the model's business, not the reader's: the bubble shows
+  // what was typed, and the attachments show as attachments.
+  const { body, attachments: notes } = splitAttachmentNotes(text);
+  const el = addMsg("user", body);
+  if (notes.length) {
+    el.appendChild(attachmentStrip(notes));
+    if (!body) el.classList.add("attachments-only");
+  }
   const tools = document.createElement("div");
   tools.className = "user-tools";
-  const getText = () => stripAttachmentNotes(el.textContent);
+  // Copy and reuse hand back what was TYPED. Read from the split, not from the
+  // rendered node — the node now carries chip text that was never in the prompt.
+  const getText = () => body;
   // A turn id exists only for a turn the server has logged, so a live turn gets
   // its remove control on the next replay rather than a control that would name
   // nothing.
@@ -6799,13 +6853,49 @@ const promptHistory = [];
 let historyIndex = null; // null = not navigating
 let historyDraft = "";
 
-function stripAttachmentNotes(text) {
-  return text
-    .split("\n")
-    .filter((line) => !/^\[(attached file|image attached|document attached):/.test(line))
-    .join("\n")
-    .trim();
+// [ATTACHMENT-NOTES-START]
+// The server appends a line per attachment to the text of the user's turn
+// ("[image attached: cat.png — you can see it; file at /…/uploads/cat.png]").
+// That line is written FOR THE MODEL — it is how a backend without native
+// vision is told a file exists, and how one with vision is told it may look.
+// It was also rendered verbatim in the blue bubble, so sending a photo showed
+// the owner a sentence addressed to somebody else, ending in an absolute path.
+//
+// This is the ONE place that knows the note format. The prose is not a display
+// string that leaked; it IS the record — it goes into the model conversation
+// and into the session log, so `reconstruct_events` replays a cold session by
+// handing back that same text. A structured field on the event would describe
+// only turns logged after today and this parser would still be needed for
+// every older one, which is two owners of one fact. So: parse once, here, and
+// let both the live path and the replay path render from the result.
+function parseAttachmentNote(line) {
+  const native =
+    /^\[(image|document) attached: (.+?) — you can (?:see|read) it; file at (.+)\]$/
+      .exec(line.trim());
+  if (native) return { kind: native[1], name: native[2], path: native[3] };
+  const plain = /^\[attached file: (.+)\]$/.exec(line.trim());
+  if (plain) {
+    return { kind: "file", name: plain[1].split("/").pop() || plain[1], path: plain[1] };
+  }
+  return null;
 }
+
+// {body, attachments} — what the owner wrote, and what they attached.
+function splitAttachmentNotes(text) {
+  const body = [];
+  const attachments = [];
+  for (const line of String(text == null ? "" : text).split("\n")) {
+    const note = parseAttachmentNote(line);
+    if (note) attachments.push(note);
+    else body.push(line);
+  }
+  return { body: body.join("\n").trim(), attachments };
+}
+
+function stripAttachmentNotes(text) {
+  return splitAttachmentNotes(text).body;
+}
+// [ATTACHMENT-NOTES-END]
 
 function rememberPrompt(text) {
   if (text && promptHistory[promptHistory.length - 1] !== text) promptHistory.push(text);
@@ -6876,6 +6966,32 @@ function clearComposer() {
 }
 
 async function pasteIntoComposer() {
+  // On a phone there is no Cmd+V, so this button is the ONLY way the clipboard
+  // reaches the composer — which is why it has to handle a copied IMAGE too,
+  // not just text. read() gives both; readText() below is the fallback for
+  // browsers without it, and it can only ever see text.
+  if (navigator.clipboard && navigator.clipboard.read) {
+    try {
+      let text = "";
+      const files = [];
+      for (const item of await navigator.clipboard.read()) {
+        const imageType = (item.types || []).find((t) => t.startsWith("image/"));
+        if (imageType) {
+          const blob = await item.getType(imageType);
+          files.push(new File([blob], "", { type: imageType }));
+        } else if ((item.types || []).includes("text/plain")) {
+          text += await (await item.getType("text/plain")).text();
+        }
+      }
+      for (const file of files) await uploadFile(file);
+      if (text) composerInsert(text); // same insertion path the @/slash triggers use
+      if (!files.length && !text) showToast("clipboard is empty");
+      return;
+    } catch {
+      // Refused, or a clipboard this browser will not describe. Fall through:
+      // readText is a narrower permission and often still answers.
+    }
+  }
   // navigator.clipboard is unavailable on insecure origins and can be refused;
   // say so rather than appearing to do nothing. The keyboard shortcut and the
   // tap-hold menu both still work, so this is a convenience, never the only way.
@@ -7050,8 +7166,10 @@ function attachInputListeners(el) {
   el.addEventListener("keydown", onInputKeydown);
   el.addEventListener("beforeinput", onInputBeforeInput);
   el.addEventListener("input", onInputInput);
+  el.addEventListener("paste", onInputPaste);
 }
 attachInputListeners(input);
+installFileDrop(window, document.body);
 
 function atFragment(text) {
   const at = text.lastIndexOf("@");
@@ -8489,8 +8607,89 @@ function removeCwdChip() {
   if (!list.children.length) list.hidden = true;
 }
 
+// [COMPOSER-FILES-START]
+// Three ways a file reaches the composer, one destination: the ＋ picker, a
+// PASTE, and a DROP. The picker was the only one for a long time, which on a
+// desktop is the slowest possible way to hand over the screenshot you just
+// took — the clipboard already holds it.
+//
+// What a file is CALLED is decided here, once, for all three. A pasted
+// screenshot arrives as a Blob with an empty name (and Chrome's "image.png" is
+// barely better), while /upload refuses an empty or dot-leading name — so a
+// nameless paste would have failed with "invalid file name" and looked like the
+// paste itself was unsupported.
+function uploadName(file) {
+  const given = (file.name || "").trim();
+  if (given && !given.startsWith(".") && given !== "image.png") return given;
+  const ext = ((file.type || "").split("/")[1] || "bin")
+    .replace(/[^a-z0-9]/gi, "").slice(0, 5) || "bin";
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  return `pasted-${stamp}.${ext}`;
+}
+
+// The files on a clipboard or a drag, from either of the two APIs that carry
+// them (`.files` everywhere current; `.items` for the Safari versions that only
+// populate that one).
+function transferFiles(data) {
+  if (!data) return [];
+  if (data.files && data.files.length) return Array.from(data.files);
+  return Array.from(data.items || [])
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
+}
+
+// Paste is ADDITIVE and never calls preventDefault. Copying a chart out of a
+// spreadsheet, or an image off a web page, puts BOTH an image and text on the
+// clipboard; swallowing the event to take the image would silently drop the
+// text the owner may well have been after. So the files become attachments and
+// the browser's own text paste still runs — nothing on the clipboard is lost.
+// (The composer is a <textarea>, where a file paste has no default behaviour of
+// its own, so there is nothing to suppress.)
+async function onInputPaste(event) {
+  for (const file of transferFiles(event.clipboardData)) await uploadFile(file);
+}
+// [COMPOSER-FILES-END]
+
+// [FILE-DROP-START]
+// Dropping a file onto a web page NAVIGATES to it by default — the chat would
+// simply disappear, replaced by the image, with the draft gone. So every
+// dragover carrying files is prevented; that is what makes the drop ours.
+// Bound on the window rather than the composer: aiming at a one-line box is a
+// worse target than the whole conversation, and the highlight says where it
+// will land either way.
+function fileDrag(event) {
+  return Array.from(event.dataTransfer ? event.dataTransfer.types || [] : [])
+    .includes("Files");
+}
+
+function installFileDrop(target, body) {
+  let depth = 0; // dragenter/leave fire per element crossed, not per window
+  const show = (on) => body.classList.toggle("dropping", on);
+  target.addEventListener("dragenter", (event) => {
+    if (!fileDrag(event)) return;
+    depth++;
+    show(true);
+  });
+  target.addEventListener("dragover", (event) => {
+    if (fileDrag(event)) event.preventDefault();
+  });
+  target.addEventListener("dragleave", () => {
+    depth = Math.max(0, depth - 1);
+    if (!depth) show(false);
+  });
+  target.addEventListener("drop", async (event) => {
+    depth = 0;
+    show(false);
+    if (!fileDrag(event)) return;
+    event.preventDefault();
+    for (const file of transferFiles(event.dataTransfer)) await uploadFile(file);
+  });
+}
+// [FILE-DROP-END]
+
 async function uploadFile(file) {
-  const query = new URLSearchParams({ name: file.name });
+  const query = new URLSearchParams({ name: uploadName(file) });
   if (token) query.set("token", token);
   let response;
   try {
@@ -8505,9 +8704,82 @@ async function uploadFile(file) {
     return;
   }
   const { path } = await response.json();
-  attachments.push({ name: file.name, path });
+  // Name it from the path the SERVER chose: a second cat.png is stored as
+  // cat-1.png, and a chip still reading "cat.png" would name the wrong file.
+  attachments.push({ name: path.split("/").pop() || uploadName(file), path });
   renderAttachments();
 }
+
+// [SHARES-START]
+// The iPhone share sheet's landing strip. The server holds the inbox and is
+// the only writer of it; this renders whatever the last `hello`/`shared` said,
+// and never keeps its own copy — two devices claiming from one inbox is the
+// normal case (phone shares it, laptop uses it), and a local list would drift
+// the moment the other one claimed something.
+//
+// Claiming is deliberately a TAP, not automatic. A share arriving while you are
+// mid-sentence must not attach itself to the message you are about to send; the
+// whole point of parking it server-side is that you choose when it joins a
+// conversation, and which one.
+function renderShares(items) {
+  const box = $("shares");
+  if (!box) return;
+  box.replaceChildren();
+  box.hidden = !items.length;
+  for (const item of items) {
+    const chip = document.createElement("div");
+    chip.className = "share-chip";
+
+    const take = document.createElement("button");
+    take.type = "button";
+    take.className = "share-take";
+    take.title = `attach ${item.name || "shared item"}`;
+    const label = item.name || (item.text || "").slice(0, 60) || "shared item";
+    take.innerHTML =
+      '<span class="share-from"></span><span class="share-name"></span>';
+    take.querySelector(".share-from").textContent = `Shared from ${item.source || "your phone"}`;
+    take.querySelector(".share-name").textContent = label;
+    take.onclick = () => claimShare(item);
+
+    const bin = document.createElement("button");
+    bin.type = "button";
+    bin.className = "share-dismiss";
+    bin.setAttribute("aria-label", `dismiss ${label}`);
+    bin.textContent = "✕";
+    bin.onclick = () => dropShare(item.id);
+
+    chip.append(take, bin);
+    box.appendChild(chip);
+  }
+}
+
+// Take a parked share into the composer: the file becomes an attachment chip,
+// and shared TEXT (a URL from Safari, a note) is inserted as text — that is
+// what it is, and making the owner open a file to read a link they shared would
+// be absurd. Both can be present on one share.
+function claimShare(item) {
+  if (item.path) {
+    attachments.push({ name: item.name || item.path.split("/").pop(), path: item.path });
+    renderAttachments();
+  }
+  if (item.text) composerInsert(item.text);
+  // If the claim never lands the item is still in the inbox, so the composer
+  // must not go on holding it — otherwise it comes back on the next repaint and
+  // is attached twice.
+  dropShare(item.id, () => {
+    attachments = attachments.filter((a) => a.path !== item.path);
+    renderAttachments();
+  });
+  input.focus();
+}
+
+// The server owns the inbox, so removal is a request, not a local splice. The
+// repaint arrives as the `shared` broadcast that follows — including on the
+// OTHER device, whose copy of this chip must go too.
+function dropShare(id, lost) {
+  act({ type: "share_drop", id }, { label: "clearing that shared item", lost });
+}
+// [SHARES-END]
 
 function renderAttachments() {
   const box = $("attachments");

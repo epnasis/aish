@@ -36,9 +36,22 @@ function ok(what, cond) {
   passed++;
 }
 
-function world({ clipboard = "pasted text", clipboardFails = false } = {}) {
+// `items` opts into the richer clipboard.read() API — the one that can carry an
+// IMAGE. Left undefined, the sandbox has readText only, which is exactly the
+// older-browser fallback the button still has to work on.
+function world({ clipboard = "pasted text", clipboardFails = false, items } = {}) {
   const calls = [];
   const slot = { attrs: {}, title: "", setAttribute(k, v) { this.attrs[k] = v; } };
+  const clipboardApi = {
+    readText: () => (clipboardFails
+      ? Promise.reject(new Error("denied"))
+      : Promise.resolve(clipboard)),
+  };
+  if (items) {
+    clipboardApi.read = () => (items === "refused"
+      ? Promise.reject(new Error("denied"))
+      : Promise.resolve(items));
+  }
   const sandbox = {
     input: { value: "", focus: () => calls.push("focus") },
     $: (id) => (id === "composer-slot" ? slot : null),
@@ -46,13 +59,9 @@ function world({ clipboard = "pasted text", clipboardFails = false } = {}) {
     resizeInput: () => calls.push("resizeInput"),
     showToast: (t) => calls.push(`toast:${t}`),
     composerInsert: (t) => calls.push(`insert:${t}`),
-    navigator: {
-      clipboard: {
-        readText: () => (clipboardFails
-          ? Promise.reject(new Error("denied"))
-          : Promise.resolve(clipboard)),
-      },
-    },
+    uploadFile: (file) => { calls.push(`upload:${file.type}`); return Promise.resolve(); },
+    File,
+    navigator: { clipboard: clipboardApi },
   };
   vm.createContext(sandbox);
   vm.runInContext(extract("// [COMPOSER-SLOT-START]", "// [COMPOSER-SLOT-END]"), sandbox);
@@ -113,6 +122,53 @@ function world({ clipboard = "pasted text", clipboardFails = false } = {}) {
     const w = world({ clipboard: "" });
     await w.s.pasteIntoComposer();
     ok("an empty clipboard says so rather than doing nothing",
+      w.calls.some((c) => c === "toast:clipboard is empty"));
+  }
+
+  // ---- a copied IMAGE ----------------------------------------------------
+  // On a phone there is no Cmd+V, so this button is the ONLY route from the
+  // clipboard to the composer. Text-only made a copied screenshot unpasteable
+  // there — the picker was the only way, which is the long way round for
+  // something already on the clipboard.
+  const item = (types, payload) => ({
+    types,
+    getType: (t) => Promise.resolve(
+      t === "text/plain" ? { text: () => Promise.resolve(payload) } : { _blob: payload },
+    ),
+  });
+
+  {
+    const w = world({ items: [item(["image/png"], "PNGBYTES")] });
+    await w.s.pasteIntoComposer();
+    ok("a copied image is uploaded as an attachment",
+      w.calls.includes("upload:image/png"));
+    ok("…and nothing bogus is inserted as text",
+      !w.calls.some((c) => c.startsWith("insert:")));
+  }
+
+  {
+    // Both on one clipboard (copying a chart out of a spreadsheet): take both.
+    const w = world({
+      items: [item(["image/png"], "PNGBYTES"), item(["text/plain"], "Q3 revenue")],
+    });
+    await w.s.pasteIntoComposer();
+    ok("an image AND text on one clipboard both arrive",
+      w.calls.includes("upload:image/png") && w.calls.includes("insert:Q3 revenue"));
+  }
+
+  {
+    // read() is the newer, broader permission; a refusal must fall back to
+    // readText rather than becoming "paste doesn't work".
+    const w = world({ items: "refused" });
+    await w.s.pasteIntoComposer();
+    ok("a refused read() still pastes text through readText",
+      w.calls.includes("insert:pasted text"));
+  }
+
+  {
+    const w = world({ items: [] });
+    await w.s.pasteIntoComposer();
+    ok("an empty clipboard still says so on the read() path",
       w.calls.some((c) => c === "toast:clipboard is empty"));
   }
 

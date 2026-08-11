@@ -469,6 +469,48 @@ def test_derived_title_and_snippet_skip_aishs_own_notes(tmp_path):
     assert "aish:" not in info.snippet
 
 
+IMAGE_NOTE = "[image attached: cat.png — you can see it; file at /u/uploads/cat.png]"
+
+
+def test_derived_title_and_snippet_skip_attachment_notes(tmp_path):
+    """Send a photo and the chat was NAMED with the sentence aish wrote to the
+    model about it, absolute uploads path and all — in the header, in the rail,
+    on the PWA's tab, and in the drawer's preview line."""
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": f"what is this?\n\n{IMAGE_NOTE}"})
+    info = SessionLog.info(log.path)
+    assert info.title == "what is this?"
+    assert info.snippet == "You: what is this?"
+    assert "you can see it" not in info.title + info.snippet
+    assert "/uploads/" not in info.title + info.snippet
+
+
+def test_a_wordless_turn_is_named_by_what_it_carried(tmp_path):
+    """A photo sent with nothing typed still says what the chat is about."""
+    log = SessionLog.new(tmp_path)
+    log.message({"role": "user", "content": IMAGE_NOTE})
+    info = SessionLog.info(log.path)
+    assert info.title == "cat.png"
+    assert info.snippet == "You: cat.png"
+
+
+def test_a_wordless_turn_with_several_files_names_them_all(tmp_path):
+    log = SessionLog.new(tmp_path)
+    log.message({
+        "role": "user",
+        "content": f"{IMAGE_NOTE}\n[attached file: /tmp/notes/report.pdf]",
+    })
+    assert SessionLog.info(log.path).title == "cat.png, report.pdf"
+
+
+def test_text_that_merely_looks_like_a_note_is_still_the_users_words(tmp_path):
+    """Being wrong in this direction would delete something they typed."""
+    log = SessionLog.new(tmp_path)
+    typed = "[attached file: this is not really a note"  # no closing bracket
+    log.message({"role": "user", "content": typed})
+    assert SessionLog.info(log.path).title == typed
+
+
 def test_reconstruct_events_none_for_legacy_log(tmp_path):
     # A session logged before trace records falls back to flat history.
     log = SessionLog.new(tmp_path)
