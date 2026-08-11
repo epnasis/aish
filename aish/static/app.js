@@ -8903,6 +8903,11 @@ function releaseSentShares(sent) {
 }
 // [SHARES-END]
 
+// Which attachments can be shown as a picture. Deliberately the same set the
+// server will deliver natively (backends.IMAGE_SUFFIXES) — /file answers 415
+// for anything else, and a chip that asked for one would flash a broken image.
+const ATTACH_IMAGE_RE = /\.(png|jpe?g|gif|webp)$/i;
+
 function renderAttachments() {
   const box = $("attachments");
   box.replaceChildren();
@@ -8910,7 +8915,26 @@ function renderAttachments() {
   attachments.forEach((attachment, i) => {
     const chip = document.createElement("span");
     chip.className = "attach-chip";
-    chip.textContent = attachment.name;
+    // A thumbnail, not just a filename — and it does two jobs. You can see
+    // WHICH photo is about to go (a name like IMG_4021.jpg identifies nothing),
+    // and the bytes are fetched NOW, while you are still typing, through the
+    // same /file URL the sent bubble will use. That second job is why the photo
+    // appears the instant you press send: on a phone over a tunnel a
+    // multi-megabyte original took seconds to arrive when the bubble asked for
+    // it for the first time, and there is no reason for that wait to land on
+    // the one moment you are watching for a result.
+    const src = ATTACH_IMAGE_RE.test(attachment.path || "") ? imageSrc(attachment.path) : null;
+    if (src) {
+      const thumb = document.createElement("img");
+      thumb.className = "attach-thumb";
+      thumb.src = src;
+      thumb.alt = "";
+      // A file that will not render must not leave a broken-image glyph in the
+      // composer: drop back to the name, which is still true.
+      thumb.onerror = () => thumb.remove();
+      chip.appendChild(thumb);
+    }
+    chip.appendChild(document.createTextNode(attachment.name));
     const remove = document.createElement("button");
     remove.type = "button";
     remove.textContent = "✕";

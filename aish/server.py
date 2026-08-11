@@ -4019,10 +4019,21 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return JSONResponse({"error": "outside session roots"}, status_code=403)
         if not path.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
-        return FileResponse(
-            path, media_type=media_type,
-            headers={"X-Content-Type-Options": "nosniff"},
-        )
+        headers = {"X-Content-Type-Options": "nosniff"}
+        # An UPLOAD is immutable by construction: _store_upload never overwrites,
+        # it appends -1, -2 … to the name, so bytes at a path in the uploads dir
+        # cannot change. That makes it safe to cache hard, which is what stops a
+        # phone re-downloading a multi-megabyte photo it fetched into the
+        # composer thirty seconds ago.
+        #
+        # Everything else is deliberately left to revalidate on its ETag: those
+        # paths are the model's own output, and a regenerated chart.png at the
+        # SAME path is exactly the thing a long max-age would leave stale on
+        # screen. `private` because a session root is one owner's files and this
+        # response passed a token check — no shared proxy may hold it.
+        if path.is_relative_to(self.uploads_dir.resolve()):
+            headers["Cache-Control"] = "private, max-age=31536000, immutable"
+        return FileResponse(path, media_type=media_type, headers=headers)
 
     @staticmethod
     def _pdf_response(data: bytes, filename: str) -> Response:

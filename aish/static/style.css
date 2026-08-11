@@ -1444,6 +1444,22 @@ body.offline #composer { opacity: 0.55; }
   border-radius: 999px;
   padding: 5px 12px;
   font-size: 15px;
+  /* The thumbnail and the name sit on one line, centred on each other; without
+     the flex the image drops the text to its baseline and the pill grows. */
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+}
+/* Small enough that the composer does not become a gallery, big enough to tell
+   two photos apart — which is the whole reason it is here rather than a name. */
+.attach-thumb {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  object-fit: cover;
+  margin-left: -4px; /* pull it into the pill's own padding */
+  background: var(--bg-elev3);
 }
 .attach-chip button {
   background: none;

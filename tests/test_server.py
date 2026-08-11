@@ -3585,6 +3585,50 @@ class TestFileEndpoint:
             assert ok.status_code == 200
 
 
+class TestFileCaching:
+    """An upload is fetched twice: once into the composer chip, once by the
+    bubble the send produces. The second must cost nothing.
+
+    Before this, pressing send began a multi-megabyte download of the original
+    at the exact moment the owner was watching for a result — measured at
+    4.2 MB on the wire AFTER the click, which on a phone over a tunnel is the
+    reported "3-5 seconds for the image to show".
+    """
+
+    def test_an_upload_may_be_cached_hard(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            path = client.post("/upload?name=photo.png", content=b"\x89PNG").json()["path"]
+            response = client.get(f"/file?path={path}")
+            assert response.status_code == 200
+            cache = response.headers["cache-control"]
+            assert "immutable" in cache and "max-age=31536000" in cache
+            # One owner's files behind a token check: no shared proxy may hold it.
+            assert "private" in cache
+
+    def test_model_output_still_revalidates(self, app_env, tmp_path):
+        """The opposite case, and the reason this is not a blanket header: a
+        regenerated chart.png at the SAME path is exactly what a long max-age
+        would leave stale on screen."""
+        client, _ = make_client(app_env, [])
+        with client:
+            chart = Path(app_env["cwd"]) / "chart.png"
+            chart.write_bytes(b"\x89PNG-v1")
+            response = client.get(f"/file?path={chart}")
+            assert response.status_code == 200
+            assert "cache-control" not in response.headers
+            assert response.headers.get("etag")  # revalidation, not blind reuse
+
+    def test_the_immutability_claim_is_true(self, app_env):
+        """The header is only honest because _store_upload never overwrites."""
+        client, _ = make_client(app_env, [])
+        with client:
+            first = client.post("/upload?name=photo.png", content=b"one").json()["path"]
+            second = client.post("/upload?name=photo.png", content=b"two").json()["path"]
+            assert first != second
+            assert Path(first).read_bytes() == b"one"  # untouched by the second
+
+
 class TestImageRootsAgreement:
     """#188: /file and the PDF exporter must serve from the SAME set. They did
     not — the exporter trusted the session's scratch workspace and /file did
