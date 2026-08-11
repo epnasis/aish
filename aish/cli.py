@@ -727,9 +727,9 @@ def print_answer_images(agent, answer: str) -> None:
     protocol = term_image.supports_images()
     if not protocol:
         return
-    # image_roots, not roots: show_image stores pictures in aish's own media
-    # dir, which is renderable but deliberately not an auto-approval root (#188).
-    for path in term_image.local_image_paths(answer, agent.image_roots()):
+    # The workspace boundary, not roots: show_image stores pictures in aish's own
+    # media dir, which is readable but deliberately not a user-granted root (#188).
+    for path in term_image.local_image_paths(answer, agent.workspace_roots()):
         term_image.emit(path, protocol)
 
 
@@ -1804,8 +1804,11 @@ def main() -> int:
     agent_holder: list = []
 
     def get_scope():
+        # The WORKSPACE boundary, not `roots`: a read-only command touching
+        # aish's own scratch/media/document stores must auto-approve, the same
+        # as writing and deleting there already does (#212).
         if agent_holder:
-            return agent_holder[0].cwd, agent_holder[0].roots
+            return agent_holder[0].cwd, agent_holder[0].workspace_roots()
         return cwd, [Path(cwd).resolve()]
 
     def get_session_prefixes() -> set[str]:

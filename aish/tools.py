@@ -735,6 +735,61 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "read_pdf",
+            "description": (
+                "Read a PDF. You MUST use this for every PDF — an attached one, a "
+                "file on disk, or a link ending in .pdf. NEVER run pdftotext, "
+                "pdftoppm, python or any other command on a PDF: this tool needs no "
+                "approval, and it keeps columns, tables and page numbers intact "
+                "where a shell command shreds them.\n"
+                "It converts the document ONCE and returns a map of what is in it "
+                "(pages, tables, figures, scanned pages) followed by the text. The "
+                "conversion is cached, so calling it again for another page or "
+                "another search is cheap — do that instead of trying to hold a "
+                "whole document in your head.\n"
+                "Example: read_pdf(source=\"/…/uploads/statement.pdf\") to see what "
+                "it is, then read_pdf(source=\"…\", search=\"total\") to find a "
+                "figure, then read_pdf(source=\"…\", pages=\"4\") to read that page "
+                "in full.\n"
+                "If the map says a page is SCANNED, its words are NOT in the text — "
+                "ask for it with pages= and it comes back as an image you can look "
+                "at. NEVER answer from a scanned page you have not been shown."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": (
+                            "Absolute path to a PDF on this machine, or a full "
+                            "http(s) URL of one."
+                        ),
+                    },
+                    "pages": {
+                        "type": "string",
+                        "description": (
+                            "Which pages to return, e.g. \"3\", \"1-4\" or \"2,5-7\". "
+                            "Omit to get the start of the document. Scanned pages "
+                            "asked for here come back as images."
+                        ),
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": (
+                            "Return only lines containing this text (case-"
+                            "insensitive), each with its page number. Use it to "
+                            "locate something in a long document before reading a "
+                            "page in full."
+                        ),
+                    },
+                },
+                "required": ["source"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_file",
             "description": (
                 "Create a file or overwrite it entirely with new content. The user sees "

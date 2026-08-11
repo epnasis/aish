@@ -47,6 +47,7 @@ Merge back to main after tests pass, then remove the worktree. Trivial fixes on 
 | `agent.py`, `claude_max.py`, `approval.py`, `tools.py`, `files.py`, `web.py`, `backends.py` | `docs/agent-core.md` |
 | `cli.py`, `prompt.py`, `aliases.py`, `dir_ignore.py`, `notify.py` | `docs/cli.md` |
 | `media.py`, `show_image`, anything that renders an image | `docs/media-and-images.md` |
+| `documents.py`, `read_pdf`, `workspace_roots` (where aish may read unasked) | `docs/documents-and-pdf.md` |
 | anything that emits or replays a trace record | `docs/trace-contract.md` (binding schema) + `docs/trace-records.md` (rationale) |
 | `session.py` | `docs/session-log.md` |
 | `server.py`, `pty_session.py`, `email_poll.py` | `docs/web-server.md` |
@@ -76,6 +77,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`files.py`** — pure `plan_*` functions compute (old, new, diff) without touching disk; `commit()` writes. The gap between plan and commit is where the diff is shown and approval obtained — nothing is written unseen. → `docs/agent-core.md`
 - **`web.py`** — `web_search`/`read_url`/`fetch_binary`: auto-approved, but their inputs leave the machine, so every call is echoed and fetched content is wrapped in an untrusted-content banner. http/https only, one SSRF guard, one TLS trust store. → `docs/agent-core.md`
 - **`media.py`** — the content-addressed, bounded-LRU media store behind `show_image`. → `docs/media-and-images.md`
+- **`documents.py`** — PDF → a page-marked markdown rendition behind `read_pdf`: convert once, then read it like a file. Every page is classified (text / columns / table / scan / figure) BEFORE it is read, so a hollow extraction can never pass as a complete one. → `docs/documents-and-pdf.md`
 - **`session.py`** — append-only JSONL per session in `~/.local/state/aish/`: conversation, audit trail, trace records, and the replay that makes a cold session render identically to a live one. → `docs/session-log.md`
 - **`cli.py`** — the terminal client: REPL, argv, slash commands, model picker, rendering. Gates identically to the web; a terminal session dies with its terminal and is never resurrected. → `docs/cli.md`
 - **`prompt.py`** — the boxed input UI, a small prompt_toolkit `Application` (not `PromptSession`) because the footer-under-input layout requires it. → `docs/cli.md`

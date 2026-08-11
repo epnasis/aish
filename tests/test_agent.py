@@ -1580,6 +1580,51 @@ class TestRootScoping:
         agent.run_task("read it")
         assert "fine" in tool_messages(agent.messages)[0]["content"]
 
+    def test_reading_back_its_own_scratch_file_needs_no_prompt(self, tmp_path):
+        """#212. The scratch dir was auto-approved for WRITING and DELETING but
+        not for READING, so the model could create a file there unprompted,
+        delete it unprompted, and then need a tap to look at the thing it had
+        just written. Observed cost: four approvals in one session, two of them
+        spent on a shell builtin the model reached for because read_file was
+        blocked on aish's own workspace."""
+        agent, _ = make_agent(
+            [model_says("ok")],
+            approve_read=lambda _p, _r: pytest.fail("reading own scratch must not prompt"),
+            cwd=str(tmp_path),
+            state_dir=tmp_path,
+        )
+        scratch_file = agent.scratch_dir / "notes.txt"
+        scratch_file.write_text("converted text\n")
+        assert agent._read_prompt_reason(str(scratch_file)) is None
+
+    def test_the_process_owned_stores_are_all_readable(self, tmp_path):
+        agent, _ = make_agent([model_says("ok")], cwd=str(tmp_path), state_dir=tmp_path)
+        for store in (agent.media_dir, agent.tool_output_dir, agent.documents_dir):
+            store.mkdir(parents=True, exist_ok=True)
+            target = store / "x.txt"
+            target.write_text("mine\n")
+            assert agent._read_prompt_reason(str(target)) is None, store
+
+    def test_widening_the_read_boundary_does_not_widen_anything_else(self, tmp_path):
+        """The safety argument for #212 in one assertion: reading back what the
+        process already writes unprompted grants nothing new, and a file
+        somewhere else on the machine still prompts exactly as before."""
+        outside = tmp_path / "elsewhere.txt"
+        outside.write_text("private\n")
+        root = tmp_path / "project"
+        root.mkdir()
+        agent, _ = make_agent([model_says("ok")], cwd=str(root), state_dir=tmp_path)
+        assert agent._read_prompt_reason(str(outside)) == "outside"
+        assert agent.scratch_dir not in agent.roots
+
+    def test_sensitivity_still_beats_the_widened_boundary(self, tmp_path):
+        """A credential file does not become readable by living in a directory
+        aish owns — sensitivity is checked first and is never widened."""
+        agent, _ = make_agent([model_says("ok")], cwd=str(tmp_path), state_dir=tmp_path)
+        secret = agent.scratch_dir / ".env"
+        secret.write_text("KEY=x\n")
+        assert agent._read_prompt_reason(str(secret)) == "sensitive"
+
     def test_sensitive_beats_outside_as_reason(self, tmp_path):
         root = tmp_path / "project"
         root.mkdir()
@@ -4308,7 +4353,7 @@ class TestShowImage:
         move the silent failure to render time."""
         agent, result, _ = self._run(tmp_path, monkeypatch, (PNG_BYTES, "image/png"))
         stored = next((tmp_path / "media").iterdir())
-        roots = [Path(r).resolve() for r in agent.image_roots()]
+        roots = [Path(r).resolve() for r in agent.workspace_roots()]
         assert any(stored.resolve().is_relative_to(r) for r in roots)
 
     def test_the_returned_line_parses_as_a_markdown_image(self, tmp_path, monkeypatch):
@@ -4492,13 +4537,14 @@ class TestShowImage:
 
 
 class TestImageRoots:
-    """One definition of "where a picture may be displayed from", consumed by
-    /file, the PDF exporter, and the terminal renderer. They disagreed before
-    #188 and the same file printed in a PDF while 403'ing in the chat."""
+    """One definition of "where aish may read from without asking", consumed by
+    /file, the PDF exporter, the terminal renderer, read_file and the approver's
+    path scoping. They disagreed before #188 and the same file printed in a PDF
+    while 403'ing in the chat; the read side was still missing until #212."""
 
     def test_covers_the_directories_aish_itself_owns(self, tmp_path):
         agent, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
-        roots = agent.image_roots()
+        roots = agent.workspace_roots()
         assert agent.media_dir in roots
         assert agent.scratch_dir in roots
         assert Path(agent.cwd).resolve() in roots
@@ -4511,8 +4557,8 @@ class TestImageRoots:
         agent, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
         assert agent.media_dir not in agent.roots
         agent.restore_workspace(str(tmp_path), [])
-        assert agent.media_dir in agent.image_roots()
-        assert agent.scratch_dir in agent.image_roots()
+        assert agent.media_dir in agent.workspace_roots()
+        assert agent.scratch_dir in agent.workspace_roots()
 
     def test_media_store_is_durable_not_the_scratch_workspace(self, tmp_path):
         """Scratch is deleted when the session ends and a transcript is
@@ -7089,3 +7135,199 @@ class TestContextRecord:
         )
         agent.run_task("hello")
         assert not [s for s in rendered if s.get("kind") == "context"]
+
+
+class TestReadPdf:
+    """#213: reading a PDF is a capability, not a shell recipe the model
+    reassembles. The result always leads with what the document IS, because the
+    failure this replaces is a confident answer built on a shredded table or a
+    scanned page that read as silence."""
+
+    pymupdf = pytest.importorskip("pymupdf")
+
+    def _pdf(self, tmp_path, name="doc.pdf", pages=None, scan_page=False):
+        import pymupdf
+
+        doc = pymupdf.open()
+        for text in pages or ["Readable page text about badgers. " * 12]:
+            page = doc.new_page()
+            page.insert_textbox(pymupdf.Rect(50, 50, 545, 700), text, fontsize=11)
+        if scan_page:
+            source = pymupdf.open()
+            drawn = source.new_page()
+            drawn.insert_textbox(
+                pymupdf.Rect(50, 50, 545, 700), "SCANNED WORDS. " * 60, fontsize=12
+            )
+            png = drawn.get_pixmap(dpi=100).tobytes("png")
+            source.close()
+            doc.new_page().insert_image(pymupdf.Rect(0, 0, 595, 842), stream=png)
+        path = tmp_path / name
+        doc.save(path)
+        doc.close()
+        return path
+
+    def _run(self, tmp_path, args, **kwargs):
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("read_pdf", **args)]), model_says("ok")],
+            state_dir=tmp_path,
+            cwd=str(tmp_path),
+            **kwargs,
+        )
+        agent.run_task("read it")
+        return agent, tool_messages(agent.messages)[0]["content"]
+
+    def test_reads_a_pdf_without_any_approval(self, tmp_path):
+        """No approver is wired for reads here: if read_pdf prompted, this
+        would hang or deny. Needing no tap is the point — the session that
+        motivated this spent four approvals getting to the same text."""
+        path = self._pdf(tmp_path)
+        _agent, result = self._run(
+            tmp_path,
+            {"source": str(path)},
+            approve=lambda _c: pytest.fail("read_pdf must not reach the command gate"),
+            approve_read=lambda _p, _r: pytest.fail("read_pdf must not prompt"),
+        )
+        assert "badgers" in result
+
+    def test_leads_with_the_structural_map(self, tmp_path):
+        path = self._pdf(tmp_path, pages=["Page one. " * 20, "Page two. " * 20])
+        _agent, result = self._run(tmp_path, {"source": str(path)})
+        assert result.startswith("doc.pdf — 2 pages,")
+
+    def test_names_the_rendition_so_it_can_be_read_like_a_file(self, tmp_path):
+        """The design turns on this: after one conversion the document is a
+        file, so a page is a read and a phrase is a grep."""
+        path = self._pdf(tmp_path)
+        agent, result = self._run(tmp_path, {"source": str(path)})
+        rendition = next(agent.documents_dir.glob("*.md"))
+        assert str(rendition) in result
+        assert agent._read_prompt_reason(str(rendition)) is None  # readable, unprompted
+
+    def test_pages_argument_returns_only_those_pages(self, tmp_path):
+        path = self._pdf(
+            tmp_path, pages=["Alpha content. " * 20, "Bravo content. " * 20,
+                             "Charlie content. " * 20]
+        )
+        _agent, result = self._run(tmp_path, {"source": str(path), "pages": "2"})
+        assert "Bravo" in result
+        assert "Alpha" not in result and "Charlie" not in result
+
+    def test_search_argument_reports_page_numbers(self, tmp_path):
+        path = self._pdf(
+            tmp_path, pages=["Nothing here. " * 20, "The total is 42 pounds. " * 5]
+        )
+        _agent, result = self._run(tmp_path, {"source": str(path), "search": "total"})
+        assert "p2:" in result and "total is 42" in result
+
+    def test_a_scanned_page_comes_back_as_an_image(self, tmp_path):
+        """The escalation the design rests on: a page with no text layer is not
+        silence, it is a picture, and aish already has a store for pictures."""
+        path = self._pdf(tmp_path, scan_page=True)
+        agent, result = self._run(tmp_path, {"source": str(path), "pages": "2"})
+        assert "no text layer" in result
+        assert "![" in result and str(agent.media_dir) in result
+
+    def test_a_scan_is_declared_even_when_not_asked_for(self, tmp_path):
+        """It must be impossible to summarise this document without learning
+        that part of it was unreadable."""
+        path = self._pdf(tmp_path, scan_page=True)
+        _agent, result = self._run(tmp_path, {"source": str(path)})
+        assert "SCANNED, no text layer: page(s) 2" in result
+
+    def test_asking_again_reuses_the_conversion(self, tmp_path, monkeypatch):
+        """Convert once, read many: the second call is what makes paging and
+        searching a long document affordable instead of a re-parse each time."""
+        import aish.agent as agent_module
+
+        path = self._pdf(tmp_path, pages=["Alpha. " * 20, "Bravo. " * 20])
+        converted: list[str] = []
+        real = agent_module.documents.convert
+
+        def counted(pdf, store):
+            rendition = real(pdf, store)
+            converted.append(str(pdf))
+            return rendition
+
+        monkeypatch.setattr(agent_module.documents, "convert", counted)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("read_pdf", source=str(path))]),
+                model_says(tool_calls=[tool_call("read_pdf", source=str(path), pages="2")]),
+                model_says("ok"),
+            ],
+            state_dir=tmp_path,
+            cwd=str(tmp_path),
+        )
+        agent.run_task("read it, then page 2")
+
+        assert len(converted) == 2  # both calls went through convert…
+        assert len(list(agent.documents_dir.glob("*.md"))) == 1  # …one rendition on disk
+        second = tool_messages(agent.messages)[1]["content"]
+        assert "Bravo" in second and "Alpha" not in second
+
+    def test_a_missing_file_is_a_sentence_not_a_crash(self, tmp_path):
+        _agent, result = self._run(tmp_path, {"source": str(tmp_path / "nope.pdf")})
+        assert result.startswith("ERROR: no such file")
+
+    def test_a_file_outside_the_workspace_is_refused(self, tmp_path):
+        outside = tmp_path.parent / "outside-the-session.pdf"
+        outside.write_bytes(b"%PDF-1.4 fake")
+        project = tmp_path / "project"
+        project.mkdir()
+        agent, _ = make_agent(
+            [model_says(tool_calls=[tool_call("read_pdf", source=str(outside))]),
+             model_says("ok")],
+            state_dir=tmp_path,
+            cwd=str(project),
+        )
+        agent.run_task("read it")
+        result = tool_messages(agent.messages)[0]["content"]
+        assert "outside this session's directories" in result
+
+    def test_a_url_that_is_not_a_pdf_says_what_it_got(self, tmp_path, monkeypatch):
+        """Same failure show_image guards: the extension agrees and the bytes
+        do not — usually a login wall served under a .pdf link."""
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(
+            agent_module.web,
+            "fetch_binary",
+            lambda url, cap: (b"<html>sign in</html>", "text/html"),
+        )
+        _agent, result = self._run(tmp_path, {"source": "https://ex.com/paper.pdf"})
+        assert "not a PDF" in result and "text/html" in result
+
+    def test_a_fetched_pdf_lands_in_the_document_store(self, tmp_path, monkeypatch):
+        import aish.agent as agent_module
+
+        path = self._pdf(tmp_path, name="remote.pdf")
+        data = path.read_bytes()
+        monkeypatch.setattr(
+            agent_module.web, "fetch_binary", lambda url, cap: (data, "application/pdf")
+        )
+        agent, result = self._run(tmp_path, {"source": "https://ex.com/remote.pdf"})
+        assert "badgers" in result
+        assert list(agent.documents_dir.glob("*.pdf"))  # kept, so a re-read needs no fetch
+
+    def test_source_is_required(self, tmp_path):
+        _agent, result = self._run(tmp_path, {"source": "  "})
+        assert "needs a source" in result
+
+    def test_read_pdf_is_read_only_and_gated_as_egress(self):
+        """Read-only so it parallelises and never prompts; egress so a
+        TRIGGERED session cannot fetch a model-chosen host unattended."""
+        from aish.agent import EGRESS_TOOLS, READ_ONLY_TOOLS
+
+        assert "read_pdf" in READ_ONLY_TOOLS
+        assert "read_pdf" in EGRESS_TOOLS
+
+    def test_a_local_path_is_never_egress_gated(self, tmp_path):
+        """A path reaches no host. Gating it would make an attached PDF
+        unreadable in exactly the unattended sessions that receive them."""
+        path = self._pdf(tmp_path)
+        agent, _ = make_agent([model_says("ok")], state_dir=tmp_path, cwd=str(tmp_path))
+        agent.origin = "email"
+        assert agent._egress_novel_hosts("read_pdf", {"source": str(path)}) is None
+        assert agent._egress_novel_hosts("read_pdf", {"source": "https://x.test/a.pdf"}) == [
+            "x.test"
+        ]

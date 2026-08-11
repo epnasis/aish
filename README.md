@@ -141,9 +141,10 @@ unless you explicitly *Share* a selection.
 
 | Tool | What | Gate |
 |------|------|------|
-| `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve inside the project; scratch-workspace deletes auto-approve) |
+| `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve inside the project and in aish's own scratch/media/document dirs; scratch-workspace deletes auto-approve) |
 | `write_file` / `edit_file` | create or edit files | **colored diff + y/N** |
 | `read_file` | read a file | auto inside the project; **prompts outside it and on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
+| `read_pdf` | read a PDF — attached, on disk, or linked — keeping columns, tables and page numbers; `pages=` and `search=` for a long one | auto |
 | `web_search` / `read_url` | DuckDuckGo + fetch a page as readable text | auto; every query/URL echoed; public hosts only (SSRF-guarded) |
 | `read_docs` | man page → `--help` fallback, full-text topic search | auto |
 | `remember` / `forget_memory` | save or prune one fact in structured memory | auto (echoed) |
@@ -152,6 +153,40 @@ unless you explicitly *Share* a selection.
 | `import_skill` | install a skill from a git repo or local path | **one consolidated review** of the whole skill + risk flags |
 | `read_tool_output` | read the next page of a **truncated** tool result, from cache | auto (never re-runs the tool) |
 | _plugin tools_ | any `TOOL.md` you or the model add — called like a built-in | read-only auto; **mutating ones prompt** |
+
+### PDFs
+
+A PDF is not text — it is a page-description program, and the ways it goes
+wrong are quiet ones. Naive extraction interleaves a two-column page and shreds
+a table into prose that still reads like a sentence; a scanned page returns
+nothing at all, which reads as "there was nothing there". So `read_pdf`
+**classifies every page before it reads it** and tells you what it found:
+
+```
+statement.pdf — 14 pages, 38,402 characters of text.
+  tables: 9 on page(s) 3-11
+  a table spans pages 7-8
+  multi-column: page(s) 2
+  SCANNED, no text layer: page(s) 12 — these are NOT in the text below…
+```
+
+That header comes first on every call, including when you asked for one page.
+It is what stops a partly-unreadable document from becoming a confident summary.
+
+Underneath, the document is converted **once** into a page-marked text
+rendition and cached by content, so asking for page 7 or searching for "total"
+afterwards is cheap — and the same document opened next week is not converted
+again. Tables come back as real markdown tables; one that runs across a page
+break is marked at both ends rather than silently stitched, because a merged
+table would make the page numbers lie.
+
+A page with no text layer is **rasterised and handed back as an image**, so a
+vision-capable model simply looks at it. On a text-only local model it cannot,
+and it says which pages it could not read rather than answering around them.
+
+On Claude and OpenAI an attached PDF still goes to the model natively — best
+fidelity. `read_pdf` covers everything else: a local model, a file already on
+disk, a link, or any document long enough that you want one page of it.
 
 Every tool result carries a **verdict the runtime computed**, not one inferred
 from how the output happens to start. A tool that exits 0 while producing
@@ -337,9 +372,12 @@ thousands of entries without bloating the context.
    them; edited commands are re-checked. Only *you* can run them, via `!`.
    Extend in `~/.config/aish/deny.txt`.
 3. **A private scratch workspace.** A per-session temp directory the model may
-   freely create, edit, and delete throwaway files in without prompting — deleted
-   when the session ends. Auto-approval there is confined strictly to that
-   directory.
+   freely create, edit, delete **and read** throwaway files in without prompting
+   — deleted when the session ends. The same applies to aish's other own
+   directories (the media store, the converted-document store, the tool-output
+   cache): reading back what the process already writes unprompted grants
+   nothing new. Your files are unaffected — anywhere else still prompts, and a
+   secret path (`~/.ssh`, `.env*`, `*.pem`…) prompts even inside these.
 4. **Audit trail.** Every command and decision (approved / denied / edited /
    auto) is logged with the session in `~/.local/state/aish/`.
 
