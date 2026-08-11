@@ -7236,6 +7236,10 @@ $("preview").addEventListener("pointermove", previewMove, { passive: false });
 $("preview").addEventListener("pointerup", previewUp);
 $("preview").addEventListener("pointercancel", previewUp);
 $("preview").addEventListener("wheel", previewWheel, { passive: false });
+// WebKit-only, and iOS is exactly where the pointer-pair pinch does not fire.
+$("preview").addEventListener("gesturestart", previewGestureStart, { passive: false });
+$("preview").addEventListener("gesturechange", previewGestureChange, { passive: false });
+$("preview").addEventListener("gestureend", previewGestureEnd, { passive: false });
 
 function atFragment(text) {
   const at = text.lastIndexOf("@");
@@ -9254,6 +9258,50 @@ function previewUp(event) {
   // long-press there still offers Save Image ([PREVIEW]).
   if (event.target && event.target.id !== "preview-img" && previewState.scale <= 1.01) {
     setTimeout(() => { if (previewLastTap === now) closePreview(); }, PREVIEW_TAP_MS);
+  }
+}
+
+// iOS pinch. Safari does NOT hand a two-finger pinch over as two clean
+// pointer streams — it claims the gesture as page zoom and reports it through
+// WebKit's own gesturestart/gesturechange/gestureend, whose `scale` is the
+// spread relative to the start of the gesture. So the pointer-pair path above
+// (which is what Chrome and Android give) is not enough on the one device this
+// feature exists for, and pinching there did nothing at all.
+//
+// preventDefault is half the point: without it Safari zooms the PAGE, leaving
+// the app itself scaled up with no way back inside a standalone PWA.
+let previewGestureFrom = null;
+
+function previewGestureStart(event) {
+  const box = previewBox();
+  if (!box) return;
+  event.preventDefault();
+  previewGestureFrom = {
+    state: previewState,
+    point: previewPoint(event, box.rect),
+  };
+}
+
+function previewGestureChange(event) {
+  const box = previewBox();
+  if (!box || !previewGestureFrom) return;
+  event.preventDefault();
+  previewState = previewPinch(
+    previewState, previewGestureFrom.state, event.scale || 1,
+    previewGestureFrom.point, box.view, box.natural,
+  );
+  previewPaint(false);
+}
+
+function previewGestureEnd(event) {
+  if (event.preventDefault) event.preventDefault();
+  previewGestureFrom = null;
+  // A pinch that ended below fit springs back to it, the way letting go of an
+  // over-pinched photo does everywhere else.
+  const box = previewBox();
+  if (box && previewState.scale <= 1.01) {
+    previewState = { scale: 1, x: 0, y: 0 };
+    previewPaint(true);
   }
 }
 
