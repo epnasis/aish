@@ -41,6 +41,7 @@ function socketWorld() {
       location: { protocol: "https:", host: "aish.test", search: "" },
       token: "tok",
       storeSession: (n) => n,
+      openNewOnLoad: false, // `?new` is consumed at load ([OPEN-NEW])
       localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
       // --- everything the handlers poke, recorded or inert ---
       $: el,

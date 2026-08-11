@@ -1,17 +1,28 @@
-// Node-only, dependency-free checks for [SHARES] — the iPhone share sheet's
-// landing strip.
+// Node-only, dependency-free checks for [SHARES] — what the iPhone share sheet
+// handed over, and how it reaches a message.
 //
-// iOS cannot register a PWA as a share target, so a share arrives over HTTP
-// from a Shortcut and is PARKED server-side. Two properties matter here, and
-// both are about who owns the list:
+// The defect this file exists to stop coming back, reported from a phone:
+// "I can see 'shared from iPhone' on the composer but adding a prompt and
+// pressing send does not send the attachment, just the prompt."
 //
-//   - the server owns it. This renders what the last hello/`shared` said and
-//     keeps no local copy, because two devices claim from one inbox (the phone
-//     shares, the laptop uses) and a local list drifts the moment the other one
-//     claims something. So removal is a REQUEST, never a splice.
-//   - claiming is a TAP. A share landing mid-sentence must not attach itself to
-//     the message you are about to send — parking it is precisely so you choose
-//     when, and which chat.
+// It did exactly that. A shared file was a chip you had to TAP first, on the
+// theory that a share landing mid-sentence must not join a message you were
+// already writing. But the strip sits in the composer's attachment zone, so it
+// READS as already attached — and the file stayed in the inbox, correctly, and
+// completely uselessly, while the words went on their own.
+//
+// The safety property was never the tap. It is that a share starts NOTHING —
+// no session, no model call — which is enforced on the server. So a shared FILE
+// is attached to the next message straight away; shared TEXT stays a chip,
+// because there is no equivalent of ✕ for text that has appended itself to a
+// half-written sentence.
+//
+// The other rules pinned here:
+//   - the server owns the inbox; this reconciles against its list and keeps no
+//     copy, because two devices claim from one inbox;
+//   - a share is consumed on SEND, not on attach — a tab closed without sending
+//     leaves it waiting rather than silently spent;
+//   - ✕ tells the server, or the next repaint puts it straight back.
 //
 // Run manually: node tests/js/test_shares.js
 "use strict";
@@ -25,14 +36,14 @@ const { ok, report } = checks();
 function world() {
   const box = fakeElement("div");
   const acts = [];
+  const sent = [];
   const inserted = [];
+  const toasts = [];
   const sandbox = {
     $: (id) => (id === "shares" ? box : null),
     document: {
       createElement: (tag) => {
         const el = fakeElement(tag);
-        // The chip builds its two labels via innerHTML and then queries for
-        // them; give those queries real nodes so the wiring is exercised.
         const parts = { "share-from": fakeElement("span"), "share-name": fakeElement("span") };
         el.querySelector = (sel) => parts[sel.replace(/^\./, "")] || null;
         el._parts = parts;
@@ -42,10 +53,13 @@ function world() {
       },
     },
     act: (message, opts) => { acts.push({ message, opts: opts || {} }); return true; },
+    send: (message) => { sent.push(message); return true; },
     composerInsert: (text) => inserted.push(text),
+    showToast: (text) => toasts.push(text),
     renderAttachments: () => {},
     input: { focus() {} },
     attachments: [],
+    Set,
   };
   vm.createContext(sandbox);
   vm.runInContext(
@@ -57,12 +71,14 @@ function world() {
     box,
     acts,
     inserted,
+    toasts,
     chips: () => box.children,
+    sent: () => JSON.parse(JSON.stringify(sent)),
     attachments: () => JSON.parse(JSON.stringify(sandbox.attachments)),
   };
 }
 
-const share = (over = {}) => ({
+const fileShare = (over = {}) => ({
   id: "s1",
   name: "IMG_4021.jpg",
   path: "/u/uploads/IMG_4021.jpg",
@@ -70,123 +86,138 @@ const share = (over = {}) => ({
   source: "iPhone",
   ...over,
 });
+const textShare = (over = {}) =>
+  fileShare({ id: "t1", name: "https://example.com/a", path: "", text: "https://example.com/a", ...over });
 
-// ---- rendering ------------------------------------------------------------
+// ---- the reported bug ------------------------------------------------------
 {
   const w = world();
+  w.s.renderShares([fileShare()]);
+  assert.deepStrictEqual(w.attachments(), [
+    { name: "IMG_4021.jpg", path: "/u/uploads/IMG_4021.jpg", share: "s1" },
+  ]);
+  ok("a waiting shared FILE is attached to the composer with no tap at all", true);
+  ok("…and does not also sit in the strip, which would be the same thing twice",
+    w.box.hidden === true && w.chips().length === 0);
+  ok("…and nothing is consumed yet: send has not happened", w.sent().length === 0);
+}
+
+// ---- consumed on SEND, not on attach --------------------------------------
+{
+  const w = world();
+  w.s.renderShares([fileShare()]);
+  w.s.releaseSentShares(w.s.attachments);
+  assert.deepStrictEqual(w.sent(), [{ type: "share_drop", id: "s1" }]);
+  ok("sending the message is what spends the share", true);
+}
+
+{
+  const w = world();
+  w.s.renderShares([fileShare()]);
+  // The tab goes away without sending: nothing was released, so the server
+  // still has it and offers it again.
+  ok("a share attached but never sent is never dropped", w.sent().length === 0);
+}
+
+{
+  const w = world();
+  w.s.attachments.push({ name: "mine.pdf", path: "/u/uploads/mine.pdf" }); // picked by hand
+  w.s.renderShares([fileShare()]);
+  w.s.releaseSentShares(w.s.attachments);
+  ok("a file the owner attached themselves is not a share and drops nothing",
+    w.sent().length === 1 && w.sent()[0].id === "s1");
+}
+
+// ---- the server owns the list ---------------------------------------------
+{
+  const w = world();
+  w.s.renderShares([fileShare()]);
+  // Claimed on the phone, or dismissed there: it leaves this composer too.
   w.s.renderShares([]);
-  ok("an empty inbox shows no strip at all", w.box.hidden === true);
-
-  w.s.renderShares([share()]);
-  ok("…and one waiting item shows one", w.box.hidden === false && w.chips().length === 1);
-  const chip = w.chips()[0];
-  ok("the chip says where it came from",
-    chip.children[0]._parts["share-from"].textContent === "Shared from iPhone");
-  ok("…and what it is", chip.children[0]._parts["share-name"].textContent === "IMG_4021.jpg");
+  ok("an item the server no longer lists leaves the composer", !w.attachments().length);
 }
 
 {
-  // A share with no file is a URL or a note — the commonest thing iOS shares.
   const w = world();
-  w.s.renderShares([share({ path: "", name: "", text: "https://example.com/article" })]);
-  ok("a text-only share is still named on the chip",
-    w.chips()[0].children[0]._parts["share-name"].textContent === "https://example.com/article");
+  w.s.attachments.push({ name: "mine.pdf", path: "/u/uploads/mine.pdf" });
+  w.s.renderShares([fileShare()]);
+  w.s.renderShares([]);
+  assert.deepStrictEqual(w.attachments(), [{ name: "mine.pdf", path: "/u/uploads/mine.pdf" }]);
+  ok("…and takes nothing else with it", true);
 }
 
-// ---- claiming -------------------------------------------------------------
 {
   const w = world();
-  w.s.renderShares([share()]);
-  ok("a rendered share attaches NOTHING until it is tapped", w.attachments().length === 0);
+  w.s.renderShares([fileShare()]);
+  w.s.renderShares([fileShare()]); // a repaint for an unrelated arrival
+  ok("a repeated repaint does not attach the same share twice",
+    w.attachments().length === 1);
+}
+
+// ---- arriving live is news; the first paint is not ------------------------
+{
+  const w = world();
+  w.s.renderShares([fileShare()]);
+  ok("the first paint is silent — a reload must not toast what was already there",
+    w.toasts.length === 0);
+  w.s.renderShares([fileShare(), fileShare({ id: "s2", name: "b.png", path: "/u/b.png" })]);
+  ok("a share arriving while you are looking says so",
+    w.toasts.length === 1 && /b\.png/.test(w.toasts[0]) && /iPhone/.test(w.toasts[0]));
+}
+
+// ---- shared TEXT stays a chip ---------------------------------------------
+{
+  const w = world();
+  w.s.renderShares([textShare()]);
+  ok("shared text does NOT type itself into the composer", w.inserted.length === 0);
+  ok("…it waits as a chip", !w.box.hidden && w.chips().length === 1);
+  ok("…which says where it came from",
+    w.chips()[0].children[0]._parts["share-from"].textContent === "Shared from iPhone");
 
   w.chips()[0].children[0].onclick();
-  assert.deepStrictEqual(w.attachments(), [
-    { name: "IMG_4021.jpg", path: "/u/uploads/IMG_4021.jpg" },
-  ]);
-  ok("tapping moves it into the composer as an attachment", true);
+  assert.deepStrictEqual(w.inserted, ["https://example.com/a"]);
+  ok("tapping it inserts the text where the cursor is", true);
   assert.deepStrictEqual(
     JSON.parse(JSON.stringify(w.acts.map((a) => a.message))),
-    [{ type: "share_drop", id: "s1" }],
+    [{ type: "share_drop", id: "t1" }],
   );
-  ok("…and asks the SERVER to clear it, rather than splicing a local list", true);
-  ok("the strip is not repainted locally — the broadcast does that",
-    w.chips().length === 1);
+  ok("…and asks the server to clear it", true);
 }
 
 {
-  // Shared text is text: making the owner open a file to read a link they
-  // shared would be absurd.
+  // A share carrying BOTH is a chip: the text half has to be placed by hand.
   const w = world();
-  w.s.renderShares([share({ path: "", text: "https://example.com/article" })]);
+  w.s.renderShares([fileShare({ text: "https://example.com/a" })]);
+  ok("a share with text AND a file waits rather than half-attaching",
+    !w.box.hidden && w.attachments().length === 0);
   w.chips()[0].children[0].onclick();
-  assert.deepStrictEqual(w.inserted, ["https://example.com/article"]);
-  ok("shared text goes into the composer as text", true);
-  ok("…and attaches no phantom file", w.attachments().length === 0);
-}
-
-{
-  // A share can carry both (a page shared as URL + screenshot).
-  const w = world();
-  w.s.renderShares([share({ text: "https://example.com/article" })]);
-  w.chips()[0].children[0].onclick();
-  ok("both halves of one share are taken",
+  ok("…and tapping takes both halves",
     w.attachments().length === 1 && w.inserted.length === 1);
 }
 
-// ---- dismissing -----------------------------------------------------------
+// ---- dismissing ------------------------------------------------------------
 {
   const w = world();
-  w.s.renderShares([share()]);
+  w.s.renderShares([textShare()]);
   w.chips()[0].children[1].onclick();
   assert.deepStrictEqual(
     JSON.parse(JSON.stringify(w.acts.map((a) => a.message))),
-    [{ type: "share_drop", id: "s1" }],
+    [{ type: "share_drop", id: "t1" }],
   );
-  ok("dismissing is the same server-side operation as claiming", true);
-  ok("…and attaches nothing on the way out", w.attachments().length === 0);
+  ok("dismissing a chip is the same server-side operation as claiming it", true);
+  ok("…and attaches nothing on the way out", !w.attachments().length);
 }
 
 // ---- the claim that never lands -------------------------------------------
 {
-  // [ACK-LEDGER]: if the drop is not receipted the item is still in the inbox,
-  // so the composer must not go on holding it — the next repaint would re-offer
-  // it and it would be attached twice.
+  // [ACK-LEDGER]: the item is still in the inbox, so the composer must not go
+  // on holding it — the next repaint would re-offer it and attach it twice.
   const w = world();
-  w.s.renderShares([share()]);
+  w.s.renderShares([fileShare({ text: "note" })]);
   w.chips()[0].children[0].onclick();
   ok("the claim carries a repair", typeof w.acts[0].opts.lost === "function");
-  ok("…and it is named in the user's words, for the toast",
-    /shared item/.test(w.acts[0].opts.label || ""));
   w.acts[0].opts.lost();
-  ok("a lost claim takes the attachment back out of the composer",
-    w.attachments().length === 0);
-}
-
-{
-  // The repair must remove the RIGHT one: a composer holding a file the owner
-  // picked themselves must not lose it because an unrelated claim went missing.
-  const w = world();
-  w.s.attachments.push({ name: "notes.pdf", path: "/u/uploads/notes.pdf" });
-  w.s.renderShares([share()]);
-  w.chips()[0].children[0].onclick();
-  w.acts[0].opts.lost();
-  assert.deepStrictEqual(w.attachments(), [
-    { name: "notes.pdf", path: "/u/uploads/notes.pdf" },
-  ]);
-  ok("…and leaves everything else the composer was holding alone", true);
-}
-
-// ---- the repaint ----------------------------------------------------------
-{
-  // The server's list is the truth, including "the other device claimed it".
-  const w = world();
-  w.s.renderShares([share(), share({ id: "s2", name: "b.png", path: "/u/b.png" })]);
-  ok("two waiting items, two chips", w.chips().length === 2);
-  w.s.renderShares([share({ id: "s2", name: "b.png", path: "/u/b.png" })]);
-  ok("a broadcast that drops one repaints to exactly what the server said",
-    w.chips().length === 1);
-  w.s.renderShares([]);
-  ok("…and an emptied inbox takes the strip away", w.box.hidden === true);
+  ok("a lost claim takes the attachment back out", !w.attachments().length);
 }
 
 report("test_shares.js");

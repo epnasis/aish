@@ -38,6 +38,7 @@ function firewallWorld() {
       CONN_WARN_DELAY: 2000,
       BASE: "/",
       token: "tok",
+      openNewOnLoad: false, // `?new` is consumed at load ([OPEN-NEW])
       connOk: true,
       currentSession: null,
       VIEW_SAFE_EVENTS: new Set(["hello", "session_list", "role", "session_state"]),
