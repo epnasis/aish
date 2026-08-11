@@ -29,7 +29,7 @@ from typing import Any, NamedTuple
 
 import yaml
 
-from . import skills
+from . import skills, web
 
 GLOBAL_RULES_DIR = Path.home() / ".config" / "aish" / "rules"
 
@@ -2226,8 +2226,19 @@ def _normalise_url(url: str) -> str:
     """A URL as an identity, for comparing what was linked against what was
     opened. Fragment and trailing slash dropped, because `#section` and a
     trailing `/` are the same page and a rule that fired on either would be
-    noise nobody could act on."""
+    noise nobody could act on.
+
+    A playable video collapses to its ID for the same reason, and it is the same
+    argument one step further: `youtu.be/ID`, `youtube.com/watch?v=ID` and the
+    `&si=…` share parameter the phone's share sheet appends are all one video.
+    The owner opens the shared form and the answer shows the canonical one (the
+    card `show_image` composes for a video still is built from the id), so
+    comparing them as strings reported his own video as a link he never opened —
+    noise about the one thing he definitely had opened (#219).
+    """
     url = str(url or "").strip().split("#", 1)[0]
+    if video := web.video_id(url):
+        return f"video:{video}"
     return url.rstrip("/").casefold()
 
 

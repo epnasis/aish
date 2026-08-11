@@ -4348,6 +4348,38 @@ class TestShowImage:
         assert len(stored) == 1 and stored[0].read_bytes() == PNG_BYTES
         assert f"![a phone]({stored[0]})" in result
 
+    def test_a_video_thumbnail_comes_back_as_the_player(self, tmp_path, monkeypatch):
+        """#219: a video's still and a link to that video are ONE thing on screen.
+        Two constructs became two cards — the same picture twice, once playable —
+        and only the fetcher knows the stored bytes ARE that video's thumbnail, so
+        the composed line has to be built here."""
+        _, result, _ = self._run(
+            tmp_path,
+            monkeypatch,
+            (PNG_BYTES, "image/png"),
+            source="https://i.ytimg.com/vi/lqltp2QaT30/hqdefault.jpg",
+            caption="Ukraine hit Wildberries again",
+        )
+        stored = next((tmp_path / "media").iterdir())
+        assert (
+            f"[![Ukraine hit Wildberries again]({stored})]"
+            "(https://www.youtube.com/watch?v=lqltp2QaT30)"
+        ) in result
+        # The instruction is imperative and says what NOT to do: the prose link is
+        # a separate decision the model makes, and it is the duplicate's other half.
+        assert "do NOT write a separate link to the same video" in result
+
+    def test_an_ordinary_image_is_not_wrapped_in_a_video_link(self, tmp_path, monkeypatch):
+        """The composed form is for a THUMBNAIL host only — a photo that happens to
+        be about a video must stay a plain picture."""
+        _, result, _ = self._run(
+            tmp_path, monkeypatch, (PNG_BYTES, "image/png"),
+            source="https://example.com/vi/lqltp2QaT30/hqdefault.jpg",
+        )
+        stored = next((tmp_path / "media").iterdir())
+        assert result.endswith(f"![a phone]({stored})")
+        assert "youtube.com" not in result
+
     def test_the_stored_path_is_displayable(self, tmp_path, monkeypatch):
         """A store that put the file somewhere no renderer serves from would just
         move the silent failure to render time."""

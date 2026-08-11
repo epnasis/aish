@@ -574,7 +574,34 @@ class _MediaEmbedder:
             return self._map_card(maps.group(1), label_html, url)
         return match.group(0)
 
+    def _label_poster(self, label_html: str) -> tuple[str, str] | None:
+        """`(image_html, caption)` when the link's own label already carries the
+        picture — the `[![still](file)](url)` poster form — else None.
+
+        The picture the answer already has IS this card's picture. Without this
+        the label was used verbatim as the CAPTION (so the caption contained an
+        `<img>` tag, which the image pass then inlined) beside a freshly fetched
+        copy of the same still: the same duplication the web UI had, in the PDF,
+        plus a network fetch for bytes already on disk (#219). The caption falls
+        back to the image's alt text, which is what the poster form puts its
+        words in.
+        """
+        img = _IMG_TAG_RE.search(label_html)
+        if not img:
+            return None
+        image = _IMG_TAG_RE.sub(self._replace_img, img.group(0))
+        if "<img" not in image:
+            return None  # unembeddable (outside the roots, or a fetch failure)
+        rest = _IMG_TAG_RE.sub("", label_html).strip()
+        if not rest:
+            alt_match = _ATTR_RES["alt"].search(img.group(0))
+            rest = _escape(html_lib.unescape(alt_match.group(1))) if alt_match else ""
+        return image, rest
+
     def _youtube_card(self, video_id: str, label_html: str, url: str) -> str:
+        poster = self._label_poster(label_html)
+        if poster is not None:
+            return _embed_card(poster[0], poster[1], url, "YouTube video")
         thumb = self._fetch(f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg")
         image = _img_tag(thumb, "video thumbnail") if thumb else None
         if image is None:
@@ -582,6 +609,9 @@ class _MediaEmbedder:
         return _embed_card(image, label_html, url, "YouTube video")
 
     def _map_card(self, map_query: str, label_html: str, url: str) -> str:
+        poster = self._label_poster(label_html)
+        if poster is not None:
+            return _embed_card(poster[0], poster[1], url, "map")
         markers = _map_markers(map_query)
         if markers is None:
             # View-only link (no q/query/directions): plain <a>, like the web UI.

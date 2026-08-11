@@ -2395,6 +2395,42 @@ class TestLinksYouDidNotOpen:
               "status": "ok"}],
         ) == []
 
+    def test_one_video_is_one_video_however_it_was_written(self):
+        """#219. The owner shares from his phone, so the URL he hands over carries
+        `&si=…`; the card an answer shows is built from the video's ID, so it is
+        the canonical form. Compared as strings those are two links, and the rule
+        reported the video he had just opened as one aish had never opened —
+        noise about the single thing it was certain about."""
+        assert self._check(
+            "[![still](/state/media/a-thumb.jpg)]"
+            "(https://www.youtube.com/watch?v=lqltp2QaT30)",
+            [{"tool": "youtube_analyze",
+              "args": {"url": "https://youtube.com/watch?v=lqltp2QaT30&si=cuYMIzjaNetY2Px5"},
+              "status": "ok"}],
+        ) == []
+
+    def test_a_DIFFERENT_video_is_still_caught(self):
+        """The collapse must be to the id, not to "any youtube link"."""
+        [failure] = self._check(
+            "Watch [this](https://www.youtube.com/watch?v=dQw4w9WgXcQ) instead.",
+            [{"tool": "youtube_analyze",
+              "args": {"url": "https://youtube.com/watch?v=lqltp2QaT30"},
+              "status": "ok"}],
+        )
+        assert failure.evidence["unverified"] == ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"]
+
+    def test_a_video_page_is_not_verified_by_a_channel_link(self):
+        """A link with no video id keeps its ordinary identity — collapsing
+        anything that merely lives on youtube.com would verify a channel or a
+        playlist off the back of one video."""
+        [failure] = self._check(
+            "See [the channel](https://www.youtube.com/@ProfessorGerdes).",
+            [{"tool": "youtube_analyze",
+              "args": {"url": "https://youtube.com/watch?v=lqltp2QaT30"},
+              "status": "ok"}],
+        )
+        assert "ProfessorGerdes" in failure.ask
+
     def test_a_trailing_slash_or_anchor_is_the_same_page(self):
         assert self._check(
             "See [it](https://example.com/guide/#setup).",

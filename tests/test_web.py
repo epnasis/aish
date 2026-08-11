@@ -535,3 +535,38 @@ class TestPageImages:
         out = web.read_url("https://site.test/a")
         assert "[page truncated" in out, "expected this fixture to exceed the cap"
         assert "https://site.test/img/hero.jpg" in out
+
+
+class TestVideoIds:
+    """The two directions of the same whitelist: what the app can PLAY, and what
+    is a video's STILL. Both are parsers, not judgement — the caller decides what
+    to do with "" (`show_video` refuses, `show_image` just stays a picture)."""
+
+    def test_the_three_playable_shapes(self):
+        assert web.video_id("https://youtube.com/watch?v=lqltp2QaT30") == "lqltp2QaT30"
+        assert web.video_id("https://youtu.be/lqltp2QaT30") == "lqltp2QaT30"
+        assert web.video_id("https://www.youtube.com/shorts/lqltp2QaT30") == "lqltp2QaT30"
+
+    def test_a_page_about_a_video_is_not_a_video(self):
+        assert web.video_id("https://youtube.com/@ProfessorGerdes") == ""
+        assert web.video_id("https://example.com/watch?v=lqltp2QaT30") == ""
+
+    def test_both_thumbnail_hosts_and_the_webp_path(self):
+        """i.ytimg.com is what the API and `youtube_analyze` hand out;
+        img.youtube.com is the older alias the web card falls back to. Any size
+        file name — the id is in the path, and every size shares it."""
+        for url in (
+            "https://i.ytimg.com/vi/lqltp2QaT30/hqdefault.jpg",
+            "https://i9.ytimg.com/vi/lqltp2QaT30/maxresdefault.jpg",
+            "https://img.youtube.com/vi/lqltp2QaT30/0.jpg",
+            "https://i.ytimg.com/vi_webp/lqltp2QaT30/sddefault.webp",
+        ):
+            assert web.thumbnail_video_id(url) == "lqltp2QaT30", url
+
+    def test_an_ordinary_image_url_is_not_a_thumbnail(self):
+        """The composed poster line hangs off this: a false positive would wrap
+        somebody's photo in a link to an unrelated video."""
+        assert web.thumbnail_video_id("https://example.com/vi/lqltp2QaT30/hq.jpg") == ""
+        assert web.thumbnail_video_id("https://i.ytimg.com/an/UCxyz/thumb.jpg") == ""
+        assert web.thumbnail_video_id("https://cdn.test/hero.jpg") == ""
+        assert web.thumbnail_video_id("") == ""

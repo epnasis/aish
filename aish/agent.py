@@ -2960,6 +2960,23 @@ class Agent:
         # makes the tool's own failure modes visible to the one deciding what
         # to do about them: a hotlink block, a login wall and the wrong photo
         # all sniff as valid images and are only distinguishable by looking.
+        if video := web.thumbnail_video_id(source):
+            # A video's still and a link to that video are ONE thing on screen —
+            # the app renders this composed line as a single card: the picture,
+            # with a play button on it. Emitted here because this is the only
+            # place that knows the stored file IS that video's thumbnail; a
+            # content-addressed path cannot say so afterwards. Without it the
+            # model wrote the picture and the link separately and the answer
+            # opened with the same image twice, once playable (#219).
+            return tools.ToolOutcome(
+                "Video still ready — it is attached to this turn, so look at it and "
+                "make sure it really is the video the user meant. The line below is "
+                "the picture AND the player in ONE card: include it in your answer "
+                "EXACTLY as written (do not alter the path or the link), and do NOT "
+                "write a separate link to the same video anywhere in the answer:\n\n"
+                f"[![{alt or 'video'}]({path})](https://www.youtube.com/watch?v={video})",
+                images=(str(path),),
+            )
         return tools.ToolOutcome(
             "Image ready — it is attached to this turn, so look at it and make "
             "sure it really shows what the user asked for. Include this line in "

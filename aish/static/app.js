@@ -1262,6 +1262,7 @@ let sawAnswer = false; // any tokens streamed since the task started —
 // once, not once per token), and renders are coalesced to one per frame.
 let answerStableLen = 0; // chars of answerText already in stable DOM
 let answerStableNodes = 0; // answerEl children that are stable
+let answerCardIds = new Set(); // videos carded in the stable prefix ([ONE-CARD])
 let answerRenderQueued = false;
 // This turn's answer was thrown away mid-stream by a replay (see resetLiveTurn):
 // stale LIVE tokens for it are dropped, replayed ones re-open it. Rides with
@@ -1305,6 +1306,7 @@ function resetLiveTurn(landing) {
   answerText = "";
   answerStableLen = 0;
   answerStableNodes = 0;
+  answerCardIds = new Set();
   sawAnswer = false;
   cards.clear();
   pendingCards = 0;
@@ -2106,6 +2108,7 @@ function onToken(text) {
     answerText = "";
     answerStableLen = 0;
     answerStableNodes = 0;
+    answerCardIds = new Set();
     // The reply itself is the reading anchor: anchorAnswer scrolls only until
     // its top reaches the top of the screen, so the view rises while the answer
     // is still short and then locks with the answer owning the whole viewport.
@@ -2184,11 +2187,16 @@ function renderAnswerNow() {
   const boundary = stableBoundary(answerText);
   while (answerEl.childNodes.length > answerStableNodes) answerEl.lastChild.remove();
   if (boundary > answerStableLen) {
-    answerEl.appendChild(renderMarkdown(answerText.slice(answerStableLen, boundary)));
+    // The prefix is frozen DOM, so its cards are permanent and commit their
+    // claims straight into the answer's set ([ONE-CARD]).
+    answerEl.appendChild(renderMarkdown(answerText.slice(answerStableLen, boundary), answerCardIds));
     answerStableLen = boundary;
     answerStableNodes = answerEl.childNodes.length;
   }
-  answerEl.appendChild(renderMarkdown(answerText.slice(answerStableLen)));
+  // The tail is thrown away and re-rendered on every token, so it gets a COPY:
+  // claims made there must not survive into the next render, or the card would
+  // demote itself to a plain link one token after it appeared.
+  answerEl.appendChild(renderMarkdown(answerText.slice(answerStableLen), new Set(answerCardIds)));
 }
 
 // A fence opens on a run of 3+ backticks or tildes. Per CommonMark, the
@@ -4442,7 +4450,21 @@ function highlightCommand(code) {
 }
 
 // ---- markdown rendering --------------------------------------------------
-function renderMarkdown(text) {
+// `scope` (optional) is the caller's per-ANSWER set of videos already rendered
+// as a card — see [ONE-CARD]. Nested renders (list items, blockquotes) pass
+// none and inherit the enclosing scope, or a card inside a list item would be
+// blind to the one beside it; a top-level render with no scope gets its own.
+function renderMarkdown(text, scope) {
+  const enclosing = cardScope;
+  cardScope = scope instanceof Set ? scope : cardScope || new Set();
+  try {
+    return renderMarkdownBlocks(text);
+  } finally {
+    cardScope = enclosing;
+  }
+}
+
+function renderMarkdownBlocks(text) {
   const frag = document.createDocumentFragment();
   // Normalize CRLF/lone-CR up front (#80): a trailing \r riding along on every
   // split line is otherwise harmless noise almost everywhere, but it can land
@@ -4930,13 +4952,53 @@ const MAPS_RE =
 const YT_PLAY_SVG =
   '<svg viewBox="0 0 68 48" aria-hidden="true"><path class="yt-btn" d="M66.52 7.74a8 8 0 0 0-5.63-5.66C55.94 1 34 1 34 1S12.06 1 7.11 2.08A8 8 0 0 0 1.48 7.74 83.7 83.7 0 0 0 .5 24a83.7 83.7 0 0 0 .98 16.26 8 8 0 0 0 5.63 5.66C12.06 47 34 47 34 47s21.94 0 26.89-1.08a8 8 0 0 0 5.63-5.66A83.7 83.7 0 0 0 67.5 24a83.7 83.7 0 0 0-.98-16.26z"/><path class="yt-arrow" d="M27 34l18-10-18-10z"/></svg>';
 
+// [ONE-CARD-START]
+// One card per video per answer. A turn about a video routinely produces the
+// still AND a link to it — `show_image` on the thumbnail, then "here is a
+// summary of [the video](…)" in the prose — and each of those used to become
+// its own card, so the answer opened with the same picture twice, once with a
+// play button on it (the state of the transcript in issue #219).
+//
+// The FIRST occurrence wins and every later one degrades to a plain hyperlink,
+// so a duplicate costs a link and never a second copy of the picture. Order is
+// the model's: the composed poster line (`_show_image` hands one back for a
+// video thumbnail) normally leads the answer, which is why it is the one that
+// becomes the card.
+//
+// The scope is the ANSWER, not the render call, and the two are different while
+// a turn streams: `renderAnswerNow` re-renders the live tail on every token and
+// freezes a growing prefix, so the set is owned by the caller — the prefix
+// commits into it, the tail is handed a throwaway copy (`renderMarkdown`).
+let cardScope = null;
+
+// Claim `id` for a card, or refuse because this answer already has one.
+// Unscoped renders (a tool result, an issue draft) claim freely: there is no
+// answer to be a duplicate within.
+function claimVideoCard(id) {
+  if (!cardScope) return true;
+  if (cardScope.has(id)) return false;
+  cardScope.add(id);
+  return true;
+}
+
+// Is this link a video THIS answer already shows a card for? Read after a
+// refused embed, to choose a fallback that is not another copy of the picture.
+function videoAlreadyCarded(url) {
+  const yt = cardScope ? url.match(YOUTUBE_RE) : null;
+  return !!yt && cardScope.has(yt[1] || yt[2]);
+}
+// [ONE-CARD-END]
+
 // Returns an embed element for a whitelisted link, or null so the caller
 // falls back to a normal <a>. `label` is used as accessible text/alt.
 // `poster` (optional, from the [![img](src)](url) form) is a resolved image src
 // shown INSTEAD of loading the frame immediately — see mapsCard.
 function embedForLink(label, url, poster) {
   const yt = url.match(YOUTUBE_RE);
-  if (yt) return youtubeEmbed(yt[1] || yt[2], label);
+  if (yt) {
+    const id = yt[1] || yt[2];
+    return claimVideoCard(id) ? youtubeEmbed(id, label, poster) : null;
+  }
   const maps = url.match(MAPS_RE);
   if (maps) {
     const params = new URLSearchParams(maps[1]);
@@ -4957,7 +5019,33 @@ function embedForLink(label, url, poster) {
   return null;
 }
 
-function youtubeEmbed(id, label) {
+// How long the player gets before the card admits nothing is happening.
+//
+// This is the WEAK net, and knowing why matters: a cross-origin frame cannot be
+// asked whether it worked, and `load` is not the answer either — measured in
+// Chrome, an iframe pointed at a blocked or unreachable host fires `load`
+// exactly as a working one does, having painted its own error page. So this
+// catches only true silence (a request left hanging), never the black box. What
+// catches that is `cannotReachYouTube` below: the app's OWN offline authority,
+// a fact aish already holds, instead of an interrogation the frame cannot
+// answer. Generous on purpose — being early yanks a player that was merely slow.
+const EMBED_FRAME_SLOW_MS = 8000;
+
+// A player cannot possibly load when our own server is unreachable over the
+// same radio (`offlineMode` is the socket's verdict, not navigator.onLine's —
+// see the connectivity block). navigator.onLine only ever ACCELERATES the
+// conclusion, which is the same weighting the rest of the file gives it.
+function cannotReachYouTube() {
+  return offlineMode || (typeof navigator !== "undefined" && navigator.onLine === false);
+}
+
+// `poster` (optional) is an already-resolved image src for this video's still,
+// normally the local copy `show_image` stored. It BEATS YouTube's own thumbnail
+// because it is same-origin, already fetched, and inside the offline mirror —
+// `i.ytimg.com` is in none of those, so a chat read on a plane showed a black
+// card where the picture had been.
+function youtubeEmbed(id, label, poster) {
+  const watchUrl = `https://www.youtube.com/watch?v=${id}`;
   const card = document.createElement("div");
   card.className = "embed embed-youtube";
   card.setAttribute("role", "button");
@@ -4968,7 +5056,7 @@ function youtubeEmbed(id, label) {
   img.className = "embed-thumb";
   img.loading = "lazy";
   img.alt = label;
-  img.src = `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
+  img.src = poster || `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
   card.appendChild(img);
 
   const play = document.createElement("div");
@@ -4976,8 +5064,24 @@ function youtubeEmbed(id, label) {
   play.innerHTML = YT_PLAY_SVG;
   card.appendChild(play);
 
+  let frame = null;
+  let watchdog = 0;
+  let stalled = null;
+
+  // The still is NOT thrown away when the player opens (it used to be — the
+  // frame replaced every child), so there is something behind the frame when
+  // the frame turns out to be nothing. CSS lays the active frame over it.
   const activate = () => {
-    const frame = document.createElement("iframe");
+    if (frame) return; // already playing; a second tap must not restack it
+    if (stalled) { stalled.remove(); stalled = null; }
+    // Don't open a frame that cannot load: an iframe over the still paints its
+    // own blank error page, which is the black box — and it fires `load`, so
+    // nothing downstream would ever notice. Say it instead, and keep the still.
+    if (cannotReachYouTube()) {
+      stall("Offline");
+      return;
+    }
+    frame = document.createElement("iframe");
     frame.className = "embed-frame";
     frame.src = `https://www.youtube-nocookie.com/embed/${id}?autoplay=1`;
     frame.title = label;
@@ -4995,11 +5099,39 @@ function youtubeEmbed(id, label) {
     // allow-same-origin lets a frame drop its own sandbox" escape only matters
     // when the framed content is same-origin AS THE PARENT — it isn't here.
     frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation");
-    card.replaceChildren(frame);
+    frame.addEventListener("load", () => { clearTimeout(watchdog); watchdog = 0; });
+    watchdog = setTimeout(() => stall(), EMBED_FRAME_SLOW_MS);
+    play.remove();
+    card.appendChild(frame);
     card.classList.add("embed-active");
     card.removeAttribute("role");
     card.removeAttribute("tabindex");
   };
+
+  // The player is not going to happen: L7 — a screen that cannot show the truth
+  // says so. Back to the still (which is why it was kept), with the one thing
+  // that still works from here, and tappable again because the next attempt may
+  // succeed — the connection this failed on is usually the thing that changes.
+  const stall = (reason) => {
+    watchdog = 0;
+    if (frame) { frame.remove(); frame = null; }
+    card.classList.remove("embed-active");
+    card.appendChild(play);
+    card.setAttribute("role", "button");
+    card.tabIndex = 0;
+    stalled = document.createElement("div");
+    stalled.className = "embed-stalled";
+    const note = document.createElement("span");
+    note.textContent = reason || "Couldn’t play here";
+    const out = externalAnchor(watchUrl);
+    out.textContent = "Open on YouTube";
+    // Or the tap bubbles to the card and re-arms the player under the new tab.
+    out.addEventListener("click", (e) => e.stopPropagation());
+    stalled.appendChild(note);
+    stalled.appendChild(out);
+    card.appendChild(stalled);
+  };
+
   card.addEventListener("click", activate);
   card.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") {
@@ -5112,6 +5244,13 @@ function imageLink(alt, imageTarget, url) {
   }
   const link = externalAnchor(url);
   link.className = "img-link";
+  // Refused because this answer already cards that video ([ONE-CARD]): the
+  // picture is on screen inside that card, so painting it again here is the
+  // duplicate being avoided. The words become a plain link to the same video.
+  if (videoAlreadyCarded(url)) {
+    link.textContent = alt || url;
+    return link;
+  }
   if (poster === null) {
     link.textContent = alt || url;
     return link;

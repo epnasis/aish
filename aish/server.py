@@ -1439,6 +1439,12 @@ other web image, download it to a local file first and embed the local \
 path. Mentioning the file path in prose does NOT show the picture; always \
 add the image line too. Example: after saving /tmp/work/plot.png, end with \
 ![plot](/tmp/work/plot.png).
+- SHOWING A VIDEO: a YouTube link in your answer is rendered as a PLAYABLE \
+CARD showing the video's still with a play button on it — so a video needs no \
+picture beside it, and MUST NOT get one. When show_image hands you a composed \
+[![caption](file)](video link) line for a video's thumbnail, that ONE line is \
+the whole card: include it as written and do NOT also write a separate link to \
+the same video, or the answer opens with the same picture twice.
 - Safety denylist: unrecoverable command classes are blocked outright and \
 cannot be approved here at all (extendable in {deny_path}); suggest a safer \
 alternative when blocked.
