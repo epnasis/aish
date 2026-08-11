@@ -3965,6 +3965,14 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             # Free-form label from the Shortcut ("iPhone", "Photos"), shown as
             # the chip's provenance. Bounded because it is arbitrary input.
             "source": (request.query_params.get("source") or "share sheet")[:40],
+            # `chat=new`: this item wants a chat of its own rather than landing
+            # on top of whatever conversation was last open. It travels with the
+            # ITEM, not with the launch URL, because iOS gives no way to open an
+            # installed web app at a chosen address — `webapp://…/?new` launches
+            # the app and drops the query — so the intent has to be recorded
+            # where the client will still find it. Advisory: the client opens
+            # the chat, and only when there is one worth leaving.
+            "fresh": request.query_params.get("chat") == "new",
             "at": time.time(),
         }
         self.shares.append(item)

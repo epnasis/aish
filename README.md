@@ -476,9 +476,13 @@ than minting another.
 Useful as a second Home Screen icon: in Safari, go to `…/?new&token=YOUR_TOKEN`,
 then **Share → Add to Home Screen** and name it "New aish chat". Include the
 token — an installed web app has its own storage and will not inherit the one
-your existing icon holds. It also pairs with the share sheet: end the Shortcut
-with **Open URL** on that address and each shared item starts its own chat with
-the file already attached.
+your existing icon holds.
+
+**It does not work from a Shortcut.** iOS has no supported way to open an
+installed web app at an address of your choosing: `webapp://your-aish-host/?new`
+launches the app but drops the query, and an `https://` URL opens Safari rather
+than the installed app. To put a *shared* item in its own chat, mark the share
+instead — see below.
 
 ### Share to aish from iOS
 
@@ -512,6 +516,12 @@ Two refinements worth making:
 
 - **Photos.** iOS shares photos as HEIC, which vision models do not read. Put a
   **Convert Image** action (to JPEG) before the POST, and set `name=shared.jpg`.
+- **A chat of its own.** Add `&chat=new` to the URL and that shared item opens
+  a fresh chat when you next open aish, instead of landing on top of the last
+  conversation. This is the one that works from a Shortcut, because the intent
+  travels with the item rather than with a URL iOS will not honour. A batch
+  shared together opens one chat between them, and an already-empty chat is
+  reused rather than left behind.
 - **Links and text.** Safari shares a URL, not a file. Drop the `name=` from the
   URL and a body with no name is read as text — so one **If** action inside the
   shortcut (POST to `…/share?token=…&source=Safari` for a link, to the `name=`

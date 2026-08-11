@@ -3350,6 +3350,22 @@ class TestShareInbox:
             assert item["text"] == "https://example.com/thing"
             assert item["name"] == "https://example.com/thing"  # what the chip shows
 
+    def test_chat_new_marks_the_item_not_the_launch_url(self, app_env):
+        """iOS will not open an installed web app at an address of your
+        choosing — `webapp://…/?new` launches the app and drops the query — so
+        "put this in its own chat" has to ride on the ITEM, where the client
+        will still find it however the app was opened. Advisory: the server
+        opens nothing, it only records the intent."""
+        client, chat = make_client(app_env, [model_says("never runs")])
+        with client:
+            client.post("/share?name=a.png&chat=new", content=b"\x89PNG")
+            client.post("/share?name=b.png", content=b"\x89PNG")
+            fresh, plain = client.app.state.server.shares
+            assert fresh["fresh"] is True
+            assert plain["fresh"] is False
+            # Still inert: recording the intent must not start anything.
+            assert chat.calls == []
+
     def test_a_body_with_no_name_is_text(self, app_env):
         """Safari shares a URL, and percent-encoding one into a query string
         inside Shortcuts works right up until the link contains an `&`. So the

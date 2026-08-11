@@ -4029,6 +4029,17 @@ function scrollToEnd(force) {
   updateEmptyHint(); // every content-adding path funnels through here
 }
 
+// Is this chat still unused? Workspace notes (a UI /cd, a dir-trust marker) are
+// system metadata, not turns — a chat is "fresh" after one. Named separately
+// from updateEmptyHint because [SHARES] asks the same question for a different
+// reason: whether opening ANOTHER new chat would just leave an empty one behind.
+function transcriptIsEmpty() {
+  return (
+    messagesEl.childElementCount <= 4 &&
+    [...messagesEl.children].every((c) => c.classList.contains("workspace-note"))
+  );
+}
+
 // Empty-state welcome hero (#123): shown only while the transcript is empty.
 function updateEmptyHint() {
   // A workspace-note (a UI /cd or dir-trust marker) is system metadata, not a
@@ -4038,10 +4049,7 @@ function updateEmptyHint() {
   // and a populated transcript can only be "empty" if it holds nothing but
   // workspace notes — with more than a handful of children it never is, so
   // skip the per-append array spread over hundreds of nodes.
-  const empty =
-    messagesEl.childElementCount <= 4 &&
-    [...messagesEl.children].every((c) => c.classList.contains("workspace-note"));
-  $("welcome").hidden = !empty; // brand hero on a fresh/empty chat (#123)
+  $("welcome").hidden = !transcriptIsEmpty(); // brand hero on a fresh chat (#123)
 }
 
 // iOS Safari settles keyboard-driven layout changes a beat after the gesture;
@@ -8812,6 +8820,7 @@ function renderShares(items) {
   }
   if (touched) renderAttachments();
   sharesPainted = true;
+  openChatForFreshShares(items);
 
   box.replaceChildren();
   box.hidden = !waiting.length;
@@ -8840,6 +8849,33 @@ function renderShares(items) {
     chip.append(take, bin);
     box.appendChild(chip);
   }
+}
+
+// A share posted with `chat=new` wants its own conversation instead of landing
+// on top of whatever was last open. It rides on the ITEM rather than on the
+// launch URL because iOS will not open an installed web app at an address of
+// your choosing — `webapp://…/?new` starts the app and drops the query — so
+// `?new` ([OPEN-NEW]) can only ever work for a browser tab or a second Home
+// Screen icon. This works however the app was opened.
+//
+// The attachment is NOT re-done afterwards: attachments deliberately survive a
+// session switch, so whatever was just attached rides into the new chat. That
+// also makes this failure-tolerant — if the new chat never arrives, the file is
+// still attached to the chat you are in, which is the old behaviour and not a
+// loss.
+const freshHonoured = new Set(); // ids already acted on — a hello repeats them
+
+function openChatForFreshShares(items) {
+  const fresh = items.filter((item) => item.fresh && !freshHonoured.has(item.id));
+  if (!fresh.length) return;
+  // ALL of them are marked, and at most ONE chat is opened: sharing three
+  // photos then opening aish means one new chat holding three, not three chats
+  // holding one each and two of them empty.
+  for (const item of fresh) freshHonoured.add(item.id);
+  // Nothing to leave behind: opening a new chat from an unused one just leaves
+  // an empty row in the rail and looks like the button misfired.
+  if (transcriptIsEmpty()) return;
+  requestNewChat();
 }
 
 // Take a parked share into the composer by hand — the path for the ones that

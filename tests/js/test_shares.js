@@ -22,7 +22,9 @@
 //     copy, because two devices claim from one inbox;
 //   - a share is consumed on SEND, not on attach — a tab closed without sending
 //     leaves it waiting rather than silently spent;
-//   - ✕ tells the server, or the next repaint puts it straight back.
+//   - ✕ tells the server, or the next repaint puts it straight back;
+//   - `chat=new` opens one chat for the batch, once, and never from an already
+//     empty one.
 //
 // Run manually: node tests/js/test_shares.js
 "use strict";
@@ -33,8 +35,10 @@ const { appSource, extract, surface, fakeElement, checks } = require("./harness"
 
 const { ok, report } = checks();
 
-function world() {
+function world({ emptyChat = false } = {}) {
   const box = fakeElement("div");
+  const newChats = [];
+  const empty = { value: emptyChat };
   const acts = [];
   const sent = [];
   const inserted = [];
@@ -57,6 +61,8 @@ function world() {
     composerInsert: (text) => inserted.push(text),
     showToast: (text) => toasts.push(text),
     renderAttachments: () => {},
+    requestNewChat: () => newChats.push(1),
+    transcriptIsEmpty: () => empty.value,
     input: { focus() {} },
     attachments: [],
     Set,
@@ -70,6 +76,8 @@ function world() {
     s: sandbox,
     box,
     acts,
+    newChats,
+    empty,
     inserted,
     toasts,
     chips: () => box.children,
@@ -218,6 +226,53 @@ const textShare = (over = {}) =>
   ok("the claim carries a repair", typeof w.acts[0].opts.lost === "function");
   w.acts[0].opts.lost();
   ok("a lost claim takes the attachment back out", !w.attachments().length);
+}
+
+// ---- `chat=new`: a share that wants its own conversation -----------------
+// It rides on the ITEM, not on the launch URL, because iOS will not open an
+// installed web app at an address of your choosing — `webapp://…/?new` starts
+// the app and drops the query. This has to work however the app was opened.
+{
+  const w = world();
+  w.s.renderShares([fileShare({ fresh: true })]);
+  ok("a share marked chat=new opens a chat for itself", w.newChats.length === 1);
+  ok("…and is still attached, because attachments survive the switch",
+    w.attachments().length === 1);
+}
+
+{
+  const w = world();
+  w.s.renderShares([fileShare()]);
+  ok("an ordinary share never moves you", w.newChats.length === 0);
+}
+
+{
+  // hello repeats the inbox on every connect and every session switch — which
+  // is exactly what the new chat causes. Without the ledger this loops.
+  const w = world();
+  w.s.renderShares([fileShare({ fresh: true })]);
+  w.s.renderShares([fileShare({ fresh: true })]);
+  w.s.renderShares([fileShare({ fresh: true })]);
+  ok("three repaints of the same item open ONE chat", w.newChats.length === 1);
+}
+
+{
+  const w = world();
+  w.s.renderShares([
+    fileShare({ id: "a", name: "a.png", path: "/u/a.png", fresh: true }),
+    fileShare({ id: "b", name: "b.png", path: "/u/b.png", fresh: true }),
+  ]);
+  ok("three photos shared at once means one new chat, not three",
+    w.newChats.length === 1);
+  ok("…holding all of them", w.attachments().length === 2);
+}
+
+{
+  const w = world({ emptyChat: true });
+  w.s.renderShares([fileShare({ fresh: true })]);
+  ok("a chat with nothing in it is not worth leaving — no spare empty chat",
+    w.newChats.length === 0);
+  ok("…and the share is attached right here", w.attachments().length === 1);
 }
 
 report("test_shares.js");
