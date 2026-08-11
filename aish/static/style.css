@@ -799,6 +799,31 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   object-fit: cover;
   display: block;
 }
+/* The still stays under the player rather than being replaced by it, so there
+   is a picture left when the player turns out to be a blank frame. Absolute,
+   because the img is still in flow and would otherwise push the frame down. */
+.msg.md .embed-active .embed-frame {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+}
+/* "Couldn’t play here — Open on YouTube", over the restored still. Bottom, not
+   centred: the play badge is in the middle, and this appears beside it. */
+.msg.md .embed-stalled {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: center;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: #fff;
+  background: linear-gradient(to top, rgb(0 0 0 / 0.72), rgb(0 0 0 / 0));
+}
+.msg.md .embed-stalled a { color: #fff; text-decoration: underline; }
 .msg.md .embed-youtube { cursor: pointer; }
 .msg.md .embed-play {
   position: absolute;

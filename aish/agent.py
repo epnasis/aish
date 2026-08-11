@@ -2857,6 +2857,22 @@ class Agent:
         # bracket or a newline in it silently breaks the markdown image parser,
         # which used to be worked around by a memory (#188 layer 3).
         alt = re.sub(r"\s+", " ", caption).replace("[", "").replace("]", "").strip()
+        video = web.thumbnail_video_id(source)
+        if video:
+            # A video's still and a link to that video are ONE thing on screen —
+            # the app renders this composed line as a single card: the picture,
+            # with a play button on it. Emitted here because this is the only
+            # place that knows the stored file IS that video's thumbnail; a
+            # content-addressed path cannot say so afterwards. Without it the
+            # model wrote the picture and the link separately and the answer
+            # opened with the same image twice, once playable (#219).
+            return (
+                "Video still ready. The line below is the picture AND the player in "
+                "ONE card. Include it in your answer EXACTLY as written (do not alter "
+                "the path or the link), and do NOT write a separate link to the same "
+                f"video anywhere in the answer:\n\n"
+                f"[![{alt or 'video'}]({path})](https://www.youtube.com/watch?v={video})"
+            )
         return (
             "Image ready. Include this line in your answer EXACTLY as written "
             f"(do not alter the path):\n\n![{alt or 'image'}]({path})"

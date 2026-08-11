@@ -452,3 +452,25 @@ def video_id(url: str) -> str:
     if not match:
         return ""
     return match.group(1) or match.group(2) or ""
+
+
+# A video's STILL, as served by YouTube's two thumbnail hosts (i.ytimg.com is
+# what the API and oEmbed hand out; img.youtube.com is the older alias, and the
+# one the web UI's own card falls back to). `_webp` and any file name — the id
+# is in the path, and every size shares it.
+_YOUTUBE_THUMB_RE = re.compile(
+    r"^https?://(?:i\d*\.ytimg\.com|img\.youtube\.com)/vi(?:_webp)?/([\w-]{11})/",
+    re.IGNORECASE,
+)
+
+
+def thumbnail_video_id(url: str) -> str:
+    """The video whose still this image URL is, or "" when it is not one.
+
+    Provenance the FETCHER knows and no later reader can recover: once the
+    bytes are stored under a content hash, nothing about the file says it is a
+    video's thumbnail. It is what lets `show_image` hand back a picture that is
+    also the player instead of a picture beside a link to it (#219).
+    """
+    match = _YOUTUBE_THUMB_RE.match((url or "").strip())
+    return match.group(1) if match else ""

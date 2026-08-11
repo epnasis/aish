@@ -229,6 +229,50 @@ def test_youtube_shorts_url_renders_embed_card(monkeypatch):
     assert requested == ["https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg"]
 
 
+def test_a_posters_own_picture_is_the_card_and_is_not_fetched_again(monkeypatch, tmp_path):
+    """#219, the PDF half. The composed `[![still](file)](video)` form reached the
+    link pass as an <a> whose LABEL was an <img>, and that label went out as the
+    card's CAPTION — where the image pass then inlined it — beside a freshly
+    fetched copy of the same still. Two pictures in the PDF and a network fetch
+    for bytes already on disk."""
+    requested = []
+
+    def fake_fetch(url: str) -> bytes:
+        requested.append(url)
+        return _tiny_png()
+
+    monkeypatch.setattr(export, "fetch_image", fake_fetch)
+    still = tmp_path / "still.png"
+    still.write_bytes(_tiny_png())
+    html = (
+        f'<a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ">'
+        f'<img alt="Ukraine hit Wildberries" src="{still}"/></a>'
+    )
+    out = export._MediaEmbedder((tmp_path,)).process(html)
+
+    assert requested == [], "the still on disk was fetched from YouTube anyway"
+    assert out.count("<img") == 1, "the picture is in the PDF twice"
+    assert "data:image/png;base64," in out
+    assert "aish-embed" in out and "YouTube video" in out
+    # The alt text is where the poster form keeps its words, so it becomes the
+    # caption — a card captioned with the raw URL loses what the answer called it.
+    assert "Ukraine hit Wildberries" in out
+
+
+def test_a_poster_outside_the_roots_falls_back_to_youtubes_own_thumbnail(monkeypatch, tmp_path):
+    """An unembeddable poster must not take the card down with it: the local file
+    is refused (never read), and the card is the one it would have been before."""
+    monkeypatch.setattr(export, "fetch_image", lambda url: _tiny_png())
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(_tiny_png())
+    html = (
+        f'<a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ">'
+        f'<img alt="a still" src="{outside}"/></a>'
+    )
+    out = export._MediaEmbedder((tmp_path / "roots",)).process(html)
+    assert "aish-embed" in out and "data:image/png;base64," in out
+
+
 def test_youtube_shorts_shares_regex_with_watch_and_short_host():
     # The three URL shapes must all match and yield the SAME 11-char id via the
     # group(1) or group(2) read (kept in lockstep with app.js YOUTUBE_RE).
