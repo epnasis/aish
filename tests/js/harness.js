@@ -454,6 +454,9 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       setStatus: spy("setStatus"),
       setRolePill: spy("setRolePill"),
       updateEmptyHint: spy("updateEmptyHint"),
+      // The share inbox rides in on hello ([SHARES]); test_shares.js drives the
+      // real one.
+      renderShares: spy("renderShares"),
       renderWorkspace: spy("renderWorkspace"),
       schedulePeeks: spy("schedulePeeks"),
       markSeen: spy("markSeen"),

@@ -62,7 +62,12 @@ function makeSandbox() {
     setTitle: (t) => calls.push("setTitle:" + t),
     rememberPrompt: (t) => calls.push("rememberPrompt:" + t),
     scrollToEnd: () => {},
+    // Attachment rendering is [ATTACHMENT-NOTES]' business and has its own
+    // file; here a turn is just its text.
     stripAttachmentNotes: (t) => t,
+    splitAttachmentNotes: (t) => ({ body: t, attachments: [] }),
+    attachmentStrip: () => fakeElement("div"),
+    renderShares: () => {},
     // --- the genuine-bubble path, kept real down to addMsg ---
     reuseChip: () => fakeElement("button"),
     redactChip: () => fakeElement("button"),

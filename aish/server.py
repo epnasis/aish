@@ -98,7 +98,15 @@ from .cli import (
 from .embeddings import SemanticIndex
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .pty_session import PtySession
-from .session import RATINGS, RESUME_MARKER, SessionLog, synthetic_kind, title_drifted
+from .session import (
+    RATINGS,
+    RESUME_MARKER,
+    SessionLog,
+    attachment_names,
+    strip_attachment_notes,
+    synthetic_kind,
+    title_drifted,
+)
 
 if TYPE_CHECKING:
     from .claude_max import ClaudeMaxAgent
@@ -370,6 +378,20 @@ TMUX_CONSOLE_SESSION = "aish-console"
 
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 EXPORT_MAX_BYTES = 5 * 1024 * 1024  # a single answer's markdown; generous ceiling
+
+# The share inbox (POST /share). iOS cannot register a PWA as a share target —
+# Web Share Target is Chromium-only, and Safari implements only the outbound
+# half — so "share to aish" from the iPhone share sheet is a Shortcut that
+# POSTs here. What arrives is PARKED, never run: it becomes an attachment
+# waiting in the composer next time the app is opened, and the owner types the
+# prompt. That is the whole security argument for this endpoint — the share
+# sheet stages work, it does not become a way to start an unattended session
+# from any app on the phone.
+SHARE_MAX_ITEMS = 25      # oldest dropped past this; an inbox, not an archive
+SHARE_TTL_S = 14 * 24 * 3600  # something shared and never used stops nagging
+# Shared TEXT goes into the composer, so it is bounded by what a composer can
+# sanely hold. Anything longer is a document and should be shared as a file.
+SHARE_TEXT_MAX = 20_000
 
 # Titling an exported answer (#172). The prompt that produced an answer names
 # the request ("test it with some difficult nested markdown"), not the document,
@@ -1436,7 +1458,12 @@ commit message, an intermediate patch or artifact) in the private scratch \
 directory named in your system-prompt rules — writing, editing, and deleting \
 there is AUTO-APPROVED (no card) and the whole directory is wiped when the \
 session ends. Everything OUTSIDE it still needs approval as usual.
-- Attachments: the web UI can upload files. Images (and PDFs, when your \
+- Attachments: the web UI can upload files — the ＋ button, a PASTE into the \
+composer (Cmd/Ctrl+V on a desktop, the paste button on a phone), or a DRAG \
+onto the window. From an iPhone, the share sheet can hand aish a file or a \
+link via a Shortcut (README: "Share to aish from iOS"); a shared item waits \
+above the composer until the owner taps it, and shares nothing to you until \
+they do. Images (and PDFs, when your \
 backend supports them) are delivered to you NATIVELY — a "[image attached: \
 … — you can see it]" note means the image itself is in the message: look at \
 it directly (describe it, read text in it, use what you see to search the \
@@ -1561,6 +1588,12 @@ class WebServer:
         self.open_session = open_session  # (path | None) -> Session
         self.state_dir = state_dir
         self.uploads_dir = state_dir / "uploads"
+        # The share inbox survives a restart, and it has to: a photo shared from
+        # the phone at lunchtime is claimed when the app is next opened, and
+        # aish-web is a launchd job that restarts in between. Held on disk, not
+        # only in this process.
+        self.shares_path = state_dir / "shares.json"
+        self.shares: list[dict] = self._load_shares()
         self.config_path = config_path
         # The token is UNCONDITIONAL (#178 P1-2): with none configured, a
         # random per-run token is generated here and printed in the launch URL
@@ -1932,6 +1965,11 @@ class WebServer:
             # The user's own successful ! commands, cross-session, most-run first:
             # terminal-mode autocomplete draws from this personal palette (#104).
             "cmd_history": cmd_history or [],
+            # Anything shared from the phone and not yet claimed (#213). Carried
+            # on hello because a share arrives while nothing is connected — that
+            # is the normal case, not the exception — so the `shared` broadcast
+            # alone would only ever reach a tab that happened to be open.
+            "shares": self.shares_snapshot(),
         }
 
     @staticmethod
@@ -2218,6 +2256,13 @@ class WebServer:
             # user-message path as `!`. Claims control of that chat like any edit.
             self._claim(client)
             await self._console_share(client, str(message.get("text", "")))
+        elif kind == "share_drop":
+            # A VIEW message: taking a shared file into the composer, or binning
+            # it, acts on the server's inbox and not on any chat — so it must
+            # not claim control of the session the client happens to be looking
+            # at. Claimed and dismissed are the same operation here; what
+            # differs is only what the CLIENT does with it first.
+            self._drop_share(str(message.get("id", "")))
         elif kind == "dequeue":
             self._dequeue(client, str(message.get("text", "")))
         elif kind == "dequeue_cwd":
@@ -3784,14 +3829,40 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             self._dedup_store(dedup_key, session.name)
         return JSONResponse({"session": session.name, "origin": origin})
 
+    def _store_upload(self, name: str, body: bytes) -> Path:
+        """Write `body` into the uploads dir under a name that is not already
+        taken. The ONE writer for both /upload (the composer) and /share (the
+        phone), so a shared file is indistinguishable from a picked one
+        everywhere downstream — same directory, same session root, same
+        _classify_attachments verdict."""
+        self.uploads_dir.mkdir(parents=True, exist_ok=True)
+        target = self.uploads_dir / name
+        stem, suffix = target.stem, target.suffix
+        counter = 1
+        while target.exists():
+            target = self.uploads_dir / f"{stem}-{counter}{suffix}"
+            counter += 1
+        target.write_bytes(body)
+        return target
+
+    @staticmethod
+    def _upload_name(raw: str) -> str | None:
+        """The stored file name, or None if the client's is unusable. Rejects
+        anything that is not a plain basename — a name is data from the network,
+        and this is the only thing standing between it and a write."""
+        name = os.path.basename((raw or "").strip())
+        if not name or name.startswith(".") or name == "..":
+            return None
+        return name
+
     async def handle_upload(self, request) -> JSONResponse:
         """POST /upload?name=<filename>, raw body — no multipart, so no extra
         dependency. Files land in <state_dir>/uploads (a session root, so the
         agent's read_file auto-approves them)."""
         if not self._token_ok(request.query_params.get("token")):
             return JSONResponse({"error": "bad token"}, status_code=403)
-        name = os.path.basename(request.query_params.get("name", "").strip())
-        if not name or name.startswith(".") or name in ("..",):
+        name = self._upload_name(request.query_params.get("name", ""))
+        if name is None:
             return JSONResponse({"error": "invalid file name"}, status_code=400)
         body = await request.body()
         if not body:
@@ -3801,15 +3872,119 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
                 {"error": f"file too large (max {UPLOAD_MAX_BYTES // (1024 * 1024)} MB)"},
                 status_code=413,
             )
-        self.uploads_dir.mkdir(parents=True, exist_ok=True)
-        target = self.uploads_dir / name
-        stem, suffix = target.stem, target.suffix
-        counter = 1
-        while target.exists():
-            target = self.uploads_dir / f"{stem}-{counter}{suffix}"
-            counter += 1
-        target.write_bytes(body)
-        return JSONResponse({"path": str(target)})
+        return JSONResponse({"path": str(self._store_upload(name, body))})
+
+    # ---- the share inbox (#213) -----------------------------------------
+    # Everything below is deliberately inert: a share is STORED and ANNOUNCED,
+    # and that is all. No session is opened, no model is called, nothing is
+    # executed. The share sheet is a way to hand aish a file, not a trigger.
+
+    def _load_shares(self) -> list[dict]:
+        """Unclaimed shares from the last run. A file that cannot be read is a
+        reason to start with an empty inbox, never a reason not to start."""
+        try:
+            data = json.loads(self.shares_path.read_text())
+        except (OSError, ValueError):
+            return []
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict) and item.get("id")]
+
+    def _save_shares(self) -> None:
+        try:
+            self.shares_path.parent.mkdir(parents=True, exist_ok=True)
+            self.shares_path.write_text(json.dumps(self.shares))
+        except OSError as exc:  # a full or read-only state dir must not 500
+            print(f"[share] could not persist the inbox: {exc}", file=sys.stderr)
+
+    def _prune_shares(self) -> None:
+        """Age and size bounds. An inbox nobody empties is a nag, and one that
+        grows without limit is a leak — both end with the owner ignoring it."""
+        cutoff = time.time() - SHARE_TTL_S
+        self.shares = [s for s in self.shares if float(s.get("at") or 0) >= cutoff]
+        if len(self.shares) > SHARE_MAX_ITEMS:
+            self.shares = self.shares[-SHARE_MAX_ITEMS:]
+
+    def shares_snapshot(self) -> list[dict]:
+        """What the composer should be offering, oldest first. Pruned on read
+        so an inbox left over a holiday is already correct in the first hello,
+        without a timer whose only job is to expire something nobody asked for."""
+        before = len(self.shares)
+        self._prune_shares()
+        if len(self.shares) != before:
+            self._save_shares()
+        return list(self.shares)
+
+    async def handle_share(self, request) -> JSONResponse:
+        """POST /share?name=<filename>&text=<text>&source=<label> — the iOS
+        share sheet's way in (a Shortcut; see README).
+
+        `name` is what decides how the raw body is read, and it is the whole
+        interface: WITH a name the body is a file, exactly as /upload; WITHOUT
+        one it is text. That second form exists because Safari shares a URL, not
+        a file, and percent-encoding a shared link into a query string inside
+        Shortcuts is the kind of thing that works until someone shares a link
+        with an `&` in it. `text=` in the query still works for short things,
+        and both a file and text may be sent (a page shared as URL + screenshot).
+
+        Answers 200 with the stored item. It does NOT start anything: the item
+        waits in the inbox until the owner claims it in the composer.
+        """
+        if not self._token_ok(request.query_params.get("token")):
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        text = (request.query_params.get("text") or "").strip()
+        body = await request.body()
+        if len(body) > UPLOAD_MAX_BYTES:
+            return JSONResponse(
+                {"error": f"file too large (max {UPLOAD_MAX_BYTES // (1024 * 1024)} MB)"},
+                status_code=413,
+            )
+        raw_name = request.query_params.get("name", "")
+        path: Path | None = None
+        if body and raw_name.strip():
+            name = self._upload_name(raw_name)
+            if name is None:
+                return JSONResponse({"error": "invalid file name"}, status_code=400)
+            path = self._store_upload(name, body)
+        elif body:
+            shared = body.decode("utf-8", errors="replace").strip()
+            # Truncation is announced, never silent: a shared page's text
+            # arriving half-length with nothing saying so is worse than a
+            # visible cut the owner can act on.
+            if len(shared) > SHARE_TEXT_MAX:
+                shared = shared[:SHARE_TEXT_MAX] + "\n… (truncated by aish)"
+            text = f"{text}\n{shared}".strip() if text else shared
+        if not path and not text:
+            return JSONResponse({"error": "share is empty"}, status_code=400)
+        item = {
+            "id": secrets.token_urlsafe(8),
+            "name": path.name if path else (text.splitlines()[0][:60] if text else ""),
+            "path": str(path) if path else "",
+            "text": text,
+            # Free-form label from the Shortcut ("iPhone", "Photos"), shown as
+            # the chip's provenance. Bounded because it is arbitrary input.
+            "source": (request.query_params.get("source") or "share sheet")[:40],
+            "at": time.time(),
+        }
+        self.shares.append(item)
+        self._prune_shares()
+        self._save_shares()
+        # Every open tab, not just one: which device the owner picks up next is
+        # not knowable here.
+        self._broadcast({"type": "shared", "items": self.shares_snapshot()})
+        return JSONResponse({"id": item["id"], "path": item["path"]})
+
+    def _drop_share(self, share_id: str) -> None:
+        """Claimed or dismissed — either way it leaves the inbox and every tab
+        hears the same list. The uploaded FILE stays where it is: a claimed
+        share is now an attachment the composer is holding by path, and a
+        dismissed one is no different from any other file in uploads."""
+        before = len(self.shares)
+        self.shares = [s for s in self.shares if s.get("id") != share_id]
+        if len(self.shares) == before:
+            return
+        self._save_shares()
+        self._broadcast({"type": "shared", "items": self.shares_snapshot()})
 
     async def handle_file(self, request) -> FileResponse | JSONResponse:
         """GET /file?path=<abs> — serves an image file so the transcript can
@@ -3938,10 +4113,15 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return "", "", ""
 
         def render(items: list[dict]) -> str:
-            return "\n\n".join(
-                f"{m['role']}: {(m.get('content') or '').strip()[:SESSION_TITLE_CHARS]}"
-                for m in items
-            )
+            # Attachment notes out: the namer needs the conversation, and an
+            # absolute uploads path in its source is how one ends up in a title.
+            # A wordless turn still says what it carried, which names it fine.
+            def body(message: dict) -> str:
+                raw = message.get("content") or ""
+                clean = strip_attachment_notes(raw)
+                return (clean or ", ".join(attachment_names(raw)))[:SESSION_TITLE_CHARS]
+
+            return "\n\n".join(f"{m['role']}: {body(m)}" for m in items)
 
         # First two messages and last two, never overlapping: for a short chat
         # the tail is simply empty rather than a duplicate of the head.
@@ -4557,6 +4737,7 @@ def create_app(
         routes=[
             WebSocketRoute("/ws", server.handle_ws),
             Route("/upload", server.handle_upload, methods=["POST"]),
+            Route("/share", server.handle_share, methods=["POST"]),
             Route("/trigger", server.handle_trigger, methods=["POST"]),
             Route("/file", server.handle_file, methods=["GET"]),
             Route("/export/answer", server.handle_export_answer, methods=["POST"]),

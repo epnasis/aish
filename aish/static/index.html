@@ -188,6 +188,11 @@
 <button id="offlinebar" type="button" hidden>Offline — reading saved chats. Sending is paused. (tap to retry)</button>
 
 <div id="suggest" hidden></div>
+<!-- Waiting from the iPhone share sheet (#213): shared items are PARKED
+     server-side and offered here, above the composer's own attachment chips.
+     Nothing has run — tapping one moves it into the composer as an attachment,
+     and the prompt is still yours to type. -->
+<div id="shares" hidden></div>
 <div id="attachments" hidden></div>
 <div id="queue-list" hidden></div>
 

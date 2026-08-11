@@ -57,6 +57,8 @@ The command's output rides on the `tool` step rather than being duplicated in th
 
 The same classifier keeps aish's own notes out of `_derive_title` and `_derive_snippet`, so a chat opened with a `/cd` is no longer titled with the announcement that produced it.
 
+**Attachment notes are the same kind of thing, one line lower down.** A turn carrying attachments has a line per file appended to it by the web server (`[image attached: cat.png — you can see it; file at /…/uploads/cat.png]`), written for the MODEL. It sits *inside* an otherwise ordinary user message rather than replacing it, so `synthetic_kind` cannot see it — and a chat opened with a photo was therefore named with the sentence aish wrote to itself, absolute path and all, in the header, the rail, the PWA tab title, the PDF and the offline mirror. `strip_attachment_notes` is the one Python definition of "what the owner actually wrote" and every derivation reads through it; `attachment_names` names a turn that has no words of its own, because a photo sent with nothing typed is still about something ("cat.png" beats an unnamed chat). Both are prefix-matched on a whole line so text a human typed that merely resembles a note is never eaten — being wrong in that direction would delete something they wrote. The frontend has the same split for the same reason (`[ATTACHMENT-NOTES]` in `docs/web-frontend.md`), and the format is pinned from both languages by `TestAttachmentNoteFormat` + `test_attachment_notes.js`.
+
 **Renderless records.** `RENDERLESS_STEPS` is skipped by `reconstruct_events`, and it is the ONE registry for "this record renders nowhere" — see `docs/trace-records.md` for why that needs two mechanisms rather than one.
 
 ---

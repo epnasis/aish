@@ -131,6 +131,56 @@ def synthetic_kind(content: str) -> str:
         return "resume"
     return "note" if text.startswith(_NOTE_MARKERS) else ""
 
+
+# A turn carrying attachments has a line per file appended to it by the web
+# server ("[image attached: cat.png — you can see it; file at /…]"). Those lines
+# are aish talking to the MODEL, exactly like the notes above, and every place
+# that shows a turn back to the OWNER has to drop them — otherwise a chat opened
+# with a photo is titled with the sentence aish wrote to itself, absolute path
+# and all, and the rail's preview line says the same.
+#
+# It is a prefix match on the whole line, deliberately: it must never eat a line
+# the human typed that merely resembles one. The frontend parses these same
+# strings ([ATTACHMENT-NOTES] in docs/web-frontend.md) and the format is pinned
+# from both languages by tests/test_server.py::TestAttachmentNoteFormat.
+_ATTACHMENT_NOTE_RE = re.compile(
+    r"^\[(?:image attached|document attached|attached file):.*\]$"
+)
+
+
+_ATTACHMENT_NAME_RE = re.compile(
+    r"^\[(?:image|document) attached: (.+?) — you can (?:see|read) it; file at .*\]$"
+)
+_ATTACHMENT_PATH_RE = re.compile(r"^\[attached file: (.+)\]$")
+
+
+def strip_attachment_notes(content: str) -> str:
+    """`content` with the server's attachment notes removed. The ONE Python
+    definition of "what the owner actually wrote" — titles, preview lines and
+    the offline mirror all read through it."""
+    kept = [
+        line for line in (content or "").split("\n")
+        if not _ATTACHMENT_NOTE_RE.match(line.strip())
+    ]
+    return "\n".join(kept).strip()
+
+
+def attachment_names(content: str) -> list[str]:
+    """What a turn attached, by name. Used to name a turn that has no words of
+    its own — a photo sent with nothing typed is still about something, and
+    "IMG_4021.jpg" beats an unnamed chat."""
+    names = []
+    for line in (content or "").split("\n"):
+        line = line.strip()
+        named = _ATTACHMENT_NAME_RE.match(line)
+        if named:
+            names.append(named.group(1))
+            continue
+        path = _ATTACHMENT_PATH_RE.match(line)
+        if path:
+            names.append(path.group(1).rsplit("/", 1)[-1])
+    return names
+
 # Model-facing search (the search_sessions tool): bounded so one call can
 # never flood a small context window.
 SEARCH_TOP = 5
@@ -1134,12 +1184,22 @@ class SessionLog:
         the user's words and say nothing about the chat, so a session opened
         with a `/cd` isn't titled with the announcement it produced (#171)."""
         for message in messages:
-            if message.get("role") == "user":
-                content = " ".join((message.get("content") or "").split())
-                if synthetic_kind(content) == "note":
-                    continue
-                bang = _BANG_RE.match(content)
-                return f"! {bang.group(1)}" if bang else content
+            if message.get("role") != "user":
+                continue
+            raw = message.get("content") or ""
+            # Notes out BEFORE the whitespace flatten, or the line boundary they
+            # are identified by is gone.
+            content = " ".join(strip_attachment_notes(raw).split())
+            if not content:
+                # A photo sent with nothing typed is still about something.
+                names = attachment_names(raw)
+                if names:
+                    return ", ".join(names)
+                continue
+            if synthetic_kind(content) == "note":
+                continue
+            bang = _BANG_RE.match(content)
+            return f"! {bang.group(1)}" if bang else content
         return _NO_USER_INPUT
 
     @staticmethod
@@ -1150,8 +1210,16 @@ class SessionLog:
         for message in reversed(messages):
             if message.get("role") not in ("user", "assistant"):
                 continue
-            content = " ".join((message.get("content") or "").split())
-            if not content or synthetic_kind(content) == "note":
+            raw = message.get("content") or ""
+            content = " ".join(strip_attachment_notes(raw).split())
+            if not content:
+                # Same as the title: a wordless turn is previewed by what it
+                # carried, not skipped as if nothing had been said.
+                names = attachment_names(raw)
+                if names:
+                    return f"You: {', '.join(names)}"[:SNIPPET_MAX]
+                continue
+            if synthetic_kind(content) == "note":
                 continue  # "You: [I moved the session to …]" is aish talking, not you
             bang = _BANG_RE.match(content)
             if bang:

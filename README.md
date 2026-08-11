@@ -411,6 +411,12 @@ this UI. Highlights:
   it writes the title — not after the prompt that asked for it.
 - **Native vision.** On vision-capable backends (Gemini, OpenAI, Claude, Ollama
   vision models), images you attach are actually *seen* by the model.
+- **Attach by ＋, paste, or drag.** Paste a screenshot straight into the composer
+  (Cmd/Ctrl+V, or the paste button on a phone, which reads copied images too) or
+  drag files anywhere onto the window. Pasting is additive: an image and text on
+  the same clipboard both arrive, the image as an attachment and the text in the
+  box. From an iPhone, the system share sheet can hand things to aish as well —
+  see [Share to aish from iOS](#share-to-aish-from-ios).
 - **Works offline.** The installed app opens and reads your past conversations
   with no connection at all — on a plane, abroad, or with the server simply off.
   Chats are mirrored to the device automatically (newest first), **search still
@@ -459,6 +465,44 @@ recommended while travelling.
 Bulk command output is trimmed in the local copy (the conversation itself is
 kept verbatim), which is what lets a whole archive fit on a phone. Storage is
 capped, and least-recently-useful unpinned chats are dropped first.
+
+### Share to aish from iOS
+
+Share a photo, a PDF or a link from any iOS app straight to aish. It takes one
+Shortcut to set up, because iOS cannot register a web app as a share
+destination — the Web Share Target API is Chromium-only, and Safari implements
+only the outbound half — so no amount of work inside aish can put it in the
+share sheet on its own. A Shortcut can be there, and can post to aish.
+
+**A shared item is parked, not run.** It waits above the composer until you tap
+it, and only then becomes an attachment on a message you write. Nothing starts
+an agent, which is the point: the share sheet is reachable from every app on the
+phone, and it stages work rather than dispatching it.
+
+In the **Shortcuts** app: new shortcut → in its settings turn on **Show in Share
+Sheet** and accept Images, Files, URLs and Text → add one **Get Contents of URL**
+action:
+
+| field | value |
+|---|---|
+| URL | `https://your-aish-host/share?token=YOUR_TOKEN&name=shared.jpg&source=iPhone` |
+| Method | `POST` |
+| Request Body | `File` → **Shortcut Input** |
+
+Name it "Share to aish". That is the whole shortcut.
+
+Two refinements worth making:
+
+- **Photos.** iOS shares photos as HEIC, which vision models do not read. Put a
+  **Convert Image** action (to JPEG) before the POST, and set `name=shared.jpg`.
+- **Links and text.** Safari shares a URL, not a file. Drop the `name=` from the
+  URL and a body with no name is read as text — so one **If** action inside the
+  shortcut (POST to `…/share?token=…&source=Safari` for a link, to the `name=`
+  URL above for a file) covers both. Keep the link in the *body*, not the query
+  string: a shared URL containing `&` does not survive being pasted into one.
+
+The token is the same one in your aish-web URL. Anyone holding it can post to
+this endpoint, so treat the shortcut as you would the URL itself.
 
 ---
 
