@@ -461,30 +461,52 @@ def rule_eval(turn, rows, ts="2026-07-28T10:00:00"):
     return {"ts": ts, "kind": "trace", "step": step}
 
 
-def eval_row(rule, verdict, binding=None, origin="user"):
-    row = {"rule": rule, "trigger": "message_shape", "tier": 0, "verdict": verdict,
+def eval_row(rule, verdict, binding=None, origin="user", trigger="message_shape"):
+    row = {"rule": rule, "trigger": trigger, "tier": 0, "verdict": verdict,
            "evidence": {"origin": origin}, "ms": 0.1}
     if binding:
         row["binding"] = binding
     return row
 
 
-def binding_rec(turn, rule, bid="b1", readers=("read_url",)):
+def binding_rec(turn, rule, bid="b1", readers=("read_url",), obligations=None):
     step = {"kind": "binding", "turn": turn, "id": bid, "rule": rule, "at": "seed",
             "tier": 0, "evidence": {},
-            "obligations": [{"verb": "route", "to": "source", "of": "deliverable",
-                             "readers": list(readers), "sources": ["https://x.test/a"]},
-                            {"verb": "prohibit", "what": ["web_search"]}],
+            "obligations": obligations if obligations is not None else [
+                {"verb": "route", "to": "source", "of": "deliverable",
+                 "readers": list(readers), "sources": ["https://x.test/a"]},
+                {"verb": "prohibit", "what": ["web_search"]}],
             "satisfiable": True, "unsatisfiable": [], "seeded": True}
     return {"ts": "2026-07-28T10:00:00", "kind": "trace", "step": step}
 
 
-def gate_rec(turn, rule, verdict, call=1, bid="b1", escalated=False, rounds=1):
+def gate_rec(turn, rule, verdict, call=1, bid="b1", escalated=False, rounds=1,
+             evidence=None):
     step = {"kind": "gate", "turn": turn, "call": call, "at": "gate",
             "gate": "rule.prohibit", "binding": bid, "rule": rule,
             "tool": "web_search", "action": {}, "verdict": verdict, "tier": 0,
-            "evidence": {}, "round": rounds, "max_rounds": 2, "escalated": escalated}
+            "evidence": evidence if evidence is not None else {},
+            "round": rounds, "max_rounds": 2, "escalated": escalated}
     return {"ts": "2026-07-28T10:00:00", "kind": "trace", "step": step}
+
+
+def verify_rec(turn, rule, verdict="allowed", bid="b1", applied=None):
+    """The turn-end row. `applied` is None for a rule whose condition was
+    settled at seed, and a bool for a `when: answer:` rule — which is written
+    even when its condition never held, so the two cases stay distinguishable."""
+    evidence: dict = {"checked": True}
+    if applied is not None:
+        evidence["condition"] = {"on": "answer", "matched": applied}
+        evidence["applied"] = applied
+    step = {"kind": "gate", "turn": turn, "call": 0, "at": "verify",
+            "gate": "rule.verify", "binding": bid, "rule": rule, "tool": "",
+            "action": {}, "verdict": verdict, "tier": 0, "evidence": evidence,
+            "round": 0, "max_rounds": 2, "escalated": False}
+    return {"ts": "2026-07-28T10:00:00", "kind": "trace", "step": step}
+
+
+DEMANDS = [{"verb": "must_first", "capability": "read_url"}]
+FORBIDS = [{"verb": "never_use", "what": ["web_search"]}]
 
 
 def tool_rec(turn, name, call=2):
@@ -569,6 +591,89 @@ class TestRuleLedger:
         ledger = scan_rules(tmp_path, now=NOW)
         assert ledger.turns == 0 and ledger.rules == {}
 
+    def test_an_answer_rule_binds_every_turn_and_applies_on_almost_none(self, tmp_path):
+        """The defect this counter exists for. `when: answer:` arms at seed, so
+        its bind count is one per turn no matter what — measured live, 17 of 23
+        rules read `binds on 100% of turns`. What the owner is asking is how
+        often it CHECKED something, and only the verify row knows."""
+        records = []
+        for turn in (1, 2, 3):
+            records += [
+                rule_eval(turn, [eval_row("live-price", "bind", "b1",
+                                          trigger="answer_shape")]),
+                binding_rec(turn, "live-price", obligations=DEMANDS),
+                verify_rec(turn, "live-price", applied=(turn == 3)),
+            ]
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", records)
+        stat = scan_rules(tmp_path, now=NOW).rules["live-price"]
+        assert stat.binds == 3 and stat.bind_rate == 1.0
+        assert stat.applied == 1 and round(stat.applied_rate, 3) == 0.333
+
+    def test_a_failed_check_counts_as_applied(self, tmp_path):
+        """The failure row carries the obligation's evidence, not the
+        condition's — so `applied` is absent there. It is the ONE case where
+        the rule most obviously fired, and reading only the key would miss it."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("live-price", "bind", "b1", trigger="answer_shape")]),
+            binding_rec(1, "live-price", obligations=DEMANDS),
+            verify_rec(1, "live-price", verdict="refused"),
+            verify_rec(1, "live-price", verdict="advised"),  # shipped with a note
+        ])
+        assert scan_rules(tmp_path, now=NOW).rules["live-price"].applied == 1
+
+    def test_an_action_rule_applies_only_when_the_gate_actually_fires(self, tmp_path):
+        """An armed action gate logs `allowed` on every call it watched go past
+        (§5: abstentions are decisions). Those are not the rule doing work."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "bind", "b1", trigger="action_shape")]),
+            binding_rec(1, "r", obligations=FORBIDS),
+            gate_rec(1, "r", "allowed", evidence={"obligation": None, "matched": None}),
+            gate_rec(1, "r", "allowed", evidence={"obligation": None, "matched": None}),
+            rule_eval(2, [eval_row("r", "bind", "b1", trigger="action_shape")]),
+            binding_rec(2, "r", obligations=FORBIDS),
+            gate_rec(2, "r", "refused", evidence={"obligation": "never_use"}),
+        ])
+        stat = scan_rules(tmp_path, now=NOW).rules["r"]
+        assert stat.binds == 2 and stat.applied == 1
+
+    def test_a_result_rule_applies_when_it_latches(self, tmp_path):
+        """Armed is not fired: the binding restricts nothing until the named
+        tool comes back in the named state, and `armed.fired` is what says so."""
+        armed = {"obligation": None, "matched": None,
+                 "armed": {"of": "youtube_analyze", "was": "empty", "fired": False}}
+        fired = {**armed, "armed": {**armed["armed"], "fired": True}}
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "bind", "b1", trigger="result_state")]),
+            binding_rec(1, "r", obligations=DEMANDS),
+            gate_rec(1, "r", "allowed", evidence=armed),
+            rule_eval(2, [eval_row("r", "bind", "b1", trigger="result_state")]),
+            binding_rec(2, "r", obligations=DEMANDS),
+            gate_rec(2, "r", "allowed", evidence=fired),
+        ])
+        assert scan_rules(tmp_path, now=NOW).rules["r"].applied == 1
+
+    def test_a_seed_decided_trigger_applies_when_it_binds(self, tmp_path):
+        """`prompt:` / `session:` / `always` decide before the turn runs, so
+        there is nothing later to wait for and the two counts must agree."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "bind", "b1"), eval_row("q", "abstain")]),
+            rule_eval(2, [eval_row("r", "bind", "b1"), eval_row("q", "abstain")]),
+        ])
+        ledger = scan_rules(tmp_path, now=NOW)
+        assert ledger.rules["r"].binds == ledger.rules["r"].applied == 2
+        assert ledger.rules["q"].applied == 0
+
+    def test_one_turn_contributes_at_most_one_applied(self, tmp_path):
+        """A rule refused four calls in a turn governed ONE turn. Counting per
+        row would make a chatty model look like a busier rule."""
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", [
+            rule_eval(1, [eval_row("r", "bind", "b1", trigger="action_shape")]),
+            binding_rec(1, "r", obligations=FORBIDS),
+            *[gate_rec(1, "r", "refused", call=n) for n in range(1, 5)],
+        ])
+        stat = scan_rules(tmp_path, now=NOW).rules["r"]
+        assert stat.applied == 1 and stat.refusals == 4
+
     def test_logs_outside_the_window_are_never_opened(self, tmp_path):
         write_log(tmp_path, "session-20250101-100000-000001.jsonl", [
             rule_eval(1, [eval_row("r", "bind", "b1")]),
@@ -597,6 +702,54 @@ class TestRuleSignals:
         write_log(tmp_path, "session-20260728-100000-000001.jsonl", records)
         signals = dict(rule_signals(scan_rules(tmp_path, now=NOW)))
         assert "binds on 100% of turns" in signals["r"]
+
+    def test_a_structural_bind_rate_is_never_reported_as_a_broad_trigger(self, tmp_path):
+        """"Narrow the trigger" is not advice about a rule that binds by
+        construction — there is nothing to narrow, and saying it every week for
+        most of the corpus is how a ledger loses the owner's attention."""
+        records = []
+        for turn in range(1, 5):
+            for rule, trigger in (("a", "answer_shape"), ("b", "action_shape"),
+                                  ("c", "result_state"), ("d", "always")):
+                records.append(rule_eval(turn, [eval_row(rule, "bind", "b1",
+                                                         trigger=trigger)]))
+                records.append(binding_rec(turn, rule, obligations=FORBIDS))
+                records.append(gate_rec(turn, rule, "refused"))  # and they DO fire
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", records)
+        signals = rule_signals(scan_rules(tmp_path, now=NOW))
+        assert not [s for s in signals if "narrow the trigger" in s[1]]
+
+    def test_an_armed_rule_that_never_applies_is_flagged(self, tmp_path):
+        """`never bound` cannot see this family: they bind every turn. The
+        live-price case — armed on 50 turns, and the log says it never once
+        checked a price — reads as perfectly healthy without this."""
+        records = []
+        for turn in range(1, 5):
+            records += [
+                rule_eval(turn, [eval_row("r", "bind", "b1", trigger="answer_shape")]),
+                binding_rec(turn, "r", obligations=DEMANDS),
+                verify_rec(turn, "r", applied=False),
+            ]
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", records)
+        signals = dict(rule_signals(scan_rules(tmp_path, now=NOW)))
+        assert "never once applied" in signals["r"]
+        assert "never matched an answer" in signals["r"]
+
+    def test_a_prohibition_that_never_fires_is_not_dead_weight(self, tmp_path):
+        """The opposite case, and the reason this signal reads the compiled
+        verbs: a `never_use` nothing trips is the rule DETERRING. Proposing to
+        retire it would aim the ledger at the rules that are working."""
+        records = []
+        for turn in range(1, 5):
+            records += [
+                rule_eval(turn, [eval_row("r", "bind", "b1", trigger="action_shape")]),
+                binding_rec(turn, "r", obligations=FORBIDS),
+                gate_rec(turn, "r", "allowed",
+                         evidence={"obligation": None, "matched": None}),
+            ]
+        write_log(tmp_path, "session-20260728-100000-000001.jsonl", records)
+        signals = dict(rule_signals(scan_rules(tmp_path, now=NOW)))
+        assert "r" not in signals
 
     def test_a_rule_the_owner_keeps_overriding_is_called_WRONG(self, tmp_path):
         records = []

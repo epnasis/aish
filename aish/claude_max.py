@@ -209,6 +209,12 @@ class ClaudeMaxAgent:
     def restore_workspace(self, cwd: str | None, trusted: list[str]) -> None:
         self.inner.restore_workspace(cwd, trusted)
 
+    def resume_turns(self, last: int) -> None:
+        # The turn counter lives on the inner agent for the same reason the
+        # rest of this state does: _locked_dispatch routes through it, so it is
+        # the thing that stamps the records.
+        self.inner.resume_turns(last)
+
     @staticmethod
     def _load_sdk():
         try:

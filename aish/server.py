@@ -4672,6 +4672,11 @@ def create_app(
             # trusted dirs are skipped.
             restored_cwd, trusted = SessionLog.restore_state(path)
             agent.restore_workspace(restored_cwd, trusted)
+            # ...and carry on this chat's turn numbering. A Session builds its
+            # agent fresh on every reopen — which on the web is every restart of
+            # aish-web, i.e. every ship — so without this the log gets a second
+            # `turn: 1` and the ledger's join collapses two turns into one.
+            agent.resume_turns(SessionLog.last_turn(path))
             # Resume with the model this session last used (the drawer shows
             # it); fall back to the startup model when it can't be built.
             if (
