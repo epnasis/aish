@@ -200,6 +200,16 @@ function ledgerWorld({ socket = "open" } = {}) {
     // output is a continuous receipt, and one per keystroke would be absurd.
     console_open: "self-evident", console_in: "self-evident",
     console_resize: "self-evident", console_close: "self-evident",
+    // FAILS SAFE, and the safe direction is the visible one. This is
+    // releaseSentShares ([SHARES]) telling the server that a shared item went
+    // out with a message. If it is the request that goes missing, the item
+    // stays in the inbox and is offered again — which is exactly what "we do
+    // not know whether it was used" should look like. The opposite failure,
+    // quietly spending a share that never went anywhere, is the one with
+    // nothing on screen to notice. The other share_drop callers — dismissing a
+    // chip, and claiming one by hand — DO go through act(), because those two
+    // claim something on screen that has to be taken back.
+    share_drop: "fails safe",
   };
 
   const bare = [...src.matchAll(/send\(\{ type: "([a-z_]+)"/g)].map((m) => m[1]);

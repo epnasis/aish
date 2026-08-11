@@ -474,10 +474,13 @@ destination — the Web Share Target API is Chromium-only, and Safari implements
 only the outbound half — so no amount of work inside aish can put it in the
 share sheet on its own. A Shortcut can be there, and can post to aish.
 
-**A shared item is parked, not run.** It waits above the composer until you tap
-it, and only then becomes an attachment on a message you write. Nothing starts
-an agent, which is the point: the share sheet is reachable from every app on the
-phone, and it stages work rather than dispatching it.
+**A shared item is parked, not run.** Next time you open aish, a shared file is
+already attached to the composer — write your prompt and send, or take it back
+out with ✕. Nothing starts an agent, which is the point: the share sheet is
+reachable from every app on the phone, and it stages work rather than
+dispatching it. A shared *link or note* waits as a tappable chip instead, since
+text would otherwise land in the middle of whatever you were writing. An item
+you never send stays waiting; it is consumed when the message goes.
 
 In the **Shortcuts** app: new shortcut → in its settings turn on **Show in Share
 Sheet** and accept Images, Files, URLs and Text → add one **Get Contents of URL**

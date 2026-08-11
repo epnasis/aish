@@ -7344,6 +7344,7 @@ function submitInput() {
     input.value = "";
     localStorage.removeItem("aish-draft");
     resizeInput(); // #117: recompute height AND drop the .tall class now it's empty
+    releaseSentShares(attachments); // shared items are spent when they are SENT
     attachments = [];
     renderAttachments();
     scrollToEndSettled();
@@ -7395,7 +7396,12 @@ function handleSlash(text) {
       // typed. Include attachments — /feedback WITH files uses the classic
       // upload flow, and without this they were silently dropped (#152).
       const sent = send({ type: "task", text, attachments: attachments.map((a) => a.path) });
-      if (sent) { attachments = []; renderAttachments(); scrollToEndSettled(); }
+      if (sent) {
+        releaseSentShares(attachments);
+        attachments = [];
+        renderAttachments();
+        scrollToEndSettled();
+      }
       return sent;
     }
     case "/jobs": openSheet("workspace-sheet"); return send({ type: "jobs" });
@@ -8711,22 +8717,66 @@ async function uploadFile(file) {
 }
 
 // [SHARES-START]
-// The iPhone share sheet's landing strip. The server holds the inbox and is
-// the only writer of it; this renders whatever the last `hello`/`shared` said,
-// and never keeps its own copy — two devices claiming from one inbox is the
-// normal case (phone shares it, laptop uses it), and a local list would drift
-// the moment the other one claimed something.
+// What the iPhone share sheet handed over. The server holds the inbox and is
+// the only writer of it; this reconciles the composer against whatever the last
+// `hello`/`shared` said and never keeps its own copy — two devices claiming
+// from one inbox is the normal case (phone shares it, laptop uses it), and a
+// local list would drift the moment the other one claimed something.
 //
-// Claiming is deliberately a TAP, not automatic. A share arriving while you are
-// mid-sentence must not attach itself to the message you are about to send; the
-// whole point of parking it server-side is that you choose when it joins a
-// conversation, and which one.
+// A shared FILE is attached to your next message straight away. It used to be a
+// chip you had to TAP first, on the theory that a share landing mid-sentence
+// must not join a message you were already writing. That theory cost a real
+// send: the strip sits in the composer's attachment zone, so it reads as
+// already attached — you type a prompt, press send, and only the words go. The
+// file was still sitting in the inbox, correctly, and completely uselessly.
+//
+// The safety property was never about the tap. It is that a share starts
+// NOTHING: no session, no model call. That is enforced on the server and is
+// untouched by attaching it here — you still write the prompt, you still press
+// send, and the ✕ still takes it back out.
+//
+// Shared TEXT stays a chip, because there is no equivalent of ✕ for text that
+// has appended itself to a half-written sentence.
+//
+// Consumed on SEND, not on attach: close the tab without sending and the item
+// is still waiting next time, rather than silently spent.
+let sharesPainted = false; // a later arrival is news; the first paint is not
+
 function renderShares(items) {
   const box = $("shares");
   if (!box) return;
-  box.replaceChildren();
-  box.hidden = !items.length;
+
+  // The server's list is the truth, including "the other device used it".
+  const live = new Set(items.map((item) => item.id));
+  const kept = attachments.filter((a) => !a.share || live.has(a.share));
+  let touched = kept.length !== attachments.length;
+  attachments = kept;
+
+  const waiting = [];
   for (const item of items) {
+    // A share carrying text is a chip even when it also has a file: the text
+    // half has to be placed by hand.
+    if (!item.path || item.text) {
+      waiting.push(item);
+      continue;
+    }
+    if (attachments.some((a) => a.share === item.id)) continue;
+    attachments.push({
+      name: item.name || item.path.split("/").pop(),
+      path: item.path,
+      share: item.id, // what makes it releasable on send, and revocable above
+    });
+    touched = true;
+    if (sharesPainted) {
+      showToast(`${item.name} attached — shared from ${item.source || "your phone"}`);
+    }
+  }
+  if (touched) renderAttachments();
+  sharesPainted = true;
+
+  box.replaceChildren();
+  box.hidden = !waiting.length;
+  for (const item of waiting) {
     const chip = document.createElement("div");
     chip.className = "share-chip";
 
@@ -8753,10 +8803,10 @@ function renderShares(items) {
   }
 }
 
-// Take a parked share into the composer: the file becomes an attachment chip,
-// and shared TEXT (a URL from Safari, a note) is inserted as text — that is
-// what it is, and making the owner open a file to read a link they shared would
-// be absurd. Both can be present on one share.
+// Take a parked share into the composer by hand — the path for the ones that
+// are not auto-attached above. Shared TEXT (a URL from Safari, a note) is
+// inserted as text: that is what it is, and making the owner open a file to
+// read a link they shared would be absurd. Both can be present on one share.
 function claimShare(item) {
   if (item.path) {
     attachments.push({ name: item.name || item.path.split("/").pop(), path: item.path });
@@ -8779,6 +8829,17 @@ function claimShare(item) {
 function dropShare(id, lost) {
   act({ type: "share_drop", id }, { label: "clearing that shared item", lost });
 }
+
+// A message that has gone consumes the shared items it carried. Plain `send`,
+// not `act`: if this is the request that goes missing, the item stays in the
+// inbox and is offered again — which is precisely what "we don't know whether
+// it was used" should look like. The opposite failure, quietly spending a
+// share that never went anywhere, is the one with nothing on screen to notice.
+function releaseSentShares(sent) {
+  for (const attachment of sent) {
+    if (attachment.share) send({ type: "share_drop", id: attachment.share });
+  }
+}
 // [SHARES-END]
 
 function renderAttachments() {
@@ -8792,7 +8853,14 @@ function renderAttachments() {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.textContent = "✕";
-    remove.onclick = () => { attachments.splice(i, 1); renderAttachments(); };
+    remove.onclick = () => {
+      const [gone] = attachments.splice(i, 1);
+      // Taking a SHARED item out is a dismissal, and the server has to hear it:
+      // otherwise the next repaint of the inbox puts it straight back, and the
+      // ✕ reads as broken.
+      if (gone && gone.share) dropShare(gone.share);
+      renderAttachments();
+    };
     chip.appendChild(remove);
     box.appendChild(chip);
   });

@@ -1461,9 +1461,9 @@ session ends. Everything OUTSIDE it still needs approval as usual.
 - Attachments: the web UI can upload files — the ＋ button, a PASTE into the \
 composer (Cmd/Ctrl+V on a desktop, the paste button on a phone), or a DRAG \
 onto the window. From an iPhone, the share sheet can hand aish a file or a \
-link via a Shortcut (README: "Share to aish from iOS"); a shared item waits \
-above the composer until the owner taps it, and shares nothing to you until \
-they do. Images (and PDFs, when your \
+link via a Shortcut (README: "Share to aish from iOS"); a shared file is \
+attached to the owner's next message and reaches you only when they send it. \
+Images (and PDFs, when your \
 backend supports them) are delivered to you NATIVELY — a "[image attached: \
 … — you can see it]" note means the image itself is in the message: look at \
 it directly (describe it, read text in it, use what you see to search the \
@@ -3928,7 +3928,8 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         and both a file and text may be sent (a page shared as URL + screenshot).
 
         Answers 200 with the stored item. It does NOT start anything: the item
-        waits in the inbox until the owner claims it in the composer.
+        waits in the inbox, and the composer attaches it to the owner's next
+        message. Nothing runs until they write one and press send.
         """
         if not self._token_ok(request.query_params.get("token")):
             return JSONResponse({"error": "bad token"}, status_code=403)
