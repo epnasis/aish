@@ -807,6 +807,30 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
   inset: 0;
   height: 100%;
 }
+/* What a tap looks like while the frame is on its way ([EMBED-HANDOFF]). It sits
+   where the badge just was, so the control under the thumb visibly BECOMES the
+   wait — a tap whose only result is the same picture reads as no tap at all. */
+.msg.md .embed-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  color: #fff;
+  background: rgb(0 0 0 / 0.45);
+  /* Never a tap target: the card's own handler owns the gesture, and a click
+     landing here instead would silently do nothing. */
+  pointer-events: none;
+  z-index: 1;
+}
+/* Above the frame, which is itself absolutely positioned once active. */
+.msg.md .embed-active .embed-loading { z-index: 2; }
+/* White, not the accent: this ring sits on a photograph, where --blue has no
+   guaranteed contrast (and blue over a still reads as a link). */
+.msg.md .embed-loading .spin { border-color: #fff; border-top-color: transparent; }
 /* "Couldn’t play here — Open on YouTube", over the restored still. Bottom, not
    centred: the play badge is in the middle, and this appears beside it. */
 .msg.md .embed-stalled {

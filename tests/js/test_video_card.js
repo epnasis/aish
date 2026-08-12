@@ -89,6 +89,8 @@ const box = {
   // (declared far above the extracted block), navigator.onLine the accelerator.
   offlineMode: false,
   navigator: { onLine: true },
+  Date: { now: () => box._now },
+  _now: 1_000_000,
   setTimeout(fn, ms) { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
   clearTimeout(id) { timers.delete(id); },
 };
@@ -98,6 +100,7 @@ vm.runInContext(
     extract("function externalAnchor", "// [INLINEIMG-START]"),
     extract("const IMG_FETCH_HOSTS", "// Images (#9)"),
     extract("// The src a markdown image target", "// Quick replies (#17)"),
+    extract("// [EMBED-HANDOFF-START]", "// [EMBED-HANDOFF-END]"),
     extract("// Rich embeds (#50)", "function inlineMd"),
     // `let cardScope` must become a var: a top-level `let` in a vm script is
     // lexical, NOT a property of the context, so the test could neither set the
@@ -129,6 +132,7 @@ const iframeOf = (el) => el.children.find((c) => c.tagName === "IFRAME");
 const imgOf = (el) => el.children.find((c) => c.tagName === "IMG");
 const stalledOf = (el) => el.children.find((c) => c.className === "embed-stalled");
 const playOf = (el) => el.children.find((c) => c.className === "embed-play");
+const loadingOf = (el) => el.children.find((c) => c.className === "embed-loading");
 const fireWatchdog = () => {
   assert.strictEqual(timers.size, 1, `expected one pending watchdog, got ${timers.size}`);
   const [[id, timer]] = [...timers];
@@ -153,6 +157,60 @@ check("a bare video link still falls back to YouTube's thumbnail", () => {
     imgOf(card).src,
     "https://img.youtube.com/vi/lqltp2QaT30/hqdefault.jpg"
   );
+});
+
+// #217 follow-up, reported from the phone as "I have to click twice". On iOS the
+// player arrives PAUSED whatever autoplay asks for, so the second tap is real —
+// what must not be is a FIRST tap with no visible result.
+check("the tap is answered at once: badge out, spinner in", () => {
+  const card = box.embedForLink("A video", WATCH, "/file?path=x");
+  card.click();
+  assert(!playOf(card), "our play badge is still up while the player loads");
+  const wait = loadingOf(card);
+  assert(wait, "the tap produced nothing visible — it reads as not having registered");
+  assert(
+    /Loading/.test(wait.children.map((c) => c.textContent).join(" ")),
+    "the wait does not say what it is waiting for"
+  );
+  assert(imgOf(card), "the still went away, so the card is a blank box while it waits");
+});
+
+check("when the player arrives our overlay goes, leaving ONE play button", () => {
+  const card = box.embedForLink("A video", WATCH);
+  card.click();
+  box._now += box.EMBED_HANDOFF_MIN_MS; // a slow-enough load clears immediately
+  iframeOf(card).fire("load");
+  assert(!loadingOf(card), "the spinner is still over a loaded player");
+  assert(!playOf(card), "our badge came back over YouTube's own controls");
+});
+
+// Measured in Chrome: the frame loads ~300ms after the tap on a good connection.
+// Clearing strictly on load flashes the acknowledgement for a third of a second,
+// which is a flicker rather than an answer to "did my tap register?".
+check("a fast load does not turn the acknowledgement into a blink", () => {
+  const card = box.embedForLink("A video", WATCH);
+  card.click();
+  box._now += 120; // the player is back before the eye can settle
+  iframeOf(card).fire("load");
+  assert(loadingOf(card), "cleared inside the floor — the tap flashed and was gone");
+  const deferred = [...timers.values()].find((t) => t.ms === box.EMBED_HANDOFF_MIN_MS - 120);
+  assert(deferred, `no deferred removal; timers: ${[...timers.values()].map((t) => t.ms)}`);
+  deferred.fn();
+  assert(!loadingOf(card), "the deferred removal did not take it down");
+});
+
+check("playsinline is asked for, or iOS takes the video fullscreen", () => {
+  const card = box.embedForLink("A video", WATCH);
+  card.click();
+  assert(/playsinline=1/.test(iframeOf(card).src), iframeOf(card).src);
+});
+
+check("a stall clears the spinner too", () => {
+  const card = box.embedForLink("A video", WATCH);
+  card.click();
+  fireWatchdog();
+  assert(!loadingOf(card), "left waiting forever next to a failure message");
+  assert(stalledOf(card), "no failure message");
 });
 
 check("the still survives activation — the frame lies over it", () => {
@@ -182,7 +240,10 @@ check("a player that loads cancels the watchdog", () => {
   const card = box.embedForLink("A video", WATCH);
   card.click();
   iframeOf(card).fire("load");
-  assert.strictEqual(timers.size, 0, "the watchdog is still armed after a successful load");
+  // By ms, not by count: the load may also have scheduled the acknowledgement's
+  // deferred removal, which is a different timer with a different job.
+  const armed = [...timers.values()].filter((t) => t.ms === box.EMBED_FRAME_SLOW_MS);
+  assert.strictEqual(armed.length, 0, "the watchdog is still armed after a successful load");
 });
 
 check("a player that never loads gives the still back, with a way out", () => {
