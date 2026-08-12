@@ -1554,7 +1554,8 @@ body.offline #composer { opacity: 0.55; }
   pointer-events: none; /* the picture below stays draggable through it */
 }
 #preview-name { text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9); }
-#preview-close { pointer-events: auto; } /* …except the button itself */
+#preview-close,
+#preview-save { pointer-events: auto; } /* …except the buttons themselves */
 /* The full name, wrapping if it must: this overlay is where a name that was
    too long for a chip is finally readable, so it must not be cut here too. */
 #preview-name {
@@ -1571,14 +1572,17 @@ body.offline #composer { opacity: 0.55; }
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
 }
 #preview-count[hidden] { display: none; }
-#preview-close {
+#preview-close,
+#preview-save {
   background: none;
   border: none;
   color: #fff;
   padding: 6px;
   cursor: pointer;
 }
-#preview-close svg { width: 24px; height: 24px; display: block; }
+#preview-close svg,
+#preview-save svg { width: 24px; height: 24px; display: block; }
+#preview-save[hidden] { display: none; }
 #preview-img {
   position: absolute;
   inset: 0;

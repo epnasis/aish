@@ -286,6 +286,16 @@ Three things make it behave like a picture rather than like a download:
 
 `previewShow` stays the one writer and now moves the status line with everything else, skipping the `src` write when it has not changed — re-setting it restarts the load of the page already on screen. It compares against `previewSrc` rather than reading the DOM back, because the DOM returns an absolutised URL that a relative one can never match. Chips open from both ends: the composer's (deliberately without a page-one thumbnail — that would rasterise a page for every PDF being held, and unlike `IMG_4021.jpg` a document's name usually says which one it is) and a sent message's, decided by the PATH rather than the note's `kind`, since a PDF outside the uploads dir is logged as a plain `[attached file: …]` and is just as readable. — `test_preview_pdf.js`
 
+### `[ATTACH-SAVE]` — getting the file, not just a look at it
+**L1.** Looking at an attachment is not having it: the preview could pinch a photo and page through a PDF, and there was still no way to put either in Files. Four decisions:
+
+- **It saves the FILE, never what is on screen.** For a PDF that is the document, not the page being read — a long-press on a page would save that page's PNG, which is the wrong object and silently so. Every page item therefore carries the same `file`, and `previewSaveTarget()` is read at the moment of the tap, since a swipe moves the file under the button.
+- **One saver.** The bytes go to `saveBlob`, the same function the PDF export already saves through, because "put a file on this device" is one behaviour and two of them would diverge on the phone first.
+- **The name comes from the chat, not the response header.** The server's quoted fallback is an ASCII transliteration, and the client already holds the real name — `Zażółć.pdf` must not land as `Za____.pdf`.
+- **A refusal says so.** A file deleted since it was sent, or a server that cannot be reached, toasts with the name and the reason. A tap that quietly does nothing is indistinguishable from a tap that missed.
+
+The button lives in the preview bar, before the ✕ (which keeps the trailing edge a thumb lands on by habit), and is hidden when nothing is behind the picture. Its tap had to be exempted from "a tap on the surround closes": the button's own handler runs first, and the close scheduled behind it tore the viewer down at the moment you asked it to save something. Chips act too — a PDF's opens the preview, and **everything else SAVES**, because a chip that names a file and then refuses to hand it over is worse than no chip; the `title` says which, since the two look identical. — `test_download.js`
+
 **File names are shortened from the MIDDLE** (`shortName`), on both the composer chip and a sent message's chip, with the full name on `title` and in the preview's own bar. The end of a name is where it differs — `IMG_4021` vs `IMG_4022`, `-final` vs `-final-2`, and the extension — so a plain trailing ellipsis removes exactly the part that tells two files apart, which is what "the names are cut so I can't distinguish some of them" was about. — `test_preview.js`, `test_composer_files.js`
 
 ### `[ANSWER-TOP]` — jump to the start of an answer

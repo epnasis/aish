@@ -223,11 +223,13 @@ function world() {
 // ---- the chip in a sent message -------------------------------------------
 {
   const opened = [];
+  const saved = [];
   const sandbox = {
     document: { createElement: (tag) => fakeElement(tag) },
     shortName: (name) => name,
     isPdfPath: (path) => /\.pdf$/i.test(String(path || "")),
     openPdfPreview: (path, name) => opened.push([path, name]),
+    saveAttachment: (path, name) => saved.push([path, name]),
   };
   vm.createContext(sandbox);
   vm.runInContext(
@@ -254,8 +256,9 @@ function world() {
   const other = sandbox.attachmentChip({
     kind: "file", name: "notes.txt", path: "/home/me/notes.txt",
   });
-  ok("everything else stays a plain named chip",
-    !other.classList.contains("attachment-openable") && other.onclick === undefined);
+  other.onclick();
+  ok("a chip with nothing to show it in saves instead — never nothing",
+    opened.length === 1 && saved.length === 1 && saved[0][0] === "/home/me/notes.txt");
 }
 
 report("test_preview_pdf.js");
