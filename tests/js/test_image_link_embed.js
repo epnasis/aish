@@ -10,6 +10,8 @@
 //   4. a bare maps link (no poster) still loads its frame eagerly
 //   5. a non-embeddable url falls back to a clickable picture, not a card
 //   6. a poster on a non-whitelisted remote host never reaches an <img>
+//   7. the tap is ANSWERED — the badge goes, a spinner says what is happening,
+//      and the poster stays put instead of the card blanking (#217 follow-up)
 //
 // Run manually: node tests/js/test_image_link_embed.js
 "use strict";
@@ -43,9 +45,15 @@ function fakeElement(tag) {
     setAttribute(k, v) { this.attrs[k] = String(v); },
     getAttribute(k) { return this.attrs[k]; },
     removeAttribute(k) { delete this.attrs[k]; },
-    appendChild(c) { this.children.push(c); return c; },
+    appendChild(c) { c._parent = el; this.children.push(c); return c; },
     replaceChildren(...c) { this.children = c; },
+    remove() {
+      const parent = this._parent;
+      if (parent) parent.children = parent.children.filter((c) => c !== this);
+      this._parent = null;
+    },
     addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
+    fire(type) { (this.listeners[type] || []).forEach((fn) => fn()); },
     click() { (this.listeners.click || []).forEach((fn) => fn()); },
     classList: {
       add(...c) { el._classes.push(...c); },
@@ -64,7 +72,15 @@ const box = {
   replaying: false,
   offlineViewing: false,
   noteRenderError() {},
+  // The acknowledgement holds for a minimum (EMBED_HANDOFF_MIN_MS), so a load
+  // inside that window defers its removal instead of blinking it away. Timers
+  // as data: the removal runs when this test says so.
+  Date: { now: () => box._now },
+  _now: 1_000_000,
+  setTimeout(fn, ms) { deferred.push({ fn, ms }); return deferred.length; },
+  clearTimeout() {},
 };
+const deferred = [];
 vm.createContext(box);
 // imageFetchAllowed + IMG_FETCH_HOSTS, then externalAnchor, then the image
 // helpers, then the embed block including IMAGE_LINK_RE and imageLink.
@@ -73,6 +89,7 @@ vm.runInContext(
     extract("function externalAnchor", "// [INLINEIMG-START]"),
     extract("const IMG_FETCH_HOSTS", "// Images (#9)"),
     extract("// The src a markdown image target", "// Quick replies (#17)"),
+    extract("// [EMBED-HANDOFF-START]", "// [EMBED-HANDOFF-END]"),
     extract("// Rich embeds (#50)", "function inlineMd"),
   ].join("\n").replace(/\bconst\b/g, "var"),
   box
@@ -119,6 +136,15 @@ check("tapping swaps in the sandboxed live map", () => {
   const card = box.imageLink("A map", POSTER, ROUTE);
   card.click();
   const frame = iframeOf(card);
+  assert(imgOf(card), "the poster vanished, leaving an empty box while Google answers");
+  const wait = card.children.find((c) => c.className === "embed-loading");
+  assert(wait, "the tap produced nothing visible — it reads as not having registered");
+  assert(!card.children.find((c) => c.className === "embed-play embed-open"),
+         "the open badge is still up while the map loads");
+  frame.fire("load");
+  deferred.forEach((t) => t.fn()); // the floor's deferred removal
+  assert(!card.children.find((c) => c.className === "embed-loading"),
+         "the spinner is still over a loaded map");
   assert(frame, "no iframe after activation");
   assert(frame.src.includes("saddr=Warszawa"), `wrong src: ${frame.src}`);
   assert(frame.src.includes("daddr=Radom%20to%3AKrakow"), "waypoint chain lost");

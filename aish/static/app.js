@@ -5039,6 +5039,63 @@ function cannotReachYouTube() {
   return offlineMode || (typeof navigator !== "undefined" && navigator.onLine === false);
 }
 
+// [EMBED-HANDOFF-START]
+// What a tap on an embed card LOOKS like while the frame is on its way.
+//
+// The tap swapped our badge for a third-party frame that takes a moment to
+// paint, and in that moment the card said nothing — the picture either sat
+// there unchanged (video) or was replaced by an empty box (maps, which threw
+// its poster away). Reported from the phone as "I have to click twice", and
+// for the video that is literally true: the player arrives PAUSED on iOS
+// whatever `autoplay=1` asks for, because the gesture does not cross into a
+// newly created cross-origin frame, so the real play button is YouTube's own
+// and it is the second tap. A first tap with no legible result reads as a tap
+// that never registered, which is the same law the pending-send bubble is
+// built on (L6/L7): the change under the thumb has to be visible, and the
+// screen must say what it is waiting for.
+//
+// So: our badge goes away AT ONCE, a spinner with words takes its place over
+// the still, and it clears when the frame loads — leaving the player's own
+// controls as the only thing to press. It does not pretend to be playback.
+// How long the acknowledgement stays up at minimum. Measured in Chrome on a
+// good connection: the frame's `load` lands ~300–450 ms after the tap, so
+// clearing strictly on load can flash the spinner for a third of a second —
+// long enough to be a flicker, too short to be read as "your tap registered",
+// which is the one job it has. Held for at least this long instead.
+const EMBED_HANDOFF_MIN_MS = 400;
+
+function embedLoadingOverlay(text) {
+  const overlay = document.createElement("div");
+  overlay.className = "embed-loading";
+  const ring = document.createElement("div");
+  ring.className = "spin";
+  const label = document.createElement("span");
+  label.textContent = text;
+  overlay.appendChild(ring);
+  overlay.appendChild(label);
+  return overlay;
+}
+
+// Take the acknowledgement down, honouring the floor above. `shown` is when it
+// went up; a load inside the window defers the removal rather than cancelling
+// it, so the sequence is always tap → visible wait → player, never a blink.
+function clearEmbedLoading(overlay, shown) {
+  if (!overlay) return;
+  const left = EMBED_HANDOFF_MIN_MS - (embedNow() - shown);
+  if (left <= 0) {
+    overlay.remove();
+    return;
+  }
+  setTimeout(() => overlay.remove(), left);
+}
+
+// Date.now() via a seam: the choreography checks run these functions in a vm
+// with timers as data, and a real clock there makes the floor untestable.
+function embedNow() {
+  return Date.now();
+}
+// [EMBED-HANDOFF-END]
+
 // `poster` (optional) is an already-resolved image src for this video's still,
 // normally the local copy `show_image` stored. It BEATS YouTube's own thumbnail
 // because it is same-origin, already fetched, and inside the offline mirror —
@@ -5067,6 +5124,8 @@ function youtubeEmbed(id, label, poster) {
   let frame = null;
   let watchdog = 0;
   let stalled = null;
+  let loading = null;
+  let shown = 0;
 
   // The still is NOT thrown away when the player opens (it used to be — the
   // frame replaced every child), so there is something behind the frame when
@@ -5083,7 +5142,12 @@ function youtubeEmbed(id, label, poster) {
     }
     frame = document.createElement("iframe");
     frame.className = "embed-frame";
-    frame.src = `https://www.youtube-nocookie.com/embed/${id}?autoplay=1`;
+    // playsinline is for iOS, where a play WITHOUT it hands the video to the
+    // native fullscreen player — leaving the chat entirely for a tap that was
+    // meant to start a video in place. autoplay is still asked for (desktop
+    // honours it, which is where one tap really is one tap) but never relied
+    // on: see [EMBED-HANDOFF] for why the second tap exists on the phone.
+    frame.src = `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&playsinline=1`;
     frame.title = label;
     frame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
     frame.allowFullscreen = true;
@@ -5099,9 +5163,19 @@ function youtubeEmbed(id, label, poster) {
     // allow-same-origin lets a frame drop its own sandbox" escape only matters
     // when the framed content is same-origin AS THE PARENT — it isn't here.
     frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-presentation");
-    frame.addEventListener("load", () => { clearTimeout(watchdog); watchdog = 0; });
+    frame.addEventListener("load", () => {
+      clearTimeout(watchdog);
+      watchdog = 0;
+      // The player is here: our overlay goes, so the only control on the card
+      // is YouTube's own and there are never two play buttons to choose from.
+      clearEmbedLoading(loading, shown);
+      loading = null;
+    });
     watchdog = setTimeout(() => stall(), EMBED_FRAME_SLOW_MS);
     play.remove();
+    loading = embedLoadingOverlay("Loading player…");
+    shown = embedNow();
+    card.appendChild(loading);
     card.appendChild(frame);
     card.classList.add("embed-active");
     card.removeAttribute("role");
@@ -5115,6 +5189,7 @@ function youtubeEmbed(id, label, poster) {
   const stall = (reason) => {
     watchdog = 0;
     if (frame) { frame.remove(); frame = null; }
+    if (loading) { loading.remove(); loading = null; }
     card.classList.remove("embed-active");
     card.appendChild(play);
     card.setAttribute("role", "button");
@@ -5198,8 +5273,27 @@ function mapsCard(frameSrc, label, poster) {
   badge.innerHTML = MAP_OPEN_SVG;
   card.appendChild(badge);
 
+  let frame = null;
+  let loading = null;
+  let shown = 0;
+
   const activate = () => {
-    card.replaceChildren(buildFrame());
+    if (frame) return; // the live map is already up
+    // The poster STAYS, exactly as the video card's still does: replacing every
+    // child meant the tap made the picture vanish and left an empty box for as
+    // long as Google took to answer — which is the other half of "I have to
+    // click twice" (a map that looks the same once loaded gives a tap no
+    // legible result at all). The frame lands over it; see [EMBED-HANDOFF].
+    frame = buildFrame();
+    frame.addEventListener("load", () => {
+      clearEmbedLoading(loading, shown);
+      loading = null;
+    });
+    badge.remove();
+    loading = embedLoadingOverlay("Opening live map…");
+    shown = embedNow();
+    card.appendChild(loading);
+    card.appendChild(frame);
     card.classList.add("embed-active");
     card.classList.remove("embed-poster");
     card.removeAttribute("role");
