@@ -1104,11 +1104,14 @@ class Agent:
         # never mentioned — see _egress_gate), gates knowledge writes (see
         # _knowledge_gate, #196), and scopes recall to knowledge entries only.
         self.origin = origin
-        # Which caption language read_media asks for first. The owner's own
-        # language, not the model's: they watch Polish sources, and a track in
-        # the wrong language is still returned — with `classification` saying
-        # so — rather than withheld.
-        self.caption_language = os.environ.get("AISH_CAPTION_LANG", "en").strip() or "en"
+        # Which caption language read_media reads. EMPTY BY DEFAULT, and that
+        # is the setting: empty means "the language the recording is spoken
+        # in". A model reads meaning out of the original far better than out of
+        # somebody's translation of it — the ambiguity, idiom and register the
+        # context turns on are exactly what a translation has already discarded
+        # — so the right place to translate is the END, once the meaning is
+        # settled. AISH_CAPTION_LANG pins a language for someone who wants one.
+        self.caption_language = os.environ.get("AISH_CAPTION_LANG", "").strip()
         # Hosts the OWNER introduced: extracted from user-typed / trigger-
         # prompt text (never from tool results or fetched pages) plus hosts
         # explicitly approved on an egress card this session. Only consulted

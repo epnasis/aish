@@ -875,9 +875,13 @@ TOOL_SCHEMAS = [
                     "language": {
                         "type": "string",
                         "description": (
-                            "Which caption language to read, e.g. \"pl\". The "
-                            "map lists what exists. Omit unless the map shows "
-                            "the one you want is not what you got."
+                            "OMIT THIS. By default you get the captions in the "
+                            "language the recording is SPOKEN in, which is what "
+                            "you want: you understand the original better than "
+                            "a translation of it, and you can translate for the "
+                            "user yourself at the end. Only name a language "
+                            "(e.g. \"pl\") if the user explicitly asks for that "
+                            "language's subtitles."
                         ),
                     },
                 },

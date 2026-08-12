@@ -127,6 +127,10 @@ class Transcript:
     asked_for: str
     cues: tuple[Cue, ...]
     duration: float
+    # The request existed but every track matching it was machine-translated,
+    # so the original was read instead. Refusing is right; refusing SILENTLY
+    # would look like the request was never made.
+    asked_only_translated: bool = False
 
     @property
     def covered(self) -> float:
@@ -439,7 +443,10 @@ def _caption_tracks(info: dict) -> tuple[CaptionTrack, ...]:
                 url = str(best["url"])
                 tracks.append(
                     CaptionTrack(
-                        language=str(language),
+                        # `en-orig` is YouTube's marker for "the source track",
+                        # not a language. Normalised HERE so the suffix cannot
+                        # reach a label, a comparison or an answer.
+                        language=str(language).split("-orig")[0],
                         url=url,
                         is_generated=generated,
                         # `tlang=` is YouTube's own marker for "translate the
@@ -465,7 +472,7 @@ def _spoken_language(info: dict, tracks) -> str:
     if declared:
         return declared
     asr = next((t for t in tracks if t.is_generated and not t.is_translation), None)
-    return asr.language if asr else ""
+    return asr.language.split("-orig")[0] if asr else ""
 
 
 def _url_expiry(url: str) -> float:
@@ -714,20 +721,28 @@ def parse_cues(text: str) -> list[Cue]:
     return cues
 
 
-def pick_track(tracks, prefer: str, spoken: str = "") -> CaptionTrack | None:
-    """The best caption track for `prefer`, or None.
+def pick_track(tracks, prefer: str = "", spoken: str = "") -> CaptionTrack | None:
+    """The caption track to read: **the language the recording is SPOKEN in**,
+    unless a language was explicitly asked for.
 
-    **A real track always beats a translation**, even one in the language that
-    was asked for. YouTube publishes ~150 machine translations per video and
-    they carry the requested language code, so the obvious ranking — "exact
-    language first" — hands back fluent Polish that nobody in the recording
-    said, and coverage is 100% because the machine translated every line. The
-    original speech in the wrong language is a translation problem the reader
-    can solve; a translation presented as speech is one nobody can detect.
+    The owner's rule, and it is about comprehension rather than politeness: a
+    model reads meaning out of the original far better than out of a
+    translation of it, because a translation has already thrown away the
+    ambiguity, the idiom and the register that the context turns on. Reading
+    English captions on an English video and translating at the END, once the
+    meaning is settled, beats reading somebody else's Polish rendering of it —
+    even for a Polish speaker asking in Polish.
 
-    Within the real tracks: the requested language first, then
-    publisher-authored over auto-generated. A translation is used only when
-    there is no transcription at all, and `classification` says so loudly.
+    So `prefer` is an OVERRIDE, not the default. Empty (the normal case) means
+    "the original", and the ranking puts the spoken language first.
+
+    **A real track always beats a machine translation** regardless. YouTube
+    publishes ~150 of those per video carrying the requested language code, so
+    an exact-language-first ranking hands back fluent Polish that nobody said,
+    at 100% coverage because the machine translated every line. Publisher-
+    authored over auto-generated within the same language; a translation is
+    read only when there is no transcription at all, and `classification` then
+    says so loudly.
     """
     if not tracks:
         return None
@@ -736,10 +751,13 @@ def pick_track(tracks, prefer: str, spoken: str = "") -> CaptionTrack | None:
 
     def rank(track: CaptionTrack) -> tuple[int, int, int, int, int]:
         language = track.language.lower()
-        exact = language == wanted or language.startswith(f"{wanted}-")
-        # When the request cannot be met, the SPOKEN language is the honest
-        # fallback — it is the only track that is definitely this recording's
-        # own words. Without it the choice fell to dict order.
+        # Only when a language was explicitly named. Otherwise this term is
+        # constant and the ORIGINAL wins, which is the point.
+        exact = bool(wanted) and (language == wanted or language.startswith(f"{wanted}-"))
+        # The recording's own words. Ranked above everything but an explicit
+        # request, because it is the only track that is definitely what was
+        # said, and because meaning survives translation worse than it
+        # survives being read in a language you then translate yourself.
         original = bool(source) and language.split("-")[0] == source
         # Last tiebreak, and openly a pragmatic one rather than a principled
         # one: with no ASR track and no declared language there is nothing that
@@ -749,10 +767,14 @@ def pick_track(tracks, prefer: str, spoken: str = "") -> CaptionTrack | None:
         # `classification` states the language that was actually read either
         # way — so the cost of it being wrong is a translation, never a claim.
         english = language.split("-")[0] == "en"
+        # An explicit request outranks the original; with no request, the
+        # original outranks everything. Same tuple, two orders — rather than
+        # two ranking functions that could drift apart.
+        first, second = (exact, original) if wanted else (original, exact)
         return (
             1 if track.is_translation else 0,
-            0 if exact else 1,
-            0 if original else 1,
+            0 if first else 1,
+            0 if second else 1,
             0 if english else 1,
             0 if not track.is_generated else 1,
         )
@@ -851,7 +873,14 @@ def load_transcript(
     store.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256(f"{CAPTION_VERSION}:{text}".encode()).hexdigest()[:16]
     path = _transcript_path(store, digest, recording.title or recording.identity)
+    wanted = (prefer or "").lower()
+    matching = [
+        t for t in recording.caption_tracks
+        if wanted and t.language.lower().split("-")[0] == wanted.split("-")[0]
+    ]
     transcript = Transcript(
+        asked_only_translated=bool(matching) and all(t.is_translation for t in matching)
+        and not track.is_translation,
         path=path,
         language=track.language,
         is_generated=track.is_generated,
@@ -935,12 +964,27 @@ def classification(transcript: Transcript) -> str:
             "subtitles, so they are a translation rather than the words as "
             "spoken. Quote them as the published subtitles, not as speech."
         )
-    if transcript.language.lower().split("-")[0] != (transcript.asked_for or "").lower():
+    asked = (transcript.asked_for or "").lower()
+    if transcript.asked_only_translated:
+        parts.append(
+            f"You asked for {transcript.asked_for}, and the only {transcript.asked_for} "
+            f"track is a MACHINE TRANSLATION of the {transcript.language} speech — so "
+            "the original was read instead. Translate it yourself if the user "
+            "needs it in another language; you will do that better than the "
+            "caption pipeline did."
+        )
+    elif asked and transcript.language.lower().split("-")[0] != asked:
         parts.append(
             f"NOT the language asked for ({transcript.asked_for}) — say which "
             "language you are quoting, and do not present a translation as the "
             "speaker's own words."
         )
+    elif spoken and not differs:
+        # Worth stating positively: this is the recording's own language, so
+        # nothing has been through a translation before reaching you. Translate
+        # at the END if the user needs it in another language — the meaning is
+        # yours to carry across, not a caption pipeline's.
+        parts.append(f"This is the language the recording is spoken in ({spoken}).")
     if transcript.duration:
         percent = round(transcript.coverage * 100)
         gap_start, gap_length = transcript.largest_gap
