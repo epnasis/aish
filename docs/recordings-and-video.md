@@ -72,6 +72,36 @@ A recording is probed **once per session** and the cache is dropped when the sig
 
 ---
 
+## Captions — the index, not a second feature (slice 2)
+
+**Speech is what makes seeing affordable.** Blind-scanning a two-hour keynote at one frame every two minutes is ~60 frames, 60–90k tokens and eight turns against the per-turn image cap. One search over the words names the four moments worth rendering, and the deliverable is still pictures. That is the whole reason captions are here.
+
+So `search=` returns **moments, never an answer** — lines shaped as `at="41:20"` to be fed straight back in. `duration=` reads what was said over a stretch. And a frame carries the line spoken at its moment (`TestSearchAndWindow`), because a picture plus its words is what makes a moment legible and the words are already in hand (capped, since that rides every frame in a stepped call).
+
+**The caption file is fetched WHOLE**, and this is the correction that shaped the design: a caption track is a couple of hundred KB of text, and the thing it is for is search. "Where do they show the phone" cannot be answered from a window, and answering it by transcribing windows in a binary search is exactly the design this replaced. Whole-file applies to CAPTIONS; it is a whisper rule that got wrongly generalised in the first plan.
+
+Conversion produces a **rendition** — one markdown file with `[h:mm:ss]` in front of every line, keyed on the caption BYTES and `CAPTION_VERSION`, in an LRU store like the media and document ones. Two URLs for one video converge on a single rendition; an edited track becomes a different one instead of a stale hit. The fetch itself is repeated once per session, cheaply, *so that an edit is noticed*. The store is inside `workspace_roots()`, because the result NAMES the file and tells the model to read it — outside that boundary the instruction would cost an approval tap, which is the #212 asymmetry reopened. `TestTranscriptStore`, `TestCaptionParsing`, `TestMediaCaptions`.
+
+Tracks are chosen by preference — the requested language first, publisher-authored over auto-generated — but a track in the **wrong language is still returned**, because words in English about a Polish video are useful as long as the caller is told. `TestTrackChoice`.
+
+### What the words ARE, computed rather than trusted
+
+A caption track can be fluent and still not be this recording's speech, and none of that is visible in the text. So it is measured, and stated wherever the words are used (`TestClassification`):
+
+- **language**, and a callout when it is not the one asked for — the failure the shipped `youtube_analyze` had for months, silently answering a question about a Polish video with English words;
+- **auto-generated or publisher-authored**, since one is materially worse;
+- **coverage** — cued time over running time. Below half, the result says so and adds that *absence of a phrase is not evidence it was never said*;
+- **the largest silent stretch**, and **a last cue far short of the running time**, which is how a caption track belonging to a different edit of a re-uploaded video announces itself;
+- and the part that cannot be measured — mistranscription, sub-second desync — is **claimed**: *nothing has checked these words against the audio*. Saying nothing there would let a caller read silence as verification.
+
+### The honest failures
+
+A search that misses says the phrase is **not in these CAPTIONS**, which is not the same as never said — and names the fallback, because something *shown* without being mentioned is invisible to a search. An empty window is **"no cues here"**, never "nobody spoke". A track that downloads but holds no cues is a recording with no words, not a recording that said nothing. And a recording with no captions at all refuses with an instruction not to substitute a transcript from anywhere else — the `youtube_analyze` substitution failure, in the tool that replaces it.
+
+Captions are fetched through `web.fetch_binary`, never yt-dlp's own downloader: one SSRF guard, one trust store.
+
+---
+
 ## What the build order got wrong (#216)
 
 The first plan led with **captions**, and it was wrong in a way worth recording, because the reasoning looked sound at every step.

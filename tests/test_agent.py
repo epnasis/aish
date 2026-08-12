@@ -4914,6 +4914,170 @@ class TestReadMedia:
         assert "Frame at" in self._result(agent)
 
 
+class TestMediaCaptions:
+    """#216 slice 2: speech is the INDEX that makes seeing affordable. Blind-
+    scanning a two-hour keynote is ~60 frames and most of a context window; one
+    search over the words names the moments worth rendering. The deliverable is
+    still pictures."""
+
+    VTT = (
+        "WEBVTT\n\n"
+        "00:00:01.000 --> 00:00:04.000\nWelcome to the keynote\n\n"
+        "00:00:04.000 --> 00:00:08.000\nHere is the new iPhone\n\n"
+        "00:00:08.000 --> 00:00:12.000\nIt has a titanium body\n"
+    )
+
+    def _agent(self, tmp_path, monkeypatch, calls, tracks=None, vtt=None):
+        import aish.agent as agent_module
+
+        rec = agent_module.recordings.Recording(
+            source="https://y/v", identity="youtube:abc", media_url="https://cdn/s.mp4",
+            is_local=False, title="Keynote", duration=12.0,
+            caption_tracks=tracks if tracks is not None else (
+                agent_module.recordings.CaptionTrack("en", "https://c/en.vtt", False),
+            ),
+        )
+        monkeypatch.setattr(agent_module.recordings, "probe", lambda source, **kw: rec)
+        monkeypatch.setattr(
+            agent_module.recordings, "frame",
+            lambda recording, seconds, **kw: (PNG_BYTES + str(int(seconds)).encode(), seconds),
+        )
+        fetched: list[str] = []
+        monkeypatch.setattr(
+            agent_module.recordings, "_fetch_captions",
+            lambda url: (fetched.append(url), (vtt if vtt is not None else self.VTT).encode())[1],
+        )
+        agent, _ = make_agent([*calls, model_says("done")], state_dir=tmp_path)
+        agent.fetched = fetched
+        return agent
+
+    def _result(self, agent):
+        agent.run_task("look")
+        return tool_messages(agent.messages)[0]["content"]
+
+    def test_search_hands_back_times_shaped_to_feed_at(self, tmp_path, monkeypatch):
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", search="iPhone")
+            ])],
+        )
+        result = self._result(agent)
+        assert 'at="0:04"' in result
+        assert "Here is the new iPhone" in result
+
+    def test_search_returns_no_pictures(self, tmp_path, monkeypatch):
+        """The index is text and costs nothing; rendering frames for every hit
+        would defeat the point of searching first."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", search="iPhone")
+            ])],
+        )
+        self._result(agent)
+        assert not [m for m in agent.messages if m.get("images")]
+
+    def test_a_miss_says_not_in_the_captions_not_never_said(self, tmp_path, monkeypatch):
+        """The distinction the whole coverage measurement exists for: something
+        SHOWN without being mentioned is invisible to a search."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", search="android")
+            ])],
+        )
+        result = self._result(agent)
+        assert "not in these CAPTIONS" in result
+        assert "does not mean it was never said" in result
+
+    def test_duration_reads_the_words_over_a_stretch(self, tmp_path, monkeypatch):
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", at="0:04", duration="5s")
+            ])],
+        )
+        result = self._result(agent)
+        assert "[0:04] Here is the new iPhone" in result
+        assert not [m for m in agent.messages if m.get("images")]
+
+    def test_an_empty_window_is_no_cues_not_no_speech(self, tmp_path, monkeypatch):
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", at="0:00", duration="1s")
+            ])],
+        )
+        assert "not the same as nobody speaking" in self._result(agent)
+
+    def test_a_frame_carries_the_words_spoken_at_that_moment(self, tmp_path, monkeypatch):
+        """A picture plus its line is what makes a moment legible, and the
+        words are already in hand."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[tool_call("read_media", source="https://y/v", at="0:05")])],
+        )
+        result = self._result(agent)
+        assert "Said here:" in result and "Here is the new iPhone" in result
+
+    def test_a_recording_with_no_captions_still_returns_its_frame(self, tmp_path, monkeypatch):
+        """Best-effort by design: no words must never cost a picture."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[tool_call("read_media", source="https://y/v", at="0:05")])],
+            tracks=(),
+        )
+        result = self._result(agent)
+        assert "Frame at 0:05" in result and "Said here" not in result
+
+    def test_search_conflicts_with_looking_at_a_place(self, tmp_path, monkeypatch):
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", search="iPhone", at="0:05")
+            ])],
+        )
+        assert "Search first" in self._result(agent)
+
+    def test_the_captions_are_fetched_once_per_session(self, tmp_path, monkeypatch):
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [
+                model_says(tool_calls=[
+                    tool_call("read_media", source="https://y/v", search="iPhone")
+                ]),
+                model_says(tool_calls=[
+                    tool_call("read_media", source="https://y/v", search="titanium")
+                ]),
+            ],
+        )
+        agent.run_task("search twice")
+        assert len(agent.fetched) == 1
+
+    def test_the_transcript_file_can_be_read_without_a_tap(self, tmp_path, monkeypatch):
+        """The result NAMES the file and tells the model to read it. Outside
+        the workspace boundary that instruction costs an approval (#212)."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", search="iPhone")
+            ])],
+        )
+        result = self._result(agent)
+        path = [w for w in result.split() if w.endswith(".md")][0]
+        assert agent._read_prompt_reason(path) is None
+
+    def test_every_words_result_states_what_the_captions_ARE(self, tmp_path, monkeypatch):
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", search="iPhone")
+            ])],
+        )
+        assert "not as verified speech" in self._result(agent)
+
+
 class TestImageRoots:
     """One definition of "where aish may read from without asking", consumed by
     /file, the PDF exporter, the terminal renderer, read_file and the approver's

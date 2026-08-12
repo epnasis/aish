@@ -1104,6 +1104,11 @@ class Agent:
         # never mentioned — see _egress_gate), gates knowledge writes (see
         # _knowledge_gate, #196), and scopes recall to knowledge entries only.
         self.origin = origin
+        # Which caption language read_media asks for first. The owner's own
+        # language, not the model's: they watch Polish sources, and a track in
+        # the wrong language is still returned — with `classification` saying
+        # so — rather than withheld.
+        self.caption_language = os.environ.get("AISH_CAPTION_LANG", "en").strip() or "en"
         # Hosts the OWNER introduced: extracted from user-typed / trigger-
         # prompt text (never from tool results or fetched pages) plus hosts
         # explicitly approved on an egress card this session. Only consulted
@@ -1300,11 +1305,24 @@ class Agent:
             if state_dir is not None
             else self.scratch_dir / "documents"
         )
+        # Beside the document renditions and for the same reason: a transcript
+        # keyed on content is still valid in next week's session, and it has to
+        # live somewhere read_file may reach (workspace_roots) or the model
+        # cannot grep the file this tool just named.
+        self.transcripts_dir = (
+            Path(state_dir) / "transcripts"
+            if state_dir is not None
+            else self.scratch_dir / "transcripts"
+        )
         # Probed recordings, keyed by the source the model named -> (what it
         # is, when we asked). Per-session and in memory only: the expensive
         # half is resolving a SIGNED stream URL that expires, so there is
         # nothing here worth persisting past the process (#216).
         self._recordings: dict[str, tuple[recordings.Recording, float]] = {}
+        # Caption renditions, keyed by recording identity. Per-session so a
+        # track edited since the last read is noticed; the rendition on disk is
+        # keyed on the caption BYTES, so an unchanged track reconverts nothing.
+        self._transcripts: dict[str, recordings.Transcript] = {}
         content = compose_system_content(
             context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir
         )
@@ -2486,6 +2504,10 @@ class Agent:
             self.scratch_dir,
             self.tool_output_dir,
             self.documents_dir,
+            # read_media NAMES the transcript file in its result and tells the
+            # model to read it. Outside this list that instruction would cost
+            # an approval tap — the #212 asymmetry, reopened.
+            self.transcripts_dir,
         ]
 
     def _execute_tool_calls(self, tool_calls: list[dict]) -> list[str]:
@@ -2596,7 +2618,9 @@ class Agent:
         if name == "show_video":
             return str(a.get("url", ""))
         if name == "read_media":
-            where = str(a.get("at") or "")
+            where = str(a.get("at") or "") or (
+                f"search {a['search']!r}" if a.get("search") else ""
+            )
             return web.strip_tracking(str(a.get("source", ""))) + (f" @{where}" if where else "")
         if name == "recall":
             return str(a.get("query") or a.get("name") or "")
@@ -2794,10 +2818,15 @@ class Agent:
             every = str(args.get("every", "") or "").strip()
             count = args.get("count")
             chapter = args.get("chapter")
-            where = at or (f"chapter {chapter}" if chapter else "the map")
+            query = str(args.get("search", "") or "").strip()
+            duration = str(args.get("duration", "") or "").strip()
+            where = (
+                f"search {query!r}" if query
+                else at or (f"chapter {chapter}" if chapter else "the map")
+            )
             shown = web.strip_tracking(source)
             return f"→ read_media: {shown} ({where})", partial(
-                self._read_media, source, at, count, every, chapter
+                self._read_media, source, at, count, every, chapter, query, duration
             )
         if name == "recall":
             query = str(args.get("query", "") or "")
@@ -3039,8 +3068,94 @@ class Agent:
 
     # ------------------------------------------------- video and audio (#216)
 
+    def _search_media(self, recording, query: str) -> str:
+        """Where something is SAID, as times to go and look at.
+
+        The index, and it returns moments rather than an answer on purpose: a
+        two-hour keynote scanned blind is ~60 frames and most of a context
+        window, while one search over the words costs nothing and names the
+        four moments worth rendering. What comes back is shaped to be fed
+        straight back in as at=.
+        """
+        try:
+            transcript = self._transcript(recording)
+        except recordings.RecordingError as exc:
+            return f"ERROR: {exc}"
+        hits = recordings.search_transcript(transcript, query)
+        head = [recordings.classification(transcript), f"Full transcript: {transcript.path}"]
+        if not hits:
+            # "Not in the captions" is not "not in the recording", and the
+            # difference is the whole reason coverage is measured.
+            return "\n\n".join(
+                head
+                + [
+                    f"No line contains {query!r}. That means it is not in these "
+                    "CAPTIONS — it does not mean it was never said or never shown. "
+                    "Something shown without being mentioned is only findable by "
+                    "looking: step through with at= and every=."
+                ]
+            )
+        lines = [
+            f'- at="{recordings.format_time(cue.start)}" — {cue.text}' for cue in hits
+        ]
+        return "\n\n".join(
+            head
+            + [
+                f"{len(hits)} moment(s) mention {query!r}. Look at one with "
+                f"read_media(source=…, at=…):",
+                "\n".join(lines),
+            ]
+        )
+
+    def _read_words(self, recording, at: str, duration: str) -> str:
+        """The words spoken over a stretch, with what they ARE stated first."""
+        try:
+            transcript = self._transcript(recording)
+            start = recordings.parse_time(at) if at else 0.0
+            span = recordings.parse_time(duration)
+        except recordings.RecordingError as exc:
+            return f"ERROR: {exc}"
+        cues = recordings.window(transcript, start, start + span)
+        head = [recordings.classification(transcript), f"Full transcript: {transcript.path}"]
+        if not cues:
+            return "\n\n".join(
+                head
+                + [
+                    f"No caption lines between {recordings.format_time(start)} and "
+                    f"{recordings.format_time(start + span)}. There are no CUES "
+                    "there — that is not the same as nobody speaking. Look at the "
+                    "picture if you need to know what is happening."
+                ]
+            )
+        body = "\n".join(
+            f"[{recordings.format_time(cue.start)}] {cue.text}" for cue in cues
+        )
+        (head_cap, _tail), _source = self._output_caps()
+        if len(body) > head_cap:
+            body = body[:head_cap] + (
+                f"\n\n[aish: cut here. Ask for a shorter duration=, or read "
+                f"{transcript.path} directly.]"
+            )
+        return "\n\n".join(head + [body])
+
+    def _transcript(self, recording) -> "recordings.Transcript":
+        """This recording's captions, converted once per session.
+
+        Re-fetched per session rather than cached to disk by URL, so a caption
+        track edited since the last read is noticed — the rendition itself is
+        keyed on the caption bytes, so an unchanged track costs one small fetch
+        and no reconversion.
+        """
+        cached = self._transcripts.get(recording.identity)
+        if cached is None:
+            cached = recordings.load_transcript(
+                recording, self.transcripts_dir, prefer=self.caption_language
+            )
+            self._transcripts[recording.identity] = cached
+        return cached
+
     def _read_media(
-        self, source: str, at: str, count, every: str, chapter
+        self, source: str, at: str, count, every: str, chapter, query: str = "", duration: str = ""
     ) -> str:
         """Look at a recording: the structural map, then frames from it.
 
@@ -3056,6 +3171,20 @@ class Agent:
             recording = self._recording(source)
         except recordings.RecordingError as exc:
             return f"ERROR: {exc}"
+
+        # Words and pictures are different questions and answering both when
+        # only one was asked doubles the cost of every call. They also conflict
+        # explicitly rather than resolving to a winner.
+        if query and (at or chapter or duration):
+            return (
+                "ERROR: search= finds WHERE something is said; at=, chapter= and "
+                "duration= read a place you already know. Search first, then look "
+                "at what it returns."
+            )
+        if query:
+            return self._search_media(recording, query)
+        if duration:
+            return self._read_words(recording, at, duration)
 
         header = [recordings.summary(recording)]
         if description := recordings.describe(recording):
@@ -3084,12 +3213,16 @@ class Agent:
                 lines.append(f"*(the frame at {stamp} could not be stored: {exc})*")
                 continue
             stored.append(str(path))
+            # What is being SAID at that moment, when there are captions to
+            # say it: a picture plus its line is what makes a moment legible,
+            # and the words are already in hand and cost nothing to attach.
+            said = self._words_at(recording, actual)
             # The timestamp goes in the ALT text, not just the prose: the media
             # store is a bounded LRU, so once this frame is evicted the only
             # way anyone can get it back is the time written beside it.
             lines.append(
-                f"Frame at {stamp}. Include this line in your answer if the user "
-                f"should see it:\n\n![{recording.title or 'frame'} at {stamp}]({path})"
+                f"Frame at {stamp}.{said} Include this line in your answer if the "
+                f"user should see it:\n\n![{recording.title or 'frame'} at {stamp}]({path})"
             )
         if not stored:
             return "\n\n".join(header + lines)
@@ -3097,6 +3230,21 @@ class Agent:
         # Built LAST — a ToolOutcome is a str subclass and the join above would
         # drop the envelope carrying the frames.
         return tools.ToolOutcome(text, images=tuple(stored))
+
+    def _words_at(self, recording, seconds: float) -> str:
+        """The caption line beside a frame, or nothing at all.
+
+        Best-effort by design: a recording with no captions must still return
+        its picture, so a failure here is silence rather than an error — the
+        map has already said whether there are words.
+        """
+        if not recording.caption_tracks:
+            return ""
+        try:
+            said = recordings.spoken_at(self._transcript(recording), seconds)
+        except (recordings.RecordingError, OSError, web.BlockedURLError):
+            return ""
+        return f' Said here: "{said}".' if said else ""
 
     def _recording(self, source: str) -> "recordings.Recording":
         """Probe once per session, then seek.
