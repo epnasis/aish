@@ -365,6 +365,16 @@ def _require_public(url: str) -> None:
             raise BlockedURLError(f"{host!r} resolves to non-public address {ip}")
 
 
+def require_public(url: str) -> None:
+    """The SSRF guard, for callers that hand a URL to something OTHER than this
+    module's own fetch — `recordings.py` gives URLs to yt-dlp and to an ffmpeg
+    subprocess, each of which has its own network stack and none of the guards
+    here. `EGRESS_TOOLS` gates which host the MODEL may name; it says nothing
+    about where a resolved stream then points, so the check has to travel with
+    the URL rather than live at the tool boundary."""
+    _require_public(url)
+
+
 class _PublicOnlyRedirects(urllib.request.HTTPRedirectHandler):
     """Re-run the SSRF check on every redirect target before following it."""
 

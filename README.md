@@ -144,6 +144,7 @@ unless you explicitly *Share* a selection.
 | `run_command` | any shell command; `background=true` detaches long jobs | **approval prompt** (read-only commands auto-approve inside the project and in aish's own scratch/media/document dirs; scratch-workspace deletes auto-approve) |
 | `write_file` / `edit_file` | create or edit files | **colored diff + y/N** |
 | `read_file` | read a file | auto inside the project; **prompts outside it and on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
+| `read_media` | look at a video or audio recording — a YouTube link, any media URL, or a file on disk. Returns a map (length, chapters, captions) and frames from any moment, each labelled with the time it actually came from | auto |
 | `read_pdf` | read a PDF — attached, on disk, or linked — keeping columns, tables and page numbers; `pages=` and `search=` for a long one | auto |
 | `web_search` / `read_url` | DuckDuckGo + fetch a page as readable text | auto; every query/URL echoed; public hosts only (SSRF-guarded) |
 | `read_docs` | man page → `--help` fallback, full-text topic search | auto |
