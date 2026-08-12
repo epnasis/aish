@@ -94,9 +94,21 @@ A caption track can be fluent and still not be this recording's speech, and none
 - **the largest silent stretch**, and **a last cue far short of the running time**, which is how a caption track belonging to a different edit of a re-uploaded video announces itself;
 - and the part that cannot be measured — mistranscription, sub-second desync — is **claimed**: *nothing has checked these words against the audio*. Saying nothing there would let a caller read silence as verification.
 
+### Machine translations are not speech, and they arrive wearing the right label
+
+**The defect this section exists for shipped in slice 2 and was caught by testing it against a real video.** YouTube publishes ~150 auto-*translations* per video alongside the real track, and they carry the language code you asked for. Asking for Polish on an English trailer returned fluent Polish, `covers 100%`, auto-generated — words nobody in the recording ever said, at the highest confidence the classification can express, because coverage is perfect when a machine translates every line. "Prefer the exact language" is the obvious ranking and it is exactly wrong.
+
+So: **a real track always beats a translation**, even one in the requested language. The original speech in the wrong language is a translation problem the reader can solve; a translation presented as speech is one nobody can detect. `tlang=` in the track URL is YouTube's own marker and the only reliable signal — the language code says nothing. A translation is read only when there is no transcription at all, and then the classification says so in capitals and forbids quoting it as anyone's speech.
+
+**Publisher-authored subtitles in another language are the quieter version** of the same thing: a human translation, better than a machine's, still not what was said. Different severity, so a different sentence rather than the same warning.
+
+**The map names only transcriptions.** Listing 150 machine translations as "captions available" presents *"Polish captions exist"* as a fact about what was spoken; the translated count is given as a count.
+
+**Which track when the request cannot be met** is decided by, in order: the requested language; the SPOKEN language; English; publisher-authored over auto. The spoken language comes from `info["language"]` when yt-dlp populates it and otherwise from the ASR track — auto-captions that are not a `tlang=` translation are speech recognition run on the audio, so their language *is* the spoken one. That is exact rather than a guess. The English tiebreak is openly pragmatic and only decides which of several wrong-language tracks is read; `language=` lets the choice be made explicitly instead. `TestTranslatedCaptions`.
+
 ### The honest failures
 
-A search that misses says the phrase is **not in these CAPTIONS**, which is not the same as never said — and names the fallback, because something *shown* without being mentioned is invisible to a search. An empty window is **"no cues here"**, never "nobody spoke". A track that downloads but holds no cues is a recording with no words, not a recording that said nothing. And a recording with no captions at all refuses with an instruction not to substitute a transcript from anywhere else — the `youtube_analyze` substitution failure, in the tool that replaces it.
+A search that misses says the phrase is **not in these CAPTIONS**, which is not the same as never said — and names the fallback, because something *shown* without being mentioned is invisible to a search. An empty window is **"no cues here"**, never "nobody spoke". A track that downloads but holds no cues is a recording with no words, not a recording that said nothing. A caption fetch that FAILS — the endpoint rate-limits routinely — says the words are temporarily unavailable and that this is not a recording without captions, because a raw traceback there reads as "nothing to read" and invites exactly the substitution the tool exists to stop. `TestCaptionFetchFailures`. And a recording with no captions at all refuses with an instruction not to substitute a transcript from anywhere else — the `youtube_analyze` substitution failure, in the tool that replaces it.
 
 Captions are fetched through `web.fetch_binary`, never yt-dlp's own downloader: one SSRF guard, one trust store.
 

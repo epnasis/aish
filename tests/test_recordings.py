@@ -525,3 +525,161 @@ class TestSearchAndWindow:
     def test_spoken_at_pins_words_to_a_moment(self, tmp_path):
         said = recordings.spoken_at(load(with_captions(), tmp_path), 6.0, slack=1.0)
         assert "new iPhone" in said
+
+
+class TestTranslatedCaptions:
+    """YouTube publishes ~150 machine translations per video and they carry the
+    language code you asked for. Ask for Polish on an English video and the
+    obvious ranking hands back fluent Polish that nobody in the recording ever
+    said — with 100% coverage, because the machine translated every line. This
+    is the "captions that are WRONG" case, and it ships by default."""
+
+    def _tracks(self):
+        return (
+            recordings.CaptionTrack("en", "https://t?caps=asr", True, is_translation=False),
+            recordings.CaptionTrack("pl", "https://t?tlang=pl", True, is_translation=True),
+        )
+
+    def test_the_tlang_marker_is_what_identifies_a_translation(self):
+        tracks = recordings._caption_tracks(
+            {
+                "automatic_captions": {
+                    "en": [{"ext": "vtt", "url": "https://t?caps=asr"}],
+                    "pl": [{"ext": "vtt", "url": "https://t?caps=asr&tlang=pl"}],
+                }
+            }
+        )
+        by_language = {t.language: t for t in tracks}
+        assert by_language["en"].is_translation is False
+        assert by_language["pl"].is_translation is True
+
+    def test_real_speech_beats_a_translation_in_the_asked_for_language(self):
+        """The original in the wrong language is a translation problem the
+        reader can solve. A translation presented as speech is one nobody can
+        detect."""
+        chosen = recordings.pick_track(self._tracks(), "pl")
+        assert chosen.language == "en" and not chosen.is_translation
+
+    def test_a_translation_is_used_only_when_there_is_no_transcription(self):
+        only_translated = (
+            recordings.CaptionTrack("pl", "https://t?tlang=pl", True, is_translation=True),
+        )
+        assert recordings.pick_track(only_translated, "pl").language == "pl"
+
+    def test_a_translation_is_declared_loudly_and_forbidden_as_a_quote(self, tmp_path):
+        only_translated = (
+            recordings.CaptionTrack("pl", "https://t?tlang=pl", True, is_translation=True),
+        )
+        transcript = load(
+            with_captions(tracks=only_translated, original_language="en"), tmp_path, prefer="pl"
+        )
+        text = recordings.classification(transcript)
+        assert "MACHINE-TRANSLATED from en" in text
+        assert "Do NOT quote them as anybody's speech" in text
+
+    def test_the_map_does_not_list_translations_as_captions(self):
+        """Naming 150 languages presents "Polish captions available" as a fact
+        about what was spoken."""
+        text = recordings.summary(remote(caption_tracks=self._tracks()))
+        listed = text.split("Captions: ")[1].split(", plus")[0]
+        assert listed == "en (auto)"  # the transcription, and only it
+        assert "1 MACHINE TRANSLATIONS" in text
+
+    def test_translations_only_says_there_is_no_original(self):
+        only_translated = (
+            recordings.CaptionTrack("pl", "https://t?tlang=pl", True, is_translation=True),
+        )
+        text = recordings.summary(remote(caption_tracks=only_translated))
+        assert "no transcription of the original speech" in text
+        assert "never quotable as speech" in text
+
+
+class TestCaptionFetchFailures:
+    """A caption fetch that dies must not read as "this recording has no
+    words" — that is the substitution failure in a new costume."""
+
+    def _boom(self, exc):
+        def fetch(url):
+            raise exc
+
+        return fetch
+
+    def test_rate_limiting_says_temporary_and_forbids_substitution(self, tmp_path):
+        import urllib.error
+
+        error = urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None)
+        with pytest.raises(RecordingError, match="rate-limiting"):
+            recordings.load_transcript(
+                with_captions(), tmp_path, fetch=self._boom(error)
+            )
+
+    def test_the_message_denies_that_the_video_is_caption_less(self, tmp_path):
+        import urllib.error
+
+        error = urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None)
+        try:
+            recordings.load_transcript(with_captions(), tmp_path, fetch=self._boom(error))
+        except RecordingError as exc:
+            assert "NOT a recording without captions" in str(exc)
+            assert "do not substitute" in str(exc)
+
+    def test_any_other_http_error_names_its_code(self, tmp_path):
+        import urllib.error
+
+        error = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with pytest.raises(RecordingError, match="HTTP 404"):
+            recordings.load_transcript(with_captions(), tmp_path, fetch=self._boom(error))
+
+    def test_a_network_failure_says_unavailable_not_absent(self, tmp_path):
+        with pytest.raises(RecordingError, match="not as absent"):
+            recordings.load_transcript(
+                with_captions(), tmp_path, fetch=self._boom(OSError("connection reset"))
+            )
+
+    def test_a_publisher_translation_is_named_as_one_too(self, tmp_path):
+        """The keynote's eight subtitle tracks are human translations: better
+        than a machine's, still not what was said. Different severity, so it is
+        a different sentence rather than the machine-translation warning."""
+        french = (recordings.CaptionTrack("fr", "https://t/fr.vtt", False, is_translation=False),)
+        transcript = load(
+            with_captions(tracks=french, original_language="en"), tmp_path, prefer="fr"
+        )
+        text = recordings.classification(transcript)
+        assert "spoken in en; these are its fr subtitles" in text
+        assert "not as speech" in text
+        assert "MACHINE-TRANSLATED" not in text
+
+    def test_the_asr_track_reveals_the_spoken_language(self):
+        """`info["language"]` is frequently empty. The ASR track is speech
+        recognition run on the audio, so its language IS the spoken one — an
+        exact signal rather than a guess."""
+        tracks = (
+            recordings.CaptionTrack("fr", "https://t/fr.vtt", False),
+            recordings.CaptionTrack("en", "https://t?caps=asr", True),
+            recordings.CaptionTrack("pl", "https://t?tlang=pl", True, is_translation=True),
+        )
+        assert recordings._spoken_language({}, tracks) == "en"
+        assert recordings._spoken_language({"language": "de"}, tracks) == "de"
+
+    def test_an_unmeetable_request_falls_back_to_the_SPOKEN_language(self):
+        """Not to dict order — which picked Chinese subtitles for a Polish
+        request on an English keynote."""
+        tracks = (
+            recordings.CaptionTrack("zh-Hans", "https://t/zh.vtt", False),
+            recordings.CaptionTrack("en", "https://t/en.vtt", False),
+            recordings.CaptionTrack("fr", "https://t/fr.vtt", False),
+        )
+        assert recordings.pick_track(tracks, "pl", spoken="en").language == "en"
+
+    def test_english_is_the_last_resort_and_only_a_tiebreak(self):
+        """With no ASR track and no declared language, nothing identifies the
+        original. English decides only WHICH wrong-language track is read, and
+        classification states the language either way — so the cost of it being
+        wrong is a translation, never a claim."""
+        tracks = (
+            recordings.CaptionTrack("zh-Hans", "https://t/zh.vtt", False),
+            recordings.CaptionTrack("en", "https://t/en.vtt", False),
+        )
+        assert recordings.pick_track(tracks, "pl", spoken="").language == "en"
+        # …and a known original still wins over it
+        assert recordings.pick_track(tracks, "pl", spoken="zh-Hans").language == "zh-Hans"
