@@ -1598,12 +1598,34 @@ body.offline #composer { opacity: 0.55; }
   -webkit-user-drag: none;
   will-change: transform;
 }
+/* A picture that failed to load is not blank — the browser draws its own broken
+   glyph and the alt text, in the top corner, over the bar. #preview-status says
+   what happened; this keeps the box (and so the gesture measurements) while
+   showing nothing. */
+#preview-img.broken { visibility: hidden; }
 /* Only while LETTING GO. A transition during the drag makes the picture lag
    behind the finger, which reads as the app being slow rather than smooth. */
 #preview-img.settling {
   transition: transform 0.22s cubic-bezier(0.2, 0.7, 0.3, 1), opacity 0.22s ease;
 }
 #preview { touch-action: none; }
+/* The words over the black while a page is being rendered, or when it could not
+   be. Centred and pointer-transparent: every touch in here belongs to the
+   gesture layer, and a status line that swallowed one would make the picture
+   under it undraggable. */
+#preview-status {
+  position: absolute;
+  inset: auto 0 0 0;
+  top: 50%;
+  transform: translateY(-50%);
+  text-align: center;
+  padding: 0 24px;
+  font-size: 15px;
+  color: var(--dim);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+}
+#preview-status[hidden] { display: none; }
 
 /* Dragging a file over the window. The whole window is the drop target, so the
    feedback has to be at that scale too — a highlight on the composer alone
@@ -1656,6 +1678,10 @@ body.dropping::after {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A chip that opens says so by responding to the touch, the same way the
+   composer's does — never with a label. */
+.msg-attachment-chip.attachment-openable { cursor: pointer; }
+.msg-attachment-chip.attachment-openable:active { background: rgba(255, 255, 255, 0.28); }
 
 /* ---- composer (Gemini-style unified capsule, #122) ---- */
 /* The whole composer IS the capsule: + / mic / send live INSIDE it, beside the

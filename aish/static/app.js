@@ -3734,7 +3734,9 @@ function addRedactedMsg() {
 // What you attached, shown as what it is: a thumbnail for an image, a named
 // chip for anything else. Tapping an image opens it full size through the same
 // token-gated /file endpoint the transcript's inline images use — no second
-// policy for where a local path may be loaded from.
+// policy for where a local path may be loaded from. A PDF's chip opens too,
+// onto its pages ([PREVIEW]) — an attachment you cannot look at is a file you
+// have to take aish's word about.
 function attachmentStrip(notes) {
   const strip = document.createElement("div");
   strip.className = "msg-attachments";
@@ -3770,6 +3772,14 @@ function attachmentChip(note) {
   // Shortened from the MIDDLE: the end of a file name is where it differs.
   chip.textContent = shortName(note.name);
   chip.title = note.path; // the full name and path stay one hover away
+  // Decided by the PATH, not by the note's kind: a PDF outside the uploads dir
+  // is logged as a plain "[attached file: …]" and is just as readable. What may
+  // actually be served is the server's call either way — /pdf/page scopes a
+  // path exactly as /file does.
+  if (isPdfPath(note.path)) {
+    chip.classList.add("attachment-openable");
+    chip.onclick = () => openPdfPreview(note.path, note.name);
+  }
   return chip;
 }
 
@@ -7524,7 +7534,18 @@ $("preview").addEventListener("gestureend", previewGestureEnd, { passive: false 
 // a phone fetching a 3 MB photo it is not. Re-clamp when the truth arrives,
 // and again whenever the window changes shape under it (rotation, the URL bar
 // sliding away), where yesterday's bounds are simply wrong.
-$("preview-img").addEventListener("load", () => { if (previewIsOpen()) previewPaint(false); });
+$("preview-img").addEventListener("load", () => {
+  if (!previewIsOpen()) return;
+  previewPageLoaded();
+  previewPaint(false);
+});
+// A page the server could not render, or a photo whose file has gone: the
+// overlay says so in words. Without this the failure is the browser's own
+// broken-image glyph on a black screen, which says nothing about which of the
+// two happened.
+$("preview-img").addEventListener("error", () => {
+  if (previewIsOpen()) previewPageFailed();
+});
 addEventListener("resize", () => { if (previewIsOpen()) previewPaint(false); });
 addEventListener("orientationchange", () => { if (previewIsOpen()) previewPaint(false); });
 
@@ -9263,6 +9284,17 @@ function renderAttachments() {
           .map((a) => ({ src: imageSrc(a.path), name: a.name }));
         openPreview(src, attachment.name, group, group.findIndex((g) => g.src === src));
       };
+    } else if (isPdfPath(attachment.path)) {
+      // The document you are about to send, before you send it — the same tap
+      // as a photo's, onto the same viewer. Deliberately WITHOUT a page-one
+      // thumbnail: that would rasterise a page for every PDF the composer is
+      // holding, and unlike IMG_4021.jpg a document's name usually says which
+      // one it is.
+      chip.classList.add("attach-openable");
+      chip.onclick = (event) => {
+        if (event.target.closest("button")) return; // ✕ is not "open it"
+        openPdfPreview(attachment.path, attachment.name);
+      };
     }
     const remove = document.createElement("button");
     remove.type = "button";
@@ -9293,12 +9325,50 @@ function renderAttachments() {
 // `group` is the pictures this one belongs to — the images in the same message,
 // or the ones waiting in the composer — so a swipe can move between them.
 // Opening a lone picture passes nothing and the paging simply never engages.
+//
+// A PDF opens here too, because its PAGES are the pictures: the group is the
+// document's pages, rasterised one at a time by the server, and every gesture
+// the viewer already has means the obvious thing on a page — swipe to turn it,
+// pinch to read the small print, the counter is the page number. See
+// openPdfPreview for why it is not an <iframe>.
 let previewGroup = [];
 let previewIndex = 0;
+// The src currently ON the image, tracked rather than read back: the DOM
+// returns an absolutised URL, so comparing against it would never match and
+// every repaint would re-set the src — which restarts the load of a page that
+// is already on screen.
+let previewSrc = "";
+// The document the open preview belongs to, "" for photographs. Its page count
+// arrives AFTER the preview opens (L7 — a tap opens the picture, it does not
+// wait for a round trip), by which time the owner may have closed it or opened
+// something else, so a late answer is applied only if it still names what is
+// on screen.
+let previewDoc = "";
+let previewPending = null;
 
-function openPreview(src, name, group, index) {
+// A page that renders quickly should show no spinner at all: the flash of one
+// is more noticeable than the wait it announces.
+const PREVIEW_STATUS_MS = 200;
+
+function isPdfPath(path) {
+  return /\.pdf$/i.test(String(path == null ? "" : path));
+}
+
+function pdfPageSrc(path, page) {
+  const params = new URLSearchParams({ path, page: String(page) });
+  if (token) params.set("token", token);
+  return `/pdf/page?${params}`;
+}
+
+// `doc` is the PDF these pictures are pages of, and it is set BEFORE anything
+// is shown rather than by the caller afterwards: the first page is the one with
+// the longest wait (nothing of that document is rendered yet), so a preview
+// that only learns it is a document after painting has already missed the
+// moment it needed to say "rendering…".
+function openPreview(src, name, group, index, doc) {
   const box = $("preview");
   if (!box) return;
+  previewDoc = doc ? String(doc) : "";
   previewGroup = Array.isArray(group) && group.length ? group : [{ src, name }];
   previewIndex = Math.max(0, Math.min(previewGroup.length - 1, index || 0));
   previewShow(previewIndex);
@@ -9308,15 +9378,63 @@ function openPreview(src, name, group, index) {
   previewReset();
 }
 
+// A PDF, previewed as the pages it is made of.
+//
+// Rejected: an <iframe> pointed at the file. It gives a real PDF viewer on a
+// desktop and fails on the device this feature is for — iOS Safari renders
+// only the FIRST page of an embedded PDF, and inside a standalone PWA there is
+// no browser chrome to escape to. Rejected too: a PDF renderer on the client,
+// which is a megabyte of library for something the server already does (aish
+// depends on PyMuPDF, and `read_pdf` rasterises a page it cannot read as text
+// for exactly the same reason — an unreadable page IS a picture).
+//
+// Page 1 goes up on the tap, before anything is known about the document. The
+// count only decides how far a swipe may go, so waiting for it would make
+// opening an attachment the one action in the app that costs a round trip.
+function openPdfPreview(path, name) {
+  const label = name || String(path).split("/").pop();
+  const first = pdfPageSrc(path, 1);
+  openPreview(first, label, [{ src: first, name: label }], 0, path);
+  if (!previewIsOpen()) return;
+  const params = new URLSearchParams({ path });
+  if (token) params.set("token", token);
+  fetch(`/pdf/info?${params}`)
+    .then((response) => (response.ok ? response.json() : null))
+    .then((info) => info && previewAdoptPages(path, label, info.pages))
+    // A count that never arrives leaves a one-page document: page 1 is on
+    // screen and readable, which is strictly better than an error over a
+    // picture the owner can already see.
+    .catch(() => {});
+}
+
+// The pages, once the server has said how many there are. Guarded on the
+// document still being the one open: this lands from a fetch, and the tap that
+// closed the preview or opened another file has no way to cancel it.
+function previewAdoptPages(path, name, pages) {
+  const total = Math.max(1, Math.floor(Number(pages) || 1));
+  if (!previewIsOpen() || previewDoc !== String(path) || total < 2) return false;
+  previewGroup = Array.from({ length: total }, (_, i) => ({
+    src: pdfPageSrc(path, i + 1),
+    name,
+  }));
+  previewShow(Math.min(previewIndex, total - 1)); // the counter, under the page already up
+  return true;
+}
+
 // Put picture `i` on screen. The ONE writer of what the preview is showing —
-// the src, the name, the counter and the index all move together, and a
-// half-applied step (new picture, old name) is the kind of thing nobody
-// notices until they are trying to tell two photos apart.
+// the src, the name, the counter, the index and what the status line says all
+// move together, and a half-applied step (new picture, old name) is the kind
+// of thing nobody notices until they are trying to tell two photos apart.
 function previewShow(i) {
   const item = previewGroup[i];
   if (!item) return;
   previewIndex = i;
-  $("preview-img").src = item.src;
+  if (item.src !== previewSrc) {
+    previewSrc = item.src;
+    $("preview-img").classList.remove("broken"); // the last one's failure is not this one's
+    $("preview-img").src = item.src;
+    previewAwaitPage();
+  }
   $("preview-img").alt = item.name || "";
   $("preview-name").textContent = item.name || "";
   const counter = $("preview-count");
@@ -9325,6 +9443,67 @@ function previewShow(i) {
     // implies a swipe would do something.
     counter.textContent = previewGroup.length > 1 ? `${i + 1} / ${previewGroup.length}` : "";
     counter.hidden = previewGroup.length < 2;
+  }
+  previewPrefetch();
+}
+
+// What the picture cannot say for itself while it is not there yet. A photo is
+// already on the device and needs none of this; a PDF page is RENDERED when it
+// is asked for, and a black screen during that reads as a preview that opened
+// onto nothing.
+function previewStatus(text) {
+  const el = $("preview-status");
+  if (!el) return;
+  el.textContent = text || "";
+  el.hidden = !text;
+}
+
+function previewAwaitPage() {
+  if (previewPending) clearTimeout(previewPending);
+  previewStatus("");
+  if (!previewDoc) return; // a photo arrives from the device, not from a renderer
+  const page = previewIndex + 1;
+  previewPending = setTimeout(() => {
+    previewPending = null;
+    previewStatus(`Rendering page ${page}…`);
+  }, PREVIEW_STATUS_MS);
+}
+
+function previewPageLoaded() {
+  if (previewPending) clearTimeout(previewPending);
+  previewPending = null;
+  previewStatus("");
+  $("preview-img").classList.remove("broken");
+}
+
+// The one case where the overlay must speak: the bytes never came. For a page
+// that is a rendering that failed (encrypted, corrupt, a page that is not
+// there); for a photo it is a file that has gone since it was sent. Either way
+// the alternative is a broken-image glyph on black.
+function previewPageFailed() {
+  if (previewPending) clearTimeout(previewPending);
+  previewPending = null;
+  previewStatus(
+    previewDoc ? `Page ${previewIndex + 1} couldn't be rendered` : "This picture couldn't be loaded"
+  );
+  // And the failed <img> goes with it. A broken image is not blank: the browser
+  // draws its own glyph WITH the alt text — in the corner, over the bar, so the
+  // file name appeared twice and the message below read as a third thing on a
+  // screen that has nothing on it. Hidden, not emptied, so the gesture layer
+  // still measures the same box.
+  $("preview-img").classList.add("broken");
+}
+
+// The next page and the one before it, fetched while the current one is being
+// read. Only for a document: a photo's bytes are already on the device (the
+// bubble or the composer chip fetched them), whereas every page is a render
+// the server has not been asked for yet, and a swipe that waits for one is a
+// swipe that feels broken.
+function previewPrefetch() {
+  if (!previewDoc || typeof Image !== "function") return;
+  for (const step of [1, -1]) {
+    const item = previewGroup[previewIndex + step];
+    if (item) new Image().src = item.src;
   }
 }
 
@@ -9364,6 +9543,12 @@ function closePreview() {
   // Drop the bytes' claim on memory, and make sure a stale picture can never
   // flash when the next one is opened.
   $("preview-img").removeAttribute("src");
+  previewSrc = "";
+  // The document goes with it, so a page count still in flight cannot land on
+  // a preview that has been closed — and so the next photo is not treated as
+  // a page that needs rendering.
+  previewDoc = "";
+  previewPageLoaded(); // clears the pending status timer and the status line
   previewReset();
   return true;
 }

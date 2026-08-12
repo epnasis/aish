@@ -70,7 +70,11 @@ const SHELL_ASSETS = [
 // Live data. These must never be served from a cache: a stale session list or a
 // replayed upload would be worse than an honest failure, and the app already
 // handles their absence (that is what the offline mirror is for).
-const NEVER_CACHE = ["/ws", "/offline/", "/upload", "/trigger", "/export/", "/dirs"];
+// /pdf/info is a fact about a file on the server (how many pages it has), and a
+// stale answer would silently shorten a document — one query, cheap to repeat.
+// Kept on ONE line: test_sw_routes.js pulls this declaration out of the file by
+// a single-line regex to give routeFor the constant it closes over.
+const NEVER_CACHE = ["/ws", "/offline/", "/upload", "/trigger", "/export/", "/dirs", "/pdf/info"];
 
 // [SW-ROUTE-START]
 // Which strategy a request gets. Kept as a pure function returning a string so
@@ -84,7 +88,10 @@ function routeFor(request, url, scope) {
   const rest = url.pathname.slice(scope.pathname.length - 1);
   if (NEVER_CACHE.some((p) => rest === p || rest.startsWith(p))) return "pass";
   if (request.mode === "navigate") return "navigate";
-  if (rest.startsWith("/file")) return "image";
+  // A rasterised PDF page IS an image, and belongs in the same bounded LRU —
+  // left to the default it would accumulate megabytes of pages in the cache the
+  // app shell lives in.
+  if (rest.startsWith("/file") || rest.startsWith("/pdf/page")) return "image";
   // The revision is in the query string, so the URL identifies exact bytes.
   if (url.searchParams.has("v")) return "immutable";
   return "revalidate";
