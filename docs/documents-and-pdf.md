@@ -97,7 +97,7 @@ These pages are **not** stored in the media store. That store is what the model
 was shown; a page somebody swiped past is not that, and content-addressing
 every page of every document scrolled through would evict real media to hold it.
 
-## The workspace boundary (#212)
+## The workspace boundary (#220)
 
 `Agent.workspace_roots()` — everywhere aish may **read** without asking: the session roots plus the directories the process owns (media store, scratch, tool-output cache, document store).
 

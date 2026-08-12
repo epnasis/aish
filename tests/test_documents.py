@@ -1,4 +1,4 @@
-"""The PDF rendition layer (#213).
+"""The PDF rendition layer (#219).
 
 Fixtures are BUILT here rather than committed as binaries: the four page kinds
 this module exists to tell apart (flowing text, columns, tables, scans) each

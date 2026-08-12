@@ -240,7 +240,7 @@ def read_url(url: str, topic: str | None = None) -> str:
                 PAGE_TITLES.clear()
             PAGE_TITLES[url] = title
     elif content_type == "application/pdf":
-        # Not a dead end any more (#213): this was the one content type aish
+        # Not a dead end any more (#219): this was the one content type aish
         # routinely meets on the web and could do nothing at all with, so the
         # refusal names the tool that CAN read it rather than the fact that
         # this one cannot.

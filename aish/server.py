@@ -2422,7 +2422,7 @@ class WebServer:
         else (unsupported type/backend, oversized, outside uploads) becomes
         a path note the agent handles through the normal gated tools.
 
-        A PDF is announced as readable whatever the backend (#213): native
+        A PDF is announced as readable whatever the backend (#219): native
         delivery is still the best fidelity and is preferred where it exists,
         but where it does not, `read_pdf` reads the same file. Only the
         DELIVERY is conditional now, not the claim — before, an attached PDF on
@@ -4731,7 +4731,7 @@ def create_app(
         def get_scope():
             # The WORKSPACE boundary, not `roots`: a read-only command touching
             # aish's own scratch/media/document stores must auto-approve, the
-            # same as writing and deleting there already does (#212).
+            # same as writing and deleting there already does (#220).
             if agent_holder:
                 return agent_holder[0].cwd, agent_holder[0].workspace_roots()
             return cwd, [Path(cwd).resolve()]

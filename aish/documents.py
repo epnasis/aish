@@ -1,4 +1,4 @@
-"""PDF → a text rendition that reads like a file (#213).
+"""PDF → a text rendition that reads like a file (#219).
 
 A PDF is not text, it is a page-description program, and the four kinds of
 page it can hold each need a different read:

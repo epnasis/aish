@@ -3258,7 +3258,7 @@ class TestUpload:
     def test_attached_image_goes_native_pdf_is_readable_either_way(self, app_env):
         """The test provider is "ollama", which has no document channel — so
         the PDF is NOT delivered natively. It is still announced as readable
-        (#213): read_pdf reads the same file on every backend, and only the
+        (#219): read_pdf reads the same file on every backend, and only the
         DELIVERY is conditional. Before, a PDF attached to a local model was
         announced as an inert path and the model went hunting for pdftotext."""
         client, chat = make_client(app_env, [model_says("I see it")])

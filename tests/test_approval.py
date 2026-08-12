@@ -616,11 +616,11 @@ class TestScratchWorkspace:
         (scratch / "link").symlink_to(outside)
         assert not path_within(str(scratch / "link" / "x.txt"), str(scratch), scratch)
 
-    # --- reading back what we wrote (#212) ---
+    # --- reading back what we wrote (#220) ---
 
     @pytest.mark.parametrize("verb", ["grep -n hello", "cat", "wc -l", "head -20", "file"])
     def test_read_only_command_on_a_scratch_file_auto_approves(self, tmp_path, scratch, verb):
-        """The session that motivated #212: `grep -i folder <scratch>/x.txt`
+        """The session that motivated #220: `grep -i folder <scratch>/x.txt`
         prompted, even though grep is a known-safe command and the model had
         just written that file there unprompted. The path scoping consulted
         `roots` alone, so aish's own workspace read as "somewhere else"."""
