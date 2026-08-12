@@ -39,6 +39,7 @@ from . import (
     documents,
     files,
     media,
+    recordings,
     rule_compiler,
     rules,
     secrets,
@@ -200,6 +201,16 @@ Rules:
    what you SEE. Never answer that kind of question from the filename, the
    caption or the surrounding page text. The same applies to a scanned PDF
    page: read_pdf attaches it as a picture and you read it from there.
+7bc. VIDEO AND AUDIO: to answer ANYTHING about what a video SHOWS — who is in
+   it, what they are wearing or doing, what a product or a slide looks like —
+   you MUST call read_media. It is the only way you can see a video. NEVER run
+   yt-dlp, ffmpeg or any other command on a recording, and NEVER answer from a
+   title, a description or a transcript when the question is about what is on
+   screen. Call it first with only the source to get the map (length, chapters,
+   captions) and an opening frame, then ask for moments: read_media(source=…,
+   at="12:34") or at="12:34", count=4, every="30s" to step through a stretch.
+   Frames arrive as pictures attached to the turn, each labelled with the time
+   it ACTUALLY came from — cite that time, not the one you asked for.
 7bb. PDFs: whenever a PDF is attached, sitting on disk, or linked, you MUST
    read it with read_pdf. NEVER run pdftotext, pdftoppm, python, strings or
    any other command on a PDF — read_pdf needs no approval and keeps columns,
@@ -744,6 +755,10 @@ READ_ONLY_TOOLS = frozenset(
         # same argument as show_image's write into the media store, and the
         # rendition is content-addressed, so it is thread-safe too.
         "read_pdf",
+        # Renders frames into aish's OWN media store and reads nothing else —
+        # same argument as show_image, and content-addressed writes make it
+        # thread-safe on the parallel read path too.
+        "read_media",
         # Same argument as show_image, minus the fetch: it validates a link the
         # app can play and hands back the line to paste. No egress at all.
         "show_video",
@@ -762,8 +777,10 @@ READ_ONLY_TOOLS = frozenset(
 # show_image is here too: its URL form is an outbound GET at a host the model
 # chose, which is exactly what this gate exists for. Its local-path form reaches
 # no host and is never gated (see _egress_novel_hosts). read_pdf takes the same
-# two shapes and is gated on the same terms.
-EGRESS_TOOLS = frozenset({"web_search", "read_url", "show_image", "read_pdf"})
+# two shapes and is gated on the same terms, as does read_media — whose URL
+# form additionally hands the resolved stream to a SUBPROCESS, which is why its
+# own SSRF check lives in recordings.py rather than at this boundary.
+EGRESS_TOOLS = frozenset({"web_search", "read_url", "show_image", "read_pdf", "read_media"})
 
 # URL or bare-domain-looking tokens in owner text. Deliberately generous
 # (matches "setup.py"-shaped tokens too): over-inclusion only ever widens
@@ -808,6 +825,19 @@ TOOL_MEDIA_UNDELIVERABLE = (
 TOOL_MEDIA_EXPIRED = (
     "[aish: picture(s) from an earlier task were dropped from view to save "
     "context. Call the tool again if you need to look at them.]"
+)
+
+# Frames returned by ONE read_media call. Deliberately below
+# TOOL_IMAGES_PER_TURN (8), so a single call is always delivered whole: a call
+# that returned more pictures than the turn can carry would print display lines
+# for frames the model never saw, and it would then describe them.
+MEDIA_FRAMES_PER_CALL = 6
+
+FRAMES_ATTACHED = (
+    "{count} frame(s) are attached to this turn — look at them and answer from "
+    "what you SEE. Each is labelled with the time it ACTUALLY came from (a seek "
+    "lands on the nearest frame the video allows); cite that time, not the one "
+    "you asked for."
 )
 
 SHOW_IMAGE_NO_CURL = (
@@ -1270,6 +1300,11 @@ class Agent:
             if state_dir is not None
             else self.scratch_dir / "documents"
         )
+        # Probed recordings, keyed by the source the model named -> (what it
+        # is, when we asked). Per-session and in memory only: the expensive
+        # half is resolving a SIGNED stream URL that expires, so there is
+        # nothing here worth persisting past the process (#216).
+        self._recordings: dict[str, tuple[recordings.Recording, float]] = {}
         content = compose_system_content(
             context, self.cwd, self.lessons_path, scratch_dir=self.scratch_dir
         )
@@ -2560,6 +2595,9 @@ class Agent:
             return str(a.get("source", ""))
         if name == "show_video":
             return str(a.get("url", ""))
+        if name == "read_media":
+            where = str(a.get("at") or "")
+            return str(a.get("source", "")) + (f" @{where}" if where else "")
         if name == "recall":
             return str(a.get("query") or a.get("name") or "")
         if name in ("read_file", "write_file", "edit_file"):
@@ -2750,6 +2788,16 @@ class Agent:
             )
             label = f"→ read_pdf: {source}" + (f" ({detail})" if detail else "")
             return label, partial(self._read_pdf, source, pages_spec, query)
+        if name == "read_media":
+            source = str(args.get("source", ""))
+            at = str(args.get("at", "") or "").strip()
+            every = str(args.get("every", "") or "").strip()
+            count = args.get("count")
+            chapter = args.get("chapter")
+            where = at or (f"chapter {chapter}" if chapter else "the map")
+            return f"→ read_media: {source} ({where})", partial(
+                self._read_media, source, at, count, every, chapter
+            )
         if name == "recall":
             query = str(args.get("query", "") or "")
             entry = str(args.get("name", "") or "").strip() or None
@@ -2984,6 +3032,162 @@ class Agent:
             f"![{alt or 'image'}]({path})",
             images=(str(path),),
         )
+
+    # ------------------------------------------------- video and audio (#216)
+
+    def _read_media(
+        self, source: str, at: str, count, every: str, chapter
+    ) -> str:
+        """Look at a recording: the structural map, then frames from it.
+
+        The map is emitted FIRST and always, for `read_pdf`'s reason — what is
+        ABSENT (no chapters, no captions, unknown length) has to be as visible
+        as what is present, or the caller reads silence as completeness.
+
+        Frames ride the result envelope so the model actually sees them (#215),
+        and each carries the timestamp ffmpeg reported having decoded rather
+        than the one that was asked for.
+        """
+        try:
+            recording = self._recording(source)
+        except recordings.RecordingError as exc:
+            return f"ERROR: {exc}"
+
+        header = [recordings.summary(recording)]
+        if description := recordings.describe(recording):
+            header.append(description)
+
+        try:
+            wanted = self._frame_times(recording, at, count, every, chapter)
+        except recordings.RecordingError as exc:
+            return "\n\n".join(header + [f"ERROR: {exc}"])
+        if not wanted:
+            # Audio-only, or live: the map is the whole answer and says why.
+            return "\n\n".join(header)
+
+        lines: list[str] = []
+        stored: list[str] = []
+        for seconds in wanted:
+            try:
+                data, actual = recordings.frame(recording, seconds)
+            except recordings.RecordingError as exc:
+                lines.append(f"*(no frame at {recordings.format_time(seconds)}: {exc})*")
+                continue
+            stamp = recordings.format_time(actual)
+            try:
+                path = media.store(data, self.media_dir, f"{recording.identity} at {stamp}")
+            except (ValueError, OSError) as exc:
+                lines.append(f"*(the frame at {stamp} could not be stored: {exc})*")
+                continue
+            stored.append(str(path))
+            # The timestamp goes in the ALT text, not just the prose: the media
+            # store is a bounded LRU, so once this frame is evicted the only
+            # way anyone can get it back is the time written beside it.
+            lines.append(
+                f"Frame at {stamp}. Include this line in your answer if the user "
+                f"should see it:\n\n![{recording.title or 'frame'} at {stamp}]({path})"
+            )
+        if not stored:
+            return "\n\n".join(header + lines)
+        text = "\n\n".join(header + [FRAMES_ATTACHED.format(count=len(stored))] + lines)
+        # Built LAST — a ToolOutcome is a str subclass and the join above would
+        # drop the envelope carrying the frames.
+        return tools.ToolOutcome(text, images=tuple(stored))
+
+    def _recording(self, source: str) -> "recordings.Recording":
+        """Probe once per session, then seek.
+
+        A resolved stream URL is signed and expires, so the cache is dropped
+        when it does — the alternative is an opaque HTTP 403 halfway through a
+        task, which reads as "the video is gone" rather than "re-resolve me".
+        """
+        key = source.strip()
+        cached, probed_at = self._recordings.get(key, (None, 0.0))
+        if cached is not None and self._still_resolvable(cached, probed_at):
+            return cached
+        recording = recordings.probe(key)
+        self._recordings[key] = (recording, time.time())
+        return recording
+
+    @staticmethod
+    def _still_resolvable(recording: "recordings.Recording", probed_at: float) -> bool:
+        """A local file never goes stale; a signed stream URL does.
+
+        The signer's own `expire=` is preferred over a guessed lifetime, with a
+        minute of slack so a seek does not start against a URL that dies
+        mid-request. With no expiry to read, fall back to a conservative TTL.
+        """
+        if recording.is_local:
+            return True
+        now = time.time()
+        if recording.expires_at:
+            return now < recording.expires_at - 60
+        return now - probed_at < recordings.URL_TTL_SECONDS
+
+    def _frame_times(
+        self, recording: "recordings.Recording", at: str, count, every: str, chapter
+    ) -> list[float]:
+        """Which moments this call is asking for.
+
+        Conflicting arguments ERROR rather than resolving to a winner: the model
+        that wrote both did not know which one it meant, and silently honouring
+        one produces frames from a place nobody asked about, cited as if they
+        were.
+        """
+        if at and chapter:
+            raise recordings.RecordingError(
+                "give either at= or chapter=, not both — they name different places."
+            )
+        if not recording.has_video or recording.is_live:
+            return []
+
+        step = recordings.parse_time(every) if every else 0.0
+        how_many = max(1, int(count or 1))
+        if how_many > 1 and not step:
+            raise recordings.RecordingError(
+                "count= needs every= as well, or every frame would come from the "
+                "same moment. Example: count=4, every=\"30s\"."
+            )
+
+        if chapter:
+            index = int(chapter)
+            if not recording.chapters:
+                raise recordings.RecordingError(
+                    "this recording publishes no chapters; use at= with a time instead."
+                )
+            if not 1 <= index <= len(recording.chapters):
+                raise recordings.RecordingError(
+                    f"there is no chapter {index} — the map lists "
+                    f"{len(recording.chapters)}."
+                )
+            start = recording.chapters[index - 1].start
+            end = (
+                recording.chapters[index].start
+                if index < len(recording.chapters)
+                else recording.duration or start + 60
+            )
+            if not step:
+                how_many = min(MEDIA_FRAMES_PER_CALL, 3)
+                step = max(1.0, (end - start) / (how_many + 1))
+            base = start + step / 2
+        elif at:
+            base = recordings.parse_time(at)
+        else:
+            # The opening frame. Not second zero: a video's first moment is
+            # routinely black, a title card, or a logo, and a blank picture
+            # reads as "nothing to see" rather than "you looked too early".
+            base = min(30.0, recording.duration * 0.05) if recording.duration else 1.0
+            how_many, step = 1, 0.0
+
+        times = [base + i * step for i in range(how_many)]
+        if recording.duration:
+            times = [t for t in times if t < recording.duration]
+            if not times:
+                raise recordings.RecordingError(
+                    f"{recordings.format_time(base)} is past the end — this "
+                    f"recording is {recordings.format_time(recording.duration)} long."
+                )
+        return times[:MEDIA_FRAMES_PER_CALL]
 
     # --------------------------------------------------------------- PDFs (#213)
 
@@ -3280,12 +3484,12 @@ class Agent:
         exactly what an injected instruction controls."""
         if self.origin == "user" or name not in EGRESS_TOOLS:
             return None
-        if name in ("read_url", "show_image", "read_pdf"):
+        if name in ("read_url", "show_image", "read_pdf", "read_media"):
             url = str(args.get("url") or args.get("source") or "")
-            # show_image and read_pdf also take a local path, which leaves the
-            # machine not at all — nothing to gate. Anything http(s)-shaped is
-            # an egress.
-            if name in ("show_image", "read_pdf") and not url.lower().startswith(
+            # show_image, read_pdf and read_media also take a local path, which
+            # leaves the machine not at all — nothing to gate. Anything
+            # http(s)-shaped is an egress.
+            if name in ("show_image", "read_pdf", "read_media") and not url.lower().startswith(
                 ("http://", "https://")
             ):
                 return None

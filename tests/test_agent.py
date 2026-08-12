@@ -4716,6 +4716,204 @@ class TestToolMedia:
         assert attached and attached[0]["images"] == [str(photo)]
 
 
+class TestReadMedia:
+    """#216: looking at a recording. Slice 1 is frames — the capability the
+    session that filed #215 actually needed ("who's the middle one"), which no
+    transcript could have answered."""
+
+    def _agent(self, tmp_path, monkeypatch, calls, recording=None, frames=None):
+        import aish.agent as agent_module
+
+        rec = recording or agent_module.recordings.Recording(
+            source="https://youtube.com/watch?v=abc",
+            identity="youtube:abc",
+            media_url="https://cdn/s.mp4",
+            is_local=False,
+            title="Three Singers",
+            duration=28.0,
+            chapters=(agent_module.recordings.Chapter(0.0, "Verse"),),
+        )
+        probes: list[str] = []
+        monkeypatch.setattr(
+            agent_module.recordings, "probe",
+            lambda source, **kw: (probes.append(source), rec)[1],
+        )
+        asked: list[float] = []
+
+        def fake_frame(recording, seconds, **kwargs):
+            asked.append(seconds)
+            if frames is not None and seconds in frames:
+                raise agent_module.recordings.RecordingError(frames[seconds])
+            # A distinct picture per moment, or the content-addressed store
+            # would collapse them into one file and hide a counting bug.
+            return PNG_BYTES + str(int(seconds)).encode(), seconds + 0.03
+
+        monkeypatch.setattr(agent_module.recordings, "frame", fake_frame)
+        agent, _ = make_agent([*calls, model_says("done")], state_dir=tmp_path)
+        agent.asked = asked
+        agent.probes = probes
+        return agent
+
+    def _result(self, agent):
+        agent.run_task("look")
+        return tool_messages(agent.messages)[0]["content"]
+
+    def _delivered(self, agent):
+        return [m for m in agent.messages if m.get("images")]
+
+    def test_the_map_comes_first_and_one_frame_with_it(self, tmp_path, monkeypatch):
+        """A bare source is a question about what this IS. Answering with the
+        map plus a picture means the model is never reasoning about a recording
+        it has neither read nor seen."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[tool_call("read_media", source="https://youtube.com/watch?v=abc")])],
+        )
+        result = self._result(agent)
+        assert result.startswith("Three Singers — 0:28 long")
+        assert len(self._delivered(agent)[0]["images"]) == 1
+
+    def test_the_opening_frame_is_not_second_zero(self, tmp_path, monkeypatch):
+        """A video's first moment is routinely black, a title card or a logo,
+        and a blank picture reads as "nothing to see" rather than "you looked
+        too early"."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[tool_call("read_media", source="https://youtube.com/watch?v=abc")])],
+        )
+        self._result(agent)
+        assert agent.asked == [pytest.approx(1.4)]  # 5% of 28s
+
+    def test_frames_are_delivered_and_labelled_with_the_time_they_CAME_from(
+        self, tmp_path, monkeypatch
+    ):
+        """The addressing scheme: a seek lands where the container allows, so
+        an answer citing the requested time would cite a picture it never got."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[tool_call("read_media", source="https://y/v", at="0:10")])],
+        )
+        result = self._result(agent)
+        assert "Frame at 0:10" in result  # 10.03 decoded, formatted
+        assert len(self._delivered(agent)[0]["images"]) == 1
+
+    def test_count_and_every_step_at_the_models_own_pace(self, tmp_path, monkeypatch):
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", at="0:05", count=3, every="5s")
+            ])],
+        )
+        self._result(agent)
+        assert agent.asked == [5.0, 10.0, 15.0]
+        assert len(self._delivered(agent)[0]["images"]) == 3
+
+    def test_count_without_every_is_refused_rather_than_guessed(self, tmp_path, monkeypatch):
+        """Every frame would come from the same moment, and three identical
+        pictures look like three looks at three moments."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", at="0:05", count=4)
+            ])],
+        )
+        assert "needs every=" in self._result(agent)
+
+    def test_at_and_chapter_together_are_refused(self, tmp_path, monkeypatch):
+        """They name different places; honouring one silently returns frames
+        from somewhere nobody asked about, cited as if they were asked for."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", at="0:05", chapter=1)
+            ])],
+        )
+        assert "not both" in self._result(agent)
+
+    def test_a_frame_past_the_end_names_the_length(self, tmp_path, monkeypatch):
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[tool_call("read_media", source="https://y/v", at="5:00")])],
+        )
+        result = self._result(agent)
+        assert "past the end" in result and "0:28" in result
+        assert not self._delivered(agent)
+
+    def test_the_per_call_cap_holds_so_one_call_is_always_delivered_whole(
+        self, tmp_path, monkeypatch
+    ):
+        """A call returning more pictures than the turn can carry would print
+        display lines for frames the model never saw — and it would then
+        describe them."""
+        import aish.agent as agent_module
+
+        assert agent_module.MEDIA_FRAMES_PER_CALL <= agent_module.TOOL_IMAGES_PER_TURN
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", at="0:01", count=20, every="1s")
+            ])],
+        )
+        self._result(agent)
+        images = self._delivered(agent)[0]["images"]
+        assert len(images) == agent_module.MEDIA_FRAMES_PER_CALL
+
+    def test_one_unreadable_moment_does_not_lose_the_others(self, tmp_path, monkeypatch):
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[
+                tool_call("read_media", source="https://y/v", at="0:05", count=3, every="5s")
+            ])],
+            frames={10.0: "the stream stalled there"},
+        )
+        result = self._result(agent)
+        assert "no frame at 0:10" in result
+        assert len(self._delivered(agent)[0]["images"]) == 2
+
+    def test_a_recording_is_probed_once_per_session(self, tmp_path, monkeypatch):
+        """Probing resolves a signed URL over the network; seeking does not.
+        Re-resolving per frame would pay that cost on every look."""
+
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [
+                model_says(tool_calls=[tool_call("read_media", source="https://y/v", at="0:05")]),
+                model_says(tool_calls=[tool_call("read_media", source="https://y/v", at="0:09")]),
+            ],
+        )
+        agent.run_task("look twice")
+        assert len(agent.probes) == 1
+        assert agent.asked == [5.0, 9.0]  # both frames still came back
+
+    def test_audio_only_returns_the_map_and_no_pictures(self, tmp_path, monkeypatch):
+        import aish.agent as agent_module
+
+        podcast = agent_module.recordings.Recording(
+            source="https://ex.com/ep.mp3", identity="url:ep", media_url="https://ex.com/ep.mp3",
+            is_local=False, title="Episode 12", duration=3600.0, has_video=False,
+        )
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[tool_call("read_media", source="https://ex.com/ep.mp3")])],
+            recording=podcast,
+        )
+        result = self._result(agent)
+        assert "AUDIO ONLY" in result
+        assert not self._delivered(agent)
+
+    def test_read_media_needs_no_approval(self, tmp_path, monkeypatch):
+        """It writes only into aish's own media store — the same argument as
+        show_image and read_pdf. A tap to look at a picture would be a tap per
+        frame."""
+        agent = self._agent(
+            tmp_path, monkeypatch,
+            [model_says(tool_calls=[tool_call("read_media", source="https://y/v", at="0:05")])],
+        )
+        agent.approve = lambda _cmd: pytest.fail("read_media must not reach the command gate")
+        agent.approve_read = lambda _p, _r: pytest.fail("read_media must not prompt")
+        assert "Frame at" in self._result(agent)
+
+
 class TestImageRoots:
     """One definition of "where aish may read from without asking", consumed by
     /file, the PDF exporter, the terminal renderer, read_file and the approver's

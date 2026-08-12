@@ -13,6 +13,11 @@ dependencies = [
     "certifi",
     "claude-agent-sdk>=0.2.121",
     "ddgs>=9.14.4",
+    # ffmpeg as a wheel, not a Homebrew install. recordings.py seeks into a
+    # video to render a frame; shelling out to a system binary would make
+    # `brew install ffmpeg` a silent prerequisite, which is exactly why
+    # poppler was rejected for the PDF reader (docs/documents-and-pdf.md).
+    "imageio-ffmpeg>=0.5",
     "markdown>=3.5",
     "ollama>=0.5",
     "openai>=1.60",
@@ -23,6 +28,9 @@ dependencies = [
     "pymupdf>=1.28.2",
     "pyyaml>=6.0",
     "starlette>=0.40",
+    # Resolves a directly-seekable stream URL (and the metadata map) for a
+    # remote recording, so nothing is ever downloaded to read one moment of it.
+    "yt-dlp>=2025.1.1",
     "uvicorn[standard]>=0.30",
     "xhtml2pdf>=0.2.16",
 ]

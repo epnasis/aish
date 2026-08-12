@@ -790,6 +790,74 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "read_media",
+            "description": (
+                "LOOK AT a video or audio recording — a YouTube link, any video/"
+                "audio URL, or a file on this machine. This is the ONLY way you "
+                "can see what is IN a video. NEVER run yt-dlp, ffmpeg or any "
+                "other command on a recording, and never answer a question about "
+                "what a video SHOWS from its title, its description or its "
+                "transcript alone.\n"
+                "USE IT WHENEVER the question is about something visible: who is "
+                "in a clip, what somebody is wearing or doing, what a product "
+                "looks like, what is on a slide.\n"
+                "Call it FIRST with only the source. You get a map — length, "
+                "chapters, whether it has captions — and one frame to start from. "
+                "Then ask for the moments you want: read_media(source=\"…\", "
+                "at=\"12:34\") for one frame, or at=\"12:34\", count=4, "
+                "every=\"30s\" to step through a stretch at your own pace. Use "
+                "the chapter list to decide where to look in a long recording.\n"
+                "Frames come back as pictures ATTACHED to the conversation: look "
+                "at them and answer from what you see. Each is labelled with the "
+                "time it actually came from — cite that, not the time you asked "
+                "for."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": (
+                            "A YouTube or other video/audio URL, or an absolute "
+                            "path to a media file on this machine."
+                        ),
+                    },
+                    "at": {
+                        "type": "string",
+                        "description": (
+                            "Where to look, as \"1:23\", \"1:02:03\", \"90s\" or "
+                            "\"2m\". Omit on the first call to get the map."
+                        ),
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": (
+                            "How many frames to return, starting at 'at'. "
+                            "Default 1."
+                        ),
+                    },
+                    "every": {
+                        "type": "string",
+                        "description": (
+                            "Gap between frames when count is above 1, e.g. "
+                            "\"5s\", \"30s\", \"2m\". Required with count."
+                        ),
+                    },
+                    "chapter": {
+                        "type": "integer",
+                        "description": (
+                            "Read a published chapter by its number in the map, "
+                            "instead of naming a time. Sampled across it."
+                        ),
+                    },
+                },
+                "required": ["source"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_file",
             "description": (
                 "Create a file or overwrite it entirely with new content. The user sees "
