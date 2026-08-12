@@ -34,7 +34,7 @@ Orchestrates the above and returns a **ready-built markdown line** — aish comp
 
 ## Delivery — the model looks at it too (#215)
 
-**Vision used to be one-way.** A picture the OWNER attached reached the model natively (`_classify_attachments` → `images` on the user message → each backend's encoder). A picture a **tool** made reached it as a *file path in prose*, because a tool result is a string on every provider aish speaks to. So aish could fetch a photo, verify it, store it, hand back a line to display it — and not see it. `read_pdf`'s scan escalation had been quietly resting on the same hole since #213: the page was rasterised and described as readable, and what arrived was its filename.
+**Vision used to be one-way.** A picture the OWNER attached reached the model natively (`_classify_attachments` → `images` on the user message → each backend's encoder). A picture a **tool** made reached it as a *file path in prose*, because a tool result is a string on every provider aish speaks to. So aish could fetch a photo, verify it, store it, hand back a line to display it — and not see it. `read_pdf`'s scan escalation had been quietly resting on the same hole since #219: the page was rasterised and described as readable, and what arrived was its filename.
 
 That is the shape of gap that produces confident nonsense rather than an error. Nothing failed; the model simply answered about a picture it never saw — from the caption, the filename, or the page it came from.
 
@@ -56,7 +56,7 @@ That is the shape of gap that produces confident nonsense rather than an error. 
 
 ## One boundary, three renderers
 
-`Agent.workspace_roots()` = `roots` + the directories the process owns (media store, scratch, tool-output cache, document store). Consumed by `/file` (`WebServer._workspace_roots`), the PDF exporter, the CLI's `term_image`, `read_file`'s prompt rule, and the approver's path scoping — see the workspace-boundary section of `docs/documents-and-pdf.md` for why the read side was added (#212).
+`Agent.workspace_roots()` = `roots` + the directories the process owns (media store, scratch, tool-output cache, document store). Consumed by `/file` (`WebServer._workspace_roots`), the PDF exporter, the CLI's `term_image`, `read_file`'s prompt rule, and the approver's path scoping — see the workspace-boundary section of `docs/documents-and-pdf.md` for why the read side was added (#220).
 
 They disagreed before #188: the exporter trusted the scratch dir and `/file` did not, so a file the model wrote **where it is told to write throwaway files** printed fine in a PDF and 403'd in the chat with nothing saying why. `TestImageRoots`, `TestImageRootsAgreement`.
 

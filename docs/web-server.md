@@ -172,7 +172,7 @@ The resumed turn is `RESUME_NOTE`, **not** the original prompt: the request and 
 
 ---
 
-## Shipping a new build (#214)
+## Shipping a new build (#221)
 
 `make ship` (`scripts/ship.sh`) is the ONE local path from a checkout to the running service: guard → lint → tests → `uv tool install` → `launchctl kickstart` → health-check. `scripts/deploy-web.sh <host>` is the remote equivalent.
 

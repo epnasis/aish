@@ -163,7 +163,7 @@ class TestReadUrl:
         assert "application/zip" in result
 
     def test_a_pdf_names_the_tool_that_can_read_it(self, monkeypatch):
-        """#213: this was the one content type aish routinely met on the web and
+        """#219: this was the one content type aish routinely met on the web and
         could do nothing at all with. A refusal that names no alternative is
         where the model starts improvising with curl."""
         monkeypatch.setattr(web, "_fetch", lambda url: ("%PDF-1.4", "application/pdf"))

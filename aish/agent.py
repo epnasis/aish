@@ -1296,7 +1296,7 @@ class Agent:
             if state_dir is not None
             else self.scratch_dir / "tool-output"
         )
-        # Text renditions of documents read with read_pdf (#213), keyed by the
+        # Text renditions of documents read with read_pdf (#219), keyed by the
         # SOURCE file's hash. Outside the scratch dir for the same reason as the
         # two above, plus one of its own: converting is the expensive half, and
         # a rendition keyed on content is still valid in next week's session.
@@ -2486,7 +2486,7 @@ class Agent:
         disagreed before #188: the exporter trusted the scratch dir and /file
         did not, so the same file printed in a PDF and 403'd in the chat.
 
-        It disagreed with itself again until #212: the process-owned dirs were
+        It disagreed with itself again until #220: the process-owned dirs were
         write-and-delete-approved but not READ-approved, so the model could
         create a scratch file unprompted, delete it unprompted, and then need a
         tap to grep the thing it had just written. Every read-side consumer now
@@ -2506,7 +2506,7 @@ class Agent:
             self.documents_dir,
             # read_media NAMES the transcript file in its result and tells the
             # model to read it. Outside this list that instruction would cost
-            # an approval tap — the #212 asymmetry, reopened.
+            # an approval tap — the #220 asymmetry, reopened.
             self.transcripts_dir,
         ]
 
@@ -3341,7 +3341,7 @@ class Agent:
                 )
         return times[:MEDIA_FRAMES_PER_CALL]
 
-    # --------------------------------------------------------------- PDFs (#213)
+    # --------------------------------------------------------------- PDFs (#219)
 
     def _read_pdf(self, source: str, pages_spec: str, query: str) -> str:
         """Read a PDF as text, with what the document IS stated before any of it.

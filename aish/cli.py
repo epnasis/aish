@@ -1806,7 +1806,7 @@ def main() -> int:
     def get_scope():
         # The WORKSPACE boundary, not `roots`: a read-only command touching
         # aish's own scratch/media/document stores must auto-approve, the same
-        # as writing and deleting there already does (#212).
+        # as writing and deleting there already does (#220).
         if agent_holder:
             return agent_holder[0].cwd, agent_holder[0].workspace_roots()
         return cwd, [Path(cwd).resolve()]

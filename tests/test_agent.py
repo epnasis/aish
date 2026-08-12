@@ -1581,7 +1581,7 @@ class TestRootScoping:
         assert "fine" in tool_messages(agent.messages)[0]["content"]
 
     def test_reading_back_its_own_scratch_file_needs_no_prompt(self, tmp_path):
-        """#212. The scratch dir was auto-approved for WRITING and DELETING but
+        """#220. The scratch dir was auto-approved for WRITING and DELETING but
         not for READING, so the model could create a file there unprompted,
         delete it unprompted, and then need a tap to look at the thing it had
         just written. Observed cost: four approvals in one session, two of them
@@ -1606,7 +1606,7 @@ class TestRootScoping:
             assert agent._read_prompt_reason(str(target)) is None, store
 
     def test_widening_the_read_boundary_does_not_widen_anything_else(self, tmp_path):
-        """The safety argument for #212 in one assertion: reading back what the
+        """The safety argument for #220 in one assertion: reading back what the
         process already writes unprompted grants nothing new, and a file
         somewhere else on the machine still prompts exactly as before."""
         outside = tmp_path / "elsewhere.txt"
@@ -4573,7 +4573,7 @@ class TestToolMedia:
     DELIVERED. A tool result is text on every provider aish speaks to, so
     before this the model was handed a file path and told to read it — which
     no model can do, and which the scanned-PDF escalation had been quietly
-    depending on since #213."""
+    depending on since #219."""
 
     def _delivered(self, agent):
         """The media messages aish added to this conversation."""
@@ -5057,7 +5057,7 @@ class TestMediaCaptions:
 
     def test_the_transcript_file_can_be_read_without_a_tap(self, tmp_path, monkeypatch):
         """The result NAMES the file and tells the model to read it. Outside
-        the workspace boundary that instruction costs an approval (#212)."""
+        the workspace boundary that instruction costs an approval (#220)."""
         agent = self._agent(
             tmp_path, monkeypatch,
             [model_says(tool_calls=[
@@ -5082,7 +5082,7 @@ class TestImageRoots:
     """One definition of "where aish may read from without asking", consumed by
     /file, the PDF exporter, the terminal renderer, read_file and the approver's
     path scoping. They disagreed before #188 and the same file printed in a PDF
-    while 403'ing in the chat; the read side was still missing until #212."""
+    while 403'ing in the chat; the read side was still missing until #220."""
 
     def test_covers_the_directories_aish_itself_owns(self, tmp_path):
         agent, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
@@ -7680,7 +7680,7 @@ class TestContextRecord:
 
 
 class TestReadPdf:
-    """#213: reading a PDF is a capability, not a shell recipe the model
+    """#219: reading a PDF is a capability, not a shell recipe the model
     reassembles. The result always leads with what the document IS, because the
     failure this replaces is a confident answer built on a shredded table or a
     scanned page that read as silence."""
