@@ -2597,7 +2597,7 @@ class Agent:
             return str(a.get("url", ""))
         if name == "read_media":
             where = str(a.get("at") or "")
-            return str(a.get("source", "")) + (f" @{where}" if where else "")
+            return web.strip_tracking(str(a.get("source", ""))) + (f" @{where}" if where else "")
         if name == "recall":
             return str(a.get("query") or a.get("name") or "")
         if name in ("read_file", "write_file", "edit_file"):
@@ -2795,7 +2795,8 @@ class Agent:
             count = args.get("count")
             chapter = args.get("chapter")
             where = at or (f"chapter {chapter}" if chapter else "the map")
-            return f"→ read_media: {source} ({where})", partial(
+            shown = web.strip_tracking(source)
+            return f"→ read_media: {shown} ({where})", partial(
                 self._read_media, source, at, count, every, chapter
             )
         if name == "recall":
@@ -2953,7 +2954,10 @@ class Agent:
         video that does not exist still passes — the owner then sees YouTube's
         own error rather than a broken box, which is the failure we can afford.
         """
-        url = url.strip()
+        # The link this hands back is the one that lands in the answer, so it
+        # is also the one the owner taps and forwards. A share token in it
+        # would follow them out of the chat.
+        url = web.strip_tracking(url.strip())
         if not url:
             return "ERROR: show_video needs a video url."
         if not web.video_id(url):
@@ -3101,7 +3105,7 @@ class Agent:
         when it does — the alternative is an opaque HTTP 403 halfway through a
         task, which reads as "the video is gone" rather than "re-resolve me".
         """
-        key = source.strip()
+        key = web.strip_tracking(source.strip())
         cached, probed_at = self._recordings.get(key, (None, 0.0))
         if cached is not None and self._still_resolvable(cached, probed_at):
             return cached

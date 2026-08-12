@@ -276,6 +276,49 @@ class TestProbe:
             recordings.probe("https://ex.com/v", extract=boom)
 
 
+class TestTrackingParams:
+    """A share link carries a token identifying whoever shared it. It must not
+    be forwarded to the host, must not make one video look like two, and must
+    not be what gets quoted back into an answer."""
+
+    def test_a_share_token_never_reaches_the_extractor(self, monkeypatch):
+        monkeypatch.setattr(recordings.web, "require_public", lambda url: None)
+        seen = []
+        recordings.probe(
+            "https://youtube.com/shorts/ORziFM6lseY?si=vyM8z4tmg27lRix4",
+            extract=lambda url: (seen.append(url), {"id": "a", "url": "https://cdn/s.mp4"})[1],
+        )
+        assert seen == ["https://youtube.com/shorts/ORziFM6lseY"]
+
+    def test_the_meaningful_parameters_survive(self, monkeypatch):
+        """A denylist, because an unrecognized parameter may be load-bearing —
+        `v` is the video and `t` is where to start."""
+        monkeypatch.setattr(recordings.web, "require_public", lambda url: None)
+        seen = []
+        recordings.probe(
+            "https://www.youtube.com/watch?v=abc&t=90&si=xyz&utm_source=news&list=PL1",
+            extract=lambda url: (seen.append(url), {"id": "a", "url": "https://cdn/s.mp4"})[1],
+        )
+        assert seen == ["https://www.youtube.com/watch?v=abc&t=90&list=PL1"]
+
+    def test_a_url_with_no_query_is_untouched(self):
+        assert (
+            recordings.web.strip_tracking("https://youtu.be/ORziFM6lseY")
+            == "https://youtu.be/ORziFM6lseY"
+        )
+
+    def test_a_signed_stream_url_is_never_stripped(self, monkeypatch):
+        """It is nothing BUT opaque parameters; dropping one turns a working
+        link into a 403. Stripping applies to what was GIVEN, never to what was
+        resolved."""
+        monkeypatch.setattr(recordings.web, "require_public", lambda url: None)
+        signed = "https://cdn/s.mp4?expire=99&sig=abc&si=notatrackingtoken"
+        recording = recordings.probe(
+            "https://ex.com/v", extract=lambda url: {"id": "a", "url": signed}
+        )
+        assert recording.media_url == signed
+
+
 class TestSummary:
     """The structural map, emitted first and always. What is ABSENT has to be
     as visible as what is present, or a caller reads silence as completeness."""
