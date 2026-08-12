@@ -2826,7 +2826,8 @@ class Agent:
             )
             shown = web.strip_tracking(source)
             return f"→ read_media: {shown} ({where})", partial(
-                self._read_media, source, at, count, every, chapter, query, duration
+                self._read_media, source, at, count, every, chapter, query, duration,
+                str(args.get("language", "") or "").strip(),
             )
         if name == "recall":
             query = str(args.get("query", "") or "")
@@ -3068,7 +3069,7 @@ class Agent:
 
     # ------------------------------------------------- video and audio (#216)
 
-    def _search_media(self, recording, query: str) -> str:
+    def _search_media(self, recording, query: str, language: str = "") -> str:
         """Where something is SAID, as times to go and look at.
 
         The index, and it returns moments rather than an answer on purpose: a
@@ -3078,7 +3079,7 @@ class Agent:
         straight back in as at=.
         """
         try:
-            transcript = self._transcript(recording)
+            transcript = self._transcript(recording, language)
         except recordings.RecordingError as exc:
             return f"ERROR: {exc}"
         hits = recordings.search_transcript(transcript, query)
@@ -3107,10 +3108,10 @@ class Agent:
             ]
         )
 
-    def _read_words(self, recording, at: str, duration: str) -> str:
+    def _read_words(self, recording, at: str, duration: str, language: str = "") -> str:
         """The words spoken over a stretch, with what they ARE stated first."""
         try:
-            transcript = self._transcript(recording)
+            transcript = self._transcript(recording, language)
             start = recordings.parse_time(at) if at else 0.0
             span = recordings.parse_time(duration)
         except recordings.RecordingError as exc:
@@ -3138,7 +3139,7 @@ class Agent:
             )
         return "\n\n".join(head + [body])
 
-    def _transcript(self, recording) -> "recordings.Transcript":
+    def _transcript(self, recording, language: str = "") -> "recordings.Transcript":
         """This recording's captions, converted once per session.
 
         Re-fetched per session rather than cached to disk by URL, so a caption
@@ -3146,16 +3147,19 @@ class Agent:
         keyed on the caption bytes, so an unchanged track costs one small fetch
         and no reconversion.
         """
-        cached = self._transcripts.get(recording.identity)
+        prefer = language or self.caption_language
+        key = f"{recording.identity}:{prefer}"
+        cached = self._transcripts.get(key)
         if cached is None:
             cached = recordings.load_transcript(
-                recording, self.transcripts_dir, prefer=self.caption_language
+                recording, self.transcripts_dir, prefer=prefer
             )
-            self._transcripts[recording.identity] = cached
+            self._transcripts[key] = cached
         return cached
 
     def _read_media(
-        self, source: str, at: str, count, every: str, chapter, query: str = "", duration: str = ""
+        self, source: str, at: str, count, every: str, chapter, query: str = "",
+        duration: str = "", language: str = "",
     ) -> str:
         """Look at a recording: the structural map, then frames from it.
 
@@ -3182,9 +3186,9 @@ class Agent:
                 "at what it returns."
             )
         if query:
-            return self._search_media(recording, query)
+            return self._search_media(recording, query, language)
         if duration:
-            return self._read_words(recording, at, duration)
+            return self._read_words(recording, at, duration, language)
 
         header = [recordings.summary(recording)]
         if description := recordings.describe(recording):

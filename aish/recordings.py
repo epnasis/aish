@@ -47,6 +47,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import urllib.error
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -92,6 +93,11 @@ class CaptionTrack:
     language: str
     url: str
     is_generated: bool
+    # A MACHINE TRANSLATION of the speech, not a transcription of it. YouTube
+    # offers ~150 of these per video and they are indistinguishable from the
+    # real track by language code alone: ask for Polish on an English video and
+    # you get fluent Polish that nobody in the recording ever said.
+    is_translation: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,6 +122,8 @@ class Transcript:
     path: Path
     language: str
     is_generated: bool
+    is_translation: bool
+    original_language: str
     asked_for: str
     cues: tuple[Cue, ...]
     duration: float
@@ -163,6 +171,7 @@ class Recording:
     identity: str
     media_url: str
     is_local: bool
+    original_language: str = ""
     title: str = ""
     uploader: str = ""
     description: str = ""
@@ -394,6 +403,7 @@ def probe(source: str, *, extract=_yt_dlp_info, run=_run_ffmpeg) -> Recording:
         title=str(info.get("title") or ""),
         uploader=str(info.get("uploader") or info.get("channel") or ""),
         description=str(info.get("description") or ""),
+        original_language=_spoken_language(info, captions),
         duration=float(info.get("duration") or 0.0),
         is_live=bool(info.get("is_live")),
         has_video=(
@@ -426,12 +436,36 @@ def _caption_tracks(info: dict) -> tuple[CaptionTrack, ...]:
                 None,
             )
             if best:
+                url = str(best["url"])
                 tracks.append(
                     CaptionTrack(
-                        language=str(language), url=str(best["url"]), is_generated=generated
+                        language=str(language),
+                        url=url,
+                        is_generated=generated,
+                        # `tlang=` is YouTube's own marker for "translate the
+                        # ASR into this language", and it is the ONLY reliable
+                        # signal — the language code says nothing.
+                        is_translation="tlang=" in url,
                     )
                 )
     return tuple(tracks)
+
+
+def _spoken_language(info: dict, tracks) -> str:
+    """What language this recording is actually SPOKEN in.
+
+    `info["language"]` is authoritative but frequently empty. The fallback is
+    exact rather than a guess: YouTube's auto-caption track that is NOT a
+    `tlang=` translation is speech recognition run on the audio, so its
+    language IS the spoken one. Without this, a request that cannot be met
+    falls back on dict order — which picked Chinese subtitles for a Polish
+    request on an English keynote.
+    """
+    declared = str(info.get("language") or "").strip()
+    if declared:
+        return declared
+    asr = next((t for t in tracks if t.is_generated and not t.is_translation), None)
+    return asr.language if asr else ""
 
 
 def _url_expiry(url: str) -> float:
@@ -559,14 +593,32 @@ def summary(recording: Recording) -> str:
     else:
         parts.append("Chapters: none published.")
 
-    if recording.caption_tracks:
+    real = [t for t in recording.caption_tracks if not t.is_translation]
+    translated = len(recording.caption_tracks) - len(real)
+    if real:
+        # Only the tracks that are a TRANSCRIPTION of this recording are named.
+        # Listing the machine translations alongside them (YouTube publishes
+        # ~150 per video) would present "Polish captions available" as a fact
+        # about what was spoken, which is the confusion this whole section
+        # exists to prevent.
         named = ", ".join(
-            f"{t.language}{' (auto)' if t.is_generated else ''}"
-            for t in recording.caption_tracks[:12]
+            f"{t.language}{' (auto)' if t.is_generated else ''}" for t in real[:8]
         )
+        line = f"Captions: {named}"
+        if translated:
+            line += (
+                f", plus {translated} MACHINE TRANSLATIONS of those words into "
+                "other languages (not what anyone said)"
+            )
         parts.append(
-            f"Captions: {named}. Search them with search= to find WHERE something "
-            "is said, then look at that moment with at=."
+            line + ". Search them with search= to find WHERE something is said, "
+            "then look at that moment with at=."
+        )
+    elif translated:
+        parts.append(
+            f"Captions: only {translated} machine translations, with no "
+            "transcription of the original speech. The words are a machine's, "
+            "not the speaker's — searchable, but never quotable as speech."
         )
     else:
         parts.append("Captions: none published, so there are no words to read — only pictures.")
@@ -662,23 +714,48 @@ def parse_cues(text: str) -> list[Cue]:
     return cues
 
 
-def pick_track(tracks, prefer: str) -> CaptionTrack | None:
+def pick_track(tracks, prefer: str, spoken: str = "") -> CaptionTrack | None:
     """The best caption track for `prefer`, or None.
 
-    Publisher-authored beats auto-generated at the same language, and the
-    requested language beats any other — but a track in the WRONG language is
-    still returned rather than withheld, because words in English about a
-    Polish video are useful as long as the caller is told. The telling is not
-    optional: `classification` names the language every time.
+    **A real track always beats a translation**, even one in the language that
+    was asked for. YouTube publishes ~150 machine translations per video and
+    they carry the requested language code, so the obvious ranking — "exact
+    language first" — hands back fluent Polish that nobody in the recording
+    said, and coverage is 100% because the machine translated every line. The
+    original speech in the wrong language is a translation problem the reader
+    can solve; a translation presented as speech is one nobody can detect.
+
+    Within the real tracks: the requested language first, then
+    publisher-authored over auto-generated. A translation is used only when
+    there is no transcription at all, and `classification` says so loudly.
     """
     if not tracks:
         return None
     wanted = (prefer or "").lower()
+    source = (spoken or "").lower().split("-")[0]
 
-    def rank(track: CaptionTrack) -> tuple[int, int]:
+    def rank(track: CaptionTrack) -> tuple[int, int, int, int, int]:
         language = track.language.lower()
         exact = language == wanted or language.startswith(f"{wanted}-")
-        return (0 if exact else 1, 0 if not track.is_generated else 1)
+        # When the request cannot be met, the SPOKEN language is the honest
+        # fallback — it is the only track that is definitely this recording's
+        # own words. Without it the choice fell to dict order.
+        original = bool(source) and language.split("-")[0] == source
+        # Last tiebreak, and openly a pragmatic one rather than a principled
+        # one: with no ASR track and no declared language there is nothing that
+        # identifies the original, and English is the likeliest source for
+        # material that has been subtitled into several languages. It only
+        # decides which of several wrong-language tracks is used, and
+        # `classification` states the language that was actually read either
+        # way — so the cost of it being wrong is a translation, never a claim.
+        english = language.split("-")[0] == "en"
+        return (
+            1 if track.is_translation else 0,
+            0 if exact else 1,
+            0 if original else 1,
+            0 if english else 1,
+            0 if not track.is_generated else 1,
+        )
 
     return sorted(tracks, key=rank)[0]
 
@@ -730,7 +807,7 @@ def load_transcript(
     hit. The fetch itself is repeated per session (cheap) precisely so an edit
     is noticed.
     """
-    track = pick_track(recording.caption_tracks, prefer)
+    track = pick_track(recording.caption_tracks, prefer, recording.original_language)
     if track is None:
         raise RecordingError(
             "this recording publishes no captions, so there are no words to "
@@ -738,7 +815,31 @@ def load_transcript(
             "available — do NOT substitute a transcript from anywhere else."
         )
     fetch = fetch or _fetch_captions
-    data = fetch(track.url)
+    try:
+        data = fetch(track.url)
+    except RecordingError:
+        raise
+    except urllib.error.HTTPError as exc:
+        # 429 is routine: the caption endpoint rate-limits, and a raw traceback
+        # here reads as "this video has no words" — the substitution failure
+        # again. Name it, and say it is temporary, so the model waits or looks
+        # instead of inventing a transcript.
+        if exc.code == 429:
+            raise RecordingError(
+                "the caption server is rate-limiting us right now (HTTP 429). "
+                "The words are temporarily unavailable — this is NOT a "
+                "recording without captions. Look at frames, or try again "
+                "shortly; do not substitute a transcript from elsewhere."
+            ) from exc
+        raise RecordingError(
+            f"the {track.language} caption track could not be fetched "
+            f"(HTTP {exc.code}). Treat the words as unavailable."
+        ) from exc
+    except (OSError, web.BlockedURLError) as exc:
+        raise RecordingError(
+            f"the {track.language} caption track could not be fetched ({exc}). "
+            "Treat the words as unavailable, not as absent."
+        ) from exc
     text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
     cues = parse_cues(text)
     if not cues:
@@ -754,6 +855,8 @@ def load_transcript(
         path=path,
         language=track.language,
         is_generated=track.is_generated,
+        is_translation=track.is_translation,
+        original_language=recording.original_language,
         asked_for=prefer,
         cues=tuple(cues),
         duration=recording.duration,
@@ -813,6 +916,25 @@ def classification(transcript: Transcript) -> str:
     """
     origin = "auto-generated by machine" if transcript.is_generated else "published by the uploader"
     parts = [f"Words: {transcript.language}, {origin}, {len(transcript.cues)} lines."]
+    spoken = transcript.original_language or ""
+    differs = spoken and transcript.language.lower().split("-")[0] != spoken.lower().split("-")[0]
+    if transcript.is_translation:
+        parts.append(
+            f"THESE ARE MACHINE-TRANSLATED from {spoken or 'another language'} — "
+            f"nobody in this recording said these words in {transcript.language}. "
+            "Do NOT quote them as anybody's speech; use them to find WHERE "
+            "something is said and describe it in your own words."
+        )
+    elif differs:
+        # A publisher-authored subtitle track in another language is a HUMAN
+        # translation: better than a machine's, and still not what was said.
+        # The distinction matters for quoting, so it is stated separately
+        # rather than folded into the machine-translation warning.
+        parts.append(
+            f"This recording is spoken in {spoken}; these are its {transcript.language} "
+            "subtitles, so they are a translation rather than the words as "
+            "spoken. Quote them as the published subtitles, not as speech."
+        )
     if transcript.language.lower().split("-")[0] != (transcript.asked_for or "").lower():
         parts.append(
             f"NOT the language asked for ({transcript.asked_for}) — say which "

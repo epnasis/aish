@@ -872,6 +872,14 @@ TOOL_SCHEMAS = [
                             "\"90s\" or \"2m\". Returns words, not pictures."
                         ),
                     },
+                    "language": {
+                        "type": "string",
+                        "description": (
+                            "Which caption language to read, e.g. \"pl\". The "
+                            "map lists what exists. Omit unless the map shows "
+                            "the one you want is not what you got."
+                        ),
+                    },
                 },
                 "required": ["source"],
             },
