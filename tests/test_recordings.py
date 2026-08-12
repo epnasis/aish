@@ -683,3 +683,56 @@ class TestCaptionFetchFailures:
         assert recordings.pick_track(tracks, "pl", spoken="").language == "en"
         # …and a known original still wins over it
         assert recordings.pick_track(tracks, "pl", spoken="zh-Hans").language == "zh-Hans"
+
+    def test_the_original_language_is_the_DEFAULT_not_a_fallback(self):
+        """The owner's rule: a model reads meaning out of the original better
+        than out of a translation, so translate at the END. Nothing asked for
+        means the spoken language wins — even over a publisher-authored track
+        in the language the owner usually reads."""
+        tracks = (
+            recordings.CaptionTrack("pl", "https://t/pl.vtt", False),
+            recordings.CaptionTrack("en", "https://t/en.vtt", False),
+        )
+        assert recordings.pick_track(tracks, "", spoken="en").language == "en"
+
+    def test_an_explicit_request_still_wins(self):
+        """language= is a deliberate choice — someone asking for the Polish
+        subtitles wants the Polish subtitles."""
+        tracks = (
+            recordings.CaptionTrack("pl", "https://t/pl.vtt", False),
+            recordings.CaptionTrack("en", "https://t/en.vtt", False),
+        )
+        assert recordings.pick_track(tracks, "pl", spoken="en").language == "pl"
+
+    def test_reading_the_original_is_stated_positively(self, tmp_path):
+        english = (recordings.CaptionTrack("en", "https://t/en.vtt", False),)
+        transcript = load(
+            with_captions(tracks=english, original_language="en"), tmp_path, prefer=""
+        )
+        text = recordings.classification(transcript)
+        assert "the language the recording is spoken in (en)" in text
+        assert "NOT the language asked for" not in text
+
+    def test_a_request_met_only_by_a_translation_is_refused_OUT_LOUD(self, tmp_path):
+        """Refusing is right — the original is better material. Refusing
+        silently would look like the request was never made."""
+        tracks = (
+            recordings.CaptionTrack("en", "https://t?caps=asr", True),
+            recordings.CaptionTrack("pl", "https://t?tlang=pl", True, is_translation=True),
+        )
+        transcript = load(
+            with_captions(tracks=tracks, original_language="en"), tmp_path, prefer="pl"
+        )
+        text = recordings.classification(transcript)
+        assert transcript.language == "en"
+        assert "the only pl track is a MACHINE TRANSLATION" in text
+        assert "Translate it yourself" in text
+
+    def test_youtubes_orig_suffix_never_reaches_the_output(self):
+        """`en-orig` is YouTube's bookkeeping, not a language — normalised at
+        the source so it cannot reach a label, a comparison or an answer."""
+        tracks = recordings._caption_tracks(
+            {"automatic_captions": {"en-orig": [{"ext": "vtt", "url": "https://t?caps=asr"}]}}
+        )
+        assert tracks[0].language == "en"
+        assert recordings._spoken_language({}, tracks) == "en"
