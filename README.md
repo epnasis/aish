@@ -443,6 +443,13 @@ this UI. Highlights:
   stays closed. When something *does* fail to render, the browser says so and
   the model is told — so it tries another source instead of leaving you looking
   at a broken picture.
+- **Tap an attachment to look at it.** A picture opens full-screen with the
+  gestures a photo viewer has — double-tap to zoom, pinch, drag to pan, swipe
+  between the pictures in one message, swipe down to dismiss. A **PDF** opens
+  the same way, page by page: swipe to turn the page, pinch to read the small
+  print, and the counter tells you where you are in the document. It opens in
+  place rather than in a new tab, so looking at your own file never means
+  leaving the app.
 - **Export to PDF, copy anything.** Per-answer or whole-session
   PDF export (rendered locally), copy chips on every code block / table / answer.
   A single-answer

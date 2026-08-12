@@ -277,6 +277,13 @@
        ENDS the gesture — exactly one move was applied and a 220px drag
        registered as 18px. -->
   <img id="preview-img" alt="" draggable="false">
+  <!-- What the picture cannot say for itself. A photo is already on the device
+       and appears at once; a PDF page is RENDERED on request, so the gap is
+       real and a black screen in it reads as a preview that opened onto
+       nothing. Says "rendering…" while it waits and names the failure when the
+       page cannot be produced at all. pointer-events: none in the stylesheet —
+       the gesture layer owns every touch in here. -->
+  <div id="preview-status" hidden></div>
 </div>
 
 <div id="backdrop" hidden></div>

@@ -3685,6 +3685,141 @@ class TestImageRootsAgreement:
                 assert client.get("/file", params={"path": str(outside)}).status_code == 403
 
 
+class TestPdfPreview:
+    """GET /pdf/info + /pdf/page (#218): an attached PDF is something the owner
+    can LOOK at, not only something aish reads out to them.
+
+    The pages are the pictures — rasterised here, shown in the photo viewer the
+    frontend already has — so what is pinned is that the endpoints are scoped
+    exactly like /file (they hand bytes off the machine over plain HTTP, which
+    is the same act) and that a page which cannot be produced says so instead of
+    returning something that renders as nothing.
+    """
+
+    def _pdf(self, path: Path, pages: int = 3) -> Path:
+        pymupdf = pytest.importorskip("pymupdf")
+        doc = pymupdf.open()
+        for number in range(pages):
+            page = doc.new_page()
+            page.insert_textbox(pymupdf.Rect(60, 60, 500, 300), f"PAGE {number + 1}", fontsize=28)
+        doc.save(path)
+        doc.close()
+        return path
+
+    def test_counts_pages_and_serves_one(self, app_env, tmp_path):
+        guide = self._pdf(tmp_path / "guide.pdf")
+        client, _ = make_client(app_env, [])
+        with client:
+            info = client.get("/pdf/info", params={"path": str(guide)})
+            assert info.status_code == 200
+            assert info.json() == {"name": "guide.pdf", "pages": 3}
+            page = client.get("/pdf/page", params={"path": str(guide), "page": "2"})
+            assert page.status_code == 200
+            assert page.headers["content-type"] == "image/png"
+            assert page.headers["x-content-type-options"] == "nosniff"
+            assert page.content.startswith(b"\x89PNG")
+
+    def test_scoped_exactly_like_the_image_endpoint(self, app_env, tmp_path, tmp_path_factory):
+        """Same boundary, same refusals — a second, looser door onto the disk is
+        the failure this shares a helper to prevent."""
+        outside = self._pdf(tmp_path_factory.mktemp("outside") / "private.pdf")
+        link = tmp_path / "innocent.pdf"
+        link.symlink_to(outside)  # resolved BEFORE containment, as /file does
+        client, _ = make_client(app_env, [])
+        with client:
+            for path in (outside, link):
+                assert client.get("/pdf/info", params={"path": str(path)}).status_code == 403
+                assert client.get("/pdf/page", params={"path": str(path)}).status_code == 403
+            assert client.get("/pdf/page", params={"path": "rel.pdf"}).status_code == 400
+            assert client.get("/pdf/page").status_code == 400
+            missing = tmp_path / "gone.pdf"
+            assert client.get("/pdf/page", params={"path": str(missing)}).status_code == 404
+
+    def test_requires_the_token(self, app_env, tmp_path):
+        guide = self._pdf(tmp_path / "guide.pdf")
+        client, _ = make_client(app_env, [], token="s3cret")
+        with client:
+            assert client.get("/pdf/info", params={"path": str(guide)}).status_code == 403
+            assert client.get("/pdf/page", params={"path": str(guide)}).status_code == 403
+            ok = client.get("/pdf/info", params={"path": str(guide), "token": "s3cret"})
+            assert ok.status_code == 200
+
+    def test_a_pdf_that_is_not_a_pdf_is_named(self, app_env, tmp_path):
+        """Usually a login wall saved under a .pdf name. PyMuPDF's own error for
+        it says nothing a reader could act on, so the magic bytes are checked
+        first — the same guard read_pdf applies to a fetched file."""
+        fake = tmp_path / "invoice.pdf"
+        fake.write_text("<html>sign in to continue</html>", encoding="utf-8")
+        notes = tmp_path / "notes.txt"
+        notes.write_text("not a document", encoding="utf-8")
+        client, _ = make_client(app_env, [])
+        with client:
+            refused = client.get("/pdf/page", params={"path": str(fake)})
+            assert refused.status_code == 415
+            assert "%PDF" in refused.json()["error"]
+            assert client.get("/pdf/page", params={"path": str(notes)}).status_code == 415
+
+    def test_a_page_that_is_not_there_says_so(self, app_env, tmp_path):
+        """A 404 with the reason in it, never a 200 carrying nothing: the client
+        shows words, where an empty body would render as a broken-image glyph on
+        a black screen."""
+        guide = self._pdf(tmp_path / "guide.pdf", pages=2)
+        client, _ = make_client(app_env, [])
+        with client:
+            gone = client.get("/pdf/page", params={"path": str(guide), "page": "9"})
+            assert gone.status_code == 404
+            assert "9" in gone.json()["error"]
+            bad = client.get("/pdf/page", params={"path": str(guide), "page": "last"})
+            assert bad.status_code == 400
+
+    def test_pages_of_an_upload_may_be_cached_hard(self, app_env, tmp_path):
+        """An upload's bytes cannot change, so its pages cannot either — and a
+        swipe back through a document must not re-render what was just read."""
+        source = self._pdf(tmp_path / "guide.pdf").read_bytes()
+        client, _ = make_client(app_env, [])
+        with client:
+            stored = client.post("/upload?name=guide.pdf", content=source).json()["path"]
+            page = client.get("/pdf/page", params={"path": stored, "page": "1"})
+            assert page.status_code == 200
+            assert "immutable" in page.headers["cache-control"]
+            assert "private" in page.headers["cache-control"]
+            etag = page.headers["etag"]
+            again = client.get(
+                "/pdf/page",
+                params={"path": stored, "page": "1"},
+                headers={"If-None-Match": etag},
+            )
+            assert again.status_code == 304
+            assert not again.content
+
+    def test_each_page_has_its_own_etag(self, app_env, tmp_path):
+        """Or page 2 would revalidate as page 1 and the whole document would
+        read as its first page."""
+        guide = self._pdf(tmp_path / "guide.pdf")
+        client, _ = make_client(app_env, [])
+        with client:
+            first = client.get("/pdf/page", params={"path": str(guide), "page": "1"})
+            second = client.get("/pdf/page", params={"path": str(guide), "page": "2"})
+            assert first.headers["etag"] != second.headers["etag"]
+            assert first.content != second.content
+
+    def test_nothing_is_added_to_the_media_store(self, app_env, tmp_path):
+        """The media store is what the MODEL was shown. A page somebody swiped
+        past is not that, and storing every page of every document scrolled
+        through would evict real media to hold it."""
+        guide = self._pdf(tmp_path / "guide.pdf")
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client):
+                media = Path(client.app.state.server.active.agent.media_dir)
+                before = sorted(p.name for p in media.glob("*")) if media.exists() else []
+                assert client.get(
+                    "/pdf/page", params={"path": str(guide), "page": "1"}
+                ).status_code == 200
+                after = sorted(p.name for p in media.glob("*")) if media.exists() else []
+                assert after == before
+
+
 class TestRenderErrorReports:
     """#188 layer 2: the browser is the only place that knows an image did not
     render, and it used to keep that to itself — the model's only feedback

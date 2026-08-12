@@ -84,6 +84,19 @@ A fetched PDF is saved into the document store rather than a temp file, so a re-
 
 ---
 
+## The owner reads it too (#218)
+
+`page_png` was built so the MODEL could see a page it could not read. The web
+preview takes the identical route for the person: `/pdf/info` + `/pdf/page`
+rasterise on demand and the pages land in the photo viewer the frontend already
+has (`docs/web-server.md`, `[PREVIEW]` in `docs/web-frontend.md`). No second
+mechanism, no PDF renderer on the client, and the one gesture set for both a
+photograph and a page.
+
+These pages are **not** stored in the media store. That store is what the model
+was shown; a page somebody swiped past is not that, and content-addressing
+every page of every document scrolled through would evict real media to hold it.
+
 ## The workspace boundary (#212)
 
 `Agent.workspace_roots()` — everywhere aish may **read** without asking: the session roots plus the directories the process owns (media store, scratch, tool-output cache, document store).

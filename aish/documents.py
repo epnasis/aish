@@ -731,20 +731,35 @@ def convert(pdf_path: Path | str, store_dir: Path | str) -> Rendition:
     return Rendition(source=source.name, path=path, pages=tuple(pages))
 
 
-def page_png(pdf_path: Path | str, number: int, dpi: int = PAGE_RASTER_DPI) -> bytes:
-    """One page rasterised as PNG — how a scan or a figure-bearing page reaches
-    a vision model. Steps the resolution down rather than failing when a dense
-    page would exceed the image cap."""
+def _open(pdf_path: Path | str):
+    """The document, or a DocumentError naming the file. Every caller that
+    touches the PDF itself comes through here, so "PyMuPDF is missing" and
+    "this file is not openable" read the same wherever they surface."""
     try:
         import pymupdf
 
     except ImportError as exc:  # pragma: no cover - dependency is declared
         raise DocumentError(f"PDF support is unavailable: {exc}") from exc
     try:
-        doc = pymupdf.open(str(pdf_path))
+        return pymupdf.open(str(pdf_path))
     except Exception as exc:
         raise DocumentError(f"could not open {Path(pdf_path).name}: {exc}") from exc
-    with doc:
+
+
+def page_count(pdf_path: Path | str) -> int:
+    """How many pages, without converting anything. The preview addresses pages
+    by number, so it needs the count before it can offer them — and a count is
+    the one question about a PDF that costs nothing to answer."""
+    with _open(pdf_path) as doc:
+        return int(doc.page_count)
+
+
+def page_png(pdf_path: Path | str, number: int, dpi: int = PAGE_RASTER_DPI) -> bytes:
+    """One page rasterised as PNG — how a scan or a figure-bearing page reaches
+    a vision model, and how the web preview shows a document at all. Steps the
+    resolution down rather than failing when a dense page would exceed the
+    image cap."""
+    with _open(pdf_path) as doc:
         if not 1 <= number <= doc.page_count:
             raise DocumentError(f"page {number} is outside {Path(pdf_path).name}")
         page = doc[number - 1]

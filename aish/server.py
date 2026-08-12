@@ -95,6 +95,7 @@ from .cli import (
     rank_models,
     save_default_model,
 )
+from .documents import DocumentError, page_count, page_png
 from .embeddings import SemanticIndex
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .pty_session import PtySession
@@ -1486,7 +1487,10 @@ the note>") — which is also how you get a specific page, search it, or see \
 a scanned page. Files that arrive as plain \
 "[attached file: <path>]" lines were NOT delivered natively: read text \
 files with read_file, process binaries with shell tools — in that mode you \
-cannot see image contents, and should say so if asked to describe one."""
+cannot see image contents, and should say so if asked to describe one. \
+The owner can TAP an attached picture or PDF in the chat to look at it \
+themselves (a PDF opens page by page), so naming a page number in your \
+answer points them at something they can check."""
 
 
 class Client:
@@ -4063,6 +4067,109 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             headers["Cache-Control"] = "private, max-age=31536000, immutable"
         return FileResponse(path, media_type=media_type, headers=headers)
 
+    # ---- a PDF, one page at a time (#218) --------------------------------
+    #
+    # An attached PDF previews like a photograph, because its PAGES are the
+    # pictures: rasterise one and the viewer that already exists — pinch, pan,
+    # swipe, "3 / 12" — reads a document with no second gesture vocabulary and
+    # no PDF renderer shipped to the client.
+    #
+    # The obvious alternative, an <iframe> pointed at the file, fails on the one
+    # device this is for: iOS Safari renders only the FIRST page of an embedded
+    # PDF, and inside a standalone PWA there is no browser chrome to escape to.
+    # Rasterising server-side is also the same move `read_pdf`'s escalation
+    # already makes — a page that cannot be read as text IS an image
+    # (`docs/documents-and-pdf.md`), and PyMuPDF is already a hard dependency.
+
+    def _pdf_target(self, request) -> tuple[Path | None, JSONResponse | None]:
+        """The PDF this request may read, or the refusal that stops it.
+
+        Scoped EXACTLY like /file — token, absolute path, symlinks resolved
+        BEFORE the containment check, inside the roots of some open session —
+        because it is the same act: handing bytes off the machine over plain
+        HTTP. One helper for both endpoints, so a rule cannot be enforced on
+        the page and forgotten on the count.
+        """
+        if not self._token_ok(request.query_params.get("token")):
+            return None, JSONResponse({"error": "bad token"}, status_code=403)
+        raw = request.query_params.get("path", "").strip()
+        if not raw:
+            return None, JSONResponse({"error": "missing path"}, status_code=400)
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            return None, JSONResponse({"error": "path must be absolute"}, status_code=400)
+        if path.suffix.lower() != ".pdf":
+            return None, JSONResponse({"error": "not a PDF"}, status_code=415)
+        path = path.resolve()
+        if not any(path.is_relative_to(r) for r in self._workspace_roots()):
+            return None, JSONResponse({"error": "outside session roots"}, status_code=403)
+        if not path.is_file():
+            return None, JSONResponse({"error": "not found"}, status_code=404)
+        try:
+            with path.open("rb") as handle:
+                magic = handle.read(4)
+        except OSError:
+            return None, JSONResponse({"error": "not found"}, status_code=404)
+        # The same guard `read_pdf` applies to a fetched file: a .pdf that is
+        # not a PDF is usually a login wall, and PyMuPDF's own error for it says
+        # nothing a reader could act on.
+        if magic != b"%PDF":
+            return None, JSONResponse({"error": "not a PDF (no %PDF header)"}, status_code=415)
+        return path, None
+
+    async def handle_pdf_info(self, request) -> JSONResponse:
+        """GET /pdf/info?path=<abs> — {name, pages}.
+
+        The preview opens on page 1 immediately and asks this afterwards, so a
+        document is on screen before the count arrives; the count only decides
+        how far a swipe can go.
+        """
+        path, refusal = self._pdf_target(request)
+        if refusal is not None or path is None:
+            return refusal  # type: ignore[return-value]
+        try:
+            pages = await asyncio.to_thread(page_count, path)
+        except DocumentError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=415)
+        return JSONResponse({"name": path.name, "pages": pages})
+
+    async def handle_pdf_page(self, request) -> Response:
+        """GET /pdf/page?path=<abs>&page=N — that page as a PNG.
+
+        Rendered on demand and never stored: the media store holds what the
+        MODEL was shown, and a page somebody swiped past is not that. Cheap to
+        repeat because the answer caches — an upload's bytes cannot change
+        (`_store_upload` never overwrites), so its pages are immutable, and
+        anything else revalidates on an ETag that carries the file's mtime.
+        """
+        path, refusal = self._pdf_target(request)
+        if refusal is not None or path is None:
+            return refusal  # type: ignore[return-value]
+        raw = request.query_params.get("page", "1").strip() or "1"
+        try:
+            number = int(raw)
+        except ValueError:
+            return JSONResponse({"error": f"page {raw!r} is not a number"}, status_code=400)
+        stat = path.stat()
+        etag = '"pdf-{}"'.format(
+            hashlib.sha1(
+                f"{path}:{stat.st_mtime_ns}:{stat.st_size}:{number}".encode()
+            ).hexdigest()[:16]
+        )
+        headers = {"X-Content-Type-Options": "nosniff", "ETag": etag}
+        if path.is_relative_to(self.uploads_dir.resolve()):
+            headers["Cache-Control"] = "private, max-age=31536000, immutable"
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        try:
+            data = await asyncio.to_thread(page_png, path, number)
+        except DocumentError as exc:
+            # Out of range, encrypted, corrupt: whichever it is, this page
+            # cannot be produced, and the message says which so the client can
+            # show words rather than a broken-image glyph.
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        return Response(content=data, media_type="image/png", headers=headers)
+
     @staticmethod
     def _pdf_response(data: bytes, filename: str) -> Response:
         return Response(
@@ -4796,6 +4903,8 @@ def create_app(
             Route("/share", server.handle_share, methods=["POST"]),
             Route("/trigger", server.handle_trigger, methods=["POST"]),
             Route("/file", server.handle_file, methods=["GET"]),
+            Route("/pdf/info", server.handle_pdf_info, methods=["GET"]),
+            Route("/pdf/page", server.handle_pdf_page, methods=["GET"]),
             Route("/export/answer", server.handle_export_answer, methods=["POST"]),
             Route("/export/session", server.handle_export_session, methods=["GET"]),
             Route("/dirs", server.handle_dirs, methods=["GET"]),
