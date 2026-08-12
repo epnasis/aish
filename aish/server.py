@@ -45,7 +45,7 @@ from concurrent.futures import ThreadPoolExecutor
 from email.utils import formataddr, getaddresses
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import uvicorn
 from starlette.applications import Starlette
@@ -636,6 +636,21 @@ IMAGE_TYPES = {
     ".webp": "image/webp",
 }
 MEDIA_MAX_BYTES = 20 * 1024 * 1024  # inline base64 limit; larger files fall back to a path
+
+
+def _attachment_disposition(name: str) -> str:
+    """A Content-Disposition that saves the file under its OWN name.
+
+    Both forms, because they answer different browsers: the quoted one is ASCII
+    only (anything else replaced, never dropped — a name reduced to "----" tells
+    you nothing), and `filename*` carries the real UTF-8 name for everything
+    that speaks RFC 5987. The ASCII pass is also what keeps a quote or a control
+    character in a filename from ending the header early."""
+    ascii_name = "".join(c if 32 <= ord(c) < 127 and c not in '"\\' else "_" for c in name)
+    return (
+        f"attachment; filename=\"{ascii_name or 'download'}\"; "
+        f"filename*=UTF-8''{quote(name)}"
+    )
 
 # Render-error reports (#188 layer 2). Until this existed, every way an image
 # could fail to display failed IN THE BROWSER after the turn was over: the
@@ -1490,7 +1505,9 @@ files with read_file, process binaries with shell tools — in that mode you \
 cannot see image contents, and should say so if asked to describe one. \
 The owner can TAP an attached picture or PDF in the chat to look at it \
 themselves (a PDF opens page by page), so naming a page number in your \
-answer points them at something they can check."""
+answer points them at something they can check — and can save any attachment \
+to their device from the same place, so they never need you to copy a file \
+out for them."""
 
 
 class Client:
@@ -4170,6 +4187,56 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return JSONResponse({"error": str(exc)}, status_code=404)
         return Response(content=data, media_type="image/png", headers=headers)
 
+    async def handle_download(self, request) -> FileResponse | JSONResponse:
+        """GET /download?path=<abs> — the file itself, saved to the device.
+
+        Looking at an attachment is not having it: a photo could be pinched and
+        a PDF paged through, and there was still no way to get either off the
+        chat and into Files. This is the same act as `/file` — bytes leaving the
+        machine over plain HTTP — so it is the same gate, plus a rule about
+        WHICH files, which is deliberately narrow and states itself:
+
+        **you may save what aish can already show you, and what you attached.**
+
+        Images and PDFs are the first half (`/file` renders one inline,
+        `/pdf/page` renders the other page by page), the uploads dir is the
+        second — the owner put those there, and an attachment nobody can open is
+        the gap this closes. Everything else in the roots stays unreachable
+        here: a source tree full of files aish has never shown anyone is not
+        what "download the attachment" means.
+
+        `Content-Disposition: attachment` + `nosniff` on every response, so a
+        `.html` in uploads is saved rather than rendered as same-origin markup.
+        """
+        if not self._token_ok(request.query_params.get("token")):
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        raw = request.query_params.get("path", "").strip()
+        if not raw:
+            return JSONResponse({"error": "missing path"}, status_code=400)
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            return JSONResponse({"error": "path must be absolute"}, status_code=400)
+        path = path.resolve()
+        if not any(path.is_relative_to(r) for r in self._workspace_roots()):
+            return JSONResponse({"error": "outside session roots"}, status_code=403)
+        suffix = path.suffix.lower()
+        shown = suffix in IMAGE_TYPES or suffix == ".pdf"
+        if not shown and not path.is_relative_to(self.uploads_dir.resolve()):
+            return JSONResponse({"error": "not a downloadable file"}, status_code=415)
+        if not path.is_file():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        media_type = IMAGE_TYPES.get(suffix) or (
+            "application/pdf" if suffix == ".pdf" else "application/octet-stream"
+        )
+        return FileResponse(
+            path,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": _attachment_disposition(path.name),
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     @staticmethod
     def _pdf_response(data: bytes, filename: str) -> Response:
         return Response(
@@ -4905,6 +4972,7 @@ def create_app(
             Route("/file", server.handle_file, methods=["GET"]),
             Route("/pdf/info", server.handle_pdf_info, methods=["GET"]),
             Route("/pdf/page", server.handle_pdf_page, methods=["GET"]),
+            Route("/download", server.handle_download, methods=["GET"]),
             Route("/export/answer", server.handle_export_answer, methods=["POST"]),
             Route("/export/session", server.handle_export_session, methods=["GET"]),
             Route("/dirs", server.handle_dirs, methods=["GET"]),

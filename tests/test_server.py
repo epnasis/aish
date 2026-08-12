@@ -3820,6 +3820,91 @@ class TestPdfPreview:
                 assert after == before
 
 
+class TestDownloadEndpoint:
+    """GET /download (#218 follow-up): looking at an attachment is not having
+    it. The rule this pins is the narrow one the endpoint states — you may save
+    what aish can already SHOW you (an image, a PDF) and what you ATTACHED
+    (anything in the uploads dir) — because the roots also contain a whole
+    project tree that no chat has ever displayed.
+    """
+
+    def test_saves_an_attachment_under_its_own_name(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            stored = client.post("/upload?name=minutes.txt", content=b"agenda").json()["path"]
+            response = client.get("/download", params={"path": stored})
+            assert response.status_code == 200
+            assert response.content == b"agenda"
+            disposition = response.headers["content-disposition"]
+            assert disposition.startswith("attachment;")
+            assert 'filename="minutes.txt"' in disposition
+            # nosniff + attachment is what keeps an uploaded .html a download
+            # rather than same-origin markup the browser would run.
+            assert response.headers["x-content-type-options"] == "nosniff"
+
+    def test_a_non_ascii_name_survives(self):
+        """Both forms, because they answer different browsers: `filename*`
+        carries the real name, and the quoted ASCII fallback REPLACES rather
+        than drops — a name reduced to "----" tells you nothing about which file
+        you just saved. The ASCII pass is also what stops a quote or a newline
+        in a filename from ending the header early."""
+        header = server_module._attachment_disposition("Zażółć.pdf")
+        assert header.startswith('attachment; filename="Za____.pdf";')
+        assert header.endswith("filename*=UTF-8''Za%C5%BC%C3%B3%C5%82%C4%87.pdf")
+        injected = server_module._attachment_disposition('we"ird\nname.txt')
+        assert '"we_ird_name.txt"' in injected
+        assert "\n" not in injected and injected.count('"') == 2
+
+    def test_serves_what_the_chat_can_already_show(self, app_env, tmp_path):
+        client, _ = make_client(app_env, [])
+        with client:
+            chart = Path(app_env["cwd"]) / "chart.png"
+            chart.write_bytes(b"\x89PNG-chart")
+            shown = client.get("/download", params={"path": str(chart)})
+            assert shown.status_code == 200
+            assert shown.content == b"\x89PNG-chart"
+            assert shown.headers["content-type"] == "image/png"
+
+    def test_refuses_a_file_no_chat_ever_displayed(self, app_env):
+        """The roots hold a project tree. `/file` has always answered 415 for a
+        .env or a .py, and a download must not be the looser door beside it."""
+        client, _ = make_client(app_env, [])
+        with client:
+            secret = Path(app_env["cwd"]) / ".env"
+            secret.write_text("API_KEY=hunter2", encoding="utf-8")
+            refused = client.get("/download", params={"path": str(secret)})
+            assert refused.status_code == 415
+            source = Path(app_env["cwd"]) / "main.py"
+            source.write_text("print('hi')", encoding="utf-8")
+            assert client.get("/download", params={"path": str(source)}).status_code == 415
+
+    def test_scoped_and_gated_exactly_like_the_image_endpoint(
+        self, app_env, tmp_path, tmp_path_factory
+    ):
+        outside = tmp_path_factory.mktemp("outside") / "private.png"
+        outside.write_bytes(b"\x89PNG-private")
+        link = tmp_path / "innocent.png"
+        link.symlink_to(outside)
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.get("/download", params={"path": str(outside)}).status_code == 403
+            assert client.get("/download", params={"path": str(link)}).status_code == 403
+            assert client.get("/download", params={"path": "rel.png"}).status_code == 400
+            assert client.get("/download").status_code == 400
+            missing = Path(app_env["cwd"]) / "gone.png"
+            assert client.get("/download", params={"path": str(missing)}).status_code == 404
+
+    def test_requires_the_token(self, app_env):
+        client, _ = make_client(app_env, [], token="s3cret")
+        with client:
+            stored = client.post(
+                "/upload?name=notes.txt&token=s3cret", content=b"x"
+            ).json()["path"]
+            assert client.get("/download", params={"path": stored}).status_code == 403
+            ok = client.get("/download", params={"path": stored, "token": "s3cret"})
+            assert ok.status_code == 200
+
+
 class TestRenderErrorReports:
     """#188 layer 2: the browser is the only place that knows an image did not
     render, and it used to keep that to itself — the model's only feedback

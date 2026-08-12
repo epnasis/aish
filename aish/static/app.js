@@ -3744,7 +3744,7 @@ function attachmentStrip(notes) {
   // owner can see in front of them, not everything the chat ever carried.
   const group = notes
     .filter((n) => n.kind === "image" && imageSrc(n.path))
-    .map((n) => ({ src: imageSrc(n.path), name: n.name }));
+    .map((n) => ({ src: imageSrc(n.path), name: n.name, file: n.path }));
   for (const note of notes) {
     const src = note.kind === "image" ? imageSrc(note.path) : null;
     if (src) {
@@ -3776,9 +3776,17 @@ function attachmentChip(note) {
   // is logged as a plain "[attached file: …]" and is just as readable. What may
   // actually be served is the server's call either way — /pdf/page scopes a
   // path exactly as /file does.
+  chip.classList.add("attachment-openable");
   if (isPdfPath(note.path)) {
-    chip.classList.add("attachment-openable");
     chip.onclick = () => openPdfPreview(note.path, note.name);
+  } else {
+    // Everything else — a spreadsheet, a zip, the .txt that started as an
+    // attachment nobody could do anything with — SAVES. There is nothing to
+    // show it in, and a chip that names a file and then refuses to hand it over
+    // is worse than no chip. The title says which of the two a tap does, since
+    // the two chips look identical.
+    chip.title = `Save ${note.name}`;
+    chip.onclick = () => saveAttachment(note.path, note.name);
   }
   return chip;
 }
@@ -4828,7 +4836,10 @@ function inlineImage(alt, target) {
   const link = local ? document.createElement("span") : externalAnchor(src);
   link.className = "img-link";
   if (local) {
-    link.onclick = () => openPreview(src, alt || target.split("/").pop());
+    // Passed as a one-item group so the picture carries the FILE it came from:
+    // a chart aish drew is as savable as a photo you sent it ([ATTACH-SAVE]).
+    const name = alt || target.split("/").pop();
+    link.onclick = () => openPreview(src, name, [{ src, name, file: target }], 0);
   }
   link.appendChild(
     markdownImg(alt, src, target, live, () => {
@@ -7519,6 +7530,10 @@ installFileDrop(window, document.body);
 // pointer-driven ([PREVIEW-GESTURE]) — a click handler alongside it would fire
 // a second time at the end of every drag and tap.
 $("preview-close").onclick = closePreview;
+$("preview-save").onclick = () => {
+  const target = previewSaveTarget();
+  if (target) saveAttachment(target.file, target.name);
+};
 $("preview").addEventListener("pointerdown", previewDown);
 $("preview").addEventListener("pointermove", previewMove, { passive: false });
 $("preview").addEventListener("pointerup", previewUp);
@@ -9281,7 +9296,7 @@ function renderAttachments() {
         if (event.target.closest("button")) return; // ✕ is not "open it"
         const group = attachments
           .filter((a) => ATTACH_IMAGE_RE.test(a.path || ""))
-          .map((a) => ({ src: imageSrc(a.path), name: a.name }));
+          .map((a) => ({ src: imageSrc(a.path), name: a.name, file: a.path }));
         openPreview(src, attachment.name, group, group.findIndex((g) => g.src === src));
       };
     } else if (isPdfPath(attachment.path)) {
@@ -9311,6 +9326,45 @@ function renderAttachments() {
     box.appendChild(chip);
   });
 }
+
+// [ATTACH-SAVE-START]
+// Looking at an attachment is not having it. A photo could be pinched and a PDF
+// paged through, and there was still no way to get either OFF the chat and into
+// Files, Photos or a folder — the one thing you want after reading a document
+// somebody sent you.
+//
+// It saves the FILE, never what is on screen: for a PDF that is the document,
+// not the page being read (a long-press on a page would save the page's PNG,
+// which is the wrong object and silently so). The bytes are fetched and handed
+// to `saveBlob` — the same one function the PDF export already saves through,
+// because "put a file on this device" is one behaviour and two of them would
+// diverge on the phone first.
+function downloadSrc(path) {
+  const params = new URLSearchParams({ path });
+  if (token) params.set("token", token);
+  return `/download?${params}`;
+}
+
+async function saveAttachment(path, name) {
+  const label = name || String(path).split("/").pop();
+  try {
+    const response = await fetch(downloadSrc(path));
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      showToast(`couldn't save ${label}: ${body.error || response.status}`);
+      return false;
+    }
+    // Named from what the CLIENT knows, not from the response header: the
+    // server's ASCII fallback is a transliteration, and the chat already holds
+    // the real name — "Zażółć.pdf" must not save as "Za______.pdf".
+    saveBlob(await response.blob(), label);
+    return true;
+  } catch {
+    showToast(`couldn't save ${label} — is the server reachable?`);
+    return false;
+  }
+}
+// [ATTACH-SAVE-END]
 
 // [PREVIEW-START]
 // Tap a picture, see the picture. It opens from three places — a composer
@@ -9394,7 +9448,7 @@ function openPreview(src, name, group, index, doc) {
 function openPdfPreview(path, name) {
   const label = name || String(path).split("/").pop();
   const first = pdfPageSrc(path, 1);
-  openPreview(first, label, [{ src: first, name: label }], 0, path);
+  openPreview(first, label, [{ src: first, name: label, file: path }], 0, path);
   if (!previewIsOpen()) return;
   const params = new URLSearchParams({ path });
   if (token) params.set("token", token);
@@ -9416,6 +9470,7 @@ function previewAdoptPages(path, name, pages) {
   previewGroup = Array.from({ length: total }, (_, i) => ({
     src: pdfPageSrc(path, i + 1),
     name,
+    file: path, // every page saves the DOCUMENT, not itself
   }));
   previewShow(Math.min(previewIndex, total - 1)); // the counter, under the page already up
   return true;
@@ -9437,6 +9492,15 @@ function previewShow(i) {
   }
   $("preview-img").alt = item.name || "";
   $("preview-name").textContent = item.name || "";
+  // Which FILE is behind this picture, and therefore what Save would save. It
+  // moves with the picture like everything else here: a save button naming the
+  // document you have swiped away from is the same class of half-applied step
+  // as a new picture under an old name.
+  const save = $("preview-save");
+  if (save) {
+    save.hidden = !item.file;
+    save.title = item.file ? `Save ${item.name || "this file"}` : "";
+  }
   const counter = $("preview-count");
   if (counter) {
     // Only when there IS a set: "1 / 1" on a single photo is noise that also
@@ -9509,6 +9573,14 @@ function previewPrefetch() {
 
 function previewGroupState() {
   return { count: previewGroup.length, index: previewIndex };
+}
+
+// What Save would save right now, or null when there is nothing behind the
+// picture. Read at the moment of the tap rather than captured when the button
+// was drawn — a swipe moves the file under it.
+function previewSaveTarget() {
+  const item = previewGroup[previewIndex];
+  return item && item.file ? { file: item.file, name: item.name } : null;
 }
 
 // Step to the next/previous picture: the current one slides out the way it was
@@ -9908,8 +9980,15 @@ function previewUp(event) {
   previewLastTap = now;
   previewLastTapAt = { x: event.clientX, y: event.clientY };
   // A single tap on the SURROUND closes; on the picture it does nothing, so
-  // long-press there still offers Save Image ([PREVIEW]).
-  if (event.target && event.target.id !== "preview-img" && previewState.scale <= 1.01) {
+  // long-press there still offers Save Image ([PREVIEW]). A tap on a BUTTON in
+  // the bar is neither: the button's own onclick has run, and closing on top of
+  // it would tear the viewer down the moment you asked it to save something.
+  if (
+    event.target &&
+    event.target.id !== "preview-img" &&
+    !(event.target.closest && event.target.closest("button")) &&
+    previewState.scale <= 1.01
+  ) {
     setTimeout(() => { if (previewLastTap === now) closePreview(); }, PREVIEW_TAP_MS);
   }
 }
