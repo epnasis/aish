@@ -807,6 +807,13 @@ TOOL_SCHEMAS = [
                 "at=\"12:34\") for one frame, or at=\"12:34\", count=4, "
                 "every=\"30s\" to step through a stretch at your own pace. Use "
                 "the chapter list to decide where to look in a long recording.\n"
+                "IN A LONG RECORDING, FIND THE MOMENT BEFORE YOU LOOK AT IT. "
+                "read_media(source=\"…\", search=\"iphone\") returns the times "
+                "the word is spoken; then look at one with at=. Stepping blindly "
+                "through two hours costs dozens of frames and usually misses it. "
+                "Use duration= to read what was SAID over a stretch, e.g. "
+                "at=\"41:20\", duration=\"2m\". A thing shown but never mentioned "
+                "will not be found by search — say so and step with every=.\n"
                 "Frames come back as pictures ATTACHED to the conversation: look "
                 "at them and answer from what you see. Each is labelled with the "
                 "time it actually came from — cite that, not the time you asked "
@@ -848,6 +855,21 @@ TOOL_SCHEMAS = [
                         "description": (
                             "Read a published chapter by its number in the map, "
                             "instead of naming a time. Sampled across it."
+                        ),
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": (
+                            "Find WHERE a word or phrase is spoken. Returns "
+                            "timestamps to pass back as at=, never an answer. "
+                            "Use it before looking at a long recording."
+                        ),
+                    },
+                    "duration": {
+                        "type": "string",
+                        "description": (
+                            "Read what was SAID from 'at' for this long, e.g. "
+                            "\"90s\" or \"2m\". Returns words, not pictures."
                         ),
                     },
                 },

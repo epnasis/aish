@@ -88,6 +88,67 @@ class Chapter:
 
 
 @dataclass(frozen=True)
+class CaptionTrack:
+    language: str
+    url: str
+    is_generated: bool
+
+
+@dataclass(frozen=True)
+class Cue:
+    start: float
+    end: float
+    text: str
+
+
+@dataclass(frozen=True)
+class Transcript:
+    """A caption track, converted once, with what is WRONG with it measured.
+
+    The fields after `cues` exist because a caption track can be fluent and
+    still not be this recording's words: auto-generated, in another language,
+    covering a third of the running time, or belonging to a different edit that
+    was re-uploaded. None of that is visible in the text itself, which is
+    exactly the shape of failure `read_pdf` classifies pages to prevent — so it
+    is MEASURED here and stated wherever the words are used.
+    """
+
+    path: Path
+    language: str
+    is_generated: bool
+    asked_for: str
+    cues: tuple[Cue, ...]
+    duration: float
+
+    @property
+    def covered(self) -> float:
+        """Seconds the cues actually speak for."""
+        return sum(max(0.0, cue.end - cue.start) for cue in self.cues)
+
+    @property
+    def coverage(self) -> float:
+        """Cued time as a fraction of running time; 0.0 when length is unknown."""
+        return min(1.0, self.covered / self.duration) if self.duration else 0.0
+
+    @property
+    def last_cue_end(self) -> float:
+        return self.cues[-1].end if self.cues else 0.0
+
+    @property
+    def largest_gap(self) -> tuple[float, float]:
+        """The longest stretch with no words in it, as (start, seconds)."""
+        widest = (0.0, 0.0)
+        previous = 0.0
+        for cue in self.cues:
+            if cue.start - previous > widest[1]:
+                widest = (previous, cue.start - previous)
+            previous = max(previous, cue.end)
+        if self.duration and self.duration - previous > widest[1]:
+            widest = (previous, self.duration - previous)
+        return widest
+
+
+@dataclass(frozen=True)
 class Recording:
     """What a recording IS, established before any of it is read.
 
@@ -109,7 +170,7 @@ class Recording:
     is_live: bool = False
     has_video: bool = True
     chapters: tuple[Chapter, ...] = ()
-    caption_languages: tuple[str, ...] = ()
+    caption_tracks: tuple[CaptionTrack, ...] = ()
     expires_at: float = 0.0
     notes: tuple[str, ...] = field(default=())
 
@@ -322,9 +383,7 @@ def probe(source: str, *, extract=_yt_dlp_info, run=_run_ffmpeg) -> Recording:
         for c in (info.get("chapters") or [])
         if c
     )
-    captions = tuple(
-        sorted({*(info.get("subtitles") or {}), *(info.get("automatic_captions") or {})})
-    )
+    captions = _caption_tracks(info)
     extractor = str(info.get("extractor_key") or info.get("extractor") or "url").lower()
     ident = str(info.get("id") or hashlib.sha256(raw.encode()).hexdigest()[:16])
     return Recording(
@@ -342,9 +401,37 @@ def probe(source: str, *, extract=_yt_dlp_info, run=_run_ffmpeg) -> Recording:
             or bool(info.get("height"))
         ),
         chapters=chapters,
-        caption_languages=captions,
+        caption_tracks=captions,
         expires_at=_url_expiry(media_url),
     )
+
+
+def _caption_tracks(info: dict) -> tuple[CaptionTrack, ...]:
+    """Caption tracks off the metadata, publisher-authored ones first.
+
+    yt-dlp offers several formats per language; VTT and SRT are the ones with
+    cue timings in them, and the timings are the entire point — a format
+    without them would give words that cannot be turned back into a moment.
+    """
+    tracks: list[CaptionTrack] = []
+    blocks = ((False, info.get("subtitles")), (True, info.get("automatic_captions")))
+    for generated, block in blocks:
+        for language, formats in (block or {}).items():
+            best = next(
+                (
+                    f
+                    for f in (formats or [])
+                    if f.get("url") and str(f.get("ext", "")).lower() in ("vtt", "srt")
+                ),
+                None,
+            )
+            if best:
+                tracks.append(
+                    CaptionTrack(
+                        language=str(language), url=str(best["url"]), is_generated=generated
+                    )
+                )
+    return tuple(tracks)
 
 
 def _url_expiry(url: str) -> float:
@@ -472,11 +559,14 @@ def summary(recording: Recording) -> str:
     else:
         parts.append("Chapters: none published.")
 
-    if recording.caption_languages:
+    if recording.caption_tracks:
+        named = ", ".join(
+            f"{t.language}{' (auto)' if t.is_generated else ''}"
+            for t in recording.caption_tracks[:12]
+        )
         parts.append(
-            "Captions exist in: "
-            + ", ".join(recording.caption_languages[:12])
-            + ". (Reading them is not built yet — this tool returns pictures.)"
+            f"Captions: {named}. Search them with search= to find WHERE something "
+            "is said, then look at that moment with at=."
         )
     else:
         parts.append("Captions: none published, so there are no words to read — only pictures.")
@@ -496,6 +586,298 @@ def describe(recording: Recording) -> str:
     if len(text) > 800:
         text = text[:800].rstrip() + " …"
     return f"What the uploader says about it:\n{text}"
+
+
+# ------------------------------------------------------ captions (#216 slice 2)
+#
+# Speech is the INDEX that makes seeing affordable, not a parallel feature.
+# Blind-scanning a two-hour keynote at one frame every two minutes is ~60
+# frames and 60-90k tokens; one search over the words finds the four moments
+# worth rendering. The deliverable is still pictures.
+
+# Part of the rendition's cache key, so improving the conversion invalidates
+# old renditions instead of serving a stale one a test would then pass against.
+CAPTION_VERSION = 1
+
+CAPTION_STORE_MAX_BYTES = 40 * 1024 * 1024
+CAPTION_STORE_MAX_FILES = 300
+
+# One caption file. Generous — a three-hour auto-captioned stream is a few MB —
+# but not unbounded, because this is fetched whole by design.
+CAPTION_MAX_BYTES = 8 * 1024 * 1024
+
+# Below this, the words cover so little of the running time that treating them
+# as "the transcript" would be the hollow read this module exists to prevent.
+COVERAGE_FLOOR = 0.5
+
+_CUE_TIME = re.compile(
+    r"(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})"
+)
+_CUE_HEADER = ("WEBVTT", "Kind:", "Language:", "NOTE", "STYLE", "REGION")
+_TRANSCRIPT_HEADER = "<!-- aish-transcript "
+
+
+def _cue_seconds(hours, minutes, secs, millis) -> float:
+    return int(hours) * 3600 + int(minutes) * 60 + int(secs) + int(millis.ljust(3, "0")) / 1000.0
+
+
+def parse_cues(text: str) -> list[Cue]:
+    """VTT or SRT -> cues, with the times the FILE gives.
+
+    The timings are the whole reason a caption file is not just a text file:
+    they are what makes a word searchable to a MOMENT, which is what the index
+    is for. A parser that drops them and reconstructs positions from word
+    counts produces timestamps that look exactly like facts and are fiction —
+    `youtube_analyze` shipped that bug for months.
+    """
+    cues: list[Cue] = []
+    start = end = 0.0
+    buffer: list[str] = []
+    open_cue = False
+
+    def flush() -> None:
+        if not open_cue or not buffer:
+            return
+        line = re.sub(r"\s+", " ", " ".join(buffer)).strip()
+        # Rolling auto-captions repeat the previous cue's words with one line
+        # added, which would otherwise duplicate every sentence in the store.
+        if line and (not cues or cues[-1].text != line):
+            cues.append(Cue(start=start, end=max(end, start), text=line))
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        match = _CUE_TIME.search(line)
+        if match:
+            flush()
+            values = match.groups()
+            start, end = _cue_seconds(*values[:4]), _cue_seconds(*values[4:])
+            buffer, open_cue = [], True
+            continue
+        if not line or line.isdigit() or line.startswith(_CUE_HEADER):
+            continue
+        cleaned = re.sub(r"<[^>]+>", "", line).strip()
+        if cleaned:
+            buffer.append(cleaned)
+    flush()
+    return cues
+
+
+def pick_track(tracks, prefer: str) -> CaptionTrack | None:
+    """The best caption track for `prefer`, or None.
+
+    Publisher-authored beats auto-generated at the same language, and the
+    requested language beats any other — but a track in the WRONG language is
+    still returned rather than withheld, because words in English about a
+    Polish video are useful as long as the caller is told. The telling is not
+    optional: `classification` names the language every time.
+    """
+    if not tracks:
+        return None
+    wanted = (prefer or "").lower()
+
+    def rank(track: CaptionTrack) -> tuple[int, int]:
+        language = track.language.lower()
+        exact = language == wanted or language.startswith(f"{wanted}-")
+        return (0 if exact else 1, 0 if not track.is_generated else 1)
+
+    return sorted(tracks, key=rank)[0]
+
+
+def _transcript_path(store_dir: Path, digest: str, hint: str) -> Path:
+    stem = re.sub(r"[^a-z0-9]+", "-", hint.lower()).strip("-")[:40].strip("-")
+    return Path(store_dir) / (f"{digest}-{stem}.md" if stem else f"{digest}.md")
+
+
+def render_transcript(cues, recording: Recording, track: CaptionTrack) -> str:
+    """The rendition: one markdown file with an explicit `[h:mm:ss]` marker in
+    front of every line.
+
+    The marker is the addressing scheme, the same role `[page N of T]` plays
+    for a document — it is what lets a search hand back a time that can be fed
+    straight to `at=`, and what makes the file readable with `read_file` and
+    greppable like anything else on disk.
+    """
+    meta = json.dumps(
+        {
+            "converter": CAPTION_VERSION,
+            "language": track.language,
+            "generated": track.is_generated,
+            "source": recording.source,
+        },
+        ensure_ascii=False,
+    )
+    lines = [f"{_TRANSCRIPT_HEADER}{meta} -->", f"# {recording.title or recording.source}", ""]
+    lines += [f"[{format_time(cue.start)}] {cue.text}" for cue in cues]
+    return "\n".join(lines) + "\n"
+
+
+def load_transcript(
+    recording: Recording,
+    store_dir: Path | str,
+    prefer: str = "en",
+    *,
+    fetch=None,
+) -> Transcript:
+    """Fetch a caption track WHOLE, convert once, and keep the rendition.
+
+    Whole, because a caption file is a couple of hundred KB of text and the
+    thing it is for is SEARCH — "where do they show the phone" cannot be
+    answered from a window, and answering it by transcribing windows in a
+    binary search is the design this replaced.
+
+    Keyed on the caption BYTES, so the same video reached by two URLs converts
+    once and an edited track becomes a different rendition rather than a stale
+    hit. The fetch itself is repeated per session (cheap) precisely so an edit
+    is noticed.
+    """
+    track = pick_track(recording.caption_tracks, prefer)
+    if track is None:
+        raise RecordingError(
+            "this recording publishes no captions, so there are no words to "
+            "search. Look at frames instead, or say that the words are not "
+            "available — do NOT substitute a transcript from anywhere else."
+        )
+    fetch = fetch or _fetch_captions
+    data = fetch(track.url)
+    text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
+    cues = parse_cues(text)
+    if not cues:
+        raise RecordingError(
+            f"the {track.language} caption track downloaded but holds no cues — "
+            "treat this recording as having no words, not as having said nothing."
+        )
+    store = Path(store_dir)
+    store.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(f"{CAPTION_VERSION}:{text}".encode()).hexdigest()[:16]
+    path = _transcript_path(store, digest, recording.title or recording.identity)
+    transcript = Transcript(
+        path=path,
+        language=track.language,
+        is_generated=track.is_generated,
+        asked_for=prefer,
+        cues=tuple(cues),
+        duration=recording.duration,
+    )
+    if path.exists():
+        path.touch()  # an LRU store: recency is what eviction reads
+    else:
+        path.write_text(render_transcript(cues, recording, track), encoding="utf-8")
+        prune_transcripts(store)
+    return transcript
+
+
+def _fetch_captions(url: str) -> bytes:
+    """The one outbound edge for captions, through the SSRF guard and the
+    shared trust store — never yt-dlp's own downloader, which has neither."""
+    data, _content_type = web.fetch_binary(url, CAPTION_MAX_BYTES)
+    return data
+
+
+def prune_transcripts(store_dir: Path) -> list[Path]:
+    """Evict least-recently-used renditions until under both caps."""
+    try:
+        files = [p for p in Path(store_dir).iterdir() if p.is_file()]
+    except OSError:
+        return []
+    entries = []
+    for path in files:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append((stat.st_mtime, stat.st_size, path))
+    entries.sort()
+    total = sum(size for _, size, _ in entries)
+    removed: list[Path] = []
+    for _, size, path in entries:
+        under_count = len(entries) - len(removed) <= CAPTION_STORE_MAX_FILES
+        if under_count and total <= CAPTION_STORE_MAX_BYTES:
+            break
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        total -= size
+        removed.append(path)
+    return removed
+
+
+def classification(transcript: Transcript) -> str:
+    """What these words ARE, computed — not what the publisher says they are.
+
+    Everything here is measured from the track itself, because the failure this
+    prevents is a caption file that reads perfectly and is not this recording's
+    speech. What CANNOT be measured — a mistranscription, a sub-second desync —
+    is claimed rather than implied, which is why the last line says unverified
+    instead of saying nothing.
+    """
+    origin = "auto-generated by machine" if transcript.is_generated else "published by the uploader"
+    parts = [f"Words: {transcript.language}, {origin}, {len(transcript.cues)} lines."]
+    if transcript.language.lower().split("-")[0] != (transcript.asked_for or "").lower():
+        parts.append(
+            f"NOT the language asked for ({transcript.asked_for}) — say which "
+            "language you are quoting, and do not present a translation as the "
+            "speaker's own words."
+        )
+    if transcript.duration:
+        percent = round(transcript.coverage * 100)
+        gap_start, gap_length = transcript.largest_gap
+        parts.append(f"Covers {percent}% of the running time.")
+        if transcript.coverage < COVERAGE_FLOOR:
+            parts.append(
+                "That is LESS THAN HALF: most of this recording has no words "
+                "against it, so absence of a phrase here is NOT evidence it was "
+                "never said. Look at frames for the rest."
+            )
+        if gap_length >= 60:
+            parts.append(
+                f"Longest stretch with no words: {format_time(gap_length)} from "
+                f"{format_time(gap_start)}."
+            )
+        drift = transcript.duration - transcript.last_cue_end
+        if drift > 120:
+            parts.append(
+                f"The last line is at {format_time(transcript.last_cue_end)} but the "
+                f"recording runs to {format_time(transcript.duration)} — these captions "
+                "may belong to a different edit of it."
+            )
+    parts.append(
+        "Nothing has checked these words against the audio; treat them as the "
+        "published caption track, not as verified speech."
+    )
+    return " ".join(parts)
+
+
+def search_transcript(transcript: Transcript, query: str, limit: int = 12) -> list[Cue]:
+    """Cues containing `query`, case-insensitively. The index's whole job.
+
+    Returns CUES — times — and never an answer: the point is to hand back
+    somewhere to look, which the caller turns into `at=`.
+    """
+    needle = query.strip().lower()
+    if not needle:
+        raise RecordingError("search needs something to look for")
+    return [cue for cue in transcript.cues if needle in cue.text.lower()][:limit]
+
+
+def window(transcript: Transcript, start: float, end: float) -> list[Cue]:
+    """Cues overlapping [start, end)."""
+    return [cue for cue in transcript.cues if cue.end > start and cue.start < end]
+
+
+# What is being said beside a frame. Capped, because this rides EVERY frame in
+# a stepped call and an uncapped quote would cost more than the picture does.
+SPOKEN_AT_SLACK = 4.0
+SPOKEN_AT_MAX_CHARS = 240
+
+
+def spoken_at(transcript: Transcript, seconds: float, slack: float = SPOKEN_AT_SLACK) -> str:
+    """What is being said at a moment, for pinning beside a frame."""
+    cues = window(transcript, seconds - slack, seconds + slack)
+    said = " ".join(cue.text for cue in cues).strip()
+    if len(said) > SPOKEN_AT_MAX_CHARS:
+        said = said[:SPOKEN_AT_MAX_CHARS].rsplit(" ", 1)[0] + " …"
+    return said
 
 
 def to_json(recording: Recording) -> str:

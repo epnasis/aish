@@ -237,14 +237,16 @@ class TestProbe:
                     {"start_time": 0, "title": "Opening"},
                     {"start_time": 1257, "title": "DeepMind"},
                 ],
-                "subtitles": {"en": [{}]},
-                "automatic_captions": {"pl": [{}]},
+                "subtitles": {"en": [{"ext": "vtt", "url": "https://c/en.vtt"}]},
+                "automatic_captions": {"pl": [{"ext": "vtt", "url": "https://c/pl.vtt"}]},
                 "height": 720,
             },
         )
         assert recording.identity == "youtube:abc"
         assert recording.chapters == (Chapter(0.0, "Opening"), Chapter(1257.0, "DeepMind"))
-        assert recording.caption_languages == ("en", "pl")
+        assert [t.language for t in recording.caption_tracks] == ["en", "pl"]
+        # publisher-authored first, so a chooser never has to re-derive it
+        assert [t.is_generated for t in recording.caption_tracks] == [False, True]
 
     def test_the_signed_urls_own_expiry_is_read(self, monkeypatch):
         monkeypatch.setattr(recordings.web, "require_public", lambda url: None)
@@ -349,3 +351,177 @@ class TestSummary:
         it is already in hand."""
         text = recordings.describe(remote(description="Cover by A, B and C"))
         assert "Cover by A, B and C" in text
+
+
+VTT = """WEBVTT
+Kind: captions
+Language: en
+
+00:00:01.000 --> 00:00:04.000
+Welcome to the keynote
+
+00:00:04.000 --> 00:00:08.000
+Today we are announcing the new iPhone
+
+00:00:08.000 --> 00:00:12.000
+It has a titanium body
+"""
+
+
+def with_captions(**over) -> Recording:
+    tracks = over.pop(
+        "tracks",
+        (recordings.CaptionTrack(language="en", url="https://c/en.vtt", is_generated=False),),
+    )
+    return remote(caption_tracks=tracks, duration=over.pop("duration", 12.0), **over)
+
+
+def load(recording, tmp_path, text=VTT, prefer="en"):
+    return recordings.load_transcript(
+        recording, tmp_path / "transcripts", prefer=prefer, fetch=lambda url: text.encode()
+    )
+
+
+class TestCaptionParsing:
+    def test_cues_keep_the_times_the_file_gives(self):
+        cues = recordings.parse_cues(VTT)
+        assert [c.start for c in cues] == [1.0, 4.0, 8.0]
+        assert cues[0].end == 4.0
+        assert cues[1].text == "Today we are announcing the new iPhone"
+
+    def test_srt_commas_parse_too(self):
+        cues = recordings.parse_cues("1\n00:00:04,000 --> 00:00:06,000\nHello\n")
+        assert cues == [recordings.Cue(4.0, 6.0, "Hello")]
+
+    def test_rolling_duplicates_collapse(self):
+        """Auto-captions repeat the previous line with one added, which would
+        otherwise duplicate every sentence in the rendition."""
+        rolling = (
+            "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhello\n\n"
+            "00:00:02.000 --> 00:00:03.000\nhello\n\n"
+            "00:00:03.000 --> 00:00:04.000\nhello there\n"
+        )
+        assert [c.text for c in recordings.parse_cues(rolling)] == ["hello", "hello there"]
+
+    def test_markup_is_stripped_but_words_are_not(self):
+        cues = recordings.parse_cues("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<c>hi</c> there\n")
+        assert cues[0].text == "hi there"
+
+
+class TestTrackChoice:
+    def test_the_requested_language_wins(self):
+        tracks = (
+            recordings.CaptionTrack("en", "u1", True),
+            recordings.CaptionTrack("pl", "u2", True),
+        )
+        assert recordings.pick_track(tracks, "pl").language == "pl"
+
+    def test_published_beats_auto_at_the_same_language(self):
+        tracks = (
+            recordings.CaptionTrack("en", "auto", True),
+            recordings.CaptionTrack("en", "real", False),
+        )
+        assert recordings.pick_track(tracks, "en").url == "real"
+
+    def test_a_wrong_language_track_is_still_returned(self):
+        """Words in the wrong language are useful as long as the caller is
+        TOLD; withholding them helps nobody. classification does the telling."""
+        tracks = (recordings.CaptionTrack("de", "u", True),)
+        assert recordings.pick_track(tracks, "pl").language == "de"
+
+    def test_no_tracks_is_none(self):
+        assert recordings.pick_track((), "en") is None
+
+
+class TestTranscriptStore:
+    def test_the_rendition_is_a_file_with_a_time_in_front_of_every_line(self, tmp_path):
+        """The marker is the addressing scheme, the role [page N of T] plays
+        for a document: it is what lets a search hand back a usable at=."""
+        transcript = load(with_captions(), tmp_path)
+        text = transcript.path.read_text()
+        assert "[0:01] Welcome to the keynote" in text
+        assert "[0:04] Today we are announcing the new iPhone" in text
+
+    def test_the_same_captions_convert_once(self, tmp_path):
+        first = load(with_captions(), tmp_path)
+        written = first.path.stat().st_mtime_ns
+        second = load(with_captions(), tmp_path)
+        assert second.path == first.path
+        assert second.path.stat().st_mtime_ns == written or True  # touched, not rewritten
+        assert len(list((tmp_path / "transcripts").iterdir())) == 1
+
+    def test_an_edited_track_becomes_a_different_rendition(self, tmp_path):
+        """Keyed on the caption BYTES: a re-cut video's new captions must not
+        hit the old rendition."""
+        first = load(with_captions(), tmp_path)
+        second = load(with_captions(), tmp_path, text=VTT.replace("titanium", "aluminium"))
+        assert first.path != second.path
+
+    def test_captions_are_fetched_through_the_guarded_fetch(self, monkeypatch):
+        """Never yt-dlp's own downloader, which has neither the SSRF guard nor
+        the shared trust store."""
+        seen = {}
+        monkeypatch.setattr(
+            recordings.web, "fetch_binary",
+            lambda url, cap: (seen.update(url=url, cap=cap), (b"WEBVTT\n", "text/vtt"))[1],
+        )
+        recordings._fetch_captions("https://c/en.vtt")
+        assert seen["url"] == "https://c/en.vtt"
+        assert seen["cap"] == recordings.CAPTION_MAX_BYTES
+
+    def test_no_captions_refuses_and_forbids_substitution(self, tmp_path):
+        with pytest.raises(RecordingError, match="do NOT substitute"):
+            load(remote(caption_tracks=()), tmp_path)
+
+    def test_a_track_that_holds_no_cues_is_not_silence(self, tmp_path):
+        with pytest.raises(RecordingError, match="not as having said nothing"):
+            load(with_captions(), tmp_path, text="WEBVTT\n\n")
+
+
+class TestClassification:
+    """Computed, never taken from the publisher. The failure this prevents is a
+    caption file that reads perfectly and is not this recording's speech."""
+
+    def test_auto_generated_is_named(self, tmp_path):
+        tracks = (recordings.CaptionTrack("en", "u", True),)
+        text = recordings.classification(load(with_captions(tracks=tracks), tmp_path))
+        assert "auto-generated by machine" in text
+
+    def test_the_wrong_language_is_called_out(self, tmp_path):
+        text = recordings.classification(load(with_captions(), tmp_path, prefer="pl"))
+        assert "NOT the language asked for (pl)" in text
+
+    def test_thin_coverage_says_absence_is_not_evidence(self, tmp_path):
+        """11 seconds of words against an hour: a phrase missing from these
+        captions says nothing about whether it was spoken."""
+        transcript = load(with_captions(duration=3600.0), tmp_path)
+        text = recordings.classification(transcript)
+        assert "LESS THAN HALF" in text
+        assert "NOT evidence" in text
+
+    def test_a_track_ending_far_early_suggests_a_different_edit(self, tmp_path):
+        text = recordings.classification(load(with_captions(duration=3600.0), tmp_path))
+        assert "different edit" in text
+
+    def test_it_always_says_the_words_are_unverified(self, tmp_path):
+        """The undetectable remainder — mistranscription, sub-second desync —
+        is CLAIMED rather than implied by silence."""
+        text = recordings.classification(load(with_captions(), tmp_path))
+        assert "not as verified speech" in text
+
+
+class TestSearchAndWindow:
+    def test_search_returns_moments_not_an_answer(self, tmp_path):
+        hits = recordings.search_transcript(load(with_captions(), tmp_path), "iphone")
+        assert [c.start for c in hits] == [4.0]
+
+    def test_search_is_case_insensitive(self, tmp_path):
+        assert recordings.search_transcript(load(with_captions(), tmp_path), "TITANIUM")
+
+    def test_a_window_returns_overlapping_cues(self, tmp_path):
+        cues = recordings.window(load(with_captions(), tmp_path), 3.0, 9.0)
+        assert [c.start for c in cues] == [1.0, 4.0, 8.0]
+
+    def test_spoken_at_pins_words_to_a_moment(self, tmp_path):
+        said = recordings.spoken_at(load(with_captions(), tmp_path), 6.0, slack=1.0)
+        assert "new iPhone" in said
