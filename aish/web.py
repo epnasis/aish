@@ -452,6 +452,47 @@ _YOUTUBE_RE = re.compile(
 )
 
 
+# Share-tracking parameters: they identify the person who shared a link, not
+# the thing it points at. YouTube's `si` is the one that arrives most often,
+# because it is what the Share button and the iOS share sheet add.
+_TRACKING_PARAMS = frozenset(
+    {
+        "si", "pp", "feature", "app", "ref", "ref_src", "ref_url", "source",
+        "fbclid", "gclid", "dclid", "msclkid", "igshid", "igsh", "twclid",
+        "mc_cid", "mc_eid", "_hsenc", "_hsmi", "yclid",
+    }
+)
+
+
+def strip_tracking(url: str) -> str:
+    """A URL with share-tracking parameters removed, and nothing else touched.
+
+    Three things at once: a token identifying the OWNER stops being forwarded
+    to whatever the link points at; the same video shared twice stops looking
+    like two different recordings, so it is not probed twice; and the link the
+    model pastes back into an answer is the clean one, since what arrives from
+    a share sheet is what gets quoted.
+
+    A DENYLIST, deliberately, where an allowlist would be better for privacy: a
+    parameter this does not recognize may be load-bearing — a signed stream URL
+    is nothing BUT opaque parameters, and dropping one turns a working link
+    into a 403. So only known tracking names go, and this is never applied to a
+    URL that was resolved rather than given (see `recordings.probe`).
+    """
+    raw = (url or "").strip()
+    if "?" not in raw:
+        return raw
+    parts = urllib.parse.urlsplit(raw)
+    kept = [
+        (key, value)
+        for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() not in _TRACKING_PARAMS and not key.lower().startswith("utm_")
+    ]
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(kept), parts.fragment)
+    )
+
+
 def video_id(url: str) -> str:
     """The playable video's id, or "" when this link is not one.
 

@@ -278,6 +278,12 @@ def probe(source: str, *, extract=_yt_dlp_info, run=_run_ffmpeg) -> Recording:
     raw = str(source).strip()
     if not raw:
         raise RecordingError("no source given")
+    # Before the guard, the extractor and the cache key: a share link carries a
+    # token identifying whoever shared it (`?si=…` from the Share button and
+    # the iOS share sheet), which has no business being forwarded to the host —
+    # and which would otherwise make one video look like a different recording
+    # each time it is shared, paying for a fresh probe every time.
+    raw = web.strip_tracking(raw)
     if not raw.lower().startswith(("http://", "https://")):
         path = Path(raw).expanduser()
         if not path.is_file():

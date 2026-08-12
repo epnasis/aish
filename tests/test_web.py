@@ -570,3 +570,32 @@ class TestVideoIds:
         assert web.thumbnail_video_id("https://i.ytimg.com/an/UCxyz/thumb.jpg") == ""
         assert web.thumbnail_video_id("https://cdn.test/hero.jpg") == ""
         assert web.thumbnail_video_id("") == ""
+
+
+class TestStripTracking:
+    """Share tokens identify the person who shared a link, not the thing it
+    points at (#216 follow-up)."""
+
+    def test_youtube_share_token_goes(self):
+        assert (
+            web.strip_tracking("https://youtu.be/ORziFM6lseY?si=vyM8z4tmg27lRix4")
+            == "https://youtu.be/ORziFM6lseY"
+        )
+
+    def test_utm_family_goes_by_prefix(self):
+        cleaned = web.strip_tracking("https://ex.com/a?utm_source=x&utm_medium=y&id=7")
+        assert cleaned == "https://ex.com/a?id=7"
+
+    def test_an_unknown_parameter_is_kept(self):
+        """A denylist: an unrecognized parameter may be load-bearing, and a
+        signed URL is nothing but unrecognized parameters."""
+        assert web.strip_tracking("https://ex.com/a?token=abc") == "https://ex.com/a?token=abc"
+
+    def test_the_fragment_and_path_are_untouched(self):
+        assert web.strip_tracking("https://ex.com/a/b?si=1#frag") == "https://ex.com/a/b#frag"
+
+    def test_a_stripped_youtube_link_is_still_playable(self):
+        """show_video validates against the app's own pattern, so stripping
+        must not produce a link the frontend then refuses."""
+        cleaned = web.strip_tracking("https://www.youtube.com/watch?v=ORziFM6lseY&si=abc")
+        assert web.video_id(cleaned) == "ORziFM6lseY"
