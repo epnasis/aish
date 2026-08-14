@@ -9,6 +9,7 @@ loopback, LAN, and cloud-metadata addresses are refused, on the initial URL
 and on every redirect (SSRF guard, see _require_public).
 """
 
+import base64
 import http.client
 import ipaddress
 import re
@@ -87,18 +88,161 @@ _IMAGE_META = {"og:image", "og:image:url", "og:image:secure_url", "twitter:image
 IMAGE_LINKS_MAX = 3
 
 
+# ------------------------------------------------------------------ links
+#
+# A page's text without its links is not the page when the page is a SHOP: the
+# offer's URL is the answer, and dropping it is what sent the model back to
+# web_search to reverse-engineer a URL for a title it had already read.
+#
+# A card's href is routinely a CLICK TRACKER rather than the offer. Measured on
+# an allegro.pl listing, every sponsored card links to
+#   allegro.pl/events/clicks?…&redirect=<the offer, urlencoded>&sig=…
+# so handing that back cites the ad system instead of the product, and it is
+# 250 characters of signature inside a budget the offers need. The redirect is
+# unwrapped, and the campaign parameters left on the far side are stripped.
+_REDIRECT_PARAMS = ("redirect", "url", "u", "target", "dest", "destination")
+_UNWRAP_MAX = 3
+
+
+def _redirect_target(value: str) -> str:
+    """The URL a redirect parameter carries, plain or base64.
+
+    Both forms were measured on the same site in one run: `/events/clicks`
+    percent-encodes its target, `/dss-proxy/clicks` base64s it. An encoding
+    this does not recognize simply is not unwrapped — the tracker URL is
+    ugly, not wrong."""
+    if value.startswith(("http://", "https://")):
+        return value
+    padded = value + "=" * (-len(value) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(padded).decode("utf-8", "strict")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    return decoded if decoded.startswith(("http://", "https://")) else ""
+
+
+def clean_link(href: str) -> str:
+    """A tracker URL reduced to what it actually points at.
+
+    Unwrapping stops at a HOST CHANGE, deliberately. A redirect off-site is a
+    different claim about where the user is being sent, and rewriting the
+    citation to it would let a page on one host slip a URL on another host into
+    the answer as though the first had served it — an injected `?redirect=`
+    would be an open door. Same-host unwrapping only takes an ad system's
+    detour off a link the site itself is serving."""
+    for _ in range(_UNWRAP_MAX):
+        parts = urllib.parse.urlsplit(href)
+        query = urllib.parse.parse_qs(parts.query)
+        inner = next(
+            (
+                target
+                for name in _REDIRECT_PARAMS
+                if query.get(name)
+                for target in [_redirect_target(query[name][0])]
+                if target
+            ),
+            "",
+        )
+        if not inner or urllib.parse.urlsplit(inner).hostname != parts.hostname:
+            break
+        href = inner
+    return strip_tracking(href)
+
+
+LINK_ARROW = " → "
+
+
+def merge_links(text: str, links: list[tuple[str, str]]) -> str:
+    """Put each anchor's URL on the line of `text` that anchor rendered as.
+
+    A separate list of links would leave the model to join it to the listing BY
+    TITLE — which is precisely the guess-the-URL step this exists to delete.
+    On the line, an offer's URL sits beside its own price and there is nothing
+    to match up.
+
+    Anchors are consumed IN ORDER, so a listing that shows the same title twice
+    (a sponsored card and its organic twin) gives each line its own URL instead
+    of pointing both at whichever came first. When a repeated line outlives its
+    anchors the last one is reused: a stale-but-same-titled URL beats none."""
+    pending: dict[str, list[str]] = {}
+    for label, href in links:
+        cleaned = clean_link(href)
+        queue = pending.setdefault(label, [])
+        if cleaned not in queue:
+            queue.append(cleaned)
+    out: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        waiting = pending.get(stripped) or []
+        if waiting:
+            href = waiting.pop(0) if len(waiting) > 1 else waiting[0]
+            out.append(f"{stripped}{LINK_ARROW}{href}")
+        else:
+            out.append(stripped)
+    return "\n".join(out)
+
+
+# Site chrome, for the fetch path. The browser path excludes the same thing
+# with `closest()`; here it is a depth counter, because HTMLParser sees a tag
+# stream rather than a tree.
+_CHROME_TAGS = {"nav", "header", "footer"}
+
+
+# What the carried links may cost. A CHARACTER budget, not a link count,
+# because the problem being solved is a character budget: a count caps nothing
+# when a shop's URLs run to 120 characters and an encyclopedia's to 60.
+# 2 500 buys ~20 offer links on the measured listing and ~40 on an article.
+LINK_NOTE_MAX_CHARS = 2500
+
+
+def link_note(dropped: str) -> str:
+    """The links truncation just cut off, kept as `title → url` pairs.
+
+    Same reasoning as `image_note`, and the same failure it was written for:
+    the cap is measured in characters, so on a listing it lands mid-page and
+    takes the URLs with it — cutting exactly the thing that stops the model
+    guessing. Measured on the allegro.pl listing behind this: 101 offer links
+    in the page, 14 of them inside the cap.
+
+    Pairs, never bare URLs. A bare list would put the model back to matching
+    offers to URLs by title, which is the step this whole feature deletes."""
+    lines = [ln.strip() for ln in dropped.splitlines() if LINK_ARROW in ln]
+    kept: list[str] = []
+    spent = 0
+    for line in lines:
+        if spent + len(line) > LINK_NOTE_MAX_CHARS:
+            break
+        kept.append(line)
+        spent += len(line) + 3
+    if not kept:
+        return ""
+    more = "" if len(kept) == len(lines) else (
+        f"\n  (+{len(lines) - len(kept)} more — read again with a 'topic' to reach them)"
+    )
+    return (
+        "\n\n[more links from the omitted part of this page — use them VERBATIM]\n"
+        + "\n".join(f"  {line}" for line in kept)
+        + more
+    )
+
+
 class _TextExtractor(HTMLParser):
     """Visible text only: skips script/style subtrees, newlines at block tags.
     The <title> (inside the otherwise-skipped <head>) is captured separately
-    so pages can be cited by name, and so are the page's declared images."""
+    so pages can be cited by name, and so are the page's declared images — and
+    so are its links, which a fetched shop page needs for exactly the reason a
+    rendered one does."""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.title_parts: list[str] = []
         self.images: list[str] = []
+        self.links: list[tuple[str, str]] = []
         self._skip_depth = 0
+        self._chrome_depth = 0
         self._in_title = False
+        self._anchor: tuple[int, str] | None = None
 
     @property
     def title(self) -> str:
@@ -127,6 +271,14 @@ class _TextExtractor(HTMLParser):
             content = (attributes.get("content") or "").strip()
             if key in _IMAGE_META and content and content not in self.images:
                 self.images.append(content)
+        if tag == "a":
+            # Nested anchors are not legal HTML; the outer one wins rather than
+            # the parser losing track of where the inner one began.
+            href = dict(attrs).get("href") or ""
+            if self._anchor is None and not self._skip_depth and not self._chrome_depth:
+                self._anchor = (len(self.parts), href.strip())
+        if tag in _CHROME_TAGS:
+            self._chrome_depth += 1
         if tag in _SKIP_TAGS:
             self._skip_depth += 1
         elif tag in _BLOCK_TAGS:
@@ -135,6 +287,17 @@ class _TextExtractor(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "title":
             self._in_title = False
+        if tag == "a" and self._anchor is not None:
+            start, href = self._anchor
+            self._anchor = None
+            label = next(
+                (ln.strip() for ln in "".join(self.parts[start:]).splitlines() if ln.strip()),
+                "",
+            )
+            if label and href:
+                self.links.append((label, href))
+        if tag in _CHROME_TAGS:
+            self._chrome_depth = max(0, self._chrome_depth - 1)
         if tag in _SKIP_TAGS:
             self._skip_depth = max(0, self._skip_depth - 1)
         elif tag in _BLOCK_TAGS:
@@ -192,7 +355,17 @@ def _extract(html: str, base_url: str = "") -> tuple[str, str, list[str]]:
         full = urllib.parse.urljoin(base_url, raw) if base_url else raw
         if full.startswith(("http://", "https://")) and full not in images:
             images.append(full)
-    return "\n".join(out).strip(), extractor.title, images[:IMAGE_LINKS_MAX]
+    # A site-relative href is exactly as useless to the reader as no href, the
+    # same reason og:image is absolutised above.
+    links = [
+        (label, urllib.parse.urljoin(base_url, href) if base_url else href)
+        for label, href in extractor.links
+    ]
+    text = merge_links(
+        "\n".join(out).strip(),
+        [(label, href) for label, href in links if href.startswith(("http://", "https://"))],
+    )
+    return text, extractor.title, images[:IMAGE_LINKS_MAX]
 
 
 # Titles of successfully fetched pages, for citing sources by name after a
@@ -304,6 +477,9 @@ def _browser_read(url: str) -> tuple[tuple[str, list[str]] | None, str]:
     # from it. An honest ERROR is worth more than a laundered block page.
     if browser.is_challenge(text, page.status):
         return None, WALLED
+    # After the wall check, never before: annotating a challenge screen's links
+    # would only make a block page look more like a page.
+    text = merge_links(text, page.links)
     _remember_title(url, page.title)
     if host:
         BROWSER_HOSTS.add(host)
@@ -447,10 +623,13 @@ def _present(
     result = f"[{source}]\n{text}"
     # AFTER truncation, deliberately: the image URLs are the point of the read
     # for a "show me" task, and burying them in the body would let the 200k
-    # cap cut exactly the thing that stops the guessing loop.
+    # cap cut exactly the thing that stops the guessing loop. A shop's LINKS
+    # are the point of the read in exactly the same way, and the cap cuts them
+    # in exactly the same place.
     if len(result) > DOCS_MAX_CHARS:
         return (UNTRUSTED_NOTE + truncate(result, head=DOCS_MAX_CHARS, tail=0)
-                + PAGE_TRUNCATION_HINT + image_note(images))
+                + PAGE_TRUNCATION_HINT + link_note(result[DOCS_MAX_CHARS:])
+                + image_note(images))
     return UNTRUSTED_NOTE + result + image_note(images)
 
 
@@ -637,9 +816,13 @@ _TRACKING_PARAMS = frozenset(
     {
         "si", "pp", "feature", "app", "ref", "ref_src", "ref_url", "source",
         "fbclid", "gclid", "dclid", "msclkid", "igshid", "igsh", "twclid",
-        "mc_cid", "mc_eid", "_hsenc", "_hsmi", "yclid",
+        "mc_cid", "mc_eid", "_hsenc", "_hsmi", "yclid", "srsltid",
     }
 )
+# Campaign parameters a shop hangs off its OWN links. `bi_*` is Allegro's, and
+# it arrives on every offer URL unwrapped out of an ad click-tracker — four
+# parameters of provenance on a link whose value is that the user can open it.
+_TRACKING_PREFIXES = ("utm_", "bi_", "_bi_")
 
 
 def strip_tracking(url: str) -> str:
@@ -664,7 +847,8 @@ def strip_tracking(url: str) -> str:
     kept = [
         (key, value)
         for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
-        if key.lower() not in _TRACKING_PARAMS and not key.lower().startswith("utm_")
+        if key.lower() not in _TRACKING_PARAMS
+        and not key.lower().startswith(_TRACKING_PREFIXES)
     ]
     return urllib.parse.urlunsplit(
         (parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(kept), parts.fragment)

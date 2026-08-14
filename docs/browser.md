@@ -141,6 +141,57 @@ The general lesson is the one that keeps recurring here: **a fallback message is
 
 No amount of fetching fixes that, so the reading contract in `SYSTEM_PROMPT_TEMPLATE` now states it directly: a result marked *rendered in the browser* WAS read and must be used; some pages failing does not make a site unreadable; and it must not write that a site blocks automated reading in a turn where it read a page from that site. Telling the owner a source failed when it succeeded is worse than the original failure, because it throws away the answer too. `TestTheReadingContract` pins each clause, because each one was written against a specific thing that happened and a tidy-up of the prompt would bring it straight back.
 
+## A page without its links is not the page, when the page is a shop
+
+`read_url` rendered a listing to plain text, and `page.inner_text('body')` throws every `href` away. Fine for an article. On a shop it discards the answer: the model could see that an offer costs 34,99 zł and had **no way to say where it was**.
+
+So it did the only thing left — took a title it had just read and searched for its own URL:
+
+```
+web_search "ZAWIESIE CZARNE WĘŻOWE BEZKOŃCOWE 2T L-0,5" "allegro.pl/oferta/"
+web_search site:allegro.pl/uzytkownik/R_pas lina karabińczyk szekla
+```
+
+**66 of 113 searches in one session** (`session-20260814-131203`) are that pattern, in a session where 51 Allegro reads *succeeded*. The system prompt already said, in capitals, `You MUST NOT use web_search with a site: filter to browse a shop`. It lost every time, because **an instruction cannot beat a missing capability** — the model was not disobeying, it was routing around a hole. The owner's own words for the result: *"nie dawaj mi instrukcji, jaką szukać, tylko bezpośrednie linki do ofert"*.
+
+What the probes found on the listing behind that session:
+
+| | measured |
+|---|---|
+| `<article>` cards on the page | 72 |
+| anchors inside them | 166 (94 with text) |
+| offer URLs recovered by the old reader | **0** |
+| shadow roots | **0** — the links were in the light DOM all along |
+
+**The URL goes ON the line, not into a list beside it.** A separate link list leaves the model to join offers to URLs *by title* — which is precisely the guess-the-URL step this removes. Merged, an offer's URL sits next to its own price and there is nothing to match up. Anchors are consumed **in order**, so a listing that shows the same title twice (a sponsored card and its organic twin) gives each line its own URL instead of pointing both at whichever came first.
+
+**A card's href is routinely a click tracker, not the offer.** Sponsored cards link to `allegro.pl/events/clicks?…&redirect=<the offer, urlencoded>&sig=…` — citing the ad system instead of the product, at ~250 characters a link. `web.clean_link` unwraps it and strips the `bi_*` campaign parameters left on the far side. **Two encodings, found on the same site in one run**: `/events/clicks` percent-encodes its target and `/dss-proxy/clicks` base64s it, so the second survived the first fix and still arrived as an unusable tracker — only a live read showed it. An encoding not recognised is simply not unwrapped; a tracker URL is ugly, not wrong.
+
+Unwrapping **stops at a host change**, deliberately: a redirect off-site is a different claim about where the user is being sent, and rewriting the citation to it would make an injected `?redirect=` an open door into the answer.
+
+**The cap is where the links died, and `<main>` alone does not save them.** A read is capped at `DOCS_MAX_CHARS` = 6000, and a listing merges to ~20 000 characters carrying **101 links** — so the cap lands mid-page and takes the URLs with it. Measured end to end through the shipped `read_url`:
+
+| | chars in | offer/product links delivered |
+|---|---|---|
+| what shipped before | 6 563 | **0** |
+| links, no `<main>` | 6 563 | 13 |
+| links + `<main>` | 6 563 | 14 |
+| **links + `<main>` + carried note** | 9 009 | **23** |
+
+`<main>` is worth keeping — it removes the category nav and the cookie wall outright, so the read now opens on the search results instead of 2 500 characters of chrome — but it is worth about **one** extra offer, not ten. An early prototype measured it at 25-vs-15 by counting nav links as wins; the shipped path excludes those, and the honest number is the table above. Do not restore that claim.
+
+What actually recovers the links is `web.link_note`: the pairs truncation cut off, appended **after** it, exactly as `image_note` already does and for exactly the same reason — on a "which offer" task the URLs *are* the read, so letting a character cap bury them cuts the one thing that stops the guessing. It is bounded by a **character** budget rather than a link count, because a count caps nothing when a shop's URLs run to 120 characters and an encyclopedia's to 60.
+
+The read viewport was on the plan too, and was dropped: 1440×900 and 1280×2134 returned **byte-identical** text, because a listing renders its cards regardless of window height. The tall-viewport arithmetic that the remote view is built on does not transfer to reads.
+
+Two fences on `<main>`. It is applied to what is handed **back**, never to what `is_challenge` **judges** — narrowing the text a wall is detected in would move thresholds measured on whole bodies, and a page wrongly called a wall is the expensive failure here. And a `<main>` holding less than half the body is **refused**: that means the site puts its content elsewhere, and preferring it would silently drop the page. Over-trimming is not a cautious version of under-trimming — same shape as the login-recording mistake above.
+
+The extraction walks shadow roots (they were empty here, but `querySelectorAll` not piercing one is exactly how a site's cards would vanish again) and skips `nav`/`header`/`footer`, which on the measured page is ~30 anchors of category navigation spent inside a budget the offers need. It is an **upgrade to a read, never a dependency of one**: any failure in `_content_links` or `_main_text` returns empty and the read proceeds as before.
+
+**The fetch path does the same thing**, via a chrome-depth counter and an anchor buffer in `_TextExtractor`, because if the browser path gives links and a plain fetch does not, the model learns to trust neither and goes back to searching. `TestLinksSurviveTheRender`, `TestLinksInTheText`.
+
+With the capability in place, the prompt's prohibition stops being a fight it loses: it now states that the listing *already contains* the links, that they must be quoted exactly, and that an offer already read must never be web_searched for.
+
 ## What the owner's first hands-on session found (2026-08-14)
 
 Three things, and the third was a design mistake rather than a bug:

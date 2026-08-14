@@ -2,6 +2,7 @@
 no network. One opt-in live test (AISH_LIVE_WEB=1) exercises the real backend.
 """
 
+import base64
 import email.message
 import os
 import ssl
@@ -601,6 +602,126 @@ class TestVideoIds:
         assert web.thumbnail_video_id("https://i.ytimg.com/an/UCxyz/thumb.jpg") == ""
         assert web.thumbnail_video_id("https://cdn.test/hero.jpg") == ""
         assert web.thumbnail_video_id("") == ""
+
+
+class TestLinksInTheText:
+    """A page's text without its links is not the page when the page is a shop.
+    The URL goes ON the line it belongs to rather than into a list beside it:
+    a separate list leaves the model to join offers to URLs BY TITLE, which is
+    precisely the guess-the-URL step this exists to delete."""
+
+    def test_a_link_is_attached_to_its_own_line(self):
+        out = web.merge_links("Widget A\n12,00 zl", [("Widget A", "https://s.pl/oferta/a")])
+        assert out == "Widget A → https://s.pl/oferta/a\n12,00 zl"
+
+    def test_repeated_titles_get_their_own_urls_in_order(self):
+        """A listing shows a sponsored card and its organic twin under the same
+        title; pointing both at whichever came first would misquote one."""
+        out = web.merge_links(
+            "Widget\nWidget",
+            [("Widget", "https://s.pl/oferta/1"), ("Widget", "https://s.pl/oferta/2")],
+        )
+        assert out.splitlines() == [
+            "Widget → https://s.pl/oferta/1",
+            "Widget → https://s.pl/oferta/2",
+        ]
+
+    def test_a_repeated_line_past_its_anchors_reuses_the_last(self):
+        out = web.merge_links("W\nW\nW", [("W", "https://s.pl/oferta/1")])
+        assert out.count("https://s.pl/oferta/1") == 3
+
+    def test_a_line_with_no_link_is_left_alone(self):
+        assert web.merge_links("just text", [("other", "https://s.pl/x")]) == "just text"
+
+    def test_an_offsite_redirect_is_not_unwrapped(self):
+        """Unwrapping off-host would let a page on one host slip a URL on
+        another host into the answer as though the first had served it — an
+        injected ?redirect= would be an open door."""
+        wrapped = "https://shop.pl/go?redirect=https%3A%2F%2Fevil.example%2Fx"
+        assert web.clean_link(wrapped) == wrapped
+
+    def test_a_same_host_redirect_is_unwrapped_and_detracked(self):
+        wrapped = (
+            "https://allegro.pl/events/clicks?type=OFFER"
+            "&redirect=https%3A%2F%2Fallegro.pl%2Foferta%2Fx-123%3Fbi_s%3Dads&sig=zz"
+        )
+        assert web.clean_link(wrapped) == "https://allegro.pl/oferta/x-123"
+
+    def test_a_base64_redirect_is_unwrapped_too(self):
+        """Both encodings were measured on the same site in one run:
+        /events/clicks percent-encodes its target, /dss-proxy/clicks base64s
+        it — and the second arrived as 250 characters of unusable tracker."""
+        target = "https://allegro.pl/oferta/karabinek-1"
+        encoded = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
+        assert web.clean_link(f"https://allegro.pl/dss-proxy/clicks?redirect={encoded}") == target
+
+    def test_a_base64_redirect_offsite_is_still_refused(self):
+        encoded = base64.urlsafe_b64encode(b"https://evil.example/x").decode().rstrip("=")
+        wrapped = f"https://allegro.pl/dss-proxy/clicks?redirect={encoded}"
+        assert web.clean_link(wrapped) == wrapped
+
+    def test_an_unrecognised_encoding_is_left_alone(self):
+        """A tracker URL is ugly, not wrong — better than a mangled one."""
+        wrapped = "https://shop.pl/go?redirect=%7B%22id%22%3A1%7D"
+        assert web.clean_link(wrapped) == wrapped
+
+    def test_a_load_bearing_parameter_survives(self):
+        """Allegro's organic cards are /produkt/...?offerId=N — the parameter
+        NAMES the offer, so stripping it would hand back the wrong page."""
+        url = "https://allegro.pl/produkt/zawiesie-abc?offerId=17138"
+        assert web.clean_link(url) == url
+
+    def test_links_cut_off_by_truncation_are_carried_past_it(self):
+        """The cap is measured in CHARACTERS, so on a listing it lands mid-page
+        and takes the URLs with it. Measured on the allegro.pl listing: 101
+        offer links in the page, 14 inside the cap."""
+        page = "filler line\n" * 900 + "Widget Z → https://s.pl/oferta/z\n"
+        monkey = web._present("https://s.pl/listing", page, [])
+        assert "page truncated" in monkey
+        assert "Widget Z → https://s.pl/oferta/z" in monkey
+
+    def test_the_carried_links_are_pairs_not_bare_urls(self):
+        """A bare list would put the model back to matching offers to URLs by
+        title, which is the step this whole feature deletes."""
+        note = web.link_note("Widget Z → https://s.pl/oferta/z\nplain text\n")
+        assert "Widget Z → https://s.pl/oferta/z" in note
+        assert "plain text" not in note
+
+    def test_carrying_links_is_bounded_by_characters_and_says_so(self):
+        """A count caps nothing when a shop's URLs run to 120 characters and an
+        encyclopedia's to 60 — the budget being protected is characters."""
+        dropped = "".join(f"W{i} → https://s.pl/oferta/{'x' * 100}-{i}\n" for i in range(200))
+        note = web.link_note(dropped)
+        assert len(note) < web.LINK_NOTE_MAX_CHARS + 200
+        assert "more — read again with a 'topic'" in note
+
+    def test_a_single_oversized_link_never_hangs_the_note(self):
+        assert web.link_note(f"W → https://s.pl/{'x' * 9000}\n") == ""
+
+    def test_a_page_with_no_dropped_links_gets_no_note(self):
+        assert web.link_note("nothing but prose\n") == ""
+
+    def test_a_fetched_page_carries_its_links_too(self):
+        """Both surfaces must agree: if the browser path gives links and a
+        plain fetch does not, the model learns not to trust either."""
+        html = (
+            "<body><nav><a href='/dzial/moda'>Moda</a></nav>"
+            "<article><a href='/oferta/w-1'><h2>Widget A</h2><span>12,00 zl</span></a>"
+            "</article></body>"
+        )
+        text, _title, _images = web._extract(html, base_url="https://s.pl/listing")
+        assert "Widget A → https://s.pl/oferta/w-1" in text
+        assert "Moda →" not in text   # site chrome is not worth the budget
+
+    def test_an_image_only_anchor_does_not_shadow_its_title(self):
+        """A card links twice — once around its picture, once around its title.
+        The picture's anchor has no text and must not consume the URL."""
+        html = (
+            "<body><a href='/oferta/x'><img src='p.jpg'></a>"
+            "<a href='/oferta/x'>Widget</a></body>"
+        )
+        text, _t, _i = web._extract(html, base_url="https://s.pl/")
+        assert "Widget → https://s.pl/oferta/x" in text
 
 
 class TestStripTracking:

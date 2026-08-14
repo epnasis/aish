@@ -506,7 +506,7 @@ class TestAThinPageGetsASecondChance:
             async def title(self):
                 return "Allegro"
 
-            async def evaluate(self, js):
+            async def evaluate(self, js, *args):
                 return []
 
             async def close(self):
@@ -526,6 +526,143 @@ class TestAThinPageGetsASecondChance:
         page = browser.read("https://allegro.pl/x")
         assert len(page.text) > browser.CHALLENGE_MAX_CHARS
         assert browser.is_challenge(page.text, page.status) is False
+
+
+class TestLinksSurviveTheRender:
+    """A rendered page used to arrive as TEXT ONLY, and on a shop that throws
+    away the answer: the model could read that an offer costs 34,99 zl and had
+    no way to say where it was. It fell back to web_search'ing `site:allegro.pl`
+    for the URL of a title it had already read — 66 of 113 searches in one
+    session (session-20260814-131203), against a system prompt that forbids
+    exactly that. Measured on that listing: 72 cards, 0 URLs recovered."""
+
+    def _read(self, monkeypatch, *, body, links=(), main=""):
+        class FakePage:
+            url = "https://allegro.pl/listing?string=x"
+
+            async def goto(self, *a, **k):
+                return type("R", (), {"status": 403})()
+
+            async def wait_for_timeout(self, ms):
+                pass
+
+            async def inner_text(self, sel):
+                return body
+
+            async def title(self):
+                return "Allegro"
+
+            async def evaluate(self, js, *args):
+                if js is browser._MAIN_JS:
+                    return main
+                if js is browser._LINKS_JS:
+                    return links
+                return []
+
+            async def close(self):
+                pass
+
+        class FakeContext:
+            async def new_page(self):
+                return FakePage()
+
+        class FakeOwner:
+            view = None
+
+            async def context(self, **k):
+                return FakeContext()
+
+        monkeypatch.setattr(browser, "_submit", run_job(FakeOwner()))
+        return browser.read("https://allegro.pl/listing?string=x")
+
+    def test_an_offers_url_arrives_on_its_own_line(self, monkeypatch):
+        page = self._read(
+            monkeypatch,
+            body=page_sized("ZAWIESIE CZARNE WEZOWE\n34,99 zl"),
+            links=[["ZAWIESIE CZARNE WEZOWE", "https://allegro.pl/oferta/zawiesie-1"]],
+        )
+        out = web_module.merge_links(page.text, page.links)
+        assert "ZAWIESIE CZARNE WEZOWE → https://allegro.pl/oferta/zawiesie-1" in out
+
+    def test_a_click_tracker_is_reduced_to_the_offer(self, monkeypatch):
+        """Every sponsored card on the measured listing linked to
+        allegro.pl/events/clicks?…&redirect=<the offer>&sig=… — citing the ad
+        system instead of the product, at 250 characters a link."""
+        tracker = (
+            "https://allegro.pl/events/clicks?emission_id=abc&type=OFFER"
+            "&redirect=https%3A%2F%2Fallegro.pl%2Foferta%2Fzawiesie-r1-14486087002"
+            "%3Fbi_s%3Dads%26bi_m%3Dproductlisting&sig=2a79c17b81"
+        )
+        page = self._read(
+            monkeypatch, body=page_sized("ZAWIESIE R1"), links=[["ZAWIESIE R1", tracker]]
+        )
+        out = web_module.merge_links(page.text, page.links)
+        assert "ZAWIESIE R1 → https://allegro.pl/oferta/zawiesie-r1-14486087002" in out
+        assert "events/clicks" not in out
+        assert "bi_s" not in out
+
+    def test_main_narrows_the_page_so_the_links_fit_the_budget(self, monkeypatch):
+        """A read is capped, and on a shop the leading kilobytes are category
+        navigation — so the cap fell inside the chrome. Measured: body 13 473
+        chars vs <main> 10 966, which is 25 linked offers in budget, not 15."""
+        main = page_sized("oferta")
+        body = "NAV JUNK " * 80 + "\n" + main    # ~19% chrome, as measured
+        page = self._read(monkeypatch, body=body, main=main)
+        assert "NAV JUNK" not in page.text
+        assert "oferta" in page.text
+
+    def test_a_fragmentary_main_is_refused_rather_than_losing_the_page(self, monkeypatch):
+        """A <main> holding a sliver means the site puts its content elsewhere.
+        Preferring it would DROP content silently, which costs more than
+        carrying some chrome."""
+        body = page_sized("the whole listing")
+        page = self._read(monkeypatch, body=body, main="a crumb")
+        assert page.text == body
+
+    def test_the_wall_check_still_sees_the_whole_body(self, monkeypatch):
+        """<main> is applied to what is handed back, never to what is JUDGED.
+        Narrowing the text a wall is detected in would move thresholds this
+        module measured on whole bodies, and a page wrongly called a wall is
+        the expensive failure here."""
+        body = page_sized("real prices")
+        page = self._read(monkeypatch, body=body, main="short")
+        assert browser.is_challenge(page.text, page.status) is False
+
+    def test_a_page_with_no_links_is_unchanged(self, monkeypatch):
+        page = self._read(monkeypatch, body=page_sized("an article"), links=[])
+        assert page.links == []
+        assert "→" not in web_module.merge_links(page.text, page.links)
+
+    def test_an_unusable_evaluate_never_breaks_the_read(self, monkeypatch):
+        """Link extraction is an upgrade to a read, never a dependency of one:
+        an old Chrome or a hostile page must still yield its text."""
+
+        class Boom:
+            async def evaluate(self, js, *args):
+                raise RuntimeError("no")
+
+        assert asyncio.new_event_loop().run_until_complete(
+            browser._content_links(Boom())
+        ) == []
+        assert asyncio.new_event_loop().run_until_complete(
+            browser._main_text(Boom(), "body")
+        ) == ""
+
+    def test_a_walled_page_is_never_annotated(self, monkeypatch):
+        """Annotating a challenge screen's links would only make a block page
+        look more like a page."""
+        monkeypatch.setattr(web_module, "_fetch", _http_error(403))
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text="Verify you are human", title="", images=[], url=url, status=403,
+                links=[("Verify you are human", "https://allegro.pl/oferta/x")],
+            ),
+        )
+        out = web_module.read_url("https://allegro.pl/listing?string=x")
+        assert out.startswith("ERROR")
+        assert "oferta" not in out
 
 
 class TestTheReadingContract:
