@@ -10597,9 +10597,10 @@ function openBrowserView(url) {
   bvSend(Object.assign({ action: "open", url }, bvViewportSize()));
 }
 
-/** The size the remote page should be laid out at: the stage we will show it
- *  in. A phone therefore gets the site's MOBILE layout, which is the whole
- *  reason this is measured rather than assumed. */
+/** The SHAPE the remote page should be laid out at: the stage we will show it
+ *  in. The server scales that shape up to a desktop width — a phone-shaped
+ *  viewport was measured and reverted (docs/browser.md) — so what this is
+ *  measured for is the ASPECT, which is what leaves nothing to letterbox. */
 function bvViewportSize() {
   // The page is asked for at EXACTLY the stage's shape, so `object-fit:
   // contain` has nothing to letterbox and the frame fills the width.

@@ -9,7 +9,7 @@
 3. **The session must be created in the browser that will later use it**, by one identity. That is why there is no proxy and no mobile/desktop split.
 4. **Follow the conventions of a mobile browser.** If a browser does it with a gesture on the content, do not add a widget. Nearly every UI complaint here has been an invented widget.
 
-Open work is on GitHub: **#223** (correction frames double traffic), **#224** (round-trip economies), **#225** (verify Google sign-in; sign-in question blind spots; JPEG quality).
+Open work is on GitHub: **#223** (correction frames double traffic), **#224** (round-trip economies), **#225** (verify Google sign-in; sign-in question blind spots — the JPEG-quality third is answered below under the frame-size measurements).
 
 `read_url` fetches with urllib: fast, cheap, anonymous, right for most of the web. Two kinds of page it cannot read **at all** — one rendered entirely by JavaScript, where the fetch returns an empty shell, and one behind a login, where the fetch is simply a different, logged-out client. This is the escalation for both: a real Chrome on this Mac, driven off-screen, with a profile that persists.
 
@@ -193,7 +193,19 @@ The view was briefly given a mobile identity, on the reasoning that a phone shou
 
 Nearly triple the page per round trip at 1280, and little more beyond it. `view_size` therefore takes the stage the client will display in and scales that **shape** up to `VIEW_DESKTOP_WIDTH` — the shape so `object-fit: contain` has nothing to letterbox, the width so one frame carries a page.
 
-Quality follows from the same sum: at 1280×2134 with `device_scale_factor` 2, q35 = 425 KB, q50 = 502 KB, q65 = 595 KB. 40 keeps text legible under the 2–3× zoom that is the whole strategy without half a megabyte per frame.
+**The width was never what cost the bytes — the pixel density was (#227).** The owner's reaction to the shipped frame was that the resolution might simply be too big, and he was right about the symptom and wrong about the knob. Measured on an allegro.pl listing, one 1280×1950 frame at q40:
+
+| density | 1280 wide | 1024 wide | 768 wide |
+|---|---|---|---|
+| **2× (was shipped)** | **446 KB** | 350 KB | 250 KB |
+| **1.5× (now)** | **295 KB** | 247 KB | 167 KB |
+| 1× | 182 KB | 134 KB | 93 KB |
+
+Read across a row and narrowing the frame saves bytes; read down a column and lowering the density saves more of them — and only one of those is free. A narrower frame is paid for in page per round trip, the single thing this view is optimised for. A lower density is the *same* 1280 CSS pixels of page, the same layout, the same text, for a third fewer bytes. So the width stays at 1280 and `VIEW_SCALE` comes down.
+
+What density buys is **zoom headroom, and only up to a point.** The stage is ~430 CSS px, so a 1280-wide frame is displayed at ~0.34 and the picture stops gaining detail once its own pixels run out: parity lands at zoom == density. 2× held true detail to a 2× zoom; 1.5× holds it to 1.5×. The double-tap is **2.5×**, so even the shipped 2× was already magnifying there — the extra pixels were being paid for on every frame and cashed in on none. Crops of a price row at 2.5×, resampled exactly as the phone does it: 2× q40 and 1.5× q50 are hard to tell apart, 1× q50 is visibly soft.
+
+So the density that came off is partly bought back as **quality**, which is far cheaper per byte — q40 → q50 is +12%, 2× → 1.5× is −34% (#225's open question, answered the same way). Net **331 KB against 446**, same page. Coordinates are unaffected either way: they are CSS pixels, and `browserViewPoint` maps against the rendered element rather than the pixel count.
 
 **It also ends an identity split that was never comfortable.** allegro.pl answers ANY mobile identity with 403 and zero text, so reads had to stay desktop while the view went mobile — meaning a session the owner created as a phone would later be read as a desktop, which is precisely the mismatch bot-scoring exists to catch. One identity again. `TestTheViewIsDesktopSoOneFrameCarriesMore`.
 
@@ -204,6 +216,24 @@ The owner proved this with paired screenshots: a partly-rendered page, then the 
 A fixed `SETTLE_MS` cannot fix that, because "loaded" is a property of the page rather than a duration. `_settle` waits on three signals, cheapest first — network idle, `readyState === 'complete'`, then a DOM-quiescence window, which is the one that catches a page whose skeleton has loaded while its content is still being written in. Every wait is bounded by `SETTLE_MAX_MS`: a page that never settles — a ticker, a spinner — must still produce a frame.
 
 **But settling BEFORE showing anything was its own bug.** It made every interaction feel dead — "the impression is that I'm waiting way longer… a strange sense that there's nothing happening" — and it still missed late repaints, because a page that changed after the capture never got another one, so the owner had to tap again to see the finished page. The owner's own prescription is the design: *"it's fine to show two screenshots… needs to be just once."* So an interaction returns a quick frame (`FIRST_FRAME_MS`), and the server then captures once more when the page settles and forwards it **only if it differs**. `TestFramesWaitForThePageToSettle`.
+
+## The sheet is full height, so it met the two edges of the screen (#226)
+
+Reclaiming the dead band under the nav row gave `#browser-sheet` `height: 100%`, and it promptly ran into both insets — once visibly, once not.
+
+**The top.** `.sheet` had always padded `env(safe-area-inset-bottom)` and nothing had ever accounted for the top, because until this sheet no sheet reached it: the address row went under the Dynamic Island and the top of the browser was simply not there. It is **padding, not a shorter box** — the sheet is bottom-anchored, so height arithmetic silently does nothing where `env()` does not resolve, while padding shifts the content down either way, which is what the bottom already did.
+
+**The bottom, in landscape, which nobody had looked at.** The column is a fixed stack — address row, hint, stage, editor, nav row — and `.bv-stage` was the only elastic member, with `min-height: 150px`. **A floor on the only elastic row is a floor on every control below it.** A landscape keyboard leaves ~205 px of visual viewport; the column needed 357, so the field being typed into sat about a hundred pixels below the screen with nothing to say so. That is the same defect as the Close button at y=899 and the text field under its own keyboard — third time, same shape.
+
+Three changes, in order of how much they matter:
+
+- **The stage's floor is a TAP TARGET, not a picture** (44 px). A tap on the page is the only gesture that leaves a field without submitting, so the stage must stay hittable — and is owed nothing beyond that, because the field wins.
+- **The browser's toolbar stands down while a field is open.** Safari does the same with its bottom bar under the keyboard; Back mid-login is a footgun besides; and it hands the stage back 50 px, so you see more of the page you are signing in to. It is keyed on the `[hidden]` attribute `bvOpenEditor`/`bvCloseEditor` already toggle — no second piece of state to fall out of step — which does mean it holds only while `#bv-edit` and `.bv-nav` are siblings.
+- **Sideways, with a field open, the sheet spends nothing on furniture**: no grabber, no hint line, minimum padding. `@media (max-height: 500px)` reads the LAYOUT viewport, which iOS keeps full-height under the keyboard, so it means "the phone is sideways" rather than "the keyboard is up" — portrait, where everything already fits, is untouched. 500 because an iPhone 16 Pro Max is 440 px tall in landscape and 430 missed it, while the shortest phone in portrait is 568.
+
+Everything is now reachable down to a 200 px visual viewport, on every phone measured.
+
+**None of this is visible to the node tests, and that is the point.** They run the shipped functions against a fake DOM with no layout engine, so all three incidents shipped green. `scripts/check-browser-sheet.py` drives the real `index.html` and the real `style.css` through a real Chrome at real device metrics and asserts what the owner can actually reach — including a genuine `env(safe-area-inset-top)` via `Emulation.setSafeAreaInsetsOverride`, which cannot otherwise be produced on a desktop, and a keyboard modelled the way app.js models one (`body.style.height` pinned to the visual viewport, because every `vh` here lies). It is not in `uv run pytest`, which launches no Chrome by design. `tests/test_browser_view_layout.py` holds the structural preconditions that would otherwise fail in silence.
 
 ## Small things that were the whole experience
 
@@ -225,6 +255,6 @@ It passed because the input-contract tests read `inspect.getsource` and never ca
 
 Nothing in the suite launches Chrome. `browser.read` / `open_for_login` are patched per test, and conftest's autouse `no_real_browser` makes any escape fail loudly — it raises from `_submit` as a `BaseException` (an `Exception` would be swallowed by `_browser_read`'s fallback, leaving the guard silent exactly where a test is most likely wrong) and redirects `AISH_STATE_DIR` so a test-written `logins.txt` can never change how the real agent gates a real host. Same reasoning as the notifier guard in CLAUDE.md: a module that reaches a live thing outside the process needs a suite-wide guard, not per-test discipline.
 
-`TestBrowserView` covers the remote view end of the socket; `TestTheViewIsDesktopSoOneFrameCarriesMore` covers the viewport decision; `TestChallengeDetection` covers telling a wall from a page; `TestViewAndReadShareOneBrowser` and `TestPreviewFence` cover the two places one profile is contended for; `TestAThinPageGetsASecondChance` covers a slow page mistaken for a wall; `TestTheReadingContract` covers what the prompt must keep saying; `TestUnresponsiveHostEscalates` and `TestKnownBlockingHostsSkipTheDoomedFetch` cover the failure that produced no renders at all; `TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestLoginRecord`, `TestReadUrlEscalation` cover the module; `TestLoginGate` covers the gate.
+`scripts/check-browser-sheet.py` is the only thing that can see the sheet's LAYOUT — a real Chrome, real phone metrics, real safe-area insets — and is deliberately outside the suite; `tests/test_browser_view_layout.py` pins the structural facts it depends on. `TestBrowserView` covers the remote view end of the socket; `TestTheViewIsDesktopSoOneFrameCarriesMore` covers the viewport decision; `TestChallengeDetection` covers telling a wall from a page; `TestViewAndReadShareOneBrowser` and `TestPreviewFence` cover the two places one profile is contended for; `TestAThinPageGetsASecondChance` covers a slow page mistaken for a wall; `TestTheReadingContract` covers what the prompt must keep saying; `TestUnresponsiveHostEscalates` and `TestKnownBlockingHostsSkipTheDoomedFetch` cover the failure that produced no renders at all; `TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestLoginRecord`, `TestReadUrlEscalation` cover the module; `TestLoginGate` covers the gate.
 
 `TestBrowserCommand` covers the WebSocket wiring — the layer where a slash command actually breaks, since a missing app.js case or WS kind surfaces only as "unknown command" in the app.
