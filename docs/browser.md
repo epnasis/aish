@@ -1,6 +1,15 @@
-# The browser — reading pages a fetch cannot read (#221)
+# The browser — reading pages a fetch cannot read, and driving one by hand (#221)
 
-`browser.py`, `web._browser_read`, `Agent._login_gate`.
+`browser.py`, `web._browser_read`, `Agent._login_gate`, `server._browser_view`, `aish/static/app.js` `[BROWSER-VIEW-*]`.
+
+**Start here if you are new to this file.** Two capabilities share one Chrome and one profile: `read_url` escalates to it when a fetch cannot read a page, and the owner drives it by hand from his phone (`/browser`). The rules that govern almost every decision below are these four, and most mistakes here have been a failure to apply one of them:
+
+1. **A round trip costs 1–3 seconds; anything local is free.** Maximise information per frame; never spend a trip on what the phone can do itself.
+2. **A native dialog is a dead end.** It is browser chrome, so `page.screenshot` cannot see it and there is nothing to tap. Capabilities that summon one are removed, or brought into the page.
+3. **The session must be created in the browser that will later use it**, by one identity. That is why there is no proxy and no mobile/desktop split.
+4. **Follow the conventions of a mobile browser.** If a browser does it with a gesture on the content, do not add a widget. Nearly every UI complaint here has been an invented widget.
+
+Open work is on GitHub: **#223** (correction frames double traffic), **#224** (round-trip economies), **#225** (verify Google sign-in; sign-in question blind spots; JPEG quality).
 
 `read_url` fetches with urllib: fast, cheap, anonymous, right for most of the web. Two kinds of page it cannot read **at all** — one rendered entirely by JavaScript, where the fetch returns an empty shell, and one behind a login, where the fetch is simply a different, logged-out client. This is the escalation for both: a real Chrome on this Mac, driven off-screen, with a profile that persists.
 
