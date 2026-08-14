@@ -5,6 +5,7 @@ no network; the only real commands executed are harmless touch/ls in tmp dirs.
 """
 
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -242,6 +243,7 @@ _EPHEMERAL_EVENTS = {
     "approval_resolved", "cwd_changed",
     "model_changed", "session_state", "file_list", "job_list",
     "model_list", "session_list", "session_deleted", "session_renamed",
+    "browser_view",
 }
 
 
@@ -7078,3 +7080,94 @@ class TestBrowserCommand:
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "browser", "arg": "forget x.pl"})
             assert recv_until(ws, "job_list")["text"] == "forgot it"
+
+
+class TestBrowserView:
+    """The remote browser view (#221): the Mac is headless, so this sheet is
+    the window. One frame per interaction, over the socket that is already
+    authenticated."""
+
+    def _fake_view(self, monkeypatch, calls):
+        from aish import browser as browser_module
+
+        def view_open(url, width=None, height=None):
+            calls.append(("open", url, width, height))
+            return browser_module.Frame(jpeg=b"\xff\xd8jpeg", url=url, title="Sign in")
+
+        def view_act(action, **kwargs):
+            calls.append((action, kwargs))
+            return browser_module.Frame(
+                jpeg=b"\xff\xd8jpeg", url="https://x.pl/after", title="After"
+            )
+
+        def view_close():
+            calls.append(("close", {}))
+            return ["x.pl"]
+
+        monkeypatch.setattr(browser_module, "view_open", view_open)
+        monkeypatch.setattr(browser_module, "view_act", view_act)
+        monkeypatch.setattr(browser_module, "view_close", view_close)
+
+    def test_open_returns_a_frame(self, app_env, monkeypatch):
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({
+                "type": "browser_view", "action": "open", "url": "https://x.pl",
+                "width": 430, "height": 900,
+            })
+            event = recv_until(ws, "browser_view")
+            assert event["action"] == "frame"
+            assert base64.b64decode(event["jpeg"]) == b"\xff\xd8jpeg"
+            assert event["title"] == "Sign in"
+            assert calls == [("open", "https://x.pl", 430, 900)]
+
+    def test_a_click_carries_its_coordinates(self, app_env, monkeypatch):
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "click", "x": 512, "y": 700})
+            assert recv_until(ws, "browser_view")["action"] == "frame"
+            action, kwargs = calls[0]
+            assert action == "click"
+            assert (kwargs["x"], kwargs["y"]) == (512, 700)
+
+    def test_typed_text_is_never_logged(self, app_env, monkeypatch):
+        """The owner types real passwords through this path. It must leave no
+        trace in the session log — not as a message, not as a trace step."""
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json(
+                {"type": "browser_view", "action": "type", "text": "hunter2-secret"}
+            )
+            recv_until(ws, "browser_view")
+        for log in Path(app_env["state_dir"]).glob("session-*.jsonl"):
+            assert "hunter2-secret" not in log.read_text()
+
+    def test_close_reports_the_hosts_it_recorded(self, app_env, monkeypatch):
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "close"})
+            event = recv_until(ws, "browser_view")
+            assert event["action"] == "closed"
+            assert event["hosts"] == ["x.pl"]
+
+    def test_a_failure_comes_back_as_an_error_not_a_dead_sheet(self, app_env, monkeypatch):
+        from aish import browser as browser_module
+
+        def boom(url, width=None, height=None):
+            raise browser_module.BrowserUnavailable("Playwright is not installed")
+
+        monkeypatch.setattr(browser_module, "view_open", boom)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "open", "url": "https://x.pl"})
+            event = recv_until(ws, "browser_view")
+            assert event["action"] == "error"
+            assert "Playwright" in event["error"]

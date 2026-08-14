@@ -229,3 +229,26 @@ class TestReadUrlEscalation:
         assert web_module.PAGE_TITLES["https://allegro.pl/listing"] == (
             "Niska cena na Allegro"
         )
+
+
+class TestViewSize:
+    """The client's own viewport drives the remote page (#221). Not cosmetic:
+    matching the width is what makes a responsive site serve its MOBILE layout,
+    so a phone gets the phone page instead of a desktop page shrunk small."""
+
+    def test_a_phone_size_is_used_as_given(self):
+        assert browser.view_size(430, 900) == (430, 900)
+
+    def test_absurd_sizes_are_clamped_not_obeyed(self):
+        """A hostile or buggy client must not be able to ask for a 40000px
+        page — that is a memory bomb on a box with a 16 GB ceiling."""
+        assert browser.view_size(40000, 40000) == (browser.VIEW_MAX_W, browser.VIEW_MAX_H)
+        assert browser.view_size(1, 1) == (browser.VIEW_MIN_W, browser.VIEW_MIN_H)
+
+    def test_missing_or_junk_falls_back_to_the_default(self):
+        """This comes straight off a WebSocket, so it may be any JSON type."""
+        for bad in (None, 0, "", "abc", {}, [], True):
+            assert browser.view_size(bad, bad) == (browser.VIEW_WIDTH, browser.VIEW_HEIGHT)
+
+    def test_a_string_number_still_works(self):
+        assert browser.view_size("430", "900") == (430, 900)

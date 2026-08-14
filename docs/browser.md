@@ -66,10 +66,28 @@ Approval is per host and lasts the session (`_approved_logins`), matching the eg
 
 Only `read_url` can carry a session; `show_image` / `read_pdf` / `read_media` fetch bytes through the anonymous opener, so they are never gated here and must not draw a card claiming they are. `TestLoginGate` pins all of it, including the seam that matters most: `_read_needs_prompt` routes a gated read **off** the parallel path, which has no gate at all and would otherwise bypass approval entirely.
 
+## The remote view — because this Mac is headless
+
+`open_for_login` opens a window **on the Mac**, which assumes somebody is sitting at it. The owner is not: mm is a headless server they reach as a PWA from a phone, so that window is one nobody can get to. The remote view is the same act done remotely — aish screenshots its own browser, the owner taps and types in the PWA, and each action returns a fresh frame.
+
+**Pixels, not a proxy, and that was a considered rejection.** The obvious-looking design is to proxy the site through aish's own HTTPS origin. It breaks comprehensively: the site's `Set-Cookie` carries its own `Domain` and lands on the wrong origin; an SPA builds URLs at runtime (`location.origin`, `fetch('/api/…')`) where no rewriting pass can reach them; CSP, service workers and OAuth `redirect_uri` validation are all origin-bound; and DataDome would refuse the odd-looking request anyway. Shipping the rendered page sidesteps every one of those.
+
+It also sidesteps the deeper constraint, which is the real reason no proxy variant works: **the session must be created in the browser that will later use it.** Even a clean forward proxy leaves the cookies in the owner's phone, which is the wrong browser — and a DataDome cookie copied across is bound to the fingerprint that obtained it.
+
+**A frame per interaction, not a video stream.** A login is about six round trips; a phone on a mobile connection would rather send six JPEGs than a screencast. `view_open` / `view_act` / `view_close` are request-response, and `bvSend` refuses to send a second interaction while one is in flight, so frames can never arrive out of order. If smooth browsing is wanted later, the screenshot and input plumbing is the same foundation a screencast needs — an upgrade, not a rewrite.
+
+**The view gets its own context, at a fixed viewport.** Reads run at the real window size, which cannot give stable coordinates; the view pins `VIEW_WIDTH`×`VIEW_HEIGHT` so a tap at (x, y) in the PWA means that point on the page. Chrome locks the profile, so the read context is closed first — the same handoff `open_for_login` makes.
+
+**Nothing typed through it is ever recorded.** The owner puts real passwords through this path, so the WS action and its arguments are handled and dropped: no trace step, no session entry, no status line. `TestBrowserView::test_typed_text_is_never_logged` greps the session log for the typed string. The client clears its own input the instant it sends, because a value left in a DOM node outlives the sheet.
+
+**No site markup enters the app.** The frame is an `<img>`, and that is the whole rendering surface — a hostile page cannot script the PWA or reach the access token, which a proxy that injected its HTML into aish's origin would have handed it outright.
+
+The coordinate mapping is the piece most likely to be quietly wrong, so it is pinned hardest (`tests/js/test_browser_view_coords.js`). `object-fit: contain` letterboxes the frame, so mapping a tap against the ELEMENT box rather than the RENDERED image is off by the letterbox margin — increasingly so toward the edges, and worst on exactly the small login field the view exists for. The test drives the shipped function through exact-fit, vertical-letterbox, horizontal-letterbox and offset-element cases, and asserts a tap in a letterbox bar is REJECTED rather than mapped into the page.
+
 ## Testing
 
 Nothing in the suite launches Chrome. `browser.read` / `open_for_login` are patched per test, and conftest's autouse `no_real_browser` makes any escape fail loudly — it raises from `_submit` as a `BaseException` (an `Exception` would be swallowed by `_browser_read`'s fallback, leaving the guard silent exactly where a test is most likely wrong) and redirects `AISH_STATE_DIR` so a test-written `logins.txt` can never change how the real agent gates a real host. Same reasoning as the notifier guard in CLAUDE.md: a module that reaches a live thing outside the process needs a suite-wide guard, not per-test discipline.
 
-`TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestLoginRecord`, `TestReadUrlEscalation` cover the module; `TestLoginGate` covers the gate.
+`TestBrowserView` covers the remote view end of the socket; `TestViewSize` covers the client-declared viewport and its clamps; `TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestLoginRecord`, `TestReadUrlEscalation` cover the module; `TestLoginGate` covers the gate.
 
 `TestBrowserCommand` covers the WebSocket wiring — the layer where a slash command actually breaks, since a missing app.js case or WS kind surfaces only as "unknown command" in the app.

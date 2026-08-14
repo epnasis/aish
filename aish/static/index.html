@@ -478,6 +478,43 @@
   </div>
 </div>
 
+<div id="browser-sheet" class="sheet" hidden>
+  <div class="grabber"></div>
+  <div class="sheet-head">
+    <strong class="grow">Browser on the Mac</strong>
+    <button class="close" aria-label="close" data-close="browser-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
+  </div>
+  <div class="bv-body">
+    <div class="bv-bar">
+      <input id="bv-url" class="bv-url" type="url" inputmode="url" autocapitalize="off"
+             autocorrect="off" spellcheck="false" placeholder="https://…">
+      <button id="bv-go" class="bv-btn">Go</button>
+    </div>
+    <div id="bv-status" class="bv-status">Tap to click · pinch or double-tap to zoom · type below</div>
+    <div class="bv-stage">
+      <!-- Tapped, not dragged: a coordinate maps straight to a click on the
+           real page. The image is the ONLY thing that ever renders the site —
+           no site HTML is injected into this document. -->
+      <img id="bv-frame" class="bv-frame" alt="the page on the Mac">
+      <button id="bv-reset" class="bv-reset" hidden>1:1</button>
+      <div id="bv-busy" class="bv-busy" hidden></div>
+    </div>
+    <div class="bv-bar">
+      <input id="bv-text" class="bv-text" type="text" autocapitalize="off" autocorrect="off"
+             spellcheck="false" placeholder="text for the focused field">
+      <button id="bv-type" class="bv-btn">Type</button>
+      <button id="bv-enter" class="bv-btn">⏎</button>
+    </div>
+    <div class="bv-bar">
+      <button id="bv-back" class="bv-btn">Back</button>
+      <button id="bv-up" class="bv-btn">▲</button>
+      <button id="bv-down" class="bv-btn">▼</button>
+      <button id="bv-refresh" class="bv-btn">Refresh</button>
+      <button id="bv-done" class="bv-btn bv-done">Done</button>
+    </div>
+  </div>
+</div>
+
 <div id="dir-sheet" class="sheet" hidden>
   <div class="grabber"></div>
   <div class="sheet-head">
