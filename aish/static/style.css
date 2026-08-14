@@ -3085,7 +3085,10 @@ body.console-open {
    `.sheet` sets only a max-height, so a content-sized column left nothing for
    the stage to grow into and the frame sat at its 150px floor with the sheet
    half empty. A browser occupies the space it is given. */
-#browser-sheet { height: 90%; }
+/* Reaches the bottom of the screen: the band under the nav row was simply
+   unused, and this sheet is a browser — the page should have everything the
+   phone can give it. */
+#browser-sheet { height: 100%; max-height: 100%; border-radius: 0; }
 
 .bv-body {
   flex: 1; min-height: 0; overflow: hidden;
@@ -3094,8 +3097,18 @@ body.console-open {
 .bv-bar { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
 /* The address row IS the header: no separate title bar to spend a row on. */
 .bv-top { padding: 2px 12px 6px; }
-.bv-nav { padding-top: 2px; }
-.bv-nav .bv-btn { background: transparent; padding: 10px 8px; }
+/* The nav row was dim, transparent and clipped at the left edge — the owner
+   could not see Back or Reload at all, and the band beneath them was dead
+   space. Real buttons, a real row, and the sheet reaches the bottom of the
+   screen so nothing is wasted below it. */
+.bv-nav { padding: 2px 0 0; gap: 10px; }
+.bv-navbtn {
+  width: 44px; height: 40px; padding: 0; display: flex;
+  align-items: center; justify-content: center;
+  background: var(--chip-bg); color: var(--fg);
+}
+.bv-navbtn svg { width: 22px; height: 22px; display: block; }
+.bv-navbtn:disabled { opacity: 0.35; }
 .bv-url-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
 .bv-url { padding-right: 38px; }
 .bv-inline-x {

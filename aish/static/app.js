@@ -10293,7 +10293,7 @@ function browserViewPoint(img, clientX, clientY) {
 
 let bvOpen = false;   // is a remote browser actually running on the Mac?
 let bvFocusRect = null;  // the focused field, in FRAME coords, from the last frame
-let bvLastUrl = "";      // to notice a navigation
+let bvLastNav = -1;      // documents loaded; a change means a new page
 let bvBusyTimer = null;
 
 // [BROWSER-VIEW-END-START]
@@ -10392,16 +10392,21 @@ function onBrowserView(event) {
     $("bv-url").value = event.url || "";
     $("bv-status").textContent = event.title || event.url || "";
   }
-  // --- a NAVIGATION resets the zoom -------------------------------------
-  // Arriving at a new page at the previous page's magnification, scrolled to
-  // wherever that one was panned, is disorienting — and no browser does it.
-  // Keyed on the URL rather than on the action, so tapping a LINK resets too.
-  if (event.url && event.url !== bvLastUrl) {
-    bvLastUrl = event.url;
-    bvZoom = { scale: 1, x: 0, y: 0 };
-    try { localStorage.setItem("aish-bv-last", event.url); } catch (e) { /* private mode */ }
+  // --- a NEW DOCUMENT resets the zoom ------------------------------------
+  // Counted server-side from real navigations, NOT inferred from the URL
+  // changing: a logout that lands on a similar address, an SPA route change
+  // and a plain reload all replace the document while the URL may look the
+  // same — which is why the zoom survived a Google logout.
+  if (typeof event.nav === "number" && event.nav !== bvLastNav) {
+    if (bvLastNav !== -1) bvZoom = { scale: 1, x: 0, y: 0 };
+    bvLastNav = event.nav;
+    try { localStorage.setItem("aish-bv-last", event.url || ""); } catch (e) { /* private */ }
   }
   $("bv-empty").hidden = true;
+  // A password went into this host and the page then moved — which is what a
+  // successful sign-in looks like from out here. Ask NOW, naming the site,
+  // rather than at the end of the session where two logins are one question.
+  if (event.signin) bvAskSignin(event.signin);
   bvFocusRect = event.focus || null;
   bvPaint(false);   // re-clamp AND redraw the outline for the new geometry
   if (event.focus && event.focus.tapped && event.focus.editable) bvOpenEditor(event.focus);
@@ -10450,6 +10455,22 @@ function bvOpenEditor(focus) {
   input.setSelectionRange(input.value.length, input.value.length);
 }
 
+function bvAskSignin(host) {
+  askConfirm({
+    title: `Signed in to ${host}?`,
+    body:
+      `If you just signed in, aish can use that session when it reads ${host} ` +
+      "— and it will ask you before every one of those reads. If that was not " +
+      "a sign-in, choose Not a sign-in.",
+    verb: "Remember it",
+    cancelVerb: "Not a sign-in",
+    action: () => act(
+      { type: "browser_login", hosts: [host] },
+      { label: "recording the sign-in" },
+    ),
+  });
+}
+
 function bvCloseEditor() {
   // Cleared on the way out: this input holds passwords, and a value left in a
   // DOM node outlives the dialog.
@@ -10474,7 +10495,8 @@ function bvCommit(submit) {
   // Send BEFORE clearing: bvSend refuses while an interaction is in flight,
   // and clearing first silently destroyed the text — a password, typically —
   // with nothing on screen to say so.
-  if (!bvSend({ action: "fill", text, submit })) {
+  if (!bvSend({ action: "fill", text, submit,
+                secret: !!(bvEditing && bvEditing.kind === "password") })) {
     $("bv-edit-note").textContent = "still working — try again in a moment";
     return;
   }

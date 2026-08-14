@@ -3735,6 +3735,7 @@ class WebServer:
                 y=message.get("y", 0),
                 text=message.get("text", ""),
                 value=message.get("value", ""),
+                secret=bool(message.get("secret")),
                 submit=bool(message.get("submit")),
                 dy=message.get("dy", 600),
                 key=message.get("key", "Enter"),
@@ -3761,6 +3762,18 @@ class WebServer:
                 {"type": "browser_view", "action": "closed", "hosts": result}
             )
             return
+        await self._send_frame(client, result)
+        # ONE corrected frame, if the page moved after the quick one. Waiting
+        # for a page to go quiet BEFORE showing anything read as nothing
+        # happening, and still missed late repaints — the owner had to tap
+        # again to see the finished page. So: show now, correct once.
+        if action in ("open", "goto", "click", "fill", "choose", "back", "refresh"):
+            # Already on the loop here — guarding on self.loop meant the
+            # correction silently never ran when it was unset.
+            asyncio.ensure_future(self._correct_frame(client, result.jpeg))
+        return
+
+    async def _send_frame(self, client: Client, result) -> None:
         await client.ws.send_json(
             {
                 "type": "browser_view",
@@ -3772,8 +3785,27 @@ class WebServer:
                 "height": result.height,
                 "error": result.error,
                 "focus": result.focus,
+                "nav": result.nav,
+                "signin": result.signin,
             }
         )
+
+    async def _correct_frame(self, client: Client, shown: bytes) -> None:
+        """Re-capture once the page has settled; forward only if it CHANGED.
+
+        Sending an identical frame would repaint for nothing; sending none at
+        all was the bug — a page that finished rendering after the capture
+        stayed stale until the owner tapped again."""
+        try:
+            settled = await asyncio.get_running_loop().run_in_executor(
+                self.worker_pool, browser.view_settled_frame
+            )
+        except Exception:  # noqa: BLE001 — a correction that fails just does not arrive
+            return
+        if settled is None or settled.jpeg == shown:
+            return
+        with contextlib.suppress(Exception):  # the socket may have gone
+            await self._send_frame(client, settled)
 
     async def _add_dir(self, client: Client, path: str) -> None:
         session = client.viewing

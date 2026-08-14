@@ -516,7 +516,7 @@
       <!-- Tapped, not dragged: a coordinate maps straight to a click on the
            real page. The image is the ONLY thing that ever renders the site —
            no site HTML is injected into this document. -->
-      <img id="bv-frame" class="bv-frame" alt="the web page" draggable="false">
+      <img id="bv-frame" class="bv-frame" alt="" draggable="false">
       <!-- Not a black rectangle. An empty browser should say what to do. -->
       <div id="bv-empty" class="bv-empty">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3.5 12h17M12 3.5c2.2 2.4 3.3 5.3 3.3 8.5S14.2 18.1 12 20.5c-2.2-2.4-3.3-5.3-3.3-8.5S9.8 5.9 12 3.5z" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
@@ -567,8 +567,12 @@
   </div>
 </div>
     <div class="bv-bar bv-nav">
-      <button id="bv-back" class="bv-btn" aria-label="back">‹ Back</button>
-      <button id="bv-refresh" class="bv-btn" aria-label="reload">↻</button>
+      <button id="bv-back" class="bv-btn bv-navbtn" aria-label="back" title="back">
+        <svg viewBox="0 0 24 24"><path d="M14.5 5.5L8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button id="bv-refresh" class="bv-btn bv-navbtn" aria-label="reload" title="reload">
+        <svg viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/><path d="M19.5 4.2v4.2h-4.2" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
     </div>
   </div>
 </div>

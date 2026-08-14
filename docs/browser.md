@@ -42,7 +42,7 @@ The same page returns **7 833 characters on a cold profile and ZERO on a warm on
 
 Without that step the browser was **weaker than a third-party reader had any right to make it look**, which is the observation that produced this section — a real Chrome with a real profile should be strictly better than a session-less datacenter fetcher on every page, and where it isn't, the defect is in how it is driven.
 
-**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case. `TestVisitingIsNotSigningIn` pins that a visit writes nothing. `TestPasswordsAreNeverReadBack` and `TestEditingUsesRealKeystrokes` pin the input contract; `TestNativeDialogsAreDeadEnds` pins the passkey removal; `TestTheViewIsMobileButReadsAreNot` and `TestFramesWaitForThePageToSettle` pin the identity split and the settle.
+**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case. `TestVisitingIsNotSigningIn` pins that a visit writes nothing. `TestPasswordsAreNeverReadBack` and `TestEditingUsesRealKeystrokes` pin the input contract; `TestNativeDialogsAreDeadEnds` pins the passkey removal; `TestTheViewIsDesktopSoOneFrameCarriesMore` and `TestFramesWaitForThePageToSettle` pin the viewport decision and the settle.
 
 ## Status is diagnostic only
 
@@ -170,27 +170,31 @@ The same reasoning covers the rest of the class. Playwright **dismisses native d
 
 `<select>` was the last of this class and is now handled the same way — by bringing the capability into the page instead of leaving it to browser chrome. The options come up with the frame and the phone draws its own picker; the choice is applied with `select_option`, which fires `change` (typing into a select does nothing). Date and time inputs open native pickers too, but they accept typed text, so they are simply treated as editable. `TestSelectsAndNativePickers`.
 
-## The view is mobile; the reads are not
+## The view is DESKTOP, because round trips are the scarce resource
 
-The owner drives the view from a phone, and his screenshot beside real Safari showed why width alone is not enough: google.com served the DESKTOP document into a 378px column, overflowing it, with the search box cut off.
+A frame costs 1–3 seconds. Zoom and pan happen on the phone and cost nothing. So the job is to maximise information per **frame**, not legibility per pixel — the owner zooms into whatever he wants once it has arrived.
 
-Measured, on google.com at that width:
+The view was briefly given a mobile identity, on the reasoning that a phone should get the phone's web. Measured, that was backwards. Sites spend the entire first mobile screen on app-install banners and navigation: the owner's screenshot of allegro.pl's mobile home page is a coupon, a logo, a promo strip and a bottom nav bar, with **no content at all** — so reaching anything cost scroll after scroll, one round trip each.
 
-| | result |
-|---|---|
-| width only (what shipped first) | desktop document, `scrollWidth` 408 > `innerWidth` 378 |
-| `+ is_mobile/has_touch`, no UA | **worse** — viewport falls back to 980px |
-| `+ mobile UA` | mobile document, no overflow |
+| viewport | bytes | content | prices |
+|---|---|---|---|
+| 430×717 | 86 KB | 7.0k chars | 61 |
+| **1280×2134** | 447 KB | **16.4k chars** | **112** |
+| 1600×2667 | 703 KB | 16.6k chars | 118 |
 
-So a mobile **user agent** is what makes a site serve its mobile document — and it is Chrome-on-Android rather than Safari-on-iPhone, because the engine really is Blink and claiming otherwise is a mismatch the anti-bot vendors spot instantly.
+Nearly triple the page per round trip at 1280, and little more beyond it. `view_size` therefore takes the stage the client will display in and scales that **shape** up to `VIEW_DESKTOP_WIDTH` — the shape so `object-fit: contain` has nothing to letterbox, the width so one frame carries a page.
 
-**But the same identity is fatal for reads.** allegro.pl answers any mobile identity with 403 and zero text — on the Android UA and the iPhone UA alike, so mobile emulation is itself the tell. Reads therefore keep the desktop identity, and `view_identity` gives the desktop identity to any host in `BROWSER_HOSTS` — the hosts already known to need the browser. A session the owner establishes by hand as a phone, then read with a desktop identity, is precisely the mismatch bot-scoring exists to catch; this keeps one identity per host on both paths. `TestTheViewIsMobileButReadsAreNot`.
+Quality follows from the same sum: at 1280×2134 with `device_scale_factor` 2, q35 = 425 KB, q50 = 502 KB, q65 = 595 KB. 40 keeps text legible under the 2–3× zoom that is the whole strategy without half a megabyte per frame.
 
-## A frame waits for the page to stop changing
+**It also ends an identity split that was never comfortable.** allegro.pl answers ANY mobile identity with 403 and zero text, so reads had to stay desktop while the view went mobile — meaning a session the owner created as a phone would later be read as a desktop, which is precisely the mismatch bot-scoring exists to catch. One identity again. `TestTheViewIsDesktopSoOneFrameCarriesMore`.
+
+## A frame arrives fast, then corrects itself once
 
 The owner proved this with paired screenshots: a partly-rendered page, then the finished one, with **no navigation between them** — only another frame. The picture had been wrong, not the page, and it made everything else look broken (it is also what made the passkey problem look worse than it was: the password step HAD arrived, in a frame he was never shown).
 
-A fixed `SETTLE_MS` cannot fix that, because "loaded" is a property of the page rather than a duration. `_settle` waits on three signals, cheapest first — network idle, `readyState === 'complete'`, then a DOM-quiescence window, which is the one that catches a page whose skeleton has loaded while its content is still being written in. Every wait is bounded by `SETTLE_MAX_MS`: a page that never settles — a ticker, a spinner — must still produce a frame. `TestFramesWaitForThePageToSettle`.
+A fixed `SETTLE_MS` cannot fix that, because "loaded" is a property of the page rather than a duration. `_settle` waits on three signals, cheapest first — network idle, `readyState === 'complete'`, then a DOM-quiescence window, which is the one that catches a page whose skeleton has loaded while its content is still being written in. Every wait is bounded by `SETTLE_MAX_MS`: a page that never settles — a ticker, a spinner — must still produce a frame.
+
+**But settling BEFORE showing anything was its own bug.** It made every interaction feel dead — "the impression is that I'm waiting way longer… a strange sense that there's nothing happening" — and it still missed late repaints, because a page that changed after the capture never got another one, so the owner had to tap again to see the finished page. The owner's own prescription is the design: *"it's fine to show two screenshots… needs to be just once."* So an interaction returns a quick frame (`FIRST_FRAME_MS`), and the server then captures once more when the page settles and forwards it **only if it differs**. `TestFramesWaitForThePageToSettle`.
 
 ## Small things that were the whole experience
 
@@ -202,6 +206,6 @@ A fixed `SETTLE_MS` cannot fix that, because "loaded" is a property of the page 
 
 Nothing in the suite launches Chrome. `browser.read` / `open_for_login` are patched per test, and conftest's autouse `no_real_browser` makes any escape fail loudly — it raises from `_submit` as a `BaseException` (an `Exception` would be swallowed by `_browser_read`'s fallback, leaving the guard silent exactly where a test is most likely wrong) and redirects `AISH_STATE_DIR` so a test-written `logins.txt` can never change how the real agent gates a real host. Same reasoning as the notifier guard in CLAUDE.md: a module that reaches a live thing outside the process needs a suite-wide guard, not per-test discipline.
 
-`TestBrowserView` covers the remote view end of the socket; `TestViewSize` covers the client-declared viewport and its clamps; `TestChallengeDetection` covers telling a wall from a page; `TestViewAndReadShareOneBrowser` and `TestPreviewFence` cover the two places one profile is contended for; `TestAThinPageGetsASecondChance` covers a slow page mistaken for a wall; `TestTheReadingContract` covers what the prompt must keep saying; `TestUnresponsiveHostEscalates` and `TestKnownBlockingHostsSkipTheDoomedFetch` cover the failure that produced no renders at all; `TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestLoginRecord`, `TestReadUrlEscalation` cover the module; `TestLoginGate` covers the gate.
+`TestBrowserView` covers the remote view end of the socket; `TestTheViewIsDesktopSoOneFrameCarriesMore` covers the viewport decision; `TestChallengeDetection` covers telling a wall from a page; `TestViewAndReadShareOneBrowser` and `TestPreviewFence` cover the two places one profile is contended for; `TestAThinPageGetsASecondChance` covers a slow page mistaken for a wall; `TestTheReadingContract` covers what the prompt must keep saying; `TestUnresponsiveHostEscalates` and `TestKnownBlockingHostsSkipTheDoomedFetch` cover the failure that produced no renders at all; `TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestLoginRecord`, `TestReadUrlEscalation` cover the module; `TestLoginGate` covers the gate.
 
 `TestBrowserCommand` covers the WebSocket wiring — the layer where a slash command actually breaks, since a missing app.js case or WS kind surfaces only as "unknown command" in the app.

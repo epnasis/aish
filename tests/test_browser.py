@@ -273,29 +273,6 @@ class TestReadUrlEscalation:
         )
 
 
-class TestViewSize:
-    """The client's own viewport drives the remote page (#221). Not cosmetic:
-    matching the width is what makes a responsive site serve its MOBILE layout,
-    so a phone gets the phone page instead of a desktop page shrunk small."""
-
-    def test_a_phone_size_is_used_as_given(self):
-        assert browser.view_size(430, 900) == (430, 900)
-
-    def test_absurd_sizes_are_clamped_not_obeyed(self):
-        """A hostile or buggy client must not be able to ask for a 40000px
-        page — that is a memory bomb on a box with a 16 GB ceiling."""
-        assert browser.view_size(40000, 40000) == (browser.VIEW_MAX_W, browser.VIEW_MAX_H)
-        assert browser.view_size(1, 1) == (browser.VIEW_MIN_W, browser.VIEW_MIN_H)
-
-    def test_missing_or_junk_falls_back_to_the_default(self):
-        """This comes straight off a WebSocket, so it may be any JSON type."""
-        for bad in (None, 0, "", "abc", {}, [], True):
-            assert browser.view_size(bad, bad) == (browser.VIEW_WIDTH, browser.VIEW_HEIGHT)
-
-    def test_a_string_number_still_works(self):
-        assert browser.view_size("430", "900") == (430, 900)
-
-
 class TestChallengeDetection:
     """A wall HAS text, so "the browser produced text" is not the same as "the
     browser produced the page" (#221).
@@ -726,44 +703,42 @@ class TestNativeDialogsAreDeadEnds:
         assert "cannot be shown here" in inspect.getsource(browser._refuse_upload)
 
 
-class TestTheViewIsMobileButReadsAreNot:
-    """The owner drives the view from a PHONE, so it must get the mobile web —
-    his screenshot beside real Safari showed a desktop document squeezed into a
-    narrow column, with the search box cut off (#221).
+class TestTheViewIsDesktopSoOneFrameCarriesMore:
+    """ROUND TRIPS ARE THE SCARCE RESOURCE; zoom is free.
 
-    Measured on google.com at 378px wide: width alone still serves the desktop
-    document and overflows it; `is_mobile` WITHOUT a user agent is worse (the
-    viewport falls back to 980px); a mobile UA gets the mobile document.
+    The view was briefly given a mobile identity, because serving the phone's
+    web to a phone-shaped viewport looked obviously right. It was wrong for
+    this UI, and the owner's screenshot settled it: allegro.pl's mobile home
+    page filled the whole frame with an app-install coupon, a logo, a promo
+    strip and a nav bar — no content at all — so reaching anything cost scroll
+    after scroll, one round trip each.
 
-    But the same measurement on allegro.pl returns 403 with ZERO text for any
-    mobile identity — mobile emulation is itself the tell there. So a host that
-    needs the desktop identity to be READ keeps it in the VIEW too, or the
-    session the owner makes by hand and the reads that use it disagree."""
+    Measured on allegro.pl: a 430-wide viewport yields ~7 000 characters and 61
+    prices; 1280-wide yields ~16 400 and 114. Nearly triple the page per round
+    trip, and the owner zooms into it locally for nothing."""
 
-    def test_the_mobile_identity_is_chrome_not_safari(self):
-        """Claiming Safari/iOS while running Blink is a mismatch anti-bot
-        vendors spot instantly. Measured: the iPhone UA was blocked too."""
-        assert "Android" in browser.MOBILE_UA
-        assert "Chrome/" in browser.MOBILE_UA
-        assert "iPhone" not in browser.MOBILE_UA
+    def test_the_page_is_asked_for_at_desktop_width(self):
+        assert browser.VIEW_DESKTOP_WIDTH >= 1024
+        width, _height = browser.view_size(430, 717)
+        assert width == browser.VIEW_DESKTOP_WIDTH
 
-    def test_a_known_blocking_host_keeps_the_desktop_identity(self):
-        browser.BROWSER_HOSTS.clear()
-        browser.BROWSER_HOSTS.add("allegro.pl")
-        try:
-            assert browser.view_identity("https://allegro.pl/oferta/x") is True
-            assert browser.view_identity("https://www.allegro.pl/x") is True
-            assert browser.view_identity("https://accounts.google.com/") is False
-        finally:
-            browser.BROWSER_HOSTS.clear()
+    def test_the_stage_SHAPE_is_preserved_so_nothing_is_letterboxed(self):
+        """object-fit: contain wastes whatever does not match. A frame shaped
+        like the stage is all page."""
+        for stage_w, stage_h in ((430, 717), (390, 560), (820, 500)):
+            width, height = browser.view_size(stage_w, stage_h)
+            assert abs((height / width) - (stage_h / stage_w)) < 0.02
 
-    def test_a_lookalike_host_does_not_inherit_the_desktop_identity(self):
-        browser.BROWSER_HOSTS.clear()
-        browser.BROWSER_HOSTS.add("allegro.pl")
-        try:
-            assert browser.view_identity("https://evilallegro.pl/x") is False
-        finally:
-            browser.BROWSER_HOSTS.clear()
+    def test_there_is_no_mobile_identity_left_to_split_the_session(self):
+        """Reads must stay desktop (allegro.pl answers ANY mobile identity with
+        403 and zero text), so a mobile view meant a session created as a phone
+        and read as a desktop — the mismatch bot-scoring exists to catch."""
+        assert not hasattr(browser, "MOBILE_UA")
+        assert not hasattr(browser, "view_identity")
+
+    def test_junk_still_falls_back_rather_than_dividing_by_zero(self):
+        assert browser.view_size(0, 0) == browser.view_size(None, None)
+        assert browser.view_size("x", "y")[0] == browser.VIEW_DESKTOP_WIDTH
 
 
 class TestFramesWaitForThePageToSettle:
@@ -772,12 +747,22 @@ class TestFramesWaitForThePageToSettle:
     picture had been wrong, not the page. A fixed sleep cannot fix it, because
     "loaded" is a property of the page, not a duration."""
 
-    def test_a_frame_settles_before_capturing(self):
+    def test_a_frame_can_settle_before_capturing(self):
         import inspect
 
         source = inspect.getsource(browser._frame)
-        assert "_settle(page)" in source
-        assert source.index("_settle") < source.index("screenshot")
+        assert "if settle:" in source
+        assert "await _settle(page)" in source
+
+    def test_the_first_frame_does_NOT_wait_for_the_settle(self):
+        """Waiting for quiet before showing ANYTHING read as nothing
+        happening. The quick frame goes out, then one correction if the page
+        moved — "it's fine to show two screenshots… needs to be just once"."""
+        import inspect
+
+        source = inspect.getsource(browser._frame)
+        assert "FIRST_FRAME_MS" in source
+        assert browser.FIRST_FRAME_MS < browser.SETTLE_MAX_MS
 
     def test_settling_is_bounded(self):
         """A page that never goes quiet — a ticker, a spinner — must still

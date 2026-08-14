@@ -355,7 +355,6 @@ async def _launch(
     args: list[str],
     viewport: dict | None = None,
     device_scale_factor: float | None = None,
-    mobile: bool = False,
 ) -> Any:
     profile = profile_dir()
     profile.mkdir(parents=True, exist_ok=True)
@@ -372,9 +371,6 @@ async def _launch(
         ignore_default_args=omit,
         viewport=viewport,  # None = the real window size, for reads
         device_scale_factor=device_scale_factor,
-        is_mobile=mobile or None,
-        has_touch=mobile or None,
-        user_agent=MOBILE_UA if mobile else None,
         accept_downloads=False,
     )
 
@@ -406,6 +402,11 @@ _IMAGES_JS = """() => {
 # long as it takes.
 SETTLE_MAX_MS = 6000
 SETTLE_QUIET_MS = 350
+# What a FIRST frame waits. Long enough to skip the flash of an empty document,
+# short enough that the owner sees something happen: waiting the full settle
+# before showing anything read as "nothing is happening", and a picture that
+# arrives late is worth less than a picture that arrives now and is corrected.
+FIRST_FRAME_MS = 450
 
 
 async def _settle(page: Any) -> None:
@@ -589,6 +590,13 @@ class _Owner:
         self.view_touched = 0.0
         self.busy = 0
         self.notice = ""   # something native happened that the frame cannot show
+        # Counts documents, not URLs. A logout that lands back on a similar
+        # address, an SPA route change, or a plain reload all replace the
+        # document without necessarily changing `url` — and the owner watched
+        # his zoom survive a Google logout because of exactly that.
+        self.navigations = 0
+        self.pending_signin = ""   # host a password was submitted to
+        self.pending_nav = -1      # the navigation count when that happened
 
     def run(self) -> None:
         import asyncio
@@ -620,7 +628,6 @@ class _Owner:
         args: list[str] | None = None,
         viewport: dict | None = None,
         device_scale_factor: float | None = None,
-        mobile: bool = False,
     ) -> Any:
         # Under the lock: concurrent reads arriving cold would otherwise each
         # launch a Chrome against a profile only one of them can hold.
@@ -640,7 +647,6 @@ class _Owner:
                     args=args or _OFFSCREEN_ARGS,
                     viewport=viewport,
                     device_scale_factor=device_scale_factor,
-                    mobile=mobile,
                 )
 
             try:
@@ -891,7 +897,11 @@ def command(arg: str) -> str:
 # The default when a client says nothing; every real one sends its own size.
 VIEW_WIDTH = 1024
 VIEW_HEIGHT = 1400
-VIEW_JPEG_QUALITY = 50
+# Frames carry ~3x the page now, so they are bigger. Measured at 1280x2134,
+# device_scale_factor 2: q35=425KB, q50=502KB, q65=595KB. 40 keeps text legible
+# under a 2-3x zoom — which is the whole strategy — without a half-megabyte
+# frame on a mobile connection.
+VIEW_JPEG_QUALITY = 40
 # Rendered at 2x so a zoomed-in frame stays sharp. The owner zooms to hit a
 # small password field, and a 1x capture blown up is exactly where that fails.
 # Coordinates stay in CSS pixels — only the image has more of them.
@@ -915,27 +925,21 @@ try {
 } catch (e) { /* a site that froze navigator keeps its passkeys; nothing to do */ }
 """
 
-# The view is driven from a PHONE, so it asks for the mobile web. Width alone
-# does not get it: measured on google.com at 378px wide, the desktop document
-# is served and overflows (docWidth 408 > innerWidth 378) — the owner's
-# screenshot beside real Safari makes the difference obvious. `is_mobile`
-# without a UA is WORSE (the viewport falls back to 980px and everything turns
-# tiny). A mobile UA is what makes a site serve its mobile document.
+# The view is DESKTOP, and briefly it was not. Serving the phone's web to a
+# phone-shaped viewport looked obviously right and was wrong for this UI: sites
+# spend the whole first mobile screen on app-install banners and navigation, so
+# a frame arrives carrying nothing and every scroll to reach content costs
+# another round trip. A desktop page carries ~2.7x the content per frame
+# (measured on allegro.pl: 16 400 characters and 114 prices against 7 000 and
+# 61), and the owner zooms into it locally for free.
 #
-# Chrome-on-Android, not Safari-on-iPhone, because the engine really is Blink:
-# claiming Safari/iOS while running Chrome is a mismatch anti-bot vendors spot
-# instantly, and the coherent story is the one to tell.
-MOBILE_UA = (
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
-)
+# Dropping it also ends an identity split that was never comfortable: allegro.pl
+# answers ANY mobile identity with 403 and zero text, so reads had to stay
+# desktop while the view went mobile, and a session created as a phone but read
+# as a desktop is the mismatch bot-scoring exists to catch. One identity again.
+VIEW_DESKTOP_WIDTH = 1280
 
-# …but NOT everywhere. Measured: allegro.pl answers a mobile identity with 403
-# and zero text, on both the Android and the iPhone UA — mobile emulation is
-# itself the tell there. Those sites keep the DESKTOP identity in the view too,
-# so the session the owner creates by hand is made by the same identity that
-# will later read with it. A login established as a phone and used as a desktop
-# is exactly the mismatch bot-scoring exists to catch.
+# Hosts that needed the browser to be READ (owned here; see web.BROWSER_HOSTS).
 BROWSER_HOSTS: set[str] = set()
 
 VIEW_MIN_W, VIEW_MAX_W = 320, 1920
@@ -943,20 +947,37 @@ VIEW_MIN_H, VIEW_MAX_H = 400, 2400
 
 
 def view_size(width: object, height: object) -> tuple[int, int]:
-    """The client's own viewport, clamped. NOT cosmetic: matching the page to
-    the device is what makes a responsive site serve its MOBILE layout, so a
-    phone gets the phone page — tappable targets, one column — instead of a
-    desktop page shrunk to illegibility. It is also why no user-agent is
-    spoofed to ask for it: width is what responsive CSS keys on, and a UA that
-    disagreed with the profile's own would risk the session that later reads
-    depend on."""
+    """A DESKTOP-width page, in the SHAPE of the client's stage.
+
+    The client sends the stage it will display in; this scales that shape up to
+    `VIEW_DESKTOP_WIDTH`. Two things follow, and both are the point.
+
+    **Round trips are the scarce resource; zoom is free.** A frame costs 1-3
+    seconds, while zooming and panning happen on the phone and cost nothing. So
+    the job is to maximise information per FRAME, not legibility per pixel —
+    the owner zooms into whatever he wants once it has arrived. Measured on
+    allegro.pl: a 430-wide viewport yields 7 000 characters and 61 prices, a
+    1280-wide one yields 16 400 and 114. Nearly triple the page for one round
+    trip.
+
+    **And a phone-shaped viewport gets the phone's WEB, which is worse here.**
+    Sites spend the first mobile screen on app-install banners and navigation:
+    the owner's screenshot of allegro.pl's mobile home page is a coupon banner,
+    a logo, a promo strip and a bottom nav bar, with no content at all. Reaching
+    anything then costs scroll after scroll, one round trip each.
+
+    Keeping the stage's ASPECT means `object-fit: contain` has nothing to
+    letterbox, so the whole frame is page."""
     try:
         # str() first: this arrives straight off a WebSocket, so it may be any
         # JSON type at all, including a dict.
-        w = int(float(str(width or 0))) or VIEW_WIDTH
-        h = int(float(str(height or 0))) or VIEW_HEIGHT
+        stage_w = int(float(str(width or 0))) or VIEW_WIDTH
+        stage_h = int(float(str(height or 0))) or VIEW_HEIGHT
     except (TypeError, ValueError):
-        w, h = VIEW_WIDTH, VIEW_HEIGHT
+        stage_w, stage_h = VIEW_WIDTH, VIEW_HEIGHT
+    stage_w = max(1, stage_w)
+    w = VIEW_DESKTOP_WIDTH
+    h = round(w * (stage_h / stage_w))
     return (
         max(VIEW_MIN_W, min(VIEW_MAX_W, w)),
         max(VIEW_MIN_H, min(VIEW_MAX_H, h)),
@@ -978,15 +999,29 @@ class Frame:
     height: int = VIEW_HEIGHT
     error: str = ""  # a navigation that failed, so a blank page is never silent
     focus: dict | None = None  # the field the page has focused, if any
+    nav: int = 0     # documents loaded so far; a change means "reset the zoom"
+    signin: str = ""  # a host a password was just submitted to
 
 
-async def _frame(owner: _Owner, click: tuple[float, float] | None = None) -> Frame:
+async def _frame(
+    owner: _Owner,
+    click: tuple[float, float] | None = None,
+    *,
+    settle: bool = True,
+) -> Frame:
+    """One captured look at the page.
+
+    `settle=False` is the FAST first frame. Waiting for a page to go quiet
+    before showing anything made every interaction feel dead — and it still
+    missed late repaints, because a page that changes AFTER the capture never
+    got another one. So the caller sends a quick frame and then ONE corrected
+    frame if the page moved, which is the shape the owner asked for: "it's fine
+    to show two screenshots… needs to be just once"."""
     page = owner.view
-    # Settle BEFORE capturing. A fixed 400ms pause was showing the owner a page
-    # mid-render — he proved it: tapping again produced the finished page with
-    # no navigation in between, which is to say the picture had been wrong, not
-    # the page.
-    await _settle(page)
+    if settle:
+        await _settle(page)
+    else:
+        await page.wait_for_timeout(FIRST_FRAME_MS)
     size = page.viewport_size or {"width": VIEW_WIDTH, "height": VIEW_HEIGHT}
     return Frame(
         jpeg=await page.screenshot(type="jpeg", quality=VIEW_JPEG_QUALITY),
@@ -995,6 +1030,7 @@ async def _frame(owner: _Owner, click: tuple[float, float] | None = None) -> Fra
         width=size["width"],
         height=size["height"],
         focus=await _focus_info(page, click),
+        nav=owner.navigations,
     )
 
 
@@ -1029,6 +1065,15 @@ def view_open(
     return _submit(job, timeout)
 
 
+def _count_navigation(owner: _Owner, page: Any, frame: Any) -> None:
+    """A MAIN-frame navigation replaced the document."""
+    try:
+        if frame == page.main_frame:
+            owner.navigations += 1
+    except Exception:  # noqa: BLE001 — a torn-down page counts nothing
+        pass
+
+
 async def _note_dialog(owner: _Owner, dialog: Any) -> None:
     owner.notice = f"the page said: {dialog.message[:200]}"
     try:
@@ -1048,28 +1093,20 @@ async def _refuse_upload(owner: _Owner, chooser: Any) -> None:
         pass
 
 
-def view_identity(url: str) -> bool:
-    """True when this host should be driven with the DESKTOP identity."""
-    host = host_of(url)
-    return bool(host) and any(
-        host == known or host.endswith("." + known) for known in BROWSER_HOSTS
-    )
-
-
 async def _open_view(owner: _Owner, url: str, w: int, h: int) -> Frame:
     # A KNOWN viewport, so a tap at (x, y) in the PWA means that point
     # here. The read context uses the real window size and cannot give
     # that, so the view gets its own — and Chrome locks the profile, so
     # the read context has to let go first.
     await owner.close_now()
-    desktop = view_identity(url)
     context = await owner.context(
         args=[f"--window-size={w},{h}", "--window-position=-4000,-4000"],
         viewport={"width": w, "height": h},
         device_scale_factor=VIEW_SCALE,
-        mobile=not desktop,
     )
     page = await context.new_page()
+    owner.navigations = 0
+    page.on("framenavigated", lambda f: _count_navigation(owner, page, f))
     await page.add_init_script(_NO_NATIVE_CREDENTIAL_UI)
     # Native dialogs the owner cannot see either. Playwright DISMISSES these by
     # default, silently — so a login that asks "leave site?" or alerts an error
@@ -1096,6 +1133,23 @@ async def _open_view(owner: _Owner, url: str, w: int, h: int) -> Frame:
     frame = await _frame(owner)
     frame.error = failed
     return frame
+
+
+def view_settled_frame(timeout: float = 30.0) -> Frame | None:
+    """Capture again once the page has gone quiet, or None if there is no view.
+
+    The FOLLOW-UP to a fast frame. Its job is to be right rather than prompt;
+    the caller only forwards it if it actually differs from what was shown."""
+
+    async def job(owner: _Owner) -> Frame | None:
+        if owner.view is None:
+            return None
+        return await _frame(owner)
+
+    try:
+        return _submit(job, timeout)
+    except Exception:  # noqa: BLE001 — a follow-up that fails just does not arrive
+        return None
 
 
 def view_act(action: str, **kwargs: Any) -> Frame:
@@ -1141,6 +1195,13 @@ def view_act(action: str, **kwargs: Any) -> Frame:
                     await page.keyboard.press("Delete")
                 if kwargs.get("submit"):
                     await page.keyboard.press("Enter")
+        if action == "fill" and kwargs.get("secret"):
+            # A password was just typed into THIS host. Remember which, so the
+            # question about saving the sign-in can be asked here and now,
+            # about a named site — rather than at the end of the session, when
+            # two logins are indistinguishable.
+            owner.pending_signin = host_of(page.url)
+            owner.pending_nav = owner.navigations
         elif action == "type":
             await page.keyboard.type(str(kwargs.get("text", "")), delay=12)
         elif action == "key":
@@ -1167,11 +1228,21 @@ def view_act(action: str, **kwargs: Any) -> Frame:
             if not target.startswith(("http://", "https://")):
                 target = "https://" + target
             await page.goto(target, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-        elif action != "refresh":
+        elif action == "refresh":
+            # RELOAD, not merely re-capture. It was a no-op that just took a
+            # fresh screenshot, so the button labelled reload did not reload —
+            # and, since nothing navigated, the zoom never reset either.
+            await page.reload(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        else:
             raise ValueError(f"unknown view action {action!r}")
         owner.view_touched = time.monotonic()
         _note_visit(owner, page.url)
-        frame = await _frame(owner, clicked)
+        frame = await _frame(owner, clicked, settle=False)
+        # The page MOVED after a password went in, which is what a successful
+        # sign-in looks like from out here. Ask now, about this host.
+        if owner.pending_signin and owner.navigations > owner.pending_nav:
+            frame.signin = owner.pending_signin
+            owner.pending_signin = ""
         if owner.notice:
             frame.error = owner.notice
             owner.notice = ""
