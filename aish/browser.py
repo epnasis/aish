@@ -355,6 +355,7 @@ async def _launch(
     args: list[str],
     viewport: dict | None = None,
     device_scale_factor: float | None = None,
+    mobile: bool = False,
 ) -> Any:
     profile = profile_dir()
     profile.mkdir(parents=True, exist_ok=True)
@@ -371,6 +372,9 @@ async def _launch(
         ignore_default_args=omit,
         viewport=viewport,  # None = the real window size, for reads
         device_scale_factor=device_scale_factor,
+        is_mobile=mobile or None,
+        has_touch=mobile or None,
+        user_agent=MOBILE_UA if mobile else None,
         accept_downloads=False,
     )
 
@@ -392,6 +396,45 @@ _IMAGES_JS = """() => {
   }
   return out;
 }"""
+
+
+# How long to keep waiting for a page to STOP changing before capturing it.
+# The owner proved this one with paired screenshots: a partially-rendered page,
+# then the finished page — with no navigation between them, only another frame.
+# A fixed sleep cannot work, because "loaded" is not a duration: it is a
+# property of the page, and a login step that swaps its whole panel takes as
+# long as it takes.
+SETTLE_MAX_MS = 6000
+SETTLE_QUIET_MS = 350
+
+
+async def _settle(page: Any) -> None:
+    """Wait until the page stops changing, or SETTLE_MAX_MS, whichever first.
+
+    Three signals, cheapest first: the network going quiet, the document
+    reporting `complete`, and finally the DOM itself going still — which is the
+    one that catches a page whose skeleton has loaded but whose content is
+    still being written in. Every wait is bounded: a page that never settles
+    (a live ticker, a spinner) must still produce a frame."""
+    try:
+        await page.wait_for_load_state("networkidle", timeout=SETTLE_MAX_MS)
+    except Exception:  # noqa: BLE001 — a chatty page never goes idle; carry on
+        pass
+    try:
+        await page.wait_for_function(
+            """() => new Promise(done => {
+                 if (document.readyState !== 'complete') return done(false);
+                 let mutations = 0;
+                 const observer = new MutationObserver(() => { mutations++; });
+                 observer.observe(document.documentElement,
+                   { childList: true, subtree: true, characterData: true });
+                 setTimeout(() => { observer.disconnect(); done(mutations === 0); },
+                   QUIET);
+               })""".replace("QUIET", str(SETTLE_QUIET_MS)),
+            timeout=SETTLE_MAX_MS,
+        )
+    except Exception:  # noqa: BLE001 — bounded: an unsettleable page is still shown
+        pass
 
 
 async def _body_text(page: Any) -> str:
@@ -442,7 +485,8 @@ _FOCUS_JS = """() => {
   // innerText here would ship the whole page as a "field value".
   const value = (editable && !secret && typeof a.value === 'string') ? a.value : '';
   return {
-    tag, kind: secret ? 'password' : (editable ? 'text' : (tag === 'select' ? 'select' : 'other')),
+    tag, type,
+    kind: secret ? 'password' : (editable ? 'text' : (tag === 'select' ? 'select' : 'other')),
     editable, secret, label: label.slice(0, 80),
     value: value.slice(0, 4000),
     rect: { x: r.x, y: r.y, w: r.width, h: r.height },
@@ -563,6 +607,7 @@ class _Owner:
         args: list[str] | None = None,
         viewport: dict | None = None,
         device_scale_factor: float | None = None,
+        mobile: bool = False,
     ) -> Any:
         # Under the lock: concurrent reads arriving cold would otherwise each
         # launch a Chrome against a profile only one of them can hold.
@@ -582,6 +627,7 @@ class _Owner:
                     args=args or _OFFSCREEN_ARGS,
                     viewport=viewport,
                     device_scale_factor=device_scale_factor,
+                    mobile=mobile,
                 )
 
             try:
@@ -856,6 +902,29 @@ try {
 } catch (e) { /* a site that froze navigator keeps its passkeys; nothing to do */ }
 """
 
+# The view is driven from a PHONE, so it asks for the mobile web. Width alone
+# does not get it: measured on google.com at 378px wide, the desktop document
+# is served and overflows (docWidth 408 > innerWidth 378) — the owner's
+# screenshot beside real Safari makes the difference obvious. `is_mobile`
+# without a UA is WORSE (the viewport falls back to 980px and everything turns
+# tiny). A mobile UA is what makes a site serve its mobile document.
+#
+# Chrome-on-Android, not Safari-on-iPhone, because the engine really is Blink:
+# claiming Safari/iOS while running Chrome is a mismatch anti-bot vendors spot
+# instantly, and the coherent story is the one to tell.
+MOBILE_UA = (
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
+)
+
+# …but NOT everywhere. Measured: allegro.pl answers a mobile identity with 403
+# and zero text, on both the Android and the iPhone UA — mobile emulation is
+# itself the tell there. Those sites keep the DESKTOP identity in the view too,
+# so the session the owner creates by hand is made by the same identity that
+# will later read with it. A login established as a phone and used as a desktop
+# is exactly the mismatch bot-scoring exists to catch.
+BROWSER_HOSTS: set[str] = set()
+
 VIEW_MIN_W, VIEW_MAX_W = 320, 1920
 VIEW_MIN_H, VIEW_MAX_H = 400, 2400
 
@@ -900,7 +969,11 @@ class Frame:
 
 async def _frame(owner: _Owner, click: tuple[float, float] | None = None) -> Frame:
     page = owner.view
-    await page.wait_for_timeout(400)  # let a click's repaint land before capture
+    # Settle BEFORE capturing. A fixed 400ms pause was showing the owner a page
+    # mid-render — he proved it: tapping again produced the finished page with
+    # no navigation in between, which is to say the picture had been wrong, not
+    # the page.
+    await _settle(page)
     size = page.viewport_size or {"width": VIEW_WIDTH, "height": VIEW_HEIGHT}
     return Frame(
         jpeg=await page.screenshot(type="jpeg", quality=VIEW_JPEG_QUALITY),
@@ -962,16 +1035,26 @@ async def _refuse_upload(owner: _Owner, chooser: Any) -> None:
         pass
 
 
+def view_identity(url: str) -> bool:
+    """True when this host should be driven with the DESKTOP identity."""
+    host = host_of(url)
+    return bool(host) and any(
+        host == known or host.endswith("." + known) for known in BROWSER_HOSTS
+    )
+
+
 async def _open_view(owner: _Owner, url: str, w: int, h: int) -> Frame:
     # A KNOWN viewport, so a tap at (x, y) in the PWA means that point
     # here. The read context uses the real window size and cannot give
     # that, so the view gets its own — and Chrome locks the profile, so
     # the read context has to let go first.
     await owner.close_now()
+    desktop = view_identity(url)
     context = await owner.context(
         args=[f"--window-size={w},{h}", "--window-position=-4000,-4000"],
         viewport={"width": w, "height": h},
         device_scale_factor=VIEW_SCALE,
+        mobile=not desktop,
     )
     page = await context.new_page()
     await page.add_init_script(_NO_NATIVE_CREDENTIAL_UI)

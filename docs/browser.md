@@ -42,7 +42,7 @@ The same page returns **7 833 characters on a cold profile and ZERO on a warm on
 
 Without that step the browser was **weaker than a third-party reader had any right to make it look**, which is the observation that produced this section — a real Chrome with a real profile should be strictly better than a session-less datacenter fetcher on every page, and where it isn't, the defect is in how it is driven.
 
-**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case. `TestVisitingIsNotSigningIn` pins that a visit writes nothing. `TestPasswordsAreNeverReadBack` and `TestEditingUsesRealKeystrokes` pin the input contract; `TestNativeDialogsAreDeadEnds` pins the passkey removal.
+**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case. `TestVisitingIsNotSigningIn` pins that a visit writes nothing. `TestPasswordsAreNeverReadBack` and `TestEditingUsesRealKeystrokes` pin the input contract; `TestNativeDialogsAreDeadEnds` pins the passkey removal; `TestTheViewIsMobileButReadsAreNot` and `TestFramesWaitForThePageToSettle` pin the identity split and the settle.
 
 ## Status is diagnostic only
 
@@ -169,6 +169,28 @@ So WebAuthn is **removed** from the view rather than attempted, and sites fall b
 The same reasoning covers the rest of the class. Playwright **dismisses native dialogs by default, silently**, so a login that alerted an error would vanish without trace — they are reported into the frame's message instead. A file-upload picker would open a native chooser on a Mac nobody is sitting at and simply hang; it is cancelled with an explanation. `TestNativeDialogsAreDeadEnds`.
 
 Still open in this class: `<select>` opens a native dropdown that screenshots do not capture, so a tap on one looks inert.
+
+## The view is mobile; the reads are not
+
+The owner drives the view from a phone, and his screenshot beside real Safari showed why width alone is not enough: google.com served the DESKTOP document into a 378px column, overflowing it, with the search box cut off.
+
+Measured, on google.com at that width:
+
+| | result |
+|---|---|
+| width only (what shipped first) | desktop document, `scrollWidth` 408 > `innerWidth` 378 |
+| `+ is_mobile/has_touch`, no UA | **worse** — viewport falls back to 980px |
+| `+ mobile UA` | mobile document, no overflow |
+
+So a mobile **user agent** is what makes a site serve its mobile document — and it is Chrome-on-Android rather than Safari-on-iPhone, because the engine really is Blink and claiming otherwise is a mismatch the anti-bot vendors spot instantly.
+
+**But the same identity is fatal for reads.** allegro.pl answers any mobile identity with 403 and zero text — on the Android UA and the iPhone UA alike, so mobile emulation is itself the tell. Reads therefore keep the desktop identity, and `view_identity` gives the desktop identity to any host in `BROWSER_HOSTS` — the hosts already known to need the browser. A session the owner establishes by hand as a phone, then read with a desktop identity, is precisely the mismatch bot-scoring exists to catch; this keeps one identity per host on both paths. `TestTheViewIsMobileButReadsAreNot`.
+
+## A frame waits for the page to stop changing
+
+The owner proved this with paired screenshots: a partly-rendered page, then the finished one, with **no navigation between them** — only another frame. The picture had been wrong, not the page, and it made everything else look broken (it is also what made the passkey problem look worse than it was: the password step HAD arrived, in a frame he was never shown).
+
+A fixed `SETTLE_MS` cannot fix that, because "loaded" is a property of the page rather than a duration. `_settle` waits on three signals, cheapest first — network idle, `readyState === 'complete'`, then a DOM-quiescence window, which is the one that catches a page whose skeleton has loaded while its content is still being written in. Every wait is bounded by `SETTLE_MAX_MS`: a page that never settles — a ticker, a spinner — must still produce a frame. `TestFramesWaitForThePageToSettle`.
 
 ## Testing
 

@@ -724,3 +724,66 @@ class TestNativeDialogsAreDeadEnds:
 
         assert "filechooser" in inspect.getsource(browser._open_view)
         assert "cannot be shown here" in inspect.getsource(browser._refuse_upload)
+
+
+class TestTheViewIsMobileButReadsAreNot:
+    """The owner drives the view from a PHONE, so it must get the mobile web —
+    his screenshot beside real Safari showed a desktop document squeezed into a
+    narrow column, with the search box cut off (#221).
+
+    Measured on google.com at 378px wide: width alone still serves the desktop
+    document and overflows it; `is_mobile` WITHOUT a user agent is worse (the
+    viewport falls back to 980px); a mobile UA gets the mobile document.
+
+    But the same measurement on allegro.pl returns 403 with ZERO text for any
+    mobile identity — mobile emulation is itself the tell there. So a host that
+    needs the desktop identity to be READ keeps it in the VIEW too, or the
+    session the owner makes by hand and the reads that use it disagree."""
+
+    def test_the_mobile_identity_is_chrome_not_safari(self):
+        """Claiming Safari/iOS while running Blink is a mismatch anti-bot
+        vendors spot instantly. Measured: the iPhone UA was blocked too."""
+        assert "Android" in browser.MOBILE_UA
+        assert "Chrome/" in browser.MOBILE_UA
+        assert "iPhone" not in browser.MOBILE_UA
+
+    def test_a_known_blocking_host_keeps_the_desktop_identity(self):
+        browser.BROWSER_HOSTS.clear()
+        browser.BROWSER_HOSTS.add("allegro.pl")
+        try:
+            assert browser.view_identity("https://allegro.pl/oferta/x") is True
+            assert browser.view_identity("https://www.allegro.pl/x") is True
+            assert browser.view_identity("https://accounts.google.com/") is False
+        finally:
+            browser.BROWSER_HOSTS.clear()
+
+    def test_a_lookalike_host_does_not_inherit_the_desktop_identity(self):
+        browser.BROWSER_HOSTS.clear()
+        browser.BROWSER_HOSTS.add("allegro.pl")
+        try:
+            assert browser.view_identity("https://evilallegro.pl/x") is False
+        finally:
+            browser.BROWSER_HOSTS.clear()
+
+
+class TestFramesWaitForThePageToSettle:
+    """The owner PROVED this with paired screenshots: a partly-rendered page,
+    then the finished one, with no navigation between — only another frame. The
+    picture had been wrong, not the page. A fixed sleep cannot fix it, because
+    "loaded" is a property of the page, not a duration."""
+
+    def test_a_frame_settles_before_capturing(self):
+        import inspect
+
+        source = inspect.getsource(browser._frame)
+        assert "_settle(page)" in source
+        assert source.index("_settle") < source.index("screenshot")
+
+    def test_settling_is_bounded(self):
+        """A page that never goes quiet — a ticker, a spinner — must still
+        produce a frame rather than hanging the view."""
+        import inspect
+
+        source = inspect.getsource(browser._settle)
+        assert "SETTLE_MAX_MS" in source
+        assert source.count("except") >= 2   # every wait degrades, none raises

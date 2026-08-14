@@ -7905,6 +7905,7 @@ $("composer-actions").addEventListener("click", (e) => {
     // Prefill the trigger and let the user add detail (or just send) — the
     // server expands /feedback into the issue-filing flow (parse_feedback).
     case "feedback": composerInsert("/feedback "); break;
+    case "browser": openBrowserView(""); break;
     case "terminal": enterCmdMode(); break; // the `!` shell-command input mode
     // The global console has its own top-bar button + Ctrl+\; not in this menu.
   }
@@ -10398,7 +10399,9 @@ function onBrowserView(event) {
   if (event.url && event.url !== bvLastUrl) {
     bvLastUrl = event.url;
     bvZoom = { scale: 1, x: 0, y: 0 };
+    try { localStorage.setItem("aish-bv-last", event.url); } catch (e) { /* private mode */ }
   }
+  $("bv-empty").hidden = true;
   bvFocusRect = event.focus || null;
   bvPaint(false);   // re-clamp AND redraw the outline for the new geometry
   if (event.focus && event.focus.tapped && event.focus.editable) bvOpenEditor(event.focus);
@@ -10422,12 +10425,24 @@ function bvOpenEditor(focus) {
   const secret = focus.kind === "password";
   const input = $("bv-edit-input");
   $("bv-edit-label").textContent = focus.label || (secret ? "Password" : "Field");
-  input.type = secret ? "password" : "text";
+  // Inherit the REMOTE field's type, so the phone keyboard is the right
+  // keyboard: an email field gets @ and no autocapitalise, a tel field gets
+  // the number pad. Typing an email on an alphabetic keyboard with
+  // autocapitalise on is its own small misery.
+  const KEYBOARDS = {
+    email: ["email", "email"], tel: ["tel", "tel"], url: ["url", "url"],
+    number: ["text", "decimal"], search: ["search", "search"],
+  };
+  const [type, mode] = secret ? ["password", "text"]
+                              : (KEYBOARDS[focus.type] || ["text", "text"]);
+  input.type = type;
+  input.inputMode = mode;
+  input.autocapitalize = (focus.type === "email" || focus.type === "url") ? "off" : "sentences";
   // A password NEVER arrives pre-filled — the server refuses to read it, so
   // there is nothing to show and nothing was transmitted.
   input.value = secret ? "" : (focus.value || "");
   $("bv-edit-eye").hidden = !secret;
-  $("bv-edit-eye").textContent = "👁";
+  $("bv-edit-eye").classList.remove("revealed");
   $("bv-edit-note").textContent = secret
     ? "The current value is hidden and never leaves the Mac. What you type replaces it."
     : "";
@@ -10470,7 +10485,8 @@ function wireBrowserEditor() {
     const input = $("bv-edit-input");
     const shown = input.type === "text";
     input.type = shown ? "password" : "text";
-    $("bv-edit-eye").textContent = shown ? "👁" : "🙈";
+    $("bv-edit-eye").classList.toggle("revealed", !shown);
+    $("bv-edit-eye").setAttribute("aria-label", shown ? "show password" : "hide password");
     input.focus();
   });
   $("bv-edit-cancel").addEventListener("click", bvCloseEditor);
@@ -10510,12 +10526,22 @@ function openBrowserView(url) {
   bvResetZoom();
   $("bv-url").value = url || "";
   if (!url) {
-    // No URL: say what to do rather than presenting an empty white rectangle,
-    // which reads as a broken browser.
-    $("bv-status").textContent = "type an address above, then Go";
+    // An empty browser should INVITE, not present a black rectangle with a
+    // line of text under it. The last page is offered as one tap, because the
+    // commonest reason to reopen this is to carry on where you left off.
+    $("bv-empty").hidden = false;
+    $("bv-status").textContent = "";
+    const last = localStorage.getItem("aish-bv-last") || "";
+    const resume = $("bv-resume");
+    resume.hidden = !last;
+    if (last) {
+      resume.textContent = `Resume ${last.replace(/^https?:\/\//, "").slice(0, 40)}`;
+      resume.onclick = () => openBrowserView(last);
+    }
     $("bv-url").focus();
     return;
   }
+  $("bv-empty").hidden = true;
   $("bv-status").textContent = `opening ${url}…`;
   bvSend(Object.assign({ action: "open", url }, bvViewportSize()));
 }

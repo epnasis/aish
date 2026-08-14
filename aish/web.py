@@ -236,7 +236,10 @@ def web_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> str:
 # first real test: one timeout, no escalation, and the browser never ran at all
 # in a session that was meant to prove it. Remembering the host means the
 # blocked path is not on the critical route a second time.
-BROWSER_HOSTS: set[str] = set()
+# Owned by `browser` because it also decides the VIEW's identity: a host that
+# needs the desktop identity to be READ must be driven with the desktop
+# identity too, or the owner's hand-made session and the later reads disagree.
+BROWSER_HOSTS = browser.BROWSER_HOSTS
 
 # What the model is told when the browser reached a page and met a wall. It
 # names the outcome and CLOSES the door on the third-party reader, which is a

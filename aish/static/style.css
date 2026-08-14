@@ -3205,13 +3205,36 @@ body.console-open {
 }
 .bv-edit-row { display: flex; gap: 8px; align-items: center; }
 .bv-edit-input {
-  flex: 1; min-width: 0; padding: 12px; border-radius: 10px; font-size: 17px;
+  flex: 1; min-width: 0; padding: 12px 78px 12px 12px; border-radius: 10px;
+  font-size: 17px;
   background: var(--chip-bg); color: var(--fg); border: 1px solid transparent;
 }
-.bv-edit-icon {
-  flex: 0 0 auto; width: 40px; height: 40px; border-radius: 10px; border: none;
-  font-size: 16px; background: var(--chip-bg); color: var(--fg);
+.bv-edit-row { position: relative; }
+/* Inside the field, right-aligned — the platform's own placement. */
+.bv-edit-inline {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 32px; height: 32px; padding: 0; border: none; background: none;
+  color: var(--dim); display: flex; align-items: center; justify-content: center;
 }
+.bv-edit-inline svg { width: 20px; height: 20px; }
+#bv-edit-clear { right: 6px; }
+#bv-edit-eye { right: 40px; }
+/* One icon at a time: showing means "tap to hide". */
+#bv-edit-eye .eye-hide { display: none; }
+#bv-edit-eye.revealed .eye-show { display: none; }
+#bv-edit-eye.revealed .eye-hide { display: block; }
+/* A class that sets `display` OVERRIDES the [hidden] attribute — higher
+   specificity than the UA rule — so `hidden = true` left it painted over the
+   page. Every display-setting class needs its own [hidden] escape. */
+.bv-empty[hidden] { display: none; }
+.bv-empty {
+  position: absolute; inset: 0; z-index: 1; display: flex; gap: 10px;
+  flex-direction: column; align-items: center; justify-content: center;
+  color: var(--dim); text-align: center; padding: 20px;
+}
+.bv-empty svg { width: 42px; height: 42px; opacity: 0.5; }
+.bv-empty-title { font-size: 15px; }
+#bv-resume { max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bv-edit-note { font-size: 13px; color: var(--dim); min-height: 16px; }
 .bv-edit-hint { font-size: 12px; color: var(--dim); opacity: 0.75; }
 .bv-edit-actions { display: flex; gap: 8px; justify-content: flex-end; }
