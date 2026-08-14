@@ -3066,3 +3066,70 @@ body.console-open {
   line-height: 1.35;
 }
 .rating-said:active { opacity: 0.5; }
+
+/* ---- remote browser view (#221) --------------------------------------- */
+/* The Mac is headless, so this sheet IS the window. The frame is an <img> and
+   nothing else — no site markup is ever injected into this document, which is
+   what keeps a hostile page from scripting the app or reaching the token. */
+/* The sheet is `max-height: 82%` and a flex column, so the body must be a
+   flex CHILD that can shrink — sized by its content instead, the controls were
+   pushed off the bottom of the screen: on a 430x900 phone the Done button
+   landed at y=899, unreachable, along with the text field and the scroll
+   buttons. Verified in a real browser; the JS tests could not have seen it. */
+.bv-body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 4px 12px 16px; display: flex; flex-direction: column; gap: 8px;
+}
+.bv-bar { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
+/* Done must never be the thing that scrolled away: it is how the session gets
+   recorded and the browser released. */
+.bv-bar:last-child {
+  position: sticky; bottom: 0; z-index: 1;
+  background: var(--bg-elev); padding: 6px 0 2px;
+}
+.bv-url, .bv-text {
+  flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; font-size: 16px;
+  background: var(--chip-bg); color: var(--fg); border: 1px solid transparent;
+}
+.bv-url { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
+.bv-btn {
+  padding: 10px 14px; border-radius: 10px; font-size: 16px; font-weight: 600;
+  background: var(--chip-bg); color: var(--fg); border: 1px solid transparent;
+}
+.bv-btn:active { opacity: 0.75; }
+.bv-done { background: var(--blue); color: #fff; margin-left: auto; }
+.bv-status {
+  font-size: 13px; color: var(--dim); min-height: 18px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bv-stage { flex: 0 0 auto; position: relative; background: #000; border-radius: 12px; overflow: hidden; }
+/* `contain` letterboxes rather than distorting: a stretched frame would make
+   every tap land somewhere other than where it looks. [BROWSER-VIEW-COORDS-START]
+   maps around the letterbox it creates. */
+.bv-frame {
+  display: block; width: 100%; max-height: 44vh; object-fit: contain;
+  min-height: 220px; background: #000;
+  transform-origin: center center;
+  touch-action: none;   /* the pointer handlers own pan and pinch, not the page */
+  will-change: transform;
+}
+/* Animated only when letting go. While a finger is down the frame must track
+   it exactly, or the whole thing feels like it is lagging behind. */
+.bv-frame.settling { transition: transform 0.18s ease-out; }
+.bv-reset {
+  position: absolute; right: 8px; top: 8px; z-index: 2;
+  padding: 6px 10px; border-radius: 8px; border: none;
+  font-size: 13px; font-weight: 700;
+  background: rgba(0, 0, 0, 0.55); color: #fff;
+}
+.bv-busy {
+  position: absolute; inset: 0; background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(1px);
+}
+.bv-busy::after {
+  content: ""; position: absolute; top: 50%; left: 50%; width: 26px; height: 26px;
+  margin: -13px 0 0 -13px; border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.25); border-top-color: #fff;
+  animation: bv-spin 0.8s linear infinite;
+}
+@keyframes bv-spin { to { transform: rotate(360deg); } }

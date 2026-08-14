@@ -1466,6 +1466,7 @@ function handle(event) {
     case "model_changed": onModelChanged(event); break;
     case "cwd_changed": renderWorkspace(event); break;
     case "job_list": $("ws-jobs").textContent = event.text || "—"; break;
+    case "browser_view": onBrowserView(event); break;
     case "file_list": onFileList(event); break;
     case "session_state": onSessionState(event); break;
     case "session_deleted": onSessionDeleted(event); break;
@@ -4884,7 +4885,7 @@ function quickReplyChip(label, payload) {
     if (seedOnly) {
       input.focus(); // let the user complete the sentence before sending
     } else {
-      submitInput(); // one-tap send
+      submitInput({ fromChip: true }); // one-tap send — as a message, never a command
     }
   };
   return btn;
@@ -7708,12 +7709,21 @@ function acceptSuggestion([value]) {
   if (kind !== "slash") updateSuggest();
 }
 
-function submitInput() {
+// [CHIP-NEVER-COMMANDS-START]
+function submitInput(options) {
   hideSuggest();
   if (dictating) stopDictation(); // tapping send finishes an in-progress dictation
   if (cmdMode) { submitCommand(); return; }
   let text = input.value.trim();
-  if (text.startsWith("/")) {
+  // A CHIP IS A MESSAGE, NEVER A COMMAND. Chip labels and payloads come from
+  // MODEL output, which under prompt injection is attacker-controlled — and a
+  // chip sends on one tap. Routing that through handleSlash let a hostile
+  // fetched page render a friendly "Sign in to continue" button that opened
+  // aish's OWN login sheet at a credential-harvesting URL. The sheet is
+  // designed to feel trustworthy, which is exactly the trust it abused.
+  // Slash commands are privileged local actions and must be TYPED by the human.
+  const fromChip = !!(options && options.fromChip);
+  if (text.startsWith("/") && !fromChip) {
     // Only clear once the command is handled/sent — an unknown command, an
     // ambiguous prefix, or a failed send keeps the text so it isn't lost (#101).
     if (handleSlash(text)) {
@@ -7724,6 +7734,7 @@ function submitInput() {
     }
     return;
   }
+  // [CHIP-NEVER-COMMANDS-END]
   if (!text && !attachments.length) return;
   // The server decides per-backend whether attachments go to the model
   // natively (vision) or as path notes for the gated tools.
@@ -7801,9 +7812,18 @@ function handleSlash(text) {
     case "/jobs": openSheet("workspace-sheet"); return send({ type: "jobs" });
     // The rest of the line is the argument: a URL to sign in at, or
     // "forget <host>" / "close". The window itself opens on the Mac.
-    case "/browser":
+    case "/browser": {
+      // A URL means "let me drive it": the Mac is headless, so an on-screen
+      // window there would be a window nobody can reach. The bare form and the
+      // bookkeeping verbs stay plain text in the workspace sheet.
+      const verb = arg.split(/\s+/)[0].toLowerCase();
+      if (arg && verb !== "forget" && verb !== "logout" && verb !== "close") {
+        openBrowserView(arg);
+        return true;
+      }
       openSheet("workspace-sheet");
       return send({ type: "browser", arg });
+    }
     case "/session": copyLogPath(); return true; // path came in on hello (#146)
     case "/mic": openMicSheet(); return true;
     case "/help": openSheet("workspace-sheet"); return true;
@@ -10109,6 +10129,275 @@ function micContext() {
     : "running in: browser tab";
   $("mic-support").innerHTML = `${support}<br>${ctx}`;
 }
+
+// ---- remote browser view -------------------------------------------------
+// The Mac runs headless, so the on-screen login window is unreachable in
+// practice. This drives aish's OWN browser from the PWA: a frame arrives, a
+// tap becomes a click at the same coordinates, and the next frame comes back.
+//
+// PIXELS, NOT A PROXY, and that is a security property as much as a rendering
+// one: the site's HTML never enters this document, so nothing it contains can
+// script this page or reach the session token. The <img> is the entire
+// attack surface.
+//
+// Nothing typed here is logged anywhere — the owner puts real passwords
+// through it.
+let bvFrame = { width: 1024, height: 1400 };
+let bvBusy = false;
+
+// [BROWSER-VIEW-ZOOM-START]
+// Zoom exists for one job: hitting a small field — a password box on a phone —
+// accurately. So a drag PANS and never dismisses (unlike the photo lightbox,
+// where drag-down closes), and a press that did not move is still a click on
+// the page. The frame is captured at 2x, so zooming in stays sharp rather
+// than showing an enlarged blur.
+const BV_MAX_ZOOM = 4;
+const BV_TAP_SLOP = 8;           // px of movement still counted as a tap
+let bvZoom = { scale: 1, x: 0, y: 0 };
+const bvPointers = new Map();
+let bvDragFrom = null;           // {x, y, zoom, moved} while one finger is down
+let bvPinchFrom = null;          // {dist, scale} while two are
+let bvLastTapAt = 0;
+
+/** Keep the picture over the stage: at 1x it is centred and immovable, and
+ *  zoomed in it can never be panned so far that the page is off screen. The
+ *  ONE writer of the transform clamps, so an out-of-bounds pan is unwritable
+ *  rather than merely unwritten. */
+function bvClamp(zoom, stage) {
+  const scale = Math.max(1, Math.min(BV_MAX_ZOOM, zoom.scale));
+  const slackX = Math.max(0, (stage.width * scale - stage.width) / 2);
+  const slackY = Math.max(0, (stage.height * scale - stage.height) / 2);
+  return {
+    scale,
+    x: Math.max(-slackX, Math.min(slackX, zoom.x)),
+    y: Math.max(-slackY, Math.min(slackY, zoom.y)),
+  };
+}
+
+function bvPaint(settle) {
+  const img = $("bv-frame");
+  const stage = img.parentElement.getBoundingClientRect();
+  bvZoom = bvClamp(bvZoom, { width: stage.width, height: stage.height });
+  img.classList.toggle("settling", !!settle);
+  // translate BEFORE scale: the transform is read back through the element's
+  // bounding box by [BROWSER-VIEW-COORDS-START], which needs a uniform scale
+  // it can invert.
+  img.style.transform =
+    `translate(${bvZoom.x}px, ${bvZoom.y}px) scale(${bvZoom.scale})`;
+  $("bv-reset").hidden = bvZoom.scale === 1;
+}
+
+function bvZoomAt(scale, clientX, clientY) {
+  // Zoom about the point under the finger, so the thing being aimed at stays
+  // put instead of sliding out from under it.
+  const img = $("bv-frame");
+  const box = img.getBoundingClientRect();
+  const cx = clientX - (box.left + box.width / 2);
+  const cy = clientY - (box.top + box.height / 2);
+  const factor = scale / bvZoom.scale;
+  bvZoom = {
+    scale,
+    x: bvZoom.x - cx * (factor - 1),
+    y: bvZoom.y - cy * (factor - 1),
+  };
+  bvPaint(true);
+}
+
+function bvResetZoom() {
+  bvZoom = { scale: 1, x: 0, y: 0 };
+  bvPaint(true);
+}
+// [BROWSER-VIEW-ZOOM-END]
+
+// [BROWSER-VIEW-COORDS-START]
+function browserViewPoint(img, clientX, clientY) {
+  // The frame is letterboxed by `object-fit: contain`, so the rendered image
+  // is not the element: mapping a tap against the ELEMENT box would be off by
+  // the letterbox margin, and every click would land slightly wrong — worst
+  // exactly where it matters, on a small login field.
+  const box = img.getBoundingClientRect();
+  const scale = Math.min(box.width / bvFrame.width, box.height / bvFrame.height);
+  const shownW = bvFrame.width * scale;
+  const shownH = bvFrame.height * scale;
+  const originX = box.left + (box.width - shownW) / 2;
+  const originY = box.top + (box.height - shownH) / 2;
+  const x = (clientX - originX) / scale;
+  const y = (clientY - originY) / scale;
+  if (x < 0 || y < 0 || x > bvFrame.width || y > bvFrame.height) return null;
+  return { x: Math.round(x), y: Math.round(y) };
+}
+// [BROWSER-VIEW-COORDS-END]
+
+let bvBusyTimer = null;
+
+function bvIdle() {
+  bvBusy = false;
+  clearTimeout(bvBusyTimer);
+  $("bv-busy").hidden = true;
+}
+
+function bvSend(message) {
+  if (bvBusy) return false;           // one interaction in flight: frames must stay ordered
+  bvBusy = true;
+  $("bv-busy").hidden = false;
+  const sent = send(Object.assign({ type: "browser_view" }, message));
+  if (!sent) { bvIdle(); return false; }
+  // A reply is the only thing that clears the spinner, so a socket that dies
+  // mid-interaction would park it forever and the sheet would look wedged with
+  // nothing to tap. On a phone reaching a home server, a dropped socket is
+  // ordinary weather, not an edge case.
+  clearTimeout(bvBusyTimer);
+  bvBusyTimer = setTimeout(() => {
+    if (!bvBusy) return;
+    bvIdle();
+    $("bv-status").textContent = "no answer — tap again";
+  }, 60000);
+  return sent;
+}
+
+function onBrowserView(event) {
+  bvIdle();
+  if (event.action === "error") {
+    $("bv-status").textContent = `error: ${event.error}`;
+    return;
+  }
+  if (event.action === "closed") {
+    closeSheets();
+    const hosts = (event.hosts || []).join(", ");
+    showToast(hosts ? `signed in recorded: ${hosts}` : "browser closed");
+    return;
+  }
+  bvFrame = { width: event.width, height: event.height };
+  bvPaint(false);   // re-clamp: a new frame may be a different shape
+  $("bv-frame").src = `data:image/jpeg;base64,${event.jpeg}`;
+  $("bv-url").value = event.url || "";
+  $("bv-status").textContent = event.title || event.url || "";
+}
+
+function openBrowserView(url) {
+  openSheet("browser-sheet");
+  $("bv-status").textContent = "opening…";
+  $("bv-frame").removeAttribute("src");
+  bvResetZoom();
+  bvSend(Object.assign(
+    { action: "open", url: url || "https://www.google.com" }, bvViewportSize()));
+}
+
+/** The size the remote page should be laid out at: the stage we will show it
+ *  in. A phone therefore gets the site's MOBILE layout, which is the whole
+ *  reason this is measured rather than assumed. */
+function bvViewportSize() {
+  const stage = $("bv-frame").parentElement.getBoundingClientRect();
+  const width = Math.round(stage.width) || Math.round(window.innerWidth);
+  // The stage is short (it shares the sheet with the controls), so asking for
+  // its literal height would make every page a letterbox slot needing constant
+  // scrolling. Ask for a page-shaped viewport at the device's own width.
+  const height = Math.round(Math.max(window.innerHeight * 0.92, width * 1.4));
+  return { width, height };
+}
+
+function wireBrowserView() {
+  const img = $("bv-frame");
+
+  img.addEventListener("pointerdown", (e) => {
+    bvPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (bvPointers.size === 2) {
+      const [a, b] = [...bvPointers.values()];
+      bvPinchFrom = { dist: Math.hypot(a.x - b.x, a.y - b.y), scale: bvZoom.scale };
+      bvDragFrom = null;
+    } else if (bvPointers.size === 1) {
+      bvDragFrom = { x: e.clientX, y: e.clientY, zoom: { ...bvZoom }, moved: 0 };
+    }
+  });
+
+  img.addEventListener("pointermove", (e) => {
+    if (!bvPointers.has(e.pointerId)) return;
+    bvPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (bvPinchFrom && bvPointers.size === 2) {
+      const [a, b] = [...bvPointers.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      if (bvPinchFrom.dist > 0) {
+        bvZoom.scale = Math.max(1, Math.min(BV_MAX_ZOOM,
+          bvPinchFrom.scale * (dist / bvPinchFrom.dist)));
+        bvPaint(false);
+      }
+      return;
+    }
+    if (!bvDragFrom) return;
+    const dx = e.clientX - bvDragFrom.x;
+    const dy = e.clientY - bvDragFrom.y;
+    bvDragFrom.moved = Math.max(bvDragFrom.moved, Math.hypot(dx, dy));
+    if (bvZoom.scale > 1) {
+      bvZoom = { scale: bvZoom.scale, x: bvDragFrom.zoom.x + dx, y: bvDragFrom.zoom.y + dy };
+      bvPaint(false);
+      e.preventDefault();
+    }
+  }, { passive: false });
+
+  const release = (e) => {
+    const wasDrag = bvDragFrom;
+    const pinching = bvPointers.size >= 2 || bvPinchFrom;
+    bvPointers.delete(e.pointerId);
+    if (bvPointers.size < 2) bvPinchFrom = null;
+    if (bvPointers.size === 0) bvDragFrom = null;
+    if (pinching || !wasDrag || wasDrag.moved > BV_TAP_SLOP) return;
+
+    const now = Date.now();
+    if (now - bvLastTapAt < 300) {       // double tap toggles zoom
+      bvLastTapAt = 0;
+      bvZoomAt(bvZoom.scale > 1 ? 1 : 2.5, e.clientX, e.clientY);
+      if (bvZoom.scale === 1) bvResetZoom();
+      return;
+    }
+    bvLastTapAt = now;
+    // A single tap is a CLICK on the page. Deliberately not debounced against
+    // the double-tap window: waiting 300ms to act on every tap would make the
+    // whole view feel broken, and a stray extra click costs a frame, not data.
+    const point = browserViewPoint(img, e.clientX, e.clientY);
+    if (point) bvSend({ action: "click", x: point.x, y: point.y });
+  };
+  img.addEventListener("pointerup", release);
+  img.addEventListener("pointercancel", (e) => {
+    bvPointers.delete(e.pointerId);
+    bvPinchFrom = null;
+    if (!bvPointers.size) bvDragFrom = null;
+  });
+  $("bv-reset").addEventListener("click", bvResetZoom);
+  $("bv-go").addEventListener("click", () => bvSend({ action: "goto", url: $("bv-url").value.trim() }));
+  $("bv-url").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("bv-go").click(); }
+  });
+  $("bv-type").addEventListener("click", () => {
+    const text = $("bv-text").value;
+    if (!text) return;
+    // Cleared IMMEDIATELY: this field holds passwords, and a value left in a
+    // DOM node outlives the sheet.
+    $("bv-text").value = "";
+    bvSend({ action: "type", text });
+  });
+  $("bv-text").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("bv-type").click(); }
+  });
+  $("bv-enter").addEventListener("click", () => bvSend({ action: "key", key: "Enter" }));
+  $("bv-back").addEventListener("click", () => bvSend({ action: "back" }));
+  $("bv-down").addEventListener("click", () => bvSend({ action: "scroll", dy: 700 }));
+  $("bv-up").addEventListener("click", () => bvSend({ action: "scroll", dy: -700 }));
+  $("bv-refresh").addEventListener("click", () => bvSend({ action: "refresh" }));
+  $("bv-done").addEventListener("click", () => bvSend({ action: "close" }));
+
+  // A rotation or a keyboard changes the shape of the page we are showing, so
+  // the remote page is RE-LAID-OUT rather than the frame being stretched.
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    if ($("browser-sheet").hidden) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const size = bvViewportSize();
+      bvSend(Object.assign({ action: "resize" }, size));
+    }, 350);
+  });
+}
+wireBrowserView();
 
 function openMicSheet() {
   openSheet("mic-sheet");

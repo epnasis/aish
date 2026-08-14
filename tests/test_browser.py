@@ -12,6 +12,15 @@ from aish import browser
 from aish import web as web_module
 
 
+# A real listing runs to tens of thousands of characters — the measured
+# allegro.pl case is 403 WITH 23 000 chars of prices. Test bodies must be
+# page-sized, or they read as a block screen (browser.is_challenge).
+def page_sized(text):
+    return text + "\n" + "\n".join(
+        f"oferta {i} — 42,00 zl" for i in range(browser.CHALLENGE_MAX_CHARS // 20 + 10)
+    )
+
+
 @pytest.fixture
 def state(tmp_path, monkeypatch):
     monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
@@ -93,7 +102,8 @@ class TestReadUrlEscalation:
             browser,
             "read",
             lambda url, **kw: browser.Page(
-                text="37,80 zl", title="Allegro", images=[], url=url, status=403
+                text=page_sized("37,80 zl"), title="Allegro", images=[], url=url,
+                status=403,
             ),
         )
         out = web_module.read_url("https://allegro.pl/listing?string=x")
@@ -109,7 +119,7 @@ class TestReadUrlEscalation:
             browser,
             "read",
             lambda url, **kw: browser.Page(
-                text="prices", title="", images=[], url=url, status=403
+                text=page_sized("prices"), title="", images=[], url=url, status=403
             ),
         )
         assert not web_module.read_url("https://allegro.pl/x").startswith("ERROR")
@@ -204,7 +214,7 @@ class TestReadUrlEscalation:
             browser,
             "read",
             lambda url, **kw: browser.Page(
-                text="Zawiesie wężowe\n37,80 zł\n", title="", images=[],
+                text=page_sized("Zawiesie wężowe\n37,80 zł"), title="", images=[],
                 url=url, status=403,
             ),
         )
@@ -229,3 +239,118 @@ class TestReadUrlEscalation:
         assert web_module.PAGE_TITLES["https://allegro.pl/listing"] == (
             "Niska cena na Allegro"
         )
+
+
+class TestViewSize:
+    """The client's own viewport drives the remote page (#221). Not cosmetic:
+    matching the width is what makes a responsive site serve its MOBILE layout,
+    so a phone gets the phone page instead of a desktop page shrunk small."""
+
+    def test_a_phone_size_is_used_as_given(self):
+        assert browser.view_size(430, 900) == (430, 900)
+
+    def test_absurd_sizes_are_clamped_not_obeyed(self):
+        """A hostile or buggy client must not be able to ask for a 40000px
+        page — that is a memory bomb on a box with a 16 GB ceiling."""
+        assert browser.view_size(40000, 40000) == (browser.VIEW_MAX_W, browser.VIEW_MAX_H)
+        assert browser.view_size(1, 1) == (browser.VIEW_MIN_W, browser.VIEW_MIN_H)
+
+    def test_missing_or_junk_falls_back_to_the_default(self):
+        """This comes straight off a WebSocket, so it may be any JSON type."""
+        for bad in (None, 0, "", "abc", {}, [], True):
+            assert browser.view_size(bad, bad) == (browser.VIEW_WIDTH, browser.VIEW_HEIGHT)
+
+    def test_a_string_number_still_works(self):
+        assert browser.view_size("430", "900") == (430, 900)
+
+
+class TestChallengeDetection:
+    """A wall HAS text, so "the browser produced text" is not the same as "the
+    browser produced the page" (#221).
+
+    This is the original failure rebuilt one layer up: the session that
+    prompted this feature drowned in `Warning: This page maybe requiring
+    CAPTCHA`, and handing such a screen back as content would have the model
+    report a challenge's wording as the shop's, and invent from it."""
+
+    def test_the_measured_403_with_a_full_listing_is_not_a_challenge(self):
+        """The case the whole feature exists for: allegro.pl answers 403 and
+        still serves 23 000 characters of real prices. Length wins over status,
+        or the detector would throw away the exact page this is here to get."""
+        listing = "\n".join(f"oferta {i} — 42,00 zl" for i in range(2000))
+        assert len(listing) >= browser.CHALLENGE_MAX_CHARS
+        assert browser.is_challenge(listing, 403) is False
+
+    def test_a_short_body_with_a_block_status_is_a_challenge(self):
+        assert browser.is_challenge("Access denied", 403) is True
+        assert browser.is_challenge("slow down", 429) is True
+
+    def test_a_wall_is_caught_by_its_wording_even_on_a_200(self):
+        """Anti-bot vendors serve the interstitial with a 200 routinely."""
+        for wording in (
+            "Please verify you are human",
+            "Checking your browser before accessing",
+            "zweryfikuj, że jesteś człowiekiem",
+            "Powered by DataDome",
+        ):
+            assert browser.is_challenge(wording, 200) is True, wording
+
+    def test_a_short_ordinary_page_is_not_a_challenge(self):
+        """A brief article must not be discarded just for being brief."""
+        assert browser.is_challenge("A short but real note about hammocks.", 200) is False
+
+    def test_a_long_page_is_content_whatever_it_says(self):
+        """`captcha` appears on plenty of real pages — a help article about
+        them, for one. Length is the guard against that false positive."""
+        long_page = "how to solve a captcha " * 400
+        assert len(long_page) >= browser.CHALLENGE_MAX_CHARS
+        assert browser.is_challenge(long_page, 200) is False
+
+    def test_read_url_reports_a_challenge_as_an_error_not_as_the_page(self, monkeypatch):
+        monkeypatch.setattr(web_module, "_fetch", _http_error(403))
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text="Verify you are human", title="", images=[], url=url, status=403
+            ),
+        )
+        out = web_module.read_url("https://allegro.pl/x")
+        assert out.startswith("ERROR")
+        assert "Verify you are human" not in out
+
+
+class TestViewAndReadShareOneBrowser:
+    def test_a_read_refuses_while_the_owner_is_driving(self, monkeypatch):
+        """One browser, one profile. A read during a hand-driven view would be
+        made at the PHONE's viewport — a mobile layout returned as if it were
+        the page — and would steal the tab they are mid-login on."""
+        owner = browser._Owner()
+        owner.view = object()
+        monkeypatch.setattr(browser, "_submit", lambda fn, timeout: fn(owner))
+        with pytest.raises(browser.BrowserUnavailable, match="driven by hand"):
+            browser.read("https://example.com")
+
+
+class TestPreviewFence:
+    """`scripts/aish-preview.sh` points preview at PROD's state dir on purpose,
+    so preview shares this profile — the owner's LIVE signed-in sessions."""
+
+    def test_preview_gets_no_browser(self, monkeypatch):
+        monkeypatch.setenv("AISH_PREVIEW", "1")
+        assert "preview" in browser.unavailable_reason()
+
+    def test_production_is_unaffected(self, monkeypatch):
+        monkeypatch.delenv("AISH_PREVIEW", raising=False)
+        assert browser.unavailable_reason() == ""
+
+    def test_a_preview_read_falls_back_instead_of_using_the_profile(self, monkeypatch):
+        """The fence must hold at the READ, not merely in a status string —
+        preview is exactly where experimental branches meet hostile content."""
+        monkeypatch.setenv("AISH_PREVIEW", "1")
+        monkeypatch.setattr(web_module, "_fetch", _http_error(403))
+        called = []
+        monkeypatch.setattr(browser, "_submit", lambda fn, timeout: called.append(fn))
+        out = web_module.read_url("https://allegro.pl/x")
+        assert out.startswith("ERROR")
+        assert called == []

@@ -362,6 +362,43 @@ The key row is Blink-SmarterKeys-style: sticky-left `esc`/`ctrl`/`tab`, sticky-r
 
 ---
 
+## Quick-reply chips
+
+### `[CHIP-NEVER-COMMANDS]` — a chip is a message, never a command
+
+A chip's label and payload come from **model output**, and a chip sends on ONE TAP. `submitInput` routed any leading `/` through `handleSlash`, so under prompt injection a hostile fetched page could render a friendly *"Sign in to continue"* chip that opened aish's own remote-browser login sheet pointed at a credential-harvesting URL — borrowing precisely the trust that sheet is designed to have. Slash commands are privileged local actions and must be **typed by the human**: a chip carrying one is now sent as ordinary message text. `tests/js/test_chip_never_commands.js` pins both directions, since the typed path must keep working.
+
+## Remote browser view
+
+### `[BROWSER-VIEW-COORDS]` — where a tap actually lands
+
+The `/browser <url>` sheet shows aish's own Chrome (running on the headless Mac) as a letterboxed `<img>` and turns a tap into a click at the same point on the real page. `browserViewPoint` owns that translation.
+
+It must map against the **rendered image**, not the element box. `object-fit: contain` letterboxes the frame, so on any aspect ratio that does not match, the element is larger than the picture in one axis; mapping against the element is then off by the letterbox margin, increasingly so toward the edges. Nothing about that failure is visible — the frame still looks correct, the click simply lands elsewhere — and it is worst on a small login field on a phone, which is the entire reason the view exists. A tap in a letterbox bar returns `null` and is dropped, rather than being mapped to a plausible-but-wrong point inside the page.
+
+Two client-side rules go with it. `bvSend` refuses a second interaction while one is in flight, so frames cannot arrive out of order and paint a stale page. And the text field is cleared the instant it sends: the owner types real passwords through this sheet, and a value left in a DOM node outlives the sheet. Nothing typed here is logged, client or server (`docs/browser.md`).
+
+The site's markup never enters this document — the `<img>` is the whole rendering surface, so a hostile page cannot script the app or reach the access token.
+
+`tests/js/test_browser_view_coords.js` drives the shipped function through exact-fit, vertical- and horizontal-letterbox, offset-element, and zoomed/panned cases.
+
+### `[BROWSER-VIEW-ZOOM]` — pinch, pan, and why a drag is not a dismissal
+
+Zoom exists for one job: hitting a small field — a password box on a phone — accurately. Everything about the gesture set follows from that, and it deliberately differs from the photo lightbox next door:
+
+- **A drag PANS, and never dismisses.** In the lightbox a drag down closes the picture; here the picture is a live page the owner is aiming at, so closing on a drag would be losing their place mid-login. `Done` closes it.
+- **A press that did not move is still a click on the page** (`BV_TAP_SLOP`), so tapping a field works whether or not the finger wobbles.
+- **Double-tap toggles 1× ↔ 2.5×, about the tapped point**, so the thing being aimed at stays put rather than sliding out from under the finger. Pinch does the same continuously.
+- **A single tap is not debounced against the double-tap window.** Waiting 300 ms to act on every tap would make the view feel broken; a stray extra click costs one frame, not data.
+
+`bvClamp` is the one writer of the transform, and it clamps there rather than at each gesture: at 1× the picture exactly fills the stage and cannot be panned at all, and zoomed in it can never be panned past its own edge. Making an out-of-bounds pan *unwritable* rather than merely unwritten is the same discipline `previewPaint` uses, and for the same reason — five call sites agreeing is not an invariant. `tests/js/test_browser_view_clamp.js`.
+
+**Zoom must not move where a tap lands**, which is why `browserViewPoint` reads the element's transformed `getBoundingClientRect()` instead of tracking zoom state of its own: the browser has already applied the transform, so the mapper inverts one uniform scale and stays correct under any zoom or pan. The frame is captured at 2× device scale so zooming shows detail rather than an enlarged blur, while coordinates stay in CSS pixels. `tests/js/test_browser_view_coords.js` pins that a page point keeps its coordinates at 1× and 2×, panned and unpanned.
+
+**The remote page is sized to the CLIENT**, not to a fixed desktop viewport: the sheet measures its stage and sends the width, so a responsive site serves its *mobile* layout to a phone — tappable targets and one column instead of a desktop page shrunk to illegibility. A rotation or keyboard re-lays-out the remote page rather than stretching the frame. No user-agent is spoofed to achieve it: width is what responsive CSS keys on, and a UA disagreeing with the profile's own would risk the session later reads depend on (`docs/browser.md`).
+
+**The sheet's own layout is load-bearing and is NOT covered by those tests**, because the node harness has a fake DOM and no layout engine. `.sheet` is `max-height: 82%` and a flex column, so `.bv-body` must be a flex CHILD that can shrink (`flex: 1; min-height: 0; overflow-y: auto`). Sized by its content instead, the controls are pushed off the bottom of the screen: measured at a 430×900 phone viewport, the Done button landed at y=899 — unreachable, along with the text field and the scroll buttons — while every JS test still passed. The last `.bv-bar` is `position: sticky; bottom: 0` so Done can never be the thing that scrolled away; it is how the session gets recorded and the browser released. Changes here need a real browser at a phone viewport, not a unit test.
+
 ## Offline mirror (client)
 
 The server half — `GET /offline/index`, `GET /offline/session`, `_prefix_sig`, `offline_events` — is in `docs/web-server.md`.

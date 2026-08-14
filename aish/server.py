@@ -23,6 +23,7 @@ fanned out.
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import functools
 import hashlib
@@ -1682,6 +1683,8 @@ class WebServer:
         # Agent workers get their OWN pool so a parked approval can never
         # starve the short ops (replay, log parsing, peeks) that stay on the
         # default to_thread executor — see WORKER_POOL_SIZE.
+        # The client currently driving the remote browser view, if any (#221).
+        self._view_client: Client | None = None
         self.worker_pool = ThreadPoolExecutor(
             max_workers=WORKER_POOL_SIZE, thread_name_prefix="aish-worker"
         )
@@ -2062,7 +2065,24 @@ class WebServer:
         # Stop fanning console output at this dead socket. The console itself is
         # NEVER killed on disconnect — it's global and keeps running (#148).
         self.console_viewers.discard(client)
+        # A remote browser view belongs to the client driving it. Left open it
+        # holds Chrome AND the profile lock — the idle reaper deliberately will
+        # not collect a live view, since the owner routinely pauses mid-login
+        # waiting on a 2FA code. So the socket closing is what ends it.
+        if self._view_client is client and self.loop is not None:
+            self._view_client = None
+            self.loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._close_orphan_view())
+            )
         self._leave(client)
+
+    async def _close_orphan_view(self) -> None:
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                self.worker_pool, browser.view_close
+            )
+        except Exception:  # noqa: BLE001 — best effort; the idle cap is the backstop
+            pass
 
     def _leave(self, client: Client) -> None:
         """Remove `client` from its viewed session's viewer set. If it was that
@@ -2248,6 +2268,8 @@ class WebServer:
             await client.ws.send_json({"type": "job_list", "text": tools.jobs_table()})
         elif kind == "browser":
             await self._browser(client, str(message.get("arg", "")).strip())
+        elif kind == "browser_view":
+            await self._browser_view(client, message)
         elif kind == "files":
             await self._send_files(client, str(message.get("query", "")))
         elif kind == "stop":
@@ -3669,6 +3691,76 @@ class WebServer:
             self.worker_pool, browser.command, arg
         )
         await client.ws.send_json({"type": "job_list", "text": text})
+
+    async def _browser_view(self, client: Client, message: dict) -> None:
+        """The remote browser view: one frame per interaction (#221).
+
+        The owner runs this Mac headless and reaches aish as a PWA, so the
+        on-screen login window is unreachable for them in practice. This is the
+        same act done remotely — and it is PIXELS, not a proxy: rewriting a
+        site's URLs through aish would break its cookies, its runtime-built
+        URLs, its CSP and its OAuth redirects, and would still leave the
+        session in the wrong browser.
+
+        **Nothing here is ever logged.** The owner types real passwords through
+        this path, so the action and its arguments are handled and dropped —
+        no trace step, no session entry, no status line carrying the text.
+        """
+        action = str(message.get("action", "")).strip()
+        loop = asyncio.get_running_loop()
+        if action == "open":
+            self._view_client = client
+        elif action == "close":
+            self._view_client = None
+
+        def run():
+            if action == "open":
+                return browser.view_open(
+                    str(message.get("url", "")).strip(),
+                    width=message.get("width"),
+                    height=message.get("height"),
+                )
+            if action == "close":
+                return browser.view_close()
+            return browser.view_act(
+                action,
+                x=message.get("x", 0),
+                y=message.get("y", 0),
+                dy=message.get("dy", 600),
+                text=message.get("text", ""),
+                key=message.get("key", "Enter"),
+                url=message.get("url", ""),
+                width=message.get("width"),
+                height=message.get("height"),
+            )
+
+        try:
+            # Worker pool, not to_thread: a navigation can take tens of
+            # seconds and to_thread's executor is what the rest of the server
+            # renders on (see WORKER_POOL_SIZE).
+            result = await loop.run_in_executor(self.worker_pool, run)
+        except Exception as exc:  # noqa: BLE001 — the sheet must say what broke
+            await client.ws.send_json(
+                {"type": "browser_view", "action": "error", "error": str(exc)[:300]}
+            )
+            return
+
+        if action == "close":
+            await client.ws.send_json(
+                {"type": "browser_view", "action": "closed", "hosts": result}
+            )
+            return
+        await client.ws.send_json(
+            {
+                "type": "browser_view",
+                "action": "frame",
+                "jpeg": base64.b64encode(result.jpeg).decode("ascii"),
+                "url": result.url,
+                "title": result.title,
+                "width": result.width,
+                "height": result.height,
+            }
+        )
 
     async def _add_dir(self, client: Client, path: str) -> None:
         session = client.viewing
