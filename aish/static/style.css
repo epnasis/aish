@@ -3114,6 +3114,17 @@ body.console-open {
    space. Real buttons, a real row, and the sheet reaches the bottom of the
    screen so nothing is wasted below it. */
 .bv-nav { padding: 2px 0 0; gap: 10px; }
+/* While a field is open, this is an editor with a page behind it rather than a
+   browser with a field in it, so the browser's own toolbar stands down — which
+   is what Safari does with its bottom bar under the keyboard, and what stops
+   Back being a footgun in the middle of a login. It also hands the stage the
+   50px back, so you see more of the page you are signing in to.
+   Keyed on the [hidden] attribute `bvOpenEditor`/`bvCloseEditor` already
+   toggle: there is no second piece of state that can fall out of step. It does
+   depend on `#bv-edit` and `.bv-nav` staying siblings — pinned by
+   tests/test_browser_view_layout.py, since a silent un-match here is invisible
+   until someone is typing in landscape. */
+#bv-edit:not([hidden]) ~ .bv-nav { display: none; }
 .bv-navbtn {
   width: 44px; height: 40px; padding: 0; display: flex;
   align-items: center; justify-content: center;
@@ -3176,7 +3187,15 @@ body.console-open {
   /* basis 0, NOT auto: with `auto` the flex base size is the content size —
      the frame's intrinsic 828px — so the stage sized itself to the image and
      overflowed the sheet instead of absorbing what was left. */
-  flex: 1 1 0; min-height: 150px; position: relative;
+  /* The floor is a TAP TARGET, not a picture. This stage is the only elastic
+     row in the column, so a floor on it is a floor on everything BELOW it —
+     whatever will not fit lands on the nav row and on the field being typed
+     into. Measured with the keyboard up in landscape (a 234px visual
+     viewport): at 150px the password input sat at y=336, a hundred pixels
+     below the screen, which is the third time this sheet has hidden a control
+     that way. 44px keeps the one gesture that LEAVES a field — a tap on the
+     page — reachable, and concedes everything after that. */
+  flex: 1 1 0; min-height: 44px; position: relative;
   background: #000; border-radius: 12px; overflow: hidden;
 }
 /* `contain` letterboxes rather than distorting: a stretched frame would make
@@ -3295,3 +3314,30 @@ body.console-open {
 .bv-edit-note { font-size: 12px; color: var(--dim); }
 .bv-edit-note:empty { display: none; }
 .bv-edit-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ---- the phone held sideways, with a field open --------------------------
+   A landscape keyboard leaves about 205px of visual viewport on a phone, and
+   51 of those were going on padding. Measured: even with the stage down to a
+   tap target and the nav row stood down, the column did not fit until 357px —
+   so the field was off the screen for the whole of landscape. In that one
+   state the sheet spends nothing on anything but the address, the page and the
+   field: no grabber, no hint line, and the smallest padding that still reads
+   as a card. It now fits down to a 200px viewport, on every phone measured.
+
+   `max-height` reads the LAYOUT viewport, which iOS deliberately keeps
+   full-height under the keyboard (the trap `.sheet` documents), so this means
+   "the phone is sideways", not "the keyboard is up" — and portrait, where
+   everything already fits, is untouched. 500px because an iPhone 16 Pro Max is
+   440px tall in landscape and 430 missed it, while the shortest phone in
+   portrait is 568.
+   Verified with scripts/check-browser-sheet.py, which is the only thing that
+   can see this: the node tests have no layout engine. */
+@media (max-height: 500px) {
+  #browser-sheet:has(#bv-edit:not([hidden])) .grabber,
+  #browser-sheet:has(#bv-edit:not([hidden])) .bv-status { display: none; }
+  #browser-sheet:has(#bv-edit:not([hidden])) .bv-body { padding-bottom: 0; gap: 6px; }
+  #browser-sheet:has(#bv-edit:not([hidden])) .bv-edit-card { padding: 6px 10px; }
+  #browser-sheet:has(#bv-edit:not([hidden])) {
+    padding-bottom: calc(4px + env(safe-area-inset-bottom));
+  }
+}

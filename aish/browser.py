@@ -983,15 +983,35 @@ def command(arg: str) -> str:
 # The default when a client says nothing; every real one sends its own size.
 VIEW_WIDTH = 1024
 VIEW_HEIGHT = 1400
-# Frames carry ~3x the page now, so they are bigger. Measured at 1280x2134,
-# device_scale_factor 2: q35=425KB, q50=502KB, q65=595KB. 40 keeps text legible
-# under a 2-3x zoom — which is the whole strategy — without a half-megabyte
-# frame on a mobile connection.
-VIEW_JPEG_QUALITY = 40
-# Rendered at 2x so a zoomed-in frame stays sharp. The owner zooms to hit a
-# small password field, and a 1x capture blown up is exactly where that fails.
-# Coordinates stay in CSS pixels — only the image has more of them.
-VIEW_SCALE = 2
+# Quality and pixel density were both set on a guess, and the owner then asked
+# whether the frame was simply too big (#227). Measured on an allegro.pl
+# listing, one 1280x1950 frame, bytes at q40:
+#
+#   density   1280 wide   1024 wide   768 wide
+#   2x        446 KB      350 KB      250 KB
+#   1.5x      295 KB      247 KB      167 KB
+#   1x        182 KB      134 KB       93 KB
+#
+# The width was never what cost the bytes. Narrowing the frame is the expensive
+# saving — it is paid for in page per round trip, the one thing this view is
+# optimised for — while the DENSITY is free of that trade: 1.5x is the same
+# 1280 CSS pixels of page, the same layout, the same text, for a third fewer
+# bytes. So the width stays and the density comes down.
+#
+# What density buys is zoom headroom, and only up to a point. The stage is
+# ~430 CSS px on a phone, so a 1280-wide frame is displayed at ~0.34 and the
+# picture stops gaining detail once its own pixels run out: parity is at zoom
+# == density, i.e. 2x held detail to a 2x zoom, 1.5x holds it to 1.5x. Beyond
+# that it is the JPEG being magnified either way — the double-tap is 2.5x, so
+# even the shipped 2x was already past parity there. Crops of a price row at
+# 2.5x, resampled exactly as the phone does it: 2x q40 and 1.5x q50 are hard to
+# tell apart, and 1x q50 is visibly soft. So the density that was dropped is
+# partly bought back in QUALITY, which is far cheaper per byte (q40 -> q50 is
+# +12%, 2x -> 1.5x is -34%).
+#
+# Net: 331 KB where the shipped setting was 446 KB, for the same page.
+VIEW_JPEG_QUALITY = 50
+VIEW_SCALE = 1.5
 # A NATIVE dialog is a dead end in the remote view, by construction: it is
 # browser chrome, not page content, so `page.screenshot` cannot see it and the
 # owner has nothing to tap. Passkeys are the case that bit — Google's sign-in
