@@ -42,7 +42,7 @@ The same page returns **7 833 characters on a cold profile and ZERO on a warm on
 
 Without that step the browser was **weaker than a third-party reader had any right to make it look**, which is the observation that produced this section — a real Chrome with a real profile should be strictly better than a session-less datacenter fetcher on every page, and where it isn't, the defect is in how it is driven.
 
-**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case. `TestVisitingIsNotSigningIn` pins that a visit writes nothing. `TestPasswordsAreNeverReadBack` and `TestEditingUsesRealKeystrokes` pin the input contract.
+**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case. `TestVisitingIsNotSigningIn` pins that a visit writes nothing. `TestPasswordsAreNeverReadBack` and `TestEditingUsesRealKeystrokes` pin the input contract; `TestNativeDialogsAreDeadEnds` pins the passkey removal.
 
 ## Status is diagnostic only
 
@@ -157,6 +157,18 @@ The first input design was a text bar living permanently in the sheet. Every par
 **`tapped` is decided here, not on the phone.** Focus moves as a side effect — pages autofocus their first input, dismissing a cookie banner can leave focus in one — so the server hit-tests the click against the focused element's rect. Only a tap that landed ON the field opens an editor; anything else just draws the outline.
 
 **Writing is real keystrokes: select-all, then type.** Not Playwright `fill()`, which dispatches one `input` event and no key events at all. Keystroke-listening widgets break on that, and 2FA code boxes break outright — six one-character inputs that advance focus on each keyup would take `"123456"` into box one. Logins with 2FA are this feature's primary scenario. Typing over a selection also works in any iframe against whatever is focused, with no element handle to go stale. `TestEditingUsesRealKeystrokes`.
+
+## A native dialog is a dead end, so the capability is removed
+
+The owner tried to sign in to Google, and after entering his email the page went grey and the password step never came. Back did not recover it.
+
+Cause: **Chrome's passkey prompt is browser chrome, not page content**, so `page.screenshot` cannot capture it — he was looking at a dimmed page behind a dialog that does not exist as far as this UI is concerned, with nothing to tap. Google's sign-in uses WebAuthn *conditional UI*, which fires the moment an email field is focused. Measured in this browser before the fix: WebAuthn available, conditional mediation available.
+
+So WebAuthn is **removed** from the view rather than attempted, and sites fall back to a password — the flow he can actually complete. This is not a judgement about passkeys; it is that offering one here can only ever produce a dead end. If native dialogs are ever surfaced, this goes.
+
+The same reasoning covers the rest of the class. Playwright **dismisses native dialogs by default, silently**, so a login that alerted an error would vanish without trace — they are reported into the frame's message instead. A file-upload picker would open a native chooser on a Mac nobody is sitting at and simply hang; it is cancelled with an explanation. `TestNativeDialogsAreDeadEnds`.
+
+Still open in this class: `<select>` opens a native dropdown that screenshots do not capture, so a tap on one looks inert.
 
 ## Testing
 

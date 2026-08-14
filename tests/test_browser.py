@@ -692,3 +692,35 @@ class TestEditingUsesRealKeystrokes:
         assert "ControlOrMeta+a" in source
         assert "keyboard.type" in source
         assert ".fill(" not in source
+
+
+class TestNativeDialogsAreDeadEnds:
+    """A native dialog is browser CHROME, not page content, so `screenshot`
+    cannot see it and the owner has nothing to tap (#221).
+
+    Passkeys are the case that bit: Google's sign-in uses WebAuthn conditional
+    UI, which fires the moment an email field is focused. The owner reported
+    the page going grey after entering his email, with the password step never
+    arriving and Back not recovering it — a prompt he could not see. Measured
+    in this browser before the fix: WebAuthn available, conditional mediation
+    available."""
+
+    def test_webauthn_is_removed_from_the_view(self):
+        script = browser._NO_NATIVE_CREDENTIAL_UI
+        assert "PublicKeyCredential" in script
+        assert "navigator" in script and "credentials" in script
+
+    def test_the_view_installs_it_before_navigating(self):
+        import inspect
+
+        source = inspect.getsource(browser._open_view)
+        assert "add_init_script(_NO_NATIVE_CREDENTIAL_UI)" in source
+        assert source.index("add_init_script") < source.index("page.goto")
+
+    def test_a_native_dialog_is_reported_rather_than_silently_dismissed(self):
+        """Playwright dismisses dialogs by DEFAULT, silently — so a login that
+        alerts an error would vanish without trace."""
+        import inspect
+
+        assert "filechooser" in inspect.getsource(browser._open_view)
+        assert "cannot be shown here" in inspect.getsource(browser._refuse_upload)

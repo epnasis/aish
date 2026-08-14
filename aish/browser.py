@@ -43,6 +43,7 @@ The context is kept warm between reads (a launch costs ~2s) but closed after
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 import time
@@ -530,6 +531,7 @@ class _Owner:
         self.view_hosts: set[str] = set()
         self.view_touched = 0.0
         self.busy = 0
+        self.notice = ""   # something native happened that the frame cannot show
 
     def run(self) -> None:
         import asyncio
@@ -835,6 +837,25 @@ VIEW_JPEG_QUALITY = 50
 # small password field, and a 1x capture blown up is exactly where that fails.
 # Coordinates stay in CSS pixels — only the image has more of them.
 VIEW_SCALE = 2
+# A NATIVE dialog is a dead end in the remote view, by construction: it is
+# browser chrome, not page content, so `page.screenshot` cannot see it and the
+# owner has nothing to tap. Passkeys are the case that bit — Google's sign-in
+# uses WebAuthn conditional UI, which fires the moment an email field is
+# focused: the page dims behind a prompt the owner cannot see, the password
+# step never arrives, and Back does not recover it. Measured in this browser:
+# WebAuthn available = True, conditional mediation available = True.
+#
+# So the capability is REMOVED rather than attempted, and sites fall back to a
+# password — which is the flow the owner can actually complete. This is not a
+# preference about passkeys; it is that offering one here can only ever produce
+# a dead end. If native dialogs are ever surfaced, this goes.
+_NO_NATIVE_CREDENTIAL_UI = """
+try {
+  delete window.PublicKeyCredential;
+  Object.defineProperty(navigator, 'credentials', { get: () => undefined });
+} catch (e) { /* a site that froze navigator keeps its passkeys; nothing to do */ }
+"""
+
 VIEW_MIN_W, VIEW_MAX_W = 320, 1920
 VIEW_MIN_H, VIEW_MAX_H = 400, 2400
 
@@ -922,6 +943,25 @@ def view_open(
     return _submit(job, timeout)
 
 
+async def _note_dialog(owner: _Owner, dialog: Any) -> None:
+    owner.notice = f"the page said: {dialog.message[:200]}"
+    try:
+        await dialog.dismiss()
+    except Exception:  # noqa: BLE001 — already gone
+        pass
+
+
+async def _refuse_upload(owner: _Owner, chooser: Any) -> None:
+    owner.notice = (
+        "this page asked to upload a file — the picker is a native dialog on "
+        "the Mac and cannot be shown here, so it was cancelled"
+    )
+    try:
+        await chooser.set_files([])
+    except Exception:  # noqa: BLE001 — cancelling a dead chooser is fine
+        pass
+
+
 async def _open_view(owner: _Owner, url: str, w: int, h: int) -> Frame:
     # A KNOWN viewport, so a tap at (x, y) in the PWA means that point
     # here. The read context uses the real window size and cannot give
@@ -934,6 +974,15 @@ async def _open_view(owner: _Owner, url: str, w: int, h: int) -> Frame:
         device_scale_factor=VIEW_SCALE,
     )
     page = await context.new_page()
+    await page.add_init_script(_NO_NATIVE_CREDENTIAL_UI)
+    # Native dialogs the owner cannot see either. Playwright DISMISSES these by
+    # default, silently — so a login that asks "leave site?" or alerts an error
+    # would vanish without trace. Accepting and reporting at least leaves the
+    # words on screen.
+    page.on("dialog", lambda d: asyncio.ensure_future(_note_dialog(owner, d)))
+    # A file chooser opens a native picker on a Mac nobody is sitting at, which
+    # would simply hang. Refuse it and say so.
+    page.on("filechooser", lambda c: asyncio.ensure_future(_refuse_upload(owner, c)))
     owner.view = page
     owner.view_hosts = set()
     owner.view_touched = time.monotonic()
@@ -1022,7 +1071,11 @@ def view_act(action: str, **kwargs: Any) -> Frame:
             raise ValueError(f"unknown view action {action!r}")
         owner.view_touched = time.monotonic()
         _note_visit(owner, page.url)
-        return await _frame(owner, clicked)
+        frame = await _frame(owner, clicked)
+        if owner.notice:
+            frame.error = owner.notice
+            owner.notice = ""
+        return frame
 
     return _submit(job, 120.0)
 

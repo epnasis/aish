@@ -10198,6 +10198,12 @@ function bvPaint(settle) {
   img.style.transform =
     `translate(${bvZoom.x}px, ${bvZoom.y}px) scale(${bvZoom.scale})`;
   bvShowZoom();
+  // The outline is positioned from the image's CURRENT geometry, so it has to
+  // be redrawn whenever that geometry moves. Painting it only when a frame
+  // arrived left it pinned to where the field used to be the moment anything
+  // was zoomed or panned — which is exactly when an outline matters most,
+  // because zoom is what you reach for to hit a small field.
+  bvPaintFocus(bvFocusRect);
 }
 
 /** Announce the zoom level WITHOUT inventing a control.
@@ -10285,6 +10291,8 @@ function browserViewPoint(img, clientX, clientY) {
 // [BROWSER-VIEW-COORDS-END]
 
 let bvOpen = false;   // is a remote browser actually running on the Mac?
+let bvFocusRect = null;  // the focused field, in FRAME coords, from the last frame
+let bvLastUrl = "";      // to notice a navigation
 let bvBusyTimer = null;
 
 // [BROWSER-VIEW-END-START]
@@ -10373,7 +10381,6 @@ function onBrowserView(event) {
   }
   bvOpen = true;    // a frame means a browser is running on the Mac
   bvFrame = { width: event.width, height: event.height };
-  bvPaint(false);   // re-clamp: a new frame may be a different shape
   $("bv-frame").src = `data:image/jpeg;base64,${event.jpeg}`;
   // A goto that threw navigated NOWHERE, so the frame is a white about:blank.
   // Showing it with an empty address bar and no word of explanation is what
@@ -10384,7 +10391,16 @@ function onBrowserView(event) {
     $("bv-url").value = event.url || "";
     $("bv-status").textContent = event.title || event.url || "";
   }
-  bvPaintFocus(event.focus);
+  // --- a NAVIGATION resets the zoom -------------------------------------
+  // Arriving at a new page at the previous page's magnification, scrolled to
+  // wherever that one was panned, is disorienting — and no browser does it.
+  // Keyed on the URL rather than on the action, so tapping a LINK resets too.
+  if (event.url && event.url !== bvLastUrl) {
+    bvLastUrl = event.url;
+    bvZoom = { scale: 1, x: 0, y: 0 };
+  }
+  bvFocusRect = event.focus || null;
+  bvPaint(false);   // re-clamp AND redraw the outline for the new geometry
   if (event.focus && event.focus.tapped && event.focus.editable) bvOpenEditor(event.focus);
 }
 
@@ -10429,6 +10445,10 @@ function bvCloseEditor() {
   bvEditing = null;
 }
 
+// Editing a value and SUBMITTING a form are two different acts, and offering
+// them as two similar buttons ("Set" / "Set & submit") made both unclear. Now:
+// the button only puts the value in the field, and the keyboard's own Go key
+// submits — which is how a form works in every browser.
 function bvCommit(submit) {
   const text = $("bv-edit-input").value;
   // Send BEFORE clearing: bvSend refuses while an interaction is in flight,
@@ -10455,7 +10475,6 @@ function wireBrowserEditor() {
   });
   $("bv-edit-cancel").addEventListener("click", bvCloseEditor);
   $("bv-edit-set").addEventListener("click", () => bvCommit(false));
-  $("bv-edit-go").addEventListener("click", () => bvCommit(true));
   $("bv-edit-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); bvCommit(true); }
     if (e.key === "Escape") { e.preventDefault(); bvCloseEditor(); }
@@ -10470,6 +10489,8 @@ function bvPaintFocus(focus) {
   const img = $("bv-frame");
   if (!box) return;
   if (!focus || !focus.rect || !focus.rect.w) { box.hidden = true; return; }
+  // Same contain-fit geometry the tap mapper inverts, read fresh each time so
+  // it tracks the transform.
   const r = img.getBoundingClientRect();
   const stage = img.parentElement.getBoundingClientRect();
   const scale = Math.min(r.width / bvFrame.width, r.height / bvFrame.height);
@@ -10597,6 +10618,13 @@ function wireBrowserView() {
       bvSend({ action: "click", x: point.x, y: point.y });
     }, BV_DOUBLE_TAP_MS);
   };
+  // The outline is measured from the image's live geometry, and a settling
+  // zoom ANIMATES over 180ms — so the paint that happens as the animation
+  // STARTS measures the old size and the outline stays put while the field
+  // slides away under it. Repaint when the transform finishes.
+  img.addEventListener("transitionend", (e) => {
+    if (e.propertyName === "transform") bvPaintFocus(bvFocusRect);
+  });
   // Belt and braces with draggable="false": some paths still raise dragstart,
   // and one is enough to cancel the pointer stream mid-swipe.
   img.addEventListener("dragstart", (e) => e.preventDefault());
