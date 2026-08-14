@@ -489,15 +489,20 @@
        a Mac. An in-app browser puts the address and the close together at the
        top; the address bar carries the identity. -->
   <div class="bv-bar bv-top">
-    <input id="bv-url" class="bv-url" type="url" inputmode="url" enterkeyhint="go"
-           autocapitalize="off" autocorrect="off" spellcheck="false"
-           placeholder="Search or enter address">
-    <!-- Close lives here, top-right, as a quiet ✕ — not a blue button in the
-         bottom bar, where it read as the primary action and got pressed by
-         accident with nothing to undo it. -->
-    <button class="bv-x" data-close="browser-sheet" aria-label="close browser">
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg>
-    </button>
+    <span class="bv-url-wrap">
+      <input id="bv-url" class="bv-url" type="url" inputmode="url" enterkeyhint="go"
+             autocapitalize="off" autocorrect="off" spellcheck="false"
+             placeholder="Search or enter address">
+      <!-- An X at the right of an address bar CLEARS THE FIELD. That is what
+           it means in every browser, and it was closing the whole session
+           instead — a tap meant to erase a URL destroyed a login in progress. -->
+      <button id="bv-url-clear" type="button" class="bv-inline-x" aria-label="clear address">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor" opacity=".28"/><path d="M9 9l6 6m0-6l-6 6" fill="none" stroke="var(--bg)" stroke-width="2.1" stroke-linecap="round"/></svg>
+      </button>
+    </span>
+    <!-- Closing is a WORD, not a glyph beside a text field: an in-app browser
+         says Done, and a word cannot be mistaken for a field control. -->
+    <button class="bv-btn bv-close-word" data-close="browser-sheet">Done</button>
   </div>
   <div class="bv-body">
     <div id="bv-status" class="bv-status">Tap a field to type · double-tap to zoom</div>
@@ -519,19 +524,12 @@
       <div id="bv-focus" class="bv-focus" hidden></div>
       <div id="bv-busy" class="bv-busy" hidden></div>
     </div>
-    <div class="bv-bar bv-nav">
-      <button id="bv-back" class="bv-btn" aria-label="back">‹ Back</button>
-      <button id="bv-refresh" class="bv-btn" aria-label="reload">↻</button>
-    </div>
-  </div>
-</div>
-
-<!-- Field editor: opened when a tap lands ON a text field in the remote page.
-     Sits above the keyboard as its own layer, so it can never be pushed under
-     the fold the way the old in-sheet bar was. -->
-<div id="bv-edit" class="modal" hidden role="dialog" aria-modal="true"
-     aria-labelledby="bv-edit-label">
-  <div class="modal-card bv-edit-card">
+<!-- A focus bar, not a modal. It is the page's field brought within reach:
+     the field's name, the value, and nothing else. Tapping away commits and
+     leaves, exactly as blurring a real field keeps what you typed; the
+     keyboard's Go submits. No Done button, no paragraph of explanation. -->
+<div id="bv-edit" class="bv-edit" hidden role="group" aria-labelledby="bv-edit-label">
+  <div class="bv-edit-card">
     <div id="bv-edit-label" class="bv-edit-label">Field</div>
     <!-- Both controls sit INSIDE the field, on its right edge, which is where
          every platform puts them and where the owner already looks. They were
@@ -552,13 +550,19 @@
       </button>
     </div>
     <div id="bv-edit-note" class="bv-edit-note"></div>
-    <div class="bv-edit-hint">Done puts the value in the field · the keyboard's Go submits the form</div>
-    <div class="bv-edit-actions">
-      <button id="bv-edit-cancel" class="bv-btn">Cancel</button>
-      <button id="bv-edit-set" class="bv-btn bv-primary">Done</button>
+  </div>
+</div>
+    <div class="bv-bar bv-nav">
+      <button id="bv-back" class="bv-btn" aria-label="back">‹ Back</button>
+      <button id="bv-refresh" class="bv-btn" aria-label="reload">↻</button>
     </div>
   </div>
 </div>
+
+<!-- Field editor: opened when a tap lands ON a text field in the remote page.
+     Sits above the keyboard as its own layer, so it can never be pushed under
+     the fold the way the old in-sheet bar was. -->
+
 
 <div id="dir-sheet" class="sheet" hidden>
   <div class="grabber"></div>

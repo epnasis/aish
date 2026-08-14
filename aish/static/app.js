@@ -10422,6 +10422,7 @@ let bvEditing = null;   // the focus info being edited
 
 function bvOpenEditor(focus) {
   bvEditing = focus;
+  $("bv-edit").hidden = false;
   const secret = focus.kind === "password";
   const input = $("bv-edit-input");
   $("bv-edit-label").textContent = focus.label || (secret ? "Password" : "Field");
@@ -10443,10 +10444,7 @@ function bvOpenEditor(focus) {
   input.value = secret ? "" : (focus.value || "");
   $("bv-edit-eye").hidden = !secret;
   $("bv-edit-eye").classList.remove("revealed");
-  $("bv-edit-note").textContent = secret
-    ? "The current value is hidden and never leaves the Mac. What you type replaces it."
-    : "";
-  $("bv-edit").hidden = false;
+  $("bv-edit-note").textContent = secret ? "hidden — typing replaces it" : "";
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
 }
@@ -10464,6 +10462,12 @@ function bvCloseEditor() {
 // them as two similar buttons ("Set" / "Set & submit") made both unclear. Now:
 // the button only puts the value in the field, and the keyboard's own Go key
 // submits — which is how a form works in every browser.
+/** Leaving the field KEEPS what you typed, as it would on a real page. */
+function bvCommitAndClose() {
+  if (!bvEditing) return false;
+  return bvCommit(false);
+}
+
 function bvCommit(submit) {
   const text = $("bv-edit-input").value;
   // Send BEFORE clearing: bvSend refuses while an interaction is in flight,
@@ -10489,11 +10493,13 @@ function wireBrowserEditor() {
     $("bv-edit-eye").setAttribute("aria-label", shown ? "show password" : "hide password");
     input.focus();
   });
-  $("bv-edit-cancel").addEventListener("click", bvCloseEditor);
-  $("bv-edit-set").addEventListener("click", () => bvCommit(false));
   $("bv-edit-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); bvCommit(true); }
-    if (e.key === "Escape") { e.preventDefault(); bvCloseEditor(); }
+    if (e.key === "Enter") { e.preventDefault(); bvCommit(true); }   // submit
+    if (e.key === "Escape") { e.preventDefault(); bvCloseEditor(); } // discard
+  });
+  $("bv-url-clear").addEventListener("click", () => {
+    $("bv-url").value = "";
+    $("bv-url").focus();
   });
 }
 wireBrowserEditor();
@@ -10550,12 +10556,17 @@ function openBrowserView(url) {
  *  in. A phone therefore gets the site's MOBILE layout, which is the whole
  *  reason this is measured rather than assumed. */
 function bvViewportSize() {
+  // The page is asked for at EXACTLY the stage's shape, so `object-fit:
+  // contain` has nothing to letterbox and the frame fills the width.
+  //
+  // Asking for a taller page than the stage was the bug: a 390x828 page shown
+  // in a 430x549 stage fits by HEIGHT, so it rendered at 0.66 scale with black
+  // bars down both sides — about 60% of the available width wasted, which is
+  // what the owner photographed. Matching the aspect also means scale 1.0, so
+  // the page is shown at its own size rather than shrunk.
   const stage = $("bv-frame").parentElement.getBoundingClientRect();
   const width = Math.round(stage.width) || Math.round(window.innerWidth);
-  // The stage is short (it shares the sheet with the controls), so asking for
-  // its literal height would make every page a letterbox slot needing constant
-  // scrolling. Ask for a page-shaped viewport at the device's own width.
-  const height = Math.round(Math.max(window.innerHeight * 0.92, width * 1.4));
+  const height = Math.round(stage.height) || Math.round(window.innerHeight * 0.6);
   return { width, height };
 }
 
@@ -10563,6 +10574,11 @@ function wireBrowserView() {
   const img = $("bv-frame");
 
   img.addEventListener("pointerdown", (e) => {
+    // Tapping the page while a field is open LEAVES the field, keeping what
+    // was typed — the same thing that happens when you tap away from a field
+    // on any page. The tap is spent on leaving, not forwarded as a click, so
+    // dismissing cannot also press something.
+    if (bvEditing) { bvCommitAndClose(); return; }
     bvPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (bvPointers.size === 2) {
       const [a, b] = [...bvPointers.values()];
@@ -10668,6 +10684,10 @@ function wireBrowserView() {
     bvPinchFrom = null;
     if (!bvPointers.size) bvDragFrom = null;
   });
+  // Focusing the address selects ALL of it, as every browser does — so the
+  // next keystroke replaces the URL and a long-press offers Copy on the whole
+  // thing, instead of dropping a caret into the middle of it.
+  $("bv-url").addEventListener("focus", (e) => e.target.select());
   // No Go button. The address bar is submitted with the keyboard's own Go key
   // (`enterkeyhint="go"`), which is how every mobile browser works — a separate
   // button is chrome for something the keyboard already offers.

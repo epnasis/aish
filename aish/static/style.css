@@ -3085,7 +3085,7 @@ body.console-open {
    `.sheet` sets only a max-height, so a content-sized column left nothing for
    the stage to grow into and the frame sat at its 150px floor with the sheet
    half empty. A browser occupies the space it is given. */
-#browser-sheet { height: 82%; }
+#browser-sheet { height: 90%; }
 
 .bv-body {
   flex: 1; min-height: 0; overflow: hidden;
@@ -3096,11 +3096,15 @@ body.console-open {
 .bv-top { padding: 2px 12px 6px; }
 .bv-nav { padding-top: 2px; }
 .bv-nav .bv-btn { background: transparent; padding: 10px 8px; }
-.bv-x {
-  flex: 0 0 auto; width: 34px; height: 34px; padding: 0;
-  border: none; background: none; color: var(--fg);
+.bv-url-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
+.bv-url { padding-right: 38px; }
+.bv-inline-x {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 28px; height: 28px; padding: 0; border: none; background: none;
+  color: var(--dim); display: flex; align-items: center; justify-content: center;
 }
-.bv-x svg { width: 26px; height: 26px; display: block; }
+.bv-inline-x svg { width: 20px; height: 20px; }
+.bv-close-word { flex: 0 0 auto; font-weight: 600; background: transparent; }
 .bv-url, .bv-text {
   flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; font-size: 16px;
   background: var(--chip-bg); color: var(--fg); border: 1px solid transparent;
@@ -3198,9 +3202,17 @@ body.console-open {
 @keyframes bv-spin { to { transform: rotate(360deg); } }
 
 /* ---- remote browser: the field editor -------------------------------- */
-.bv-edit-card { display: flex; flex-direction: column; gap: 10px; }
+/* A row in the sheet, above the nav bar — NOT a modal over everything. The
+   sheet is a fixed column now, so a row here can never be pushed under the
+   fold the way the old type bar was. */
+.bv-edit[hidden] { display: none; }
+.bv-edit { flex: 0 0 auto; }
+.bv-edit-card {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 10px; border-radius: 12px; background: var(--bg-elev2);
+}
 .bv-edit-label {
-  font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .bv-edit-row { display: flex; gap: 8px; align-items: center; }
@@ -3235,6 +3247,6 @@ body.console-open {
 .bv-empty svg { width: 42px; height: 42px; opacity: 0.5; }
 .bv-empty-title { font-size: 15px; }
 #bv-resume { max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bv-edit-note { font-size: 13px; color: var(--dim); min-height: 16px; }
-.bv-edit-hint { font-size: 12px; color: var(--dim); opacity: 0.75; }
+.bv-edit-note { font-size: 12px; color: var(--dim); }
+.bv-edit-note:empty { display: none; }
 .bv-edit-actions { display: flex; gap: 8px; justify-content: flex-end; }

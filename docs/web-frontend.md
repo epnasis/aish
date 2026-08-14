@@ -387,6 +387,10 @@ The heuristic, learned the slow way across three rounds of feedback: **if a mobi
 
 A sheet can be dismissed four ways: the Close button, the ✕, the backdrop, and a swipe down the grabber. Only the button told the server. The other three left a real Chrome running on a machine nobody is sitting at — and because a read REFUSES while the owner is driving the view (`docs/browser.md`), a stray swipe meant aish could not read **any** page until the 15-minute idle cap expired. `bvEndIfOpen` therefore hangs off `closeSheets`, the one funnel every dismissal already goes through, rather than off each dismissal in turn.
 
+### The page fills the stage
+
+`bvViewportSize` asks for the remote page at **exactly the stage's shape**, so `object-fit: contain` has nothing to letterbox. Asking for a taller page was a measured regression: a 390×828 page shown in a 430×549 stage fits by HEIGHT and renders at 0.66 scale with black bars down both sides — about 60% of the width wasted, which the owner photographed. Matching the aspect also means scale 1.0, so the page is shown at its own size rather than shrunk.
+
 ### `[BROWSER-VIEW-EDIT]` — tapping a field opens an editor
 
 The first design put a text field permanently in the sheet with **Type** and **⏎** buttons. Owner feedback after real use, and every clause of it is a distinct defect:
@@ -396,7 +400,11 @@ The first design put a text field permanently in the sheet with **Type** and **�
 - *"I cannot edit the value in the field once I enter it, since it only adds to the values"* — Type sent keystrokes, so there was no correcting and no clearing.
 - *"I still don't understand the button type versus the enter button."*
 
-So: a tap on a field opens a modal editor — label, current value, ✕ to clear, **Cancel / Set / Set & submit**. That answers the Type-vs-⏎ question by deleting it, and the modal is its own layer so it can never be pushed under the fold the way an in-sheet bar was. `bvPaintFocus` outlines whatever the page has focused, which supplies the missing "what did I just select".
+So: a tap on a field opens an editor carrying the field's **name** and its value. It began as a modal with Cancel / Set / Set & submit and a paragraph of explanation, which was too much furniture for "type into a field" — the owner asked for something "not modal-like, more like a focus". It is now a row in the sheet above the nav bar: the label, the value, an inline clear and (for passwords) a reveal, and nothing else.
+
+**It behaves like a field on a page, because that is the model it is borrowing.** Tapping the page LEAVES the field and keeps what was typed, as blurring a real field does — and that tap is spent on leaving rather than forwarded as a click, so dismissing cannot also press something. Enter submits; Escape discards. There is no Done button, which also answers the old Type-vs-⏎ confusion by deleting both sides of it.
+
+A row is safe here only because the sheet is a fixed column: the previous in-sheet bar was pushed under the fold by the keyboard, which is what made a modal look necessary in the first place. `bvPaintFocus` outlines whatever the page has focused, supplying the missing "what did I just select".
 
 **It opens only when the tap landed ON the field** (`focus.tapped`, decided server-side by hit-testing the click against the focused element's rect). Focus also moves as a *side effect* — pages autofocus their first input, dismissing a cookie banner can leave focus in one — and popping an editor then would rebuild the exact surprise this replaces.
 

@@ -192,6 +192,11 @@ The owner proved this with paired screenshots: a partly-rendered page, then the 
 
 A fixed `SETTLE_MS` cannot fix that, because "loaded" is a property of the page rather than a duration. `_settle` waits on three signals, cheapest first — network idle, `readyState === 'complete'`, then a DOM-quiescence window, which is the one that catches a page whose skeleton has loaded while its content is still being written in. Every wait is bounded by `SETTLE_MAX_MS`: a page that never settles — a ticker, a spinner — must still produce a frame. `TestFramesWaitForThePageToSettle`.
 
+## Small things that were the whole experience
+
+- **An ✕ at the right of an address bar CLEARS THE FIELD.** That is what it means in every browser, and it was closing the session instead — a tap meant to erase a URL destroyed a login in progress. Closing is now the word **Done**, because a word cannot be mistaken for a field control, and the address has its own clear inside it.
+- **Focusing the address selects all of it**, so the next keystroke replaces the URL and a long-press offers Copy on the whole thing.
+
 ## Testing
 
 Nothing in the suite launches Chrome. `browser.read` / `open_for_login` are patched per test, and conftest's autouse `no_real_browser` makes any escape fail loudly — it raises from `_submit` as a `BaseException` (an `Exception` would be swallowed by `_browser_read`'s fallback, leaving the guard silent exactly where a test is most likely wrong) and redirects `AISH_STATE_DIR` so a test-written `logins.txt` can never change how the real agent gates a real host. Same reasoning as the notifier guard in CLAUDE.md: a module that reaches a live thing outside the process needs a suite-wide guard, not per-test discipline.
