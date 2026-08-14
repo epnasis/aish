@@ -7108,6 +7108,85 @@ class TestBrowserView:
         monkeypatch.setattr(browser_module, "view_act", view_act)
         monkeypatch.setattr(browser_module, "view_close", view_close)
 
+    def test_detail_sharpens_one_rectangle_and_echoes_its_token(
+        self, app_env, monkeypatch
+    ):
+        """Zooming past what a frame carries fetches THAT rectangle, sharp.
+
+        The token rides back untouched: the client stamps each request with the
+        frame it was aiming at, and a patch that arrives after the page moved on
+        must be droppable rather than painted over it."""
+        from aish import browser as browser_module
+
+        asked = {}
+
+        def view_detail(x, y, w, h, scale):
+            asked.update(x=x, y=y, w=w, h=h, scale=scale)
+            return browser_module.Detail(
+                jpeg=b"\xff\xd8patch", x=320, y=480, width=640, height=975,
+                scale=2.5, nav=3,
+            )
+
+        monkeypatch.setattr(browser_module, "view_detail", view_detail)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({
+                "type": "browser_view", "action": "detail",
+                "x": 300, "y": 460, "w": 660, "h": 1000, "scale": 2.52,
+                "token": 7,
+            })
+            event = recv_until(ws, "browser_view")
+        assert event["action"] == "detail"
+        assert base64.b64decode(event["jpeg"]) == b"\xff\xd8patch"
+        assert (event["x"], event["y"], event["w"], event["h"]) == (320, 480, 640, 975)
+        assert event["scale"] == 2.5
+        assert event["token"] == 7
+        assert asked == {"x": 300, "y": 460, "w": 660, "h": 1000, "scale": 2.52}
+
+    def test_a_detail_that_cannot_be_taken_says_nothing(self, app_env, monkeypatch):
+        """A sharpening that failed leaves the frame it was sharpening, which is
+        still the page. An error line would report a problem on a view that is
+        working — and the previous action's spinner is not this one's to clear.
+
+        Asserted by what comes NEXT: a following action's reply must be the
+        first browser_view seen, so anything the detail sent would show up here.
+        """
+        from aish import browser as browser_module
+
+        def boom(*a, **k):
+            raise RuntimeError("chrome went away")
+
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        monkeypatch.setattr(browser_module, "view_detail", boom)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({
+                "type": "browser_view", "action": "detail",
+                "x": 0, "y": 0, "w": 100, "h": 100, "scale": 2, "token": 1,
+            })
+            ws.send_json({"type": "browser_view", "action": "close"})
+            event = recv_until(ws, "browser_view")
+        assert event["action"] == "closed"
+
+    def test_no_view_open_sends_no_patch(self, app_env, monkeypatch):
+        """`view_detail` answers None when there is nothing to capture, and a
+        patch of nothing is not a message."""
+        from aish import browser as browser_module
+
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        monkeypatch.setattr(browser_module, "view_detail", lambda *a, **k: None)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({
+                "type": "browser_view", "action": "detail",
+                "x": 0, "y": 0, "w": 100, "h": 100, "scale": 2, "token": 1,
+            })
+            ws.send_json({"type": "browser_view", "action": "close"})
+            event = recv_until(ws, "browser_view")
+        assert event["action"] == "closed"
+
     def test_open_returns_a_frame(self, app_env, monkeypatch):
         calls = []
         self._fake_view(monkeypatch, calls)

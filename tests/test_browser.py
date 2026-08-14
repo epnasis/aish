@@ -703,6 +703,70 @@ class TestNativeDialogsAreDeadEnds:
         assert "cannot be shown here" in inspect.getsource(browser._refuse_upload)
 
 
+class TestDetailIsFetchedForWhatHeIsLookingAt:
+    """A frame is an OVERVIEW; sharpness past its density is fetched (#227).
+
+    The owner met a blurred page above a 2.5x zoom, and no density setting fixes
+    it: zoom goes to 4x, and a frame is sharp only to `zoom == density`, so
+    serving 4x from the frame would mean a 1.3 MB, 228 ms capture on EVERY
+    glance and scroll. A patch of the visible rectangle is 90 KB and 18 ms at
+    that zoom — and gets cheaper the further in he goes, because the region
+    shrinks as fast as the scale grows. Detail is O(screen); density is O(page).
+    """
+
+    def test_a_frame_is_still_dense_enough_for_ordinary_zooming(self):
+        """Density was dropped to 1.5 to save bytes, which was the wrong target
+        — this JPEG never reaches the model, so its only cost is Mac -> phone,
+        about 90 ms of a 1-3 s trip. It buys sharpness he noticed at once."""
+        assert browser.VIEW_SCALE >= 2
+
+    def test_the_scale_is_capped_at_what_a_screen_can_show(self):
+        _, _, _, _, scale = browser.detail_request(0, 0, 400, 600, 99, 1280, 1950)
+        assert scale == browser.VIEW_DETAIL_MAX_SCALE
+        _, _, _, _, floor = browser.detail_request(0, 0, 400, 600, 0.1, 1280, 1950)
+        assert floor == 1.0
+
+    def test_a_rect_off_the_page_is_pulled_BACK_not_refused(self):
+        """A rounding error at the edge of a zoomed page should cost a few
+        pixels of coverage, not the capture."""
+        x, y, w, h, _ = browser.detail_request(2000, 3000, 400, 600, 2, 1280, 1950)
+        assert (x, y, w, h) == (880, 1350, 400, 600)
+        assert x + w <= 1280 and y + h <= 1950
+
+    def test_a_rect_bigger_than_the_page_becomes_the_page(self):
+        x, y, w, h, _ = browser.detail_request(-50, -50, 9999, 9999, 2, 1280, 1950)
+        assert (x, y, w, h) == (0, 0, 1280, 1950)
+
+    def test_junk_from_the_socket_does_not_reach_chrome(self):
+        x, y, w, h, scale = browser.detail_request(
+            {"x": 1}, None, "abc", [], "nope", 1280, 1950
+        )
+        assert (x, y) == (0, 0)
+        assert 16 <= w <= 1280 and 16 <= h <= 1950
+        assert 1.0 <= scale <= browser.VIEW_DETAIL_MAX_SCALE
+
+    def test_an_oversized_ask_loses_SCALE_and_never_coverage(self):
+        """Shrinking the rect would silently cover less of what he is looking
+        at; shrinking the scale only means the patch is less sharp than his
+        screen could show, which he can see past."""
+        x, y, w, h, scale = browser.detail_request(0, 0, 1280, 1950, 4, 1280, 1950)
+        assert (w, h) == (1280, 1950)
+        assert w * h * scale * scale <= browser.VIEW_DETAIL_MAX_PIXELS
+        assert scale < 4
+
+    def test_a_screenful_stays_a_screenful_however_far_he_zooms(self):
+        """The reason this scales where density does not: at 2x the visible
+        region is half the page, at 4x a quarter — and the pixel count of the
+        capture barely moves, because scale rises exactly as the region falls."""
+        counts = []
+        for zoom in (2, 2.5, 3, 4):
+            w = 1280 / zoom
+            h = 1950 / zoom
+            _, _, cw, ch, s = browser.detail_request(0, 0, w, h, zoom, 1280, 1950)
+            counts.append(cw * s * ch * s)
+        assert max(counts) / min(counts) < 1.05
+
+
 class TestTheViewIsDesktopSoOneFrameCarriesMore:
     """ROUND TRIPS ARE THE SCARCE RESOURCE; zoom is free.
 
@@ -921,6 +985,73 @@ class TestEveryActionActuallyRuns:
         frame = self._run(owner, monkeypatch, action, **kwargs)
         assert isinstance(frame, browser.Frame)
         assert owner.view.did, f"{action} did nothing to the page"
+
+    def test_the_detail_capture_really_reaches_chrome(self, monkeypatch):
+        """EXECUTED, not read. `view_detail` goes straight to CDP because
+        Playwright's screenshot() has no per-clip scale — a path nothing else
+        here uses, so nothing else here would notice it breaking."""
+        import asyncio
+        import base64
+
+        sent = []
+
+        class FakeCDP:
+            async def send(self, method, params):
+                sent.append((method, params))
+                return {"data": base64.b64encode(b"\xff\xd8patch").decode()}
+
+            async def detach(self):
+                sent.append(("detach", None))
+
+        class FakeContext:
+            async def new_cdp_session(self, page):
+                return FakeCDP()
+
+        owner = self._owner()
+        owner.view.context = FakeContext()
+
+        def drive(job, timeout):
+            return asyncio.new_event_loop().run_until_complete(job(owner))
+
+        monkeypatch.setattr(browser, "_submit", drive)
+        patch = browser.view_detail(300, 460, 512, 780, 2.5)
+
+        assert isinstance(patch, browser.Detail)
+        assert patch.jpeg == b"\xff\xd8patch"
+        method, params = sent[0]
+        assert method == "Page.captureScreenshot"
+        assert params["clip"] == {
+            "x": 300, "y": 460, "width": 512, "height": 780, "scale": 2.5
+        }
+        assert params["format"] == "jpeg"
+        # The scale CAPTURED rides back, so the client can tell a clamped patch
+        # from the one it asked for.
+        assert patch.scale == 2.5
+        assert ("detach", None) in sent, "a CDP session was left on the target"
+
+    def test_a_detail_with_no_view_open_is_nothing_rather_than_an_error(
+        self, monkeypatch
+    ):
+        """A missing patch is a blurry patch, not a failure: the frame under it
+        is still the page."""
+        import asyncio
+
+        owner = browser._Owner()
+        owner.view = None
+        monkeypatch.setattr(
+            browser, "_submit",
+            lambda job, timeout: asyncio.new_event_loop().run_until_complete(job(owner)),
+        )
+        assert browser.view_detail(0, 0, 100, 100, 2) is None
+
+    def test_a_detail_capture_never_waits_for_the_page_to_settle(self, monkeypatch):
+        """The page has not been touched — this is the same paint at more
+        pixels. Settling would turn a sharpening into an interaction, and the
+        owner is sitting there having stopped moving."""
+        import inspect
+
+        source = inspect.getsource(browser.view_detail)
+        assert "_settle" not in source
 
     def test_a_click_really_clicks(self, monkeypatch):
         owner = self._owner()

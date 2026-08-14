@@ -517,6 +517,13 @@
            real page. The image is the ONLY thing that ever renders the site —
            no site HTML is injected into this document. -->
       <img id="bv-frame" class="bv-frame" alt="" draggable="false">
+      <!-- [BROWSER-VIEW-DETAIL] A sharp re-capture of just the part he is
+           looking at, laid over the frame in PAGE coordinates so it stays put
+           while he keeps panning. The layer is the frame's own box and carries
+           the frame's own transform, so there is one geometry, not two. -->
+      <div id="bv-detail-layer" class="bv-detail-layer" hidden>
+        <img id="bv-detail" class="bv-detail" alt="" draggable="false">
+      </div>
       <!-- Not a black rectangle. An empty browser should say what to do. -->
       <div id="bv-empty" class="bv-empty">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3.5 12h17M12 3.5c2.2 2.4 3.3 5.3 3.3 8.5S14.2 18.1 12 20.5c-2.2-2.4-3.3-5.3-3.3-8.5S9.8 5.9 12 3.5z" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>

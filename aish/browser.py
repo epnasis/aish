@@ -44,6 +44,8 @@ The context is kept warm between reads (a launch costs ~2s) but closed after
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
 import os
 import threading
 import time
@@ -898,35 +900,61 @@ def command(arg: str) -> str:
 # The default when a client says nothing; every real one sends its own size.
 VIEW_WIDTH = 1024
 VIEW_HEIGHT = 1400
-# Quality and pixel density were both set on a guess, and the owner then asked
-# whether the frame was simply too big (#227). Measured on an allegro.pl
-# listing, one 1280x1950 frame, bytes at q40:
+# BYTES ARE THE WRONG TARGET HERE, and #227 was investigated in those terms
+# before anyone checked. This JPEG never reaches the model — `read_url` hands it
+# extracted TEXT, and `is_challenge` judges text — so a frame costs no context,
+# no tokens and no model time. Its only cost is Mac -> phone, on a trip that
+# already runs 1-3 seconds. Measured on an allegro.pl listing, one 1280x1950
+# frame at q50:
 #
-#   density   1280 wide   1024 wide   768 wide
-#   2x        446 KB      350 KB      250 KB
-#   1.5x      295 KB      247 KB      167 KB
-#   1x        182 KB      134 KB       93 KB
+#   density   jpeg      capture   transfer @20Mbps
+#   1.5x      331 KB     71 ms     136 ms
+#   2x        497 KB     94 ms     204 ms
+#   3x        909 KB    128 ms     373 ms
+#   4x       1295 KB    228 ms     531 ms
 #
-# The width was never what cost the bytes. Narrowing the frame is the expensive
-# saving — it is paid for in page per round trip, the one thing this view is
-# optimised for — while the DENSITY is free of that trade: 1.5x is the same
-# 1280 CSS pixels of page, the same layout, the same text, for a third fewer
-# bytes. So the width stays and the density comes down.
+# Density 1.5 was shipped to save bytes and cost about 90 ms of the trip to undo
+# — three percent — in exchange for sharpness the owner noticed immediately.
+# So the frame is dense again. Quality stays at 50: +12% for visibly fewer
+# artifacts is the same bargain read the right way round (#225).
 #
-# What density buys is zoom headroom, and only up to a point. The stage is
-# ~430 CSS px on a phone, so a 1280-wide frame is displayed at ~0.34 and the
-# picture stops gaining detail once its own pixels run out: parity is at zoom
-# == density, i.e. 2x held detail to a 2x zoom, 1.5x holds it to 1.5x. Beyond
-# that it is the JPEG being magnified either way — the double-tap is 2.5x, so
-# even the shipped 2x was already past parity there. Crops of a price row at
-# 2.5x, resampled exactly as the phone does it: 2x q40 and 1.5x q50 are hard to
-# tell apart, and 1x q50 is visibly soft. So the density that was dropped is
-# partly bought back in QUALITY, which is far cheaper per byte (q40 -> q50 is
-# +12%, 2x -> 1.5x is -34%).
-#
-# Net: 331 KB where the shipped setting was 446 KB, for the same page.
+# The WIDTH is a different question and the answer there has not changed: 1280
+# carries ~2.7x the page of a phone-width viewport per round trip, which is the
+# resource that is actually scarce. See `view_size`.
 VIEW_JPEG_QUALITY = 50
-VIEW_SCALE = 1.5
+VIEW_SCALE = 2
+
+# Density has a ceiling that no setting reaches, though, and that is what the
+# owner hit: a frame is sharp only up to `zoom == density`, and zoom goes to 4x.
+# Even 2x is already magnifying at the 2.5x double-tap. Serving 4x from the
+# frame would mean a 1.3 MB, 228 ms capture on EVERY frame — glance, scroll,
+# tap — to serve the one moment he stops and reads.
+#
+# So a frame is an OVERVIEW, and detail is fetched for the rectangle he is
+# actually looking at. `Page.captureScreenshot` takes a clip with its own
+# `scale`, independent of the context's device_scale_factor, so this needs no
+# second context and no reload. The economics are the whole argument:
+#
+#   detail patch at 2.5x zoom    178 KB    38 ms
+#   detail patch at 4x zoom       90 KB    18 ms
+#
+# It gets CHEAPER as he zooms further in, because the region shrinks as fast as
+# the scale grows — the patch is always about one screenful. Detail is O(screen)
+# where density is O(page), which is why this scales and raising VIEW_SCALE
+# never will.
+#
+# The client asks for the scale ITS screen can show — stage CSS width x its own
+# devicePixelRatio, over the page width it can see — so a lesser phone asks for
+# less and nothing here has to know about anybody's hardware. Past parity the
+# extra pixels are invisible, so the cap is real and not a guess.
+VIEW_DETAIL_MAX_SCALE = 4.0
+# Higher than a frame's: this is the one capture whose entire job is being read,
+# it is a fraction of a frame's area, and it arrives when he has stopped moving.
+VIEW_DETAIL_QUALITY = 60
+# A backstop on the request, not a tuning knob: clip x scale is under the
+# client's control, and a bad pair should not ask Chrome for a 100-megapixel
+# JPEG on a box that also runs a VM.
+VIEW_DETAIL_MAX_PIXELS = 12_000_000
 # A NATIVE dialog is a dead end in the remote view, by construction: it is
 # browser chrome, not page content, so `page.screenshot` cannot see it and the
 # owner has nothing to tap. Passkeys are the case that bit — Google's sign-in
@@ -1170,6 +1198,103 @@ def view_settled_frame(timeout: float = 30.0) -> Frame | None:
     try:
         return _submit(job, timeout)
     except Exception:  # noqa: BLE001 — a follow-up that fails just does not arrive
+        return None
+
+
+@dataclass
+class Detail:
+    """A sharp re-capture of ONE rectangle of the page already on screen.
+
+    Carries the rect it covers, in the same CSS pixels a tap maps into, because
+    the client positions it by page coordinates rather than by screen ones —
+    which is what keeps it aligned while he goes on panning."""
+
+    jpeg: bytes
+    x: int
+    y: int
+    width: int
+    height: int
+    # The scale actually CAPTURED, after clamping — not the one asked for. The
+    # client decides from this whether a later, deeper zoom still needs a trip,
+    # and it must not decide that from its own request.
+    scale: float = 1.0
+    nav: int = 0
+
+
+def detail_request(
+    x: object, y: object, width: object, height: object, scale: object,
+    view_w: int, view_h: int,
+) -> tuple[int, int, int, int, float]:
+    """Clamp a detail request to the page and to what is worth capturing.
+
+    Pure, so the clamping is testable without a browser. The rect is pulled
+    inside the viewport rather than rejected: a rounding error at the edge of a
+    zoomed page should cost a few pixels of coverage, not the whole capture."""
+    def num(v: object, fallback: float = 0.0) -> float:
+        try:
+            return float(str(v))
+        except (TypeError, ValueError):
+            return fallback
+
+    s = max(1.0, min(VIEW_DETAIL_MAX_SCALE, num(scale, 1.0)))
+    w = max(16.0, min(float(view_w), num(width, view_w)))
+    h = max(16.0, min(float(view_h), num(height, view_h)))
+    rx = max(0.0, min(float(view_w) - w, num(x)))
+    ry = max(0.0, min(float(view_h) - h, num(y)))
+    # Shrink the SCALE, never the rect: a smaller rect would silently cover
+    # less of what he is looking at, while a smaller scale only means the patch
+    # is less sharp than his screen could show — degradation he can see past.
+    if w * h * s * s > VIEW_DETAIL_MAX_PIXELS:
+        s = max(1.0, (VIEW_DETAIL_MAX_PIXELS / (w * h)) ** 0.5)
+    return int(rx), int(ry), int(w), int(h), s
+
+
+def view_detail(
+    x: object, y: object, width: object, height: object, scale: object,
+    timeout: float = 30.0,
+) -> Detail | None:
+    """Re-capture one rectangle at the resolution the client's screen can show.
+
+    None when there is no view — a missing detail patch is a blurry patch, not
+    an error: the frame underneath it is still the page. Deliberately does NOT
+    settle. The page has not been touched; this is the same paint at more
+    pixels, and waiting would turn a sharpening into an interaction."""
+
+    async def job(owner: _Owner) -> Detail | None:
+        page = owner.view
+        if page is None:
+            return None
+        size = page.viewport_size or {"width": VIEW_WIDTH, "height": VIEW_HEIGHT}
+        rx, ry, w, h, s = detail_request(
+            x, y, width, height, scale, size["width"], size["height"]
+        )
+        owner.view_touched = time.monotonic()
+        # Straight to CDP: Playwright's screenshot() has no per-clip scale, and
+        # the scale is the entire point — the context's own density is what was
+        # not enough. Detached rather than cached, so a view that is torn down
+        # underneath leaves nothing attached to a dead target.
+        session = await page.context.new_cdp_session(page)
+        try:
+            shot = await session.send(
+                "Page.captureScreenshot",
+                {
+                    "format": "jpeg",
+                    "quality": VIEW_DETAIL_QUALITY,
+                    "clip": {"x": rx, "y": ry, "width": w, "height": h, "scale": s},
+                },
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                await session.detach()
+        return Detail(
+            jpeg=base64.b64decode(shot["data"]),
+            x=rx, y=ry, width=w, height=h, scale=s,
+            nav=owner.navigations,
+        )
+
+    try:
+        return _submit(job, timeout)
+    except Exception:  # noqa: BLE001 — see the docstring: no patch, no error
         return None
 
 

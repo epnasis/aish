@@ -193,19 +193,35 @@ The view was briefly given a mobile identity, on the reasoning that a phone shou
 
 Nearly triple the page per round trip at 1280, and little more beyond it. `view_size` therefore takes the stage the client will display in and scales that **shape** up to `VIEW_DESKTOP_WIDTH` — the shape so `object-fit: contain` has nothing to letterbox, the width so one frame carries a page.
 
-**The width was never what cost the bytes — the pixel density was (#227).** The owner's reaction to the shipped frame was that the resolution might simply be too big, and he was right about the symptom and wrong about the knob. Measured on an allegro.pl listing, one 1280×1950 frame at q40:
+**Bytes were the wrong target, and #227 was investigated in those terms before anyone checked.** The frame never reaches the model — `read_url` hands it extracted text, `is_challenge` judges text — so it costs no context, no tokens and no model time. Its only cost is Mac→phone, on a trip that already runs 1–3 seconds. Measured on an allegro.pl listing, one 1280×1950 frame at q50:
 
-| density | 1280 wide | 1024 wide | 768 wide |
+| density | jpeg | capture | transfer @20 Mbps |
 |---|---|---|---|
-| **2× (was shipped)** | **446 KB** | 350 KB | 250 KB |
-| **1.5× (now)** | **295 KB** | 247 KB | 167 KB |
-| 1× | 182 KB | 134 KB | 93 KB |
+| 1.5× | 331 KB | 71 ms | 136 ms |
+| **2× (shipped)** | **497 KB** | **94 ms** | **204 ms** |
+| 3× | 909 KB | 128 ms | 373 ms |
+| 4× | 1295 KB | 228 ms | 531 ms |
 
-Read across a row and narrowing the frame saves bytes; read down a column and lowering the density saves more of them — and only one of those is free. A narrower frame is paid for in page per round trip, the single thing this view is optimised for. A lower density is the *same* 1280 CSS pixels of page, the same layout, the same text, for a third fewer bytes. So the width stays at 1280 and `VIEW_SCALE` comes down.
+Density 1.5 was shipped briefly to save bytes and cost about **90 ms of the trip** to undo — three percent — in exchange for sharpness the owner noticed immediately. So the frame is dense again, and quality stays at 50: +12% for visibly fewer artifacts is the same bargain read the right way round (#225). The general lesson is the one worth keeping: *check what the number you are optimising is actually spent on.* The width question is separate and its answer has not changed — 1280 buys page per round trip, which is the resource that is genuinely scarce.
 
-What density buys is **zoom headroom, and only up to a point.** The stage is ~430 CSS px, so a 1280-wide frame is displayed at ~0.34 and the picture stops gaining detail once its own pixels run out: parity lands at zoom == density. 2× held true detail to a 2× zoom; 1.5× holds it to 1.5×. The double-tap is **2.5×**, so even the shipped 2× was already magnifying there — the extra pixels were being paid for on every frame and cashed in on none. Crops of a price row at 2.5×, resampled exactly as the phone does it: 2× q40 and 1.5× q50 are hard to tell apart, 1× q50 is visibly soft.
+## Density has a ceiling, so detail is fetched for what he is looking at
 
-So the density that came off is partly bought back as **quality**, which is far cheaper per byte — q40 → q50 is +12%, 2× → 1.5× is −34% (#225's open question, answered the same way). Net **331 KB against 446**, same page. Coordinates are unaffected either way: they are CSS pixels, and `browserViewPoint` maps against the rendered element rather than the pixel count.
+A frame is sharp only up to `zoom == density`, and zoom goes to **4×**. Even 2× is already magnifying at the 2.5× double-tap; the owner found it blurred past there and no setting fixes that, because serving 4× from the frame means a 1.3 MB, 228 ms capture on **every** frame — glance, scroll, tap — to serve the one moment he stops and reads.
+
+So a frame is an **overview**, and detail is a separate capture of the rectangle actually on screen. `Page.captureScreenshot` takes a clip with its own `scale`, independent of the context's `device_scale_factor` — so this needs no second context, no reload and no re-navigation. It is reached through CDP directly because Playwright's `screenshot()` has no per-clip scale, and the scale is the entire point.
+
+The economics are the whole argument:
+
+| | jpeg | capture |
+|---|---|---|
+| detail patch at 2.5× zoom | 178 KB | 38 ms |
+| detail patch at 4× zoom | **90 KB** | **18 ms** |
+
+It gets **cheaper the further in he goes**, because the region shrinks as fast as the scale grows — a patch is always about one screenful. **Detail is O(screen) where density is O(page)**, which is why this scales and raising `VIEW_SCALE` never will.
+
+The client asks for the scale **its own screen** can show — stage CSS width × its `devicePixelRatio`, over the page width visible — so a lesser phone asks for less and nothing here has to know about anybody's hardware. `detail_request` is pure and clamps the ask: the rect is pulled back inside the page rather than refused (a rounding error at the edge of a zoomed page should cost a few pixels of coverage, not the capture), and an over-large ask loses **scale, never coverage** — a smaller rect would silently cover less of what he is looking at, while a smaller scale only means the patch is less sharp than his screen could show. The scale actually captured rides back, so the client can tell a clamped patch from the one it asked for.
+
+It deliberately does **not settle**. The page has not been touched; this is the same paint at more pixels, and waiting would turn a sharpening into an interaction. A failure sends **nothing** — a missing patch is a blurry patch, not an error, and the frame underneath it is still the page. The client half, and the rules about when a trip is worth spending, are `[BROWSER-VIEW-DETAIL]` in `docs/web-frontend.md`.
 
 **It also ends an identity split that was never comfortable.** allegro.pl answers ANY mobile identity with 403 and zero text, so reads had to stay desktop while the view went mobile — meaning a session the owner created as a phone would later be read as a desktop, which is precisely the mismatch bot-scoring exists to catch. One identity again. `TestTheViewIsDesktopSoOneFrameCarriesMore`.
 
@@ -255,6 +271,6 @@ It passed because the input-contract tests read `inspect.getsource` and never ca
 
 Nothing in the suite launches Chrome. `browser.read` / `open_for_login` are patched per test, and conftest's autouse `no_real_browser` makes any escape fail loudly — it raises from `_submit` as a `BaseException` (an `Exception` would be swallowed by `_browser_read`'s fallback, leaving the guard silent exactly where a test is most likely wrong) and redirects `AISH_STATE_DIR` so a test-written `logins.txt` can never change how the real agent gates a real host. Same reasoning as the notifier guard in CLAUDE.md: a module that reaches a live thing outside the process needs a suite-wide guard, not per-test discipline.
 
-`scripts/check-browser-sheet.py` is the only thing that can see the sheet's LAYOUT — a real Chrome, real phone metrics, real safe-area insets — and is deliberately outside the suite; `tests/test_browser_view_layout.py` pins the structural facts it depends on. `TestBrowserView` covers the remote view end of the socket; `TestTheViewIsDesktopSoOneFrameCarriesMore` covers the viewport decision; `TestChallengeDetection` covers telling a wall from a page; `TestViewAndReadShareOneBrowser` and `TestPreviewFence` cover the two places one profile is contended for; `TestAThinPageGetsASecondChance` covers a slow page mistaken for a wall; `TestTheReadingContract` covers what the prompt must keep saying; `TestUnresponsiveHostEscalates` and `TestKnownBlockingHostsSkipTheDoomedFetch` cover the failure that produced no renders at all; `TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestLoginRecord`, `TestReadUrlEscalation` cover the module; `TestLoginGate` covers the gate.
+`TestDetailIsFetchedForWhatHeIsLookingAt` covers the clamping and the screenful-stays-a-screenful property that makes fetched detail scale where density does not; `TestEveryActionActuallyRuns` also EXECUTES the CDP capture, since nothing else in the module takes that path. `scripts/check-browser-sheet.py` is the only thing that can see the sheet's LAYOUT — a real Chrome, real phone metrics, real safe-area insets — and is deliberately outside the suite; `tests/test_browser_view_layout.py` pins the structural facts it depends on. `TestBrowserView` covers the remote view end of the socket; `TestTheViewIsDesktopSoOneFrameCarriesMore` covers the viewport decision; `TestChallengeDetection` covers telling a wall from a page; `TestViewAndReadShareOneBrowser` and `TestPreviewFence` cover the two places one profile is contended for; `TestAThinPageGetsASecondChance` covers a slow page mistaken for a wall; `TestTheReadingContract` covers what the prompt must keep saying; `TestUnresponsiveHostEscalates` and `TestKnownBlockingHostsSkipTheDoomedFetch` cover the failure that produced no renders at all; `TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestLoginRecord`, `TestReadUrlEscalation` cover the module; `TestLoginGate` covers the gate.
 
 `TestBrowserCommand` covers the WebSocket wiring — the layer where a slash command actually breaks, since a missing app.js case or WS kind surfaces only as "unknown command" in the app.

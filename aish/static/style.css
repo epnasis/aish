@@ -3207,6 +3207,16 @@ body.console-open {
    `browserViewPoint` reads this element's rect, which is now exactly the
    stage's, and `object-fit: contain` letterboxes inside it — the geometry the
    mapper already inverts. */
+/* The detail patch rides the frame's geometry rather than inventing its own:
+   the layer is the same box as `.bv-frame` (both `inset: 0` of the stage), so
+   the identical transform string puts the same page point in the same place.
+   Untouchable — a tap must reach the frame underneath, which owns the
+   coordinate mapping. */
+.bv-detail-layer {
+  position: absolute; inset: 0; pointer-events: none; overflow: hidden;
+}
+.bv-detail-layer[hidden] { display: none; }
+.bv-detail { position: absolute; display: block; }
 .bv-frame {
   position: absolute; inset: 0;
   display: block; width: 100%; height: 100%; object-fit: contain;

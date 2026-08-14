@@ -410,6 +410,23 @@ A row is safe here only because the sheet is a fixed column: the previous in-she
 
 **A password is never pre-filled**, and that is a transmission decision, not a display one — see `docs/browser.md`. The eye toggle reveals only what the owner is typing now, and the input is cleared and reset to `password` on close, because a value left in a DOM node outlives the dialog. Commit sends BEFORE clearing: `bvSend` refuses while an interaction is in flight, and clearing first silently destroyed the text — usually a password — with nothing on screen to say so.
 
+### `[BROWSER-VIEW-DETAIL]` — when zooming is worth a round trip
+
+A frame is an **overview**, and it is sharp only up to `zoom == its own density`. Past that the phone is enlarging a JPEG — which is what the owner reported above 2.5×, and which no density setting fixes: zoom goes to 4×, so serving it from the frame would mean a 1.3 MB capture on every glance and scroll to serve the one moment he stops and reads. The server side, with the measurements, is in `docs/browser.md`.
+
+So the deep end is fetched for the rectangle he is actually looking at. The client's whole job here is **deciding when to spend a trip**, and every rule is one:
+
+- **Density is read off the PICTURE** (`naturalWidth / bvFrame.width`), never held as a copy of the server's setting — one fewer number that can fall out of step with the thing it describes.
+- **The scale asked for is what THIS screen can show**: stage CSS width × its own `devicePixelRatio`, over the page width visible. A 2× phone therefore asks for less than a 3× one at the same zoom, and nothing on the server has to know about anybody's hardware. Past parity the extra pixels are invisible.
+- **No trip while the frame can already show it.** Zooming within the frame's own density is what "zoom is free" means.
+- **No second trip for ground already covered** — the patch is captured wider than the screen (`BV_DETAIL_PAD`) so small pans stay sharp — and the covered scale compared is the one the **server captured**, not the one requested. Believing the request would leave a patch claiming a sharpness it does not have, after which no further trip is ever made.
+- **Only once the gesture has stopped** (`BV_DETAIL_SETTLE_MS`), so a pinch in three parts costs one trip rather than three.
+- **Not through `bvSend`.** That guard exists so *frames* stay ordered, and a patch is neither an interaction nor something the page can change under. Behind the guard, a sharpening would swallow the next tap. Ordering is handled instead by a **token**: every frame bumps `bvFrameSeq`, each request carries it, and a patch that comes back stamped with an older one is dropped. A sharp rectangle of a page that has moved on is worse than a blurry one of the page in front of him, because it looks authoritative.
+
+`bvVisiblePageRect` reads the **live transformed geometry** rather than `bvZoom`, for the same reason `browserViewPoint` does — the browser has already applied the transform, so inverting one uniform scale cannot drift out of step with it. It clamps at the page edges instead of refusing there: a rounding error should cost a few pixels of coverage, not the capture.
+
+The patch is positioned in **page coordinates inside the layer's untransformed box**, and the layer then carries the frame's own transform string — so the two can never diverge under zoom or pan, and there is one geometry rather than two. The layer is `pointer-events: none`, because the frame underneath owns the coordinate mapping and a tap must reach it. — `test_browser_view_detail.js`
+
 ### `[BROWSER-VIEW-COORDS]` — where a tap actually lands
 
 The `/browser <url>` sheet shows aish's own Chrome (running on the headless Mac) as a letterboxed `<img>` and turns a tap into a click at the same point on the real page. `browserViewPoint` owns that translation.

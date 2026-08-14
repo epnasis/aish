@@ -10199,6 +10199,7 @@ function bvPaint(settle) {
   img.style.transform =
     `translate(${bvZoom.x}px, ${bvZoom.y}px) scale(${bvZoom.scale})`;
   bvShowZoom();
+  bvPaintDetail();   // rides the same transform, so it moves with the picture
   // The outline is positioned from the image's CURRENT geometry, so it has to
   // be redrawn whenever that geometry moves. Painting it only when a frame
   // arrived left it pinned to where the field used to be the moment anything
@@ -10268,9 +10269,153 @@ function bvPageScale() {
 
 function bvResetZoom() {
   bvZoom = { scale: 1, x: 0, y: 0 };
+  bvClearDetail();   // back to fit: the frame's own pixels are enough again
   bvPaint(true);
 }
 // [BROWSER-VIEW-ZOOM-END]
+
+// [BROWSER-VIEW-DETAIL-START]
+// A frame is an OVERVIEW, and it is sharp only up to `zoom == its density`.
+// Past that the phone is magnifying a JPEG, which is what the owner met at 2.5x
+// and above. No density fixes it: zoom goes to 4x, so serving it from the frame
+// would mean a 1.3 MB capture on every glance and scroll to serve the one
+// moment he stops and reads. So the deep end is fetched for the rectangle he is
+// actually looking at, and that gets CHEAPER the further in he goes — the
+// region shrinks as fast as the scale grows, so a patch is always about one
+// screenful (90 KB at 4x). Detail is O(screen); density is O(page).
+//
+// A trip is still a trip, so it is spent only when he has STOPPED moving, only
+// when the frame genuinely cannot show what he is asking for, and never twice
+// for ground already covered.
+const BV_DETAIL_SETTLE_MS = 260;   // a gesture is over, not merely paused
+const BV_DETAIL_MARGIN = 1.15;     // how far past the frame's own density is worth a trip
+const BV_DETAIL_PAD = 1.25;        // capture wider than the screen so small pans stay sharp
+let bvDetail = null;               // {x, y, w, h, scale} of the patch on screen
+let bvDetailTimer = null;
+let bvFrameSeq = 0;                // bumped by every frame: a patch older than it is stale
+
+/** The page rectangle currently on screen, in the CSS pixels a tap maps into.
+ *
+ *  Read from the LIVE geometry rather than from `bvZoom`, for the same reason
+ *  `browserViewPoint` does: the browser has already applied the transform, so
+ *  inverting one uniform scale cannot drift out of step with it. Clamped to the
+ *  page rather than refused at the edges — a rounding error should cost a few
+ *  pixels of coverage, not the capture. */
+function bvVisiblePageRect() {
+  const img = $("bv-frame");
+  if (!img || !bvFrame.width || !bvFrame.height) return null;
+  const stage = img.parentElement.getBoundingClientRect();
+  const box = img.getBoundingClientRect();       // transform already applied
+  const shown = Math.min(box.width / bvFrame.width, box.height / bvFrame.height);
+  if (!(shown > 0)) return null;
+  const originX = box.left + (box.width - bvFrame.width * shown) / 2;
+  const originY = box.top + (box.height - bvFrame.height * shown) / 2;
+  const x0 = Math.max(0, (stage.left - originX) / shown);
+  const y0 = Math.max(0, (stage.top - originY) / shown);
+  const x1 = Math.min(bvFrame.width, (stage.right - originX) / shown);
+  const y1 = Math.min(bvFrame.height, (stage.bottom - originY) / shown);
+  if (x1 <= x0 || y1 <= y0) return null;
+  // `shown` is screen CSS px per page CSS px; the SCREEN's own pixels are what
+  // decide how much resolution is worth having.
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0,
+           need: shown * (window.devicePixelRatio || 1) };
+}
+
+/** How many image pixels the frame carries per page CSS pixel — read off the
+ *  picture itself, so the client never holds a copy of the server's density
+ *  that could fall out of step with it. */
+function bvFrameDensity() {
+  const img = $("bv-frame");
+  if (!img || !img.naturalWidth || !bvFrame.width) return 0;
+  return img.naturalWidth / bvFrame.width;
+}
+
+function bvDetailCovers(rect) {
+  const d = bvDetail;
+  return !!d && rect.x >= d.x && rect.y >= d.y &&
+    rect.x + rect.w <= d.x + d.w && rect.y + rect.h <= d.y + d.h &&
+    rect.need <= d.scale * 1.05;
+}
+
+/** Drop the patch. Anything that could have changed the page calls this: a
+ *  sharp rectangle of a page that has moved on is worse than a blurry one of
+ *  the page in front of him, because it looks authoritative. */
+function bvClearDetail() {
+  bvDetail = null;
+  clearTimeout(bvDetailTimer);
+  const layer = $("bv-detail-layer");
+  if (layer) layer.hidden = true;
+}
+
+function bvScheduleDetail() {
+  clearTimeout(bvDetailTimer);
+  bvDetailTimer = setTimeout(bvRequestDetail, BV_DETAIL_SETTLE_MS);
+}
+
+function bvRequestDetail() {
+  if ($("browser-sheet").hidden || !bvOpen) return;
+  const rect = bvVisiblePageRect();
+  const density = bvFrameDensity();
+  if (!rect || !density) return;
+  // The frame can already show this. Zooming within what it carries is what
+  // "zoom is free" means, and spending a round trip on it would make the view
+  // chattier than the picture is better.
+  if (rect.need <= density * BV_DETAIL_MARGIN) { bvClearDetail(); return; }
+  if (bvDetailCovers(rect)) return;
+  const padW = Math.min(bvFrame.width, rect.w * BV_DETAIL_PAD);
+  const padH = Math.min(bvFrame.height, rect.h * BV_DETAIL_PAD);
+  const want = {
+    x: Math.round(Math.max(0, Math.min(bvFrame.width - padW,
+                                       rect.x - (padW - rect.w) / 2))),
+    y: Math.round(Math.max(0, Math.min(bvFrame.height - padH,
+                                       rect.y - (padH - rect.h) / 2))),
+    w: Math.round(padW), h: Math.round(padH),
+    scale: Math.round(rect.need * 100) / 100,
+  };
+  // NOT through bvSend: that guard exists so FRAMES stay ordered, and a patch
+  // is neither an interaction nor a thing the page can be changed by. Putting
+  // it behind the guard would make a sharpening swallow the next tap. Ordering
+  // is handled instead by the token — a patch that arrives after the page has
+  // moved on is dropped rather than painted.
+  send({ type: "browser_view", action: "detail", token: bvFrameSeq, ...want });
+}
+
+/** Lay the patch over the frame in PAGE coordinates.
+ *
+ *  Positions are computed in the layer's own UNTRANSFORMED box, and the layer
+ *  then carries the frame's transform — so zoom and pan move both by exactly
+ *  the same amount and the patch can never drift off the thing it sharpens. */
+function bvPaintDetail() {
+  const layer = $("bv-detail-layer");
+  const patch = $("bv-detail");
+  if (!layer || !patch) return;
+  if (!bvDetail || !patch.src) { layer.hidden = true; return; }
+  const stage = $("bv-frame").parentElement.getBoundingClientRect();
+  const fit = Math.min(stage.width / bvFrame.width, stage.height / bvFrame.height);
+  if (!(fit > 0)) { layer.hidden = true; return; }
+  const originX = (stage.width - bvFrame.width * fit) / 2;
+  const originY = (stage.height - bvFrame.height * fit) / 2;
+  patch.style.left = `${originX + bvDetail.x * fit}px`;
+  patch.style.top = `${originY + bvDetail.y * fit}px`;
+  patch.style.width = `${bvDetail.w * fit}px`;
+  patch.style.height = `${bvDetail.h * fit}px`;
+  layer.style.transform = $("bv-frame").style.transform;
+  layer.hidden = false;
+}
+
+function bvOnDetail(event) {
+  // Stale: a frame arrived while this was in flight, so it sharpens a page that
+  // is no longer on screen.
+  if (event.token !== bvFrameSeq) return;
+  // The scale the SERVER captured at, not the one this asked for: the request
+  // is clamped there, and believing the request would leave a patch claiming a
+  // sharpness it does not have — after which no further trip is ever made.
+  bvDetail = { x: event.x, y: event.y, w: event.w, h: event.h, scale: event.scale };
+  const patch = $("bv-detail");
+  patch.onload = bvPaintDetail;
+  patch.src = `data:image/jpeg;base64,${event.jpeg}`;
+}
+// [BROWSER-VIEW-DETAIL-END]
 
 // [BROWSER-VIEW-COORDS-START]
 function browserViewPoint(img, clientX, clientY) {
@@ -10309,6 +10454,7 @@ function bvEndIfOpen() {
   if (!bvOpen) return;
   bvOpen = false;
   bvIdle();
+  bvClearDetail();
   send({ type: "browser_view", action: "close" });
 }
 // [BROWSER-VIEW-END-END]
@@ -10342,6 +10488,7 @@ function bvSend(message) {
 }
 
 function onBrowserView(event) {
+  if (event.action === "detail") { bvOnDetail(event); return; }
   bvIdle();
   if (event.action === "error") {
     $("bv-status").textContent = `error: ${event.error}`;
@@ -10381,6 +10528,10 @@ function onBrowserView(event) {
     return;
   }
   bvOpen = true;    // a frame means a browser is running on the Mac
+  // A new picture of the page: whatever was sharpened may no longer be there,
+  // and any patch still in flight was aimed at the old one.
+  bvFrameSeq += 1;
+  bvClearDetail();
   bvFrame = { width: event.width, height: event.height };
   $("bv-frame").src = `data:image/jpeg;base64,${event.jpeg}`;
   // A goto that threw navigated NOWHERE, so the frame is a white about:blank.
@@ -10453,6 +10604,12 @@ function bvOpenEditor(focus) {
   $("bv-edit-note").textContent = secret ? "hidden — typing replaces it" : "";
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
+  // The editor row takes ~83px OUT of the stage, and everything drawn over the
+  // picture is positioned from the stage's box: the focus outline, the zoom
+  // clamp, the sharpened patch. Without this they stay where they were before
+  // the row appeared — pinned beside the field they are pointing at, which is
+  // exactly when an outline matters.
+  bvPaint(false);
 }
 
 function bvAskSignin(host) {
@@ -10478,6 +10635,7 @@ function bvCloseEditor() {
   $("bv-edit-input").type = "text";
   $("bv-edit").hidden = true;
   bvEditing = null;
+  bvPaint(false);   // the stage grows back; see bvOpenEditor
 }
 
 // Editing a value and SUBMITTING a form are two different acts, and offering
@@ -10671,6 +10829,10 @@ function wireBrowserView() {
     bvPointers.delete(e.pointerId);
     if (bvPointers.size < 2) bvPinchFrom = null;
     if (bvPointers.size === 0) bvDragFrom = null;
+    // A pinch or a pan that has ended may have gone past what the frame
+    // carries. Scheduled, not sent: the settle timer is what keeps a gesture
+    // in several parts from costing a trip per part.
+    if (bvPointers.size === 0) bvScheduleDetail();
     if (pinching || !wasDrag) return;
     if (wasDrag.moved > BV_TAP_SLOP) {
       // A SWIPE SCROLLS THE PAGE. At 1x there is nothing to pan — the frame
@@ -10697,6 +10859,7 @@ function wireBrowserView() {
       bvTapTimer = null;
       if (bvZoom.scale > 1) bvResetZoom();
       else bvZoomAt(2.5, e.clientX, e.clientY);
+      bvScheduleDetail();
       return;
     }
     const point = browserViewPoint(img, e.clientX, e.clientY);

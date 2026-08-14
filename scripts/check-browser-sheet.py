@@ -27,7 +27,14 @@ changing anything in the `.bv-*` column:
     uv run python scripts/check-browser-sheet.py            # pass/fail per case
     uv run python scripts/check-browser-sheet.py --shots /tmp/bv   # + screenshots
 
-Exits non-zero if any control is unreachable.
+It also checks the sharpened detail patch (#227), which has the same problem
+for the same reason: it is laid over the frame in PAGE coordinates and the
+layer then carries the frame's own transform, and no fake DOM has `object-fit`,
+a transform or rounding to get that wrong with. A misplaced patch is invisible
+— it looks like a sharp picture, in the wrong place — so it is checked through
+the SHIPPED tap mapper at several zoom levels.
+
+Exits non-zero if any control is unreachable or the patch does not land.
 """
 
 from __future__ import annotations
@@ -136,6 +143,67 @@ def _problems(g: dict, top: int, bottom: int, vvh: int, pan: int) -> list[str]:
     return out
 
 
+# The detail patch is laid over the frame in PAGE coordinates and the layer
+# then carries the frame's own transform. That trick is only sound while both
+# boxes are identical, and nothing in tests/js/ can see it — a fake DOM has no
+# `object-fit`, no transform and no rounding. So it is checked here, through the
+# SHIPPED tap mapper: map the patch's rendered corner back to a page point and
+# it must be the page point the patch claims to cover. A patch that is off is
+# invisible — it looks like a sharp picture, in the wrong place.
+_DETAIL_ALIGNMENT = """([zoom, rect]) => {
+  const img = document.getElementById('bv-frame');
+  bvFrame = { width: 1280, height: 1950 };
+  bvZoom = { scale: zoom, x: 0, y: 0 };
+  bvPaint(false);
+  bvDetail = rect;
+  const patch = document.getElementById('bv-detail');
+  patch.src = 'data:image/svg+xml;base64,' + btoa(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>');
+  bvPaintDetail();
+  const box = patch.getBoundingClientRect();
+  // Half a pixel in, so a boundary does not round out of the frame.
+  const topLeft = browserViewPoint(img, box.left + 0.5, box.top + 0.5);
+  const bottomRight = browserViewPoint(img, box.right - 0.5, box.bottom - 0.5);
+  return { topLeft, bottomRight, box: {w: box.width, h: box.height} };
+}"""
+
+
+def _check_detail_alignment(port: int, shots: Path | None) -> int:
+    """Does the sharpened patch cover the page rectangle it says it covers?"""
+    from playwright.sync_api import sync_playwright
+
+    rect = {"x": 320, "y": 480, "w": 640, "h": 975, "scale": 2.5}
+    bad = 0
+    print()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(channel="chrome")
+        ctx = browser.new_context(viewport={"width": 430, "height": 932},
+                                  device_scale_factor=3, is_mobile=True, has_touch=True)
+        page = ctx.new_page()
+        page.goto(f"http://127.0.0.1:{port}/index.html", wait_until="domcontentloaded")
+        page.wait_for_timeout(500)
+        page.evaluate(_OPEN_SHEET, [932, False])
+        for zoom in (1, 1.8, 2.5, 4):
+            g = page.evaluate(_DETAIL_ALIGNMENT, [zoom, rect])
+            tl, br = g["topLeft"], g["bottomRight"]
+            off = []
+            if not tl or abs(tl["x"] - rect["x"]) > 2 or abs(tl["y"] - rect["y"]) > 2:
+                off.append(f"top-left maps to {tl}, not ({rect['x']}, {rect['y']})")
+            want_br = (rect["x"] + rect["w"], rect["y"] + rect["h"])
+            if not br or abs(br["x"] - want_br[0]) > 2 or abs(br["y"] - want_br[1]) > 2:
+                off.append(f"bottom-right maps to {br}, not {want_br}")
+            bad += bool(off)
+            print(f"{'FAIL' if off else 'ok  '}  detail patch at {zoom}x zoom "
+                  f"covers the page rect it claims")
+            for line in off:
+                print(f"        *** {line}")
+        if shots:
+            page.screenshot(path=str(shots / "detail-alignment.png"))
+        ctx.close()
+        browser.close()
+    return bad
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--shots", metavar="DIR", help="also write a screenshot per case")
@@ -185,10 +253,12 @@ def main() -> int:
                     page.screenshot(path=str(shots / f"{stem}.png"))
                 ctx.close()
             browser.close()
+        print(f"\n{len(CASES) - failures}/{len(CASES)} cases reachable")
+        # Inside the try: the file server is what serves index.html, and it is
+        # shut down in the finally.
+        failures += _check_detail_alignment(port, shots)
     finally:
         srv.shutdown()
-
-    print(f"\n{len(CASES) - failures}/{len(CASES)} cases reachable")
     return 1 if failures else 0
 
 

@@ -3729,6 +3729,12 @@ class WebServer:
                 )
             if action == "close":
                 return browser.view_close()
+            if action == "detail":
+                return browser.view_detail(
+                    message.get("x"), message.get("y"),
+                    message.get("w"), message.get("h"),
+                    message.get("scale"),
+                )
             return browser.view_act(
                 action,
                 x=message.get("x", 0),
@@ -3750,8 +3756,32 @@ class WebServer:
             # renders on (see WORKER_POOL_SIZE).
             result = await loop.run_in_executor(self.worker_pool, run)
         except Exception as exc:  # noqa: BLE001 — the sheet must say what broke
+            if action == "detail":
+                # A sharpening that failed leaves the frame it was sharpening.
+                # Saying so would put an error line on a page that is fine.
+                return
             await client.ws.send_json(
                 {"type": "browser_view", "action": "error", "error": str(exc)[:300]}
+            )
+            return
+
+        if action == "detail":
+            if result is None:
+                return
+            await client.ws.send_json(
+                {
+                    "type": "browser_view",
+                    "action": "detail",
+                    "jpeg": base64.b64encode(result.jpeg).decode("ascii"),
+                    "x": result.x, "y": result.y,
+                    "w": result.width, "h": result.height,
+                    "scale": result.scale,
+                    "nav": result.nav,
+                    # Echoed back untouched: the client stamps each request with
+                    # the frame it was aiming at, and drops a patch that arrives
+                    # after the page moved on.
+                    "token": message.get("token"),
+                }
             )
             return
 
