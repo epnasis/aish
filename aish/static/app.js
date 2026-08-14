@@ -10744,8 +10744,14 @@ function wireBrowserView() {
     bvSend(Object.assign(
       { action: "goto", url: $("bv-url").value.trim() }, bvViewportSize()));
   });
-  $("bv-back").addEventListener("click", () => bvSend({ action: "back" }));
-  $("bv-refresh").addEventListener("click", () => bvSend({ action: "refresh" }));
+  // The size rides along with every navigation action: if the view has been
+  // reaped (15 minutes idle) the server reopens it, and it needs to know the
+  // shape to open at.
+  $("bv-back").addEventListener("click", () =>
+    bvSend(Object.assign({ action: "back" }, bvViewportSize())));
+  $("bv-refresh").addEventListener("click", () =>
+    bvSend(Object.assign({ action: "refresh", url: $("bv-url").value.trim() },
+                         bvViewportSize())));
   // A rotation or a keyboard changes the shape of the page we are showing, so
   // the remote page is RE-LAID-OUT rather than the frame being stretched.
   let resizeTimer = null;

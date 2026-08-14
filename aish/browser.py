@@ -597,6 +597,7 @@ class _Owner:
         self.navigations = 0
         self.pending_signin = ""   # host a password was submitted to
         self.pending_nav = -1      # the navigation count when that happened
+        self.last_url = ""         # where the view was, so it can be reopened
 
     def run(self) -> None:
         import asyncio
@@ -1161,17 +1162,24 @@ def view_act(action: str, **kwargs: Any) -> Frame:
     async def job(owner: _Owner) -> Frame:
         page = owner.view
         if page is None:
-            # Navigating with nothing open OPENS it. `/browser` with no URL
-            # shows the sheet without starting a browser, so the owner's first
-            # Go landed on "no remote view is open" — a true statement and a
-            # useless one, since asking to go somewhere IS asking to open it.
-            if action in ("goto", "refresh") and kwargs.get("url"):
-                target = str(kwargs["url"])
-                if not target.startswith(("http://", "https://")):
-                    target = "https://" + target
-                vw, vh = view_size(kwargs.get("width"), kwargs.get("height"))
-                return await _open_view(owner, target, vw, vh)
-            raise BrowserUnavailable("no remote view is open")
+            # NOTHING the owner can ask for should answer "no remote view is
+            # open". That is a statement about aish's bookkeeping, not about
+            # what he wanted — and he met it after the 15-minute idle reaper
+            # collected a view he was still looking at, on a page that was
+            # still on his screen. Whatever he asked for, reopen and do it.
+            target = str(kwargs.get("url") or owner.last_url or "")
+            if not target:
+                raise BrowserUnavailable(
+                    "the browser has nothing open — type an address above"
+                )
+            if not target.startswith(("http://", "https://")):
+                target = "https://" + target
+            vw, vh = view_size(kwargs.get("width"), kwargs.get("height"))
+            frame = await _open_view(owner, target, vw, vh)
+            # A tap or a scroll aimed at the OLD page would land somewhere
+            # arbitrary on the freshly loaded one, so reopening is where it
+            # stops: he sees the page again and acts on what he can see.
+            return frame
         clicked: tuple[float, float] | None = None
         if action == "click":
             clicked = (float(kwargs["x"]), float(kwargs["y"]))
@@ -1193,15 +1201,17 @@ def view_act(action: str, **kwargs: Any) -> Frame:
                     await page.keyboard.type(text, delay=12)
                 else:
                     await page.keyboard.press("Delete")
+                # Recorded BEFORE the submit keystroke: a fast navigation would
+                # otherwise increment `navigations` first, making the
+                # after-the-password test false and silently losing the
+                # question.
+                if kwargs.get("secret"):
+                    # A password went into THIS host — remember which, so the
+                    # sign-in question can name it, here and now.
+                    owner.pending_signin = host_of(page.url)
+                    owner.pending_nav = owner.navigations
                 if kwargs.get("submit"):
                     await page.keyboard.press("Enter")
-        if action == "fill" and kwargs.get("secret"):
-            # A password was just typed into THIS host. Remember which, so the
-            # question about saving the sign-in can be asked here and now,
-            # about a named site — rather than at the end of the session, when
-            # two logins are indistinguishable.
-            owner.pending_signin = host_of(page.url)
-            owner.pending_nav = owner.navigations
         elif action == "type":
             await page.keyboard.type(str(kwargs.get("text", "")), delay=12)
         elif action == "key":
@@ -1236,6 +1246,7 @@ def view_act(action: str, **kwargs: Any) -> Frame:
         else:
             raise ValueError(f"unknown view action {action!r}")
         owner.view_touched = time.monotonic()
+        owner.last_url = page.url or owner.last_url
         _note_visit(owner, page.url)
         frame = await _frame(owner, clicked, settle=False)
         # The page MOVED after a password went in, which is what a successful

@@ -42,7 +42,7 @@ The same page returns **7 833 characters on a cold profile and ZERO on a warm on
 
 Without that step the browser was **weaker than a third-party reader had any right to make it look**, which is the observation that produced this section — a real Chrome with a real profile should be strictly better than a session-less datacenter fetcher on every page, and where it isn't, the defect is in how it is driven.
 
-**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case. `TestVisitingIsNotSigningIn` pins that a visit writes nothing. `TestPasswordsAreNeverReadBack` and `TestEditingUsesRealKeystrokes` pin the input contract; `TestNativeDialogsAreDeadEnds` pins the passkey removal; `TestTheViewIsDesktopSoOneFrameCarriesMore` and `TestFramesWaitForThePageToSettle` pin the viewport decision and the settle.
+**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case. `TestVisitingIsNotSigningIn` pins that a visit writes nothing. `TestPasswordsAreNeverReadBack` and `TestEditingUsesRealKeystrokes` pin the input contract; `TestEveryActionActuallyRuns` executes every one of them; `TestNativeDialogsAreDeadEnds` pins the passkey removal; `TestTheViewIsDesktopSoOneFrameCarriesMore` and `TestFramesWaitForThePageToSettle` pin the viewport decision and the settle.
 
 ## Status is diagnostic only
 
@@ -201,6 +201,16 @@ A fixed `SETTLE_MS` cannot fix that, because "loaded" is a property of the page 
 - **An ✕ at the right of an address bar CLEARS THE FIELD.** That is what it means in every browser, and it was closing the session instead — a tap meant to erase a URL destroyed a login in progress. The field has its own clear inside it now, and **closing is an ✕ on the far LEFT**, where it cannot be read as a control belonging to the field.
 - **Closing is not called "Done".** It was, briefly, and that was a different mistake: "Done" reads as finishing a task, and this browser is not only for signing in. It is also for browsing so the profile's history looks human, for seeing what aish sees on a page, and in time for watching it act. The affordance should not imply the errand is over.
 - **Focusing the address selects all of it**, so the next keystroke replaces the URL and a long-press offers Copy on the whole thing.
+
+## Nothing answers "no remote view is open"
+
+That sentence is a statement about aish's bookkeeping, not about what the owner asked for — and he met it on a page still visible on his screen, after the idle reaper collected the view behind it. Any action now reopens at the last URL and shows him the page again. It stops there rather than replaying his tap, because a tap aimed at the old page would land somewhere arbitrary on a freshly loaded one.
+
+## Every action is EXECUTED in a test, not read
+
+A total interaction outage once shipped while 68 tests passed. A new `if` block inserted mid-chain split one `if/elif/else` into two, so `click`, non-secret `fill` and `clear` fell through to `raise ValueError("unknown view action")` — after the click had already been performed on the page. Every tap would have errored.
+
+It passed because the input-contract tests read `inspect.getsource` and never call anything: **source inspection cannot see control flow.** `TestEveryActionActuallyRuns` drives every action against a fake page and asserts something reached it. Any test that asserts on source text needs a sibling that executes.
 
 ## Testing
 

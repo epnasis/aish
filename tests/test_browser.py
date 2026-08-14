@@ -800,3 +800,137 @@ class TestSelectsAndNativePickers:
         js = browser._FOCUS_JS
         for kind in ("'date'", "'time'", "'month'"):
             assert kind in js
+
+
+class TestEveryActionActuallyRuns:
+    """EXECUTES each view action against a fake page.
+
+    A total interaction outage shipped while 68 tests passed: a new `if` block
+    was inserted mid-chain, splitting one if/elif/else into two, so `click`,
+    non-secret `fill` and `clear` fell through to `raise ValueError("unknown
+    view action")` — after the click had already been performed on the page.
+    Every tap would have errored.
+
+    It passed because the input-contract tests read `inspect.getsource` and
+    never call anything. Source inspection cannot see control flow; this can."""
+
+    class FakePage:
+        url = "https://example.com/"
+
+        def __init__(self):
+            self.did = []
+            self.mouse = self._Mouse(self)
+            self.keyboard = self._Keyboard(self)
+
+        class _Mouse:
+            def __init__(self, page):
+                self.page = page
+
+            async def click(self, x, y):
+                self.page.did.append(("click", x, y))
+
+            async def wheel(self, dx, dy):
+                self.page.did.append(("wheel", dy))
+
+        class _Keyboard:
+            def __init__(self, page):
+                self.page = page
+
+            async def press(self, key):
+                self.page.did.append(("press", key))
+
+            async def type(self, text, delay=None):
+                self.page.did.append(("type", text))
+
+        async def goto(self, *a, **k):
+            self.did.append(("goto", a[0] if a else None))
+            return type("R", (), {"status": 200})()
+
+        async def reload(self, **k):
+            self.did.append(("reload",))
+
+        async def go_back(self, **k):
+            self.did.append(("back",))
+
+        async def set_viewport_size(self, size):
+            self.did.append(("viewport", size["width"]))
+
+        async def select_option(self, sel, value):
+            self.did.append(("select", value))
+
+        async def wait_for_timeout(self, ms):
+            pass
+
+        async def screenshot(self, **k):
+            return b"\xff\xd8"
+
+        async def title(self):
+            return "T"
+
+        async def inner_text(self, sel):
+            return "text"
+
+        async def evaluate(self, js):
+            return [] if "meta" in js else None
+
+        @property
+        def viewport_size(self):
+            return {"width": 1280, "height": 2134}
+
+        @property
+        def frames(self):
+            return []
+
+        @property
+        def main_frame(self):
+            return None
+
+    def _owner(self):
+        owner = browser._Owner()
+        owner.view = self.FakePage()
+        return owner
+
+    def _run(self, owner, monkeypatch, action, **kwargs):
+        import asyncio
+
+        def drive(job, timeout):
+            return asyncio.new_event_loop().run_until_complete(job(owner))
+
+        monkeypatch.setattr(browser, "_submit", drive)
+        monkeypatch.setattr(browser, "_settle", lambda page: asyncio.sleep(0))
+        return browser.view_act(action, **kwargs)
+
+    @pytest.mark.parametrize(
+        "action,kwargs",
+        [
+            ("click", {"x": 10, "y": 20}),
+            ("fill", {"text": "hello", "submit": False}),
+            ("fill", {"text": "secret", "secret": True, "submit": True}),
+            ("clear", {}),
+            ("key", {"key": "Enter"}),
+            ("scroll", {"dy": 400}),
+            ("back", {}),
+            ("refresh", {}),
+            ("goto", {"url": "https://example.com/x"}),
+            ("choose", {"value": "two"}),
+            ("resize", {"width": 430, "height": 717}),
+        ],
+    )
+    def test_the_action_runs_and_returns_a_frame(self, action, kwargs, monkeypatch):
+        owner = self._owner()
+        frame = self._run(owner, monkeypatch, action, **kwargs)
+        assert isinstance(frame, browser.Frame)
+        assert owner.view.did, f"{action} did nothing to the page"
+
+    def test_a_click_really_clicks(self, monkeypatch):
+        owner = self._owner()
+        self._run(owner, monkeypatch, "click", x=11, y=22)
+        assert ("click", 11.0, 22.0) in owner.view.did
+
+    def test_a_password_fill_is_remembered_before_it_submits(self, monkeypatch):
+        """Recorded after the Enter press, a fast navigation could increment the
+        counter first and silently lose the sign-in question."""
+        owner = self._owner()
+        self._run(owner, monkeypatch, "fill", text="pw", secret=True, submit=True)
+        assert owner.pending_signin == "example.com"
+        assert owner.pending_nav == owner.navigations
