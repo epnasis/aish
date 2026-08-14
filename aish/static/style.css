@@ -3111,6 +3111,12 @@ body.console-open {
   min-height: 220px; background: #000;
   transform-origin: center center;
   touch-action: none;   /* the pointer handlers own pan and pinch, not the page */
+  /* Dragging an <img> starts Chrome's native image drag-and-drop, and the
+     browser taking over the gesture fires pointercancel — so a swipe died one
+     move in, with no scroll and a stale drag left behind. Measured: pointerdown,
+     ONE pointermove, then silence. */
+  -webkit-user-drag: none;
+  user-select: none;
   will-change: transform;
 }
 /* Animated only when letting go. While a finger is down the frame must track

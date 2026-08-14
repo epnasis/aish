@@ -370,6 +370,10 @@ A chip's label and payload come from **model output**, and a chip sends on ONE T
 
 ## Remote browser view
 
+### `[BROWSER-VIEW-END]` — a dismissed sheet must not leave a browser running
+
+A sheet can be dismissed four ways: the Close button, the ✕, the backdrop, and a swipe down the grabber. Only the button told the server. The other three left a real Chrome running on a machine nobody is sitting at — and because a read REFUSES while the owner is driving the view (`docs/browser.md`), a stray swipe meant aish could not read **any** page until the 15-minute idle cap expired. `bvEndIfOpen` therefore hangs off `closeSheets`, the one funnel every dismissal already goes through, rather than off each dismissal in turn.
+
 ### `[BROWSER-VIEW-COORDS]` — where a tap actually lands
 
 The `/browser <url>` sheet shows aish's own Chrome (running on the headless Mac) as a letterboxed `<img>` and turns a tap into a click at the same point on the real page. `browserViewPoint` owns that translation.
@@ -389,6 +393,9 @@ Zoom exists for one job: hitting a small field — a password box on a phone —
 - **A drag PANS, and never dismisses.** In the lightbox a drag down closes the picture; here the picture is a live page the owner is aiming at, so closing on a drag would be losing their place mid-login. `Done` closes it.
 - **A press that did not move is still a click on the page** (`BV_TAP_SLOP`), so tapping a field works whether or not the finger wobbles.
 - **Double-tap toggles 1× ↔ 2.5×, about the tapped point**, so the thing being aimed at stays put rather than sliding out from under the finger. Pinch does the same continuously.
+- **The frame is `draggable="false"`, and that is load-bearing.** Dragging an `<img>` starts Chrome's native image drag-and-drop, and the browser taking over the gesture fires `pointercancel` — so a swipe died one move in, leaving no scroll and a stale drag behind. Measured on a real mouse: `pointerdown`, ONE `pointermove`, then silence. A `dragstart` preventDefault backs it up.
+- **The gesture ends on the RELEASE's own coordinates, and on a window-level `pointerup` too.** Chrome coalesces and drops moves under load, so trusting the last one seen measures a shorter swipe than the finger made; and a release that drifts off the frame would otherwise never end the drag at all. (Pointer *capture* is the usual fix and is deliberately avoided — on an `<img>` it silently breaks drags, the same lesson `previewDown` records.)
+- **A swipe scrolls the page.** At 1× there is nothing to pan — the frame already fills the stage — so a drag did nothing at all, which wasted the most natural gesture on a phone and left the ▲/▼ buttons as the only way down a page. Zoomed in, the drag has already panned and must not also scroll. The delta is converted through `bvPageScale`, the same `contain`-fit geometry the tap mapper inverts, so a swipe moves the page by what it looks like it moves rather than by a fraction of it.
 - **A single tap is not debounced against the double-tap window.** Waiting 300 ms to act on every tap would make the view feel broken; a stray extra click costs one frame, not data.
 
 `bvClamp` is the one writer of the transform, and it clamps there rather than at each gesture: at 1× the picture exactly fills the stage and cannot be panned at all, and zoomed in it can never be panned past its own edge. Making an out-of-bounds pan *unwritable* rather than merely unwritten is the same discipline `previewPaint` uses, and for the same reason — five call sites agreeing is not an invariant. `tests/js/test_browser_view_clamp.js`.

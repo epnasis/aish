@@ -134,3 +134,31 @@ report("browser view coordinates");
 }
 
 report("browser view coordinates under zoom");
+
+// ---- a swipe must move the page by what it looks like it moves ----------
+//
+// The frame is `contain`-fitted, so a finger travelling 100px across a
+// shrunken frame is more than 100px of page. Getting this wrong is not
+// visible as a bug — the page just scrolls the wrong amount, every time.
+{
+  const sandbox = { bvFrame: { width: 1000, height: 2000 } };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    surface(extract(appSource(), "// [BROWSER-VIEW-ZOOM-START]", "// [BROWSER-VIEW-ZOOM-END]")),
+    sandbox
+  );
+  // Half-size frame: 1px of finger is 2px of page.
+  sandbox.$ = () => ({ getBoundingClientRect: () => ({ width: 500, height: 1000 }) });
+  ok("a shrunken frame scales the swipe up", sandbox.bvPageScale() === 2);
+
+  // Shown at natural size: 1:1.
+  sandbox.$ = () => ({ getBoundingClientRect: () => ({ width: 1000, height: 2000 }) });
+  ok("a frame at natural size scrolls 1:1", sandbox.bvPageScale() === 1);
+
+  // A collapsed stage must not produce Infinity/NaN scroll deltas.
+  sandbox.$ = () => ({ getBoundingClientRect: () => ({ width: 0, height: 0 }) });
+  ok("a zero-sized stage falls back to 1:1 rather than NaN",
+    sandbox.bvPageScale() === 1);
+}
+
+report("browser view swipe scaling");

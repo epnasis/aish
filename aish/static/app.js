@@ -10204,6 +10204,16 @@ function bvZoomAt(scale, clientX, clientY) {
   bvPaint(true);
 }
 
+/** Screen pixels -> page pixels. The frame is drawn `contain`-fitted, so a
+ *  finger travelling 100px across a shrunken frame is more than 100px of page.
+ *  Same geometry the tap mapper inverts, so a swipe moves what it looks like
+ *  it moves. */
+function bvPageScale() {
+  const box = $("bv-frame").getBoundingClientRect();
+  const scale = Math.min(box.width / bvFrame.width, box.height / bvFrame.height);
+  return scale > 0 ? 1 / scale : 1;
+}
+
 function bvResetZoom() {
   bvZoom = { scale: 1, x: 0, y: 0 };
   bvPaint(true);
@@ -10229,7 +10239,25 @@ function browserViewPoint(img, clientX, clientY) {
 }
 // [BROWSER-VIEW-COORDS-END]
 
+let bvOpen = false;   // is a remote browser actually running on the Mac?
 let bvBusyTimer = null;
+
+// [BROWSER-VIEW-END-START]
+/** End the remote browser if one is running. Called from EVERY route that
+ *  hides the sheet, not just the Close button.
+ *
+ *  A sheet can be dismissed four ways — the button, the ✕, the backdrop, and a
+ *  swipe down the grabber — and only the button used to tell the server. The
+ *  other three left a browser open on a machine nobody is sitting at, and
+ *  because a read refuses while the owner is driving the view, a stray swipe
+ *  meant aish could not read ANY page until the 15-minute idle cap expired. */
+function bvEndIfOpen() {
+  if (!bvOpen) return;
+  bvOpen = false;
+  bvIdle();
+  send({ type: "browser_view", action: "close" });
+}
+// [BROWSER-VIEW-END-END]
 
 function bvIdle() {
   bvBusy = false;
@@ -10271,6 +10299,7 @@ function onBrowserView(event) {
     return;
   }
   if (event.action === "closed") {
+    bvOpen = false;
     closeSheets();
     const hosts = event.hosts || [];
     if (!hosts.length) { showToast("browser closed"); return; }
@@ -10297,6 +10326,7 @@ function onBrowserView(event) {
     });
     return;
   }
+  bvOpen = true;    // a frame means a browser is running on the Mac
   bvFrame = { width: event.width, height: event.height };
   bvPaint(false);   // re-clamp: a new frame may be a different shape
   $("bv-frame").src = `data:image/jpeg;base64,${event.jpeg}`;
@@ -10350,7 +10380,10 @@ function wireBrowserView() {
       bvPinchFrom = { dist: Math.hypot(a.x - b.x, a.y - b.y), scale: bvZoom.scale };
       bvDragFrom = null;
     } else if (bvPointers.size === 1) {
-      bvDragFrom = { x: e.clientX, y: e.clientY, zoom: { ...bvZoom }, moved: 0 };
+      bvDragFrom = {
+        x: e.clientX, y: e.clientY, lastY: e.clientY,
+        zoom: { ...bvZoom }, moved: 0,
+      };
     }
   });
 
@@ -10370,6 +10403,7 @@ function wireBrowserView() {
     if (!bvDragFrom) return;
     const dx = e.clientX - bvDragFrom.x;
     const dy = e.clientY - bvDragFrom.y;
+    bvDragFrom.lastY = e.clientY;
     bvDragFrom.moved = Math.max(bvDragFrom.moved, Math.hypot(dx, dy));
     if (bvZoom.scale > 1) {
       bvZoom = { scale: bvZoom.scale, x: bvDragFrom.zoom.x + dx, y: bvDragFrom.zoom.y + dy };
@@ -10379,12 +10413,32 @@ function wireBrowserView() {
   }, { passive: false });
 
   const release = (e) => {
+    if (!bvPointers.has(e.pointerId) && !bvDragFrom) return;
     const wasDrag = bvDragFrom;
     const pinching = bvPointers.size >= 2 || bvPinchFrom;
     bvPointers.delete(e.pointerId);
     if (bvPointers.size < 2) bvPinchFrom = null;
     if (bvPointers.size === 0) bvDragFrom = null;
-    if (pinching || !wasDrag || wasDrag.moved > BV_TAP_SLOP) return;
+    if (pinching || !wasDrag) return;
+    if (wasDrag.moved > BV_TAP_SLOP) {
+      // A SWIPE SCROLLS THE PAGE. At 1x there is nothing to pan — the frame
+      // already fills the stage — so a drag that did nothing was the single
+      // most natural gesture on a phone going to waste, leaving the ▲/▼
+      // buttons as the only way down a page. Zoomed in, the drag has already
+      // panned (above) and must not also scroll.
+      if (bvZoom.scale === 1) {
+        // The RELEASE's own position, not the last pointermove: Chrome
+        // coalesces and drops moves under load, so trusting the last one seen
+        // measures a shorter swipe than the finger made — or none at all.
+        const endY = Number.isFinite(e.clientY) ? e.clientY : wasDrag.lastY;
+        const travelled = endY - wasDrag.y;
+        if (Math.abs(travelled) > BV_TAP_SLOP) {
+          // Finger up = page down, as everywhere else.
+          bvSend({ action: "scroll", dy: Math.round(-travelled * bvPageScale()) });
+        }
+      }
+      return;
+    }
 
     const now = Date.now();
     if (now - bvLastTapAt < 300) {       // double tap toggles zoom
@@ -10400,7 +10454,18 @@ function wireBrowserView() {
     const point = browserViewPoint(img, e.clientX, e.clientY);
     if (point) bvSend({ action: "click", x: point.x, y: point.y });
   };
+  // Belt and braces with draggable="false": some paths still raise dragstart,
+  // and one is enough to cancel the pointer stream mid-swipe.
+  img.addEventListener("dragstart", (e) => e.preventDefault());
   img.addEventListener("pointerup", release);
+  // A release that lands OUTSIDE the frame still ends the gesture. Without
+  // this a swipe that drifted off the edge left the drag hanging: no scroll,
+  // and the next tap inherited a stale drag. (Pointer CAPTURE is the usual fix
+  // and is deliberately avoided here — on an <img> it silently breaks drags,
+  // the same lesson the photo viewer records.)
+  window.addEventListener("pointerup", (e) => {
+    if (bvDragFrom && !$("browser-sheet").hidden) release(e);
+  });
   img.addEventListener("pointercancel", (e) => {
     bvPointers.delete(e.pointerId);
     bvPinchFrom = null;
@@ -10936,6 +11001,7 @@ $("pad-input").addEventListener("keydown", (e) => {
 })();
 
 function closeSheets() {
+  bvEndIfOpen();   // never leave a browser running behind a dismissed sheet
   // Blur a focused sheet input before hiding it: merely hiding leaves iOS to
   // dismiss the keyboard on its own schedule, and the layout-viewport pan it
   // caused can then settle without any visualViewport event (#8).
