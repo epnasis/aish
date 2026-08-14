@@ -42,7 +42,7 @@ The same page returns **7 833 characters on a cold profile and ZERO on a warm on
 
 Without that step the browser was **weaker than a third-party reader had any right to make it look**, which is the observation that produced this section — a real Chrome with a real profile should be strictly better than a session-less datacenter fetcher on every page, and where it isn't, the defect is in how it is driven.
 
-**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case. `TestVisitingIsNotSigningIn` pins that a visit writes nothing.
+**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case. `TestVisitingIsNotSigningIn` pins that a visit writes nothing. `TestPasswordsAreNeverReadBack` and `TestEditingUsesRealKeystrokes` pin the input contract.
 
 ## Status is diagnostic only
 
@@ -145,6 +145,18 @@ Three things, and the third was a design mistake rather than a bug:
 A login is a fact only the owner can state, and they are right there when the sheet closes, so **it asks**: the shared confirm modal names the hosts and what agreeing means, with *Just looking* as the resting choice. `record_logins` is the only writer, and it runs when they say yes. (The button that raised this also said **Done**, which they reasonably read as "dismiss the keyboard" — it says **Close** now.)
 
 The general shape is worth keeping: *the safe direction* is not always the restrictive one. Over-recording a login is not a cautious version of under-recording it; it is a different false statement, and this one taxed the main path to make it.
+
+## Input: a tap opens an editor, and a password is never read back
+
+The first input design was a text bar living permanently in the sheet. Every part of it failed in use — the owner's report is in `docs/web-frontend.md` under `[BROWSER-VIEW-EDIT]`. The server side of the replacement:
+
+**`_FOCUS_JS` reports what the page has focused** — kind, label, rect, and for ordinary fields the current value — probed across child frames too, since a login form is routinely in an iframe, with the rect offset by the iframe's own box so the client can outline it in the one coordinate space it has.
+
+**A password's value is NEVER read.** The frame already ships everything *visible*, so pre-filling an ordinary field adds essentially no exposure; a password field shows dots, so the pixels have never carried the value and reading it would be strictly **new** exposure — of a credential Chrome's profile may have autofilled and aish never saw typed. Masking it on the phone does not undo transmitting it. Refusal keys on `autocomplete: current-password/new-password` as well as the momentary `type`, because sites flip `type=password` to `text` for their own reveal button and tapping that first would otherwise launder the value into the read-back path. `TestPasswordsAreNeverReadBack`.
+
+**`tapped` is decided here, not on the phone.** Focus moves as a side effect — pages autofocus their first input, dismissing a cookie banner can leave focus in one — so the server hit-tests the click against the focused element's rect. Only a tap that landed ON the field opens an editor; anything else just draws the outline.
+
+**Writing is real keystrokes: select-all, then type.** Not Playwright `fill()`, which dispatches one `input` event and no key events at all. Keystroke-listening widgets break on that, and 2FA code boxes break outright — six one-character inputs that advance focus on each keyup would take `"123456"` into box one. Logins with 2FA are this feature's primary scenario. Typing over a selection also works in any iframe against whatever is focused, with no element handle to go stale. `TestEditingUsesRealKeystrokes`.
 
 ## Testing
 

@@ -407,6 +407,86 @@ async def _declared_images_async(page: Any) -> list[str]:
         return []
 
 
+# What the page currently has focused, so the phone can show WHICH field it is
+# and offer a proper editor for it.
+#
+# A password's value is NEVER read back. The frame shows dots, so the pixels
+# have never carried it — reading `input[type=password].value` would be
+# strictly NEW exposure, and the value may be one Chrome's own profile
+# autofilled, i.e. a stored credential aish never saw typed. Rendering it
+# masked on the phone does not undo transmitting it. Refusal keys on
+# autocomplete too, because sites flip type=password to type=text for their own
+# reveal button and tapping that first would otherwise launder the value.
+_FOCUS_JS = """() => {
+  const a = document.activeElement;
+  if (!a || a === document.body || a === document.documentElement) return null;
+  const tag = a.tagName.toLowerCase();
+  const type = (a.getAttribute('type') || 'text').toLowerCase();
+  const auto = (a.getAttribute('autocomplete') || '').toLowerCase();
+  const TEXTLIKE = ['text','search','email','url','tel','number','password',''];
+  const secret = type === 'password' ||
+                 auto === 'current-password' || auto === 'new-password';
+  const editable = tag === 'textarea' || a.isContentEditable ||
+                   (tag === 'input' && TEXTLIKE.includes(type));
+  let label = a.getAttribute('aria-label') || a.getAttribute('placeholder') || '';
+  if (!label && a.id) {
+    try {
+      const l = document.querySelector('label[for="' + CSS.escape(a.id) + '"]');
+      if (l) label = l.innerText.trim();
+    } catch (e) { /* an id CSS.escape cannot handle is simply unlabelled */ }
+  }
+  if (!label) label = a.getAttribute('name') || '';
+  const r = a.getBoundingClientRect();
+  // value ONLY for a real field, and never for a secret. Falling back to
+  // innerText here would ship the whole page as a "field value".
+  const value = (editable && !secret && typeof a.value === 'string') ? a.value : '';
+  return {
+    tag, kind: secret ? 'password' : (editable ? 'text' : (tag === 'select' ? 'select' : 'other')),
+    editable, secret, label: label.slice(0, 80),
+    value: value.slice(0, 4000),
+    rect: { x: r.x, y: r.y, w: r.width, h: r.height },
+  };
+}"""
+
+
+async def _focus_info(page: Any, click: tuple[float, float] | None) -> dict | None:
+    """The focused field, in FRAME coordinates, or None.
+
+    Probes child frames too — a login form is routinely in an iframe — and
+    offsets their rects by the iframe's own box so the client can outline it in
+    the one coordinate space it knows."""
+    for frame in page.frames:
+        try:
+            info = await frame.evaluate(_FOCUS_JS)
+        except Exception:  # noqa: BLE001 — a cross-origin or dead frame is simply skipped
+            continue
+        if not info:
+            continue
+        if frame is not page.main_frame:
+            try:
+                element = await frame.frame_element()
+                box = await element.bounding_box()
+                if box:
+                    info["rect"]["x"] += box["x"]
+                    info["rect"]["y"] += box["y"]
+            except Exception:  # noqa: BLE001 — un-offsettable: outline would lie, so drop it
+                info["rect"] = {"x": 0, "y": 0, "w": 0, "h": 0}
+        # Did the tap land ON this field? Focus also moves as a SIDE EFFECT —
+        # pages autofocus their first input, and dismissing a cookie banner can
+        # leave focus in one. Opening an editor then is the "surprising popup"
+        # complaint rebuilt, so the client only opens one when the owner
+        # actually aimed at the field.
+        r = info["rect"]
+        info["tapped"] = bool(
+            click
+            and r["w"]
+            and r["x"] <= click[0] <= r["x"] + r["w"]
+            and r["y"] <= click[1] <= r["y"] + r["h"]
+        )
+        return info
+    return None
+
+
 async def _dismiss_consent(page: Any) -> None:
     for selector in _CONSENT_SELECTORS:
         try:
@@ -794,9 +874,10 @@ class Frame:
     width: int = VIEW_WIDTH
     height: int = VIEW_HEIGHT
     error: str = ""  # a navigation that failed, so a blank page is never silent
+    focus: dict | None = None  # the field the page has focused, if any
 
 
-async def _frame(owner: _Owner) -> Frame:
+async def _frame(owner: _Owner, click: tuple[float, float] | None = None) -> Frame:
     page = owner.view
     await page.wait_for_timeout(400)  # let a click's repaint land before capture
     size = page.viewport_size or {"width": VIEW_WIDTH, "height": VIEW_HEIGHT}
@@ -806,6 +887,7 @@ async def _frame(owner: _Owner) -> Frame:
         title=(await page.title()) or "",
         width=size["width"],
         height=size["height"],
+        focus=await _focus_info(page, click),
     )
 
 
@@ -891,8 +973,29 @@ def view_act(action: str, **kwargs: Any) -> Frame:
                 vw, vh = view_size(kwargs.get("width"), kwargs.get("height"))
                 return await _open_view(owner, target, vw, vh)
             raise BrowserUnavailable("no remote view is open")
+        clicked: tuple[float, float] | None = None
         if action == "click":
-            await page.mouse.click(float(kwargs["x"]), float(kwargs["y"]))
+            clicked = (float(kwargs["x"]), float(kwargs["y"]))
+            await page.mouse.click(*clicked)
+        elif action in ("fill", "clear"):
+            # REAL KEYSTROKES, not Playwright fill(). fill() dispatches one
+            # `input` event and no key events at all, which breaks
+            # keystroke-listening widgets — and breaks 2FA code boxes outright,
+            # the six one-character inputs that advance focus on each keyup:
+            # fill() would drop "123456" into box one. Typing over a selection
+            # fires exactly the events typing always fires, in any iframe,
+            # against whatever is focused — no element handle to go stale.
+            await page.keyboard.press("ControlOrMeta+a")
+            if action == "clear":
+                await page.keyboard.press("Delete")
+            else:
+                text = str(kwargs.get("text", ""))
+                if text:
+                    await page.keyboard.type(text, delay=12)
+                else:
+                    await page.keyboard.press("Delete")
+                if kwargs.get("submit"):
+                    await page.keyboard.press("Enter")
         elif action == "type":
             await page.keyboard.type(str(kwargs.get("text", "")), delay=12)
         elif action == "key":
@@ -919,7 +1022,7 @@ def view_act(action: str, **kwargs: Any) -> Frame:
             raise ValueError(f"unknown view action {action!r}")
         owner.view_touched = time.monotonic()
         _note_visit(owner, page.url)
-        return await _frame(owner)
+        return await _frame(owner, clicked)
 
     return _submit(job, 120.0)
 

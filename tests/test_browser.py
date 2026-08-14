@@ -651,3 +651,44 @@ class TestSheddingASouredReputation:
         ctx = self.FakeContext([{"name": "datadome", "domain": ".other.example"}])
         self._run(browser._shed_reputation(ctx, "https://allegro.pl/x"))
         assert all(domain.endswith("allegro.pl") for _, domain in ctx.cleared)
+
+
+class TestPasswordsAreNeverReadBack:
+    """The JPEG already carries everything VISIBLE, so pre-filling an ordinary
+    field adds nothing. A password field shows dots — the pixels have never
+    carried the value — so reading `input[type=password].value` would be
+    strictly NEW exposure, of a credential Chrome's own profile may have
+    autofilled and aish never saw typed. Rendering it masked on the phone does
+    not undo transmitting it."""
+
+    def test_the_probe_refuses_a_password_value(self):
+        js = browser._FOCUS_JS
+        assert "type === 'password'" in js
+        assert "!secret" in js   # value is read only when NOT secret
+
+    def test_a_revealed_password_is_still_refused(self):
+        """Sites flip type=password to type=text for their own eye button.
+        Keying only on the momentary type would let tapping that first launder
+        the value into the read-back path."""
+        js = browser._FOCUS_JS
+        assert "current-password" in js
+        assert "new-password" in js
+
+    def test_the_page_text_is_never_used_as_a_field_value(self):
+        """An early probe fell back to innerText for non-fields and returned
+        the WHOLE PAGE as a "field value"."""
+        assert "innerText" not in browser._FOCUS_JS.split("const value")[1]
+
+
+class TestEditingUsesRealKeystrokes:
+    def test_fill_selects_all_then_types(self):
+        """Playwright fill() dispatches ONE input event and no key events, so
+        keystroke-listening widgets break — and 2FA code boxes break outright:
+        six one-character inputs that advance on each keyup would receive
+        "123456" in box one. This feature's primary scenario is logins."""
+        import inspect
+
+        source = inspect.getsource(browser.view_act)
+        assert "ControlOrMeta+a" in source
+        assert "keyboard.type" in source
+        assert ".fill(" not in source

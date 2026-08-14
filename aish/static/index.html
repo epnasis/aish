@@ -490,27 +490,49 @@
              autocorrect="off" spellcheck="false" placeholder="https://…">
       <button id="bv-go" class="bv-btn">Go</button>
     </div>
-    <div id="bv-status" class="bv-status">Tap to click · pinch or double-tap to zoom · type below</div>
+    <div id="bv-status" class="bv-status">Tap a field to type · double-tap to zoom</div>
     <div class="bv-stage">
       <!-- Tapped, not dragged: a coordinate maps straight to a click on the
            real page. The image is the ONLY thing that ever renders the site —
            no site HTML is injected into this document. -->
       <img id="bv-frame" class="bv-frame" alt="the page on the Mac" draggable="false">
-      <button id="bv-reset" class="bv-reset" hidden>1:1</button>
+      <!-- A readout, not a control: pointer-events none, fades on its own.
+           Double-tap is the reset. -->
+      <div id="bv-zoom" class="bv-zoom" hidden></div>
+      <div id="bv-tap" class="bv-tap" hidden></div>
+      <div id="bv-focus" class="bv-focus" hidden></div>
       <div id="bv-busy" class="bv-busy" hidden></div>
     </div>
-    <div class="bv-bar">
-      <input id="bv-text" class="bv-text" type="text" autocapitalize="off" autocorrect="off"
-             spellcheck="false" placeholder="type into the page">
-      <button id="bv-type" class="bv-btn">Type</button>
-      <button id="bv-enter" class="bv-btn">⏎</button>
-    </div>
+    <!-- The persistent type bar is gone. Tapping a field opens the editor
+         below, which is how a phone behaves everywhere else — and it dissolves
+         the Type-vs-Enter question rather than explaining it. -->
     <div class="bv-bar">
       <button id="bv-back" class="bv-btn">Back</button>
-      <button id="bv-up" class="bv-btn">▲</button>
-      <button id="bv-down" class="bv-btn">▼</button>
       <button id="bv-refresh" class="bv-btn">Refresh</button>
       <button id="bv-done" class="bv-btn bv-done">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Field editor: opened when a tap lands ON a text field in the remote page.
+     Sits above the keyboard as its own layer, so it can never be pushed under
+     the fold the way the old in-sheet bar was. -->
+<div id="bv-edit" class="modal" hidden role="dialog" aria-modal="true"
+     aria-labelledby="bv-edit-label">
+  <div class="modal-card bv-edit-card">
+    <div id="bv-edit-label" class="bv-edit-label">Field</div>
+    <div class="bv-edit-row">
+      <input id="bv-edit-input" class="bv-edit-input" type="text"
+             autocapitalize="off" autocorrect="off" spellcheck="false"
+             autocomplete="off">
+      <button id="bv-edit-eye" class="bv-edit-icon" hidden aria-label="show">👁</button>
+      <button id="bv-edit-clear" class="bv-edit-icon" aria-label="clear">✕</button>
+    </div>
+    <div id="bv-edit-note" class="bv-edit-note"></div>
+    <div class="bv-edit-actions">
+      <button id="bv-edit-cancel" class="bv-btn">Cancel</button>
+      <button id="bv-edit-set" class="bv-btn bv-done">Set</button>
+      <button id="bv-edit-go" class="bv-btn bv-done">Set &amp; submit</button>
     </div>
   </div>
 </div>

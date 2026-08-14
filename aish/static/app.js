@@ -10154,6 +10154,18 @@ let bvBusy = false;
 // than showing an enlarged blur.
 const BV_MAX_ZOOM = 4;
 const BV_TAP_SLOP = 8;           // px of movement still counted as a tap
+// A tap waits this long to see whether it is half of a double-tap. The old
+// code sent the click immediately, arguing a 300ms wait "would make the view
+// feel broken" and a stray click "costs a frame, not data". Both halves were
+// wrong here: the round trip is already 1-3s so 300ms is imperceptible, and a
+// stray click follows links, toggles controls and focuses fields — page state
+// that costs a round trip to discover and may be unrecoverable mid-login. It
+// is also what made double-tap-to-zoom useless: the first tap clicked the
+// page, so the page changed under the zoom.
+// 300ms is the platform's own number — mobile browsers used exactly this delay
+// because the viewport was double-tap-zoomable. This is a zoomable viewport.
+const BV_DOUBLE_TAP_MS = 300;
+let bvTapTimer = null;
 let bvZoom = { scale: 1, x: 0, y: 0 };
 const bvPointers = new Map();
 let bvDragFrom = null;           // {x, y, zoom, moved} while one finger is down
@@ -10185,7 +10197,40 @@ function bvPaint(settle) {
   // it can invert.
   img.style.transform =
     `translate(${bvZoom.x}px, ${bvZoom.y}px) scale(${bvZoom.scale})`;
-  $("bv-reset").hidden = bvZoom.scale === 1;
+  bvShowZoom();
+}
+
+/** Announce the zoom level WITHOUT inventing a control.
+ *
+ *  The old "1:1" button merged the two: he read a badge sitting on the content
+ *  as a status readout and never pressed it. In this category they are never
+ *  the same element — a readout is transient and untappable (a PDF viewer's
+ *  fading "150%"), a control is a labelled verb in the chrome. Double-tap is
+ *  the reset, which is the convention and exactly what he asked for. */
+let bvZoomPillTimer = null;
+function bvShowZoom() {
+  const pill = $("bv-zoom");
+  if (!pill) return;
+  if (bvZoom.scale === 1) { pill.hidden = true; return; }
+  pill.textContent = `${bvZoom.scale.toFixed(1)}×`;
+  pill.hidden = false;
+  clearTimeout(bvZoomPillTimer);
+  bvZoomPillTimer = setTimeout(() => { pill.hidden = true; }, 900);
+}
+
+/** A dot where the tap landed, painted at once. The click itself is 300ms +
+ *  a round trip away, and it also shows WHERE the tap mapped — which is the
+ *  aiming problem zoom exists for. */
+function bvMarkTap(clientX, clientY) {
+  const mark = $("bv-tap");
+  const stage = $("bv-frame").parentElement.getBoundingClientRect();
+  if (!mark) return;
+  mark.style.left = `${clientX - stage.left}px`;
+  mark.style.top = `${clientY - stage.top}px`;
+  mark.hidden = false;
+  mark.classList.remove("ping");
+  void mark.offsetWidth;               // restart the animation
+  mark.classList.add("ping");
 }
 
 function bvZoomAt(scale, clientX, clientY) {
@@ -10339,7 +10384,104 @@ function onBrowserView(event) {
     $("bv-url").value = event.url || "";
     $("bv-status").textContent = event.title || event.url || "";
   }
+  bvPaintFocus(event.focus);
+  if (event.focus && event.focus.tapped && event.focus.editable) bvOpenEditor(event.focus);
 }
+
+// [BROWSER-VIEW-EDIT-START]
+// Tapping a field opens an editor, because that is what a phone does
+// everywhere else. The old design was a text bar living permanently in the
+// sheet: it gave no sign which field was focused, offered no way to CORRECT a
+// value (it only appended keystrokes), had no clear, and — measured — slid
+// under the fold the instant the keyboard it fed opened.
+//
+// It opens only when the tap landed ON the field. Focus also moves as a side
+// effect (pages autofocus their first input; dismissing a cookie banner can
+// leave focus in one), and popping an editor then would rebuild the very
+// surprise this replaces. The server decides that and sends `tapped`.
+let bvEditing = null;   // the focus info being edited
+
+function bvOpenEditor(focus) {
+  bvEditing = focus;
+  const secret = focus.kind === "password";
+  const input = $("bv-edit-input");
+  $("bv-edit-label").textContent = focus.label || (secret ? "Password" : "Field");
+  input.type = secret ? "password" : "text";
+  // A password NEVER arrives pre-filled — the server refuses to read it, so
+  // there is nothing to show and nothing was transmitted.
+  input.value = secret ? "" : (focus.value || "");
+  $("bv-edit-eye").hidden = !secret;
+  $("bv-edit-eye").textContent = "👁";
+  $("bv-edit-note").textContent = secret
+    ? "The current value is hidden and never leaves the Mac. What you type replaces it."
+    : "";
+  $("bv-edit").hidden = false;
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function bvCloseEditor() {
+  // Cleared on the way out: this input holds passwords, and a value left in a
+  // DOM node outlives the dialog.
+  $("bv-edit-input").value = "";
+  $("bv-edit-input").type = "text";
+  $("bv-edit").hidden = true;
+  bvEditing = null;
+}
+
+function bvCommit(submit) {
+  const text = $("bv-edit-input").value;
+  // Send BEFORE clearing: bvSend refuses while an interaction is in flight,
+  // and clearing first silently destroyed the text — a password, typically —
+  // with nothing on screen to say so.
+  if (!bvSend({ action: "fill", text, submit })) {
+    $("bv-edit-note").textContent = "still working — try again in a moment";
+    return;
+  }
+  bvCloseEditor();
+}
+
+function wireBrowserEditor() {
+  $("bv-edit-clear").addEventListener("click", () => {
+    $("bv-edit-input").value = "";
+    $("bv-edit-input").focus();
+  });
+  $("bv-edit-eye").addEventListener("click", () => {
+    const input = $("bv-edit-input");
+    const shown = input.type === "text";
+    input.type = shown ? "password" : "text";
+    $("bv-edit-eye").textContent = shown ? "👁" : "🙈";
+    input.focus();
+  });
+  $("bv-edit-cancel").addEventListener("click", bvCloseEditor);
+  $("bv-edit-set").addEventListener("click", () => bvCommit(false));
+  $("bv-edit-go").addEventListener("click", () => bvCommit(true));
+  $("bv-edit-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); bvCommit(true); }
+    if (e.key === "Escape") { e.preventDefault(); bvCloseEditor(); }
+  });
+}
+wireBrowserEditor();
+
+/** Outline whatever the page has focused, in the frame's own coordinates.
+ *  His first complaint was that tapping gave no sign of what got selected. */
+function bvPaintFocus(focus) {
+  const box = $("bv-focus");
+  const img = $("bv-frame");
+  if (!box) return;
+  if (!focus || !focus.rect || !focus.rect.w) { box.hidden = true; return; }
+  const r = img.getBoundingClientRect();
+  const stage = img.parentElement.getBoundingClientRect();
+  const scale = Math.min(r.width / bvFrame.width, r.height / bvFrame.height);
+  const originX = r.left + (r.width - bvFrame.width * scale) / 2 - stage.left;
+  const originY = r.top + (r.height - bvFrame.height * scale) / 2 - stage.top;
+  box.style.left = `${originX + focus.rect.x * scale}px`;
+  box.style.top = `${originY + focus.rect.y * scale}px`;
+  box.style.width = `${focus.rect.w * scale}px`;
+  box.style.height = `${focus.rect.h * scale}px`;
+  box.hidden = false;
+}
+// [BROWSER-VIEW-EDIT-END]
 
 function openBrowserView(url) {
   openSheet("browser-sheet");
@@ -10440,19 +10582,20 @@ function wireBrowserView() {
       return;
     }
 
-    const now = Date.now();
-    if (now - bvLastTapAt < 300) {       // double tap toggles zoom
-      bvLastTapAt = 0;
-      bvZoomAt(bvZoom.scale > 1 ? 1 : 2.5, e.clientX, e.clientY);
-      if (bvZoom.scale === 1) bvResetZoom();
+    if (bvTapTimer) {                    // the second tap of a pair: ZOOM ONLY
+      clearTimeout(bvTapTimer);
+      bvTapTimer = null;
+      if (bvZoom.scale > 1) bvResetZoom();
+      else bvZoomAt(2.5, e.clientX, e.clientY);
       return;
     }
-    bvLastTapAt = now;
-    // A single tap is a CLICK on the page. Deliberately not debounced against
-    // the double-tap window: waiting 300ms to act on every tap would make the
-    // whole view feel broken, and a stray extra click costs a frame, not data.
     const point = browserViewPoint(img, e.clientX, e.clientY);
-    if (point) bvSend({ action: "click", x: point.x, y: point.y });
+    if (!point) return;
+    bvMarkTap(e.clientX, e.clientY);     // instant local feedback while we wait
+    bvTapTimer = setTimeout(() => {
+      bvTapTimer = null;
+      bvSend({ action: "click", x: point.x, y: point.y });
+    }, BV_DOUBLE_TAP_MS);
   };
   // Belt and braces with draggable="false": some paths still raise dragstart,
   // and one is enough to cancel the pointer stream mid-swipe.
@@ -10471,26 +10614,11 @@ function wireBrowserView() {
     bvPinchFrom = null;
     if (!bvPointers.size) bvDragFrom = null;
   });
-  $("bv-reset").addEventListener("click", bvResetZoom);
   $("bv-go").addEventListener("click", () => bvSend({ action: "goto", url: $("bv-url").value.trim() }));
   $("bv-url").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); $("bv-go").click(); }
   });
-  $("bv-type").addEventListener("click", () => {
-    const text = $("bv-text").value;
-    if (!text) return;
-    // Cleared IMMEDIATELY: this field holds passwords, and a value left in a
-    // DOM node outlives the sheet.
-    $("bv-text").value = "";
-    bvSend({ action: "type", text });
-  });
-  $("bv-text").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); $("bv-type").click(); }
-  });
-  $("bv-enter").addEventListener("click", () => bvSend({ action: "key", key: "Enter" }));
   $("bv-back").addEventListener("click", () => bvSend({ action: "back" }));
-  $("bv-down").addEventListener("click", () => bvSend({ action: "scroll", dy: 700 }));
-  $("bv-up").addEventListener("click", () => bvSend({ action: "scroll", dy: -700 }));
   $("bv-refresh").addEventListener("click", () => bvSend({ action: "refresh" }));
   $("bv-done").addEventListener("click", () => bvSend({ action: "close" }));
 

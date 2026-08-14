@@ -3733,8 +3733,9 @@ class WebServer:
                 action,
                 x=message.get("x", 0),
                 y=message.get("y", 0),
-                dy=message.get("dy", 600),
                 text=message.get("text", ""),
+                submit=bool(message.get("submit")),
+                dy=message.get("dy", 600),
                 key=message.get("key", "Enter"),
                 url=message.get("url", ""),
                 width=message.get("width"),
@@ -3769,6 +3770,7 @@ class WebServer:
                 "width": result.width,
                 "height": result.height,
                 "error": result.error,
+                "focus": result.focus,
             }
         )
 

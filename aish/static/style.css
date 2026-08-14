@@ -3071,22 +3071,27 @@ body.console-open {
 /* The Mac is headless, so this sheet IS the window. The frame is an <img> and
    nothing else — no site markup is ever injected into this document, which is
    what keeps a hostile page from scripting the app or reaching the token. */
-/* The sheet is `max-height: 82%` and a flex column, so the body must be a
-   flex CHILD that can shrink — sized by its content instead, the controls were
-   pushed off the bottom of the screen: on a 430x900 phone the Done button
-   landed at y=899, unreachable, along with the text field and the scroll
-   buttons. Verified in a real browser; the JS tests could not have seen it. */
+/* NOTHING IN THIS SHEET SCROLLS, and that is the fix rather than a preference.
+   Twice now the controls have been pushed off the bottom of the screen — the
+   Close button at y=899 on a 430x900 phone, and then the text field and Type
+   button at 545/548 in a 543px visual viewport, which is to say the field went
+   under the fold the instant the keyboard that types into it opened.
+   Both had the same cause: a content-sized column plus a `vh` frame height.
+   `vh` tracks the iOS LAYOUT viewport, which stays full-height under the
+   keyboard — the trap `.sheet` already documents ("% of the fixed body, NOT
+   dvh"). So the bars are fixed-height, the stage absorbs whatever is left, and
+   there is no scroll position that can hide a control at any viewport. */
+/* This sheet FILLS its allowance rather than being sized by its content.
+   `.sheet` sets only a max-height, so a content-sized column left nothing for
+   the stage to grow into and the frame sat at its 150px floor with the sheet
+   half empty. A browser occupies the space it is given. */
+#browser-sheet { height: 82%; }
+
 .bv-body {
-  flex: 1; min-height: 0; overflow-y: auto;
+  flex: 1; min-height: 0; overflow: hidden;
   padding: 4px 12px 16px; display: flex; flex-direction: column; gap: 8px;
 }
 .bv-bar { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
-/* Done must never be the thing that scrolled away: it is how the session gets
-   recorded and the browser released. */
-.bv-bar:last-child {
-  position: sticky; bottom: 0; z-index: 1;
-  background: var(--bg-elev); padding: 6px 0 2px;
-}
 .bv-url, .bv-text {
   flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; font-size: 16px;
   background: var(--chip-bg); color: var(--fg); border: 1px solid transparent;
@@ -3102,13 +3107,30 @@ body.console-open {
   font-size: 13px; color: var(--dim); min-height: 18px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.bv-stage { flex: 0 0 auto; position: relative; background: #000; border-radius: 12px; overflow: hidden; }
+/* The stage takes the remaining height, so the frame is as large as the sheet
+   allows instead of a fixed 44vh slot. That also cuts the letterbox waste: the
+   remote page is requested at ~0.92 screen height and was being shown in a
+   44vh box, so every frame rendered at roughly half scale between black bars. */
+.bv-stage {
+  /* basis 0, NOT auto: with `auto` the flex base size is the content size —
+     the frame's intrinsic 828px — so the stage sized itself to the image and
+     overflowed the sheet instead of absorbing what was left. */
+  flex: 1 1 0; min-height: 150px; position: relative;
+  background: #000; border-radius: 12px; overflow: hidden;
+}
 /* `contain` letterboxes rather than distorting: a stretched frame would make
    every tap land somewhere other than where it looks. [BROWSER-VIEW-COORDS-START]
    maps around the letterbox it creates. */
+/* Absolutely positioned so the image contributes NOTHING to layout: the stage
+   decides the size, the image fills it. A frame that can influence its own
+   container is how the overflow above happened in the first place.
+   `browserViewPoint` reads this element's rect, which is now exactly the
+   stage's, and `object-fit: contain` letterboxes inside it — the geometry the
+   mapper already inverts. */
 .bv-frame {
-  display: block; width: 100%; max-height: 44vh; object-fit: contain;
-  min-height: 220px; background: #000;
+  position: absolute; inset: 0;
+  display: block; width: 100%; height: 100%; object-fit: contain;
+  background: #000;
   transform-origin: center center;
   touch-action: none;   /* the pointer handlers own pan and pinch, not the page */
   /* Dragging an <img> starts Chrome's native image drag-and-drop, and the
@@ -3122,11 +3144,34 @@ body.console-open {
 /* Animated only when letting go. While a finger is down the frame must track
    it exactly, or the whole thing feels like it is lagging behind. */
 .bv-frame.settling { transition: transform 0.18s ease-out; }
-.bv-reset {
-  position: absolute; right: 8px; top: 8px; z-index: 2;
-  padding: 6px 10px; border-radius: 8px; border: none;
-  font-size: 13px; font-weight: 700;
-  background: rgba(0, 0, 0, 0.55); color: #fff;
+/* READOUT, not a control — hence pointer-events: none. A tappable badge on the
+   content is what the "1:1" button got wrong: he parsed it as status and never
+   pressed it, which is the correct reading of a badge sitting on content. */
+.bv-zoom {
+  position: absolute; right: 8px; top: 8px; z-index: 3; pointer-events: none;
+  padding: 5px 9px; border-radius: 8px;
+  font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums;
+  background: rgba(0, 0, 0, 0.6); color: #fff;
+}
+/* Where the tap landed, shown instantly — the click is 300ms plus a round trip
+   behind it, and silence for that long reads as a dropped tap. */
+.bv-tap {
+  position: absolute; z-index: 3; pointer-events: none;
+  width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
+}
+.bv-tap.ping { animation: bv-ping 0.45s ease-out forwards; }
+@keyframes bv-ping {
+  from { transform: scale(0.5); opacity: 0.95; }
+  to   { transform: scale(2.2); opacity: 0; }
+}
+/* The field the page currently has focused. His first complaint was that a tap
+   gave no sign of what it had selected. */
+.bv-focus {
+  position: absolute; z-index: 2; pointer-events: none;
+  border: 2px solid var(--blue); border-radius: 4px;
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.25);
 }
 .bv-busy {
   position: absolute; inset: 0; background: rgba(0, 0, 0, 0.35);
@@ -3139,3 +3184,21 @@ body.console-open {
   animation: bv-spin 0.8s linear infinite;
 }
 @keyframes bv-spin { to { transform: rotate(360deg); } }
+
+/* ---- remote browser: the field editor -------------------------------- */
+.bv-edit-card { display: flex; flex-direction: column; gap: 10px; }
+.bv-edit-label {
+  font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bv-edit-row { display: flex; gap: 8px; align-items: center; }
+.bv-edit-input {
+  flex: 1; min-width: 0; padding: 12px; border-radius: 10px; font-size: 17px;
+  background: var(--chip-bg); color: var(--fg); border: 1px solid transparent;
+}
+.bv-edit-icon {
+  flex: 0 0 auto; width: 40px; height: 40px; border-radius: 10px; border: none;
+  font-size: 16px; background: var(--chip-bg); color: var(--fg);
+}
+.bv-edit-note { font-size: 13px; color: var(--dim); min-height: 16px; }
+.bv-edit-actions { display: flex; gap: 8px; justify-content: flex-end; }

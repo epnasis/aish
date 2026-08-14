@@ -374,6 +374,21 @@ A chip's label and payload come from **model output**, and a chip sends on ONE T
 
 A sheet can be dismissed four ways: the Close button, the ✕, the backdrop, and a swipe down the grabber. Only the button told the server. The other three left a real Chrome running on a machine nobody is sitting at — and because a read REFUSES while the owner is driving the view (`docs/browser.md`), a stray swipe meant aish could not read **any** page until the 15-minute idle cap expired. `bvEndIfOpen` therefore hangs off `closeSheets`, the one funnel every dismissal already goes through, rather than off each dismissal in turn.
 
+### `[BROWSER-VIEW-EDIT]` — tapping a field opens an editor
+
+The first design put a text field permanently in the sheet with **Type** and **⏎** buttons. Owner feedback after real use, and every clause of it is a distinct defect:
+
+- *"there was no feedback that I highlighted a field so I did not know what field I have highlighted"* — a tap gave no sign of what it selected.
+- *"I didn't know how to open up the keyboard"*, then *"the type at the bottom was actually not visible because it doesn't fit the screen"* — measured: at the 543px visual viewport the keyboard leaves, `bv-text` sat at 505–545 and `bv-type` at 503–548. **Tapping the field opened the keyboard that pushed that field off the bottom.**
+- *"I cannot edit the value in the field once I enter it, since it only adds to the values"* — Type sent keystrokes, so there was no correcting and no clearing.
+- *"I still don't understand the button type versus the enter button."*
+
+So: a tap on a field opens a modal editor — label, current value, ✕ to clear, **Cancel / Set / Set & submit**. That answers the Type-vs-⏎ question by deleting it, and the modal is its own layer so it can never be pushed under the fold the way an in-sheet bar was. `bvPaintFocus` outlines whatever the page has focused, which supplies the missing "what did I just select".
+
+**It opens only when the tap landed ON the field** (`focus.tapped`, decided server-side by hit-testing the click against the focused element's rect). Focus also moves as a *side effect* — pages autofocus their first input, dismissing a cookie banner can leave focus in one — and popping an editor then would rebuild the exact surprise this replaces.
+
+**A password is never pre-filled**, and that is a transmission decision, not a display one — see `docs/browser.md`. The eye toggle reveals only what the owner is typing now, and the input is cleared and reset to `password` on close, because a value left in a DOM node outlives the dialog. Commit sends BEFORE clearing: `bvSend` refuses while an interaction is in flight, and clearing first silently destroyed the text — usually a password — with nothing on screen to say so.
+
 ### `[BROWSER-VIEW-COORDS]` — where a tap actually lands
 
 The `/browser <url>` sheet shows aish's own Chrome (running on the headless Mac) as a letterboxed `<img>` and turns a tap into a click at the same point on the real page. `browserViewPoint` owns that translation.
@@ -392,6 +407,8 @@ Zoom exists for one job: hitting a small field — a password box on a phone —
 
 - **A drag PANS, and never dismisses.** In the lightbox a drag down closes the picture; here the picture is a live page the owner is aiming at, so closing on a drag would be losing their place mid-login. `Done` closes it.
 - **A press that did not move is still a click on the page** (`BV_TAP_SLOP`), so tapping a field works whether or not the finger wobbles.
+- **A tap waits `BV_DOUBLE_TAP_MS` (300) before it clicks**, so a double-tap can mean zoom and *only* zoom. The original code sent the click immediately, arguing a wait "would make the view feel broken" and a stray click "costs a frame, not data". Both halves were wrong: the round trip is already 1–3s so the wait is imperceptible, and a stray click follows links, toggles controls and focuses fields — state that costs a round trip to discover and may be unrecoverable mid-login. It is also what made double-tap useless in practice: the first tap clicked the page, so the page changed under the zoom. 300 ms is the platform's own number, used by mobile browsers for exactly this case. A tap marker paints instantly so the wait is never silence.
+- **Zoom state is a READOUT, never a control.** The old `1:1` button merged them and the owner read a badge sitting on content as status — correctly — and never pressed it. `.bv-zoom` is `pointer-events: none` and fades; double-tap is the reset, which is both the convention and what he asked for.
 - **Double-tap toggles 1× ↔ 2.5×, about the tapped point**, so the thing being aimed at stays put rather than sliding out from under the finger. Pinch does the same continuously.
 - **The frame is `draggable="false"`, and that is load-bearing.** Dragging an `<img>` starts Chrome's native image drag-and-drop, and the browser taking over the gesture fires `pointercancel` — so a swipe died one move in, leaving no scroll and a stale drag behind. Measured on a real mouse: `pointerdown`, ONE `pointermove`, then silence. A `dragstart` preventDefault backs it up.
 - **The gesture ends on the RELEASE's own coordinates, and on a window-level `pointerup` too.** Chrome coalesces and drops moves under load, so trusting the last one seen measures a shorter swipe than the finger made; and a release that drifts off the frame would otherwise never end the drag at all. (Pointer *capture* is the usual fix and is deliberately avoided — on an `<img>` it silently breaks drags, the same lesson `previewDown` records.)
