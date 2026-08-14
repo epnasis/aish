@@ -159,6 +159,53 @@ def is_challenge(text: str, status: int | None) -> bool:
     return status in _BLOCK_STATUS
 
 
+# Anti-bot REPUTATION cookies. These are not the site's session and never the
+# owner's login — they are the scoring token a bot-management vendor issues,
+# and once it has decided against you it keeps deciding against you: measured
+# on allegro.pl, a page returning 7 833 characters on a cold profile returned
+# ZERO on a warm one, and dropping `datadome` alone took it straight back to
+# 7 874. The score is the block, so the score is what gets discarded.
+#
+# NEVER widen this to "clear the cookies for this host". The same jar holds the
+# sessions the owner signed in for by hand, which is the entire reason the
+# profile persists; clearing those to fix a scrape would trade the feature for
+# the workaround. Deletion is BY NAME, one cookie at a time.
+#
+# `cf_clearance` is deliberately absent: it is a PASS token, evidence a
+# challenge was already solved. Dropping it would throw away a good thing.
+_REPUTATION_COOKIES = (
+    "datadome",        # DataDome — what allegro.pl uses
+    "__cf_bm",         # Cloudflare bot management (not cf_clearance)
+    "_px", "_pxhd", "_pxvid",   # PerimeterX
+    "ak_bmsc", "bm_sz", "bm_sv",  # Akamai Bot Manager
+)
+
+
+async def _shed_reputation(context: Any, url: str) -> bool:
+    """Drop this host's bot-scoring cookies. True if anything went.
+
+    Targeted deletion by name — never `clear_cookies()`, which would take the
+    owner's logins with it."""
+    host = host_of(url)
+    if not host:
+        return False
+    shed = False
+    try:
+        present = {c.get("name") for c in await context.cookies()}
+    except Exception:  # noqa: BLE001 — no jar, nothing to shed
+        return False
+    for name in _REPUTATION_COOKIES:
+        if name not in present:
+            continue
+        for domain in (host, f".{host}"):
+            try:
+                await context.clear_cookies(name=name, domain=domain)
+                shed = True
+            except Exception:  # noqa: BLE001 — best effort, per name
+                continue
+    return shed
+
+
 class BrowserUnavailable(RuntimeError):
     """Playwright or Chrome is not installed — the caller falls back."""
 
@@ -529,13 +576,25 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
             )
         context = await owner.context()
         page = await context.new_page()
-        try:
+
+        async def attempt() -> tuple[Any, str]:
             response = await page.goto(
                 url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS
             )
             await page.wait_for_timeout(SETTLE_MS)
             await _dismiss_consent(page)
-            text = await _body_text(page)
+            return response, await _body_text(page)
+
+        try:
+            response, text = await attempt()
+            # A wall on a profile that has been reading for a while is usually
+            # the SCORE, not the page: the vendor's token has soured. Shed it
+            # and ask once more. This is what makes a real browser strictly
+            # better than a session-less third-party reader rather than merely
+            # different — without it, aish gave up on a page it could read.
+            if is_challenge(text, response.status if response else None):
+                if await _shed_reputation(context, url):
+                    response, text = await attempt()
             # A SHORT page is ambiguous: a wall is short, but so is a page that
             # has not finished painting. Reads serialise through this one
             # thread, so three in a turn means the third starts on a busy

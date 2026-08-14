@@ -562,3 +562,68 @@ class TestTheReadingContract:
         assert "REPORT WHAT ACTUALLY HAPPENED" in prompt
         assert "rendered in the browser" in prompt
         assert "blocks automated reading" in prompt
+
+
+class TestSheddingASouredReputation:
+    """A wall on a warm profile is usually the SCORE, not the page (#221).
+
+    Measured on allegro.pl: an offer page returning 7 833 characters on a cold
+    profile returned ZERO on a warm one, and dropping `datadome` alone took it
+    back to 7 874. Without this the browser was WEAKER than it should be, and
+    aish gave up on a page it could read — which is what the owner reported."""
+
+    class FakeContext:
+        def __init__(self, cookies):
+            self._cookies = list(cookies)
+            self.cleared = []
+
+        async def cookies(self):
+            return self._cookies
+
+        async def clear_cookies(self, *, name=None, domain=None, path=None):
+            self.cleared.append((name, domain))
+            self._cookies = [
+                c for c in self._cookies
+                if not (c["name"] == name and c["domain"] == domain)
+            ]
+
+    def _run(self, coro):
+        return asyncio.new_event_loop().run_until_complete(coro)
+
+    def test_the_scoring_cookie_is_dropped(self):
+        ctx = self.FakeContext([{"name": "datadome", "domain": ".allegro.pl"}])
+        assert self._run(browser._shed_reputation(ctx, "https://allegro.pl/oferta/x")) is True
+        assert ("datadome", ".allegro.pl") in ctx.cleared
+
+    def test_a_login_cookie_is_NEVER_dropped(self):
+        """The same jar holds the sessions the owner signed in for by hand —
+        the entire reason the profile persists. Clearing those to fix a scrape
+        would trade the feature for the workaround."""
+        ctx = self.FakeContext([
+            {"name": "datadome", "domain": ".allegro.pl"},
+            {"name": "QXLSESSID", "domain": ".allegro.pl"},
+            {"name": "wdctx", "domain": ".allegro.pl"},
+        ])
+        self._run(browser._shed_reputation(ctx, "https://allegro.pl/oferta/x"))
+        survivors = {c["name"] for c in self._run(ctx.cookies())}
+        assert "QXLSESSID" in survivors
+        assert "wdctx" in survivors
+        assert "datadome" not in survivors
+        assert all(name in browser._REPUTATION_COOKIES for name, _ in ctx.cleared)
+
+    def test_a_pass_token_is_kept(self):
+        """`cf_clearance` is EVIDENCE a challenge was already solved. Dropping
+        it would throw away a good thing and invite the challenge back."""
+        assert "cf_clearance" not in browser._REPUTATION_COOKIES
+        ctx = self.FakeContext([{"name": "cf_clearance", "domain": ".shop.example"}])
+        assert self._run(browser._shed_reputation(ctx, "https://shop.example/x")) is False
+
+    def test_nothing_is_shed_for_an_unparseable_url(self):
+        ctx = self.FakeContext([{"name": "datadome", "domain": ".allegro.pl"}])
+        assert self._run(browser._shed_reputation(ctx, "not a url")) is False
+        assert ctx.cleared == []
+
+    def test_only_this_host_is_touched(self):
+        ctx = self.FakeContext([{"name": "datadome", "domain": ".other.example"}])
+        self._run(browser._shed_reputation(ctx, "https://allegro.pl/x"))
+        assert all(domain.endswith("allegro.pl") for _, domain in ctx.cleared)

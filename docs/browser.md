@@ -34,6 +34,16 @@ It ships **on**, because the owner was shown that trade-off explicitly and chose
 
 **Jina Reader is retired as advice, on evidence.** It was the fallback before this existed, and across the owner's two real sessions it returned FOUR empty stubs and TWO timeouts and not one page of content — every "success" being `Title: allegro.pl / Warning: This page maybe requiring CAPTCHA / Markdown Content:` and nothing after it. Worse, `read_url` logged that stub `ok` and handed it to the model as the page, which is the same laundering `is_challenge` exists to prevent, one tool over. It fetches from a datacenter with no session, so recommending it *after* the local browser has failed points at something strictly weaker. A URL the owner pastes is still fetched; the stub is now refused (`_JINA_STUB`), and a Jina URL is never escalated to the browser, since rendering a rendering service proves nothing.
 
+## A wall on a warm profile is the SCORE, not the page
+
+The clearest wrong call in this whole build was recorded here as fact: *"Allegro serves a completely empty 403 body for that offer, consistently — that's the site's call, not a bug."* It was neither consistent nor the site's call.
+
+The same page returns **7 833 characters on a cold profile and ZERO on a warm one**, and dropping a single cookie — `datadome` — takes it straight back to **7 874**. Bot-management vendors issue a scoring token, and once it has decided against you it keeps deciding against you. The score IS the block, so the score is what gets discarded: a read that comes back walled sheds this host's reputation cookies and asks exactly once more.
+
+Without that step the browser was **weaker than a third-party reader had any right to make it look**, which is the observation that produced this section — a real Chrome with a real profile should be strictly better than a session-less datacenter fetcher on every page, and where it isn't, the defect is in how it is driven.
+
+**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case.
+
 ## Status is diagnostic only
 
 A site that dislikes automation may answer **403 and still serve the whole listing, prices included** — measured, not hypothesised. So a browser read is judged on whether it produced **text**, never on the code. Judging on the code would throw away the exact page this feature exists to get (`TestReadUrlEscalation`).
