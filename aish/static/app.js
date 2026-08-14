@@ -10405,6 +10405,7 @@ function onBrowserView(event) {
   bvFocusRect = event.focus || null;
   bvPaint(false);   // re-clamp AND redraw the outline for the new geometry
   if (event.focus && event.focus.tapped && event.focus.editable) bvOpenEditor(event.focus);
+  else if (event.focus && event.focus.tapped && event.focus.options) bvOpenPicker(event.focus);
 }
 
 // [BROWSER-VIEW-EDIT-START]
@@ -10504,6 +10505,28 @@ function wireBrowserEditor() {
 }
 wireBrowserEditor();
 
+/** Chrome draws a <select> with NATIVE UI, which `page.screenshot` cannot
+ *  capture — so tapping one produced a frame that looked completely inert,
+ *  the same dead end as the passkey prompt. The options come up with the frame
+ *  and the phone draws its own list. */
+function bvOpenPicker(focus) {
+  const list = $("bv-picker-list");
+  list.textContent = "";
+  $("bv-picker-label").textContent = focus.label || "Choose";
+  for (const option of focus.options) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = option.label;
+    if (option.chosen) button.className = "chosen";
+    button.addEventListener("click", () => {
+      $("bv-picker").hidden = true;
+      bvSend({ action: "choose", value: option.value });
+    });
+    list.appendChild(button);
+  }
+  $("bv-picker").hidden = false;
+}
+
 /** Outline whatever the page has focused, in the frame's own coordinates.
  *  His first complaint was that tapping gave no sign of what got selected. */
 function bvPaintFocus(focus) {
@@ -10579,6 +10602,7 @@ function wireBrowserView() {
     // on any page. The tap is spent on leaving, not forwarded as a click, so
     // dismissing cannot also press something.
     if (bvEditing) { bvCommitAndClose(); return; }
+    if (!$("bv-picker").hidden) { $("bv-picker").hidden = true; return; }
     bvPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (bvPointers.size === 2) {
       const [a, b] = [...bvPointers.values()];

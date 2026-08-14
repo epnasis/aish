@@ -467,7 +467,11 @@ _FOCUS_JS = """() => {
   const tag = a.tagName.toLowerCase();
   const type = (a.getAttribute('type') || 'text').toLowerCase();
   const auto = (a.getAttribute('autocomplete') || '').toLowerCase();
-  const TEXTLIKE = ['text','search','email','url','tel','number','password',''];
+  // date/time inputs open Chrome's NATIVE picker, which screenshots cannot
+  // capture — but they accept typed text, so they are treated as editable and
+  // the owner types the value rather than facing an invisible calendar.
+  const TEXTLIKE = ['text','search','email','url','tel','number','password','',
+                    'date','datetime-local','month','week','time'];
   const secret = type === 'password' ||
                  auto === 'current-password' || auto === 'new-password';
   const editable = tag === 'textarea' || a.isContentEditable ||
@@ -480,12 +484,21 @@ _FOCUS_JS = """() => {
     } catch (e) { /* an id CSS.escape cannot handle is simply unlabelled */ }
   }
   if (!label) label = a.getAttribute('name') || '';
+  // A <select> opens native UI too, so its options are sent up and the phone
+  // draws its own picker.
+  let options = null;
+  if (tag === 'select') {
+    options = [...a.options].slice(0, 200).map(o => ({
+      value: o.value, label: (o.label || o.text || o.value).slice(0, 80),
+      chosen: o.selected,
+    }));
+  }
   const r = a.getBoundingClientRect();
   // value ONLY for a real field, and never for a secret. Falling back to
   // innerText here would ship the whole page as a "field value".
   const value = (editable && !secret && typeof a.value === 'string') ? a.value : '';
   return {
-    tag, type,
+    tag, type, options,
     kind: secret ? 'password' : (editable ? 'text' : (tag === 'select' ? 'select' : 'other')),
     editable, secret, label: label.slice(0, 80),
     value: value.slice(0, 4000),
@@ -1132,6 +1145,10 @@ def view_act(action: str, **kwargs: Any) -> Frame:
             await page.keyboard.type(str(kwargs.get("text", "")), delay=12)
         elif action == "key":
             await page.keyboard.press(str(kwargs.get("key", "Enter")))
+        elif action == "choose":
+            # select_option fires `change`, which is what a site listens for —
+            # typing into a <select> would do nothing at all.
+            await page.select_option(":focus", str(kwargs.get("value", "")))
         elif action == "resize":
             # The sheet changed shape — a rotation, or a keyboard opening. The
             # page is re-laid-out rather than the frame being stretched, so a

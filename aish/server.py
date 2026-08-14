@@ -3734,6 +3734,7 @@ class WebServer:
                 x=message.get("x", 0),
                 y=message.get("y", 0),
                 text=message.get("text", ""),
+                value=message.get("value", ""),
                 submit=bool(message.get("submit")),
                 dy=message.get("dy", 600),
                 key=message.get("key", "Enter"),

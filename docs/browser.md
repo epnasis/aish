@@ -168,7 +168,7 @@ So WebAuthn is **removed** from the view rather than attempted, and sites fall b
 
 The same reasoning covers the rest of the class. Playwright **dismisses native dialogs by default, silently**, so a login that alerted an error would vanish without trace — they are reported into the frame's message instead. A file-upload picker would open a native chooser on a Mac nobody is sitting at and simply hang; it is cancelled with an explanation. `TestNativeDialogsAreDeadEnds`.
 
-Still open in this class: `<select>` opens a native dropdown that screenshots do not capture, so a tap on one looks inert.
+`<select>` was the last of this class and is now handled the same way — by bringing the capability into the page instead of leaving it to browser chrome. The options come up with the frame and the phone draws its own picker; the choice is applied with `select_option`, which fires `change` (typing into a select does nothing). Date and time inputs open native pickers too, but they accept typed text, so they are simply treated as editable. `TestSelectsAndNativePickers`.
 
 ## The view is mobile; the reads are not
 
@@ -194,7 +194,8 @@ A fixed `SETTLE_MS` cannot fix that, because "loaded" is a property of the page 
 
 ## Small things that were the whole experience
 
-- **An ✕ at the right of an address bar CLEARS THE FIELD.** That is what it means in every browser, and it was closing the session instead — a tap meant to erase a URL destroyed a login in progress. Closing is now the word **Done**, because a word cannot be mistaken for a field control, and the address has its own clear inside it.
+- **An ✕ at the right of an address bar CLEARS THE FIELD.** That is what it means in every browser, and it was closing the session instead — a tap meant to erase a URL destroyed a login in progress. The field has its own clear inside it now, and **closing is an ✕ on the far LEFT**, where it cannot be read as a control belonging to the field.
+- **Closing is not called "Done".** It was, briefly, and that was a different mistake: "Done" reads as finishing a task, and this browser is not only for signing in. It is also for browsing so the profile's history looks human, for seeing what aish sees on a page, and in time for watching it act. The affordance should not imply the errand is over.
 - **Focusing the address selects all of it**, so the next keystroke replaces the URL and a long-press offers Copy on the whole thing.
 
 ## Testing

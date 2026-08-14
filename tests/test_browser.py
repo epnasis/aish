@@ -787,3 +787,31 @@ class TestFramesWaitForThePageToSettle:
         source = inspect.getsource(browser._settle)
         assert "SETTLE_MAX_MS" in source
         assert source.count("except") >= 2   # every wait degrades, none raises
+
+
+class TestSelectsAndNativePickers:
+    """Chrome draws a <select> with NATIVE UI, which `page.screenshot` cannot
+    capture — so a tapped select produced a frame that looked completely inert.
+    Same dead end as the passkey prompt, and the same answer: the capability is
+    brought into the page rather than left to browser chrome."""
+
+    def test_a_select_reports_its_options(self):
+        js = browser._FOCUS_JS
+        assert "tag === 'select'" in js
+        assert "a.options" in js
+        assert "chosen: o.selected" in js
+
+    def test_choosing_uses_select_option_not_typing(self):
+        """`select_option` fires `change`, which is what a site listens for.
+        Typing into a <select> does nothing at all."""
+        import inspect
+
+        source = inspect.getsource(browser.view_act)
+        assert "select_option" in source
+
+    def test_date_inputs_are_typed_rather_than_left_to_a_native_calendar(self):
+        """A date input opens Chrome's own picker, invisible for the same
+        reason — but it accepts typed text, so it is treated as editable."""
+        js = browser._FOCUS_JS
+        for kind in ("'date'", "'time'", "'month'"):
+            assert kind in js

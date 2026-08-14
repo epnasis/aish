@@ -489,6 +489,15 @@
        a Mac. An in-app browser puts the address and the close together at the
        top; the address bar carries the identity. -->
   <div class="bv-bar bv-top">
+    <!-- Closing is an ✕, not a word. "Done" reads as finishing a TASK, and
+         this browser is not only for logging in — it is also for browsing so
+         the profile's history looks human, for seeing what aish sees, and in
+         time for watching it act. It sits at the LEFT, well away from the
+         field's own clear on the right: adjacency to that field is what made
+         an ✕ read as "clear the address" and cost a session. -->
+    <button class="bv-x" data-close="browser-sheet" aria-label="close browser" title="close">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".7"/></svg>
+    </button>
     <span class="bv-url-wrap">
       <input id="bv-url" class="bv-url" type="url" inputmode="url" enterkeyhint="go"
              autocapitalize="off" autocorrect="off" spellcheck="false"
@@ -500,9 +509,6 @@
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor" opacity=".28"/><path d="M9 9l6 6m0-6l-6 6" fill="none" stroke="var(--bg)" stroke-width="2.1" stroke-linecap="round"/></svg>
       </button>
     </span>
-    <!-- Closing is a WORD, not a glyph beside a text field: an in-app browser
-         says Done, and a word cannot be mistaken for a field control. -->
-    <button class="bv-btn bv-close-word" data-close="browser-sheet">Done</button>
   </div>
   <div class="bv-body">
     <div id="bv-status" class="bv-status">Tap a field to type · double-tap to zoom</div>
@@ -523,6 +529,14 @@
       <div id="bv-tap" class="bv-tap" hidden></div>
       <div id="bv-focus" class="bv-focus" hidden></div>
       <div id="bv-busy" class="bv-busy" hidden></div>
+      <!-- Chrome's own dropdown is NATIVE UI: page.screenshot cannot see it,
+           so a tapped select looked inert. This is aish's own picker. -->
+      <div id="bv-picker" class="bv-picker" hidden>
+        <div class="bv-picker-card">
+          <div id="bv-picker-label" class="bv-edit-label">Choose</div>
+          <div id="bv-picker-list" class="bv-picker-list"></div>
+        </div>
+      </div>
     </div>
 <!-- A focus bar, not a modal. It is the page's field brought within reach:
      the field's name, the value, and nothing else. Tapping away commits and
