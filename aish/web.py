@@ -246,6 +246,12 @@ def _browser_read(url: str) -> tuple[str, list[str]] | None:
     )
     if not text.strip():
         return None
+    # A wall HAS text, so "non-empty" is not the same as "the page". Handing a
+    # challenge screen back as content is the ORIGINAL failure rebuilt one layer
+    # up: the model would read "verify you are human" as the shop and answer
+    # from it. An honest ERROR is worth more than a laundered block page.
+    if browser.is_challenge(text, page.status):
+        return None
     _remember_title(url, page.title)
     return text, page.images
 

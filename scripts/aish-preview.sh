@@ -8,6 +8,10 @@
 # in README (Branch preview). Reusable for any future branch: it always runs
 # the tree the script lives in.
 #
+# The browser reader is DISABLED here (AISH_PREVIEW=1 → browser.is_preview):
+# the profile holding the owner's live logins lives under the shared state dir,
+# and a branch preview must not be able to act as them.
+#
 # SHARED STATE: preview points at prod's AISH_STATE_DIR, so sessions, the
 # command audit log, the allowlist and ~/.config/aish knowledge are the SAME
 # in both UIs (that's the point — compare on identical data). The append-only
@@ -45,7 +49,12 @@ done
 # the shared-state contract is visible and survives a future default change.
 export AISH_STATE_DIR="${AISH_STATE_DIR:-$HOME/.local/state/aish}"
 
+# Sharing the state dir means sharing the BROWSER PROFILE, which holds live
+# signed-in sessions. A branch preview must not be able to act as the owner.
+export AISH_PREVIEW=1
+
 echo "→ preview: ${MODEL} on http://${HOST}:${PORT}/  (state: ${AISH_STATE_DIR})"
 echo "  proxy /preview/ → ${HOST}:${PORT} to reach it at https://aish.wenda.eu/preview/"
 echo "  ⚠ shared sessions with prod — don't run the same session on both at once"
+echo "  ⚠ browser reader disabled here (shared profile holds prod's logins)"
 exec uv run --project "$PROJECT" aish-web --host "$HOST" --port "$PORT" --model "$MODEL"

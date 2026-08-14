@@ -1683,6 +1683,8 @@ class WebServer:
         # Agent workers get their OWN pool so a parked approval can never
         # starve the short ops (replay, log parsing, peeks) that stay on the
         # default to_thread executor — see WORKER_POOL_SIZE.
+        # The client currently driving the remote browser view, if any (#221).
+        self._view_client: Client | None = None
         self.worker_pool = ThreadPoolExecutor(
             max_workers=WORKER_POOL_SIZE, thread_name_prefix="aish-worker"
         )
@@ -2063,7 +2065,24 @@ class WebServer:
         # Stop fanning console output at this dead socket. The console itself is
         # NEVER killed on disconnect — it's global and keeps running (#148).
         self.console_viewers.discard(client)
+        # A remote browser view belongs to the client driving it. Left open it
+        # holds Chrome AND the profile lock — the idle reaper deliberately will
+        # not collect a live view, since the owner routinely pauses mid-login
+        # waiting on a 2FA code. So the socket closing is what ends it.
+        if self._view_client is client and self.loop is not None:
+            self._view_client = None
+            self.loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._close_orphan_view())
+            )
         self._leave(client)
+
+    async def _close_orphan_view(self) -> None:
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                self.worker_pool, browser.view_close
+            )
+        except Exception:  # noqa: BLE001 — best effort; the idle cap is the backstop
+            pass
 
     def _leave(self, client: Client) -> None:
         """Remove `client` from its viewed session's viewer set. If it was that
@@ -3689,6 +3708,10 @@ class WebServer:
         """
         action = str(message.get("action", "")).strip()
         loop = asyncio.get_running_loop()
+        if action == "open":
+            self._view_client = client
+        elif action == "close":
+            self._view_client = None
 
         def run():
             if action == "open":

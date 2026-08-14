@@ -362,6 +362,12 @@ The key row is Blink-SmarterKeys-style: sticky-left `esc`/`ctrl`/`tab`, sticky-r
 
 ---
 
+## Quick-reply chips
+
+### `[CHIP-NEVER-COMMANDS]` — a chip is a message, never a command
+
+A chip's label and payload come from **model output**, and a chip sends on ONE TAP. `submitInput` routed any leading `/` through `handleSlash`, so under prompt injection a hostile fetched page could render a friendly *"Sign in to continue"* chip that opened aish's own remote-browser login sheet pointed at a credential-harvesting URL — borrowing precisely the trust that sheet is designed to have. Slash commands are privileged local actions and must be **typed by the human**: a chip carrying one is now sent as ordinary message text. `tests/js/test_chip_never_commands.js` pins both directions, since the typed path must keep working.
+
 ## Remote browser view
 
 ### `[BROWSER-VIEW-COORDS]` — where a tap actually lands

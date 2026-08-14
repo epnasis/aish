@@ -4885,7 +4885,7 @@ function quickReplyChip(label, payload) {
     if (seedOnly) {
       input.focus(); // let the user complete the sentence before sending
     } else {
-      submitInput(); // one-tap send
+      submitInput({ fromChip: true }); // one-tap send — as a message, never a command
     }
   };
   return btn;
@@ -7709,12 +7709,21 @@ function acceptSuggestion([value]) {
   if (kind !== "slash") updateSuggest();
 }
 
-function submitInput() {
+// [CHIP-NEVER-COMMANDS-START]
+function submitInput(options) {
   hideSuggest();
   if (dictating) stopDictation(); // tapping send finishes an in-progress dictation
   if (cmdMode) { submitCommand(); return; }
   let text = input.value.trim();
-  if (text.startsWith("/")) {
+  // A CHIP IS A MESSAGE, NEVER A COMMAND. Chip labels and payloads come from
+  // MODEL output, which under prompt injection is attacker-controlled — and a
+  // chip sends on one tap. Routing that through handleSlash let a hostile
+  // fetched page render a friendly "Sign in to continue" button that opened
+  // aish's OWN login sheet at a credential-harvesting URL. The sheet is
+  // designed to feel trustworthy, which is exactly the trust it abused.
+  // Slash commands are privileged local actions and must be TYPED by the human.
+  const fromChip = !!(options && options.fromChip);
+  if (text.startsWith("/") && !fromChip) {
     // Only clear once the command is handled/sent — an unknown command, an
     // ambiguous prefix, or a failed send keeps the text so it isn't lost (#101).
     if (handleSlash(text)) {
@@ -7725,6 +7734,7 @@ function submitInput() {
     }
     return;
   }
+  // [CHIP-NEVER-COMMANDS-END]
   if (!text && !attachments.length) return;
   // The server decides per-backend whether attachments go to the model
   // natively (vision) or as path notes for the gated tools.
@@ -10218,18 +10228,35 @@ function browserViewPoint(img, clientX, clientY) {
 }
 // [BROWSER-VIEW-COORDS-END]
 
+let bvBusyTimer = null;
+
+function bvIdle() {
+  bvBusy = false;
+  clearTimeout(bvBusyTimer);
+  $("bv-busy").hidden = true;
+}
+
 function bvSend(message) {
   if (bvBusy) return false;           // one interaction in flight: frames must stay ordered
   bvBusy = true;
   $("bv-busy").hidden = false;
   const sent = send(Object.assign({ type: "browser_view" }, message));
-  if (!sent) { bvBusy = false; $("bv-busy").hidden = true; }
+  if (!sent) { bvIdle(); return false; }
+  // A reply is the only thing that clears the spinner, so a socket that dies
+  // mid-interaction would park it forever and the sheet would look wedged with
+  // nothing to tap. On a phone reaching a home server, a dropped socket is
+  // ordinary weather, not an edge case.
+  clearTimeout(bvBusyTimer);
+  bvBusyTimer = setTimeout(() => {
+    if (!bvBusy) return;
+    bvIdle();
+    $("bv-status").textContent = "no answer — tap again";
+  }, 60000);
   return sent;
 }
 
 function onBrowserView(event) {
-  bvBusy = false;
-  $("bv-busy").hidden = true;
+  bvIdle();
   if (event.action === "error") {
     $("bv-status").textContent = `error: ${event.error}`;
     return;
