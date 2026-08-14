@@ -1,0 +1,73 @@
+# The browser — reading pages a fetch cannot read (#221)
+
+`browser.py`, `web._browser_read`, `Agent._login_gate`.
+
+`read_url` fetches with urllib: fast, cheap, anonymous, right for most of the web. Two kinds of page it cannot read **at all** — one rendered entirely by JavaScript, where the fetch returns an empty shell, and one behind a login, where the fetch is simply a different, logged-out client. This is the escalation for both: a real Chrome on this Mac, driven off-screen, with a profile that persists.
+
+---
+
+## What the measurements actually said
+
+The feature exists because of a session (`session-20260814-062523`) where allegro.pl was tried five times and never once returned a page: `read_url` took **403** three times, and the `r.jina.ai` fallback returned `Warning: This page maybe requiring CAPTCHA` with an **empty body** three times. The model then twice proposed `curl`, claiming the owner's home IP had "a much greater chance of bypassing the block" — **false**, and the owner rejected both with a comment. They offered to solve the captcha themselves and there was no mechanism to hand them one.
+
+What the probes then found, and every design decision below follows from it:
+
+| Setup | Result |
+|---|---|
+| urllib, browser-ish UA | 403 |
+| Jina Reader (datacenter, no session) | empty page + CAPTCHA warning |
+| **headless** Chrome, cold profile | **403, zero text** |
+| **headful** Chrome, cold profile | **200, 22.8k chars, real prices** |
+| headful, off-screen window | 200 — off-screen costs nothing |
+| headful, 2nd+ read on the same profile | **403** |
+| headful + automation flags suppressed | reads keep working |
+
+Three things follow. **Headless is what these sites block**, not the IP and not the User-Agent — so the browser runs headful and is merely parked off the visible desktop. **No captcha is ever offered**, so "show the human the challenge and let them solve it" — the escape hatch the first design was built around — had nothing to solve and was cut. And **the block lands on the profile after the first page**, which is what makes the automation flags load-bearing rather than cosmetic.
+
+## The stealth switch is a decision, not a default
+
+`--disable-blink-features=AutomationControlled` plus dropping `--enable-automation` is what makes reads 2..n work. Its only purpose is to hide that the browser is automated: it is anti-detection, and it is likely contrary to those sites' terms.
+
+It ships **on**, because the owner was shown that trade-off explicitly and chose it (2026-08-14). It is one switch — `AISH_BROWSER_STEALTH=0` — so the decision stays visible and reversible rather than dissolving into a pile of flags nobody can find later. Do not add fingerprint spoofing, proxy rotation or profile rotation on top: that is an arms race lost on every Allegro deploy, and each addition makes the switch mean less.
+
+`AISH_BROWSER=0` disables the browser entirely; `read_url` then degrades to exactly its pre-#221 behaviour, the Jina hint included. That fallback is pinned by `TestJinaFallbackHint` via the `no_browser` fixture — those tests must say there is no browser rather than rely on one being absent.
+
+## Status is diagnostic only
+
+A site that dislikes automation may answer **403 and still serve the whole listing, prices included** — measured, not hypothesised. So a browser read is judged on whether it produced **text**, never on the code. Judging on the code would throw away the exact page this feature exists to get (`TestReadUrlEscalation`).
+
+## Where the profile lives is a safety decision
+
+`~/.local/state/aish/browser/profile`, **never `~/.config/aish/`**. The config tree is auto-committed and pushed to a private GitHub repo by the knowledge-git agent, and this directory is made of live session cookies — a profile under config would publish the owner's logins to a git remote on a timer. `TestProfileLocation` pins it.
+
+Persistence is the *point*, not an optimisation: a session the owner established by hand is still there next week, and every later read of that site is made as them. Nothing here ever clears the profile.
+
+## One thread owns the browser
+
+Playwright's sync API binds its objects to the creating thread, and `read_url` runs on a pool — `_execute_tool_calls` fans read-only tools out concurrently — so a shared context touched from a second thread errors out. Every call is marshalled to one long-lived owner thread through `_JOBS`. That also buys single-ownership of the profile directory, which Chrome requires: it locks the user-data-dir and a second launch against a live profile fails. It is why `open_for_login` closes the off-screen context before opening the on-screen one.
+
+The context stays warm between reads (a launch is ~2s) and closes after `IDLE_SECONDS`, because this box runs a Home Assistant VM and Colima against a 16 GB ceiling and an idle Chrome is not free.
+
+## `/browser` — the owner's own door
+
+`browser.command()` is shared verbatim by the CLI and the web so both surfaces say the same thing and neither owns the wording. No argument shows the profile, the stealth state and which sites are signed in; a URL opens a **real, on-screen** window to sign in at; `forget <host>` drops one; `close` shuts it down.
+
+aish never types the owner's credentials — it hands them a browser and stays out of it. The window opens **on the Mac**, not on the phone that asked, so the web path acks that fact immediately and reports the result whenever they close the window (up to fifteen minutes later). It runs on the worker pool, not `to_thread`, because it parks for exactly that long.
+
+Which hosts count as signed-in is recorded from what the owner **navigated to** during a login window, not from the cookie jar: a jar is mostly third-party trackers, and "sites I logged into" is a claim only their own navigation supports (`TestLoginRecord`). Matching is on a dot boundary, so `evilallegro.pl` is not `allegro.pl`.
+
+## The login gate — and why it is not the egress gate
+
+`Agent._login_gate` holds a `read_url` that would be made with the owner's live session until they approve it, and it applies to **every origin, the attended session included**.
+
+That is the difference from `_egress_gate`, which asks *"is this host one the owner named?"* and only in a triggered session, on the reasoning that an attended owner can see the host for themselves. This gate asks a different question — *"does this read carry the owner's session?"* — and their watching does not settle it, because the URL may have come from text on a page rather than from them. An injected instruction that steers a read at a signed-in site would otherwise pull private account data into the context silently.
+
+Approval is per host and lasts the session (`_approved_logins`), matching the egress gate: a task that reads five pages of one portal asks once. It is session-scoped like every other grant (L4). With no approver it fails **closed** — reading the owner's account with nobody watching is the one outcome this exists to prevent.
+
+Only `read_url` can carry a session; `show_image` / `read_pdf` / `read_media` fetch bytes through the anonymous opener, so they are never gated here and must not draw a card claiming they are. `TestLoginGate` pins all of it, including the seam that matters most: `_read_needs_prompt` routes a gated read **off** the parallel path, which has no gate at all and would otherwise bypass approval entirely.
+
+## Testing
+
+Nothing in the suite launches Chrome. `browser.read` / `open_for_login` are patched per test, and conftest's autouse `no_real_browser` makes any escape fail loudly — it raises from `_submit` as a `BaseException` (an `Exception` would be swallowed by `_browser_read`'s fallback, leaving the guard silent exactly where a test is most likely wrong) and redirects `AISH_STATE_DIR` so a test-written `logins.txt` can never change how the real agent gates a real host. Same reasoning as the notifier guard in CLAUDE.md: a module that reaches a live thing outside the process needs a suite-wide guard, not per-test discipline.
+
+`TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestLoginRecord`, `TestReadUrlEscalation` cover the module; `TestLoginGate` covers the gate.

@@ -210,6 +210,13 @@ function ledgerWorld({ socket = "open" } = {}) {
     // chip, and claiming one by hand — DO go through act(), because those two
     // claim something on screen that has to be taken back.
     share_drop: "fails safe",
+    // ANSWERS INTO AN EMPTY SHEET. /browser opens the workspace sheet first
+    // and every outcome — the profile status, a forgotten host, the window
+    // that opened on the Mac — arrives as text to fill it. A request that goes
+    // missing therefore shows as a sheet that never fills, which is the
+    // absence being visible rather than hidden. Nothing is claimed on screen
+    // ahead of the reply, so there is nothing for a receipt to take back.
+    browser: "fails safe",
   };
 
   const bare = [...src.matchAll(/send\(\{ type: "([a-z_]+)"/g)].map((m) => m[1]);

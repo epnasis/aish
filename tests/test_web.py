@@ -12,7 +12,24 @@ import urllib.request
 
 import pytest
 
-from aish import web
+from aish import browser, web
+
+
+@pytest.fixture
+def no_browser(monkeypatch):
+    """No renderer available, so read_url degrades to the plain-fetch
+    behaviour it had before #221 — the third-party reader hint.
+
+    The browser is tried FIRST for a block or an empty shell (it is on this
+    machine and keeps a session; Jina renders from a datacenter with none, and
+    against a site that blocks automation it returns an empty page). These
+    tests pin the floor under it, so they must say there is no browser rather
+    than rely on one being absent."""
+
+    def unavailable(url, **kwargs):
+        raise browser.BrowserUnavailable("no browser in tests")
+
+    monkeypatch.setattr(browser, "read", unavailable)
 
 
 class TestHtmlToText:
@@ -180,7 +197,7 @@ class TestReadUrl:
         assert result.startswith("ERROR")
         assert "connection refused" in result
 
-    def test_empty_page_reported(self, monkeypatch):
+    def test_empty_page_reported(self, monkeypatch, no_browser):
         monkeypatch.setattr(web, "_fetch", lambda url: ("<html></html>", "text/html"))
         assert web.read_url("https://example.com/blank").startswith("ERROR")
 
@@ -193,7 +210,7 @@ def http_error_fetch(code, reason):
 
 
 class TestJinaFallbackHint:
-    def test_bot_block_codes_suggest_jina(self, monkeypatch):
+    def test_bot_block_codes_suggest_jina(self, monkeypatch, no_browser):
         for code, reason in ((403, "Forbidden"), (429, "Too Many Requests"), (503, "Unavailable")):
             monkeypatch.setattr(web, "_fetch", http_error_fetch(code, reason))
             result = web.read_url("https://shop.example.com/price")
@@ -209,13 +226,13 @@ class TestJinaFallbackHint:
             assert result.startswith("ERROR")
             assert "r.jina.ai" not in result
 
-    def test_empty_page_suggests_jina(self, monkeypatch):
+    def test_empty_page_suggests_jina(self, monkeypatch, no_browser):
         monkeypatch.setattr(web, "_fetch", lambda url: ("<html></html>", "text/html"))
         result = web.read_url("https://spa.example.com/app")
         assert result.startswith("ERROR")
         assert "https://r.jina.ai/https://spa.example.com/app" in result
 
-    def test_failed_jina_url_not_suggested_again(self, monkeypatch):
+    def test_failed_jina_url_not_suggested_again(self, monkeypatch, no_browser):
         url = "https://r.jina.ai/https://shop.example.com/price"
         monkeypatch.setattr(web, "_fetch", http_error_fetch(403, "Forbidden"))
         assert "r.jina.ai/https://r.jina.ai" not in web.read_url(url)

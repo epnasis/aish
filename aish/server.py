@@ -57,7 +57,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from . import backends, dir_ignore, export, notify, tools
+from . import backends, browser, dir_ignore, export, notify, tools
 from .agent import (
     CANCELLED_RESULT,
     FEEDBACK_SWITCH_NOTE,
@@ -2246,6 +2246,8 @@ class WebServer:
             await self._add_dir(client, str(message.get("path", "")).strip())
         elif kind == "jobs":
             await client.ws.send_json({"type": "job_list", "text": tools.jobs_table()})
+        elif kind == "browser":
+            await self._browser(client, str(message.get("arg", "")).strip())
         elif kind == "files":
             await self._send_files(client, str(message.get("query", "")))
         elif kind == "stop":
@@ -3636,6 +3638,37 @@ class WebServer:
             return
         # rebase fired on_state → the top-bar chip + queue-card refresh; no
         # manual _cwd_event needed (issue #95 unified that path).
+
+    async def _browser(self, client: Client, arg: str) -> None:
+        """`/browser` from the web. Status and bookkeeping answer at once;
+        opening a login window does not — it waits until the owner closes it,
+        which is up to fifteen minutes.
+
+        So the window case ACKS first and reports later. The window opens on
+        the Mac, not on whatever device is asking, and the ack says so: a
+        phone tapping /browser with a URL otherwise waits on something it
+        cannot see."""
+        opens_window = bool(arg) and arg.split()[0].lower() not in (
+            "forget", "logout", "close"
+        )
+        if opens_window:
+            await client.ws.send_json(
+                {
+                    "type": "job_list",
+                    "text": (
+                        "Opening a Chrome window on the Mac — sign in there.\n"
+                        "Close the window when you are done; /browser will then "
+                        "show what was recorded."
+                    ),
+                }
+            )
+        # Worker pool, not to_thread: a login window parks this call for as
+        # long as the owner needs, and to_thread's shared executor is what the
+        # rest of the server renders on (see WORKER_POOL_SIZE).
+        text = await asyncio.get_running_loop().run_in_executor(
+            self.worker_pool, browser.command, arg
+        )
+        await client.ws.send_json({"type": "job_list", "text": text})
 
     async def _add_dir(self, client: Client, path: str) -> None:
         session = client.viewing

@@ -14,7 +14,7 @@ import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import aliases, backends, term_image, tools
+from . import aliases, backends, browser, term_image, tools
 from .agent import (
     Agent,
     ModelUnavailable,
@@ -158,8 +158,8 @@ class ChipStream:
             self._buf = ""
 
 SLASH_COMMANDS = (
-    "/add-dir", "/aliases", "/cd", "/clear", "/delete", "/dir-add", "/exit",
-    "/feedback", "/help", "/jobs", "/learn", "/model", "/new", "/quit",
+    "/add-dir", "/aliases", "/browser", "/cd", "/clear", "/delete", "/dir-add",
+    "/exit", "/feedback", "/help", "/jobs", "/learn", "/model", "/new", "/quit",
     "/rename", "/resume", "/session",
 )
 
@@ -195,6 +195,12 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  each write); /learn lessons migrates the legacy lessons.md
   {CYAN}/feedback [text]{RESET} file a bug/idea as a GitHub issue on epnasis/aish —
                  aish drafts it, you approve, it creates the issue
+  {CYAN}/browser [url]{RESET}  open a real Chrome window on aish's own persistent profile
+                 so you can sign in to a site; the session is remembered, so
+                 later reads of it are made as you (and each one asks first).
+                 No arg shows the profile and which sites you are signed into;
+                 {CYAN}/browser forget <host>{RESET} drops one, {CYAN}/browser close{RESET}
+                 shuts it down
   {CYAN}/aliases{RESET}       list command aliases (config.toml [aliases]); expanded on
                  the first word before the approval gate — {CYAN}/aliases import{RESET}
                  pulls your zsh aliases in (existing entries are kept)
@@ -1298,6 +1304,9 @@ def handle_slash(
             print(f"{DIM}usage: /aliases (list) or /aliases import{RESET}")
         else:
             print_aliases(agent)
+        return "handled"
+    if command == "/browser":
+        print(browser.command(task.partition(" ")[2].strip()))
         return "handled"
     if command == "/jobs":
         print(f"{DIM}{tools.jobs_table()}{RESET}")

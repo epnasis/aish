@@ -3828,6 +3828,164 @@ class TestReadonlyPluginParallel:
         assert any('"text": "two"' in r for r in results)
 
 
+class TestLoginGate:
+    """#221: reading a site the owner is SIGNED INTO holds for approval, in
+    every session including the attended one.
+
+    The distinction from TestEgressGate is the point. That gate asks "is this
+    host one the owner named?" and only in a triggered session, because an
+    attended owner can see the host for themselves. This one asks "does this
+    read carry the owner's live session?" — and their watching does not settle
+    it, since the URL may have come from text on a page rather than from them.
+    """
+
+    def _signed_into(self, monkeypatch, *hosts):
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(
+            agent_module.browser,
+            "is_logged_in",
+            lambda url: next((h for h in hosts if h in url), ""),
+        )
+        fetched: list[str] = []
+        monkeypatch.setattr(
+            agent_module.web, "read_url",
+            lambda url, topic=None: (fetched.append(url), f"page at {url}")[1],
+        )
+        return fetched
+
+    def test_signed_in_host_denied_never_reads(self, monkeypatch):
+        from aish.agent import LOGIN_READ_DENIED
+
+        fetched = self._signed_into(monkeypatch, "allegro.pl")
+        asked = []
+
+        def approve_tool(name, args, preview=None):
+            asked.append(preview)
+            return False
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://allegro.pl/moje-konto")
+                ]),
+                model_says("did not read it"),
+            ],
+            approve_tool=approve_tool,
+        )
+        agent.run_task("what did I order")
+        assert fetched == []
+        assert tool_messages(agent.messages)[0]["content"] == LOGIN_READ_DENIED.format(
+            host="allegro.pl"
+        )
+        assert asked and "signed-in browser session" in asked[0]
+
+    def test_approved_read_proceeds_and_asks_once_per_session(self, monkeypatch):
+        """A task that reads five pages of one portal asks once, matching the
+        egress gate — a per-page prompt would make the feature unusable."""
+        fetched = self._signed_into(monkeypatch, "allegro.pl")
+        asked = []
+
+        def approve_tool(name, args, preview=None):
+            asked.append(preview)
+            return True
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://allegro.pl/a")
+                ]),
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://allegro.pl/b")
+                ]),
+                model_says("read both"),
+            ],
+            approve_tool=approve_tool,
+        )
+        agent.run_task("check my orders")
+        assert fetched == ["https://allegro.pl/a", "https://allegro.pl/b"]
+        assert len(asked) == 1
+
+    def test_a_public_host_is_never_gated(self, monkeypatch):
+        """The gate is about the SESSION, not the site: reading a page nobody
+        is signed into must stay exactly as frictionless as it was."""
+        fetched = self._signed_into(monkeypatch, "allegro.pl")
+        asked = []
+
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://example.com/x")
+                ]),
+                model_says("read it"),
+            ],
+            approve_tool=lambda *a, **k: asked.append(a) or True,
+        )
+        agent.run_task("read that page")
+        assert fetched == ["https://example.com/x"]
+        assert asked == []
+
+    def test_no_approver_blocks_rather_than_reads(self, monkeypatch):
+        """With nobody to ask, the gate must fail CLOSED. Both shipped
+        surfaces wire an approver (cli.make_tool_approver, the server's card),
+        so this is the floor under any construction that does not."""
+        from aish.agent import LOGIN_READ_NO_APPROVER
+
+        fetched = self._signed_into(monkeypatch, "allegro.pl")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://allegro.pl/moje-konto")
+                ]),
+                model_says("could not"),
+            ],
+            approve_tool=None,
+        )
+        agent.run_task("check my orders")
+        assert fetched == []
+        assert LOGIN_READ_NO_APPROVER.format(host="allegro.pl") in tool_messages(
+            agent.messages
+        )[0]["content"]
+
+    def test_an_unattended_session_never_reads_a_signed_in_host(self, monkeypatch):
+        """Belt and braces with the egress gate, which refuses this one first
+        on the host being un-named. Asserted on the OUTCOME rather than the
+        message so it keeps holding whichever gate gets there."""
+        fetched = self._signed_into(monkeypatch, "allegro.pl")
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[
+                    tool_call("read_url", url="https://allegro.pl/moje-konto")
+                ]),
+                model_says("could not"),
+            ],
+            origin="email",
+            approve_tool=None,
+        )
+        agent.run_task("check my orders")
+        assert fetched == []
+
+    def test_a_gated_read_leaves_the_parallel_path(self, monkeypatch):
+        """The parallel read path has NO gate — a gated call that stayed on it
+        would bypass approval entirely. `_read_needs_prompt` is the seam that
+        routes it back to _dispatch, so it is pinned directly."""
+        self._signed_into(monkeypatch, "allegro.pl")
+        agent, _ = make_agent([model_says("hi")])
+        assert agent._read_needs_prompt("read_url", {"url": "https://allegro.pl/a"})
+        assert not agent._read_needs_prompt("read_url", {"url": "https://example.com/a"})
+        agent._approved_logins.add("allegro.pl")
+        assert not agent._read_needs_prompt("read_url", {"url": "https://allegro.pl/a"})
+
+    def test_only_read_url_can_carry_a_session(self, monkeypatch):
+        """show_image / read_pdf fetch bytes through the anonymous opener, so
+        they cannot read as the owner and must not draw a card that claims
+        they do."""
+        self._signed_into(monkeypatch, "allegro.pl")
+        agent, _ = make_agent([model_says("hi")])
+        assert agent._login_host("read_url", {"url": "https://allegro.pl/a"})
+        assert agent._login_host("show_image", {"source": "https://allegro.pl/p.jpg"}) == ""
+
+
 class TestEgressGate:
     """#178 P0-2: in a NON-user (triggered) session, web_search/read_url to a
     host the owner never introduced hold on the approve_tool channel instead

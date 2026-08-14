@@ -7424,6 +7424,7 @@ const SLASH_COMMANDS = [
   ["/cd", "change working directory (re-anchors approval root)"],
   ["/add-dir", "allow auto-approved work in another tree"],
   ["/jobs", "list background jobs"],
+  ["/browser", "sign in to a site in aish's own browser (window opens on the Mac)"],
   ["/session", "show this session's log path (copyable)"],
   ["/mic", "test speech recognition (mic diagnostic)"],
   ["/help", "about aish web"],
@@ -7798,6 +7799,11 @@ function handleSlash(text) {
       return sent;
     }
     case "/jobs": openSheet("workspace-sheet"); return send({ type: "jobs" });
+    // The rest of the line is the argument: a URL to sign in at, or
+    // "forget <host>" / "close". The window itself opens on the Mac.
+    case "/browser":
+      openSheet("workspace-sheet");
+      return send({ type: "browser", arg });
     case "/session": copyLogPath(); return true; // path came in on hello (#146)
     case "/mic": openMicSheet(); return true;
     case "/help": openSheet("workspace-sheet"); return true;

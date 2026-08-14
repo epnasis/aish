@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
+from . import browser
 from .tools import DOCS_MAX_CHARS, _filter_topic, truncate
 
 SEARCH_MAX_RESULTS = 5
@@ -213,6 +214,42 @@ def web_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> str:
     return truncate("\n".join(lines))
 
 
+def _remember_title(url: str, title: str) -> None:
+    if not title:
+        return
+    if len(PAGE_TITLES) >= PAGE_TITLES_MAX:
+        PAGE_TITLES.clear()
+    PAGE_TITLES[url] = title
+
+
+def _browser_read(url: str) -> tuple[str, list[str]] | None:
+    """(text, images) as a REAL browser renders the page, or None if it could
+    not be used. The escalation for the two pages a fetch cannot read at all:
+    JavaScript-only (the fetch gets an empty shell) and login-walled (the fetch
+    is a logged-out client).
+
+    The browser hands back RENDERED text, already extracted — running its HTML
+    back through `_extract` would re-lose everything a site renders into shadow
+    DOM, which on the listing this was built for was the entire page.
+
+    Judged on whether it produced TEXT, never on the status code — a site that
+    dislikes automation may answer 403 and still serve the entire listing,
+    prices included, which is exactly what allegro.pl does."""
+    try:
+        page = browser.read(url)
+    except browser.BrowserUnavailable:
+        return None
+    except Exception:  # noqa: BLE001 — a launch/nav failure falls back, never crashes a read
+        return None
+    text = "\n".join(
+        line for line in (ln.strip() for ln in page.text.splitlines()) if line
+    )
+    if not text.strip():
+        return None
+    _remember_title(url, page.title)
+    return text, page.images
+
+
 def read_url(url: str, topic: str | None = None) -> str:
     url = url.strip()
     if not url.startswith(("http://", "https://")):
@@ -227,6 +264,15 @@ def read_url(url: str, topic: str | None = None) -> str:
             "through user approval)."
         )
     except urllib.error.HTTPError as exc:
+        # A block is where the browser earns its keep, so it is tried BEFORE
+        # the third-party reader is suggested: Jina renders from a datacenter
+        # with no session at all, and against this class of site it returns an
+        # empty page with a CAPTCHA warning (three calls, three empty pages, in
+        # the session that prompted all this).
+        if exc.code in _JINA_BLOCK_CODES:
+            rendered = _browser_read(url)
+            if rendered is not None:
+                return _present(url, *rendered, topic=topic, via_browser=True)
         hint = _jina_hint(url) if exc.code in _JINA_BLOCK_CODES else ""
         return f"ERROR: {url} returned HTTP {exc.code} {exc.reason}{hint}"
     except Exception as exc:  # noqa: BLE001 — DNS, TLS, timeouts: report, don't crash
@@ -235,10 +281,7 @@ def read_url(url: str, topic: str | None = None) -> str:
     images: list[str] = []
     if content_type in ("text/html", "application/xhtml+xml"):
         text, title, images = _extract(text, base_url=url)
-        if title:
-            if len(PAGE_TITLES) >= PAGE_TITLES_MAX:
-                PAGE_TITLES.clear()
-            PAGE_TITLES[url] = title
+        _remember_title(url, title)
     elif content_type == "application/pdf":
         # Not a dead end any more (#219): this was the one content type aish
         # routinely meets on the web and could do nothing at all with, so the
@@ -252,21 +295,42 @@ def read_url(url: str, topic: str | None = None) -> str:
     elif not (content_type.startswith("text/") or content_type.endswith(("json", "xml"))):
         return f"ERROR: {url} is {content_type}, not a text page — cannot read it"
     if not text.strip():
+        # A JavaScript-only page: the fetch succeeded and returned a shell.
+        # This is the commonest browser win by far — far more of the web than
+        # the sites that actively block automation.
+        rendered = _browser_read(url)
+        if rendered is not None:
+            return _present(url, *rendered, topic=topic, via_browser=True)
         return f"ERROR: {url} returned no readable text{_jina_hint(url)}"
 
+    return _present(url, text, images, topic=topic)
+
+
+def _present(
+    url: str,
+    text: str,
+    images: list[str],
+    *,
+    topic: str | None = None,
+    via_browser: bool = False,
+) -> str:
+    """The read, as the model receives it. Shared by the fetch and the browser
+    so a rendered page is filtered, truncated and image-noted identically."""
+    source = f"{url} — rendered in the browser" if via_browser else url
     if topic:
         matched = _filter_topic(text, topic)
         if matched:
             return UNTRUSTED_NOTE + truncate(
-                f"[{url} — lines matching {topic!r}]\n{matched}", head=DOCS_MAX_CHARS, tail=0
+                f"[{source} — lines matching {topic!r}]\n{matched}",
+                head=DOCS_MAX_CHARS, tail=0
             ) + image_note(images)
         return UNTRUSTED_NOTE + truncate(
-            f"[{url}] NO LINES MATCH {topic!r}; start of page instead:\n{text}",
+            f"[{source}] NO LINES MATCH {topic!r}; start of page instead:\n{text}",
             head=DOCS_MAX_CHARS,
             tail=0,
         ) + image_note(images)
 
-    result = f"[{url}]\n{text}"
+    result = f"[{source}]\n{text}"
     # AFTER truncation, deliberately: the image URLs are the point of the read
     # for a "show me" task, and burying them in the body would let the 200k
     # cap cut exactly the thing that stops the guessing loop.
