@@ -191,8 +191,21 @@ _CHROME_TAGS = {"nav", "header", "footer"}
 # What the carried links may cost. A CHARACTER budget, not a link count,
 # because the problem being solved is a character budget: a count caps nothing
 # when a shop's URLs run to 120 characters and an encyclopedia's to 60.
-# 2 500 buys ~20 offer links on the measured listing and ~40 on an article.
-LINK_NOTE_MAX_CHARS = 2500
+#
+# Carrying links is the CHEAP way to recover them, and that is why this is
+# generous where DOCS_MAX_CHARS is not. Raising the page cap instead buys the
+# same links plus the card boilerplate wrapped around them — measured on the
+# listing behind this feature:
+#
+#   note budget   2500 -> 8 891 chars,  30 links   (296 chars per link)
+#   note budget   6000 -> 12 441 chars, 48 links   (259)
+#   whole page, uncapped -> 34 231 chars, 101 links (339)
+#
+# The cost that matters is CONTEXT, and a tool result is re-sent on every model
+# call for the rest of the task — but it is weighed against what it replaces:
+# 30+ searches in one turn at 1-2k characters each. One read that ends the
+# searching is cheaper than the searching.
+LINK_NOTE_MAX_CHARS = 6000
 
 
 def link_note(dropped: str) -> str:

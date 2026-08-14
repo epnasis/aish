@@ -176,11 +176,21 @@ Unwrapping **stops at a host change**, deliberately: a redirect off-site is a di
 | what shipped before | 6 563 | **0** |
 | links, no `<main>` | 6 563 | 13 |
 | links + `<main>` | 6 563 | 14 |
-| **links + `<main>` + carried note** | 9 009 | **23** |
+| **links + `<main>` + carried note** | 12 441 | **48** |
 
 `<main>` is worth keeping — it removes the category nav and the cookie wall outright, so the read now opens on the search results instead of 2 500 characters of chrome — but it is worth about **one** extra offer, not ten. An early prototype measured it at 25-vs-15 by counting nav links as wins; the shipped path excludes those, and the honest number is the table above. Do not restore that claim.
 
 What actually recovers the links is `web.link_note`: the pairs truncation cut off, appended **after** it, exactly as `image_note` already does and for exactly the same reason — on a "which offer" task the URLs *are* the read, so letting a character cap bury them cuts the one thing that stops the guessing. It is bounded by a **character** budget rather than a link count, because a count caps nothing when a shop's URLs run to 120 characters and an encyclopedia's to 60.
+
+**Carrying the links is the cheap way to recover them, which is why that budget is generous where `DOCS_MAX_CHARS` is not.** Raising the page cap instead buys the same links plus the card boilerplate wrapped around them — the repeated *SUPERCENA / dostawa we wtorek / star rating* under every card:
+
+| | chars | links | chars per link |
+|---|---|---|---|
+| note budget 2 500 | 8 891 | 30 | 296 |
+| **note budget 6 000** | **12 441** | **48** | **259** |
+| whole page, uncapped | 34 231 | 101 | 339 |
+
+The cost being protected is **context**, and the thing that makes it bite is that a tool result is re-sent on every model call for the rest of the task — not bandwidth, and not the remote view's frames, which never enter the model's context at all. It is weighed against what it replaces: 30+ searches in one turn at 1–2k characters each. **One read that ends the searching is cheaper than the searching**, which is the whole reason this is worth spending context on.
 
 The read viewport was on the plan too, and was dropped: 1440×900 and 1280×2134 returned **byte-identical** text, because a listing renders its cards regardless of window height. The tall-viewport arithmetic that the remote view is built on does not transfer to reads.
 
