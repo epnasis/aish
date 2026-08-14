@@ -30,7 +30,9 @@ Three things follow. **Headless is what these sites block**, not the IP and not 
 
 It ships **on**, because the owner was shown that trade-off explicitly and chose it (2026-08-14). It is one switch — `AISH_BROWSER_STEALTH=0` — so the decision stays visible and reversible rather than dissolving into a pile of flags nobody can find later. Do not add fingerprint spoofing, proxy rotation or profile rotation on top: that is an arms race lost on every Allegro deploy, and each addition makes the switch mean less.
 
-`AISH_BROWSER=0` disables the browser entirely; `read_url` then degrades to exactly its pre-#221 behaviour, the Jina hint included. That fallback is pinned by `TestJinaFallbackHint` via the `no_browser` fixture — those tests must say there is no browser rather than rely on one being absent.
+`AISH_BROWSER=0` disables the browser entirely; `read_url` then reports the block honestly instead of rendering it. That path is pinned by `TestBlockedPageAdvice` via the `no_browser` fixture — those tests must say there is no browser rather than rely on one being absent.
+
+**Jina Reader is retired as advice, on evidence.** It was the fallback before this existed, and across the owner's two real sessions it returned FOUR empty stubs and TWO timeouts and not one page of content — every "success" being `Title: allegro.pl / Warning: This page maybe requiring CAPTCHA / Markdown Content:` and nothing after it. Worse, `read_url` logged that stub `ok` and handed it to the model as the page, which is the same laundering `is_challenge` exists to prevent, one tool over. It fetches from a datacenter with no session, so recommending it *after* the local browser has failed points at something strictly weaker. A URL the owner pastes is still fetched; the stub is now refused (`_JINA_STUB`), and a Jina URL is never escalated to the browser, since rendering a rendering service proves nothing.
 
 ## Status is diagnostic only
 
@@ -44,7 +46,7 @@ Persistence is the *point*, not an optimisation: a session the owner established
 
 ## One thread owns the browser
 
-Playwright's sync API binds its objects to the creating thread, and `read_url` runs on a pool — `_execute_tool_calls` fans read-only tools out concurrently — so a shared context touched from a second thread errors out. Every call is marshalled to one long-lived owner thread through `_JOBS`. That also buys single-ownership of the profile directory, which Chrome requires: it locks the user-data-dir and a second launch against a live profile fails. It is why `open_for_login` closes the off-screen context before opening the on-screen one.
+Playwright's sync API binds its objects to the creating thread, and `read_url` runs on a pool — `_execute_tool_calls` fans read-only tools out concurrently — so a shared context touched from a second thread errors out. Every call is marshalled to one long-lived owner thread through the owner loop. That also buys single-ownership of the profile directory, which Chrome requires: it locks the user-data-dir and a second launch against a live profile fails. It is why `open_for_login` closes the off-screen context before opening the on-screen one.
 
 The context stays warm between reads (a launch is ~2s) and closes after `IDLE_SECONDS`, because this box runs a Home Assistant VM and Colima against a 16 GB ceiling and an idle Chrome is not free.
 

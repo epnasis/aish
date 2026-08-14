@@ -34,24 +34,34 @@ PAGE_TRUNCATION_HINT = (
     "to search the full page text]"
 )
 
-# Sites behind bot protection (Cloudflare etc.) 403/429/503 a plain urllib
-# fetch, and JS-only SPAs return an empty shell. Jina Reader fetches and
-# renders the page server-side and returns markdown. Deliberately a hint to
-# the model, not an automatic retry: the fallback sends the URL to a third
-# party, so it must be a separate read_url call the user sees echoed — never
-# a hidden hop inside this one.
+# Sites behind bot protection 403/429/503 a plain urllib fetch, and JS-only
+# SPAs return an empty shell. The answer to both is now the browser on this
+# machine (`_browser_read`), which has a real renderer and a real session.
+#
+# JINA READER IS NO LONGER SUGGESTED, on the evidence. It was the fallback
+# before the browser existed, and across the owner's two real sessions it
+# returned FOUR empty stubs and TWO timeouts and not one page of content —
+# every "success" being `Title: allegro.pl / Warning: This page maybe requiring
+# CAPTCHA / Markdown Content:` and nothing after it. It fetches from a
+# datacenter with no session, which is strictly weaker than the browser that
+# already failed, so recommending it after a block sent the model to a worse
+# tool and cost a 22-second timeout to learn nothing.
+#
+# The prefix stays known for two reasons: a URL the OWNER pastes is still
+# fetched normally, and a Jina URL must never be escalated to the browser
+# (rendering a rendering-service's stub proves nothing) or have its stub
+# laundered into content (_JINA_STUB).
 JINA_READER_PREFIX = "https://r.jina.ai/"
 _JINA_BLOCK_CODES = (403, 429, 503)
+_JINA_STUB = "maybe requiring CAPTCHA"
 
 
-def _jina_hint(url: str) -> str:
-    if url.startswith(JINA_READER_PREFIX):
-        return ""  # the fallback itself failed; don't suggest it again
+def _blocked_note(url: str) -> str:
     return (
-        f" — the site may block simple fetchers or need JavaScript; you may "
-        f"retry ONCE via read_url on {JINA_READER_PREFIX}{url} (Jina Reader, "
-        "a third-party service that fetches the page for you — never use it "
-        "for URLs containing tokens, session ids, or other secrets)"
+        " — the site refused a plain fetch and the browser could not render it "
+        "either. Do NOT retry through r.jina.ai or any other third-party "
+        "reader: it fetches with no session and does worse. Use a different "
+        "source, or ask the user to open the page in /browser"
     )
 
 # Fetched pages are attacker-controllable; flag them so the model treats the
@@ -269,6 +279,10 @@ def _browser_read(url: str) -> tuple[tuple[str, list[str]] | None, str]:
     fetchers — retry via Jina", which was a lie once the browser had already
     tried and been walled. The model duly spent two more calls on Jina (one a
     22-second timeout) and reported that Allegro simply cannot be read."""
+    if url.startswith(JINA_READER_PREFIX):
+        # Rendering a rendering service proves nothing, and its own stub page
+        # would then be judged as if it were the site.
+        return None, "a third-party reader URL is not rendered again"
     try:
         page = browser.read(url)
     except browser.BrowserUnavailable as exc:
@@ -347,7 +361,7 @@ def read_url(url: str, topic: str | None = None) -> str:
                 return _present(url, *rendered, topic=topic, via_browser=True)
             if why == WALLED:
                 return f"ERROR: {url} — {WALLED}"
-        hint = _jina_hint(url) if exc.code in _JINA_BLOCK_CODES else ""
+        hint = _blocked_note(url) if exc.code in _JINA_BLOCK_CODES else ""
         return f"ERROR: {url} returned HTTP {exc.code} {exc.reason}{hint}"
     except Exception as exc:  # noqa: BLE001 — DNS, TLS, timeouts: report, don't crash
         # A site that stops ANSWERING a plain fetcher is the same problem as one
@@ -380,6 +394,15 @@ def read_url(url: str, topic: str | None = None) -> str:
         )
     elif not (content_type.startswith("text/") or content_type.endswith(("json", "xml"))):
         return f"ERROR: {url} is {content_type}, not a text page — cannot read it"
+    if url.startswith(JINA_READER_PREFIX) and _JINA_STUB in text:
+        # Its "success" shape: a title, a CAPTCHA warning, and an empty
+        # `Markdown Content:`. Logged ok and handed to the model as the page,
+        # which is how a CAPTCHA warning became a shop's contents.
+        return (
+            f"ERROR: {url} returned a reader stub, not the page (it says the "
+            "page may require a CAPTCHA and gave no content). Use a different "
+            "source, or ask the user to open the page in /browser"
+        )
     if not text.strip():
         # A JavaScript-only page: the fetch succeeded and returned a shell.
         # This is the commonest browser win by far — far more of the web than
@@ -389,7 +412,7 @@ def read_url(url: str, topic: str | None = None) -> str:
             return _present(url, *rendered, topic=topic, via_browser=True)
         if why == WALLED:
             return f"ERROR: {url} — {WALLED}"
-        return f"ERROR: {url} returned no readable text{_jina_hint(url)}"
+        return f"ERROR: {url} returned no readable text{_blocked_note(url)}"
 
     return _present(url, text, images, topic=topic)
 

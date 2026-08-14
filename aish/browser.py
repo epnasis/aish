@@ -18,13 +18,23 @@ GitHub repo by the knowledge-git agent, and this directory is made of live
 session cookies. A profile under config would push the owner's logins to a git
 remote on a timer.
 
-**One thread owns the browser.** Playwright's sync API binds its objects to the
-thread that created them, and `read_url` runs on a pool (`_execute_tool_calls`
-fans read-only tools out concurrently), so a shared context touched from a
-second thread errors out. Everything here is therefore marshalled to one
-long-lived owner thread through `_JOBS`; that also gives single-ownership of
-the profile directory for free, which Chrome requires — it locks the
-user-data-dir and a second launch against a live profile fails.
+**One thread owns the browser, and it runs an event loop.** Playwright binds
+its objects to whatever created them, and `read_url` runs on a pool
+(`_execute_tool_calls` fans read-only tools out concurrently), so a context
+touched from a second thread errors out. Everything is therefore marshalled to
+one long-lived owner thread — which also gives single-ownership of the profile
+directory for free, since Chrome locks the user-data-dir and a second launch
+against a live profile fails.
+
+That thread owns an **asyncio loop** rather than a job queue, and the
+difference is the concurrency aish has everywhere else. Read-only tools fan
+out because they are network-bound; routed through a serial browser they took
+the SUM of their times instead of the slowest (measured live: 7.0s, 11.5s and
+14.3s for three pages in one turn — and the third was slow enough that a
+half-painted page was mistaken for a block wall). More browsers is not the fix,
+because Chrome locks the profile and the profile is the point: one set of the
+owner's sessions, shared by every read. So it is one browser with many TABS.
+Callers still block; the WORK overlaps.
 
 The context is kept warm between reads (a launch costs ~2s) but closed after
 `IDLE_SECONDS`, because this box runs a Home Assistant VM and Colima beside a
@@ -33,15 +43,12 @@ The context is kept warm between reads (a launch costs ~2s) but closed after
 
 from __future__ import annotations
 
-import functools
 import os
-import queue
 import threading
 import time
 import urllib.parse
 from collections.abc import Callable
-from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -180,13 +187,6 @@ class Page:
     status: int | None
 
 
-@dataclass
-class _Job:
-    fn: Callable[[Any], Any]
-    future: Future = field(default_factory=Future)
-
-
-_JOBS: queue.Queue[_Job] = queue.Queue()
 _OWNER: threading.Thread | None = None
 _OWNER_LOCK = threading.Lock()
 
@@ -301,7 +301,7 @@ def forget_login(host: str) -> bool:
 
 # ------------------------------------------------------- the owner thread
 
-def _launch(
+async def _launch(
     playwright: Any,
     *,
     args: list[str],
@@ -315,7 +315,7 @@ def _launch(
     if stealth():
         launch_args += _STEALTH_ARGS
         omit += _STEALTH_OMIT
-    return playwright.chromium.launch_persistent_context(
+    return await playwright.chromium.launch_persistent_context(
         str(profile),
         channel="chrome",  # the real Chrome already on this Mac, not a bundled build
         headless=False,  # headless is what these sites actually block
@@ -346,132 +346,163 @@ _IMAGES_JS = """() => {
 }"""
 
 
-def _declared_images(page: Any) -> list[str]:
+async def _body_text(page: Any) -> str:
     try:
-        return list(page.evaluate(_IMAGES_JS))[:3]
-    except Exception:  # noqa: BLE001 — no images is a fine answer
-        return []
-
-
-def _body_text(page: Any) -> str:
-    try:
-        return page.inner_text("body")
+        return await page.inner_text("body")
     except Exception:  # noqa: BLE001 — no body is a real answer: no text
         return ""
 
 
-def _dismiss_consent(page: Any) -> None:
+async def _declared_images_async(page: Any) -> list[str]:
+    try:
+        return list(await page.evaluate(_IMAGES_JS))[:3]
+    except Exception:  # noqa: BLE001 — no images is a fine answer
+        return []
+
+
+async def _dismiss_consent(page: Any) -> None:
     for selector in _CONSENT_SELECTORS:
         try:
             button = page.locator(selector).first
-            if button.is_visible(timeout=800):
-                button.click(timeout=2_000)
-                page.wait_for_timeout(1_200)
+            if await button.is_visible(timeout=800):
+                await button.click(timeout=2_000)
+                await page.wait_for_timeout(1_200)
                 return
         except Exception:  # noqa: BLE001 — best effort; a missing banner is the norm
             continue
 
 
 class _Owner:
-    """The one thread that touches Playwright. Owns the context's lifetime."""
+    """The one thread that touches Playwright — and now an event LOOP, not a
+    job queue.
+
+    It was a queue, and that quietly cost aish a property it has everywhere
+    else: `_execute_tool_calls` fans read-only tools out concurrently because
+    they are network-bound, so a turn reading three pages should take as long
+    as the slowest. Routed through one serial browser they took the SUM —
+    measured live at 7.0s, 11.5s, 14.3s for three Allegro pages, and the third
+    was slow enough that a half-painted page got mistaken for a block wall.
+
+    The fix is not more browsers. Chrome locks the profile, and the profile is
+    the point: one set of the owner's sessions, shared by every read. So it is
+    one browser with many TABS, driven by the async API on a loop this thread
+    owns — `read()` still blocks its caller, but N callers now overlap inside
+    one Chrome.
+    """
 
     def __init__(self) -> None:
         self._playwright: Any = None
         self._context: Any = None
+        self.loop: Any = None
+        self._ready = threading.Event()
+        self._lock: Any = None  # created on the loop: guards context setup
         # The page a remote view is driving, when one is open. Held here
         # because it must outlive a single job: the whole point of the view is
         # that tap, type and tap again land on the SAME page.
         self.view: Any = None
         self.view_hosts: set[str] = set()
         self.view_touched = 0.0
+        self.busy = 0
 
     def run(self) -> None:
-        while True:
-            try:
-                job = _JOBS.get(timeout=IDLE_SECONDS)
-            except queue.Empty:
-                # NEVER reap a context a view is still driving. Frames are sent
-                # only on interaction, so an open view is silent by design —
-                # and the owner routinely goes quiet for well over IDLE_SECONDS
-                # mid-login, waiting on a 2FA SMS or a password manager. Reaping
-                # then killed the page under them and left `view` pointing at a
-                # dead target, so the next tap failed with the login half done.
-                # 2FA on a headless box is the PRIMARY case for this feature; it
-                # was the one the reaper broke.
-                #
-                # But an open view cannot suppress the reaper FOREVER, or a
-                # client that vanished without closing — a backgrounded PWA, a
-                # dropped socket — would hold Chrome and the profile lock until
-                # someone intervened on a machine nobody sits at.
-                idle_for = time.monotonic() - self.view_touched
-                if self.view is None or idle_for > VIEW_MAX_IDLE:
-                    self._close()
-                continue
-            try:
-                job.future.set_result(job.fn(self))
-            except BaseException as exc:  # noqa: BLE001 — travels to the caller
-                job.future.set_exception(exc)
+        import asyncio
 
-    def context(
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self._lock = asyncio.Lock()
+        self._ready.set()
+        self.loop.create_task(self._reap())
+        self.loop.run_forever()
+
+    async def _reap(self) -> None:
+        """Close an idle browser. Same rules as the queue version: never reap a
+        live view (a 2FA pause outlasts any sane idle timer), never let an
+        abandoned one hold Chrome forever, and never reap mid-read."""
+        import asyncio
+
+        while True:
+            await asyncio.sleep(IDLE_SECONDS)
+            if self.busy:
+                continue
+            idle_for = time.monotonic() - self.view_touched
+            if self.view is None or idle_for > VIEW_MAX_IDLE:
+                await self._close()
+
+    async def context(
         self,
         *,
         args: list[str] | None = None,
         viewport: dict | None = None,
         device_scale_factor: float | None = None,
     ) -> Any:
-        if self._context is not None:
-            return self._context
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:  # pragma: no cover — guarded by unavailable_reason
-            raise BrowserUnavailable(str(exc)) from exc
-        if self._playwright is None:
-            self._playwright = sync_playwright().start()
-        launch = functools.partial(
-            _launch,
-            self._playwright,
-            args=args or _OFFSCREEN_ARGS,
-            viewport=viewport,
-            device_scale_factor=device_scale_factor,
-        )
-        try:
-            self._context = launch()
-        except Exception as exc:  # noqa: BLE001 — one specific, recoverable cause
-            # Chrome leaves a SingletonLock in the profile when it dies badly.
-            # Every later launch then fails, so every read AND every view fails
-            # until somebody kills Chrome by hand — on a headless server with
-            # nobody in front of it. Clearing a stale lock and retrying ONCE is
-            # the difference between a blip and a dead capability.
-            if not _clear_stale_lock(exc):
-                raise
-            self._context = launch()
-        return self._context
+        # Under the lock: concurrent reads arriving cold would otherwise each
+        # launch a Chrome against a profile only one of them can hold.
+        async with self._lock:
+            if self._context is not None:
+                return self._context
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError as exc:  # pragma: no cover — see unavailable_reason
+                raise BrowserUnavailable(str(exc)) from exc
+            if self._playwright is None:
+                self._playwright = await async_playwright().start()
 
-    def _close(self) -> None:
+            async def launch():
+                return await _launch(
+                    self._playwright,
+                    args=args or _OFFSCREEN_ARGS,
+                    viewport=viewport,
+                    device_scale_factor=device_scale_factor,
+                )
+
+            try:
+                self._context = await launch()
+            except Exception as exc:  # noqa: BLE001 — one specific, recoverable cause
+                # Chrome leaves a SingletonLock in the profile when it dies
+                # badly. Every later launch then fails, so every read AND every
+                # view fails until somebody kills Chrome by hand — on a headless
+                # server with nobody in front of it.
+                if not _clear_stale_lock(exc):
+                    raise
+                self._context = await launch()
+            return self._context
+
+    async def _close(self) -> None:
         self.view = None  # a closed context has no page left to drive
         if self._context is not None:
             try:
-                self._context.close()
+                await self._context.close()
             except Exception:  # noqa: BLE001 — a dead browser is already closed
                 pass
             self._context = None
 
-    def close_now(self) -> None:
-        self._close()
+    async def close_now(self) -> None:
+        await self._close()
 
 
-def _submit(fn: Callable[[_Owner], Any], timeout: float) -> Any:
+def _submit(job: Callable[[_Owner], Any], timeout: float) -> Any:
+    """Run `job` (an async callable taking the owner) on the browser loop and
+    wait for it. Callers block; the WORK overlaps."""
+    import asyncio
+
     global _OWNER
     with _OWNER_LOCK:
         if _OWNER is None or not _OWNER.is_alive():
             owner = _Owner()
-            _OWNER = threading.Thread(
-                target=owner.run, name="aish-browser", daemon=True
-            )
+            _OWNER = threading.Thread(target=owner.run, name="aish-browser", daemon=True)
+            _OWNER.owner = owner  # type: ignore[attr-defined]
             _OWNER.start()
-    job = _Job(fn)
-    _JOBS.put(job)
-    return job.future.result(timeout=timeout)
+            owner._ready.wait(10)
+        owner = _OWNER.owner  # type: ignore[attr-defined]
+
+    async def run():
+        owner.busy += 1
+        try:
+            return await job(owner)
+        finally:
+            owner.busy -= 1
+
+    return asyncio.run_coroutine_threadsafe(run(), owner.loop).result(timeout=timeout)
 
 
 # -------------------------------------------------------------- the reads
@@ -485,7 +516,7 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
     if reason:
         raise BrowserUnavailable(reason)
 
-    def job(owner: _Owner) -> Page:
+    async def job(owner: _Owner) -> Page:
         if owner.view is not None:
             # The owner is driving the browser by hand. Reusing that context
             # would read the site at their PHONE's viewport and hand back a
@@ -496,15 +527,15 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
                 "the browser is being driven by hand right now (/browser) — "
                 "the page will be readable again once that window is closed"
             )
-        context = owner.context()
-        page = context.new_page()
+        context = await owner.context()
+        page = await context.new_page()
         try:
-            response = page.goto(
+            response = await page.goto(
                 url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS
             )
-            page.wait_for_timeout(SETTLE_MS)
-            _dismiss_consent(page)
-            text = _body_text(page)
+            await page.wait_for_timeout(SETTLE_MS)
+            await _dismiss_consent(page)
+            text = await _body_text(page)
             # A SHORT page is ambiguous: a wall is short, but so is a page that
             # has not finished painting. Reads serialise through this one
             # thread, so three in a turn means the third starts on a busy
@@ -513,18 +544,18 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
             # reporting that the site could not be read at all. Give a thin
             # page one more chance to fill in before judging it.
             if len(text) < CHALLENGE_MAX_CHARS:
-                page.wait_for_timeout(SETTLE_MS)
-                text = max(text, _body_text(page), key=len)
+                await page.wait_for_timeout(SETTLE_MS)
+                text = max(text, await _body_text(page), key=len)
             return Page(
                 text=text,
-                title=page.title() or "",
-                images=_declared_images(page),
+                title=(await page.title()) or "",
+                images=await _declared_images_async(page),
                 url=page.url or url,
                 status=response.status if response is not None else None,
             )
         finally:
             try:
-                page.close()
+                await page.close()
             except Exception:  # noqa: BLE001
                 pass
 
@@ -542,11 +573,11 @@ def open_for_login(url: str, *, timeout: float = LOGIN_WINDOW_TIMEOUT) -> list[s
     if reason:
         raise BrowserUnavailable(reason)
 
-    def job(owner: _Owner) -> list[str]:
-        owner.close_now()  # the off-screen context must release the profile lock
-        context = owner.context(args=_LOGIN_ARGS)
+    async def job(owner: _Owner) -> list[str]:
+        await owner.close_now()  # release the profile lock before relaunching
+        context = await owner.context(args=_LOGIN_ARGS)
         visited: set[str] = set()
-        page = context.new_page()
+        page = await context.new_page()
 
         def note(frame: Any) -> None:
             try:
@@ -559,7 +590,7 @@ def open_for_login(url: str, *, timeout: float = LOGIN_WINDOW_TIMEOUT) -> list[s
 
         page.on("framenavigated", note)
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         except Exception:  # noqa: BLE001 — they can still drive it by hand
             pass
         deadline = timeout
@@ -568,12 +599,12 @@ def open_for_login(url: str, *, timeout: float = LOGIN_WINDOW_TIMEOUT) -> list[s
             if page.is_closed() or not context.pages:
                 break
             try:
-                page.wait_for_timeout(int(step * 1000))
+                await page.wait_for_timeout(int(step * 1000))
             except Exception:  # noqa: BLE001 — closed mid-wait IS the exit condition
                 break
             deadline -= step
         _remember_logins(visited)
-        owner.close_now()  # back to a cold profile; the next read relaunches off-screen
+        await owner.close_now()  # next read relaunches off-screen at full size
         return sorted(visited)
 
     return _submit(job, timeout + 30.0)
@@ -705,14 +736,14 @@ class Frame:
     height: int = VIEW_HEIGHT
 
 
-def _frame(owner: _Owner) -> Frame:
+async def _frame(owner: _Owner) -> Frame:
     page = owner.view
-    page.wait_for_timeout(400)  # let a click's repaint land before capturing
+    await page.wait_for_timeout(400)  # let a click's repaint land before capture
     size = page.viewport_size or {"width": VIEW_WIDTH, "height": VIEW_HEIGHT}
     return Frame(
-        jpeg=page.screenshot(type="jpeg", quality=VIEW_JPEG_QUALITY),
+        jpeg=await page.screenshot(type="jpeg", quality=VIEW_JPEG_QUALITY),
         url=page.url or "",
-        title=(page.title() or ""),
+        title=(await page.title()) or "",
         width=size["width"],
         height=size["height"],
     )
@@ -747,28 +778,28 @@ def view_open(
         raise BrowserUnavailable(reason)
     w, h = view_size(width, height)
 
-    def job(owner: _Owner) -> Frame:
+    async def job(owner: _Owner) -> Frame:
         # A KNOWN viewport, so a tap at (x, y) in the PWA means that point
         # here. The read context uses the real window size and cannot give
         # that, so the view gets its own — and Chrome locks the profile, so
         # the read context has to let go first.
-        owner.close_now()
-        context = owner.context(
+        await owner.close_now()
+        context = await owner.context(
             args=[f"--window-size={w},{h}", "--window-position=-4000,-4000"],
             viewport={"width": w, "height": h},
             device_scale_factor=VIEW_SCALE,
         )
-        page = context.new_page()
+        page = await context.new_page()
         owner.view = page
         owner.view_hosts = set()
         owner.view_touched = time.monotonic()
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-        except Exception:  # noqa: BLE001 — a failed nav still shows them the error page
+            await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001 — a failed nav still shows the error page
             pass
         owner.view_touched = time.monotonic()
         _note_visit(owner, page.url)
-        return _frame(owner)
+        return await _frame(owner)
 
     return _submit(job, timeout)
 
@@ -779,39 +810,39 @@ def view_act(action: str, **kwargs: Any) -> Frame:
     Keystrokes are NEVER logged or traced anywhere in this path — the owner
     types real passwords through it."""
 
-    def job(owner: _Owner) -> Frame:
+    async def job(owner: _Owner) -> Frame:
         page = owner.view
         if page is None:
             raise BrowserUnavailable("no remote view is open")
         if action == "click":
-            page.mouse.click(float(kwargs["x"]), float(kwargs["y"]))
+            await page.mouse.click(float(kwargs["x"]), float(kwargs["y"]))
         elif action == "type":
-            page.keyboard.type(str(kwargs.get("text", "")), delay=12)
+            await page.keyboard.type(str(kwargs.get("text", "")), delay=12)
         elif action == "key":
-            page.keyboard.press(str(kwargs.get("key", "Enter")))
+            await page.keyboard.press(str(kwargs.get("key", "Enter")))
         elif action == "resize":
             # The sheet changed shape — a rotation, or a keyboard opening. The
             # page is re-laid-out rather than the frame being stretched, so a
             # responsive site can switch layout with it.
             rw, rh = view_size(kwargs.get("width"), kwargs.get("height"))
-            page.set_viewport_size({"width": rw, "height": rh})
+            await page.set_viewport_size({"width": rw, "height": rh})
         elif action == "scroll":
-            page.mouse.wheel(0, float(kwargs.get("dy", 600)))
+            await page.mouse.wheel(0, float(kwargs.get("dy", 600)))
         elif action == "back":
             try:
-                page.go_back(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                await page.go_back(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             except Exception:  # noqa: BLE001 — nothing to go back to is not an error
                 pass
         elif action == "goto":
             target = str(kwargs.get("url", ""))
             if not target.startswith(("http://", "https://")):
                 target = "https://" + target
-            page.goto(target, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            await page.goto(target, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         elif action != "refresh":
             raise ValueError(f"unknown view action {action!r}")
         owner.view_touched = time.monotonic()
         _note_visit(owner, page.url)
-        return _frame(owner)
+        return await _frame(owner)
 
     return _submit(job, 120.0)
 
@@ -822,12 +853,12 @@ def view_close() -> list[str]:
     Same rule as the on-screen window: what they NAVIGATED to is the claim,
     because only their own navigation supports "I signed in here"."""
 
-    def job(owner: _Owner) -> list[str]:
+    async def job(owner: _Owner) -> list[str]:
         visited = sorted(owner.view_hosts)
         owner.view = None
         owner.view_hosts = set()
         _remember_logins(set(visited))
-        owner.close_now()  # next read relaunches off-screen at the real window size
+        await owner.close_now()  # next read relaunches off-screen at full size
         return visited
 
     return _submit(job, 60.0)
@@ -838,7 +869,10 @@ def view_is_open() -> bool:
     if _OWNER is None or not _OWNER.is_alive():
         return False
     try:
-        return bool(_submit(lambda owner: owner.view is not None, timeout=15.0))
+        async def check(owner):
+            return owner.view is not None
+
+        return bool(_submit(check, timeout=15.0))
     except Exception:  # noqa: BLE001 — a wedged browser is not an open view
         return False
 
@@ -848,6 +882,9 @@ def shutdown() -> None:
     if _OWNER is None or not _OWNER.is_alive():
         return
     try:
-        _submit(lambda owner: owner.close_now(), timeout=30.0)
+        async def close(owner):
+            await owner.close_now()
+
+        _submit(close, timeout=30.0)
     except Exception:  # noqa: BLE001 — shutdown is best effort
         pass

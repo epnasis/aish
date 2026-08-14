@@ -4,12 +4,20 @@ Nothing here launches Chrome: `browser.read` / `open_for_login` are patched,
 and conftest's `no_real_browser` makes any escape from that fail loudly.
 """
 
+import asyncio
 import urllib.error
 
 import pytest
 
 from aish import browser
 from aish import web as web_module
+
+
+def run_job(owner):
+    """Stand-in for browser._submit: jobs are coroutines on the browser loop,
+    so a test drives one directly instead of pretending it is a function."""
+    return lambda job, timeout: asyncio.new_event_loop().run_until_complete(job(owner))
+
 
 
 # A real listing runs to tens of thousands of characters — the measured
@@ -336,7 +344,7 @@ class TestViewAndReadShareOneBrowser:
         the page — and would steal the tab they are mid-login on."""
         owner = browser._Owner()
         owner.view = object()
-        monkeypatch.setattr(browser, "_submit", lambda fn, timeout: fn(owner))
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
         with pytest.raises(browser.BrowserUnavailable, match="driven by hand"):
             browser.read("https://example.com")
 
@@ -485,30 +493,35 @@ class TestAThinPageGetsASecondChance:
         class FakePage:
             url = "https://allegro.pl/x"
 
-            def goto(self, *a, **k):
+            async def goto(self, *a, **k):
                 return type("R", (), {"status": 403})()
 
-            def wait_for_timeout(self, ms):
+            async def wait_for_timeout(self, ms):
                 pass
 
-            def inner_text(self, sel):
+            async def inner_text(self, sel):
                 return next(pages)
 
-            def title(self):
+            async def title(self):
                 return "Allegro"
 
-            def evaluate(self, js):
+            async def evaluate(self, js):
                 return []
 
-            def close(self):
+            async def close(self):
                 pass
 
         class FakeContext:
-            def new_page(self):
+            async def new_page(self):
                 return FakePage()
 
-        owner = type("O", (), {"view": None, "context": lambda self, **k: FakeContext()})()
-        monkeypatch.setattr(browser, "_submit", lambda fn, timeout: fn(owner))
+        class FakeOwner:
+            view = None
+
+            async def context(self, **k):
+                return FakeContext()
+
+        monkeypatch.setattr(browser, "_submit", run_job(FakeOwner()))
         page = browser.read("https://allegro.pl/x")
         assert len(page.text) > browser.CHALLENGE_MAX_CHARS
         assert browser.is_challenge(page.text, page.status) is False

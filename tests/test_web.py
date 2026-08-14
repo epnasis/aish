@@ -209,15 +209,21 @@ def http_error_fetch(code, reason):
     return raiser
 
 
-class TestJinaFallbackHint:
+class TestBlockedPageAdvice:
+    """Jina Reader used to be THE advice after a block. It is retired: across
+    two real sessions it returned four empty stubs and two timeouts and no
+    content at all, and pointing the model at a session-less datacenter fetcher
+    after the local browser had already failed only cost time."""
+
     def test_bot_block_codes_suggest_jina(self, monkeypatch, no_browser):
         for code, reason in ((403, "Forbidden"), (429, "Too Many Requests"), (503, "Unavailable")):
             monkeypatch.setattr(web, "_fetch", http_error_fetch(code, reason))
             result = web.read_url("https://shop.example.com/price")
             assert result.startswith("ERROR"), result
             assert f"HTTP {code}" in result
-            assert "https://r.jina.ai/https://shop.example.com/price" in result
-            assert "secrets" in result  # the hint must carry the privacy warning
+            assert "r.jina.ai" in result   # named, but to forbid it
+            assert "Do NOT retry through r.jina.ai" in result
+            assert "/browser" in result     # and pointed at what DOES work
 
     def test_other_http_errors_get_no_hint(self, monkeypatch):
         for code, reason in ((404, "Not Found"), (500, "Server Error")):
@@ -226,18 +232,26 @@ class TestJinaFallbackHint:
             assert result.startswith("ERROR")
             assert "r.jina.ai" not in result
 
-    def test_empty_page_suggests_jina(self, monkeypatch, no_browser):
+    def test_empty_page_is_reported_without_a_third_party_detour(
+        self, monkeypatch, no_browser
+    ):
         monkeypatch.setattr(web, "_fetch", lambda url: ("<html></html>", "text/html"))
         result = web.read_url("https://spa.example.com/app")
         assert result.startswith("ERROR")
-        assert "https://r.jina.ai/https://spa.example.com/app" in result
+        assert "Do NOT retry through r.jina.ai" in result
 
-    def test_failed_jina_url_not_suggested_again(self, monkeypatch, no_browser):
-        url = "https://r.jina.ai/https://shop.example.com/price"
-        monkeypatch.setattr(web, "_fetch", http_error_fetch(403, "Forbidden"))
-        assert "r.jina.ai/https://r.jina.ai" not in web.read_url(url)
-        monkeypatch.setattr(web, "_fetch", lambda u: ("", "text/plain"))
-        assert "r.jina.ai/https://r.jina.ai" not in web.read_url(url)
+    def test_a_reader_stub_is_never_presented_as_the_page(self, monkeypatch, no_browser):
+        """Its success shape is a title, a CAPTCHA warning and empty content.
+        That was logged ok and handed over as the shop's page."""
+        stub = (
+            "Title: allegro.pl\n\nWarning: This page maybe requiring CAPTCHA, "
+            "please make sure you are authorized to access this page.\n\n"
+            "Markdown Content:\n"
+        )
+        monkeypatch.setattr(web, "_fetch", lambda u: (stub, "text/plain"))
+        result = web.read_url("https://r.jina.ai/https://allegro.pl/oferta/x")
+        assert result.startswith("ERROR")
+        assert "reader stub" in result
 
 
 def fake_resolver(*addresses):
