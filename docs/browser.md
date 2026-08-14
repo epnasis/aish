@@ -42,7 +42,7 @@ The same page returns **7 833 characters on a cold profile and ZERO on a warm on
 
 Without that step the browser was **weaker than a third-party reader had any right to make it look**, which is the observation that produced this section — a real Chrome with a real profile should be strictly better than a session-less datacenter fetcher on every page, and where it isn't, the defect is in how it is driven.
 
-**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case.
+**Deletion is BY NAME, one cookie at a time, and never `clear_cookies()`.** The same jar holds the sessions the owner signed into by hand, which is the entire reason the profile persists; clearing those to fix a scrape would trade the feature for the workaround. `cf_clearance` is deliberately not on the list — it is a PASS token, evidence a challenge was already solved, and dropping it would throw away a good thing. `TestSheddingASouredReputation` pins the login-survives case as hard as the shedding case. `TestVisitingIsNotSigningIn` pins that a visit writes nothing.
 
 ## Status is diagnostic only
 
@@ -131,6 +131,20 @@ The general lesson is the one that keeps recurring here: **a fallback message is
 **And then the run failed anyway, in the model rather than the code.** Its final answer told the owner that *"Allegro's servers very effectively prevent automated reading"* — in a turn where it had successfully read **three** Allegro pages, two in the browser and one through Jina, with real prices in them. It reported the failures, generalised them over the whole site, discarded the data it already had, and answered from other shops. From the owner's seat that is indistinguishable from the feature not working, which is exactly what he reported.
 
 No amount of fetching fixes that, so the reading contract in `SYSTEM_PROMPT_TEMPLATE` now states it directly: a result marked *rendered in the browser* WAS read and must be used; some pages failing does not make a site unreadable; and it must not write that a site blocks automated reading in a turn where it read a page from that site. Telling the owner a source failed when it succeeded is worse than the original failure, because it throws away the answer too. `TestTheReadingContract` pins each clause, because each one was written against a specific thing that happened and a tidy-up of the prompt would bring it straight back.
+
+## What the owner's first hands-on session found (2026-08-14)
+
+Three things, and the third was a design mistake rather than a bug:
+
+**`/browser` opened a settings panel.** The bare form sent its output to the workspace sheet — so a command named after a browser answered a request to open one with a list of paths. It now opens the browser in both forms, with the address bar focused and a line saying what to do; only `forget` and `close` stay as text.
+
+**A failed navigation was painted as a working browser.** `view_open` caught a `goto` exception and carried on to the screenshot — but a `goto` that throws navigates NOWHERE, so the frame was a white `about:blank` with an empty address bar and no explanation. The owner read that as the feature being broken, which is exactly what it looked like. A `Frame` now carries an `error`, and the client keeps the typed URL and says what happened.
+
+**Closing the view claimed a login that never happened.** Every visited host was written to `logins.txt` on close. The rationale — "gating a merely-visited site errs safe" — was wrong in both directions: browsing to allegro.pl asserted an account there, and then every read of the site *this whole feature exists for* demanded approval. Friction on the main path, bought with a false claim about the owner's account.
+
+A login is a fact only the owner can state, and they are right there when the sheet closes, so **it asks**: the shared confirm modal names the hosts and what agreeing means, with *Just looking* as the resting choice. `record_logins` is the only writer, and it runs when they say yes. (The button that raised this also said **Done**, which they reasonably read as "dismiss the keyboard" — it says **Close** now.)
+
+The general shape is worth keeping: *the safe direction* is not always the restrictive one. Over-recording a login is not a cautious version of under-recording it; it is a different false statement, and this one taxed the main path to make it.
 
 ## Testing
 

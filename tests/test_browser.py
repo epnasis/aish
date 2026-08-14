@@ -101,6 +101,30 @@ class TestCommand:
         assert "allegro.pl" in browser.command("https://allegro.pl")
 
 
+class TestVisitingIsNotSigningIn:
+    """Closing the remote view used to mark every host visited as signed in, so
+    browsing to allegro.pl claimed an account there — and every later read of
+    the site the feature exists for then wanted approval. Friction on the main
+    path, and a claim about the owner's account that was untrue."""
+
+    def test_visiting_records_nothing(self, state):
+        owner = browser._Owner()
+        browser._note_visit(owner, "https://allegro.pl/oferta/x")
+        assert owner.view_hosts == {"allegro.pl"}
+        assert browser.logged_in_hosts() == set()   # nothing written
+
+    def test_the_owner_saying_so_records_it(self, state):
+        assert browser.record_logins(["allegro.pl"]) == ["allegro.pl"]
+        assert browser.is_logged_in("https://allegro.pl/moje") == "allegro.pl"
+
+    def test_recording_normalises_what_the_client_sends(self, state):
+        assert browser.record_logins(["https://www.X-KOM.pl/"]) == ["x-kom.pl"]
+
+    def test_junk_is_dropped_rather_than_recorded(self, state):
+        assert browser.record_logins(["", "   "]) == []
+        assert browser.logged_in_hosts() == set()
+
+
 class TestReadUrlEscalation:
     """The escalation itself: what makes a blocked or empty page readable."""
 

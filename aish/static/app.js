@@ -7813,16 +7813,17 @@ function handleSlash(text) {
     // The rest of the line is the argument: a URL to sign in at, or
     // "forget <host>" / "close". The window itself opens on the Mac.
     case "/browser": {
-      // A URL means "let me drive it": the Mac is headless, so an on-screen
-      // window there would be a window nobody can reach. The bare form and the
-      // bookkeeping verbs stay plain text in the workspace sheet.
+      // /browser OPENS THE BROWSER — with or without a URL. It used to send the
+      // bare form to the workspace sheet, which answered a request to open a
+      // browser with a settings panel; the name promises one thing and it did
+      // another. Only the bookkeeping verbs stay as text.
       const verb = arg.split(/\s+/)[0].toLowerCase();
-      if (arg && verb !== "forget" && verb !== "logout" && verb !== "close") {
-        openBrowserView(arg);
-        return true;
+      if (verb === "forget" || verb === "logout" || verb === "close") {
+        openSheet("workspace-sheet");
+        return send({ type: "browser", arg });
       }
-      openSheet("workspace-sheet");
-      return send({ type: "browser", arg });
+      openBrowserView(arg);
+      return true;
     }
     case "/session": copyLogPath(); return true; // path came in on hello (#146)
     case "/mic": openMicSheet(); return true;
@@ -10240,7 +10241,10 @@ function bvSend(message) {
   if (bvBusy) return false;           // one interaction in flight: frames must stay ordered
   bvBusy = true;
   $("bv-busy").hidden = false;
-  const sent = send(Object.assign({ type: "browser_view" }, message));
+  // Spread, not Object.assign: the ownership lint finds bare sends by reading
+  // the literal `send({ type: "..."`, so building the message dynamically hid
+  // this one from the audit entirely rather than declaring it.
+  const sent = send({ type: "browser_view", ...message });
   if (!sent) { bvIdle(); return false; }
   // A reply is the only thing that clears the spinner, so a socket that dies
   // mid-interaction would park it forever and the sheet would look wedged with
@@ -10261,26 +10265,66 @@ function onBrowserView(event) {
     $("bv-status").textContent = `error: ${event.error}`;
     return;
   }
+  if (event.action === "recorded") {
+    const hosts = (event.hosts || []).join(", ");
+    showToast(hosts ? `signed in: ${hosts}` : "nothing recorded");
+    return;
+  }
   if (event.action === "closed") {
     closeSheets();
-    const hosts = (event.hosts || []).join(", ");
-    showToast(hosts ? `signed in recorded: ${hosts}` : "browser closed");
+    const hosts = event.hosts || [];
+    if (!hosts.length) { showToast("browser closed"); return; }
+    // ASK. Closing the sheet used to mark every host visited as signed-in, so
+    // merely browsing to allegro.pl claimed an account there — and then every
+    // read of the site this feature exists for wanted approval. Whether a
+    // login happened is the owner's fact to state, and they are right here.
+    askConfirm({
+      title: "Did you sign in?",
+      body:
+        `You visited ${hosts.join(", ")}. If you signed in, aish will read ` +
+        `${hosts.length > 1 ? "those sites" : "that site"} as you — and will ` +
+        "ask you first, every time. If you only looked around, choose Not now.",
+      verb: "I signed in",
+      cancelVerb: "Just looking",
+      // act(), not a bare send: this ARMS the approval gate, and a request
+      // that vanished would leave the owner believing reads of their account
+      // will ask when they will not. The frame messages below are different —
+      // a lost one just fails to repaint, and the spinner says so.
+      action: () => act(
+        { type: "browser_login", hosts },
+        { label: "recording the sign-in" },
+      ),
+    });
     return;
   }
   bvFrame = { width: event.width, height: event.height };
   bvPaint(false);   // re-clamp: a new frame may be a different shape
   $("bv-frame").src = `data:image/jpeg;base64,${event.jpeg}`;
-  $("bv-url").value = event.url || "";
-  $("bv-status").textContent = event.title || event.url || "";
+  // A goto that threw navigated NOWHERE, so the frame is a white about:blank.
+  // Showing it with an empty address bar and no word of explanation is what
+  // made the view look broken; keep the typed URL and say what happened.
+  if (event.error) {
+    $("bv-status").textContent = event.error;
+  } else {
+    $("bv-url").value = event.url || "";
+    $("bv-status").textContent = event.title || event.url || "";
+  }
 }
 
 function openBrowserView(url) {
   openSheet("browser-sheet");
-  $("bv-status").textContent = "opening…";
   $("bv-frame").removeAttribute("src");
   bvResetZoom();
-  bvSend(Object.assign(
-    { action: "open", url: url || "https://www.google.com" }, bvViewportSize()));
+  $("bv-url").value = url || "";
+  if (!url) {
+    // No URL: say what to do rather than presenting an empty white rectangle,
+    // which reads as a broken browser.
+    $("bv-status").textContent = "type an address above, then Go";
+    $("bv-url").focus();
+    return;
+  }
+  $("bv-status").textContent = `opening ${url}…`;
+  bvSend(Object.assign({ action: "open", url }, bvViewportSize()));
 }
 
 /** The size the remote page should be laid out at: the stage we will show it
@@ -11404,11 +11448,14 @@ $("input-clear").onclick = () => clearComposer();
 // disagreeing about how serious the same action is.
 let confirmAction = null; // what the open modal does if confirmed
 
-function askConfirm({ title, body, verb, action }) {
+function askConfirm({ title, body, verb, cancelVerb, action }) {
   confirmAction = action;
   $("confirm-title").textContent = title;
   $("confirm-body").textContent = body;
   $("confirm-ok").textContent = verb || "Delete";
+  // Reset EVERY time, never only when overridden: the modal is shared, so a
+  // label left behind by one caller silently mislabels the next one's escape.
+  $("confirm-cancel").textContent = cancelVerb || "Cancel";
   $("confirm-modal").hidden = false;
   $("confirm-cancel").focus(); // the resting choice takes the keyboard, never the destructive one
 }

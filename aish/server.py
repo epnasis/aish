@@ -2270,6 +2270,13 @@ class WebServer:
             await self._browser(client, str(message.get("arg", "")).strip())
         elif kind == "browser_view":
             await self._browser_view(client, message)
+        elif kind == "browser_login":
+            hosts = browser.record_logins(
+                [str(h) for h in (message.get("hosts") or [])]
+            )
+            await client.ws.send_json(
+                {"type": "browser_view", "action": "recorded", "hosts": hosts}
+            )
         elif kind == "files":
             await self._send_files(client, str(message.get("query", "")))
         elif kind == "stop":
@@ -3746,6 +3753,8 @@ class WebServer:
             return
 
         if action == "close":
+            # The hosts are OFFERED, not recorded: whether a login happened is
+            # the owner's fact to state. The client asks; `signed_in` writes.
             await client.ws.send_json(
                 {"type": "browser_view", "action": "closed", "hosts": result}
             )
@@ -3759,6 +3768,7 @@ class WebServer:
                 "title": result.title,
                 "width": result.width,
                 "height": result.height,
+                "error": result.error,
             }
         )
 

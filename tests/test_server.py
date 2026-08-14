@@ -7148,15 +7148,70 @@ class TestBrowserView:
         for log in Path(app_env["state_dir"]).glob("session-*.jsonl"):
             assert "hunter2-secret" not in log.read_text()
 
-    def test_close_reports_the_hosts_it_recorded(self, app_env, monkeypatch):
+    def test_close_OFFERS_the_hosts_it_saw_without_recording_them(
+        self, app_env, monkeypatch
+    ):
+        """Visiting is not signing in. Closing used to write every visited host
+        to logins.txt, so merely browsing to allegro.pl claimed an account
+        there — and then every read of the site this feature exists for wanted
+        approval. Whether a login happened is the owner's fact to state."""
+        from aish import browser as browser_module
+
         calls = []
         self._fake_view(monkeypatch, calls)
+        recorded = []
+        monkeypatch.setattr(
+            browser_module, "record_logins", lambda hosts: recorded.extend(hosts) or hosts
+        )
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):
             ws.send_json({"type": "browser_view", "action": "close"})
             event = recv_until(ws, "browser_view")
             assert event["action"] == "closed"
             assert event["hosts"] == ["x.pl"]
+            assert recorded == []          # offered, not written
+
+    def test_a_login_is_recorded_only_when_the_owner_says_so(self, app_env, monkeypatch):
+        """Its own message, not a view action: recording ARMS the approval
+        gate, so it goes through act() and carries a receipt. A request that
+        vanished would leave the owner believing reads of their account will
+        ask when they will not."""
+        from aish import browser as browser_module
+
+        recorded = []
+        monkeypatch.setattr(
+            browser_module, "record_logins", lambda hosts: recorded.extend(hosts) or hosts
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_login", "hosts": ["x.pl"], "rid": "r1"})
+            event = recv_until(ws, "browser_view")
+            assert event["action"] == "recorded"
+            assert recorded == ["x.pl"]
+            assert recv_until(ws, "ack")["rid"] == "r1"
+
+    def test_a_failed_navigation_is_reported_not_painted_white(
+        self, app_env, monkeypatch
+    ):
+        """A goto that throws navigates NOWHERE, so the frame is a white
+        about:blank. Sending it with an empty address bar and no explanation is
+        what made the view look broken."""
+        from aish import browser as browser_module
+
+        monkeypatch.setattr(
+            browser_module,
+            "view_open",
+            lambda url, width=None, height=None: browser_module.Frame(
+                jpeg=b"\xff\xd8", url="about:blank", title="",
+                error="could not open https://x.pl (TimeoutError)",
+            ),
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser_view", "action": "open", "url": "https://x.pl"})
+            event = recv_until(ws, "browser_view")
+            assert event["action"] == "frame"
+            assert "could not open" in event["error"]
 
     def test_a_failure_comes_back_as_an_error_not_a_dead_sheet(self, app_env, monkeypatch):
         from aish import browser as browser_module

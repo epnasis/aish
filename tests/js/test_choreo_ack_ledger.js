@@ -217,6 +217,12 @@ function ledgerWorld({ socket = "open" } = {}) {
     // absence being visible rather than hidden. Nothing is claimed on screen
     // ahead of the reply, so there is nothing for a receipt to take back.
     browser: "fails safe",
+    // THE FRAME LOOP speaks for itself, like the console. A lost interaction
+    // simply fails to repaint, and the sheet says so on its own timer ("no
+    // answer — tap again") rather than pretending it worked. Recording a
+    // SIGN-IN is deliberately not here: it arms the approval gate, so it goes
+    // through act() as `browser_login`.
+    browser_view: "self-evident",
   };
 
   const bare = [...src.matchAll(/send\(\{ type: "([a-z_]+)"/g)].map((m) => m[1]);

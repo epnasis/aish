@@ -793,6 +793,7 @@ class Frame:
     title: str
     width: int = VIEW_WIDTH
     height: int = VIEW_HEIGHT
+    error: str = ""  # a navigation that failed, so a blank page is never silent
 
 
 async def _frame(owner: _Owner) -> Frame:
@@ -809,23 +810,19 @@ async def _frame(owner: _Owner) -> Frame:
 
 
 def _note_visit(owner: _Owner, url: str) -> None:
-    """Record a visited host as a login IMMEDIATELY, not when the view closes.
+    """Remember a host the owner VISITED. Visiting is not signing in.
 
-    `view_close` used to be the only writer, which quietly inverted the whole
-    point of the login gate: a phone PWA is normally ended by backgrounding it
-    or losing the network, not by tapping Done. The cookies persisted (the
-    login worked) while the host was never recorded — so the gate never fired
-    for it and the model could read the owner's live account with no approval
-    at all, which is the precise thing the gate exists to prevent.
+    This used to write straight to logins.txt, on the reasoning that gating a
+    merely-visited site errs safe. It does not: browsing to allegro.pl and
+    closing the sheet marked it signed-in, so every later read of the site the
+    whole feature exists for asked for approval — friction on the main path,
+    and a claim about the owner's account that was simply untrue.
 
-    Writing eagerly errs toward gating a site the owner merely VISITED. That is
-    the safe direction: the cost is one approval card, and `/browser forget`
-    undoes it."""
+    A login is a thing only the owner can confirm, so `view_close` hands these
+    back and the UI ASKS. Nothing here writes the record."""
     host = host_of(url)
-    if not host or host in owner.view_hosts:
-        return
-    owner.view_hosts.add(host)
-    _remember_logins({host})
+    if host:
+        owner.view_hosts.add(host)
 
 
 def view_open(
@@ -838,29 +835,40 @@ def view_open(
     w, h = view_size(width, height)
 
     async def job(owner: _Owner) -> Frame:
-        # A KNOWN viewport, so a tap at (x, y) in the PWA means that point
-        # here. The read context uses the real window size and cannot give
-        # that, so the view gets its own — and Chrome locks the profile, so
-        # the read context has to let go first.
-        await owner.close_now()
-        context = await owner.context(
-            args=[f"--window-size={w},{h}", "--window-position=-4000,-4000"],
-            viewport={"width": w, "height": h},
-            device_scale_factor=VIEW_SCALE,
-        )
-        page = await context.new_page()
-        owner.view = page
-        owner.view_hosts = set()
-        owner.view_touched = time.monotonic()
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-        except Exception:  # noqa: BLE001 — a failed nav still shows the error page
-            pass
-        owner.view_touched = time.monotonic()
-        _note_visit(owner, page.url)
-        return await _frame(owner)
+        return await _open_view(owner, url, w, h)
 
     return _submit(job, timeout)
+
+
+async def _open_view(owner: _Owner, url: str, w: int, h: int) -> Frame:
+    # A KNOWN viewport, so a tap at (x, y) in the PWA means that point
+    # here. The read context uses the real window size and cannot give
+    # that, so the view gets its own — and Chrome locks the profile, so
+    # the read context has to let go first.
+    await owner.close_now()
+    context = await owner.context(
+        args=[f"--window-size={w},{h}", "--window-position=-4000,-4000"],
+        viewport={"width": w, "height": h},
+        device_scale_factor=VIEW_SCALE,
+    )
+    page = await context.new_page()
+    owner.view = page
+    owner.view_hosts = set()
+    owner.view_touched = time.monotonic()
+    failed = ""
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception as exc:  # noqa: BLE001 — reported, never silently blank
+        # A goto that throws navigates NOWHERE, so the page is still
+        # about:blank — and screenshotting that presented a white rectangle
+        # and an empty address bar as though the view had opened. The owner
+        # reasonably read it as the feature being broken.
+        failed = f"could not open {url} ({type(exc).__name__})"
+    owner.view_touched = time.monotonic()
+    _note_visit(owner, page.url)
+    frame = await _frame(owner)
+    frame.error = failed
+    return frame
 
 
 def view_act(action: str, **kwargs: Any) -> Frame:
@@ -872,6 +880,16 @@ def view_act(action: str, **kwargs: Any) -> Frame:
     async def job(owner: _Owner) -> Frame:
         page = owner.view
         if page is None:
+            # Navigating with nothing open OPENS it. `/browser` with no URL
+            # shows the sheet without starting a browser, so the owner's first
+            # Go landed on "no remote view is open" — a true statement and a
+            # useless one, since asking to go somewhere IS asking to open it.
+            if action in ("goto", "refresh") and kwargs.get("url"):
+                target = str(kwargs["url"])
+                if not target.startswith(("http://", "https://")):
+                    target = "https://" + target
+                vw, vh = view_size(kwargs.get("width"), kwargs.get("height"))
+                return await _open_view(owner, target, vw, vh)
             raise BrowserUnavailable("no remote view is open")
         if action == "click":
             await page.mouse.click(float(kwargs["x"]), float(kwargs["y"]))
@@ -907,20 +925,37 @@ def view_act(action: str, **kwargs: Any) -> Frame:
 
 
 def view_close() -> list[str]:
-    """End the view, recording every host the owner visited as a login.
+    """End the view and hand back the hosts visited — WITHOUT recording them.
 
-    Same rule as the on-screen window: what they NAVIGATED to is the claim,
-    because only their own navigation supports "I signed in here"."""
+    Whether a login happened is the owner's fact to state, not one aish may
+    infer from a URL having been open."""
 
     async def job(owner: _Owner) -> list[str]:
         visited = sorted(owner.view_hosts)
         owner.view = None
         owner.view_hosts = set()
-        _remember_logins(set(visited))
         await owner.close_now()  # next read relaunches off-screen at full size
         return visited
 
     return _submit(job, 60.0)
+
+
+def record_logins(hosts: list[str]) -> list[str]:
+    """Mark hosts as signed in, because the owner said so.
+
+    Takes whatever the client sends — a bare host, a full URL, blank — since
+    this arrives over a WebSocket. Prefixing a scheme onto a value that already
+    had one silently recorded a host called "https"."""
+    clean: set[str] = set()
+    for raw in hosts:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        host = host_of(text if "//" in text else "https://" + text)
+        if host:
+            clean.add(host)
+    _remember_logins(clean)
+    return sorted(clean)
 
 
 def view_is_open() -> bool:
