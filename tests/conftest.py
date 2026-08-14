@@ -5,6 +5,7 @@ developer's real phone."""
 
 import pytest
 
+from aish import browser as browser_module
 from aish import notify as notify_module
 from aish import rule_compiler as rule_compiler_module
 from aish import rules as rules_module
@@ -60,6 +61,35 @@ def no_real_notifications(monkeypatch):
     """
     monkeypatch.setenv("AISH_NOTIFY", "0")
     assert not notify_module.enabled()
+
+
+@pytest.fixture(autouse=True)
+def no_real_browser(tmp_path_factory, monkeypatch):
+    """Never launch a real Chrome, and never touch the owner's real profile.
+
+    Same reasoning as the notifier guard: `browser` reaches a live, persistent
+    thing outside the process — a profile holding the owner's actual logins —
+    so it needs a suite-wide guard rather than per-test discipline. A test that
+    reaches the launch path fails loudly here instead of opening a window on
+    the developer's desktop, or worse, driving a signed-in session.
+
+    AISH_STATE_DIR is redirected too, so `logins.txt` written by a test can
+    never make the real agent gate (or stop gating) a real host.
+    """
+
+    class BrowserLaunched(BaseException):
+        """BaseException: `_browser_read` swallows Exception to fall back to
+        the plain fetch, which would eat an AssertionError and leave the guard
+        silent exactly where a test is most likely to be wrong."""
+
+    def refuse(*args, **kwargs):
+        raise BrowserLaunched(
+            "a test reached the real browser — patch browser.read / "
+            "browser.open_for_login instead"
+        )
+
+    monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path_factory.mktemp("state")))
+    monkeypatch.setattr(browser_module, "_submit", refuse)
 
 
 @pytest.fixture(autouse=True)

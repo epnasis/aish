@@ -21,6 +21,10 @@ dependencies = [
     "markdown>=3.5",
     "ollama>=0.5",
     "openai>=1.60",
+    # The browser behind web._browser_read. Drives the REAL Chrome already on
+    # this Mac (channel="chrome"), so this is the driver only — no bundled
+    # browser download, and `playwright install` is not a prerequisite.
+    "playwright>=1.49",
     "prompt-toolkit>=3.0",
     # Rule frontmatter is nested YAML (#205's when:/then: blocks), parsed with
     # safe_load so a rule file can never construct an object. Already present

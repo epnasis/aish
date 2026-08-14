@@ -36,6 +36,7 @@ import ollama
 from . import aliases as alias_map
 from . import (
     backends,
+    browser,
     documents,
     files,
     media,
@@ -177,10 +178,16 @@ Rules:
    local data (file contents, key values, personal details) in them.
    read_url only reaches public internet hosts; for a localhost or LAN
    service, propose a curl command instead (it goes through approval).
-   If a page comes back bot-blocked (HTTP 403/429/503) or with no readable
-   text (JavaScript-only), you may retry ONCE via read_url on
-   https://r.jina.ai/<url> — a third-party reader that renders the page;
-   never send it a URL containing tokens or other secrets.
+   A page that is bot-blocked (HTTP 403/429/503) or JavaScript-only is
+   retried FOR YOU in a real browser on this machine, so just call read_url
+   once and read what comes back — a result marked "rendered in the browser"
+   already IS the retry. Only if that still fails may you retry ONCE via
+   read_url on https://r.jina.ai/<url>, a third-party reader; never send it a
+   URL containing tokens or other secrets. Do NOT reach for curl when a page
+   is blocked: it fails the same way, and the user has said so.
+   The browser keeps the user's own signed-in sessions, so reading a site
+   they are logged into asks them first — expect that prompt and never work
+   around it.
    When researching, batch independent lookups: issue several web_search /
    read_url calls in a single reply — they run in parallel, which is much
    faster than one per turn.
@@ -857,6 +864,23 @@ EGRESS_NO_APPROVER = (
     "the owner named, or finish and report."
 )
 
+# Reading a site the owner is SIGNED INTO (#221). The browser reader carries
+# their live session, so such a read is made as them and can return private
+# pages — order history, messages, an account balance. That is what the owner
+# asked for and it is genuinely useful; what it must never be is silent, since
+# the URL can come from an injected instruction on a page rather than from
+# them. So the host is named and the read waits for a yes.
+LOGIN_READ_DENIED = (
+    "USER DENIED reading {host} with their signed-in browser — nothing was "
+    "read. Do not retry it; read a public source instead, or ask the user."
+)
+
+LOGIN_READ_NO_APPROVER = (
+    "NOT EXECUTED: {host} is a site the owner is signed into, and an automated "
+    "session may not read it as them with no approver available. Use a public "
+    "source, or finish and report."
+)
+
 # Origin-gated knowledge writes (#196). remember/forget_memory auto-approve, and
 # that is deliberate: capturing a fact must stay frictionless. The reasoning is
 # attended-only, though — unattended, the text proposing the write can be an
@@ -1118,6 +1142,10 @@ class Agent:
         # when origin != "user".
         self._owner_hosts: set[str] = set()
         self._approved_hosts: set[str] = set()
+        # Signed-in hosts vouched for on a login card this session (#221).
+        # Session-scoped like every other grant (L4): a yes given in the chat
+        # you leave must not follow you into the one you land in.
+        self._approved_logins: set[str] = set()
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
         self.task_sources: list[dict] = []  # pages read_url fetched for the current task
         self.approve = approve
@@ -3631,6 +3659,11 @@ class Agent:
             return self._read_prompt_reason(str(args.get("path", ""))) is not None
         # Egress calls needing an approval card (#178 P0-2) must run through
         # _dispatch sequentially — the parallel thunks would bypass the gate.
+        # Same for a read that would use a signed-in session (#221): the
+        # parallel path has no gate at all, so a gated read must leave it.
+        login_host = self._login_host(name, args)
+        if login_host and login_host not in self._approved_logins:
+            return True
         return self._egress_novel_hosts(name, args) is not None
 
     def _egress_novel_hosts(self, name: str, args: dict) -> list[str] | None:
@@ -3699,6 +3732,57 @@ class Agent:
         # Plain approve: the owner vouched for these hosts for the rest of
         # this session, so the same host does not re-prompt every step.
         self._approved_hosts.update(novel)
+        return None
+
+    def _login_host(self, name: str, args: dict) -> str:
+        """The signed-in host this call would read as the owner, or "".
+
+        Only read_url: it is the one tool that escalates to the persistent
+        browser, and so the one that can carry a live session. The image and
+        document readers fetch bytes through the anonymous opener."""
+        if name != "read_url":
+            return ""
+        return browser.is_logged_in(str(args.get("url", "")))
+
+    def _login_gate(self, name: str, args: dict) -> str | None:
+        """Approval gate for reading a site the owner is signed into (#221):
+        None = proceed, else the refusal text for the model.
+
+        Unlike _egress_gate this applies to EVERY origin, the attended session
+        included. The reason the owner's presence normally settles a read —
+        they can see what it is — is exactly what does not hold here: the risk
+        is not the host, it is that their session goes with it, and the model
+        proposing the URL may be acting on text it read on a page."""
+        host = self._login_host(name, args)
+        if not host:
+            return None
+        if host in self._approved_logins:
+            return None
+        if self.approve_tool is None:
+            return _gate_outcome(
+                LOGIN_READ_NO_APPROVER.format(host=host), decision="blocked"
+            )
+        preview = (
+            f"read {host} using your signed-in browser session — the page will "
+            "be fetched as you, and may contain private account data"
+        )
+        decision = self.approve_tool(name, args, preview)
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            return _gate_outcome(
+                _with_feedback(LOGIN_READ_DENIED.format(host=host), decision.comment),
+                decision="denied",
+            )
+        if isinstance(decision, Approved):
+            return _gate_outcome(
+                TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
+                decision="held",
+            )
+        if decision is None or decision is False:
+            return _gate_outcome(LOGIN_READ_DENIED.format(host=host), decision="denied")
+        # Vouched for the rest of this session, matching _egress_gate: a task
+        # that reads five pages of one portal asks once, not five times.
+        self._approved_logins.add(host)
         return None
 
     def _knowledge_gate(self, name: str, args: dict) -> str | None:
@@ -4639,6 +4723,11 @@ class Agent:
             # Outbound reads in a triggered session hold for approval when
             # they reach beyond the owner's own hosts (#178 P0-2).
             refusal = self._egress_gate(name, args)
+            if refusal is not None:
+                return refusal
+            # …and a read of a site the owner is SIGNED INTO holds in every
+            # session, attended or not (#221).
+            refusal = self._login_gate(name, args)
             if refusal is not None:
                 return refusal
             label, thunk = self._read_only_call(name, args)

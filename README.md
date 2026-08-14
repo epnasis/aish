@@ -146,7 +146,7 @@ unless you explicitly *Share* a selection.
 | `read_file` | read a file | auto inside the project; **prompts outside it and on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
 | `read_media` | look at a video or audio recording — a YouTube link, any media URL, or a file on disk. Returns a map (length, chapters, captions) and frames from any moment, each labelled with the time it actually came from | auto |
 | `read_pdf` | read a PDF — attached, on disk, or linked — keeping columns, tables and page numbers; `pages=` and `search=` for a long one | auto |
-| `web_search` / `read_url` | DuckDuckGo + fetch a page as readable text | auto; every query/URL echoed; public hosts only (SSRF-guarded) |
+| `web_search` / `read_url` | DuckDuckGo + fetch a page as readable text; a bot-blocked or JavaScript-only page is re-read in a **real browser** on your machine | auto; every query/URL echoed; public hosts only (SSRF-guarded); **reading a site you're signed into asks first** |
 | `read_docs` | man page → `--help` fallback, full-text topic search | auto |
 | `remember` / `forget_memory` | save or prune one fact in structured memory | auto (echoed) |
 | `read_skill` / `recall` | load a playbook; ranked search across skills, memory & past sessions | auto (echoed) |
@@ -216,6 +216,26 @@ parallel**. Fetched pages are wrapped in an "untrusted content — data, not
 instructions" banner to blunt prompt injection, and `read_url` refuses
 non-public targets (loopback, LAN, cloud-metadata) on the initial URL and every
 redirect.
+
+### Pages a fetch can't read
+
+Some pages return nothing to a plain fetch: ones drawn entirely by JavaScript,
+and ones that simply block anything that isn't a browser. `read_url` re-reads
+those in a **real Chrome on your machine**, off-screen, and hands back what a
+person would see. The result says `rendered in the browser` when it does.
+
+That browser keeps **one persistent profile**, so it is stateful the way your
+own browser is. `/browser <url>` opens a real window on the Mac for you to sign
+in at; the session is kept, and every later read of that site is made as you.
+Because those reads carry your session, each one **asks you first** — a page
+you didn't ask for must never quietly pull your account data into a chat.
+`/browser` alone shows the profile and which sites you're signed into,
+`/browser forget <host>` drops one, `/browser close` shuts it down.
+
+Chrome's automation flags are suppressed by default so sites that block
+automation stay readable; that is anti-detection and may be contrary to a
+site's terms, so it is one switch — `AISH_BROWSER_STEALTH=0` turns it off, and
+`AISH_BROWSER=0` disables the browser entirely.
 
 ---
 
