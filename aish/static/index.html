@@ -480,16 +480,22 @@
 
 <div id="browser-sheet" class="sheet" hidden>
   <div class="grabber"></div>
-  <div class="sheet-head">
-    <strong class="grow">Browser on the Mac</strong>
-    <button class="close" aria-label="close" data-close="browser-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
+  <!-- No title row. It said "Browser on the Mac": a whole row of chrome to
+       state something you can SEE, and wrong the moment this runs anywhere but
+       a Mac. An in-app browser puts the address and the close together at the
+       top; the address bar carries the identity. -->
+  <div class="bv-bar bv-top">
+    <input id="bv-url" class="bv-url" type="url" inputmode="url" enterkeyhint="go"
+           autocapitalize="off" autocorrect="off" spellcheck="false"
+           placeholder="Search or enter address">
+    <!-- Close lives here, top-right, as a quiet ✕ — not a blue button in the
+         bottom bar, where it read as the primary action and got pressed by
+         accident with nothing to undo it. -->
+    <button class="bv-x" data-close="browser-sheet" aria-label="close browser">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg>
+    </button>
   </div>
   <div class="bv-body">
-    <div class="bv-bar">
-      <input id="bv-url" class="bv-url" type="url" inputmode="url" autocapitalize="off"
-             autocorrect="off" spellcheck="false" placeholder="https://…">
-      <button id="bv-go" class="bv-btn">Go</button>
-    </div>
     <div id="bv-status" class="bv-status">Tap a field to type · double-tap to zoom</div>
     <div class="bv-stage">
       <!-- Tapped, not dragged: a coordinate maps straight to a click on the
@@ -503,13 +509,9 @@
       <div id="bv-focus" class="bv-focus" hidden></div>
       <div id="bv-busy" class="bv-busy" hidden></div>
     </div>
-    <!-- The persistent type bar is gone. Tapping a field opens the editor
-         below, which is how a phone behaves everywhere else — and it dissolves
-         the Type-vs-Enter question rather than explaining it. -->
-    <div class="bv-bar">
-      <button id="bv-back" class="bv-btn">Back</button>
-      <button id="bv-refresh" class="bv-btn">Refresh</button>
-      <button id="bv-done" class="bv-btn bv-done">Close</button>
+    <div class="bv-bar bv-nav">
+      <button id="bv-back" class="bv-btn" aria-label="back">‹ Back</button>
+      <button id="bv-refresh" class="bv-btn" aria-label="reload">↻</button>
     </div>
   </div>
 </div>
@@ -531,8 +533,8 @@
     <div id="bv-edit-note" class="bv-edit-note"></div>
     <div class="bv-edit-actions">
       <button id="bv-edit-cancel" class="bv-btn">Cancel</button>
-      <button id="bv-edit-set" class="bv-btn bv-done">Set</button>
-      <button id="bv-edit-go" class="bv-btn bv-done">Set &amp; submit</button>
+      <button id="bv-edit-set" class="bv-btn bv-primary">Set</button>
+      <button id="bv-edit-go" class="bv-btn bv-primary">Set &amp; submit</button>
     </div>
   </div>
 </div>

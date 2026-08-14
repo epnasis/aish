@@ -370,6 +370,19 @@ A chip's label and payload come from **model output**, and a chip sends on ONE T
 
 ## Remote browser view
 
+### It is a browser, so it looks like one
+
+The sheet was built as a sheet with browser parts bolted on, and every widget that came from "sheet" rather than "browser" was wrong:
+
+- **A title row reading "Browser on the Mac"** — a whole row of chrome spent stating something visible from the content, and false the moment aish runs anywhere but a Mac. Deleted; the address bar carries the identity, as in every in-app browser.
+- **A "Go" button beside the address bar** — no browser has one. The field is `type="url" inputmode="url" enterkeyhint="go"`, so the phone keyboard offers **Go**, and Enter blurs the field so the keyboard gets out of the way.
+- **A blue "Close" in the bottom bar** — blue is the primary-commit style, so closing read as the most important action in the sheet and was pressed by accident, with nothing to undo it. Close is now a quiet ✕ at the top right, which is where an in-app browser puts it and where the sheet's own close already lived.
+- **Back and Refresh stay** — both earned their place in use.
+
+The result gives the page **74% of the sheet** (549px of 738 on a 430×900 phone) where the old fixed 44vh slot gave it 396px.
+
+The heuristic, learned the slow way across three rounds of feedback: **if a mobile browser or a remote-desktop client does it with a gesture on the content, do not add a widget.** Widgets are for what has no gesture — the address, Back, Refresh, Close.
+
 ### `[BROWSER-VIEW-END]` — a dismissed sheet must not leave a browser running
 
 A sheet can be dismissed four ways: the Close button, the ✕, the backdrop, and a swipe down the grabber. Only the button told the server. The other three left a real Chrome running on a machine nobody is sitting at — and because a read REFUSES while the owner is driving the view (`docs/browser.md`), a stray swipe meant aish could not read **any** page until the 15-minute idle cap expired. `bvEndIfOpen` therefore hangs off `closeSheets`, the one funnel every dismissal already goes through, rather than off each dismissal in turn.

@@ -10614,14 +10614,18 @@ function wireBrowserView() {
     bvPinchFrom = null;
     if (!bvPointers.size) bvDragFrom = null;
   });
-  $("bv-go").addEventListener("click", () => bvSend({ action: "goto", url: $("bv-url").value.trim() }));
+  // No Go button. The address bar is submitted with the keyboard's own Go key
+  // (`enterkeyhint="go"`), which is how every mobile browser works — a separate
+  // button is chrome for something the keyboard already offers.
   $("bv-url").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); $("bv-go").click(); }
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    e.target.blur();     // let the keyboard go; the frame is what to look at
+    bvSend(Object.assign(
+      { action: "goto", url: $("bv-url").value.trim() }, bvViewportSize()));
   });
   $("bv-back").addEventListener("click", () => bvSend({ action: "back" }));
   $("bv-refresh").addEventListener("click", () => bvSend({ action: "refresh" }));
-  $("bv-done").addEventListener("click", () => bvSend({ action: "close" }));
-
   // A rotation or a keyboard changes the shape of the page we are showing, so
   // the remote page is RE-LAID-OUT rather than the frame being stretched.
   let resizeTimer = null;
