@@ -7036,3 +7036,45 @@ class TestRateAnswer:
         [cold] = [e for e in events if e["type"] == "rating"]
         assert cold["comment"] == "it never read the page"
         assert cold == rating, "hot and cold must agree on the whole event"
+
+
+class TestBrowserCommand:
+    """`/browser` over the WebSocket (#221). The wiring is what breaks: a slash
+    command needs the app.js case, the WS kind, and the handler, and a missing
+    one shows up only as "unknown command" in the app."""
+
+    def test_status_comes_back_as_sheet_text(self, app_env, monkeypatch):
+        from aish import browser as browser_module
+
+        monkeypatch.setattr(
+            browser_module, "command", lambda arg: f"status for {arg!r}"
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser", "arg": ""})
+            assert recv_until(ws, "job_list")["text"] == "status for ''"
+
+    def test_opening_a_window_acks_before_it_blocks(self, app_env, monkeypatch):
+        """A login window parks for as long as the owner needs it. The phone
+        that asked must be told the window is on the MAC, not left waiting on
+        something it cannot see."""
+        from aish import browser as browser_module
+
+        monkeypatch.setattr(
+            browser_module, "command", lambda arg: "signed-in sites recorded: x.pl"
+        )
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser", "arg": "https://x.pl"})
+            first = recv_until(ws, "job_list")["text"]
+            assert "on the Mac" in first
+            assert "x.pl" in recv_until(ws, "job_list")["text"]
+
+    def test_bookkeeping_does_not_ack_a_window_it_never_opens(self, app_env, monkeypatch):
+        from aish import browser as browser_module
+
+        monkeypatch.setattr(browser_module, "command", lambda arg: "forgot it")
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "browser", "arg": "forget x.pl"})
+            assert recv_until(ws, "job_list")["text"] == "forgot it"
