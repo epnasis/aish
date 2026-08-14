@@ -353,6 +353,13 @@ def _declared_images(page: Any) -> list[str]:
         return []
 
 
+def _body_text(page: Any) -> str:
+    try:
+        return page.inner_text("body")
+    except Exception:  # noqa: BLE001 — no body is a real answer: no text
+        return ""
+
+
 def _dismiss_consent(page: Any) -> None:
     for selector in _CONSENT_SELECTORS:
         try:
@@ -497,10 +504,17 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
             )
             page.wait_for_timeout(SETTLE_MS)
             _dismiss_consent(page)
-            try:
-                text = page.inner_text("body")
-            except Exception:  # noqa: BLE001 — no body is a real answer: no text
-                text = ""
+            text = _body_text(page)
+            # A SHORT page is ambiguous: a wall is short, but so is a page that
+            # has not finished painting. Reads serialise through this one
+            # thread, so three in a turn means the third starts on a busy
+            # machine — and a half-painted listing looked exactly like a
+            # challenge, was rejected as one, and sent the model off to Jina
+            # reporting that the site could not be read at all. Give a thin
+            # page one more chance to fill in before judging it.
+            if len(text) < CHALLENGE_MAX_CHARS:
+                page.wait_for_timeout(SETTLE_MS)
+                text = max(text, _body_text(page), key=len)
             return Page(
                 text=text,
                 title=page.title() or "",

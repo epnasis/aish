@@ -318,6 +318,15 @@ class TestChallengeDetection:
         out = web_module.read_url("https://allegro.pl/x")
         assert out.startswith("ERROR")
         assert "Verify you are human" not in out
+        # …and it must say the BROWSER met a wall, not "the site may block
+        # simple fetchers — retry via Jina". That message sent the model to a
+        # datacenter fetcher with no session; it burned two calls (one a 22s
+        # timeout) and it concluded Allegro was unreadable.
+        assert "verification wall" in out
+        # The reader is NAMED here, but to forbid it — a bare "don't" that does
+        # not say what not to do is the hint the model ignores.
+        assert "Do NOT retry this through r.jina.ai" in out
+        assert "you may retry ONCE via read_url on https://r.jina.ai/" not in out
 
 
 class TestViewAndReadShareOneBrowser:
@@ -462,3 +471,81 @@ class TestKnownBlockingHostsSkipTheDoomedFetch:
         monkeypatch.setattr(web_module, "_fetch", lambda url: ("<p>hello</p>", "text/html"))
         web_module.read_url("https://example.com/x")
         assert web_module.BROWSER_HOSTS == set()
+
+
+class TestAThinPageGetsASecondChance:
+    """Reads serialise through one browser thread, so the third in a turn
+    starts on a busy machine. A half-painted listing is SHORT, which is exactly
+    what a wall looks like — and it was rejected as one, live, on the owner's
+    second test (14.3s, ok=False, while its two siblings rendered fine)."""
+
+    def test_a_page_that_fills_in_late_is_read_not_rejected(self, monkeypatch):
+        pages = iter(["thin", "the full listing " * 400])
+
+        class FakePage:
+            url = "https://allegro.pl/x"
+
+            def goto(self, *a, **k):
+                return type("R", (), {"status": 403})()
+
+            def wait_for_timeout(self, ms):
+                pass
+
+            def inner_text(self, sel):
+                return next(pages)
+
+            def title(self):
+                return "Allegro"
+
+            def evaluate(self, js):
+                return []
+
+            def close(self):
+                pass
+
+        class FakeContext:
+            def new_page(self):
+                return FakePage()
+
+        owner = type("O", (), {"view": None, "context": lambda self, **k: FakeContext()})()
+        monkeypatch.setattr(browser, "_submit", lambda fn, timeout: fn(owner))
+        page = browser.read("https://allegro.pl/x")
+        assert len(page.text) > browser.CHALLENGE_MAX_CHARS
+        assert browser.is_challenge(page.text, page.status) is False
+
+
+class TestTheReadingContract:
+    """What the system prompt must keep saying about reading pages (#221).
+
+    Pinned as text because every clause here was written to stop a SPECIFIC
+    thing the model did in the owner's live tests, and a well-meaning tidy-up
+    of the prompt would silently bring each one back."""
+
+    def _prompt(self):
+        from aish.agent import SYSTEM_PROMPT_TEMPLATE
+
+        return SYSTEM_PROMPT_TEMPLATE
+
+    def test_no_hand_rolled_fetchers_in_any_language(self):
+        """It wrote its own Python fetcher and ran it — curl with extra steps,
+        on a page read_url handles. The owner has denied that shape three
+        times across two sessions."""
+        prompt = self._prompt()
+        assert "MUST NOT fetch a web page any other way" in prompt
+        assert "Python" in prompt
+
+    def test_a_shop_is_read_at_its_own_listing_url(self):
+        """Twelve `site:allegro.pl` searches returned the search engine's index
+        instead of today's prices."""
+        prompt = self._prompt()
+        assert "site:allegro.pl" in prompt
+        assert "listing?string=" in prompt
+
+    def test_success_must_not_be_reported_as_failure(self):
+        """The one that actually cost the owner an answer: it read three
+        Allegro pages, then told him Allegro blocks automated reading and
+        answered from other shops — throwing away data it already had."""
+        prompt = self._prompt()
+        assert "REPORT WHAT ACTUALLY HAPPENED" in prompt
+        assert "rendered in the browser" in prompt
+        assert "blocks automated reading" in prompt

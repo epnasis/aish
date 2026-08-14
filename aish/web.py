@@ -228,6 +228,19 @@ def web_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> str:
 # blocked path is not on the critical route a second time.
 BROWSER_HOSTS: set[str] = set()
 
+# What the model is told when the browser reached a page and met a wall. It
+# names the outcome and CLOSES the door on the third-party reader, which is a
+# datacenter fetcher with no session — strictly weaker than the browser that
+# just failed. Suggesting it there cost two wasted calls and left the model
+# concluding the site was unreadable, when the honest answer is "not this page,
+# right now".
+WALLED = (
+    "the browser opened it but the site served a verification wall instead of "
+    "the page. Do NOT retry this through r.jina.ai — it fetches from a "
+    "datacenter with no session and will do worse. Use another source, or ask "
+    "the user to open it in /browser"
+)
+
 
 def _remember_title(url: str, title: str) -> None:
     if not title:
@@ -237,7 +250,7 @@ def _remember_title(url: str, title: str) -> None:
     PAGE_TITLES[url] = title
 
 
-def _browser_read(url: str) -> tuple[str, list[str]] | None:
+def _browser_read(url: str) -> tuple[tuple[str, list[str]] | None, str]:
     """(text, images) as a REAL browser renders the page, or None if it could
     not be used. The escalation for the two pages a fetch cannot read at all:
     JavaScript-only (the fetch gets an empty shell) and login-walled (the fetch
@@ -249,29 +262,35 @@ def _browser_read(url: str) -> tuple[str, list[str]] | None:
 
     Judged on whether it produced TEXT, never on the status code — a site that
     dislikes automation may answer 403 and still serve the entire listing,
-    prices included, which is exactly what allegro.pl does."""
+    prices included, which is exactly what allegro.pl does.
+
+    Returns (result, reason). The REASON is not decoration: when this returned a
+    bare None the caller could only fall back to "the site may block simple
+    fetchers — retry via Jina", which was a lie once the browser had already
+    tried and been walled. The model duly spent two more calls on Jina (one a
+    22-second timeout) and reported that Allegro simply cannot be read."""
     try:
         page = browser.read(url)
-    except browser.BrowserUnavailable:
-        return None
-    except Exception:  # noqa: BLE001 — a launch/nav failure falls back, never crashes a read
-        return None
+    except browser.BrowserUnavailable as exc:
+        return None, f"no browser available ({exc})"
+    except Exception as exc:  # noqa: BLE001 — a launch/nav failure falls back, never crashes
+        return None, f"the browser could not load it ({type(exc).__name__})"
     host = browser.host_of(url)
     text = "\n".join(
         line for line in (ln.strip() for ln in page.text.splitlines()) if line
     )
     if not text.strip():
-        return None
+        return None, "the browser rendered an empty page"
     # A wall HAS text, so "non-empty" is not the same as "the page". Handing a
     # challenge screen back as content is the ORIGINAL failure rebuilt one layer
     # up: the model would read "verify you are human" as the shop and answer
     # from it. An honest ERROR is worth more than a laundered block page.
     if browser.is_challenge(text, page.status):
-        return None
+        return None, WALLED
     _remember_title(url, page.title)
     if host:
         BROWSER_HOSTS.add(host)
-    return text, page.images
+    return (text, page.images), ""
 
 
 def _worth_rendering(exc: Exception) -> bool:
@@ -302,9 +321,11 @@ def read_url(url: str, topic: str | None = None) -> str:
     # the refusal is not always a prompt 403, and a tarpit costs the whole
     # timeout before anything escalates (see BROWSER_HOSTS).
     if browser.host_of(url) in BROWSER_HOSTS:
-        rendered = _browser_read(url)
+        rendered, why = _browser_read(url)
         if rendered is not None:
             return _present(url, *rendered, topic=topic, via_browser=True)
+        if why == WALLED:
+            return f"ERROR: {url} — {WALLED}"
 
     try:
         text, content_type = _fetch(url)
@@ -321,9 +342,11 @@ def read_url(url: str, topic: str | None = None) -> str:
         # empty page with a CAPTCHA warning (three calls, three empty pages, in
         # the session that prompted all this).
         if exc.code in _JINA_BLOCK_CODES:
-            rendered = _browser_read(url)
+            rendered, why = _browser_read(url)
             if rendered is not None:
                 return _present(url, *rendered, topic=topic, via_browser=True)
+            if why == WALLED:
+                return f"ERROR: {url} — {WALLED}"
         hint = _jina_hint(url) if exc.code in _JINA_BLOCK_CODES else ""
         return f"ERROR: {url} returned HTTP {exc.code} {exc.reason}{hint}"
     except Exception as exc:  # noqa: BLE001 — DNS, TLS, timeouts: report, don't crash
@@ -334,9 +357,11 @@ def read_url(url: str, topic: str | None = None) -> str:
         # socket timeout, and the escalation — wired only to 403/429/503 —
         # never ran.
         if _worth_rendering(exc):
-            rendered = _browser_read(url)
+            rendered, why = _browser_read(url)
             if rendered is not None:
                 return _present(url, *rendered, topic=topic, via_browser=True)
+            if why == WALLED:
+                return f"ERROR: {url} — {WALLED}"
         return f"ERROR: could not fetch {url}: {exc}"
 
     images: list[str] = []
@@ -359,9 +384,11 @@ def read_url(url: str, topic: str | None = None) -> str:
         # A JavaScript-only page: the fetch succeeded and returned a shell.
         # This is the commonest browser win by far — far more of the web than
         # the sites that actively block automation.
-        rendered = _browser_read(url)
+        rendered, why = _browser_read(url)
         if rendered is not None:
             return _present(url, *rendered, topic=topic, via_browser=True)
+        if why == WALLED:
+            return f"ERROR: {url} — {WALLED}"
         return f"ERROR: {url} returned no readable text{_jina_hint(url)}"
 
     return _present(url, text, images, topic=topic)
