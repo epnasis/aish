@@ -9,6 +9,7 @@ loopback, LAN, and cloud-metadata addresses are refused, on the initial URL
 and on every redirect (SSRF guard, see _require_public).
 """
 
+import http.client
 import ipaddress
 import re
 import socket
@@ -214,6 +215,20 @@ def web_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> str:
     return truncate("\n".join(lines))
 
 
+# Hosts that have needed the browser in THIS process. A site that blocks a
+# plain fetcher blocks it every time, so the second read skips straight to the
+# renderer instead of paying for a refusal first.
+#
+# This is not only a latency win, it closes a hole. Allegro answers a plain
+# fetch with 403 in 0.1s *usually* — but under load, or after it has decided to
+# tarpit the address, it simply stops answering, and the read dies on a socket
+# timeout instead. On 2026-08-14 that is exactly what happened on the owner's
+# first real test: one timeout, no escalation, and the browser never ran at all
+# in a session that was meant to prove it. Remembering the host means the
+# blocked path is not on the critical route a second time.
+BROWSER_HOSTS: set[str] = set()
+
+
 def _remember_title(url: str, title: str) -> None:
     if not title:
         return
@@ -241,6 +256,7 @@ def _browser_read(url: str) -> tuple[str, list[str]] | None:
         return None
     except Exception:  # noqa: BLE001 — a launch/nav failure falls back, never crashes a read
         return None
+    host = browser.host_of(url)
     text = "\n".join(
         line for line in (ln.strip() for ln in page.text.splitlines()) if line
     )
@@ -253,13 +269,42 @@ def _browser_read(url: str) -> tuple[str, list[str]] | None:
     if browser.is_challenge(text, page.status):
         return None
     _remember_title(url, page.title)
+    if host:
+        BROWSER_HOSTS.add(host)
     return text, page.images
+
+
+def _worth_rendering(exc: Exception) -> bool:
+    """Is this failure one a real browser might get past?
+
+    Narrowly: the host ACCEPTED us and then went quiet or cut us off, which is
+    what being stonewalled looks like from urllib and precisely what a real
+    browser gets past.
+
+    Everything else is excluded on purpose. A DNS failure has no host to
+    render; a refused connection means nothing is listening, so Chrome meets
+    the same closed door. Launching a browser for either costs seconds to prove
+    a certainty, so the match is a short allowlist rather than `OSError`, which
+    is broad enough to swallow both."""
+    reason = getattr(exc, "reason", exc)
+    return isinstance(
+        reason,
+        (TimeoutError, socket.timeout, ConnectionResetError, http.client.HTTPException),
+    )
 
 
 def read_url(url: str, topic: str | None = None) -> str:
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         return f"ERROR: read_url only fetches http(s) URLs (got {url!r})"
+
+    # A host already known to refuse plain fetches goes straight to the browser:
+    # the refusal is not always a prompt 403, and a tarpit costs the whole
+    # timeout before anything escalates (see BROWSER_HOSTS).
+    if browser.host_of(url) in BROWSER_HOSTS:
+        rendered = _browser_read(url)
+        if rendered is not None:
+            return _present(url, *rendered, topic=topic, via_browser=True)
 
     try:
         text, content_type = _fetch(url)
@@ -282,6 +327,16 @@ def read_url(url: str, topic: str | None = None) -> str:
         hint = _jina_hint(url) if exc.code in _JINA_BLOCK_CODES else ""
         return f"ERROR: {url} returned HTTP {exc.code} {exc.reason}{hint}"
     except Exception as exc:  # noqa: BLE001 — DNS, TLS, timeouts: report, don't crash
+        # A site that stops ANSWERING a plain fetcher is the same problem as one
+        # that refuses it out loud, and the browser is the same answer. Missing
+        # this cost the feature its first live test: Allegro tarpitted the
+        # address after a hand-rolled script hammered it, read_url died on a
+        # socket timeout, and the escalation — wired only to 403/429/503 —
+        # never ran.
+        if _worth_rendering(exc):
+            rendered = _browser_read(url)
+            if rendered is not None:
+                return _present(url, *rendered, topic=topic, via_browser=True)
         return f"ERROR: could not fetch {url}: {exc}"
 
     images: list[str] = []

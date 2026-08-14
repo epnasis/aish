@@ -98,10 +98,18 @@ A model-driven design review caught four things worth recording, because each wa
 
 Also fenced: the browser is **disabled on preview** (`AISH_PREVIEW=1`), because `scripts/aish-preview.sh` shares production's state dir and therefore this profile; a read arriving while the owner is driving the view now refuses rather than borrowing their phone-sized context and returning a mobile layout as if it were the page.
 
+## What the first live test found (2026-08-14)
+
+The owner's first real run of the shipped feature produced **zero browser renders** in the whole session. The escalation was wired only to `HTTPError` in 403/429/503. Allegro answers a plain fetch with a prompt 403 *usually* — but the model had just hammered the address with a hand-rolled Python script (three requests, three 403s), after which Allegro stopped answering altogether, so `read_url` died on a socket **timeout**, fell into the generic handler, and returned the error without ever reaching the browser. The capability worked perfectly when invoked directly; nothing ever invoked it.
+
+Two changes follow. **A host that stops ANSWERING a plain fetcher is the same problem as one that refuses out loud**, so `_worth_rendering` escalates on timeouts and dropped connections too — but not on DNS failures, where there is no host to render and Chrome would cost seconds to prove a typo is a typo. And `BROWSER_HOSTS` remembers, per process, which hosts have needed the browser, so the second read of such a host skips the doomed fetch entirely rather than putting a possible tarpit on the critical path again.
+
+The session also showed the model reaching for a **self-written Python fetcher** before trying `read_url` at all — curl with extra steps, on a page `read_url` now handles, and the owner has denied that shape of thing three times across two sessions. The system prompt now forbids fetching a page by any other means in any language, and says to read a shop's own listing URL rather than web_search'ing for it: the search engine returns its index, the shop returns today's prices.
+
 ## Testing
 
 Nothing in the suite launches Chrome. `browser.read` / `open_for_login` are patched per test, and conftest's autouse `no_real_browser` makes any escape fail loudly — it raises from `_submit` as a `BaseException` (an `Exception` would be swallowed by `_browser_read`'s fallback, leaving the guard silent exactly where a test is most likely wrong) and redirects `AISH_STATE_DIR` so a test-written `logins.txt` can never change how the real agent gates a real host. Same reasoning as the notifier guard in CLAUDE.md: a module that reaches a live thing outside the process needs a suite-wide guard, not per-test discipline.
 
-`TestBrowserView` covers the remote view end of the socket; `TestViewSize` covers the client-declared viewport and its clamps; `TestChallengeDetection` covers telling a wall from a page; `TestViewAndReadShareOneBrowser` and `TestPreviewFence` cover the two places one profile is contended for; `TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestLoginRecord`, `TestReadUrlEscalation` cover the module; `TestLoginGate` covers the gate.
+`TestBrowserView` covers the remote view end of the socket; `TestViewSize` covers the client-declared viewport and its clamps; `TestChallengeDetection` covers telling a wall from a page; `TestViewAndReadShareOneBrowser` and `TestPreviewFence` cover the two places one profile is contended for; `TestUnresponsiveHostEscalates` and `TestKnownBlockingHostsSkipTheDoomedFetch` cover the failure that produced no renders at all; `TestCommand` covers the shared `/browser` text; `TestProfileLocation`, `TestLoginRecord`, `TestReadUrlEscalation` cover the module; `TestLoginGate` covers the gate.
 
 `TestBrowserCommand` covers the WebSocket wiring — the layer where a slash command actually breaks, since a missing app.js case or WS kind surfaces only as "unknown command" in the app.

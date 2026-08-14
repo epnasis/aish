@@ -354,3 +354,111 @@ class TestPreviewFence:
         out = web_module.read_url("https://allegro.pl/x")
         assert out.startswith("ERROR")
         assert called == []
+
+
+class TestUnresponsiveHostEscalates:
+    """The bug that cost the feature its first live test (2026-08-14).
+
+    Escalation was wired only to HTTPError 403/429/503. Allegro answers a plain
+    fetch with a prompt 403 *usually* — but after a hand-rolled script hammered
+    the address it simply stopped answering, the read died on a socket timeout,
+    and the generic handler returned the error without ever trying the browser.
+    The whole session shows zero browser renders. A host that stops ANSWERING a
+    plain fetcher is the same problem as one that refuses out loud."""
+
+    def _timeout_fetch(self, exc):
+        def boom(url):
+            raise exc
+
+        return boom
+
+    def _rendered(self, monkeypatch):
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text=page_sized("37,80 zl"), title="Allegro", images=[], url=url,
+                status=200,
+            ),
+        )
+
+    def test_a_read_timeout_escalates(self, monkeypatch):
+        monkeypatch.setattr(web_module, "_fetch", self._timeout_fetch(TimeoutError("timed out")))
+        self._rendered(monkeypatch)
+        out = web_module.read_url("https://allegro.pl/listing?string=x")
+        assert "rendered in the browser" in out
+        assert "37,80 zl" in out
+
+    def test_a_dropped_connection_escalates(self, monkeypatch):
+        monkeypatch.setattr(
+            web_module, "_fetch", self._timeout_fetch(ConnectionResetError("reset"))
+        )
+        self._rendered(monkeypatch)
+        assert not web_module.read_url("https://allegro.pl/x").startswith("ERROR")
+
+    def test_a_urlerror_wrapping_a_timeout_escalates(self, monkeypatch):
+        """What urllib actually raises in the wild — the reason is nested."""
+        monkeypatch.setattr(
+            web_module,
+            "_fetch",
+            self._timeout_fetch(urllib.error.URLError(TimeoutError("timed out"))),
+        )
+        self._rendered(monkeypatch)
+        assert not web_module.read_url("https://allegro.pl/x").startswith("ERROR")
+
+    def test_a_dns_failure_does_NOT_launch_a_browser(self, monkeypatch):
+        """There is no host to render. Launching Chrome to prove a typo is a
+        typo costs seconds for a certainty."""
+        import socket
+
+        monkeypatch.setattr(
+            web_module,
+            "_fetch",
+            self._timeout_fetch(urllib.error.URLError(socket.gaierror("no such host"))),
+        )
+        calls = []
+        monkeypatch.setattr(browser, "read", lambda url, **kw: calls.append(url))
+        assert web_module.read_url("https://nope.invalid/x").startswith("ERROR")
+        assert calls == []
+
+
+
+    def test_a_refused_connection_does_NOT_launch_a_browser(self, monkeypatch):
+        """Nothing is listening, so Chrome meets the same closed door. The
+        match is a short allowlist rather than OSError, which is broad enough
+        to swallow this and every DNS failure with it."""
+        monkeypatch.setattr(
+            web_module, "_fetch", self._timeout_fetch(ConnectionRefusedError("refused"))
+        )
+        calls = []
+        monkeypatch.setattr(browser, "read", lambda url, **kw: calls.append(url))
+        assert web_module.read_url("https://down.example/x").startswith("ERROR")
+        assert calls == []
+
+
+class TestKnownBlockingHostsSkipTheDoomedFetch:
+    def test_a_host_that_needed_the_browser_goes_there_first_next_time(self, monkeypatch):
+        monkeypatch.setattr(web_module, "BROWSER_HOSTS", set())
+        monkeypatch.setattr(web_module, "_fetch", _http_error(403))
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text=page_sized("prices"), title="", images=[], url=url, status=403
+            ),
+        )
+        web_module.read_url("https://allegro.pl/a")
+        assert "allegro.pl" in web_module.BROWSER_HOSTS
+
+        # Second read: the plain fetch must not even be attempted.
+        def must_not_run(url):
+            raise AssertionError("the plain fetch ran for a known-blocking host")
+
+        monkeypatch.setattr(web_module, "_fetch", must_not_run)
+        assert not web_module.read_url("https://allegro.pl/b").startswith("ERROR")
+
+    def test_an_ordinary_host_is_never_remembered(self, monkeypatch):
+        monkeypatch.setattr(web_module, "BROWSER_HOSTS", set())
+        monkeypatch.setattr(web_module, "_fetch", lambda url: ("<p>hello</p>", "text/html"))
+        web_module.read_url("https://example.com/x")
+        assert web_module.BROWSER_HOSTS == set()
