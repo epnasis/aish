@@ -51,7 +51,7 @@ import threading
 import time
 import urllib.parse
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -228,13 +228,19 @@ class Page:
 
     `status` is diagnostic ONLY. A site that dislikes automation may answer 403
     and still serve the whole listing (measured on the same page). Callers
-    judge a read by whether it produced TEXT, never by the code."""
+    judge a read by whether it produced TEXT, never by the code.
+
+    `links` is (first line of the anchor's text, absolute href) in DOM order.
+    Text alone is not the page on a SHOP: a listing's whole point is which
+    offer and at what URL, and rendering it to plain text threw the URL away —
+    see `_LINKS_JS`."""
 
     text: str
     title: str
     images: list[str]
     url: str
     status: int | None
+    links: list[tuple[str, str]] = field(default_factory=list)
 
 
 _OWNER: threading.Thread | None = None
@@ -445,6 +451,82 @@ async def _body_text(page: Any) -> str:
         return await page.inner_text("body")
     except Exception:  # noqa: BLE001 — no body is a real answer: no text
         return ""
+
+
+# The page's own <main>, when it declares one. Purely a BUDGET decision: a read
+# is capped at DOCS_MAX_CHARS, and on a shop the leading kilobytes are category
+# navigation — so the cap fell inside the chrome and cut the offers short.
+# Measured on the allegro.pl listing this was built for: body 13 473 chars,
+# <main> 10 966, and within the SAME cap that is 25 linked offers instead of 15.
+#
+# It is applied only to what is handed back, never to what `is_challenge`
+# judges. Narrowing the text a wall is detected in would move thresholds this
+# module measured on whole bodies, and a page wrongly called a wall is the
+# expensive failure here (see the reasoning around CHALLENGE_MAX_CHARS).
+_MAIN_JS = """() => {
+  const m = document.querySelector('main, [role="main"]');
+  return m ? m.innerText : '';
+}"""
+
+# A <main> that holds most of the page is the page; one that holds a fragment
+# means the site puts its content elsewhere, and preferring it would silently
+# DROP content. Half is the line: losing text costs more than keeping chrome.
+_MAIN_MIN_SHARE = 0.5
+
+
+async def _main_text(page: Any, body: str) -> str:
+    """`body` narrowed to <main>, or "" when that would lose content."""
+    try:
+        main = (await page.evaluate(_MAIN_JS)) or ""
+    except Exception:  # noqa: BLE001 — no <main> is the common case, not a fault
+        return ""
+    return main if len(main) >= _MAIN_MIN_SHARE * len(body) else ""
+
+
+# Anchors, with the text they are ON. A rendered page had its hrefs thrown
+# away — fine for an article, fatal for a shop, where the URL IS the answer.
+# Without it the model could see that an offer costs 34,99 zł and had no way to
+# say where it was, so it fell back to web_search'ing `site:allegro.pl` for the
+# URL of a title it had already read — 66 times in one session, against a system
+# prompt that forbids exactly that. An instruction loses to a missing capability.
+#
+# `innerText`, not `textContent`: it is what the reader SEES, so a hidden menu
+# does not enter the text, and it matches `inner_text('body')` line for line —
+# which is what lets the merge attach each URL to its own line rather than
+# handing over a separate list the model would have to join by title (the
+# error-prone step this whole fix removes).
+#
+# Shadow roots are walked because `querySelectorAll` does not pierce them and a
+# site that renders its cards into one would otherwise look link-free. Site
+# chrome is excluded: on the measured listing that is ~30 anchors of category
+# navigation, spent inside a budget the offers need.
+_LINK_CHROME = 'nav, header, footer, [role="navigation"], [role="banner"], [role="contentinfo"]'
+_LINKS_MAX = 150
+_LINKS_JS = """(chrome) => {
+  const out = [];
+  const walk = (root) => {
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) walk(el.shadowRoot);
+      if (el.tagName !== 'A' || !el.getAttribute('href')) continue;
+      if (el.closest && el.closest(chrome)) continue;
+      const href = el.href || '';
+      if (!/^https?:/i.test(href)) continue;
+      const text = (el.innerText || '').trim();
+      if (!text) continue;   // an image-only anchor duplicates its title anchor
+      out.push([text.split('\\n')[0].trim(), href]);
+    }
+  };
+  walk(document);
+  return out;
+}"""
+
+
+async def _content_links(page: Any) -> list[tuple[str, str]]:
+    try:
+        found = await page.evaluate(_LINKS_JS, _LINK_CHROME)
+    except Exception:  # noqa: BLE001 — no links is a fine answer: a page of text
+        return []
+    return [(str(t), str(h)) for t, h in found][:_LINKS_MAX]
 
 
 async def _declared_images_async(page: Any) -> list[str]:
@@ -755,12 +837,15 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
             if len(text) < CHALLENGE_MAX_CHARS:
                 await page.wait_for_timeout(SETTLE_MS)
                 text = max(text, await _body_text(page), key=len)
+            # Narrowing happens AFTER every judgement above, so <main> can never
+            # move a threshold that was measured on a whole body.
             return Page(
-                text=text,
+                text=(await _main_text(page, text)) or text,
                 title=(await page.title()) or "",
                 images=await _declared_images_async(page),
                 url=page.url or url,
                 status=response.status if response is not None else None,
+                links=await _content_links(page),
             )
         finally:
             try:

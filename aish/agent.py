@@ -195,6 +195,13 @@ Rules:
    shop's own listing returns today's offers and prices. You MUST NOT use
    web_search with a `site:` filter to browse a shop (no `site:allegro.pl ...`);
    read the shop's own listing URL instead.
+   THE LISTING ALREADY CONTAINS THE LINKS. Every line that is a link comes back
+   as `title → https://…`, so the URL of an offer sits on the same line as its
+   price. Quote those URLs EXACTLY as given. You MUST NOT web_search for the
+   URL of an offer you have already read, and you MUST NOT build one from its
+   title — the link is in front of you and a guessed one 404s. When you
+   recommend a product, give its link; a recommendation the user cannot open is
+   an instruction to go searching, which is what they asked you to do for them.
    REPORT WHAT ACTUALLY HAPPENED. A result marked "rendered in the browser"
    WAS READ successfully — use what it says. If some pages on a site failed
    and others succeeded, the site is NOT unreadable: answer from the ones that
