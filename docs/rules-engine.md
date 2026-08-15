@@ -454,7 +454,25 @@ Two distinctions carry the whole check:
 
 **Identity is the page, not the string** (`_normalise_url`): fragment and trailing slash go, and a playable video collapses to `video:<id>`. The second one is the first one's argument taken a step further — `youtu.be/ID`, `watch?v=ID` and the `&si=…` the phone's share sheet appends are one video. It is load-bearing, not tidiness: the owner shares the phone's form, the answer shows the canonical form (`show_image` composes a video still's card from the id — #217), and compared as strings the rule reported *the one video it was certain he had opened* as a link nobody opened. The collapse is to the ID and nowhere wider — a channel or playlist URL keeps its ordinary identity, or one video would verify a link to the whole channel. `TestLinksYouDidNotOpen`.
 
-It also repairs a rule that was overclaiming. `live-price` said *"you must have read the seller's own page"* while checking only that *some* URL was read — a description promising more than the file enforced, which is #205's own exhibit, in a hand-written rule held up as the gold standard. With this check in force, a price quoted alongside a link is a price behind a real fetch. `TestLinksYouDidNotOpen`.
+It also *partly* repairs a rule that was overclaiming. `live-price` said *"you must have read the seller's own page"* while checking only that *some* URL was read — a description promising more than the file enforced, which is #205's own exhibit, in a hand-written rule held up as the gold standard. With this check in force, a link in a price answer is a link behind a real fetch. **The number beside it still was not**, which is the next section. `TestLinksYouDidNotOpen`.
+
+### `unverified_prices` — the same join, one step further in
+
+The link rule verifies the URL. It says nothing about the figure printed next to it, and that gap is not theoretical: it is what the owner spent a shopping session catching by hand.
+
+`must_first: read_url` is an **ordering** — did a fetch happen before the answer. It cannot fail on the case it was written for. In the session that filed this the model read **ten pages**, so the obligation was met ten times over, and the answer still carried `49,49 zł` from a two-day-old `web_search` snippet. The real price was `63,19`. Every link in that answer was verified; three of the four prices were not.
+
+Two things made it worse than an ordinary remembered number. The reader was spending its whole budget on the page's carousel of OTHER products (`docs/agent-core.md`), so the offer's own price was never in the read at all — the model had a hole where the price should be. And the carousel's tiles carried *a neighbour's* `49,49 zł` and the same sling **in yellow**, so the wrong figure had corroboration on screen. The model then repeated the stale number in a later turn *after* it had located the correct one, which is why fixing the reader alone was never going to be enough.
+
+`answer_must_not_include: unverified_prices` joins per **link**, not per turn: a figure is attributed to the link **on its own line** — `[Title](url) – 49,49 PLN`, the shape a shopping answer has — and must appear among the prices the harness saw in *that* page. On the real answer this refuses 49,49, 33,99 and 14,44, and passes 29,99, which was genuinely read off the card. A turn-wide join would have passed all four, because 49,49 was on *a* page — just not that one.
+
+Three things it deliberately does not do:
+
+- **A figure with no link on its line is not checked.** A free-delivery threshold and a total the model added up are claims about arithmetic, not about a page, and refusing them would make the rule unlivable.
+- **A link that was never opened is left to the link rule.** Two asks for one mistake sends the model in two directions, and the link rule's ask is the one that can be acted on.
+- **The currency is dropped from the comparison, the amount is not.** The page says `63,19 zł` and the answer says `63,19 PLN`; matching the symbol would turn a formatting difference into a refusal. `1 299,00` and `1,299.00` normalise to one key for the same reason — the owner reads both conventions.
+
+**The figures are derived at the READ, and that is forced, not stylistic.** The turn record caps a call's result at 600 characters, and on the page behind this rule the price sat 6 000 in; a check reading the stored result would refuse every correct answer it was ever shown. So the reader's own output is scanned for money at the moment it arrives and the amounts ride on the call record — bounded per call, and the whole page is never held. Provenance is only knowable where the data was. `TestPricesYouDidNotRead`, `TestMoneyFigures`.
 
 ### Seeding costs only what it buys
 

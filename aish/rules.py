@@ -227,9 +227,80 @@ MEANING_KEY = "like"
 # never merely that it appeared in a search result's text. That distinction is
 # the point: quoting a URL out of a snippet is exactly the move being stopped.
 NAMED_UNVERIFIED_LINKS = "unverified_links"
+
+# `answer_must_not_include: unverified_prices` — a price that is not on the
+# page it is attached to. The same JOIN as above, one step further in.
+#
+# `must_first: read_url` was the owner's price rule for a year, and it is an
+# ORDERING: did a fetch happen before the answer. It cannot fail on the case it
+# was written for. In the session that filed this the model read ten pages, so
+# the obligation was met ten times over, and then quoted `49,49 zł` from a
+# two-day-old search snippet — a figure that was on NO page it had opened. Worse
+# than a remembered price: the offer page's carousel of OTHER products carried a
+# neighbour's price and the same sling in yellow, so the answer had corroboration
+# on screen for a number that was never the product's.
+#
+# The join is per-LINK, not per-turn, because per-turn is what failed. A figure
+# is attributed to the link on ITS OWN LINE — the shape of a shopping answer,
+# `[Title](url) – 49,49 PLN` — and checked against the figures the harness saw
+# in THAT page. A figure with no link on its line is not attributed to anything
+# and is not checked: a delivery threshold or a total the model added up is not
+# a claim about a page, and refusing those would make the rule unlivable.
+#
+# On the real answer this refuses 49,49, 33,99 and 14,44 — the three the owner
+# had to catch by hand — and passes 29,99, which was genuinely read off the card.
+NAMED_UNVERIFIED_PRICES = "unverified_prices"
 NAMED_ANSWER_CHECKS = {
     NAMED_UNVERIFIED_LINKS: "a link you never opened",
+    NAMED_UNVERIFIED_PRICES: "a price that is not on the page you linked it to",
 }
+
+# Money as it is WRITTEN, in either order and in either decimal convention:
+# `63,19 zł`, `PLN 63.19`, `€7`, `1 299,00 EUR`. The currency has to be there —
+# a bare number is a quantity, not a price.
+_CURRENCY = r"(?:zł|PLN|EUR|USD|GBP|CHF|CZK|SEK|NOK|DKK|[€$£])"
+_AMOUNT = r"\d{1,3}(?:[  .,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
+_MONEY_RE = re.compile(
+    rf"(?:(?P<pre>{_CURRENCY})\s*(?P<a>{_AMOUNT})|(?P<b>{_AMOUNT})\s*(?P<post>{_CURRENCY}))",
+    re.IGNORECASE,
+)
+# Per call, so one page cannot crowd the turn's record. A shop page carries a
+# few dozen; a listing more, and the cap is what stops a pathological one.
+MONEY_FIGURES_MAX = 300
+
+
+def money_figures(text: str) -> list[str]:
+    """Every written price in `text`, as comparable amounts.
+
+    Normalised because the two sides are written differently and mean the same
+    thing: a page says `63,19 zł` and the answer says `63,19 PLN`. The CURRENCY
+    is deliberately dropped from the key — matching it would turn a formatting
+    difference into a refusal, and the amount is what is being checked."""
+    found: list[str] = []
+    for match in _MONEY_RE.finditer(text or ""):
+        raw = match.group("a") or match.group("b") or ""
+        amount = _normalise_amount(raw)
+        if amount and amount not in found:
+            found.append(amount)
+        if len(found) >= MONEY_FIGURES_MAX:
+            break
+    return found
+
+
+def _normalise_amount(raw: str) -> str:
+    """`1 299,00` and `1,299.00` and `1299` to one key.
+
+    The last separator followed by one or two digits is the DECIMAL point;
+    every other separator is grouping. Written this way round because Polish
+    and English disagree on which character is which, and the owner reads both.
+    """
+    body = raw.replace(" ", " ").strip()
+    if not body:
+        return ""
+    match = re.search(r"[.,](\d{1,2})$", body)
+    fraction = match.group(1).ljust(2, "0") if match else "00"
+    whole = re.sub(r"\D", "", body[: match.start()] if match else body)
+    return f"{whole.lstrip('0') or '0'}.{fraction}"
 
 # Where a URL has to appear for a call to count as having ACTED on it. Args
 # only: a URL in a tool's OUTPUT was merely seen, and seeing is what the search
@@ -2165,6 +2236,9 @@ def _verify_one(
     if obligation.get("named") == NAMED_UNVERIFIED_LINKS:
         return _verify_links(binding, obligation, evidence, common)
 
+    if obligation.get("named") == NAMED_UNVERIFIED_PRICES:
+        return _verify_prices(binding, obligation, evidence, common)
+
     if anchors := obligation.get(MEANING_KEY):
         return _verify_meaning(binding, obligation, evidence, list(anchors), common)
 
@@ -2213,6 +2287,15 @@ def _present(kind: str, evidence: TurnEvidence) -> tuple[bool, list[str]]:
     wanted = list(dict.fromkeys(wanted))
     return (bool(wanted) and all(token in answer for token in wanted)), wanted
 
+
+UNVERIFIED_PRICES_ASK = (
+    "The rule '{rule}' does not allow a price that is not on the page you "
+    "attached it to, and the answer has {count}: {shown}. {description}\n"
+    "That figure was not in what came back from that page. Read the page again "
+    "with a 'topic' (try the word the site puts beside the amount) and use what "
+    "it says — or, if the page does not show a price, say so instead of "
+    "supplying one from anywhere else."
+)
 
 UNVERIFIED_LINKS_ASK = (
     "The rule '{rule}' does not allow a link you have not opened, and the answer "
@@ -2289,6 +2372,78 @@ def _verify_links(
         {"named": NAMED_UNVERIFIED_LINKS, "linked": linked[:8],
          "opened": sorted(acted)[:8], "unverified": unverified[:8]},
         UNVERIFIED_LINKS_ASK.format(
+            count=f"{len(unverified)} of them" if len(unverified) > 1 else "one",
+            shown=shown, **common,
+        ),
+    )
+
+
+def _pages_read(evidence: TurnEvidence) -> dict[str, set[str]]:
+    """Per URL, the prices the harness saw in what came back.
+
+    The figures are derived AT THE READ and travel on the call record, because
+    the whole result cannot: it is capped there, and on the page behind this
+    rule the price sat 6 000 characters in — past any cap a turn record could
+    afford. Provenance is only knowable where the data was."""
+    pages: dict[str, set[str]] = {}
+    for call in evidence.calls:
+        if not _ran(call):
+            continue
+        args = call.get("args") or {}
+        figures = set(call.get("figures") or ())
+        for key in _URL_ARGS:
+            if value := str(args.get(key, "") or "").strip():
+                pages.setdefault(_normalise_url(value), set()).update(figures)
+    return pages
+
+
+def _attributed_prices(answer: str) -> list[tuple[str, str, str]]:
+    """(url, amount, as written) for every price on a line that links somewhere.
+
+    Line-scoped on purpose. `[Title](url) – 49,49 PLN` is the shape of the
+    answer being checked; a figure on a line with no link is a threshold or a
+    total, which is a claim about arithmetic rather than about a page."""
+    out: list[tuple[str, str, str]] = []
+    for line in answer.splitlines():
+        links = list(_MD_LINK_RE.finditer(line))
+        if not links:
+            continue
+        for money in _MONEY_RE.finditer(line):
+            preceding = [m for m in links if m.start() < money.start()]
+            if not preceding:
+                continue
+            url = preceding[-1].group(1) or preceding[-1].group(2)
+            amount = _normalise_amount(money.group("a") or money.group("b") or "")
+            if url and amount:
+                out.append((url, amount, money.group(0).strip()))
+    return out
+
+
+def _verify_prices(
+    binding: Binding, obligation: dict, evidence: TurnEvidence, common: dict,
+) -> VerifyFailure | None:
+    answer = evidence.looked_at(obligation.get("in", WHERE_ANYWHERE))
+    claimed = _attributed_prices(answer)
+    if not claimed:
+        return None
+    pages = _pages_read(evidence)
+    # A link that was never opened is the OTHER rule's finding. Saying it twice
+    # sends the model two asks for one mistake, and the link rule's is the one
+    # that can be acted on.
+    unverified = [
+        (url, written)
+        for url, amount, written in claimed
+        if _normalise_url(url) in pages and amount not in pages[_normalise_url(url)]
+    ]
+    if not unverified:
+        return None
+    shown = "; ".join(f"{written} on {url}" for url, written in unverified[:3])
+    return VerifyFailure(
+        binding, obligation,
+        {"named": NAMED_UNVERIFIED_PRICES,
+         "claimed": [f"{w} → {u}" for u, _a, w in claimed[:8]],
+         "unverified": [f"{w} → {u}" for u, w in unverified[:8]]},
+        UNVERIFIED_PRICES_ASK.format(
             count=f"{len(unverified)} of them" if len(unverified) > 1 else "one",
             shown=shown, **common,
         ),

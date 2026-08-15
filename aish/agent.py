@@ -4382,6 +4382,11 @@ class Agent:
             # handed over — an equality, where "does the answer contain
             # something picture-shaped" would be a guess.
             "result": str(result)[:CALL_RESULT_CHARS],
+            # Derived HERE because it cannot be derived later: the cap above
+            # holds 600 characters and on the offer page behind this rule the
+            # price sat 6 000 in. A price check that read the stored result
+            # would refuse every correct answer it was shown.
+            "figures": rules.money_figures(str(result)),
         })
 
     def _command_has_a_secret(self, command: str) -> bool:

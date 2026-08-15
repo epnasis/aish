@@ -2450,6 +2450,119 @@ class TestLinksYouDidNotOpen:
             rules._answer_check("answer_must_include", "unverified_links")
 
 
+class TestPricesYouDidNotRead:
+    """`must_first: read_url` was the owner's price rule for a year and it is an
+    ORDERING — did a fetch happen. It cannot fail on the case it was written for.
+
+    In the session that filed this the model read TEN pages, so the obligation
+    was met ten times over, and quoted `49,49 zł` from a two-day-old search
+    snippet: a figure that was on no page it had opened. The join has to be per
+    LINK, not per turn.
+    """
+
+    CARABINER = "https://allegro.pl/oferta/karabinek-black-diamond-15960083405"
+    SLING = "https://allegro.pl/oferta/zawiesie-czarne-17366509587"
+
+    def _binding(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "live-price", "description": "A price must be on the page.",
+            "when_subject": "always",
+            "answer_must_not_include": "unverified_prices",
+        }), capabilities={"read_url"})
+        assert not errors, errors
+        return rules.bind(rule, {"on": "always"}, "b1", {"read_url"})
+
+    def _check(self, answer, calls=()):
+        return rules.verify([self._binding()],
+                            rules.TurnEvidence(answer=answer, calls=tuple(calls)))
+
+    def _read(self, url, page):
+        return {"tool": "read_url", "args": {"url": url}, "status": "ok",
+                "figures": rules.money_figures(page)}
+
+    def test_the_real_answer_that_filed_this_is_refused(self):
+        """Verbatim from the session, and the page text is the real page: the
+        carousel carried a neighbour's `49,49 zł`, the offer's own price was
+        `63,19 zł`, and the answer said 49,49."""
+        page = ("Podobne oferty\n47,09 zł\nKarabinek Bent Gate\n"
+                "Warunki oferty\ncena\n63,19 zł\n")
+        answer = (
+            "* [Karabinek Black Diamond HotForge czarny]"
+            f"({self.CARABINER}) – **49,49 PLN**\n"
+        )
+        [failure] = self._check(answer, [self._read(self.CARABINER, page)])
+        assert "49,49 PLN" in failure.ask
+        assert failure.evidence["unverified"] == [f"49,49 PLN → {self.CARABINER}"]
+
+    def test_a_price_actually_on_the_page_passes(self):
+        """29,99 was genuinely read off the card. A rule that refused it too
+        would be noise the owner learns to ignore."""
+        page = "Warunki oferty\ncena\n29,99 zł\n"
+        answer = f"* [Zawiesie czarne]({self.SLING}) – **29,99 PLN**\n"
+        assert self._check(answer, [self._read(self.SLING, page)]) == []
+
+    def test_reading_TEN_pages_does_not_license_a_price_from_none_of_them(self):
+        """The ordering rule's exact failure. Every page opened, obligation met,
+        answer still wrong."""
+        answer = f"* [Karabinek]({self.CARABINER}) – **49,49 PLN**\n"
+        calls = [self._read(f"https://allegro.pl/oferta/other-{n}", "12,00 zł")
+                 for n in range(10)]
+        calls.append(self._read(self.CARABINER, "63,19 zł"))
+        assert self._check(answer, calls) != []
+
+    def test_the_price_of_a_NEIGHBOURING_tile_is_not_this_offers_price(self):
+        """The corroboration trap: 49,49 was on a page — the other sling's —
+        so a turn-wide join would have passed it."""
+        answer = f"* [Karabinek]({self.CARABINER}) – **49,49 PLN**\n"
+        calls = [self._read(self.CARABINER, "cena\n63,19 zł\n"),
+                 self._read(self.SLING, "Podobne oferty\n49,49 zł\n")]
+        assert self._check(answer, calls) != []
+
+    def test_a_figure_with_no_link_on_its_line_is_not_a_claim_about_a_page(self):
+        """A delivery threshold and a total the model added up are claims about
+        arithmetic. Refusing those would make the rule unlivable."""
+        page = "cena\n29,99 zł\n"
+        answer = (
+            f"* [Zawiesie]({self.SLING}) – **29,99 PLN**\n"
+            "Darmowa dostawa Smart! zaczyna się od 49,90 PLN, "
+            "a razem wychodzi 78,00 PLN.\n"
+        )
+        assert self._check(answer, [self._read(self.SLING, page)]) == []
+
+    def test_a_comma_and_a_full_stop_are_the_same_price(self):
+        """The page is Polish and the answer may not be. A formatting
+        difference must never read as a wrong price."""
+        answer = f"* [Widget]({self.SLING}) – **1,299.00 EUR**\n"
+        assert self._check(answer, [self._read(self.SLING, "1 299,00 zł")]) == []
+
+    def test_a_link_never_opened_is_left_to_the_LINK_rule(self):
+        """Two asks for one mistake sends the model in two directions, and the
+        link rule's ask is the one that can be acted on."""
+        answer = "* [Widget](https://never.opened/x) – **10,00 PLN**\n"
+        assert self._check(answer) == []
+
+    def test_it_can_only_be_written_as_a_PROHIBITION(self):
+        with pytest.raises(rules.RuleError):
+            rules._answer_check("answer_must_include", "unverified_prices")
+
+
+class TestMoneyFigures:
+    def test_it_reads_both_orders_and_both_conventions(self):
+        assert rules.money_figures("63,19 zł") == ["63.19"]
+        assert rules.money_figures("PLN 63.19") == ["63.19"]
+        assert rules.money_figures("€7") == ["7.00"]
+        assert rules.money_figures("1 299,00 EUR") == ["1299.00"]
+
+    def test_a_bare_number_is_a_quantity_not_a_price(self):
+        """`120 cm x 18 mm`, `22 kN`, `2 oferty` — a shop page is full of
+        numbers and only some of them are money."""
+        assert rules.money_figures("Pętla 120 cm x 18 mm, 22 kN, 2 oferty") == []
+
+    def test_it_is_bounded(self):
+        page = " ".join(f"{n},99 zł" for n in range(2000))
+        assert len(rules.money_figures(page)) <= rules.MONEY_FIGURES_MAX
+
+
 class TestOpeningIsTheAnswers:
     """#212 moved the window and nobody noticed. Once a turn narrates, the
     deliverable Verify grades starts with the NARRATION — so `in: opening`,

@@ -5,6 +5,7 @@ no network. One opt-in live test (AISH_LIVE_WEB=1) exercises the real backend.
 import base64
 import email.message
 import os
+import pathlib
 import ssl
 import sys
 import types
@@ -134,7 +135,7 @@ class TestWebSearch:
 
 PAGE = (
     "<html><body><h1>Widget Manual</h1><p>Widgets frob nicely.</p>"
-    + "".join(f"<p>filler paragraph {i}</p>" for i in range(400))
+    + "".join(f"<p>filler paragraph {i}</p>" for i in range(900))
     + "<p>The secret flag is --frobnicate.</p></body></html>"
 )
 
@@ -152,7 +153,7 @@ class TestReadUrl:
         assert "page truncated" in result
         assert "'topic'" in result
         assert result.startswith(web.UNTRUSTED_NOTE)
-        assert len(result) < web.DOCS_MAX_CHARS + 300 + len(web.UNTRUSTED_NOTE)
+        assert len(result) < web.PAGE_MAX_CHARS + 300 + len(web.UNTRUSTED_NOTE)
 
     def test_topic_reaches_past_truncation(self, monkeypatch):
         monkeypatch.setattr(web, "_fetch", lambda url: (PAGE, "text/html"))
@@ -675,7 +676,7 @@ class TestLinksInTheText:
         """The cap is measured in CHARACTERS, so on a listing it lands mid-page
         and takes the URLs with it. Measured on the allegro.pl listing: 101
         offer links in the page, 14 inside the cap."""
-        page = "filler line\n" * 900 + "Widget Z → https://s.pl/oferta/z\n"
+        page = "filler line\n" * 3000 + "Widget Z → https://s.pl/oferta/z\n"
         monkey = web._present("https://s.pl/listing", page, [])
         assert "page truncated" in monkey
         assert "Widget Z → https://s.pl/oferta/z" in monkey
@@ -722,6 +723,101 @@ class TestLinksInTheText:
         )
         text, _t, _i = web._extract(html, base_url="https://s.pl/")
         assert "Widget → https://s.pl/oferta/x" in text
+
+
+class TestTileStrips:
+    """The carousel of OTHER products that a shop leads with, and which used to
+    spend the whole read before the page's own price arrived.
+
+    The fixture is the real thing: `tests/fixtures/allegro_offer.txt` is text
+    from the offer page in the session that filed this — its leading carousel
+    exactly as the reader saw it, and its buy box, in the order the page has
+    them. The price sits past the OLD 6 000-char cap, which is why the model
+    quoted a two-day-old search snippet instead.
+    """
+
+    OFFER = (
+        pathlib.Path(__file__).parent / "fixtures" / "allegro_offer.txt"
+    ).read_text()
+
+    def tile(self, n: int, price: str = "12,00 zl") -> str:
+        return (
+            f"{price}\nWidget {n} → https://s.pl/oferta/w-{n}\n"
+            "zaplac pozniej z\ndostawa we wtorek\n"
+        )
+
+    def test_the_pages_own_price_survives_the_read(self, monkeypatch):
+        """The bug, end to end. 63,19 zl is what the offer actually cost; the
+        answer said 49,49, which was never on the page at all."""
+        monkeypatch.setattr(web, "_fetch", lambda _u: (self.OFFER, "text/plain"))
+        # Not the real host: allegro.pl is in BROWSER_HOSTS, and a test must
+        # never reach the renderer. The PAGE is what is under test.
+        out = web.read_url("https://shop.test/oferta/karabinek-15960083405")
+        assert "63,19" in out
+        assert "Warunki oferty" in out
+
+    def test_a_strip_keeps_every_title_price_and_url(self):
+        """Compacted, never dropped: on a listing the tiles ARE the page, and on
+        an offer page the strip holds the other sellers and the variants."""
+        page = "".join(self.tile(n, f"{n},99 zl") for n in range(6))
+        out = web.compact_tiles(page)
+        for n in range(6):
+            assert f"Widget {n} → https://s.pl/oferta/w-{n}" in out
+            assert f"{n},99 zl" in out
+
+    def test_a_tile_becomes_one_line_carrying_its_own_price(self):
+        page = "".join(self.tile(n, f"{n},99 zl") for n in range(6))
+        lines = [ln for ln in web.compact_tiles(page).splitlines() if "Widget 3" in ln]
+        assert len(lines) == 1
+        assert "3,99 zl" in lines[0], "the tile's price must ride on the tile's line"
+
+    def test_the_line_repeated_on_every_tile_goes_and_is_named(self):
+        """A silent drop reads exactly like a page that never had it."""
+        out = web.compact_tiles("".join(self.tile(n) for n in range(6)))
+        assert "dostawa we wtorek" not in "\n".join(
+            ln for ln in out.splitlines() if not ln.startswith("[")
+        )
+        assert "dostawa we wtorek" in out, "the strip label must say what went"
+
+    def test_a_line_carrying_a_digit_is_never_dropped(self):
+        """Repetition is the signal, but prices repeat too — two tiles at the
+        same price must both keep it."""
+        page = "".join(self.tile(n, "20,00 zl") for n in range(6))
+        out = web.compact_tiles(page)
+        assert out.count("20,00 zl") == 6
+
+    def test_prose_is_left_alone(self):
+        prose = "A paragraph about hammocks.\nAnother one, rather longer.\n"
+        assert web.compact_tiles(prose) == prose.rstrip("\n")
+
+    def test_three_tiles_are_not_a_strip(self):
+        page = "".join(self.tile(n) for n in range(3))
+        assert web.compact_tiles(page) == page.rstrip("\n")
+
+    def test_the_strip_shrinks_the_read(self):
+        """Measured on the real offer: 185 lines to 76, 11% of the characters.
+
+        The character saving is deliberately modest — titles and URLs are kept,
+        and they are the bulk. Compaction is what makes a 13k page fit a 12k
+        budget; it was never going to be the whole fix on its own."""
+        before, after = self.OFFER, web.compact_tiles(self.OFFER)
+        assert len(after.splitlines()) < len(before.splitlines()) * 0.5
+        assert len(after) < len(before) * 0.95
+
+    def test_a_page_too_big_to_carry_still_rescues_its_links(self, monkeypatch):
+        """The note is a fallback, not a second budget: it is reached only when
+        the body genuinely did not fit."""
+        page = "filler line\n" * 3000 + "Widget Z → https://s.pl/oferta/z\n"
+        out = web._present("https://s.pl/listing", page, [])
+        assert "page truncated" in out
+        assert "Widget Z → https://s.pl/oferta/z" in out
+
+    def test_a_page_that_fits_carries_no_note_at_all(self):
+        """Nothing was dropped, so there is nothing to rescue — this is where
+        the old shape paid for the same carousel twice."""
+        out = web._present("https://s.pl/offer", self.OFFER, [])
+        assert "page truncated" not in out
+        assert "more links from the omitted part" not in out
 
 
 class TestStripTracking:

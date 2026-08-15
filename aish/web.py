@@ -188,6 +188,126 @@ def merge_links(text: str, links: list[tuple[str, str]]) -> str:
 _CHROME_TAGS = {"nav", "header", "footer"}
 
 
+# --- tile strips -----------------------------------------------------------
+#
+# A shop page leads with a carousel of OTHER products — "Podobne oferty",
+# fifteen tiles of price + title + link + delivery promise — because the site
+# wants it seen first. The read is budgeted in characters from the top, so that
+# carousel used to spend the whole budget and the page's OWN price never
+# arrived. Measured on the offer behind this: 6 672 characters dropped and the
+# text was STILL tiles at the cut, so the description and the buy box were
+# never in the read at all. The model then quoted a price from a two-day-old
+# search snippet, and the tiles' prices — a neighbour's, and the same sling in
+# YELLOW — sat there corroborating it.
+#
+# COMPACTED, NEVER DROPPED, and that distinction is the whole design. Dropping
+# tiles needs a rule for when a tile strip is decoration and when it is the
+# content, and there is no such rule: on a listing the tiles ARE the page, and
+# on this very offer page the strip held "other sellers of this product" — the
+# only useful thing on it once the offer itself had expired — and the variant
+# selector, which is exactly what a black-vs-yellow shopper needs. A carousel
+# of unrelated products and a list of other sellers are structurally identical.
+# So nothing is rejected: each tile is squashed onto ONE line carrying its
+# price, title and URL, and a listing simply gets denser (the fix that put
+# links in the reader wanted this too — more offers inside the same budget).
+#
+# The one thing that IS removed is the line repeated verbatim across the strip
+# — "zapłać później z", "dostawa we wtorek" — which by definition distinguishes
+# no tile from another. Never a line carrying a digit, because that is where
+# prices live, and the strip label says what went, since a silent drop reads
+# exactly like a page that never had it.
+#
+# It runs on the merged text rather than the DOM, which is what lets one
+# implementation serve both the fetch and the browser paths.
+TILE_STRIP_MIN = 4  # tiles in a row before a run is a strip
+TILE_MAX_LINES = 8  # lines a tile may hold and still be tile-shaped
+TILE_LINE_MAX_CHARS = 80  # a long line is prose, not tile furniture
+TILE_REPEAT_MIN = 3  # tiles a line must repeat across to count as boilerplate
+TILE_LABELS_SHOWN = 3
+
+_HAS_DIGIT = re.compile(r"\d")
+
+
+def _tile_segments(text: str) -> tuple[list[list[str]], list[str]]:
+    """Lines grouped so each group ends at the one link it carries.
+
+    A tile's price sits ABOVE its title and its delivery promise below, so the
+    link is the only reliable anchor — cutting after it puts each tile's own
+    price in its own group."""
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        current.append(line)
+        if LINK_ARROW in line:
+            segments.append(current)
+            current = []
+    return segments, current
+
+
+def _is_tile(segment: list[str]) -> bool:
+    return len(segment) <= TILE_MAX_LINES and all(
+        len(line) <= TILE_LINE_MAX_CHARS for line in segment[:-1]
+    )
+
+
+def _strip_boilerplate(strip: list[list[str]]) -> set[str]:
+    seen: dict[str, int] = {}
+    for segment in strip:
+        for line in {ln for ln in segment if LINK_ARROW not in ln}:
+            seen[line] = seen.get(line, 0) + 1
+    return {
+        line
+        for line, hits in seen.items()
+        if hits >= TILE_REPEAT_MIN and line and not _HAS_DIGIT.search(line)
+    }
+
+
+def _compact_strip(strip: list[list[str]]) -> list[str]:
+    boilerplate = _strip_boilerplate(strip)
+    lines = [
+        " ".join(kept)
+        for segment in strip
+        if (kept := [ln for ln in segment if ln and ln not in boilerplate])
+    ]
+    label = f"[{len(strip)} linked tiles, one line each"
+    if boilerplate:
+        shown = ", ".join(repr(ln) for ln in sorted(boilerplate)[:TILE_LABELS_SHOWN])
+        more = len(boilerplate) - TILE_LABELS_SHOWN
+        label += f"; dropped as identical on every tile: {shown}"
+        label += f" (+{more} more)" if more > 0 else ""
+    return [label + "]", *lines]
+
+
+def compact_tiles(text: str) -> str:
+    """Runs of tile-shaped groups squashed to one line each. Content-preserving:
+    every title, URL and price survives — only repetition and newlines go."""
+    segments, trailing = _tile_segments(text)
+    out: list[str] = []
+    index = 0
+    last_strip_ended_at = -1
+    boilerplate: set[str] = set()
+    while index < len(segments):
+        end = index
+        while end < len(segments) and _is_tile(segments[end]):
+            end += 1
+        if end - index >= TILE_STRIP_MIN:
+            out.extend(_compact_strip(segments[index:end]))
+            boilerplate = _strip_boilerplate(segments[index:end])
+            last_strip_ended_at = end
+            index = end
+            continue
+        for segment in segments[index : end + 1]:
+            out.extend(segment)
+        index = end + 1
+    # The last tile's delivery promise lands here — it has no link after it to
+    # close a segment, so without this the one line the strip label says it
+    # dropped is still in the page.
+    if last_strip_ended_at == len(segments):
+        trailing = [line for line in trailing if line not in boilerplate]
+    out.extend(trailing)
+    return "\n".join(out)
+
+
 # What the carried links may cost. A CHARACTER budget, not a link count,
 # because the problem being solved is a character budget: a count caps nothing
 # when a shop's URLs run to 120 characters and an encyclopedia's to 60.
@@ -206,6 +326,21 @@ _CHROME_TAGS = {"nav", "header", "footer"}
 # 30+ searches in one turn at 1-2k characters each. One read that ends the
 # searching is cheaper than the searching.
 LINK_NOTE_MAX_CHARS = 6000
+
+
+# What a whole page may spend, BODY FIRST. The old shape was a 6 000-char page
+# cap and a separate 6 000-char link note, and it paid for the noise twice: the
+# carousel filled the head, then the same carousel's links filled the note —
+# ~10.1k of context spent on the real offer pages in the session behind this,
+# with the page's own price in neither. These pages run 10-13k in total, so a
+# single budget the body draws on first delivers them WHOLE for less than the
+# split one spent on fragments.
+#
+# The note is not a second budget but a fallback: a body that fits leaves
+# nothing dropped, so there are no links to rescue and the note is empty. It is
+# reached only on a page too big to carry, which is where the link rescue was
+# always aimed — the 101-offer listing, not a product page.
+PAGE_MAX_CHARS = 12000
 
 
 def link_note(dropped: str) -> str:
@@ -620,6 +755,7 @@ def _present(
     """The read, as the model receives it. Shared by the fetch and the browser
     so a rendered page is filtered, truncated and image-noted identically."""
     source = f"{url} — rendered in the browser" if via_browser else url
+    text = compact_tiles(text)
     if topic:
         matched = _filter_topic(text, topic)
         if matched:
@@ -639,9 +775,9 @@ def _present(
     # cap cut exactly the thing that stops the guessing loop. A shop's LINKS
     # are the point of the read in exactly the same way, and the cap cuts them
     # in exactly the same place.
-    if len(result) > DOCS_MAX_CHARS:
-        return (UNTRUSTED_NOTE + truncate(result, head=DOCS_MAX_CHARS, tail=0)
-                + PAGE_TRUNCATION_HINT + link_note(result[DOCS_MAX_CHARS:])
+    if len(result) > PAGE_MAX_CHARS:
+        return (UNTRUSTED_NOTE + truncate(result, head=PAGE_MAX_CHARS, tail=0)
+                + PAGE_TRUNCATION_HINT + link_note(result[PAGE_MAX_CHARS:])
                 + image_note(images))
     return UNTRUSTED_NOTE + result + image_note(images)
 
