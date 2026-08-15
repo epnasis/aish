@@ -474,6 +474,19 @@ Three things it deliberately does not do:
 
 **The figures are derived at the READ, and that is forced, not stylistic.** The turn record caps a call's result at 600 characters, and on the page behind this rule the price sat 6 000 in; a check reading the stored result would refuse every correct answer it was ever shown. So the reader's own output is scanned for money at the moment it arrives and the amounts ride on the call record — bounded per call, and the whole page is never held. Provenance is only knowable where the data was. `TestPricesYouDidNotRead`, `TestMoneyFigures`.
 
+### `false_access_claims` — the third join, and the one prose had already failed twice
+
+**"That site blocked me", in a turn that read it perfectly well.** In July a run told the owner *"Allegro's servers very effectively prevent automated reading"* in a turn where it had read three Allegro pages with real prices in them; the fix was a clause in `SYSTEM_PROMPT_TEMPLATE` saying not to. On 2026-08-15 the same model wrote that its Allegro read had hit a *"blokada dostępu (błąd 403 Forbidden)"* — in a turn where **all twelve reads succeeded**, the named page returning 16 500 characters including its price. The only 403s anywhere in that log are digits inside offer ids.
+
+It costs more than a wrong sentence, and that is the argument for spending a check on it. The claim is an **exit**: having declared the site unreadable, the model abandoned the shop the owner had just explicitly asked for, discarded pages it had already read, and answered from a competitor. The owner saw a Decathlon link with no reason given. The real reason was on the block above it — the Allegro offer was `OutOfStock` — and was never said.
+
+The harness knows which reads succeeded, so this is decidable rather than requestable. Two things keep it honest:
+
+- **Host-matched, not turn-wide.** Being blocked by one site while reading another is an ordinary turn and must stay sayable.
+- **Attributed to the NEAREST host in the sentence.** *"lasiesta.com refused me, so I used Allegro"* names both — the one that failed and the one used instead — and a check that merely asked *"does this answer mention a host we read"* refuses it. A rule that refuses honest reporting teaches the model to stop reporting, which is worse than the bug. Blame is attributed before the intersection with what was read, so the site that actually blocked you is a candidate even though it was never read.
+
+**The marker list is lexical, and that limit is stated rather than hidden.** A claim written in a language not on the list is not seen, so the check UNDER-fires — the safe direction, since an unseen claim leaves today's behaviour while an over-eager one would suppress a true report of a real block. Polish and English, because those are the two languages the owner is answered in. `TestSayingASiteBlockedYou`.
+
 ### Seeding costs only what it buys
 
 Every trigger arms at seed; only a `prompt:` condition is decided there. So an ordinary turn — nothing to do with prices, images or mail — bound **15 of 21 rules and seeded 9,562 characters**, because the engine was conditional about *enforcement* and unconditional about *announcement*. That is precisely how a rules engine becomes the fatter system prompt the owner said he did not want, and two of the three arming trigger kinds were added the same day the measurement was taken.

@@ -2546,6 +2546,92 @@ class TestPricesYouDidNotRead:
             rules._answer_check("answer_must_include", "unverified_prices")
 
 
+class TestSayingASiteBlockedYou:
+    """Tried as PROSE twice, failed twice.
+
+    July: a run told the owner *"Allegro's servers very effectively prevent
+    automated reading"* in a turn where it had read three Allegro pages with
+    real prices in them. The fix was a clause in the system prompt. On
+    2026-08-15 the same model wrote that its Allegro read had hit a *"blokada
+    dostępu (błąd 403 Forbidden)"* — in a turn where all TWELVE reads
+    succeeded. The only 403s in that log are digits inside offer ids.
+
+    It matters more than a wrong sentence: having declared the site unreadable
+    it abandoned the shop the owner had just asked for and answered from
+    Decathlon, discarding pages it had already read.
+    """
+
+    def _binding(self):
+        rule, errors = rules.lint(rules.render({
+            "name": "read-means-read", "description": "Do not say a site blocked you.",
+            "when_subject": "always",
+            "answer_must_not_include": "false_access_claims",
+        }), capabilities={"read_url"})
+        assert not errors, errors
+        return rules.bind(rule, {"on": "always"}, "b1", {"read_url"})
+
+    def _check(self, answer, calls=()):
+        return rules.verify([self._binding()],
+                            rules.TurnEvidence(answer=answer, calls=tuple(calls)))
+
+    def _read(self, url, status="ok"):
+        return {"tool": "read_url", "args": {"url": url}, "status": status}
+
+    def test_the_real_sentence_that_filed_this_is_refused(self):
+        """Verbatim from the session, and the read it contradicts is real."""
+        answer = (
+            "Moja próba podania linku do Allegro dla karabinka Black Diamond "
+            "napotkała na blokadę dostępu (błąd 403 Forbidden) ze strony "
+            "zabezpieczeń anty-botowych Allegro, dlatego jako alternatywę "
+            "zaproponowałem link z Decathlonu."
+        )
+        [failure] = self._check(answer, [
+            self._read("https://allegro.pl/oferta/karabinek-15960083405"),
+            self._read("https://allegro.pl/listing?string=karabinek"),
+        ])
+        assert failure.evidence["host"] == "allegro.pl"
+        assert "allegro.pl" in failure.ask
+        assert len(failure.evidence["read_this_turn"]) == 2
+
+    def test_the_site_NAME_counts_not_only_the_domain(self):
+        """Nobody writes "allegro.pl blocked me" in a sentence. They write
+        "Allegro"."""
+        assert self._check(
+            "Allegro nie pozwoliło mi otworzyć tej strony.",
+            [self._read("https://allegro.pl/oferta/x")],
+        ) != []
+
+    def test_being_blocked_by_a_site_you_did_NOT_read_still_stands(self):
+        """The honest case, and it must stay sayable — a check that refused it
+        would teach the model to hide a real failure."""
+        assert self._check(
+            "Strona lasiesta.com odmówiła dostępu, więc użyłem Allegro.",
+            [self._read("https://allegro.pl/oferta/x")],
+        ) == []
+
+    def test_a_turn_that_read_nothing_may_say_it_read_nothing(self):
+        assert self._check("Allegro zablokowało odczyt.") == []
+
+    def test_a_FAILED_read_is_not_a_contradiction(self):
+        """The claim is true when the call really did fail."""
+        assert self._check(
+            "Allegro zablokowało odczyt.",
+            [self._read("https://allegro.pl/oferta/x", status="failed")],
+        ) == []
+
+    def test_a_short_host_label_does_not_match_inside_words(self):
+        """A two-letter label would hit inside ordinary words and refuse honest
+        answers."""
+        assert self._check(
+            "Ta strona nie chciała się otworzyć.",
+            [self._read("https://x.co/page")],
+        ) == []
+
+    def test_it_can_only_be_written_as_a_PROHIBITION(self):
+        with pytest.raises(rules.RuleError):
+            rules._answer_check("answer_must_include", "false_access_claims")
+
+
 class TestMoneyFigures:
     def test_it_reads_both_orders_and_both_conventions(self):
         assert rules.money_figures("63,19 zł") == ["63.19"]

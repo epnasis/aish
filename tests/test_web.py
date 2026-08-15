@@ -849,7 +849,35 @@ class TestWhatThePageDeclares:
     def test_the_declared_price_and_availability_are_read(self):
         out = self.facts()
         assert "63.19 PLN" in out
-        assert "OutOfStock" in out
+        assert "OUT OF STOCK" in out
+
+    def test_availability_is_a_PHRASE_never_schema_orgs_word(self):
+        """The enum used to be printed as-is and the model wrote "(Status:
+        InStock)" into a Polish answer — on a page that declared no
+        availability at all. A borrowed word became a badge of verification
+        for a fact nobody had."""
+        for state in ("InStock", "OutOfStock", "PreOrder", "SoldOut"):
+            declared = [json.dumps({
+                "@type": "Product", "name": "W",
+                "offers": {"@type": "Offer", "price": "10.00",
+                           "availability": f"https://schema.org/{state}"},
+            })]
+            out = self.facts(declared=declared)
+            assert state not in out, f"{state} leaked as machine vocabulary"
+        assert "in stock" in self.facts(declared=[json.dumps({
+            "@type": "Product", "name": "W",
+            "offers": {"@type": "Offer", "availability": "https://schema.org/InStock"},
+        })])
+
+    def test_out_of_stock_goes_FIRST_and_says_what_to_do(self):
+        """It was the quietest line on the block and the real reason the model
+        abandoned the shop the owner asked for — which it never said, inventing
+        an access block and switching to a competitor instead."""
+        out = self.facts()
+        body = [ln for ln in out.splitlines() if ln.startswith("  ")]
+        assert "OUT OF STOCK" in body[0], "the dead offer must not be a footnote"
+        assert "TELL THE USER" in out
+        assert "silently swap in a different shop" in out
 
     def test_it_is_a_CLAIM_and_says_so(self):
         """Written by the site, so exactly as attacker-controlled as the visible
@@ -936,7 +964,7 @@ class TestWhatThePageDeclares:
         out = web.read_url("https://shop.test/oferta/karabinek-15960083405")
         assert "[page truncated" in out, "expected this fixture to exceed the cap"
         assert "63.19 PLN" in out
-        assert "OutOfStock" in out
+        assert "OUT OF STOCK" in out
 
 
 class TestStripTracking:

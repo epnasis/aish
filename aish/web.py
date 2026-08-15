@@ -220,10 +220,31 @@ _CHROME_TAGS = {"nav", "header", "footer"}
 FACTS_NAME_MAX = 120
 FACTS_MAX_CHARS = 500
 _SCHEMA_PREFIX = "https://schema.org/"
-_AVAILABILITY_WORDS = frozenset({
-    "InStock", "OutOfStock", "PreOrder", "BackOrder", "SoldOut",
-    "InStoreOnly", "OnlineOnly", "LimitedAvailability", "Discontinued",
-})
+
+# schema.org's word, translated to a PHRASE, and that is a bug fix rather than
+# a nicety. The enum used to be printed as-is, and the model did two things
+# with it: it wrote "(Status: InStock)" into a Polish answer to the owner —
+# English machine vocabulary in a conversation that had none — and it wrote
+# that on a page which declared NO availability at all. A borrowed word became
+# a badge of verification for a fact nobody had. A phrase cannot be quoted
+# that way because it is already the sentence the answer would have to write.
+_AVAILABILITY = {
+    "InStock": "in stock",
+    "OnlineOnly": "in stock, online only",
+    "InStoreOnly": "in stock in shops only",
+    "LimitedAvailability": "limited availability",
+    "PreOrder": "available to pre-order",
+    "BackOrder": "on back-order",
+    "OutOfStock": "OUT OF STOCK",
+    "SoldOut": "SOLD OUT",
+    "Discontinued": "DISCONTINUED",
+}
+# The states in which the thing cannot be bought today. This is the most
+# valuable field on the block and it was the quietest: on the offer behind
+# this, `OutOfStock` was the real reason the model abandoned Allegro — and it
+# never told the owner, inventing an access block instead and switching shops.
+# So it goes FIRST and says what to do with it.
+_NOT_BUYABLE = frozenset({"OutOfStock", "SoldOut", "Discontinued"})
 
 
 _LD_SCRIPT_RE = re.compile(
@@ -351,11 +372,14 @@ def page_facts(blocks: list[str], visible: str, url: str) -> str:
                 f"several sellers, from {low or '?'} to {high or '?'} "
                 f"{currency}".rstrip()
             )
-    availability = _declared_text(
-        offer.get("availability"), 80
-    ).removeprefix(_SCHEMA_PREFIX)
-    if availability in _AVAILABILITY_WORDS:
-        lines.append(f"availability: {availability}")
+    state = _declared_text(offer.get("availability"), 80).removeprefix(_SCHEMA_PREFIX)
+    if phrase := _AVAILABILITY.get(state):
+        if state in _NOT_BUYABLE:
+            lines.insert(0, f"the page says this is {phrase} — TELL THE USER THAT. "
+                            "Do not present it as something to buy, and do not "
+                            "silently swap in a different shop instead.")
+        else:
+            lines.append(f"the page says this is {phrase}")
     if not lines:
         return ""
     body = "\n".join(f"  {line}" for line in lines)[:FACTS_MAX_CHARS]

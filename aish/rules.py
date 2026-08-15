@@ -29,7 +29,7 @@ from typing import Any, NamedTuple
 
 import yaml
 
-from . import skills, web
+from . import browser, skills, web
 
 GLOBAL_RULES_DIR = Path.home() / ".config" / "aish" / "rules"
 
@@ -250,9 +250,32 @@ NAMED_UNVERIFIED_LINKS = "unverified_links"
 # On the real answer this refuses 49,49, 33,99 and 14,44 — the three the owner
 # had to catch by hand — and passes 29,99, which was genuinely read off the card.
 NAMED_UNVERIFIED_PRICES = "unverified_prices"
+
+# `answer_must_not_include: false_access_claims` — "the site blocked me", in a
+# turn that read that site perfectly well.
+#
+# The third join, and the one that had already been tried as PROSE and failed
+# twice. In July a run told the owner that *"Allegro's servers very effectively
+# prevent automated reading"* in a turn where it had read three Allegro pages
+# with real prices in them; the fix was a clause in the system prompt saying
+# not to. On 2026-08-15 the same model wrote that its Allegro read had hit a
+# *"blokada dostępu (błąd 403 Forbidden)"* — in a turn where all TWELVE reads
+# succeeded, the named page returning 16 500 characters including its price.
+# The only 403s anywhere in that log are digits inside offer ids.
+#
+# It matters more than a wrong sentence, because it is an EXIT: having declared
+# the site unreadable, the model abandons the shop the owner asked for and
+# answers from somewhere else, discarding pages it had already read. The owner
+# sees a competitor's link and no reason for it.
+#
+# The harness knows which reads succeeded, so this is decidable rather than
+# requestable. Host-matched, not turn-wide: being blocked by one site while
+# reading another is an ordinary turn and must stay sayable.
+NAMED_FALSE_ACCESS = "false_access_claims"
 NAMED_ANSWER_CHECKS = {
     NAMED_UNVERIFIED_LINKS: "a link you never opened",
     NAMED_UNVERIFIED_PRICES: "a price that is not on the page you linked it to",
+    NAMED_FALSE_ACCESS: "a claim that a site blocked you, when you read it",
 }
 
 # Money as it is WRITTEN, in either order and in either decimal convention:
@@ -2239,6 +2262,9 @@ def _verify_one(
     if obligation.get("named") == NAMED_UNVERIFIED_PRICES:
         return _verify_prices(binding, obligation, evidence, common)
 
+    if obligation.get("named") == NAMED_FALSE_ACCESS:
+        return _verify_access(binding, obligation, evidence, common)
+
     if anchors := obligation.get(MEANING_KEY):
         return _verify_meaning(binding, obligation, evidence, list(anchors), common)
 
@@ -2287,6 +2313,16 @@ def _present(kind: str, evidence: TurnEvidence) -> tuple[bool, list[str]]:
     wanted = list(dict.fromkeys(wanted))
     return (bool(wanted) and all(token in answer for token in wanted)), wanted
 
+
+FALSE_ACCESS_ASK = (
+    "The rule '{rule}' does not allow saying that {host} could not be read, "
+    "because you read {count} page(s) from it in THIS turn: {shown}. "
+    "{description}\n"
+    "Use what those pages gave you. If one particular page failed, say which "
+    "one and what you got from the others — never that the site is unreadable. "
+    "And do not answer from a different site instead without saying plainly "
+    "that you are doing so, and why."
+)
 
 UNVERIFIED_PRICES_ASK = (
     "The rule '{rule}' does not allow a price that is not on the page you "
@@ -2446,6 +2482,131 @@ def _verify_prices(
         UNVERIFIED_PRICES_ASK.format(
             count=f"{len(unverified)} of them" if len(unverified) > 1 else "one",
             shown=shown, **common,
+        ),
+    )
+
+
+def _hosts_read(evidence: TurnEvidence) -> dict[str, list[str]]:
+    """Host → the URLs successfully read from it this turn."""
+    pages: dict[str, list[str]] = {}
+    for call in evidence.calls:
+        if not _ran(call):
+            continue
+        args = call.get("args") or {}
+        for key in _URL_ARGS:
+            value = str(args.get(key, "") or "").strip()
+            if value and (host := browser.host_of(value)):
+                pages.setdefault(host, []).append(value)
+    return pages
+
+
+# `allegro.pl` is written "Allegro" in a sentence, so the bare name has to
+# match — but only when it is long enough to mean something. A two-letter
+# label would hit inside ordinary words and refuse honest answers.
+_HOST_NAME_MIN = 4
+
+# Where a blocking claim IS, so the check can tell which site it is about.
+#
+# "lasiesta.com refused me, so I used Allegro" is an honest, useful sentence
+# and it names BOTH hosts — one blocked, one read. A check that only asked
+# "does this answer mention a host we read" refuses it, and a rule that refuses
+# honest reporting teaches the model to stop reporting. So each marker is
+# attributed to the NEAREST host in its own sentence, which is the one the
+# claim is about.
+#
+# Lexical, and that is an honest limit rather than a hidden one: a claim
+# written in a language not listed here is not seen, so the check UNDER-fires.
+# That is the safe direction — an unseen claim leaves today's behaviour, while
+# an over-eager one would suppress a true report of a real block. Polish and
+# English because those are the two languages the owner is answered in.
+_BLOCKED_MARKERS = (
+    "403", "forbidden", "captcha", "anti-bot", "anty-bot",
+    "blocked", "blocking", "refused", "denied", "unreadable", "inaccessible",
+    "could not be read", "cannot be read", "could not read", "prevent",
+    "blokad", "zablokowa", "odmówi", "odmowi", "nie pozwol", "uniemożliw",
+    "uniemozliw", "zabezpiecze", "nie udało się otworzyć",
+    "nie udalo sie otworzyc", "nie mogę otworzyć", "nie moge otworzyc",
+)
+_SENTENCE_SPLIT = re.compile(r"[!?\n]+|(?<![a-z0-9])\.|\.(?![a-z0-9])")
+_DOMAIN_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\b")
+
+
+def _host_mentions(sentence: str, hosts: list[str]) -> list[tuple[int, str]]:
+    """(where it is named, host) for every site this sentence names.
+
+    Domains written out are found for ANY site, not only the ones read — the
+    site that actually blocked you is by definition one that was not read, and
+    it has to be a candidate or the claim gets pinned on the wrong host."""
+    found: list[tuple[int, str]] = []
+    for match in _DOMAIN_RE.finditer(sentence):
+        host = match.group(0)
+        found.append((match.start(), host.removeprefix("www.")))
+    seen = {host for _at, host in found}
+    for host in hosts:
+        name = host.split(".")[0]
+        at = sentence.find(name) if len(name) >= _HOST_NAME_MIN else -1
+        if at >= 0 and host not in seen:
+            found.append((at, host))
+    return found
+
+
+def _hosts_called_blocked(answer: str, hosts: list[str] | None = None) -> set[str]:
+    """The hosts this answer says it could not read.
+
+    Nearest-host-in-the-sentence, because a sentence routinely names the site
+    that failed AND the one used instead. Attributing the claim to the closer
+    of the two is what keeps "lasiesta.com refused me, so I used Allegro"
+    sayable — an honest report the whole check exists to preserve."""
+    known = hosts if hosts is not None else []
+    blamed: set[str] = set()
+    for sentence in _SENTENCE_SPLIT.split(answer.casefold()):
+        mentions = _host_mentions(sentence, known)
+        if not mentions:
+            continue
+        for marker in _BLOCKED_MARKERS:
+            at = sentence.find(marker)
+            if at < 0:
+                continue
+            blamed.add(min(mentions, key=lambda m: abs(m[0] - at))[1])
+    return blamed
+
+
+def _verify_access(
+    binding: Binding, obligation: dict, evidence: TurnEvidence, common: dict,
+) -> VerifyFailure | None:
+    """Refuse "that site blocked me" about a site this turn actually read.
+
+    The rule's `when:` decides whether the answer MEANS that — the harness has
+    no business judging prose, and the claim is written in whichever language
+    the owner is being answered in. This half is the join: is there a host the
+    answer names AND read successfully?
+
+    Host-matched deliberately. Blocked by one site while reading another is an
+    ordinary turn, and a check that refused it would be teaching the model to
+    hide a real failure — which is the opposite of the point."""
+    answer = evidence.looked_at(obligation.get("in", WHERE_ANYWHERE))
+    read = _hosts_read(evidence)
+    if not read:
+        return None  # nothing was read, so "I could not read it" stands
+    # A site the turn never touched cannot be contradicted — it is the honest
+    # case, and it is why the blame is attributed BEFORE this intersection
+    # rather than by searching only among the hosts that were read.
+    contradicted = {
+        host: read[host]
+        for host in _hosts_called_blocked(answer, sorted(read))
+        if host in read
+    }
+    if not contradicted:
+        return None
+    host, urls = next(iter(sorted(contradicted.items())))
+    return VerifyFailure(
+        binding, obligation,
+        {"named": NAMED_FALSE_ACCESS, "host": host,
+         "read_this_turn": urls[:8], "hosts": sorted(contradicted)[:8]},
+        FALSE_ACCESS_ASK.format(
+            host=host, count=len(urls),
+            shown=", ".join(urls[:2]) + ("…" if len(urls) > 2 else ""),
+            **common,
         ),
     )
 
