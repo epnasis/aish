@@ -3006,7 +3006,242 @@ class TestFork:
             recv_until(ws, "done")
             ws.send_json({"type": "fork", "after": 5})
             error = recv_until(ws, "error")
-            assert "out of range" in error["text"]
+            assert "can't fork from there" in error["text"]
+
+    def test_a_live_answer_names_itself(self, app_env):
+        # #229: the id of the record just written rides on `done`, so the Fork
+        # button on an answer the owner WATCHED arrive names the same record a
+        # replayed one does. Without it a live chat would have no anchor at all
+        # until it was reloaded.
+        client, _ = make_client(app_env, [model_says("live answer")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "hi"})
+            done = recv_until(ws, "done")
+            assert done.get("answer"), "a live answer carries its record id"
+            replay_id = done["answer"]
+
+            ws.send_json({"type": "fork", "answer": replay_id})
+            recv_until(ws, "hello")
+            replay = recv_until(ws, "replay")
+            assert "live answer" in json.dumps(replay["events"])
+
+    def test_fork_from_here_by_answer_id(self, app_env):
+        # The per-answer Fork, addressed by name: branch up to and including
+        # that answer, dropping later turns.
+        client, _ = make_client(
+            app_env,
+            [model_says("first answer alpha"), model_says("second answer beta")],
+        )
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "one"})
+            first = recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "two"})
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "fork", "answer": first["answer"]})
+            forked = recv_until(ws, "hello")
+            assert forked["session"] != hello["session"]
+            replay = recv_until(ws, "replay")
+            users = [e["text"] for e in replay["events"] if e["type"] == "user"]
+            dumped = json.dumps(replay["events"])
+            assert users == ["one"]
+            assert "alpha" in dumped and "beta" not in dumped
+
+    def test_fork_point_survives_a_partial_transcript(self, app_env, monkeypatch):
+        # THE REGRESSION (#229 × #228). The fork used to be an ordinal counted by
+        # the browser over what it had RENDERED, and the first paint is capped —
+        # so on a chat trimmed to its tail, "the answer I tapped" and "the Nth
+        # answer in the log" were different records, and the fork branched from
+        # the wrong one with nothing reporting a mismatch.
+        #
+        # Squeezed here to a two-event window: the replay this client receives
+        # cannot contain the first turn at all, and the fork must still land on
+        # the answer it names.
+        monkeypatch.setattr(server_module, "TRANSCRIPT_MAX", 2)
+        monkeypatch.setattr(server_module, "TRANSCRIPT_KEEP", 2)
+        client, _ = make_client(
+            app_env,
+            [model_says("answer alpha"), model_says("answer beta"), model_says("answer gamma")],
+        )
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "one"})
+            first = recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "two"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "three"})
+            recv_until(ws, "done")
+
+            # What a fresh viewer of this chat is given: a trimmed tail.
+            ws.send_json({"type": "resume", "path": hello["session"]})
+            recv_until(ws, "hello")
+            replay = recv_until(ws, "replay")
+            assert replay["truncated"], "the view really is short of the whole chat"
+            assert "alpha" not in json.dumps(replay["events"])
+
+            # The id was minted when the answer was written, so it still names
+            # that record however little of the chat this client holds.
+            ws.send_json({"type": "fork", "answer": first["answer"]})
+            recv_until(ws, "hello")
+            forked = recv_until(ws, "replay")
+            dumped = json.dumps(forked["events"])
+            assert "alpha" in dumped, "the fork branched from the answer that was named"
+            assert "beta" not in dumped and "gamma" not in dumped
+
+    def test_fork_from_an_answer_that_names_nothing_is_refused(self, app_env):
+        # A stale id (an answer since deleted, a page from another chat) must be
+        # refused, never resolved to "something near there".
+        client, _ = make_client(app_env, [model_says("only answer")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "hi"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "fork", "answer": "no-such-answer"})
+            error = recv_until(ws, "error")
+            assert "can't fork from there" in error["text"]
+            # And nothing was created for a fork that did not happen.
+            ws.send_json({"type": "sessions", "query": ""})
+            listing = recv_until(ws, "session_list")
+            assert listing["current"] == hello["session"]
+
+    def test_fork_carries_the_photos_attached_before_the_cut(self, app_env, tmp_path):
+        # The owner reported forks arriving without their attachments; that was
+        # the wrong fork POINT (the turns carrying them were behind the cut), and
+        # this is the property that had to hold once the point was right.
+        photo = app_env["state_dir"] / "uploads" / "IMG_1326.jpeg"
+        photo.parent.mkdir(parents=True, exist_ok=True)
+        photo.write_bytes(b"\xff\xd8\xff\xe0 not really a jpeg")
+        client, _ = make_client(
+            app_env, [model_says("a terrace"), model_says("something later")]
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json(
+                {"type": "task", "text": "look at this", "attachments": [str(photo)]}
+            )
+            first = recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "and now something else"})
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "fork", "answer": first["answer"]})
+            recv_until(ws, "hello")
+            replay = recv_until(ws, "replay")
+            users = [e["text"] for e in replay["events"] if e["type"] == "user"]
+            assert any("IMG_1326.jpeg" in t for t in users), "the attachment came along"
+
+
+class TestHistoryMore:
+    """Reading further back than the first paint reaches (#228).
+
+    The replay is capped at `TRANSCRIPT_KEEP` events because a replay is one
+    frame on a socket and a long chat is megabytes. That cap was the whole
+    story, though: above it the client showed "… earlier events trimmed …" and
+    there was nothing to tap. A 1314-event chat opened at its 815th event, and
+    its first two thirds — six of its answers and three of its photos — could
+    not be reached from the app at all.
+    """
+
+    def _long_chat(self, app_env, monkeypatch, turns=3):
+        monkeypatch.setattr(server_module, "TRANSCRIPT_MAX", 2)
+        monkeypatch.setattr(server_module, "TRANSCRIPT_KEEP", 2)
+        client, _ = make_client(
+            app_env, [model_says(f"answer {n}") for n in range(turns)]
+        )
+        return client
+
+    def test_a_trimmed_replay_says_how_much_it_is_missing(self, app_env, monkeypatch):
+        client = self._long_chat(app_env, monkeypatch)
+        with client, connected(client) as (ws, hello, _):
+            for n in range(3):
+                ws.send_json({"type": "task", "text": f"turn {n}"})
+                recv_until(ws, "done")
+            ws.send_json({"type": "resume", "path": hello["session"]})
+            recv_until(ws, "hello")
+            replay = recv_until(ws, "replay")
+            assert replay["truncated"]
+            assert replay["total"] > len(replay["events"]), (
+                "the client must be able to say what is missing, not just that "
+                "something is"
+            )
+
+    def test_asking_for_more_returns_the_whole_chat(self, app_env, monkeypatch):
+        client = self._long_chat(app_env, monkeypatch)
+        with client, connected(client) as (ws, hello, _):
+            for n in range(3):
+                ws.send_json({"type": "task", "text": f"turn {n}"})
+                recv_until(ws, "done")
+            ws.send_json({"type": "resume", "path": hello["session"]})
+            recv_until(ws, "hello")
+            first = recv_until(ws, "replay")
+            assert "turn 0" not in json.dumps(first["events"])
+
+            ws.send_json({"type": "history_more", "window": 500})
+            full = recv_until(ws, "replay")
+            dumped = json.dumps(full["events"])
+            assert "turn 0" in dumped and "answer 0" in dumped
+            assert not full["truncated"], "the beginning of the chat is reachable"
+            assert full["total"] == len(full["events"])
+            # Reading back through a chat you are looking at is not new activity.
+            assert full.get("seen") is True
+
+    def test_the_ceiling_is_reported_never_silent(self, app_env, monkeypatch):
+        # The reply is a WINDOW, and past the per-request ceiling there is
+        # genuinely nothing more to hand over. That must be SAID: a control that
+        # keeps offering "N more" and does nothing is the same dead end #228 was,
+        # in a friendlier font.
+        monkeypatch.setattr(server_module, "TRANSCRIPT_WINDOW_MAX", 3)
+        client = self._long_chat(app_env, monkeypatch)
+        monkeypatch.setattr(server_module, "TRANSCRIPT_KEEP", 1)
+        with client, connected(client) as (ws, _, _):
+            for n in range(3):
+                ws.send_json({"type": "task", "text": f"turn {n}"})
+                recv_until(ws, "done")
+            ws.send_json({"type": "history_more", "window": 500})
+            reply = recv_until(ws, "replay")
+            assert len(reply["events"]) == 3
+            assert reply["truncated"] and reply["total"] > 3
+            assert reply["more"] is False, "asking again would get no further"
+
+    def test_a_reachable_beginning_says_there_is_more_on_the_way(self, app_env, monkeypatch):
+        client = self._long_chat(app_env, monkeypatch)
+        with client, connected(client) as (ws, hello, _):
+            for n in range(3):
+                ws.send_json({"type": "task", "text": f"turn {n}"})
+                recv_until(ws, "done")
+            ws.send_json({"type": "resume", "path": hello["session"]})
+            recv_until(ws, "hello")
+            recv_until(ws, "replay")
+            ws.send_json({"type": "history_more", "window": 3})
+            reply = recv_until(ws, "replay")
+            assert reply["truncated"] and reply["more"] is True
+
+    def test_refused_while_the_chat_is_working(self, app_env, tmp_path, monkeypatch):
+        # A running turn's tokens are not on disk yet, so rebuilding from the
+        # log would paint the answer being written straight out of the view.
+        client, _ = make_client(
+            app_env,
+            [
+                model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+                model_says("done"),
+            ],
+        )
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "run it"})
+            request = recv_until(ws, "approval_request")
+            ws.send_json({"type": "history_more", "window": 5000})
+            error = recv_until(ws, "error")
+            assert "can't load earlier messages" in error["text"]
+            assert error["code"] == "refused", "a refusal must not read as a turn failure"
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+
+    def test_reading_further_back_claims_no_control(self, app_env, monkeypatch):
+        # A VIEW message: looking at more of a chat is not acting on it, so it
+        # must not take the controller role away from another device.
+        client = self._long_chat(app_env, monkeypatch)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "turn 0"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "history_more", "window": 500})
+            reply = recv_until(ws, "replay")
+            assert reply["events"], "the read still answered"
 
     def test_fork_empty_conversation_refused(self, app_env):
         client, _ = make_client(app_env, [])

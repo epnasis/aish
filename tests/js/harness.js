@@ -272,6 +272,14 @@ function hostileWorld({ visible = false, width = 1100, globals = {} } = {}) {
     URLSearchParams,
     Set,
     Map,
+    // Reading further back than the first paint reaches ([BACKFILL]). Every
+    // replay, every refusal and every session switch ends an outstanding one,
+    // so most extracted blocks reach it incidentally; test_backfill.js drives
+    // the real thing. A world that wants the real block just overrides these.
+    endBackfill() {},
+    noteWindow() {},
+    restoreBackfillPos: () => false,
+    backfillFromBottom: -1,
   };
   sandbox.window = sandbox;
   sandbox.self = sandbox;

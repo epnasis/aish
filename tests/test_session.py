@@ -1568,6 +1568,129 @@ class TestOutputStamp:
         assert ts > out > 0, "the pager ages by activity and flags unread by output"
 
 
+class TestAnswerIdentity:
+    """A fork branches from a NAMED answer, not from a counted one (#229).
+
+    The fork point used to be an ordinal: the browser counted answers as it
+    rendered them, the server counted them again over the whole log, and the two
+    agreed only when the browser had rendered all of them. It had not — the
+    replay is capped (#228) — so a 25-answer chat whose view began at answer 15
+    sent "6" for the answer the owner tapped as 20, and the server cut at ITS
+    sixth. Fourteen answers of context, and the photos in them, gone with no
+    error anywhere.
+
+    Two counts of one thing is the defect; these pin the single name that
+    replaced them. Note the second divergence underneath, which the ordinal
+    could never have survived either: `reconstruct_events` and
+    `truncate_at_answer` do not even agree on WHICH records are answers.
+    """
+
+    def _log(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "one"})
+        log.message({"role": "assistant", "content": "answer one"})
+        log.message({"role": "user", "content": "two"})
+        log.message({"role": "assistant", "content": "narrating", "interim": True})
+        log.message({"role": "assistant", "content": "answer two"})
+        log.message({"role": "user", "content": "three"})
+        log.message({"role": "assistant", "content": "answer three"})
+        log.step({"kind": "tool", "name": "read_docs"})  # a trace record makes it replayable
+        log.close()
+        return log
+
+    def test_message_returns_the_id_it_wrote(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        answer = log.message({"role": "assistant", "content": "hi"})
+        log.close()
+        assert answer, "an assistant record is named, like a user turn is"
+        records = [json.loads(line) for line in log.path.read_text().splitlines()]
+        assert records[0]["turn"] == answer
+
+    def test_every_answer_event_carries_its_record_id(self, tmp_path):
+        log = self._log(tmp_path)
+        events = SessionLog.reconstruct_events(log.path)
+        answers = [e for e in events if e["type"] == "done"]
+        ids = [e.get("answer") for e in answers]
+        assert len(ids) == 3 and all(ids), "every replayed answer names its record"
+        assert len(set(ids)) == 3, "and no two answers share a name"
+
+    def test_forking_by_id_cuts_at_that_answer(self, tmp_path):
+        log = self._log(tmp_path)
+        text = log.path.read_text(encoding="utf-8")
+        events = SessionLog.reconstruct_events(log.path)
+        second = [e for e in events if e["type"] == "done"][1]
+
+        forked = SessionLog.truncate_at_answer_id(text, second["answer"])
+        assert "answer two" in forked
+        assert "answer three" not in forked
+        assert "three" not in forked, "the turn after the fork point is not carried"
+        # The narration on the way to that answer belongs to the turn and stays.
+        assert "narrating" in forked
+
+    def test_an_id_that_names_nothing_is_refused_not_guessed(self, tmp_path):
+        log = self._log(tmp_path)
+        text = log.path.read_text(encoding="utf-8")
+        assert SessionLog.truncate_at_answer_id(text, "no-such-answer") is None
+        assert SessionLog.truncate_at_answer_id(text, "") is None
+
+    def test_a_log_written_before_ids_still_forks_by_id(self, tmp_path):
+        # Records with no `turn` fall back to their LINE INDEX, which names a
+        # record perfectly well in an append-only file — so the mechanism covers
+        # every chat already on disk, not only the ones written from now on.
+        path = tmp_path / "session-20260101-000000.jsonl"
+        path.write_text(
+            "\n".join(
+                json.dumps(r)
+                for r in [
+                    {"kind": "message", "role": "user", "content": "one"},
+                    {"kind": "message", "role": "assistant", "content": "old answer"},
+                    {"kind": "trace", "step": {"kind": "tool", "name": "read_docs"}},
+                    {"kind": "message", "role": "user", "content": "two"},
+                    {"kind": "message", "role": "assistant", "content": "later answer"},
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        events = SessionLog.reconstruct_events(path)
+        first = [e for e in events if e["type"] == "done"][0]
+        assert first["answer"] == "@1", "a nameless record answers to its line"
+        forked = SessionLog.truncate_at_answer_id(path.read_text(), first["answer"])
+        assert "old answer" in forked and "later answer" not in forked
+
+    def test_the_two_counts_the_ordinal_relied_on_can_disagree(self, tmp_path):
+        # WHY the ordinal could not simply be repaired: the two sides do not
+        # count the same records. `truncate_at_answer` calls an assistant record
+        # final when no `tool` message follows it; `reconstruct_events` — what
+        # the browser renders, and therefore what it counts — promotes the last
+        # thing said in each TURN, whatever came after it.
+        #
+        # A turn that spoke, called a tool and was then stopped is where they
+        # part: the browser shows an answer bubble for it, the cutter does not
+        # count it at all. So ordinal 1 means two different records, and the
+        # divergence grows by one for every such turn in the chat.
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "one"})
+        log.message({"role": "assistant", "content": "let me look"})
+        log.message({"role": "tool", "tool_name": "read_docs", "content": "docs"})
+        log.message({"role": "user", "content": "two"})
+        log.message({"role": "assistant", "content": "the second answer"})
+        log.step({"kind": "tool", "name": "read_docs"})
+        log.close()
+
+        text = log.path.read_text(encoding="utf-8")
+        events = SessionLog.reconstruct_events(log.path)
+        rendered = [e for e in events if e["type"] == "done"]
+        assert [e["result"] for e in rendered] == ["let me look", "the second answer"]
+
+        # The first Fork button in that chat sits on "let me look" — and sending
+        # its ordinal would have branched past the whole second turn.
+        assert "the second answer" in SessionLog.truncate_at_answer(text, 1)
+        assert "the second answer" not in SessionLog.truncate_at_answer_id(
+            text, rendered[0]["answer"]
+        )
+
+
 class TestRedaction:
     """A chat had no eraser (#202): the log is append-only and replayed whole,
     so a probe fired at the wrong chat, a message sent by an autocorrect Return,

@@ -98,17 +98,18 @@ REDACT_KIND = "redact"
 
 
 def _turn_id(record: dict, index: int) -> str:
-    """The name a user record answers to when something wants to point at its
-    turn (#202).
+    """The name a message record answers to when something wants to point at
+    it — a user turn for a removal (#202), an assistant answer for a fork
+    (#229).
 
     Written records carry their own `turn` id, minted at write time — a random
     one rather than a counter, because a resumed log is appended to by a fresh
     SessionLog that would have to reconstruct any counter, and because redaction
     rewrites the file underneath it. Logs written before ids existed fall back to
-    the record's LINE INDEX, which identifies a turn perfectly well in a file
-    nobody is appending to mid-request; a redaction rewrites the file and the
-    client is handed the recomputed stream immediately after, so a shifted index
-    is never left in anyone's hands.
+    the record's LINE INDEX, which identifies a record perfectly well in an
+    append-only file (appending never moves an existing line); a redaction
+    rewrites the file and the client is handed the recomputed stream immediately
+    after, so a shifted index is never left in anyone's hands.
     """
     turn = record.get("turn")
     return turn if isinstance(turn, str) and turn else f"@{index}"
@@ -709,11 +710,17 @@ class SessionLog:
         ratings: list[dict] = []
         steps: list[dict] = []
         answer = ""
+        answer_id = ""
         # Where in `steps` each of this turn's deliveries sits (#212). A turn
         # says things on its way to the answer, and which of them WAS the
         # answer is only knowable at the end — so they are all buffered in
         # place, and `flush` lifts the last one out to become `done`.
         deliveries: list[int] = []
+        # The id of the record behind each of those deliveries, in step. The one
+        # `flush` promotes to `done` carries its id onto the event, so a fork
+        # names the ANSWER and never a count of what a client happened to render
+        # (#229).
+        delivery_ids: list[str] = []
         open_turn = False
         has_trace = False
         running_steps = 0  # started (thinking/tool) but not finished — a cut-off turn
@@ -725,6 +732,7 @@ class SessionLog:
 
         def flush() -> None:
             nonlocal steps, answer, open_turn, running_steps, failure, deliveries
+            nonlocal delivery_ids, answer_id
             if not open_turn:
                 return
             if deliveries and not failure:
@@ -743,8 +751,10 @@ class SessionLog:
                 # narration exists for. A failed turn keeps ALL of them.
                 last = deliveries[-1]
                 answer = steps[last]["text"]
+                answer_id = delivery_ids[-1]
                 del steps[last : last + 2]
                 deliveries = deliveries[:-1]
+                delivery_ids = delivery_ids[:-1]
             # ONE acknowledgement per turn reaches the owner, so replay shows
             # one too (L1). The log still records every interim message — that
             # is the honest record of what the model said — but the harness
@@ -755,6 +765,7 @@ class SessionLog:
                 del steps[start : start + 2]
             events.extend(steps)
             deliveries = []
+            delivery_ids = []
             if failure:
                 # The turn's own recorded failure, replayed as the `error` event
                 # a live viewer saw (#203). It outranks the inference below: the
@@ -762,6 +773,7 @@ class SessionLog:
                 # made from the fact that steps were left unfinished.
                 events.append({"type": "error", "text": failure})
                 steps, answer, open_turn, running_steps, failure = [], "", False, 0, ""
+                answer_id = ""
                 return
             if running_steps > 0 and not answer:
                 # A step was still running and no final answer was reached — the
@@ -771,9 +783,16 @@ class SessionLog:
                 # answer is complete even if a trailing trace record was clipped.)
                 events.append({"type": "error", "text": INTERRUPTED_TASK})
             else:
-                events.append({"type": "done", "result": answer})
+                done: dict = {"type": "done", "result": answer}
+                # Only when this turn really promoted an assistant record. A
+                # bang command's empty `done` names nothing, and a fork must
+                # refuse rather than guess at a cut point.
+                if answer_id:
+                    done["answer"] = answer_id
+                events.append(done)
             steps = []
             answer = ""
+            answer_id = ""
             open_turn = False
             running_steps = 0
 
@@ -969,6 +988,7 @@ class SessionLog:
                 content = (record.get("content") or "").strip()
                 if content:
                     deliveries.append(len(steps))
+                    delivery_ids.append(_turn_id(record, index))
                     steps.append({"type": "token", "text": content})
                     steps.append({"type": "delivery", "text": content})
         flush()
@@ -1014,11 +1034,45 @@ class SessionLog:
         ]
         if after < 1 or after > len(finals):
             return None
-        cut = finals[after - 1]
-        # Include the rest of that turn's trailing records (thinking_cancel,
-        # model, framing …) up to the NEXT user message, so the fork replays the
-        # complete turn instead of orphaning a trace record logged after the
-        # answer (which would otherwise reconstruct as a dangling step).
+        return SessionLog._cut_after_answer(lines, finals[after - 1])
+
+    @staticmethod
+    def truncate_at_answer_id(text: str, answer: str) -> str | None:
+        """Return the log truncated to include everything up to AND INCLUDING
+        the assistant record NAMED `answer` — the fork point as an identity
+        rather than a position (#229).
+
+        This is the whole reason forks stopped landing on the wrong answer.
+        `truncate_at_answer` above takes an ordinal, and the only party who can
+        supply one is the browser, counting answers as it renders them — so a
+        transcript trimmed to its last N events (#228) made the browser's third
+        answer the log's seventeenth, and the fork branched fourteen answers too
+        early with nothing anywhere reporting a mismatch. An id cannot be
+        counted wrong: it either names a record in this log or it names nothing,
+        and naming nothing is a refusal the owner sees.
+
+        Returns None when no assistant record answers to that name."""
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if (
+                record.get("kind") == "message"
+                and record.get("role") == "assistant"
+                and _turn_id(record, i) == answer
+            ):
+                return SessionLog._cut_after_answer(lines, i)
+        return None
+
+    @staticmethod
+    def _cut_after_answer(lines: list[str], cut: int) -> str:
+        """The log through line `cut` (an assistant answer), plus the rest of
+        that turn's trailing records (thinking_cancel, model, framing …) up to
+        the NEXT user message — so the fork replays the complete turn instead of
+        orphaning a trace record logged after the answer, which would otherwise
+        reconstruct as a dangling step."""
         end = len(lines)
         for i in range(cut + 1, len(lines)):
             try:
@@ -1709,15 +1763,18 @@ class SessionLog:
         self._fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         self._fh.flush()
 
-    def message(self, message: dict) -> None:
+    def message(self, message: dict) -> str:
         # A user record opens a turn, and a turn is the unit a redaction names
-        # (#202), so it gets a stable id here — at the one place every logged
-        # message passes through. `_parse` keeps only the conversation keys, so
-        # the id can never leak into a resumed conversation or the model's
-        # context.
-        if message.get("role") == "user" and not message.get("turn"):
+        # (#202); an assistant record IS an answer, and an answer is the unit a
+        # fork names (#229). Both get a stable id here — at the one place every
+        # logged message passes through — and it is returned so the live server
+        # can put the id of the answer it just wrote on the event announcing it.
+        # `_parse` keeps only the conversation keys, so the id can never leak
+        # into a resumed conversation or the model's context.
+        if message.get("role") in ("user", "assistant") and not message.get("turn"):
             message = {**message, "turn": uuid.uuid4().hex[:12]}
         self._record("message", **message)
+        return str(message.get("turn") or "")
 
     def model(self, spec: str) -> None:
         """Note the model in use; written lazily, just before the next real
