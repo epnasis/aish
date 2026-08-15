@@ -233,7 +233,12 @@ class Page:
     `links` is (first line of the anchor's text, absolute href) in DOM order.
     Text alone is not the page on a SHOP: a listing's whole point is which
     offer and at what URL, and rendering it to plain text threw the URL away —
-    see `_LINKS_JS`."""
+    see `_LINKS_JS`.
+
+    `declared` is the page's own schema.org JSON-LD, raw. It is the half of the
+    page written for indexers rather than for people, so `inner_text` cannot
+    see it — and it is the only statement of what a page is ABOUT that does not
+    have to be inferred from where things sit on it."""
 
     text: str
     title: str
@@ -241,6 +246,7 @@ class Page:
     url: str
     status: int | None
     links: list[tuple[str, str]] = field(default_factory=list)
+    declared: list[str] = field(default_factory=list)
 
 
 _OWNER: threading.Thread | None = None
@@ -534,6 +540,40 @@ async def _declared_images_async(page: Any) -> list[str]:
         return list(await page.evaluate(_IMAGES_JS))[:3]
     except Exception:  # noqa: BLE001 — no images is a fine answer
         return []
+
+
+# What the page DECLARES about itself, for Google and every other indexer:
+# schema.org in JSON-LD. Almost every commercial page on the web carries it,
+# because rich results require it — which makes it the one description of a page
+# that is language-independent, layout-independent, and not a guess.
+#
+# It lives in a <script>, so `inner_text` cannot see it and never could: the
+# reader takes what a PERSON sees, and this is the half written for machines.
+# That blindness is why a price could only ever be inferred from position on the
+# page, which is what put a neighbouring advert's figure in an answer.
+#
+# The raw strings are handed back and interpreted in Python. A page can declare
+# a 500 KB @graph, so the read is capped HERE, at the point where the size is
+# known and before any of it is carried anywhere.
+_LD_JSON_MAX = 60_000
+_LD_JSON_BLOCKS = 8
+_LD_JSON = """(max) => {
+  const out = [];
+  for (const el of document.querySelectorAll('script[type="application/ld+json"]')) {
+    const raw = (el.textContent || '').trim();
+    if (raw && raw.length <= max) out.push(raw);
+    if (out.length >= 8) break;
+  }
+  return out;
+}"""
+
+
+async def _declared_data_async(page: Any) -> list[str]:
+    try:
+        blocks = list(await page.evaluate(_LD_JSON, _LD_JSON_MAX))
+    except Exception:  # noqa: BLE001 — a page that declares nothing is normal
+        return []
+    return blocks[:_LD_JSON_BLOCKS]
 
 
 # What the page currently has focused, so the phone can show WHICH field it is
@@ -846,6 +886,7 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
                 url=page.url or url,
                 status=response.status if response is not None else None,
                 links=await _content_links(page),
+                declared=await _declared_data_async(page),
             )
         finally:
             try:

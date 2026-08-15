@@ -12,6 +12,7 @@ and on every redirect (SSRF guard, see _require_public).
 import base64
 import http.client
 import ipaddress
+import json
 import re
 import socket
 import ssl
@@ -19,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
+from typing import Any
 
 from . import browser
 from .tools import DOCS_MAX_CHARS, _filter_topic, truncate
@@ -186,6 +188,182 @@ def merge_links(text: str, links: list[tuple[str, str]]) -> str:
 # with `closest()`; here it is a depth counter, because HTMLParser sees a tag
 # stream rather than a tree.
 _CHROME_TAGS = {"nav", "header", "footer"}
+
+
+# --- what the page declares about itself ------------------------------------
+#
+# schema.org in JSON-LD: the summary a site publishes for Google, carried by
+# almost every commercial page because rich results require it. It is the only
+# statement of what a page is ABOUT that is language-independent, layout-
+# independent, and does not have to be inferred from where things sit on the
+# page — which is precisely what the reader had been doing when a neighbouring
+# advert's price ended up in an answer.
+#
+# A CROSS-CHECK, never an authority, and every clause of that is load-bearing:
+#
+#   * It is written by the SITE, so it is exactly as attacker-controlled as the
+#     visible text. It stays inside the untrusted banner, is phrased as
+#     something the page CLAIMS, and carries TYPED values only — an amount, an
+#     ISO currency, one of schema.org's availability words, a length-capped
+#     name — so a page cannot use this block to address the model in prose.
+#   * A marketplace page carries several sellers, and its declared price may
+#     honestly be the CHEAPEST of them while the seller whose page this is
+#     charges more. An aggregate is reported as a RANGE, never as the price.
+#   * When declared and rendered DISAGREE, both are shown and neither wins.
+#     Letting the declaration win would let a stale server-side cache veto a
+#     correct price read off the buy box — this same bug, running backwards.
+#
+# Measured live on the offer behind this: `Offer / price 63.19 PLN /
+# availability OutOfStock`. That is the correct price, which the model needed
+# eight reads to find — and the fact that the offer was DEAD, which it never
+# found at all and which no amount of reading the visible text would have said.
+FACTS_NAME_MAX = 120
+FACTS_MAX_CHARS = 500
+_SCHEMA_PREFIX = "https://schema.org/"
+_AVAILABILITY_WORDS = frozenset({
+    "InStock", "OutOfStock", "PreOrder", "BackOrder", "SoldOut",
+    "InStoreOnly", "OnlineOnly", "LimitedAvailability", "Discontinued",
+})
+
+
+_LD_SCRIPT_RE = re.compile(
+    r"<script[^>]*type\s*=\s*['\"]application/ld\+json['\"][^>]*>(.*?)</script>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def declared_data(html: str) -> list[str]:
+    """The JSON-LD blocks in raw HTML, for the FETCH path.
+
+    A regex rather than the extractor, because the extractor skips `<script>`
+    subtrees for text and teaching it to keep one kind would put a second
+    meaning inside the skip logic. Script content cannot contain `</script>`,
+    so the boundary is not the usual HTML-with-regex trap. Both surfaces must
+    agree: if the browser path declares a page's price and a plain fetch does
+    not, the model learns to trust neither."""
+    return [
+        block.strip()
+        for block in _LD_SCRIPT_RE.findall(html or "")
+        if block.strip() and len(block) <= browser._LD_JSON_MAX
+    ][:browser._LD_JSON_BLOCKS]
+
+
+def _ld_nodes(blocks: list[str]) -> list[dict]:
+    """Every object in the declared JSON, with `@graph` and lists flattened."""
+    nodes: list[dict] = []
+    pending: list[Any] = []
+    for raw in blocks:
+        try:
+            pending.append(json.loads(raw))
+        except (ValueError, TypeError):
+            continue  # a malformed declaration is not an error, it is silence
+    while pending:
+        item = pending.pop(0)
+        if isinstance(item, list):
+            pending.extend(item)
+        elif isinstance(item, dict):
+            nodes.append(item)
+            pending.extend(item.get("@graph") or [])
+    return nodes
+
+
+def _declared_text(value: Any, limit: int = FACTS_NAME_MAX) -> str:
+    """A declared value as one short, single-line string, or "".
+
+    Every field that reaches the model goes through this. A declaration is page
+    content, and page content does not get to arrive unbounded or multi-line in
+    a block the model reads as a summary."""
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("@id") or ""
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return ""
+    return " ".join(str(value).split())[:limit]
+
+
+def _declared_amount(value: Any) -> str:
+    text = _declared_text(value, 32).replace(" ", "")
+    return text if re.fullmatch(r"\d+(?:[.,]\d{1,2})?", text) else ""
+
+
+def _offer_for(node: dict, url: str) -> dict:
+    """The offer THIS page is about, out of the several a product may declare.
+
+    A product sold by five sellers declares five offers, and the one belonging
+    here is the one naming this page — by URL, or by the id the URL carries.
+    Picking any other would be the aggregate-price mistake by a second route."""
+    offers = node.get("offers")
+    candidates = [
+        offer for offer in (offers if isinstance(offers, list) else [offers])
+        if isinstance(offer, dict)
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    identifiers = {part for part in re.split(r"[^0-9a-zA-Z]+", url) if len(part) >= 6}
+    named = [
+        offer for offer in candidates
+        if identifiers & {
+            part for part in re.split(
+                r"[^0-9a-zA-Z]+", _declared_text(offer.get("url"), 400)
+            ) if len(part) >= 6
+        }
+        or _declared_text(offer.get("sku"), 64) in identifiers
+    ]
+    return named[0] if len(named) == 1 else {}
+
+
+def _visible_amounts(text: str) -> set[str]:
+    """Deferred import, not laziness: `rules` imports THIS module, so the money
+    vocabulary cannot be reached from here at import time. It lives there
+    because it is the price rule's vocabulary; it is used here because the
+    agreement check asks the same question of the page."""
+    from . import rules
+
+    return set(rules.money_figures(text))
+
+
+def page_facts(blocks: list[str], visible: str, url: str) -> str:
+    """The page's own declaration as a few typed lines, or "" when it has none."""
+    products = [
+        node for node in _ld_nodes(blocks)
+        if "Product" in str(node.get("@type", ""))
+    ]
+    if not products:
+        return ""
+    node = products[0]
+    offer = _offer_for(node, url)
+    currency = _declared_text(offer.get("priceCurrency"), 8).upper()
+    lines: list[str] = []
+    if name := _declared_text(node.get("name")):
+        lines.append(f"name: {name}")
+    if price := _declared_amount(offer.get("price")):
+        from . import rules
+
+        shown = rules._normalise_amount(price) in _visible_amounts(visible)
+        note = "" if shown else "   (NOT among the prices shown on the page — say so)"
+        lines.append(f"price: {price} {currency}".rstrip() + note)
+    else:
+        low = _declared_amount(offer.get("lowPrice"))
+        high = _declared_amount(offer.get("highPrice"))
+        if low or high:
+            # What a multi-seller page declares. Reporting either end as "the
+            # price" is the marketplace mistake this block exists not to make.
+            lines.append(
+                f"several sellers, from {low or '?'} to {high or '?'} "
+                f"{currency}".rstrip()
+            )
+    availability = _declared_text(
+        offer.get("availability"), 80
+    ).removeprefix(_SCHEMA_PREFIX)
+    if availability in _AVAILABILITY_WORDS:
+        lines.append(f"availability: {availability}")
+    if not lines:
+        return ""
+    body = "\n".join(f"  {line}" for line in lines)[:FACTS_MAX_CHARS]
+    return (
+        "[what this page DECLARES about itself, in the summary it publishes for "
+        "search engines — the site's own claim, not a reading of the page]\n"
+        f"{body}\n"
+    )
 
 
 # --- tile strips -----------------------------------------------------------
@@ -584,8 +762,9 @@ def _remember_title(url: str, title: str) -> None:
     PAGE_TITLES[url] = title
 
 
-def _browser_read(url: str) -> tuple[tuple[str, list[str]] | None, str]:
-    """(text, images) as a REAL browser renders the page, or None if it could
+def _browser_read(url: str) -> tuple[tuple[str, list[str], list[str]] | None, str]:
+    """(text, images, declared) as a REAL browser renders the page, or None
+    if it could
     not be used. The escalation for the two pages a fetch cannot read at all:
     JavaScript-only (the fetch gets an empty shell) and login-walled (the fetch
     is a logged-out client).
@@ -631,7 +810,7 @@ def _browser_read(url: str) -> tuple[tuple[str, list[str]] | None, str]:
     _remember_title(url, page.title)
     if host:
         BROWSER_HOSTS.add(host)
-    return (text, page.images), ""
+    return (text, page.images, page.declared), ""
 
 
 def _worth_rendering(exc: Exception) -> bool:
@@ -706,7 +885,11 @@ def read_url(url: str, topic: str | None = None) -> str:
         return f"ERROR: could not fetch {url}: {exc}"
 
     images: list[str] = []
+    declared: list[str] = []
     if content_type in ("text/html", "application/xhtml+xml"):
+        # Read off the RAW html, before extraction: the declaration lives in a
+        # <script>, which the text extractor skips by design.
+        declared = declared_data(text)
         text, title, images = _extract(text, base_url=url)
         _remember_title(url, title)
     elif content_type == "application/pdf":
@@ -741,13 +924,14 @@ def read_url(url: str, topic: str | None = None) -> str:
             return f"ERROR: {url} — {WALLED}"
         return f"ERROR: {url} returned no readable text{_blocked_note(url)}"
 
-    return _present(url, text, images, topic=topic)
+    return _present(url, text, images, declared, topic=topic)
 
 
 def _present(
     url: str,
     text: str,
     images: list[str],
+    declared: list[str] | None = None,
     *,
     topic: str | None = None,
     via_browser: bool = False,
@@ -755,21 +939,30 @@ def _present(
     """The read, as the model receives it. Shared by the fetch and the browser
     so a rendered page is filtered, truncated and image-noted identically."""
     source = f"{url} — rendered in the browser" if via_browser else url
+    facts = page_facts(declared or [], text, url)
     text = compact_tiles(text)
     if topic:
+        # The declaration rides along on a topic read too. A topic read is the
+        # one aimed at a specific fact, and dropping the page's own statement
+        # of that fact from the narrowest read would be exactly backwards.
         matched = _filter_topic(text, topic)
         if matched:
             return UNTRUSTED_NOTE + truncate(
-                f"[{source} — lines matching {topic!r}]\n{matched}",
+                f"[{source} — lines matching {topic!r}]\n{facts}{matched}",
                 head=DOCS_MAX_CHARS, tail=0
             ) + image_note(images)
         return UNTRUSTED_NOTE + truncate(
-            f"[{source}] NO LINES MATCH {topic!r}; start of page instead:\n{text}",
+            f"[{source}] NO LINES MATCH {topic!r}; start of page instead:\n"
+            f"{facts}{text}",
             head=DOCS_MAX_CHARS,
             tail=0,
         ) + image_note(images)
 
-    result = f"[{source}]\n{text}"
+    # The declaration goes ABOVE the body and inside the budget: it is a few
+    # typed lines, and it is the one part of the read that cannot be recovered
+    # by reading further down. It stays below the untrusted banner because it
+    # is page content like any other.
+    result = f"[{source}]\n{facts}{text}"
     # AFTER truncation, deliberately: the image URLs are the point of the read
     # for a "show me" task, and burying them in the body would let the 200k
     # cap cut exactly the thing that stops the guessing loop. A shop's LINKS

@@ -141,6 +141,14 @@ The general lesson is the one that keeps recurring here: **a fallback message is
 
 No amount of fetching fixes that, so the reading contract in `SYSTEM_PROMPT_TEMPLATE` now states it directly: a result marked *rendered in the browser* WAS read and must be used; some pages failing does not make a site unreadable; and it must not write that a site blocks automated reading in a turn where it read a page from that site. Telling the owner a source failed when it succeeded is worse than the original failure, because it throws away the answer too. `TestTheReadingContract` pins each clause, because each one was written against a specific thing that happened and a tidy-up of the prompt would bring it straight back.
 
+## The half of the page written for machines
+
+`Page.declared` carries the page's schema.org JSON-LD, raw. It lives in a `<script>`, so `inner_text` cannot see it — and that blindness was structural: the reader takes what a *person* sees, so the only thing left to infer a price from was **where it sat on the page**, which is how a sponsored tile's figure ended up in an answer as the product's price.
+
+Measured live on the offer in the session that filed it: two blocks, a page description and a product one, the second declaring an offer at price 63.19 PLN with availability OutOfStock. That is the correct price — the one the model needed eight reads to find — plus the fact that the offer was **dead**, which it never found at all.
+
+The cap is in the JS, not in Python: a page can declare a 500 KB `@graph`, and the size is known at the point of reading it, before any of it is carried across the thread boundary. What the blocks MEAN — which offer belongs to this page, an aggregate range versus a price, agreement with what is rendered — is decided in `web.py` and documented in `docs/agent-core.md`; this module only hands over what the page said. `TestLinksInTheText`.
+
 ## A page without its links is not the page, when the page is a shop
 
 `read_url` rendered a listing to plain text, and `page.inner_text('body')` throws every `href` away. Fine for an article. On a shop it discards the answer: the model could see that an offer costs 34,99 zł and had **no way to say where it was**.

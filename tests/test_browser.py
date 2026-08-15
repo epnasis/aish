@@ -536,7 +536,7 @@ class TestLinksSurviveTheRender:
     session (session-20260814-131203), against a system prompt that forbids
     exactly that. Measured on that listing: 72 cards, 0 URLs recovered."""
 
-    def _read(self, monkeypatch, *, body, links=(), main=""):
+    def _read(self, monkeypatch, *, body, links=(), main="", declared=()):
         class FakePage:
             url = "https://allegro.pl/listing?string=x"
 
@@ -557,6 +557,8 @@ class TestLinksSurviveTheRender:
                     return main
                 if js is browser._LINKS_JS:
                     return links
+                if js is browser._LD_JSON:
+                    return declared
                 return []
 
             async def close(self):
@@ -632,6 +634,23 @@ class TestLinksSurviveTheRender:
         page = self._read(monkeypatch, body=page_sized("an article"), links=[])
         assert page.links == []
         assert "→" not in web_module.merge_links(page.text, page.links)
+
+    def test_the_page_hands_back_what_it_DECLARES_about_itself(self, monkeypatch):
+        """schema.org lives in a <script>, so `inner_text` cannot see it and
+        never could — the reader takes what a PERSON sees and this is the half
+        written for indexers. That blindness is why a price could only be
+        inferred from position, which is how an advert's figure reached an
+        answer. Measured live on the real offer: price 63.19, OutOfStock."""
+        declared = ['{"@type": "Product", "offers": {"price": "63.19"}}']
+        page = self._read(monkeypatch, body=page_sized("oferta"), declared=declared)
+        assert page.declared == declared
+
+    def test_an_enormous_declaration_is_refused_at_the_source(self, monkeypatch):
+        """A page can declare a 500 KB @graph. The cap is in the JS, where the
+        size is known and before any of it is carried anywhere."""
+        assert "max" in browser._LD_JSON and "length <= max" in browser._LD_JSON
+        page = self._read(monkeypatch, body=page_sized("oferta"), declared=[])
+        assert page.declared == []
 
     def test_an_unusable_evaluate_never_breaks_the_read(self, monkeypatch):
         """Link extraction is an upgrade to a read, never a dependency of one:
