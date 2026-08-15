@@ -603,6 +603,9 @@ function enterSession(name, { source = "hello", title, stash = false } = {}) {
   // A switch must never let the outgoing chat's fingerprint "noop" the incoming
   // replay; an unchanged name must never lose the one the prefetch just painted.
   if (name !== currentSession) { viewFp = ""; viewDirty = true; }
+  // A backfill in flight belongs to the chat being LEFT ([BACKFILL]): its
+  // reading position must not be applied to the one arriving.
+  if (name !== currentSession) { backfillFromBottom = -1; endBackfill(); }
   currentSession = name;
   // Only the mirror paints a truncated copy, and only an unstashable view may
   // come from one — so provenance is a property of the SOURCE, not a flag each
@@ -654,7 +657,7 @@ function resumeSession(name) {
     const pre = freshPrefetch(name);
     if (pre) {
       enterSession(name, { source: "prefetch", title: knownTitle(name) });
-      onReplay({ events: pre.events, truncated: pre.truncated });
+      onReplay({ events: pre.events, truncated: pre.truncated, total: pre.total });
       return;
     }
     // Nothing warm in memory — only the two most recent chats are ever pre-warmed,
@@ -1427,7 +1430,14 @@ function handle(event) {
       // toast: transient feedback about an action, like every other refused
       // action in this app.
       if (event.code === "no_such_session") { onSessionGone(event.name || ""); break; }
-      if (event.code) { showToast(event.text); break; }
+      if (event.code) {
+        // A refusal ends whatever it refused; the backfill control must not be
+        // left saying "loading" when the server has already said no ([BACKFILL]).
+        backfillFromBottom = -1;
+        endBackfill();
+        showToast(event.text);
+        break;
+      }
       // [ERROR-KIND-END]
       closeAnswer();
       finishTrace(true); // #48: a mid-turn error must close the live trace, not leave it stuck "Working…"
@@ -1823,6 +1833,117 @@ function restoreScrollPos() {
 }
 // [SCROLLPOS-END]
 
+// [BACKFILL-START]
+// Reading further back than the first paint reaches (#228).
+//
+// The replay is bounded — a long chat is megabytes and a replay is one frame —
+// and for a long time that bound was the whole story: above it sat "… earlier
+// events trimmed …" and there was no way past. A 1314-event chat opened at its
+// 815th event, and its first two thirds, six answers and three photos, were not
+// reachable from the app at all.
+//
+// So the marker became a CONTROL. It asks the server for a wider window of the
+// same log and the ordinary replay path repaints from it — no second rendering
+// path, no prepend into a live DOM, nothing that can disagree with what a normal
+// replay would have drawn. The price is re-rendering what is already on screen,
+// paid once, on a deliberate tap.
+//
+// Holding the reader's place across that repaint is the only subtlety, and it is
+// deliberately NOT [SCROLLPOS]'s anchor: that anchor is a child INDEX, and every
+// index shifts when a thousand events are inserted above. Distance from the
+// BOTTOM is the quantity that doesn't move when content is added to the top, so
+// that is what is measured and put back.
+// The row is a read that makes a CLAIM ("loading…", disabled), so it goes
+// through `act` rather than a bare `send` — the ledger's whole point is that a
+// claim about the server must be undoable when the server never answers, and a
+// zombie socket would otherwise leave the control saying "loading" forever.
+const HISTORY_PAGE = 1000;
+
+let viewWindow = 0;      // events the view on screen was painted from
+let viewTotal = 0;       // events the chat holds, per the server
+let viewHasMore = true;  // …and whether the server would hand over any more
+let backfillFromBottom = -1; // ≥0 while a backfill repaint is in flight
+let backfillRow = null;      // the control mid-request, for putting it back
+
+function noteWindow(event) {
+  const events = event.events || [];
+  viewWindow = events.length;
+  viewTotal = Math.max(event.total || 0, events.length);
+  // Whether asking again would get you more. Absent on an old server (and on a
+  // mirror paint) means "assume yes" — the pre-ceiling behaviour.
+  viewHasMore = event.more !== false;
+}
+
+// Put the control back the way it was: the request is over, however it ended.
+// Called by the ack ledger when nothing came back, by the refusal path, and by
+// every replay — including the one that answers the request, whose rebuild
+// throws the row away anyway.
+function endBackfill() {
+  if (backfillRow) {
+    backfillRow.disabled = false;
+    backfillRow.textContent = earlierLabel();
+    backfillRow = null;
+  }
+}
+
+function requestBackfill(row) {
+  if (offlineViewing) { showToast("connect to load earlier messages"); return; }
+  if (backfillRow) return; // one in flight is enough
+  backfillRow = row;
+  row.textContent = "loading earlier messages…";
+  row.disabled = true;
+  const from = messagesEl.scrollHeight - messagesEl.scrollTop;
+  const ok = act(
+    { type: "history_more", window: viewWindow + HISTORY_PAGE },
+    { label: "loading earlier messages", lost: endBackfill },
+  );
+  if (!ok) { endBackfill(); return; }
+  backfillFromBottom = from;
+}
+
+// True when a backfill repaint was in flight and the reader's place was put
+// back. Consumed once — a later ordinary replay must fall through to the
+// remembered reading position like any other.
+function restoreBackfillPos() {
+  if (backfillFromBottom < 0) return false;
+  const from = backfillFromBottom;
+  backfillFromBottom = -1;
+  messagesEl.scrollTop = messagesEl.scrollHeight - from;
+  updateScrollButton();
+  return true;
+}
+
+function earlierLabel() {
+  const missing = Math.max(viewTotal - viewWindow, 0);
+  return missing
+    ? `↑ load earlier messages (${missing} more)`
+    : "↑ load earlier messages";
+}
+
+// The top-of-transcript control. It says what is missing rather than that
+// something is — "earlier events trimmed" told the reader their chat had been
+// damaged, when in fact the log was whole and only the frame was small.
+//
+// Past the server's per-request ceiling there is genuinely nothing more to
+// fetch, and a control that would do nothing is the same dead end in a friendlier
+// font — so it becomes a plain line saying where the rest is.
+function earlierRow() {
+  if (!viewHasMore) {
+    const note = document.createElement("div");
+    note.className = "msg notice";
+    note.textContent =
+      "↑ this chat is too long to open in full here — the rest is in its log";
+    return note;
+  }
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "msg notice earlier-row";
+  row.textContent = earlierLabel();
+  row.onclick = () => requestBackfill(row);
+  return row;
+}
+// [BACKFILL-END]
+
 function stashCurrentView() {
   const stashable = viewStashable({
     name: currentSession,
@@ -1897,6 +2018,7 @@ function onPeek(event) {
   prefetched.set(event.name, {
     events: event.events || [],
     truncated: !!event.truncated,
+    total: event.total || 0, // so a warm-painted view's [BACKFILL] row can count
     ts: Date.now(),
   });
   while (prefetched.size > PREFETCH_KEEP) {
@@ -1992,6 +2114,7 @@ function onReplay(event) {
   // ([PENDING-SEND]) — BEFORE the landing is decided, because a `noop` landing
   // returns early and is just as authoritative about what arrived.
   adjudicateHeldSends(currentSession, event.events);
+  endBackfill(); // any replay ends an outstanding "load earlier" ([BACKFILL])
   // A repaint the server flags `seen` follows an edit made from a viewer's own
   // hands (removing an exchange, #202) and reaches only clients VIEWING this
   // chat, so what they are being handed is its current state. Without it the
@@ -2030,11 +2153,15 @@ function onReplay(event) {
   clearQueueChips(); // the whole queue area belongs to the chat being replaced; _show re-sends the new one's
   const cached = viewCache.get(currentSession);
   viewCache.delete(currentSession); // detached nodes are single-use either way
+  // How much of the chat this replay is, and how much there is ([BACKFILL]).
+  // Recorded for BOTH landings: a reused stash was built from a replay of the
+  // same size, and its "load earlier" row reads these when it is tapped.
+  noteWindow(event);
   if (landing === "reuse") {
     messagesEl.replaceChildren(...cached.nodes);
     renderedAnswers = cached.renderedAnswers;
   } else {
-    if (event.truncated) addMsg("notice", "… earlier events trimmed …");
+    if (event.truncated) messagesEl.appendChild(earlierRow());
     replaying = true; // replayed history must not re-fire notifications
     try {
       for (const item of event.events) handle(item);
@@ -2055,9 +2182,9 @@ function onReplay(event) {
   // keeps its claim: that no-op is the point of the warm peek.)
   viewFp = offlineViewing ? "" : fp;
   viewDirty = false;
-  // The reading position if this is the same transcript you left (a reload, a
-  // switch and back); the tail if anything changed while you were away.
-  if (!restoreScrollPos()) scrollToEnd(true);
+  // The reading position, in priority order: the place a backfill must not move
+  // you from, then the place you left this chat at, then the tail.
+  if (!restoreBackfillPos() && !restoreScrollPos()) scrollToEnd(true);
   snapViewportSoon(); // session switches race keyboard dismissal with this rebuild (#8)
   setTimeout(() => reportViewport("after-replay"), 1200);
   // Every replay marks a fresh view (new chat, resume, reconnect) — on
@@ -2265,19 +2392,24 @@ function stableBoundary(text) {
 //
 // `interim` closes a NARRATION delivery (#212) instead of an answer. The tool
 // row is the deliverable's row — copy, export, fork, regenerate, 👍/👎 — and
-// every one of those names the turn's ANSWER: the fork ordinal counts final
-// answers (`truncate_at_answer` defines them the same way), regenerate re-runs
-// the prompt, and a rating must bind to the turn rather than fragment across
-// however many times the model spoke on the way there. So an interim bubble
-// gets no row at all; it is marked instead, and reads as progress.
-function closeAnswer(interim) {
+// every one of those names the turn's ANSWER: the fork names the record the
+// turn promoted to its answer ([FORK-ANCHOR]), regenerate re-runs the prompt,
+// and a rating must bind to the turn rather than fragment across however many
+// times the model spoke on the way there. So an interim bubble gets no row at
+// all; it is marked instead, and reads as progress.
+// `answerId` names the record this bubble came from (#229) and is known only to
+// `done` — a bubble closed by anything else (the next user turn, a rebuild) is
+// one whose turn never reported an id, and its Fork falls back to the ordinal.
+function closeAnswer(interim, answerId) {
   // A finished answer (streaming ends, or something else interrupts the
   // block) gets its copy/read-aloud row; mid-stream re-renders would clobber it.
   if (answerEl) {
     renderAnswerNow(); // flush any tokens still waiting on the next frame
     highlightFences(answerEl); // the answer is settled now — safe to tokenize fences once
     if (interim) answerEl.classList.add("interim");
-    else if (answerText.trim()) attachAnswerTools(answerEl, answerText, lastUserPrompt);
+    else if (answerText.trim()) {
+      attachAnswerTools(answerEl, answerText, lastUserPrompt, answerId);
+    }
   }
   answerEl = null;
   answerText = "";
@@ -2320,9 +2452,9 @@ function onDone(event) {
     const el = addMsg("answer md", "");
     el.replaceChildren(renderMarkdown(event.result));
     highlightFences(el);
-    attachAnswerTools(el, event.result, lastUserPrompt);
+    attachAnswerTools(el, event.result, lastUserPrompt, event.answer);
   }
-  closeAnswer();
+  closeAnswer(false, event.answer);
   answerAbandoned = false; // this turn is over; the next one streams normally
   maybeSpeakReply(); // voice-in → voice-out: auto-read a reply to a dictated message (#97)
   finishTrace();
@@ -3803,15 +3935,17 @@ function addUserMsg(text, at, turn) {
   }
   const tools = document.createElement("div");
   tools.className = "user-tools";
-  // Copy and reuse hand back what was TYPED. Read from the split, not from the
-  // rendered node — the node now carries chip text that was never in the prompt.
+  // Copy hands back what was TYPED; reuse hands back the whole message, files
+  // included ([REUSE-PROMPT]). Both read from the split, not from the rendered
+  // node — the node now carries chip text that was never in the prompt.
   const getText = () => body;
+  const getNotes = () => notes;
   // A turn id exists only for a turn the server has logged, so a live turn gets
   // its remove control on the next replay rather than a control that would name
   // nothing.
   currentTurnId = turn || "";
   if (turn) tools.append(redactChip(turn));
-  tools.append(reuseChip(getText), copyChip(getText, "copy prompt"));
+  tools.append(reuseChip(getText, getNotes), copyChip(getText, "copy prompt"));
   stampTurn(tools, at);
   messagesEl.appendChild(tools);
   return el;
@@ -5986,9 +6120,23 @@ function forkIcon() {
   });
 }
 
+// [FORK-ANCHOR-START]
 // Fork from a specific answer: branch the conversation up to and including this
-// answer into a new session (issue #47, from-here). `ordinal` is 1-based.
-function forkChip(ordinal) {
+// answer into a new session (issue #47, from-here).
+//
+// `answerId` NAMES the answer — the id of the assistant record behind it, minted
+// where it was written and carried on `done` both live and on replay. `ordinal`
+// is what this used to send, and it was wrong in the ordinary case: the browser
+// counts answers as it renders them, the server counts them again over the whole
+// log, and those two agree only if the browser rendered ALL of them. It had not
+// — the replay is capped (#228) — so a chat whose view started at its fifteenth
+// answer forked from its sixth, silently, fourteen answers of context and three
+// photos short of what the owner tapped (#229).
+//
+// The ordinal stays only as the fallback for a transcript with no ids at all: a
+// pre-trace log replayed as a flat `history` blob, where nothing identifies a
+// record because the records were never written to be identified.
+function forkChip(ordinal, answerId) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "copy-chip";
@@ -5997,10 +6145,12 @@ function forkChip(ordinal) {
   btn.appendChild(forkIcon());
   btn.onclick = () => {
     if (clientBusy) { showToast("can't fork while working"); return; }
-    act({ type: "fork", after: ordinal }, { label: "the fork" });
+    const at = answerId ? { answer: answerId } : { after: ordinal };
+    act({ type: "fork", ...at }, { label: "the fork" });
   };
   return btn;
 }
+// [FORK-ANCHOR-END]
 
 // [ANSWER-TOP-START]
 // Jump to the START of this answer. A long reply runs off the top of the screen
@@ -6090,7 +6240,7 @@ let renderedAnswers = 0;
 // populated by both the live and the history-replay paths.
 let currentTurnId = "";
 
-function attachAnswerTools(el, source, prompt) {
+function attachAnswerTools(el, source, prompt, answerId) {
   const ordinal = ++renderedAnswers;
   const tools = document.createElement("div");
   tools.className = "msg-tools";
@@ -6099,7 +6249,7 @@ function attachAnswerTools(el, source, prompt) {
   // bracket the row instead of sitting next to Retry.
   if (TTS_OK) tools.appendChild(buildTtsBox(el));
   tools.appendChild(exportChip(() => source));
-  tools.appendChild(forkChip(ordinal));
+  tools.appendChild(forkChip(ordinal, answerId));
   // Regenerate: only the newest answer keeps it, so retire the previous one.
   // Gate on the per-answer `prompt` (populated by both the live and the
   // history-replay paths) — the global lastUserPrompt is unset during a cold
@@ -7364,30 +7514,56 @@ async function pasteIntoComposer() {
 // Put a previous prompt's text back in the composer. An EXPLICIT action (the
 // reuse chip on the message), not a click on the whole bubble — the big bubble
 // surface made stray taps clobber a draft (#155). Only fills an empty composer.
-function refillComposer(text) {
-  text = stripAttachmentNotes(text);
-  if (!text) return;
-  if (input.value.trim() && input.value.trim() !== text) {
+// [REUSE-PROMPT-START]
+// Reuse restores the MESSAGE, not just its words (#230).
+//
+// Copy and reuse both read the body of the split ([ATTACHMENT-NOTES]) because
+// the note lines are addressed to the model, not the reader. For copy that is
+// the end of it — a clipboard holds text. For reuse it was a silent hole: the
+// composer has an attachment zone, and a prompt that had been sent WITH a photo
+// came back without one. Pressing send then asked the model to look at something
+// that was not there, and nothing on screen said so; the composer looked exactly
+// like a correct one.
+//
+// The files are still on disk under the uploads dir and the notes carry the name
+// and the full path, so restoring them is only wiring. A file since deleted is
+// not filtered out here — the composer chip fetches it through the same
+// token-gated /file endpoint the transcript's thumbnails use, and falls back to
+// naming it, which stays true.
+function refillComposer(text, notes) {
+  const body = stripAttachmentNotes(text);
+  const files = (notes || []).filter((note) => note && note.path);
+  if (!body && !files.length) return;
+  if (input.value.trim() && input.value.trim() !== body) {
     showToast("clear the input first to reuse this prompt");
     return;
   }
-  input.value = text;
-  input.setSelectionRange(text.length, text.length);
+  input.value = body;
+  input.setSelectionRange(body.length, body.length);
+  let added = false;
+  for (const note of files) {
+    if (attachments.some((a) => a.path === note.path)) continue;
+    attachments.push({ name: note.name, path: note.path });
+    added = true;
+  }
+  if (added) renderAttachments();
   resizeInput();
   input.focus();
 }
 
-// A chip (beside copy) that refills the composer with the message text.
-function reuseChip(getText) {
+// A chip (beside copy) that refills the composer with the message — its text
+// and whatever was attached to it.
+function reuseChip(getText, getNotes) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "copy-chip"; // same styling, sits next to the copy chip
   btn.title = "reuse this prompt";
   btn.setAttribute("aria-label", "reuse this prompt");
   btn.append(pencilIcon());
-  btn.onclick = () => refillComposer(getText());
+  btn.onclick = () => refillComposer(getText(), getNotes ? getNotes() : []);
   return btn;
 }
+// [REUSE-PROMPT-END]
 
 function recallHistory(key) {
   if (key === "ArrowUp") {

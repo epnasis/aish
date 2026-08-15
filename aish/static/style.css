@@ -551,6 +551,22 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .msg.notice { color: var(--dim); font-size: 13.8px; text-align: center; }
 
+/* The way back into a long chat ([BACKFILL]). It sits where "… earlier events
+   trimmed …" used to and reads as a control rather than an epitaph: full-width
+   so the tap target is the whole line, blue so it is obviously live. */
+.msg.notice.earlier-row {
+  display: block;
+  width: 100%;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: var(--blue);
+  cursor: pointer;
+  padding: 10px 0;
+  -webkit-tap-highlight-color: transparent;
+}
+.msg.notice.earlier-row:disabled { color: var(--dim); cursor: default; }
+
 /* A message drawn on SEND, before the server has confirmed it ([PENDING-SEND]).
    Held back rather than styled as a different thing: it IS your message, and it
    is about to become the real bubble in place — a distinct colour would make the

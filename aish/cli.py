@@ -239,12 +239,23 @@ class LogRef:
         # it is sent — the case the feature exists for. Unset elsewhere (the CLI,
         # a resumed history), where SessionLog.message mints its own.
         self.pending_turn: str | None = None
+        # The id of the last assistant record written (#229) — what the web
+        # server puts on the `done` event so a live answer's Fork button names
+        # the same record a replayed one does. Reset at the start of every task,
+        # so a turn that produced no answer (cancelled, failed) can never hand
+        # the fork the PREVIOUS turn's id.
+        self.last_answer_id: str = ""
 
     def message(self, message: dict) -> None:
         if message.get("role") == "user" and self.pending_turn:
             message = {**message, "turn": self.pending_turn}
             self.pending_turn = None
-        self.log.message(message)
+        written = self.log.message(message)
+        # Non-empty is the same test `reconstruct_events` applies to decide what
+        # counts as something the model SAID — so the id the live path publishes
+        # names exactly the record a cold replay would promote to the answer.
+        if message.get("role") == "assistant" and (message.get("content") or "").strip():
+            self.last_answer_id = written
 
     def command(self, command: str, decision: str) -> None:
         self.log.command(command, decision)

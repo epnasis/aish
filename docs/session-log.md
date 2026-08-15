@@ -26,7 +26,7 @@ Written by `_write_line`, each stamped with an ISO timestamp — since the first
 
 | kind | what it carries |
 |---|---|
-| `message` | a conversation turn; user records also carry a minted `turn` id |
+| `message` | a conversation turn; user AND assistant records carry a minted `turn` id |
 | `cmd_start` / `cmd_end` | terminal-block framing, from the `command_log` sink |
 | `trace` | the structured activity-trace steps — the same dicts the web renders |
 | `title` | the chat's name, stamped `auto` or not |
@@ -48,6 +48,8 @@ Written by `_write_line`, each stamped with an ISO timestamp — since the first
 ## Replay (L1)
 
 The command's output rides on the `tool` step rather than being duplicated in the framing records, and is spliced back in as one `stream` with `run_command`'s trailing `[exit code: N]` marker stripped — matching the live body, where the code arrives via `command_end`. A legacy tool step with no framing gets a synthesized block. One `done` per task carries the final assistant text; it returns `None` for pre-trace logs, and the server falls back to a flat `history` blob then.
+
+**A `done` NAMES its answer (#229).** It carries `answer` — the id of the assistant record `flush` promoted, via `_turn_id`, so a record written before ids existed falls back to its line index and every chat already on disk is covered. That id is the fork point (`truncate_at_answer_id`), and it replaced an ordinal: `truncate_at_answer` counted final answers over the log while the browser counted rendered ones over its view, and on a trimmed view (#228) the two numbers named different records — a fork tapped on the twentieth answer branched from the sixth. Worth knowing that the two counts could disagree even on a WHOLE view: a turn that spoke, called a tool and then stopped is one answer here and none to `truncate_at_answer`, which requires that no `tool` message follow. `truncate_at_answer` is kept for pages cached before ids shipped; `_cut_after_answer` is the shared tail — everything up to the NEXT user message, so a trace record logged after the answer is not orphaned into a dangling step. `TestAnswerIdentity`.
 
 **Deliveries (#212).** A turn says several things on its way to the answer, and replay used to keep only the last: `answer = content` on every assistant record, last one winning. Live those interim messages had streamed — so a chat the owner watched say three things came back cold as a chat that said one, which is L1 failing quietly on the most ordinary turn there is. Each non-empty assistant text now replays as the `token` + `delivery` pair a live client receives, **in position** among the steps it interleaved with; `flush` lifts the last one out to become `done`. A turn that only ever said one thing produces neither event and is byte-identical to before, which is most old logs. Nothing new is written to disk — interim assistant entries have always been logged; only the reader changed.
 

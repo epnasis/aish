@@ -299,9 +299,22 @@ async def serve_config_font(request):
     )
 
 # Replay buffer bounds: enough for a long task's worth of events; beyond it
-# the oldest are dropped and the client shows a truncation marker.
+# the oldest are dropped from the FIRST paint and the client offers to fetch
+# them (`history_more`, #228). The cap is a payload bound, never a limit on what
+# the chat holds: the log is the whole chat, and everything above the window is
+# one tap away. Before that tap existed, an 1314-event chat opened at its 815th
+# event and the first two thirds of it — six of its answers, three of its photos
+# — could not be reached from the UI at all.
 TRANSCRIPT_MAX = 600
 TRANSCRIPT_KEEP = 500
+# How much further back each "load earlier" adds, and the most one request may
+# carry — a replay is a single JSON frame, and past some size the frame itself
+# is the problem. Far above any chat seen so far (the longest was 1314 events),
+# and every reply says whether asking again would get you more, so reaching the
+# ceiling is something the reader is TOLD rather than a control that stops
+# working. A silent ceiling is the same defect #228 was.
+TRANSCRIPT_PAGE = 1000
+TRANSCRIPT_WINDOW_MAX = 20000
 
 # Open sessions kept in memory at once; beyond this the longest-idle one is
 # closed (its file persists — reopening it later just reloads the history).
@@ -709,6 +722,11 @@ class Bridge:
         self.pending: dict[str, queue.Queue] = {}
         self.transcript: list[dict] = []
         self.truncated = False
+        # Everything this chat has recorded, not just what fits the window
+        # (#228). The client needs it to say how much more there is and to know
+        # when a backfill has reached the beginning; `transcript` alone can only
+        # report its own size.
+        self.total = 0
         # Fired on the worker thread just before an approval blocks, with the
         # request event + whether anyone is viewing (#163): the hook decides
         # whether to push a notification (only for an unattended triggered
@@ -742,6 +760,7 @@ class Bridge:
                 last["text"] += event["text"]
             else:
                 self.transcript.append(dict(event))
+                self.total += 1
                 if len(self.transcript) > TRANSCRIPT_MAX:
                     del self.transcript[: len(self.transcript) - TRANSCRIPT_KEEP]
                     self.truncated = True
@@ -2143,7 +2162,12 @@ class WebServer:
         snapshot = list(bridge.transcript)
         await client.ws.send_json(self._hello(session, pager, cmd_history))
         await client.ws.send_json(
-            {"type": "replay", "events": snapshot, "truncated": bridge.truncated}
+            {
+                "type": "replay",
+                "events": snapshot,
+                "truncated": bridge.truncated,
+                "total": bridge.total,
+            }
         )
         # The queue area is backend-authoritative and reconstructed on attach
         # rather than replayed from the transcript — this is what makes it
@@ -2240,12 +2264,23 @@ class WebServer:
         elif kind == "peek":
             # VIEW message: warming a recent chat claims nothing.
             await self._peek(client, str(message.get("path", "")))
+        elif kind == "history_more":
+            # VIEW message: reading further back claims nothing (#228).
+            window = message.get("window")
+            await self._history_more(
+                client, window if isinstance(window, int) else TRANSCRIPT_PAGE
+            )
         elif kind == "new":
             await self._new_session(client)
         elif kind == "fork":
             after = message.get("after")
+            answer = message.get("answer")
             self._claim(client)
-            await self._fork_session(client, after if isinstance(after, int) else None)
+            await self._fork_session(
+                client,
+                after if isinstance(after, int) else None,
+                answer if isinstance(answer, str) and answer else None,
+            )
         elif kind == "delete_session":
             await self._delete_session(client, str(message.get("name", "")))
         elif kind == "rename_session":
@@ -2646,6 +2681,7 @@ class WebServer:
         bridge = session.bridge
         bridge.truncated = len(events) > TRANSCRIPT_MAX
         bridge.transcript[:] = events[-TRANSCRIPT_KEEP:] if bridge.truncated else events
+        bridge.total = len(events)
         # Through the bridge, so every viewer of this chat repaints — a removal
         # made on the phone must not leave the laptop showing the text.
         #
@@ -2659,6 +2695,7 @@ class WebServer:
                 "type": "replay",
                 "events": list(bridge.transcript),
                 "truncated": bridge.truncated,
+                "total": bridge.total,
                 "seen": True,
             },
             record=False,
@@ -2818,6 +2855,10 @@ class WebServer:
         # every other device until something happened to ask.
         self._touch(session)
         session.logref.task_start(text)
+        # This turn has said nothing yet (#229). Cleared here rather than after
+        # the answer, so a turn that is cancelled or fails publishes NO fork
+        # anchor instead of the previous turn's.
+        session.logref.last_answer_id = ""
         failure = ""  # set by either except arm; recorded on the way out
         try:
             if resume and isinstance(session.agent, Agent):
@@ -2849,6 +2890,13 @@ class WebServer:
             if suffix is not None:
                 session.bridge.emit({"type": "token", "text": suffix})
             done: dict[str, Any] = {"type": "done", "result": result}
+            # WHICH answer this is (#229) — the id of the assistant record just
+            # written, so a Fork tapped on a live answer names the same record a
+            # replayed one does. Recorded with the event, so the hot transcript a
+            # reconnect replays carries it too; a cold replay re-derives the same
+            # id from the log itself.
+            if session.logref.last_answer_id:
+                done["answer"] = session.logref.last_answer_id
             # Riding on `done` (not a new event type) makes replay correctness
             # automatic and keeps the answer↔sources association explicit.
             sources = getattr(session.agent, "task_sources", [])
@@ -3401,6 +3449,59 @@ class WebServer:
                 "name": name,
                 "events": list(session.bridge.transcript),
                 "truncated": session.bridge.truncated,
+                "total": session.bridge.total,
+            }
+        )
+
+    async def _history_more(self, client: Client, window: int) -> None:
+        """VIEW message: repaint the chat on screen from a BIGGER window of its
+        own log (#228).
+
+        The first paint is bounded (`TRANSCRIPT_KEEP`) because a replay is one
+        frame on a socket and a long chat is megabytes. That bound was the whole
+        answer, though, so the rest of the chat was not merely unpainted — it was
+        unreachable, with a "… earlier events trimmed …" line where the reading
+        used to be. This is the way back: ask for more, get the same replay event
+        with more of the log in it, and the client re-renders holding the
+        reader's place.
+
+        The window is re-read FROM THE LOG rather than from `bridge.transcript`,
+        which is the bounded hot copy and by definition does not have the part
+        being asked for. That is also why this is refused while the chat is
+        working: a running turn's tokens are not on disk yet, so a rebuild from
+        the log would paint the answer being written straight out of the view.
+        Nothing is recorded and no claim is taken — reading further back is not
+        an act on the conversation."""
+        session = client.viewing
+        if session is None:
+            return
+        if session.busy:
+            await self._refuse(
+                client, "can't load earlier messages while this chat is working — "
+                    "the answer being written isn't on disk yet; try when it finishes",
+            )
+            return
+        path = session.logref.log.path
+        events = await asyncio.to_thread(SessionLog.reconstruct_events, path)
+        if events is None:  # pre-trace log: one flat blob, nothing to page
+            history = await asyncio.to_thread(SessionLog.load_messages, path)
+            events = [{"type": "history", "messages": history}]
+        window = max(TRANSCRIPT_KEEP, min(window, TRANSCRIPT_WINDOW_MAX))
+        snapshot = events[-window:]
+        await client.ws.send_json(
+            {
+                "type": "replay",
+                "events": snapshot,
+                "truncated": len(snapshot) < len(events),
+                "total": len(events),
+                # Whether asking AGAIN would get you more. At the ceiling this
+                # is false while `truncated` is still true, and the client says
+                # so instead of offering a control that would do nothing.
+                "more": len(snapshot) < len(events) and window < TRANSCRIPT_WINDOW_MAX,
+                # Reading further back in a chat you are looking at is not new
+                # activity, and must not come back as an unread dot (as for the
+                # redaction repaint, this reaches only a client that is viewing).
+                "seen": True,
             }
         )
 
@@ -3422,7 +3523,9 @@ class WebServer:
         self.add_session(session, default=False)
         await self._show(client, session)
 
-    async def _fork_session(self, client: Client, after: int | None = None) -> None:
+    async def _fork_session(
+        self, client: Client, after: int | None = None, answer: str | None = None
+    ) -> None:
         """Branch the current conversation into a NEW session seeded with the
         history so far, leaving the original untouched — the "explore a tangent
         without polluting the main thread" move (issue #47).
@@ -3433,9 +3536,12 @@ class WebServer:
         identically to any resumed session — hot or later cold. The source's
         Agent and log are only read, never mutated.
 
-        `after` (1-based) forks "from here": the copy is truncated to include up
-        to and including that answer, so a per-answer Fork button branches from
-        an earlier point. `None` forks the whole conversation.
+        `answer` forks "from here" and is how the per-answer Fork button asks:
+        the copy is truncated to include up to and including the assistant
+        record with that id (#229). `after` is the same thing addressed by
+        1-based ordinal — kept for a cached page built before ids existed, and
+        WRONG whenever that page's transcript was trimmed (#228), which is the
+        defect ids replaced it for. Neither given forks the whole conversation.
 
         Refused while the source is busy (a mid-task snapshot would capture a
         half-finished turn) and when there's nothing to fork yet."""
@@ -3462,14 +3568,16 @@ class WebServer:
         def copy_log() -> Path | None:
             # message + model + trace + terminal-framing records all carry over,
             # so the fork reconstructs the same transcript (and --resume history)
-            # as the original up to the fork point. `after` truncates to that
-            # answer; None copies the whole log.
+            # as the original up to the fork point — attachments included, since
+            # a user record's `images`/`documents` ride along with it.
             src_text = src_path.read_text(encoding="utf-8")
-            forked_text = (
-                src_text if after is None
-                else SessionLog.truncate_at_answer(src_text, after)
-            )
-            if forked_text is None:  # `after` out of range
+            if answer is not None:
+                forked_text = SessionLog.truncate_at_answer_id(src_text, answer)
+            elif after is not None:
+                forked_text = SessionLog.truncate_at_answer(src_text, after)
+            else:
+                forked_text = src_text
+            if forked_text is None:  # names no answer in this log
                 return None
             new_path = SessionLog.new(self.state_dir).path
             new_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3478,7 +3586,9 @@ class WebServer:
 
         new_path = await asyncio.to_thread(copy_log)
         if new_path is None:
-            await self._refuse(client, "can't fork from there — that answer is out of range")
+            await self._refuse(
+                client, "can't fork from there — that answer is no longer in this chat"
+            )
             return
         session = await self._open_by_name(new_path.name)
         if session is None:  # pragma: no cover — we just wrote a valid session file
