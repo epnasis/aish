@@ -106,6 +106,8 @@ from .session import (
     SessionLog,
     attachment_guidance,
     attachment_names,
+    files_named,
+    real_attachments,
     strip_attachment_notes,
     synthetic_kind,
     title_drifted,
@@ -528,7 +530,7 @@ def _prefix_sig(events: list[dict], count: int) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
-def _turn_event(text: str) -> dict[str, Any]:
+def _turn_event(text: str, files: list[dict] | None = None) -> dict[str, Any]:
     """The `user` transcript event for text the HUMAN typed — never classified as
     synthetic, because what you type is yours (#171). See `_user_event` for what
     `ts` is for; it is the one thing both flavours share."""
@@ -544,9 +546,18 @@ def _turn_event(text: str) -> dict[str, Any]:
     # has to exist on a LIVE turn, not only after the chat is replayed cold;
     # Session.open_turn hands this id to the log so both halves answer to the
     # same name.
-    return {
+    event: dict[str, Any] = {
         "type": "user", "text": text, "ts": now, "at": now, "turn": uuid.uuid4().hex[:12],
     }
+    # WHICH `![[…]]` in this message name a real file (#233). Only the server
+    # can answer that — the browser cannot see the disk — and without the answer
+    # it had to guess, drawing an attachment chip over the words of anyone who
+    # wrote ABOUT the notation. The rule is "a reference that resolves to
+    # nothing stays as plain text", and this is what makes it true on screen
+    # rather than only in the log.
+    if files is not None:
+        event["files"] = files
+    return event
 
 
 def _user_event(text: str, synthetic: str = "") -> dict[str, Any]:
@@ -2489,6 +2500,47 @@ class WebServer:
             return True
         return False
 
+    def _real_files(self, text: str) -> list[dict] | None:
+        """The files this message names that exist, for the browser (#233), or
+        None when the message contains no `![[…]]` at all and the question does
+        not arise.
+
+        The distinction is load-bearing: an EMPTY list means "I looked and none
+        of these name a file", which is what makes prose about the notation
+        render as prose. A missing field means "nobody looked" — an older server
+        or a mirror written before this — and there the client must fall back to
+        taking references at face value. Collapsing the two is what left a chip
+        drawn over the words of anyone writing about wiki-links."""
+        return files_named(text, self.uploads_dir)
+
+    def _message_attachments(self, text: str, picked: list[str]) -> list[str]:
+        """Every file this message carries, in the order the model should hear
+        about them: the ones NAMED IN THE TEXT first, then anything the composer
+        attached that the text never mentioned.
+
+        Two ways of saying "this file comes with the message" used to exist with
+        complementary halves (#233). Typing `@` completed a path into your
+        sentence — position, no delivery. Tapping ＋ delivered the file — but
+        always as a trailing line, so which file went with which clause was
+        something the model had to guess. An embed does both: it sits where you
+        put it AND the file goes.
+
+        Naming a file the composer also attached is ONE attachment, not two —
+        that is the ordinary case now, since ＋ writes the embed into the text.
+        A name that matches nothing on disk is not an attachment at all; it is
+        the owner writing about the notation, and it stays their words."""
+        def real(path: str) -> str:
+            # By identity, not spelling: /tmp/x and /private/tmp/x are one file,
+            # and the two sides reach it by different routes.
+            try:
+                return str(Path(path).resolve())
+            except OSError:
+                return path
+
+        named = [path for _, path in real_attachments(text, self.uploads_dir)]
+        already = {real(p) for p in named}
+        return named + [p for p in picked if real(p) not in already]
+
     def _classify_attachments(
         self, agent, paths: list[str]
     ) -> tuple[list[str], list[str], list[str]]:
@@ -2799,9 +2851,14 @@ class WebServer:
         # Attachments classify at start time so a model switch while queued
         # is honored (vision support is per-backend).
         images, documents, guidance = self._classify_attachments(
-            session.agent, attachments
+            session.agent, self._message_attachments(text, attachments)
         )
         if guidance:
+            # The embeds stay WHERE THEY WERE WRITTEN — that position is the
+            # point of them (#233) — and the guidance rides underneath, one line
+            # per file. Two facts in two places: the text says which file
+            # belongs to which clause, the guidance says what may be done with
+            # each. Neither can say the other's half.
             text = f"{text}\n\n" + "\n".join(guidance) if text else "\n".join(guidance)
         # Two forms from here on (#231). `text` goes to the MODEL and carries the
         # guidance. What the browser paints — and, via run_task, what the log
@@ -2811,7 +2868,7 @@ class WebServer:
         # surface facing the owner had to undo it.
         shown = to_record_form(text, self.uploads_dir)
         session.busy = True
-        session.open_turn(_turn_event(shown))
+        session.open_turn(_turn_event(shown, self._real_files(shown)))
         if text.startswith("/"):
             # /learn and /feedback are the task-expanding slash commands on web:
             # the transcript shows what the user typed, the model gets the

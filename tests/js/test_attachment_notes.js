@@ -58,7 +58,7 @@ vm.runInContext(
   surface(extract(appSource(), "// [ATTACHMENT-NOTES-START]", "// [ATTACHMENT-NOTES-END]")),
   sandbox,
 );
-const { splitAttachmentNotes, stripAttachmentNotes, recordSource } = sandbox;
+const { splitAttachmentNotes, stripAttachmentNotes, recordSource, messageParts, messageBody } = sandbox;
 
 // The whole point: the note leaves the bubble, and what it described survives
 // as structure rather than as prose.
@@ -158,7 +158,7 @@ const { splitAttachmentNotes, stripAttachmentNotes, recordSource } = sandbox;
   const split = splitAttachmentNotes("what is this?\n\n![[cat.png]]");
   ok("the bubble shows what was typed", split.body === "what is this?");
   same(split.attachments, [
-    { kind: "image", name: "cat.png", path: `${UPLOADS}/cat.png` },
+    { kind: "image", name: "cat.png", path: `${UPLOADS}/cat.png`, ref: "cat.png" },
   ]);
   ok("…and the bare name resolved to something /file can serve", true);
 }
@@ -168,7 +168,7 @@ const { splitAttachmentNotes, stripAttachmentNotes, recordSource } = sandbox;
 {
   const split = splitAttachmentNotes("look\n\n![[/tmp/archive.zip]]");
   same(split.attachments, [
-    { kind: "file", name: "archive.zip", path: "/tmp/archive.zip" },
+    { kind: "file", name: "archive.zip", path: "/tmp/archive.zip", ref: "/tmp/archive.zip" },
   ]);
 }
 
@@ -192,14 +192,103 @@ const { splitAttachmentNotes, stripAttachmentNotes, recordSource } = sandbox;
 // conservatism the prose forms have. Being wrong here deletes what they wrote.
 {
   const typed = [
-    "in Obsidian you write ![[note]] inline",   // mid-line, not a whole line
-    "![[]]",                                    // empty target
-    "[[cat.png]]",                              // a link, not an embed
+    "![[]]",           // empty target
+    "[[cat.png]]",     // a link, not an embed
+    "![[a\nb]]",       // a newline can never be inside one
   ];
   for (const line of typed) {
     const split = splitAttachmentNotes(line);
-    ok(`kept as text: ${line}`, split.body === line.trim() && !split.attachments.length);
+    ok(`kept as text: ${JSON.stringify(line)}`,
+      split.body === line.trim() && !split.attachments.length);
   }
+}
+
+// ---- a file INSIDE a sentence (#233) ---------------------------------------
+
+// The parse is a SEQUENCE, so the bubble can draw the file where it was
+// written. That position is the only thing saying which file goes with which
+// clause, and the model gets it no other way.
+{
+  const parts = messageParts("the error in ![[shot.png]], fix like ![[patch.txt]]");
+  same(parts.map((p) => (p.type === "text" ? ["text", p.text] : ["file", p.note.name, p.block])), [
+    ["text", "the error in "],
+    ["file", "shot.png", false],
+    ["text", ", fix like "],
+    ["file", "patch.txt", false],
+  ]);
+  ok("both files are found inside the sentence", true);
+}
+
+// A file ALONE on its line is the block case — an attached photo — and is what
+// an ordinary ＋ attachment still looks like.
+{
+  const parts = messageParts("look at this\n\n![[cat.png]]");
+  ok("the trailing file is a block", parts[1].type === "file" && parts[1].block === true);
+}
+
+// Two derivations, and the difference is the audience. `messageBody` preserves
+// the message (reuse re-sends it); `stripAttachmentNotes` is for reading (a
+// title must not show notation, and must not have its subject cut out either).
+{
+  const text = "the error in ![[shot.png]] is here";
+  ok("the body keeps the reference verbatim", messageBody(text) === text);
+  ok("the display reads it as the file name",
+    stripAttachmentNotes(text) === "the error in shot.png is here");
+}
+
+// Prose about wiki-links keeps its words. WHICH references are real is the
+// server's answer — it can see the disk and the browser cannot — and it rides
+// on the event as `files`. Given that list, a reference naming nothing stays
+// exactly the words it is.
+{
+  const typed = "in Obsidian you write ![[note]] inline";
+  const real = [];                       // the server found no such file
+  ok("the words survive intact", messageBody(typed, real) === typed);
+  same(messageParts(typed, real), [{ type: "text", text: typed }]);
+  ok("…and nothing is drawn as an attachment", true);
+}
+
+// A whole LINE naming nothing is words too — dropping it would silently lose a
+// line from a copied message.
+{
+  const typed = "![[note]]";
+  ok("a lone unreal reference is kept", messageBody(typed, []) === typed);
+}
+
+// With a list present, the real ones are still files and the rest are not.
+{
+  const text = "compare ![[a.png]] with ![[nope]]";
+  const real = [{ name: "a.png", path: `${UPLOADS}/a.png` }];
+  const parts = messageParts(text, real);
+  same(parts.map((p) => (p.type === "text" ? ["text", p.text] : ["file", p.note.name])), [
+    ["text", "compare "],
+    ["file", "a.png"],
+    ["text", " with ![[nope]]"],
+  ]);
+}
+
+// No list at all — an older server, or a mirror written before this — takes
+// every reference at face value. That is the behaviour from before, never worse.
+{
+  const parts = messageParts("see ![[a.png]]", undefined);
+  ok("a missing list changes nothing", parts.some((p) => p.type === "file"));
+}
+
+// Copying a message whose photo sits inside a sentence must not hand it back
+// twice — once in place and once appended.
+{
+  const text = "the error in ![[shot.png]] is here";
+  const split = splitAttachmentNotes(text);
+  ok("an inline file is not appended again",
+    recordSource(messageBody(text), split.attachments) === text);
+}
+
+// …while a file that had no place in the text still gets appended.
+{
+  const text = "look at this";
+  const notes = [{ kind: "image", name: "cat.png", path: `${UPLOADS}/cat.png` }];
+  ok("a trailing file is appended",
+    recordSource(text, notes) === "look at this\n\n![[cat.png]]");
 }
 
 // ---- copy writes the SOURCE back out ---------------------------------------

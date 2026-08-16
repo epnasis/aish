@@ -3829,13 +3829,17 @@ class TestAttachmentNoteFormat:
         assert once == "look\n![[cat.png]]"
         assert session_module.to_record_form(once, uploads) == once
 
-    def test_text_that_merely_resembles_an_embed_is_left_alone(self):
-        """The owner writing about wiki-links must not have their words eaten —
-        the same conservatism the prose forms have always had."""
+    def test_text_that_merely_resembles_an_embed_attaches_nothing(self, tmp_path):
+        """The owner writing about wiki-links must not have their words eaten.
+        Whole-line matching used to guarantee that; since an embed can sit
+        inside a sentence (#233) the guarantee is EXISTENCE instead — `note` is
+        not a file, so it is not an attachment and the words are untouched."""
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
         typed = "in Obsidian you write ![[note]] inline to embed something"
-        assert session_module.to_record_form(typed, Path("/u")) == typed
-        assert session_module.strip_attachment_notes(typed) == typed
-        assert session_module.attachment_names(typed) == []
+        assert session_module.real_attachments(typed, uploads) == []
+        assert session_module.to_record_form(typed, uploads) == typed
+        assert session_module.message_body(typed) == typed
 
 
 class TestFileEndpoint:
