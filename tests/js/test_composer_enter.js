@@ -8,6 +8,10 @@
 // where Enter RUNNING the command is the point (#100/#156), on both the desktop
 // keydown path and iOS's beforeinput/insertLineBreak path.
 //
+// Also under test: Cmd/Ctrl+Enter sends from the prose composer. It does not
+// weaken #170 — a modifier chord is unreachable by autocorrect, IME and
+// dictation, which are what made bare Enter unsafe there.
+//
 // Run manually: node tests/js/test_composer_enter.js
 "use strict";
 
@@ -48,7 +52,7 @@ assert(typeof sandbox.onInputBeforeInput === "function", "failed to extract onIn
 
 function keyEvent(key, extra = {}) {
   return Object.assign(
-    { key, shiftKey: false, prevented: false, stopped: false },
+    { key, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, prevented: false, stopped: false },
     { preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; } },
     extra,
   );
@@ -137,6 +141,53 @@ check("prose: Enter on a partial slash still accepts the suggestion", () => {
   sandbox.onInputKeydown(e);
   assert.deepStrictEqual(calls, ["acceptSuggestion:/help"]);
   assert.strictEqual(e.prevented, true);
+});
+
+check("prose: Cmd+Enter sends — a chord no autocorrect/IME/dictation can emit", () => {
+  reset({ value: "hello" });
+  const e = keyEvent("Enter", { metaKey: true });
+  sandbox.onInputKeydown(e);
+  assert.deepStrictEqual(calls, ["submitInput"]);
+  assert.strictEqual(e.prevented, true, "no stray newline alongside the send");
+});
+
+check("prose: Ctrl+Enter sends too (the non-Mac desktop chord)", () => {
+  reset({ value: "hello" });
+  const e = keyEvent("Enter", { ctrlKey: true });
+  sandbox.onInputKeydown(e);
+  assert.deepStrictEqual(calls, ["submitInput"]);
+  assert.strictEqual(e.prevented, true);
+});
+
+check("prose: Cmd+Shift+Enter still sends", () => {
+  reset({ value: "hello" });
+  const e = keyEvent("Enter", { metaKey: true, shiftKey: true });
+  sandbox.onInputKeydown(e);
+  assert.deepStrictEqual(calls, ["submitInput"]);
+});
+
+check("prose: Cmd+Enter sends past an open suggestion popup, never completes", () => {
+  reset({ value: "/he", popup: { items: [["/help", "about aish web"]], index: 0, kind: "slash" } });
+  const e = keyEvent("Enter", { metaKey: true });
+  sandbox.onInputKeydown(e);
+  assert.deepStrictEqual(calls, ["submitInput"], "the chord means send, not complete");
+  assert.strictEqual(e.prevented, true);
+});
+
+check("terminal mode: Cmd+Enter runs the command like bare Enter", () => {
+  reset({ cmdMode: true, value: "ls -la" });
+  const e = keyEvent("Enter", { metaKey: true });
+  sandbox.onInputKeydown(e);
+  assert.deepStrictEqual(calls, ["submitInput"]);
+  assert.strictEqual(e.prevented, true);
+});
+
+check("prose: Alt+Enter is NOT the send chord (it is a newline everywhere)", () => {
+  reset({ value: "hello" });
+  const e = keyEvent("Enter", { altKey: true });
+  sandbox.onInputKeydown(e);
+  assert.deepStrictEqual(calls, []);
+  assert.strictEqual(e.prevented, false);
 });
 
 check("terminal mode: Enter on an exactly-typed command runs it", () => {
