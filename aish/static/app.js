@@ -3885,15 +3885,14 @@ function addRedactedMsg() {
 // policy for where a local path may be loaded from. A PDF's chip opens too,
 // onto its pages ([PREVIEW]) — an attachment you cannot look at is a file you
 // have to take aish's word about.
-// One file, drawn. `block` is a file that was alone on its line — an attached
-// photo, full width; otherwise it sits inside a sentence and is drawn at text
-// size so the line still reads as a line (#233). `group` is what a swipe moves
-// between: the pictures in THIS message, the set in front of the owner.
-function attachmentNode(note, group, block) {
+// One file, drawn — always the same way, wherever in the message it was written
+// (#234). `group` is what a swipe moves between: the pictures in THIS message,
+// the set in front of the owner.
+function attachmentNode(note, group) {
   const src = note.kind === "image" ? imageSrc(note.path) : null;
   if (!src) return attachmentChip(note);
   const thumb = document.createElement("img");
-  thumb.className = block ? "msg-attachment-thumb" : "msg-attachment-inline";
+  thumb.className = "msg-attachment-thumb";
   thumb.src = src;
   thumb.alt = note.name;
   thumb.title = note.name;
@@ -3915,7 +3914,7 @@ function attachmentStrip(notes) {
   const strip = document.createElement("div");
   strip.className = "msg-attachments";
   const group = messagePictures(notes);
-  for (const note of notes) strip.appendChild(attachmentNode(note, group, true));
+  for (const note of notes) strip.appendChild(attachmentNode(note, group));
   return strip;
 }
 
@@ -3945,40 +3944,35 @@ function attachmentChip(note) {
 }
 
 function addUserMsg(text, at, turn, real) {
-  // The bubble is the RENDERED message: what was typed, with each attachment
-  // shown as the thing it is rather than as the line that names it — the same
-  // relationship Obsidian has between `![[cat.png]]` in the source and the
-  // picture in the note.
+  // The bubble is the RENDERED message: the words, and each file shown as the
+  // thing it is rather than as the line that names it — the same relationship
+  // Obsidian has between `![[cat.png]]` in the source and the picture in the
+  // note. A file between two clauses pushes them apart and sits full size in
+  // the gap; every file draws the same way, wherever it was written (#234).
   const parts = messageParts(text, real);
   const notes = parts.filter((p) => p.type === "file").map((p) => p.note);
-  const inline = parts.some((p) => p.type === "file" && !p.block);
-  // A message with no file INSIDE its text is the overwhelmingly common one, and
-  // it keeps exactly the DOM it always had: one text node, then a strip. Only a
-  // message that genuinely interleaves pays for the split (#233).
-  const el = addMsg("user", inline ? "" : messageBody(text, real));
+  // A message with no files at all is the overwhelmingly common one and keeps
+  // exactly the DOM it always had: one text node, nothing else.
+  const el = addMsg("user", notes.length ? "" : messageBody(text, real));
   const group = messagePictures(notes);
   let strip = null;
-  const openStrip = () => {
-    if (!strip) {
-      strip = document.createElement("div");
-      strip.className = "msg-attachments";
-      el.appendChild(strip);
-    }
-    return strip;
-  };
   for (const part of parts) {
     if (part.type === "text") {
-      if (!inline) continue; // already the bubble's own text
       strip = null;
-      const run = document.createElement("span");
+      const run = document.createElement("div");
       run.className = "msg-run";
       run.textContent = part.text;
       el.appendChild(run);
-    } else if (part.block) {
-      openStrip().appendChild(attachmentNode(part.note, group, true));
     } else {
-      strip = null;
-      el.appendChild(attachmentNode(part.note, group, false));
+      // Files written together stay together — two photos sent at once sit
+      // side by side, as they always have. A run of text between them ends the
+      // group, which is what puts a picture in the gap it was written into.
+      if (!strip) {
+        strip = document.createElement("div");
+        strip.className = "msg-attachments";
+        el.appendChild(strip);
+      }
+      strip.appendChild(attachmentNode(part.note, group));
     }
   }
   if (notes.length && !stripAttachmentNotes(text, real)) el.classList.add("attachments-only");
@@ -7480,13 +7474,30 @@ function resolveAttachment(ref) {
 
 // {body, attachments} — what the owner wrote, and what they attached.
 // A message as an ordered SEQUENCE (#233): runs of text and files, in the order
-// they were written. `{type:"text"}` or `{type:"file", note, block}`, where
-// `block` marks a file that was alone on its line — an attached photo — as
-// against one sitting inside a sentence.
+// they were written. `{type:"text"}` or `{type:"file", note, ownLine}`.
 //
-// The sequence is what lets the bubble draw a file where the owner put it,
-// which is the same relationship Obsidian has between `![[cat.png]]` in the
-// source and the picture in the note.
+// EVERY FILE DRAWS THE SAME — full size, on its own line, breaking the text
+// around it. A picture between two clauses pushes them apart:
+//
+//     This image ![[shot.png]] you should check.
+//
+//        This image
+//        ┌────────────┐
+//        │            │
+//        └────────────┘
+//        you should check.
+//
+// That is what Obsidian does with an embed, and it is the version that works:
+// the position is kept AND the picture is legible. Sizing a picture to the
+// height of the words beside it kept the position and lost the picture, which
+// is backwards — a screenshot two lines tall is unreadable, and being read is
+// the only reason it was sent (#234).
+//
+// `ownLine` is not about how it DRAWS, then; it is about how it was WRITTEN,
+// and only the source derivations care. `messageBody` — what reuse re-sends and
+// copy hands back — keeps a reference that was written inside a sentence
+// exactly where it was, and drops one that was alone on its line because
+// `recordSource` re-appends those. That is what makes copy round-trip.
 // `real` — the `files` the server put on the event — is the list of references
 // in THIS message that name a file that exists. Only the server can know that,
 // and without it the browser guessed: someone writing ABOUT the notation got an
@@ -7508,7 +7519,7 @@ function messageParts(text, real) {
     const whole = parseAttachmentNote(line);
     if (whole && isFile(whole)) {      // the file IS the line
       flushText();
-      parts.push({ type: "file", note: whole, block: true });
+      parts.push({ type: "file", note: whole, ownLine: true });
       continue;
     }
     if (!whole && line.includes("![[")) {
@@ -7526,7 +7537,7 @@ function messageParts(text, real) {
         const before = line.slice(last, match.index);
         if (before) buffer.push(before);
         flushText();
-        parts.push({ type: "file", note, block: false });
+        parts.push({ type: "file", note, ownLine: false });
         last = match.index + match[0].length;
       }
       if (found) {
@@ -7538,32 +7549,6 @@ function messageParts(text, real) {
     buffer.push(line);
   }
   flushText();
-  // A picture a message merely ENDS with is an ATTACHMENT, whatever line it is
-  // on, and gets the full thumbnail an attachment has always had — not a
-  // picture shrunk to the height of the words beside it. A screenshot rendered
-  // two lines tall is unreadable, which is the one thing a screenshot is sent
-  // to be (#234).
-  //
-  // Unless the message is WRITTEN in the inline style — some file in it has
-  // words after it. Then a trailing one belongs to the same sentence and is
-  // sized like its siblings: "compare ![[a.png]] with ![[b.png]]" is one
-  // thought, and showing the second picture at four times the first would read
-  // as two different kinds of thing.
-  //
-  // Deciding this HERE rather than only in the composer is what makes it true
-  // of messages ALREADY SENT. The composer stopped producing them, but a log is
-  // never rewritten, so every message sent while it did would otherwise have
-  // stayed a smudge for good.
-  const written_inline = parts.some(
-    (part, i) =>
-      part.type === "file" && !part.block &&
-      parts.slice(i + 1).some((later) => later.type === "text"),
-  );
-  if (!written_inline) {
-    for (let i = parts.length - 1; i >= 0 && parts[i].type === "file"; i -= 1) {
-      parts[i].block = true;
-    }
-  }
   return parts;
 }
 
@@ -7582,7 +7567,7 @@ function splitAttachmentNotes(text, real) {
 // matches `message_body` in session.py.
 function messageBody(text, real) {
   return messageParts(text, real)
-    .filter((part) => part.type === "text" || !part.block)
+    .filter((part) => part.type === "text" || !part.ownLine)
     .map((part) => (part.type === "text" ? part.text : `![[${part.note.ref}]]`))
     .join("")
     .trim();

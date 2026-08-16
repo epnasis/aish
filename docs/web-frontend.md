@@ -256,9 +256,21 @@ Drop is bound on the **window**, not the composer — a one-line box is a poor t
 ### `[ATTACHMENT-NOTES]` — a message has two forms, and files sit where they were written
 **L1.** A message that carried a file says so with an **embed**: `![[cat.png]]`, wiki-link style as in Obsidian. Name alone for a file aish keeps (the uploads folder is the only place one can be, and names there are made unique on write, so the name IS the address); full path for a file living anywhere else, where nothing could derive it back. That is the **record form**: what the log stores, what the bubble renders, what copy writes back out, what reuse re-attaches from.
 
-**An embed means the same thing wherever it sits (#233).** Inside a sentence it is the file in that position: *"the error in `![[shot.png]]`, the fix like `![[patch.txt]]`"*. Otherwise it is the file as a block — the full thumbnail an attachment has always had.
+**An embed means the same thing wherever it sits (#233), and every one of them draws the same (#234).** A file between two clauses pushes them apart and sits full size in the gap:
 
-**"Inside a sentence" means there are WORDS AFTER IT (#234), not "on a line of its own."** A message that merely ends with a picture is a message with an attachment, however it is punctuated, and a screenshot drawn two lines tall is unreadable — which is the one thing a screenshot is sent to be. The exception is a message WRITTEN in the inline style, where some file does have words after it: then a trailing one belongs to the same sentence and is sized like its siblings, because *"compare `![[a.png]]` with `![[b.png]]`"* is one thought and showing the second at four times the first reads as two different kinds of thing. Deciding this in the RENDERER and not only in the composer is what repairs messages already sent — the composer stopped producing them, but a log is never rewritten. A notation that only worked at the end of a message was a footer, not a representation, and the position is information the model gets no other way. `messageParts` returns the message as an ordered SEQUENCE of text runs and files, which is what lets `addUserMsg` draw each file where the owner put it.
+```
+This image ![[shot.png]] you should check.
+
+    This image
+    ┌──────────────┐
+    │              │
+    └──────────────┘
+    you should check.
+```
+
+That is what Obsidian does with an embed, and it is the version that works: the position is kept AND the picture is legible. The first attempt sized a picture to the height of the words beside it — position kept, picture lost, which is backwards. A screenshot two lines tall is unreadable, and being read is the only reason a screenshot is sent. It also removed a heuristic that had to decide when a trailing picture "belonged to the sentence"; with one size there is nothing to decide.
+
+`messageParts` returns the message as an ordered SEQUENCE of text runs and files, which is what lets `addUserMsg` draw each file where the owner put it. Files written together stay together — two photos sent at once are one side-by-side group, as they always were; a run of words between them ends the group. `ownLine` on a file part is about how it was WRITTEN, not how it draws, and only the source derivations read it: a reference written inside a sentence stays in the words, one written alone is re-appended by `recordSource`, and that is what makes copy round-trip.
 
 The whole-line rule this replaced existed so a `![[…]]` the owner TYPED was not eaten — and it mattered because a matched line was REMOVED from the bubble and redrawn as a thumbnail, so a false match deleted their words. A reference rendered in place cannot do that. The rule is now about the outcome instead of the syntax: **a reference that resolves to nothing stays as plain text.** Only the server can decide that — the browser cannot see the disk — so the `user` event carries `files`, the references in THAT message which name a real file, and `reconstruct_events` re-derives the same list so a chat reopened cold draws the identical bubble.
 

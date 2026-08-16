@@ -210,58 +210,60 @@ const { splitAttachmentNotes, stripAttachmentNotes, recordSource, messageParts, 
 // clause, and the model gets it no other way.
 {
   const parts = messageParts("the error in ![[shot.png]], fix like ![[patch.txt]]");
-  same(parts.map((p) => (p.type === "text" ? ["text", p.text] : ["file", p.note.name, p.block])), [
+  same(parts.map((p) => (p.type === "text" ? ["text", p.text] : ["file", p.note.name])), [
     ["text", "the error in "],
-    ["file", "shot.png", false],
+    ["file", "shot.png"],
     ["text", ", fix like "],
-    ["file", "patch.txt", false],
+    ["file", "patch.txt"],
   ]);
   ok("both files are found inside the sentence", true);
 }
 
-// A file ALONE on its line is the block case — an attached photo — and is what
-// an ordinary ＋ attachment still looks like.
+// A file between two clauses splits the text around it, and the picture goes in
+// the gap at full size (#234): "This image / [picture] / you should check."
 {
-  const parts = messageParts("look at this\n\n![[cat.png]]");
-  ok("the trailing file is a block", parts[1].type === "file" && parts[1].block === true);
+  const parts = messageParts("This image ![[shot.png]] you should check.");
+  same(parts.map((p) => p.type), ["text", "file", "text"]);
+  ok("the words before it stay before it", parts[0].text === "This image ");
+  ok("…and the words after it stay after", parts[2].text === " you should check.");
 }
 
-// ---- what "inside a sentence" actually means (#234) -------------------------
+// `ownLine` is about how it was WRITTEN, not how it draws — every file draws
+// the same. Only the source derivations read it: a reference written inside a
+// sentence stays in the words, one written alone is re-appended by copy.
+{
+  const written = messageParts("look at this\n\n![[cat.png]]");
+  ok("a file alone on its line is marked as such",
+    written[1].type === "file" && written[1].ownLine === true);
+  const inside = messageParts("look at ![[cat.png]] here");
+  ok("…and one inside a sentence is not",
+    inside[1].type === "file" && inside[1].ownLine === false);
+}
 
-// THE REPORTED BUBBLE. A message that merely ENDS with a picture is one with an
-// attachment, whatever line the reference sits on — and it gets the thumbnail
-// an attachment has always had. This one was sent BEFORE the composer stopped
-// writing references onto the same line, and a log is never rewritten, so
-// deciding it here is the only thing that repairs it.
+// ---- every file is a picture you can actually see (#234) --------------------
+
+// THE REPORTED BUBBLE, stored the way the old composer wrote it — words and the
+// reference on one line. A log is never rewritten, so this shape exists for
+// good; the parse has to put the words first and the file after, and the file
+// is a file like any other.
 {
   const parts = messageParts("The url from notification does not open ![[shot.png]]");
-  const file = parts.find((p) => p.type === "file");
-  ok("a picture at the end of a message is an attachment", file.block === true);
-  ok("…and the words before it are still there",
-    parts[0].type === "text" && /does not open/.test(parts[0].text));
+  same(parts.map((p) => p.type), ["text", "file"]);
+  ok("the words before it are still there", /does not open/.test(parts[0].text));
 }
 
-// Words AFTER it are what make it inline: that is a file in a sentence.
+// Files written TOGETHER stay together — two photos sent at once are one group,
+// side by side, as they always were. Nothing separates them, so nothing splits.
 {
-  const parts = messageParts("the error in ![[shot.png]] is here");
-  ok("a picture with words after it stays inline",
-    parts.find((p) => p.type === "file").block === false);
+  const parts = messageParts("![[a.png]]\n![[b.png]]");
+  same(parts.map((p) => p.type), ["file", "file"]);
 }
 
-// A message WRITTEN in the inline style keeps its trailing picture inline too.
-// "compare A with B" is one thought; showing B at four times the size of A
-// would read as two different kinds of thing.
+// Words BETWEEN two files separate them, which is the whole point of writing
+// them apart.
 {
-  const files = messageParts("compare ![[a.png]] with ![[b.png]]")
-    .filter((p) => p.type === "file");
-  ok("siblings in one sentence are sized alike",
-    files.length === 2 && files.every((f) => f.block === false));
-}
-
-// Two attached photos and no sentence: both are attachments, as always.
-{
-  const files = messageParts("![[a.png]]\n![[b.png]]").filter((p) => p.type === "file");
-  ok("plain attachments stay blocks", files.every((f) => f.block === true));
+  const parts = messageParts("compare ![[a.png]] with ![[b.png]]");
+  same(parts.map((p) => p.type), ["text", "file", "text", "file"]);
 }
 
 // Two derivations, and the difference is the audience. `messageBody` preserves

@@ -1688,29 +1688,13 @@ body.dropping::after {
      needs its own edge to stop it bleeding into the bubble. */
   background: var(--bg-elev2);
 }
-/* A file written INSIDE a sentence (#233). Sized to the LINE rather than to the
-   bubble, so the sentence still reads as a sentence — the picture is a word in
-   it, not a break in it. This is only ever the deliberate case now: a file
-   attached at the END of a message is a block and keeps its full thumbnail,
-   which is how almost every attachment is made (#234).
-
-   Tall enough to be recognisable, though. At one line-height it was a favicon —
-   you could tell a picture was there and nothing more — and being able to see
-   WHICH picture is the whole reason for putting it in the sentence. Tapping
-   opens it full size, exactly as a block thumbnail does. */
-.msg-attachment-inline {
-  height: 2.6em;
-  max-width: 45%;
-  border-radius: 6px;
-  vertical-align: -0.9em;
-  margin: 0 3px;
-  cursor: pointer;
-  background: var(--bg-elev2);
-  object-fit: cover;
-}
-/* Text runs either side of an inline file. The bubble is no longer one text
-   node, so the runs carry the wrapping the bubble used to. */
+/* A run of words between two files (#234). The bubble is no longer one text
+   node when it carries files, so the runs carry the wrapping it used to — and
+   they are blocks, because a picture written between two clauses is meant to
+   push them apart, not to sit in the line. */
 .msg-run { white-space: pre-wrap; }
+.msg-run + .msg-attachments { margin-top: 8px; }
+.msg-attachments + .msg-run { margin-top: 8px; }
 .msg-attachment-chip {
   background: rgba(255, 255, 255, 0.16);
   border-radius: 999px;
