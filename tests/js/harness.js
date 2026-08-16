@@ -444,6 +444,7 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       recentSessions: [],
       cmdHistory: [],
       currentLogPath: "",
+      uploadsDir: "", // where attachments resolve from ([ATTACHMENT-NOTES], #231)
       taskErrored: false,
       consoleOpen: false,
       offlineMode: false,

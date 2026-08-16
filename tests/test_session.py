@@ -3,8 +3,19 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
-from aish.session import SessionLog, title_drifted
+from aish.session import (
+    SessionLog,
+    attachment_embed,
+    attachment_guidance,
+    attachment_names,
+    attachment_refs,
+    resolve_attachment,
+    strip_attachment_notes,
+    title_drifted,
+    to_record_form,
+)
 
 
 def test_roundtrip_messages_and_commands(tmp_path):
@@ -1689,6 +1700,74 @@ class TestAnswerIdentity:
         assert "the second answer" not in SessionLog.truncate_at_answer_id(
             text, rendered[0]["answer"]
         )
+
+
+class TestAttachmentForms:
+    """A message has two forms and they are not the same string (#231).
+
+    The RECORD form is what the log keeps and the owner sees: `![[cat.png]]`.
+    The GUIDANCE form is what a model is handed — a sentence per file saying
+    whether it can look at it or must open it — and depends on which backend is
+    answering, so it is built at hand-over and never stored.
+
+    They used to be one string, written for the model, which meant it was the
+    ONLY record that a message had a photo. So everything facing the owner had
+    to undo it: the bubble hid it, copy stripped it, the title ignored it, reuse
+    re-parsed it — two parsers, one per language, kept in step by tests, all
+    re-deriving from prose a fact the record already held as a list.
+    """
+
+    UPLOADS = "/state/uploads"
+    GUIDANCE = "[image attached: cat.png — you can see it; file at /state/uploads/cat.png]"
+
+    def test_a_held_file_is_stored_by_name_alone(self):
+        uploads = Path(self.UPLOADS)
+        assert attachment_embed("/state/uploads/cat.png", held=True) == "![[cat.png]]"
+        assert to_record_form(f"look\n{self.GUIDANCE}", uploads) == "look\n![[cat.png]]"
+
+    def test_a_file_elsewhere_keeps_its_path(self):
+        # Nothing could derive /tmp back from "shot.png", so the path stays.
+        assert attachment_embed("/tmp/shot.png", held=False) == "![[/tmp/shot.png]]"
+        assert to_record_form(
+            "look\n[attached file: /tmp/shot.png]", Path(self.UPLOADS)
+        ) == "look\n![[/tmp/shot.png]]"
+
+    def test_converting_to_the_record_form_is_idempotent(self):
+        uploads = Path(self.UPLOADS)
+        once = to_record_form(f"look\n{self.GUIDANCE}", uploads)
+        assert to_record_form(once, uploads) == once
+
+    def test_a_bare_name_resolves_against_the_uploads_folder(self):
+        assert resolve_attachment("cat.png", Path(self.UPLOADS)) == "/state/uploads/cat.png"
+        assert resolve_attachment("/tmp/x.png", Path(self.UPLOADS)) == "/tmp/x.png"
+        # No folder known: a name resolves to itself. Wrong as a path, but never
+        # a crash and never a path pointing somewhere unintended.
+        assert resolve_attachment("cat.png", None) == "cat.png"
+
+    def test_both_forms_read_the_same_way(self):
+        record = "look\n![[cat.png]]"
+        legacy = f"look\n{self.GUIDANCE}"
+        assert strip_attachment_notes(record) == strip_attachment_notes(legacy) == "look"
+        assert attachment_names(record) == attachment_names(legacy) == ["cat.png"]
+
+    def test_a_title_can_be_derived_from_an_embed_alone(self, tmp_path):
+        # A photo sent with nothing typed is still about something.
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "![[IMG_4021.jpg]]"})
+        log.close()
+        assert SessionLog.info(log.path).title == "IMG_4021.jpg"
+
+    def test_words_that_look_like_an_embed_are_left_alone(self):
+        typed = "in Obsidian you write ![[note]] inline to embed something"
+        assert to_record_form(typed, Path(self.UPLOADS)) == typed
+        assert strip_attachment_notes(typed) == typed
+        assert attachment_refs(typed) == []
+
+    def test_the_guidance_says_what_the_model_may_do(self):
+        assert "you can see it" in attachment_guidance("c.png", "/u/c.png", "image")
+        assert "you can read it" in attachment_guidance("p.pdf", "/u/p.pdf", "document")
+        # No kind means the bytes did not go: the model must open the file.
+        assert attachment_guidance("x.zip", "/u/x.zip", "") == "[attached file: /u/x.zip]"
 
 
 class TestRedaction:

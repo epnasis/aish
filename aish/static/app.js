@@ -2071,6 +2071,7 @@ function onHello(event) {
   rosterBaseline(event.roster_seq); // and whether we missed anything while away
   if (railIsOpen()) requestSessions($("sessions-search").value || ""); // docked: stay current
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
+  uploadsDir = event.uploads_dir || uploadsDir; // resolves `![[cat.png]]` (#231)
   renderWorkspace(event);
   taskErrored = false; // fresh connected view — clear any stale red
   setBusy(event.busy);
@@ -3925,8 +3926,10 @@ function attachmentChip(note) {
 }
 
 function addUserMsg(text, at, turn) {
-  // The note lines are the model's business, not the reader's: the bubble shows
-  // what was typed, and the attachments show as attachments.
+  // The bubble is the RENDERED message: what was typed, with each attachment
+  // shown as the thing it is rather than as the line that names it — the same
+  // relationship Obsidian has between `![[cat.png]]` in the source and the
+  // picture in the note.
   const { body, attachments: notes } = splitAttachmentNotes(text);
   const el = addMsg("user", body);
   if (notes.length) {
@@ -3935,9 +3938,12 @@ function addUserMsg(text, at, turn) {
   }
   const tools = document.createElement("div");
   tools.className = "user-tools";
-  // Copy hands back what was TYPED; reuse hands back the whole message, files
-  // included ([REUSE-PROMPT]). Both read from the split, not from the rendered
-  // node — the node now carries chip text that was never in the prompt.
+  // Copy hands back the SOURCE — the words plus `![[cat.png]]` — so a message
+  // pasted into notes carries its pictures with it and comes back the same
+  // shape it left. Reuse hands back the same message as a message: words into
+  // the field, files into the strip ([REUSE-PROMPT]). Both read the split
+  // rather than the rendered node, which now carries chip text nobody typed.
+  const getSource = () => recordSource(body, notes);
   const getText = () => body;
   const getNotes = () => notes;
   // A turn id exists only for a turn the server has logged, so a live turn gets
@@ -3945,7 +3951,7 @@ function addUserMsg(text, at, turn) {
   // nothing.
   currentTurnId = turn || "";
   if (turn) tools.append(redactChip(turn));
-  tools.append(reuseChip(getText, getNotes), copyChip(getText, "copy prompt"));
+  tools.append(reuseChip(getText, getNotes), copyChip(getSource, "copy prompt"));
   stampTurn(tools, at);
   messagesEl.appendChild(tools);
   return el;
@@ -7374,7 +7380,25 @@ let historyDraft = "";
 // only turns logged after today and this parser would still be needed for
 // every older one, which is two owners of one fact. So: parse once, here, and
 // let both the live path and the replay path render from the result.
+// What a message SAYS an attachment is, in either form.
+//
+// `![[cat.png]]` is what messages hold now (#231): wiki-link style, as in
+// Obsidian, name only for a file aish keeps and a full path for one that lives
+// elsewhere. `uploadsDir` — sent once in the hello, since only the server knows
+// where its own folder is — is what turns a bare name back into something
+// `/file` will serve.
+//
+// The three bracketed prose forms below are what every message written before
+// this says. They are still read and always will be: a chat log is never
+// rewritten, so the old shape has to keep rendering for as long as the chat
+// exists. They are never produced.
 function parseAttachmentNote(line) {
+  const embed = /^!\[\[([^\]]+)\]\]$/.exec(line.trim());
+  if (embed) {
+    const ref = embed[1];
+    const name = ref.split("/").pop() || ref;
+    return { kind: kindOfFile(name), name, path: resolveAttachment(ref) };
+  }
   const native =
     /^\[(image|document) attached: (.+?) — you can (?:see|read) it; file at (.+)\]$/
       .exec(line.trim());
@@ -7384,6 +7408,24 @@ function parseAttachmentNote(line) {
     return { kind: "file", name: plain[1].split("/").pop() || plain[1], path: plain[1] };
   }
   return null;
+}
+
+// An embed carries no "what kind is this" word, because the kind is not a
+// property of the message — it is what THIS backend could take, decided when the
+// message was sent and true of nothing afterwards. For showing it, the name is
+// enough and is what a file manager uses too.
+function kindOfFile(name) {
+  if (ATTACH_IMAGE_RE.test(name)) return "image";
+  return /\.pdf$/i.test(name) ? "document" : "file";
+}
+
+// A reference with no directory in it names a file aish holds; anything else is
+// already a path. With no uploads folder known yet (the first paint, before the
+// hello lands) a bare name resolves to itself — the thumbnail then fails and
+// falls back to naming the file, which is what a deleted file already does.
+function resolveAttachment(ref) {
+  if (ref.includes("/") || !uploadsDir) return ref;
+  return `${uploadsDir.replace(/\/$/, "")}/${ref}`;
 }
 
 // {body, attachments} — what the owner wrote, and what they attached.
@@ -7400,6 +7442,23 @@ function splitAttachmentNotes(text) {
 
 function stripAttachmentNotes(text) {
   return splitAttachmentNotes(text).body;
+}
+
+// The message back as SOURCE: what was typed, then one embed per file. Written
+// from the parsed attachments rather than by keeping the original lines, so a
+// message stored in the old prose form copies out in today's shape — one format
+// leaves this app, whatever shape it was read in.
+function recordSource(body, notes) {
+  if (!notes || !notes.length) return body;
+  const lines = notes.map((note) => `![[${attachmentRef(note)}]]`);
+  return body ? `${body}\n\n${lines.join("\n")}` : lines.join("\n");
+}
+
+// Name alone for a file aish holds, full path for one that lives elsewhere —
+// the same rule the server stores by, so copying and re-sending round-trips.
+function attachmentRef(note) {
+  const dir = uploadsDir ? uploadsDir.replace(/\/$/, "") : "";
+  return dir && note.path === `${dir}/${note.name}` ? note.name : note.path;
 }
 // [ATTACHMENT-NOTES-END]
 
@@ -11877,6 +11936,11 @@ function toggleWrap() {
 // can select transcript text, and freezing viewport settling while it does.
 // `currentSession` lives with its owner, [SESSION-ENTER].
 let currentLogPath = ""; // absolute JSONL log path for this session, from hello (#146)
+// Where the server keeps the files it was handed, from hello (#231). A stored
+// attachment says `![[cat.png]]` with no path — deliberately, since the name is
+// unique there and an absolute path would be noise that also breaks whenever the
+// state directory moves — so this is what makes the name loadable.
+let uploadsDir = "";
 // The server's own recency list, oldest→newest, delivered on every hello. It
 // used to be the pager's pages; it survives as the cheapest answer to "which
 // chats are worth warming" (see prefetchTargets) and as the title source for a

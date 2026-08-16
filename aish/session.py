@@ -137,35 +137,75 @@ def synthetic_kind(content: str) -> str:
     return "note" if text.startswith(_NOTE_MARKERS) else ""
 
 
-# A turn carrying attachments has a line per file appended to it by the web
-# server ("[image attached: cat.png — you can see it; file at /…]"). Those lines
-# are aish talking to the MODEL, exactly like the notes above, and every place
-# that shows a turn back to the OWNER has to drop them — otherwise a chat opened
-# with a photo is titled with the sentence aish wrote to itself, absolute path
-# and all, and the rail's preview line says the same.
+# ---------------------------------------------------------------------------
+# How a turn says "a file came with this message" (#231).
 #
-# It is a prefix match on the whole line, deliberately: it must never eat a line
-# the human typed that merely resembles one. The frontend parses these same
-# strings ([ATTACHMENT-NOTES] in docs/web-frontend.md) and the format is pinned
-# from both languages by tests/test_server.py::TestAttachmentNoteFormat.
+# THE STORED FORM IS AN EMBED: `![[cat.png]]`, wiki-link style, one per file, on
+# its own line. Name only for a file aish holds (the uploads folder is the one
+# place they go, and names there are made unique on write, so the name IS the
+# address); full path for a file that lives anywhere else, where nothing could
+# derive it back.
+#
+# WHAT THE MODEL IS TOLD IS NOT THIS. It gets a sentence per file — "you can see
+# it", "you can read it", or a bare path meaning "go and open this yourself" —
+# built fresh at the moment the message is handed over, and again whenever a
+# stored conversation is loaded back into a model. That guidance depends on
+# which backend is answering right now, so it is transactional by nature and is
+# never written down. `attachment_guidance` below is the one place it is built.
+#
+# The two used to be the same string, and that was the fault. A sentence written
+# for a model was the ONLY record that a message had a photo, so everything
+# facing the owner had to undo it: the bubble hid it, copy stripped it, the
+# title ignored it, reuse re-parsed it to find the file again — two parsers, one
+# per language, kept in step by tests. All of it re-deriving from prose a fact
+# the record already held as a list.
+#
+# The three prose forms below are still READ, forever: they are what every chat
+# already on disk says, and a log is never rewritten. They are never WRITTEN
+# again. The frontend has the same split ([ATTACHMENT-NOTES] in
+# docs/web-frontend.md), and both languages are pinned to this format by
+# tests/test_server.py::TestAttachmentNoteFormat.
 _ATTACHMENT_NOTE_RE = re.compile(
     r"^\[(?:image attached|document attached|attached file):.*\]$"
 )
 
 
 _ATTACHMENT_NAME_RE = re.compile(
-    r"^\[(?:image|document) attached: (.+?) — you can (?:see|read) it; file at .*\]$"
+    r"^\[(?:image|document) attached: (.+?) — you can (?:see|read) it; file at (.*)\]$"
 )
 _ATTACHMENT_PATH_RE = re.compile(r"^\[attached file: (.+)\]$")
 
+# The stored form. A whole line, so a `![[…]]` the owner typed mid-sentence is
+# their text and stays their text — the same conservatism the prose forms have.
+_EMBED_RE = re.compile(r"^!\[\[([^\]]+)\]\]$")
+
+
+def attachment_embed(path: str, held: bool) -> str:
+    """The stored line for one attached file.
+
+    `held` means aish has the file in its own uploads folder, where the name is
+    unique and the folder is fixed — so the name alone addresses it, and storing
+    a machine-specific absolute path would be noise that also breaks the moment
+    the state directory moves. A file from anywhere else keeps its full path,
+    because nothing could reconstruct it."""
+    return f"![[{Path(path).name if held else path}]]"
+
+
+def _embedded(line: str) -> str | None:
+    """The target of an embed line, or None. Kept private: callers want either
+    the names (`attachment_names`) or the whole reference (`attachment_refs`)."""
+    match = _EMBED_RE.match(line.strip())
+    return match.group(1) if match else None
+
 
 def strip_attachment_notes(content: str) -> str:
-    """`content` with the server's attachment notes removed. The ONE Python
-    definition of "what the owner actually wrote" — titles, preview lines and
-    the offline mirror all read through it."""
+    """`content` with every attachment line removed — embeds and the legacy
+    prose alike. The ONE Python definition of "what the owner actually wrote":
+    titles, preview lines, search snippets and the offline mirror all read
+    through it."""
     kept = [
         line for line in (content or "").split("\n")
-        if not _ATTACHMENT_NOTE_RE.match(line.strip())
+        if not _ATTACHMENT_NOTE_RE.match(line.strip()) and _embedded(line) is None
     ]
     return "\n".join(kept).strip()
 
@@ -174,17 +214,96 @@ def attachment_names(content: str) -> list[str]:
     """What a turn attached, by name. Used to name a turn that has no words of
     its own — a photo sent with nothing typed is still about something, and
     "IMG_4021.jpg" beats an unnamed chat."""
-    names = []
-    for line in (content or "").split("\n"):
-        line = line.strip()
-        named = _ATTACHMENT_NAME_RE.match(line)
-        if named:
-            names.append(named.group(1))
+    return [ref[1] for ref in attachment_refs(content)]
+
+
+def to_record_form(content: str, uploads_dir: Path | None) -> str:
+    """A message turned into the form that gets STORED (#231): every attachment
+    line becomes `![[…]]`, whatever it was before.
+
+    Two forms of a message exist and the names are worth keeping straight. The
+    **record form** is what the log holds and what the owner sees, copies and
+    reuses — embeds, no machine prose. The **guidance form** is what a model is
+    handed, with a sentence per file saying whether it can look at it or must
+    open it; that depends on which backend is answering and is never stored.
+
+    This converts either into the record form, so it is idempotent and it
+    SELF-HEALS: any path that hands guidance text back around — retry rewinding
+    the model's own context is the live example — lands back on the stored form
+    instead of quietly writing prose into a fresh log line. Content with no
+    attachment lines comes back byte-identical, which is almost every message."""
+    out: list[str] = []
+    for raw in (content or "").split("\n"):
+        line = raw.strip()
+        refs = attachment_refs(line)
+        if not refs:
+            out.append(raw)
             continue
-        path = _ATTACHMENT_PATH_RE.match(line)
-        if path:
-            names.append(path.group(1).rsplit("/", 1)[-1])
-    return names
+        path = resolve_attachment(refs[0][0], uploads_dir)
+        held = uploads_dir is not None and Path(path).parent == Path(uploads_dir)
+        out.append(attachment_embed(path, held))
+    return "\n".join(out)
+
+
+def resolve_attachment(ref: str, uploads_dir: Path | None) -> str:
+    """An attachment reference turned back into a path on disk.
+
+    A reference with no directory in it names a file aish holds, so it resolves
+    against the uploads folder; anything else already IS a path. With no uploads
+    folder known (a bare Agent, a test), a name resolves to itself — wrong as a
+    path, but never a crash, and never a path pointing somewhere unintended."""
+    if "/" in ref or uploads_dir is None:
+        return ref
+    return str(uploads_dir / ref)
+
+
+def attachment_guidance(name: str, path: str, kind: str) -> str:
+    """The sentence the MODEL is given about one attached file.
+
+    `kind` is what actually happened to it on the way out: `"image"` or
+    `"document"` mean the bytes are in the request and the model may simply look
+    (the two backends differ on which they take, which is why this is decided at
+    hand-over time and not stored); anything else means only the path went, and
+    the model must open the file with a tool if it wants the contents.
+
+    This is the ONE producer. `_classify_attachments` calls it when a message is
+    sent, and `Agent.load_history` calls it again when a stored conversation is
+    loaded back into a model — so a turn reads identically to the model whether
+    it just happened or happened last month. Nothing that comes out of here is
+    ever written to the log; the log holds `attachment_embed` instead."""
+    if kind == "image":
+        return f"[image attached: {name} — you can see it; file at {path}]"
+    if kind == "document":
+        return f"[document attached: {name} — you can read it; file at {path}]"
+    return f"[attached file: {path}]"
+
+
+def attachment_refs(content: str) -> list[tuple[str, str]]:
+    """Every file a turn attached, as (reference, name) in the order written.
+
+    `reference` is what the line says — a bare name for a file aish holds, an
+    absolute path for one it does not — and is exactly what a reader needs to
+    resolve it. `name` is always the last segment, for anything that just wants
+    to say which file it was. Reads the stored embeds and all three legacy prose
+    forms, so a chat written years apart parses the same way."""
+    refs: list[tuple[str, str]] = []
+    for raw in (content or "").split("\n"):
+        line = raw.strip()
+        target = _embedded(line)
+        if target is None:
+            # Legacy prose carries the path as well as the name, and the PATH is
+            # the reference: those notes predate the uploads folder being the
+            # only home for an attachment, so the name alone may not resolve.
+            named = _ATTACHMENT_NAME_RE.match(line)
+            if named:
+                refs.append((named.group(2) or named.group(1), named.group(1)))
+                continue
+            plain = _ATTACHMENT_PATH_RE.match(line)
+            if not plain:
+                continue
+            target = plain.group(1)
+        refs.append((target, target.rsplit("/", 1)[-1]))
+    return refs
 
 # Model-facing search (the search_sessions tool): bounded so one call can
 # never flood a small context window.

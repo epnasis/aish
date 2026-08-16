@@ -3511,11 +3511,17 @@ class TestUpload:
                     }
                 )
                 user = recv_until(ws, "user")
-                assert "you can see it" in user["text"]  # image went native
-                assert f"[document attached: paper.pdf — you can read it; " \
-                       f"file at {pdf['path']}]" in user["text"]
+                # What the OWNER is shown is the record form (#231) — the files
+                # by name, no machine prose. This assertion used to read the
+                # model's guidance out of this event, which was only possible
+                # while one string served both.
+                assert user["text"] == "what is this?\n\n![[photo.png]]\n![[paper.pdf]]"
                 recv_until(ws, "done")
             sent = [m for m in chat.calls[0]["messages"] if m["role"] == "user"][-1]
+            # …and what the MODEL got is the guidance, asserted where it lives.
+            assert "you can see it" in sent["content"]  # image went native
+            assert f"[document attached: paper.pdf — you can read it; " \
+                   f"file at {pdf['path']}]" in sent["content"]
             assert sent.get("images") == [image["path"]]
             assert "documents" not in sent  # not native on this backend
 
@@ -3528,9 +3534,12 @@ class TestUpload:
                 {"type": "task", "text": "look", "attachments": [str(secret)]}
             )
             user = recv_until(ws, "user")
-            assert f"[attached file: {secret}]" in user["text"]
+            # A file aish does NOT hold keeps its full path in the record (#231):
+            # nothing could derive it back from the name alone.
+            assert f"![[{secret}]]" in user["text"]
             recv_until(ws, "done")
             sent = [m for m in chat.calls[0]["messages"] if m["role"] == "user"][-1]
+            assert f"[attached file: {secret}]" in sent["content"]  # go and open it
             assert "images" not in sent  # nothing base64'd from outside uploads
 
     def test_upload_requires_token_when_set(self, app_env):
@@ -3728,47 +3737,105 @@ class TestShareInbox:
                 ws.send_json(
                     {"type": "task", "text": "what is this?", "attachments": [shared["path"]]}
                 )
-                assert "you can see it" in recv_until(ws, "user")["text"]
+                # Indistinguishable from a picked file everywhere downstream:
+                # the owner sees the record form, the model gets the guidance.
+                assert "![[photo.png]]" in recv_until(ws, "user")["text"]
                 recv_until(ws, "done")
             sent = [m for m in chat.calls[0]["messages"] if m["role"] == "user"][-1]
+            assert "you can see it" in sent["content"]
             assert sent.get("images") == [shared["path"]]
 
 
 class TestAttachmentNoteFormat:
-    """The note the server appends to a turn carrying attachments.
+    """The two shapes a message uses to say a file came with it (#231).
 
-    It is written for the MODEL, but the frontend has to render the turn
-    without it (`[ATTACHMENT-NOTES]` in docs/web-frontend.md) and parses these
-    exact strings to do it. That makes the format a cross-language contract
-    with no shared code to enforce it, so it is pinned from both sides: here,
-    and in tests/js/test_attachment_notes.js. Change one and this fails.
+    The RECORD form is `![[cat.png]]`: what the log keeps, what the owner sees,
+    copies and reuses. Python writes it and reads it back; the frontend parses
+    it to draw the thumbnail (`[ATTACHMENT-NOTES]` in docs/web-frontend.md) and
+    writes it again when you copy a message.
+
+    The GUIDANCE form is the bracketed prose telling the model what it may do
+    with each file. Nothing writes it to disk any more, but every message
+    written before #231 IS in that shape and always will be — a chat log is
+    never rewritten — so both languages must keep reading it forever.
+
+    Both are cross-language contracts with no shared code to enforce them, so
+    both are pinned from both sides: here, and in tests/js/test_attachment_notes.js.
+    Change one and this fails.
     """
 
+    EMBED = "![[{ref}]]"
     NATIVE_IMAGE = "[image attached: {name} — you can see it; file at {path}]"
     NATIVE_DOC = "[document attached: {name} — you can read it; file at {path}]"
     PLAIN = "[attached file: {path}]"
 
-    def test_notes_match_the_shapes_the_frontend_parses(self, app_env):
+    def test_guidance_matches_the_shapes_the_frontend_still_parses(self, app_env):
         client, _ = make_client(app_env, [])
         with client:
             server = client.app.state.server
             image = Path(client.post("/upload?name=cat.png", content=b"\x89PNG").json()["path"])
             outside = Path(app_env["cwd"]) / "elsewhere.txt"
             outside.write_text("x")
-            _, _, notes = server._classify_attachments(server.active.agent, [
+            _, _, guidance = server._classify_attachments(server.active.agent, [
                 str(image), str(outside),
             ])
-            assert notes == [
+            assert guidance == [
                 self.NATIVE_IMAGE.format(name=image.name, path=image),
                 self.PLAIN.format(path=outside),
             ]
 
-    def test_the_document_note_shape_is_pinned_too(self, app_env):
-        """The test provider has no pdf support, so the shape is asserted
-        against the string the code builds rather than through a live turn —
-        the frontend parses it either way."""
-        source = Path(server_module.__file__).read_text()
-        assert self.NATIVE_DOC.replace("{name}", "{path.name}") in source
+    def test_the_document_shape_is_pinned_too(self, app_env):
+        """The test provider has no pdf support, so this shape is asserted
+        against the builder directly rather than through a live turn."""
+        assert session_module.attachment_guidance(
+            "paper.pdf", "/u/paper.pdf", "document"
+        ) == self.NATIVE_DOC.format(name="paper.pdf", path="/u/paper.pdf")
+
+    def test_the_record_form_is_a_name_for_a_file_aish_holds(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            server = client.app.state.server
+            image = Path(client.post("/upload?name=cat.png", content=b"\x89PNG").json()["path"])
+            _, _, guidance = server._classify_attachments(
+                server.active.agent, [str(image)]
+            )
+            assert session_module.to_record_form(
+                "\n".join(guidance), server.uploads_dir
+            ) == self.EMBED.format(ref="cat.png")
+
+    def test_the_record_form_keeps_the_path_for_a_file_it_does_not(self, app_env):
+        outside = Path(app_env["cwd"]) / "elsewhere.txt"
+        outside.write_text("x")
+        client, _ = make_client(app_env, [])
+        with client:
+            server = client.app.state.server
+            _, _, guidance = server._classify_attachments(
+                server.active.agent, [str(outside)]
+            )
+            assert session_module.to_record_form(
+                "\n".join(guidance), server.uploads_dir
+            ) == self.EMBED.format(ref=outside)
+
+    def test_converting_to_the_record_form_is_idempotent(self, app_env):
+        """Guidance in, record out; record in, the same record out. This is what
+        lets any path that hands text back around — a retry rewinding the
+        model's own context is the live one — land on the stored shape instead
+        of writing prose into a fresh log line."""
+        uploads = Path(app_env["state_dir"]) / "uploads"
+        once = session_module.to_record_form(
+            "look\n" + self.NATIVE_IMAGE.format(name="cat.png", path=uploads / "cat.png"),
+            uploads,
+        )
+        assert once == "look\n![[cat.png]]"
+        assert session_module.to_record_form(once, uploads) == once
+
+    def test_text_that_merely_resembles_an_embed_is_left_alone(self):
+        """The owner writing about wiki-links must not have their words eaten —
+        the same conservatism the prose forms have always had."""
+        typed = "in Obsidian you write ![[note]] inline to embed something"
+        assert session_module.to_record_form(typed, Path("/u")) == typed
+        assert session_module.strip_attachment_notes(typed) == typed
+        assert session_module.attachment_names(typed) == []
 
 
 class TestFileEndpoint:
@@ -5308,7 +5375,7 @@ class TestFeedbackAttachmentSwitch:
             # The switch note is model-only: the user echo stays clean.
             echo = recv_until(ws, "user")
             assert "SWITCH" not in echo["text"]
-            assert "[attached file: /tmp/shot.png]" in echo["text"]
+            assert "![[/tmp/shot.png]]" in echo["text"]  # record form (#231)
             recv_until(ws, "done")
             prompt = self._last_user_prompt(chat, 1)
             # The attachment was detected and the model re-anchored on the
