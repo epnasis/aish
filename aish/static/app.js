@@ -3951,9 +3951,13 @@ function addUserMsg(text, at, turn, real) {
   // the gap; every file draws the same way, wherever it was written (#234).
   const parts = messageParts(text, real);
   const notes = parts.filter((p) => p.type === "file").map((p) => p.note);
-  // A message with no files at all is the overwhelmingly common one and keeps
-  // exactly the DOM it always had: one text node, nothing else.
-  const el = addMsg("user", notes.length ? "" : messageBody(text, real));
+  // ONE path, always. There used to be a shortcut for the common message with
+  // no files — set the bubble's text directly and skip the loop — and when the
+  // loop later stopped skipping, every ordinary message rendered its own words
+  // TWICE (#235). Two ways to draw the same thing is what allowed that, so
+  // there is now one: the bubble starts empty and everything in it comes from
+  // `parts`.
+  const el = addMsg("user", "");
   const group = messagePictures(notes);
   let strip = null;
   for (const part of parts) {

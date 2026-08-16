@@ -32,13 +32,25 @@ function extract(startMarker, endMarker) {
 // A DOM just rich enough for the two message builders: elements remember their
 // class, their text and their children, so the test can read back what was
 // actually appended.
+// `textContent` AGGREGATES, like the real thing. It used to be a plain string
+// that ignored children, and that hid a live defect: a bubble that set its text
+// and then appended the same words as a child read back as correct here while
+// every ordinary message on screen showed itself twice (#235). A fake that
+// lies in the direction of "everything is fine" is worse than no fake.
 function fakeElement(tag) {
+  let own = "";
   const el = {
     tagName: tag,
     className: "",
-    textContent: "",
     innerHTML: "",
     children: [],
+    get textContent() {
+      return own + el.children.map((c) => c.textContent || "").join("");
+    },
+    set textContent(value) {
+      own = value == null ? "" : String(value);
+      el.children.length = 0;   // assigning text replaces the children, as in the DOM
+    },
     append(...nodes) { this.children.push(...nodes); },
     appendChild(node) { this.children.push(node); return node; },
     remove() {},
@@ -67,6 +79,7 @@ function makeSandbox() {
     stripAttachmentNotes: (t) => t,
     messageBody: (t) => t,
     messageParts: (t) => (t ? [{ type: "text", text: t }] : []),
+    // (a real message with no files is one text run — same as messageParts gives)
     messagePictures: () => [],
     attachmentNode: () => fakeElement("img"),
     recordSource: (t) => t,
