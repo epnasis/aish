@@ -7575,12 +7575,42 @@ class TestAttachmentFormsAcrossTheSeam:
         )
 
     def test_a_file_the_model_could_not_take_restores_as_a_path_to_open(self, tmp_path):
+        archive = tmp_path / "x.zip"
+        archive.write_bytes(b"PK")
         cold, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
-        cold.load_history([{"role": "user", "content": "look\n![[/tmp/x.zip]]"}])
+        cold.load_history([{"role": "user", "content": f"look\n![[{archive}]]"}])
         content = cold.messages[-1]["content"]
-        assert content == "look\n\n[attached file: /tmp/x.zip]", (
+        assert content == f"look\n\n[attached file: {archive}]", (
             "nothing said the bytes were delivered, so the model must be told to open it"
         )
+
+    def test_a_reference_to_nothing_is_left_as_the_words_it_is(self, tmp_path):
+        """The rule that replaced whole-line matching (#233), from the model's
+        side: prose about wiki-links names no file, so nothing is rewritten and
+        the model is never told about an attachment nobody sent. This is also
+        what keeps the CLI — which has no uploads folder — honest."""
+        cold, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
+        typed = "in Obsidian you write ![[note]] inline"
+        cold.load_history([{"role": "user", "content": typed}])
+        assert cold.messages[-1]["content"] == typed
+
+    def test_a_file_inside_a_sentence_stays_inside_the_sentence(self, tmp_path):
+        """The position is the only thing saying which file goes with which
+        clause (#233). Flattening it on reload would have made a restored turn
+        read differently from the live one — quietly, and only for the feature
+        the inline form exists for."""
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        (uploads / "shot.png").write_bytes(b"\x89PNG")
+        cold, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
+        cold.load_history([{
+            "role": "user",
+            "content": "the error in ![[shot.png]] is here",
+            "images": [str(uploads / "shot.png")],
+        }])
+        content = cold.messages[-1]["content"]
+        assert content.startswith("the error in ![[shot.png]] is here")
+        assert "you can see it" in content
 
     def test_the_picture_is_still_a_picture_through_a_symlink(self, tmp_path):
         """Found in a browser run, not here: on macOS the state dir was reached

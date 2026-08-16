@@ -65,8 +65,11 @@ function makeSandbox() {
     // Attachment rendering is [ATTACHMENT-NOTES]' business and has its own
     // file; here a turn is just its text.
     stripAttachmentNotes: (t) => t,
-    splitAttachmentNotes: (t) => ({ body: t, attachments: [] }),
-    attachmentStrip: () => fakeElement("div"),
+    messageBody: (t) => t,
+    messageParts: (t) => (t ? [{ type: "text", text: t }] : []),
+    messagePictures: () => [],
+    attachmentNode: () => fakeElement("img"),
+    recordSource: (t) => t,
     renderShares: () => {},
     // --- the genuine-bubble path, kept real down to addMsg ---
     reuseChip: () => fakeElement("button"),
@@ -102,7 +105,7 @@ function makeSandbox() {
     "\n" +
     extract("// [MSG-STAMP-START]", "// [MSG-STAMP-END]").replace(/\bconst\b/g, "var") +
     "\n" +
-    extract("function addUserMsg(text, at, turn) {", "function addAnsiMsg") +
+    extract("function addUserMsg(text, at, turn, real) {", "function addAnsiMsg") +
     "\n" +
     extract("function addMsg(kind, text) {", "// The prompt that started") +
     "\n" +

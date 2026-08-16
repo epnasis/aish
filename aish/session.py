@@ -140,11 +140,26 @@ def synthetic_kind(content: str) -> str:
 # ---------------------------------------------------------------------------
 # How a turn says "a file came with this message" (#231).
 #
-# THE STORED FORM IS AN EMBED: `![[cat.png]]`, wiki-link style, one per file, on
-# its own line. Name only for a file aish holds (the uploads folder is the one
-# place they go, and names there are made unique on write, so the name IS the
-# address); full path for a file that lives anywhere else, where nothing could
-# derive it back.
+# THE STORED FORM IS AN EMBED: `![[cat.png]]`, wiki-link style. Name only for a
+# file aish holds (the uploads folder is the one place they go, and names there
+# are made unique on write, so the name IS the address); full path for a file
+# that lives anywhere else, where nothing could derive it back.
+#
+# AN EMBED MEANS THE SAME THING WHEREVER IT SITS (#233). Alone on a line it is
+# the file as a block, which is what an attached photo looks like. Inside a
+# sentence it is the file in that position — "the error in ![[shot.png]], the fix
+# like ![[patch.txt]]" — and the position is information the model gets no other
+# way. A notation that only worked at the end of a message was a footer, not a
+# representation.
+#
+# The whole-line rule it replaced was there to stop a `![[…]]` the owner TYPED
+# from being eaten, and that mattered because a matched line was REMOVED from the
+# bubble and redrawn as a thumbnail: a false match deleted their words. An embed
+# rendered in place cannot do that, so the rule is now about the outcome instead
+# of the syntax — A REFERENCE THAT RESOLVES TO NOTHING STAYS AS PLAIN TEXT.
+# Prose about wiki-links survives because the file it names does not exist, which
+# is the same test the frontend applies and the same one `Agent.load_history`
+# applies before it rewrites anything.
 #
 # WHAT THE MODEL IS TOLD IS NOT THIS. It gets a sentence per file — "you can see
 # it", "you can read it", or a bare path meaning "go and open this yourself" —
@@ -175,9 +190,13 @@ _ATTACHMENT_NAME_RE = re.compile(
 )
 _ATTACHMENT_PATH_RE = re.compile(r"^\[attached file: (.+)\]$")
 
-# The stored form. A whole line, so a `![[…]]` the owner typed mid-sentence is
-# their text and stays their text — the same conservatism the prose forms have.
-_EMBED_RE = re.compile(r"^!\[\[([^\]]+)\]\]$")
+# The stored form, matched ANYWHERE (#233). No newline inside, so a stray `![[`
+# can never swallow the rest of a message; no `]` inside, so the first closer
+# ends it.
+_EMBED_RE = re.compile(r"!\[\[([^\]\n]+)\]\]")
+# …and the same thing anchored, for "is this line nothing but a file?" — which
+# is what decides block or inline, and nothing else.
+_EMBED_LINE_RE = re.compile(r"^!\[\[([^\]\n]+)\]\]$")
 
 
 def attachment_embed(path: str, held: bool) -> str:
@@ -192,29 +211,54 @@ def attachment_embed(path: str, held: bool) -> str:
 
 
 def _embedded(line: str) -> str | None:
-    """The target of an embed line, or None. Kept private: callers want either
-    the names (`attachment_names`) or the whole reference (`attachment_refs`)."""
-    match = _EMBED_RE.match(line.strip())
+    """The target of a line that is NOTHING BUT an embed, or None. That is the
+    block case — an attached photo on its own line — and the only thing this
+    distinction decides is how it renders."""
+    match = _EMBED_LINE_RE.match(line.strip())
     return match.group(1) if match else None
 
 
-def strip_attachment_notes(content: str) -> str:
-    """`content` with every attachment line removed — embeds and the legacy
-    prose alike. The ONE Python definition of "what the owner actually wrote":
-    titles, preview lines, search snippets and the offline mirror all read
-    through it."""
+def message_body(content: str) -> str:
+    """The message with its attachment LINES removed and its inline references
+    left exactly where they are.
+
+    A file alone on a line is an attachment, not a sentence, so it goes. A file
+    inside a sentence is part of the sentence and stays (#233) — that position
+    is the only thing saying which file belongs to which clause, and it is what
+    the model is meant to read.
+
+    This is the derivation for anything that has to preserve the message:
+    rebuilding a model's view of a stored turn, and the composer's reuse.
+    `strip_attachment_notes` below is the DISPLAY derivation and deliberately
+    differs."""
     kept = [
-        line for line in (content or "").split("\n")
-        if not _ATTACHMENT_NOTE_RE.match(line.strip()) and _embedded(line) is None
+        raw for raw in (content or "").split("\n")
+        if not _ATTACHMENT_NOTE_RE.match(raw.strip()) and _embedded(raw) is None
     ]
     return "\n".join(kept).strip()
+
+
+def strip_attachment_notes(content: str) -> str:
+    """What the owner actually wrote, for DISPLAY — titles, preview lines,
+    search snippets and the offline mirror all read through it.
+
+    Same as `message_body` except that an inline reference becomes its NAME:
+    dropping it would leave "the error in , the fix like ", a title with its
+    subject taken out, and keeping the brackets would put notation in a chat
+    title. The name is what the owner would have written anyway.
+
+    The two derivations differ ON PURPOSE and the difference is the audience: a
+    title is read, a message is re-sent."""
+    return _EMBED_RE.sub(
+        lambda m: m.group(1).rsplit("/", 1)[-1], message_body(content)
+    ).strip()
 
 
 def attachment_names(content: str) -> list[str]:
     """What a turn attached, by name. Used to name a turn that has no words of
     its own — a photo sent with nothing typed is still about something, and
     "IMG_4021.jpg" beats an unnamed chat."""
-    return [ref[1] for ref in attachment_refs(content)]
+    return [item.name for item in attachment_refs(content)]
 
 
 def to_record_form(content: str, uploads_dir: Path | None) -> str:
@@ -232,17 +276,36 @@ def to_record_form(content: str, uploads_dir: Path | None) -> str:
     the model's own context is the live example — lands back on the stored form
     instead of quietly writing prose into a fresh log line. Content with no
     attachment lines comes back byte-identical, which is almost every message."""
+    # Files the message already names IN ITS TEXT. A file named inline ALSO gets
+    # a guidance line, because the model is told about every file — so without
+    # this the record would carry it twice, once in the sentence where it was
+    # written and once again in a trailing list, and the bubble would show the
+    # same photo two times (#233).
+    inline = {
+        resolve_attachment(item.ref, uploads_dir)
+        for item in attachment_refs(content)
+        if item.embed
+    }
     out: list[str] = []
     for raw in (content or "").split("\n"):
         line = raw.strip()
-        refs = attachment_refs(line)
-        if not refs:
+        if _EMBED_RE.search(raw):
+            # Already the record form, wherever on the line it sits. Left
+            # exactly as written — rewriting it would move an inline file out of
+            # the sentence it belongs to, which is the whole point of it being
+            # there.
             out.append(raw)
             continue
-        path = resolve_attachment(refs[0][0], uploads_dir)
+        legacy = _ATTACHMENT_NAME_RE.match(line) or _ATTACHMENT_PATH_RE.match(line)
+        if not legacy:
+            out.append(raw)
+            continue
+        path = resolve_attachment(attachment_refs(line)[0].ref, uploads_dir)
+        if path in inline:
+            continue  # said once, in the place the owner put it
         held = uploads_dir is not None and Path(path).parent == Path(uploads_dir)
         out.append(attachment_embed(path, held))
-    return "\n".join(out)
+    return "\n".join(out).strip("\n")
 
 
 def resolve_attachment(ref: str, uploads_dir: Path | None) -> str:
@@ -251,10 +314,65 @@ def resolve_attachment(ref: str, uploads_dir: Path | None) -> str:
     A reference with no directory in it names a file aish holds, so it resolves
     against the uploads folder; anything else already IS a path. With no uploads
     folder known (a bare Agent, a test), a name resolves to itself — wrong as a
-    path, but never a crash, and never a path pointing somewhere unintended."""
-    if "/" in ref or uploads_dir is None:
+    path, but never a crash, and never a path pointing somewhere unintended.
+
+    A BARE NAME CAN ONLY EVER MEAN THAT FOLDER. Since an embed can be typed
+    (#233), the reference is input now, not just something the server wrote —
+    and `..` in a name would otherwise walk out of the one directory whose
+    contents are safe to hand over without asking. A name that escapes resolves
+    to itself, which exists nowhere and is therefore treated as plain text."""
+    if uploads_dir is None or "/" in ref:
+        return ref
+    if ref in ("", ".", "..") or ref.startswith("."):
         return ref
     return str(uploads_dir / ref)
+
+
+def real_attachments(content: str, uploads_dir: Path | None) -> list[tuple[str, str]]:
+    """The files a message names that ACTUALLY EXIST, as (name, path).
+
+    This is the rule that replaced whole-line matching (#233). An embed can now
+    be typed, and typed text about wiki-links must survive — so what separates
+    "the owner attached a file" from "the owner wrote about the notation" is
+    whether the thing named is on disk. Prose about `![[note]]` names no file
+    and stays prose.
+
+    The check applies to EMBEDS only. The legacy bracketed forms are not
+    something anyone types by accident, and a file since deleted should still
+    tell the model it was once attached, so those are taken at their word."""
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in attachment_refs(content):
+        path = resolve_attachment(item.ref, uploads_dir)
+        if path in seen:
+            continue  # named twice in one message is one file, delivered once
+        if item.embed:
+            try:
+                if not Path(path).is_file():
+                    continue
+            except OSError:
+                continue
+        seen.add(path)
+        found.append((item.name, path))
+    return found
+
+
+def files_named(content: str, uploads_dir: Path | None) -> list[dict] | None:
+    """What a CLIENT needs to draw a message: the references in it that name a
+    real file, as `{"name", "path"}` — or None when it holds no `![[…]]` at all
+    and the question never arises (#233).
+
+    Empty and absent mean different things and both are needed. Empty is "I
+    looked, and none of these is a file", which is what lets prose about the
+    notation render as prose. Absent is "nobody looked" — an older server, a
+    mirror written before this — where the client takes references at face
+    value, the behaviour from before and never worse than it."""
+    if not any(item.embed for item in attachment_refs(content)):
+        return None
+    return [
+        {"name": name, "path": path}
+        for name, path in real_attachments(content, uploads_dir)
+    ]
 
 
 def attachment_guidance(name: str, path: str, kind: str) -> str:
@@ -278,31 +396,47 @@ def attachment_guidance(name: str, path: str, kind: str) -> str:
     return f"[attached file: {path}]"
 
 
-def attachment_refs(content: str) -> list[tuple[str, str]]:
-    """Every file a turn attached, as (reference, name) in the order written.
+class Attachment(NamedTuple):
+    """One file a message names.
 
-    `reference` is what the line says — a bare name for a file aish holds, an
-    absolute path for one it does not — and is exactly what a reader needs to
-    resolve it. `name` is always the last segment, for anything that just wants
-    to say which file it was. Reads the stored embeds and all three legacy prose
-    forms, so a chat written years apart parses the same way."""
-    refs: list[tuple[str, str]] = []
+    `ref` is what the message says — a bare name for a file aish holds, an
+    absolute path for one it does not — and is what a reader resolves. `name` is
+    the last segment, for anything that only needs to say which file. `embed`
+    marks the modern `![[…]]` form, which is the one that can be TYPED and so
+    the one that has to prove the file exists before it counts (#233)."""
+
+    ref: str
+    name: str
+    embed: bool
+
+
+def attachment_refs(content: str) -> list[Attachment]:
+    """Every file a message names, in the order written. Reads the modern embeds
+    and all three legacy prose forms, so a chat written years apart parses the
+    same way."""
+    refs: list[Attachment] = []
     for raw in (content or "").split("\n"):
         line = raw.strip()
-        target = _embedded(line)
-        if target is None:
-            # Legacy prose carries the path as well as the name, and the PATH is
-            # the reference: those notes predate the uploads folder being the
-            # only home for an attachment, so the name alone may not resolve.
-            named = _ATTACHMENT_NAME_RE.match(line)
-            if named:
-                refs.append((named.group(2) or named.group(1), named.group(1)))
-                continue
-            plain = _ATTACHMENT_PATH_RE.match(line)
-            if not plain:
-                continue
+        embeds = _EMBED_RE.findall(raw)
+        if embeds:
+            # Every embed on the line, in the order written — one alone (an
+            # attached photo) or several inside a sentence (#233) are the same
+            # thing to every reader; only the renderer cares which.
+            refs.extend(
+                Attachment(t, t.rsplit("/", 1)[-1], True) for t in embeds
+            )
+            continue
+        # Legacy prose carries the path as well as the name, and the PATH is the
+        # reference: those notes predate the uploads folder being the only home
+        # for an attachment, so the name alone may not resolve.
+        named = _ATTACHMENT_NAME_RE.match(line)
+        if named:
+            refs.append(Attachment(named.group(2) or named.group(1), named.group(1), False))
+            continue
+        plain = _ATTACHMENT_PATH_RE.match(line)
+        if plain:
             target = plain.group(1)
-        refs.append((target, target.rsplit("/", 1)[-1]))
+            refs.append(Attachment(target, target.rsplit("/", 1)[-1], False))
     return refs
 
 # Model-facing search (the search_sessions tool): bounded so one call can
@@ -825,6 +959,10 @@ class SessionLog:
 
         Returns None when the log predates trace records (no `trace` kind), so
         the caller can fall back to a flat conversation history."""
+        # A log lives in the state dir, and the uploads folder sits beside it —
+        # so a bare `![[cat.png]]` can be resolved from the log's own location,
+        # with nothing to pass in and nothing to keep in step (#233).
+        uploads = path.parent / "uploads"
         events: list[dict] = []
         ratings: list[dict] = []
         steps: list[dict] = []
@@ -1087,6 +1225,13 @@ class SessionLog:
                     # every replayed turn, so the control exists on a chat that
                     # was reopened cold — which is most of them.
                     event["turn"] = _turn_id(record, index)
+                    # WHICH references in this turn name a real file (#233) —
+                    # the same fact the live event carries, re-derived here so a
+                    # chat reopened cold draws the identical bubble. A reader
+                    # cannot work this out from the text: only the disk knows.
+                    files = files_named(content, uploads)
+                    if files is not None:
+                        event["files"] = files
                     # WHEN this turn happened (#200), deliberately under `at`
                     # and not `ts`: on a live event `ts` means "this turn is
                     # starting now" and drives the trace card's clock, and cold

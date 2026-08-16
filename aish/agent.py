@@ -56,8 +56,8 @@ from .session import (
     SessionLog,
     attachment_guidance,
     attachment_names,
-    attachment_refs,
-    resolve_attachment,
+    message_body,
+    real_attachments,
     strip_attachment_notes,
     to_record_form,
 )
@@ -1440,14 +1440,21 @@ class Agent:
         return Path(self.state_dir) / "uploads" if self.state_dir else None
 
     def _restore_attachments(self, message: dict) -> dict:
-        """One stored message, with any attachment embeds turned back into model
-        guidance. Untouched when it carries none, which is almost every message
-        and every message written before #231."""
+        """One stored message, with the files it names turned back into model
+        guidance. Untouched when it names none, which is almost every message
+        and every message written before #231.
+
+        `real_attachments` is what decides, and its test is whether the file is
+        actually there (#232). That is the guard against rewriting a message
+        where the owner merely WROTE about the notation — prose mentioning
+        `![[note]]` names nothing on disk, so nothing here touches it. It also
+        means the CLI, which has no uploads folder and delivers no files, leaves
+        such text alone rather than announcing a file nobody sent."""
         content = message.get("content")
         if message.get("role") != "user" or not isinstance(content, str):
             return message
-        refs = attachment_refs(content)
-        if not refs:
+        files = real_attachments(content, self.uploads_dir)
+        if not files:
             return message
         # Keyed by the file's REAL path, on both sides. A string comparison was
         # wrong and quietly so: `/tmp/x.png` and `/private/tmp/x.png` are one
@@ -1466,11 +1473,17 @@ class Agent:
             **{real(p): "image" for p in message.get("images") or []},
             **{real(p): "document" for p in message.get("documents") or []},
         }
-        lines: list[str] = []
-        for ref, name in refs:
-            path = resolve_attachment(ref, self.uploads_dir)
-            lines.append(attachment_guidance(name, path, native.get(real(path), "")))
-        body = strip_attachment_notes(content)
+        lines = [
+            attachment_guidance(name, path, native.get(real(path), ""))
+            for name, path in files
+        ]
+        # `message_body`, NOT the display strip: a file written inside a
+        # sentence stays in that sentence (#232). Flattening it to a name here
+        # would have made a restored turn read differently from the live one —
+        # the model saw "the error in ![[shot.png]]" while it was happening and
+        # "the error in shot.png" ever after, quietly losing the one thing the
+        # inline form exists to carry.
+        body = message_body(content)
         return {
             **message,
             "content": f"{body}\n\n" + "\n".join(lines) if body else "\n".join(lines),

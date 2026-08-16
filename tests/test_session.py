@@ -10,7 +10,9 @@ from aish.session import (
     attachment_embed,
     attachment_guidance,
     attachment_names,
-    attachment_refs,
+    files_named,
+    message_body,
+    real_attachments,
     resolve_attachment,
     strip_attachment_notes,
     title_drifted,
@@ -1744,6 +1746,67 @@ class TestAttachmentForms:
         # a crash and never a path pointing somewhere unintended.
         assert resolve_attachment("cat.png", None) == "cat.png"
 
+    def test_a_file_inside_a_sentence_is_the_same_attachment(self, tmp_path):
+        """An embed means the same thing wherever it sits (#233) — that is what
+        makes it a representation rather than a footer."""
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        (uploads / "shot.png").write_bytes(b"x")
+        (uploads / "patch.txt").write_text("x")
+        text = "the error in ![[shot.png]], the fix like ![[patch.txt]]"
+        assert [n for n, _ in real_attachments(text, uploads)] == [
+            "shot.png", "patch.txt",
+        ]
+        # Stored exactly as written: the position is the information.
+        assert to_record_form(text, uploads) == text
+
+    def test_a_file_named_twice_is_delivered_once(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        (uploads / "a.png").write_bytes(b"x")
+        text = "compare ![[a.png]] with ![[a.png]] again"
+        assert len(real_attachments(text, uploads)) == 1
+
+    def test_a_typed_name_cannot_walk_out_of_the_uploads_folder(self, tmp_path):
+        """A reference is INPUT now, so a name is the one thing standing between
+        typed text and a directory whose contents are handed over unasked."""
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        secret = tmp_path / "secret.txt"
+        secret.write_text("x")
+        assert resolve_attachment("../secret.txt", uploads) == "../secret.txt"
+        assert real_attachments("![[../secret.txt]]", uploads) == []
+
+    def test_looked_and_found_nothing_is_not_the_same_as_nobody_looked(self, tmp_path):
+        """The distinction a client draws messages by (#233), and the one I got
+        wrong first: `[]` means "these reference nothing" and prose renders as
+        prose; `None` means "nobody classified this" — an older server, a mirror
+        written before — and the client takes references at face value, which is
+        the behaviour from before and never worse. Collapsing the two drew an
+        attachment chip over the words of anyone writing about wiki-links."""
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        (uploads / "a.png").write_bytes(b"x")
+        assert files_named("just words", uploads) is None
+        assert files_named("write ![[note]] inline", uploads) == []
+        assert files_named("see ![[a.png]]", uploads) == [
+            {"name": "a.png", "path": str(uploads / "a.png")}
+        ]
+
+    def test_a_replayed_turn_says_the_same_as_the_live_one(self, tmp_path):
+        """The browser draws a bubble from this list, so a chat reopened cold
+        has to be handed the same answer a live turn was."""
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        (uploads / "a.png").write_bytes(b"x")
+        log = SessionLog.new(tmp_path)
+        log.message({"role": "user", "content": "see ![[a.png]] and ![[note]]"})
+        log.step({"kind": "tool", "name": "read_docs"})
+        log.message({"role": "assistant", "content": "ok"})
+        log.close()
+        user = [e for e in SessionLog.reconstruct_events(log.path) if e["type"] == "user"][0]
+        assert user["files"] == [{"name": "a.png", "path": str(uploads / "a.png")}]
+
     def test_both_forms_read_the_same_way(self):
         record = "look\n![[cat.png]]"
         legacy = f"look\n{self.GUIDANCE}"
@@ -1757,11 +1820,26 @@ class TestAttachmentForms:
         log.close()
         assert SessionLog.info(log.path).title == "IMG_4021.jpg"
 
-    def test_words_that_look_like_an_embed_are_left_alone(self):
+    def test_words_that_look_like_an_embed_attach_nothing(self, tmp_path):
+        """The rule that replaced whole-line matching (#233). An embed can be
+        typed now, so what separates "attached a file" from "wrote about the
+        notation" is whether the thing named is on disk. `note` is not."""
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
         typed = "in Obsidian you write ![[note]] inline to embed something"
-        assert to_record_form(typed, Path(self.UPLOADS)) == typed
-        assert strip_attachment_notes(typed) == typed
-        assert attachment_refs(typed) == []
+        assert real_attachments(typed, uploads) == []
+        assert to_record_form(typed, uploads) == typed
+        # …and the words survive verbatim wherever the message is preserved.
+        assert message_body(typed) == typed
+
+    def test_the_display_derivation_reads_a_reference_as_its_name(self):
+        """A chat title must not show notation, and must not have its subject
+        cut out either — so `strip_attachment_notes` (titles, previews, search)
+        reads an inline reference as the file name. `message_body` is the
+        derivation that preserves the message; these two differ on purpose."""
+        typed = "the error in ![[shot.png]] is here"
+        assert strip_attachment_notes(typed) == "the error in shot.png is here"
+        assert message_body(typed) == typed
 
     def test_the_guidance_says_what_the_model_may_do(self):
         assert "you can see it" in attachment_guidance("c.png", "/u/c.png", "image")

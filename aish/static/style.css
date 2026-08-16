@@ -1688,6 +1688,23 @@ body.dropping::after {
      needs its own edge to stop it bleeding into the bubble. */
   background: var(--bg-elev2);
 }
+/* A file written INSIDE a sentence (#232). Sized to the line rather than to the
+   bubble, so the sentence still reads as a sentence — the picture is a word in
+   it, not a break in it. Nudged up a touch because a box sitting on the text
+   baseline reads as sunken next to lowercase letters. */
+.msg-attachment-inline {
+  height: 1.55em;
+  max-width: 40%;
+  border-radius: 5px;
+  vertical-align: -0.35em;
+  margin: 0 2px;
+  cursor: pointer;
+  background: var(--bg-elev2);
+  object-fit: cover;
+}
+/* Text runs either side of an inline file. The bubble is no longer one text
+   node, so the runs carry the wrapping the bubble used to. */
+.msg-run { white-space: pre-wrap; }
 .msg-attachment-chip {
   background: rgba(255, 255, 255, 0.16);
   border-radius: 999px;

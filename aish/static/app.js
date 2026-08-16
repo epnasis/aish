@@ -1375,7 +1375,7 @@ function handle(event) {
         ? null
         : event.synthetic
           ? addSystemMsg(event.synthetic, event.text)
-          : addUserMsg(event.text, event.at, event.turn);
+          : addUserMsg(event.text, event.at, event.turn, event.files);
       // Your own message always comes into view, even if you were scrolled up.
       if (!replaying) scrollToEnd(true);
       break;
@@ -3885,32 +3885,37 @@ function addRedactedMsg() {
 // policy for where a local path may be loaded from. A PDF's chip opens too,
 // onto its pages ([PREVIEW]) — an attachment you cannot look at is a file you
 // have to take aish's word about.
+// One file, drawn. `block` is a file that was alone on its line — an attached
+// photo, full width; otherwise it sits inside a sentence and is drawn at text
+// size so the line still reads as a line (#233). `group` is what a swipe moves
+// between: the pictures in THIS message, the set in front of the owner.
+function attachmentNode(note, group, block) {
+  const src = note.kind === "image" ? imageSrc(note.path) : null;
+  if (!src) return attachmentChip(note);
+  const thumb = document.createElement("img");
+  thumb.className = block ? "msg-attachment-thumb" : "msg-attachment-inline";
+  thumb.src = src;
+  thumb.alt = note.name;
+  thumb.title = note.name;
+  // A file that has since been deleted must not leave a broken-image glyph
+  // where a photo was: fall back to naming it, which is still true.
+  thumb.onerror = () => thumb.replaceWith(attachmentChip(note));
+  thumb.onclick = () =>
+    openPreview(src, note.name, group, group.findIndex((g) => g.src === src));
+  return thumb;
+}
+
+function messagePictures(notes) {
+  return notes
+    .filter((n) => n.kind === "image" && imageSrc(n.path))
+    .map((n) => ({ src: imageSrc(n.path), name: n.name, file: n.path }));
+}
+
 function attachmentStrip(notes) {
   const strip = document.createElement("div");
   strip.className = "msg-attachments";
-  // The pictures in THIS message are what a swipe moves between — the set the
-  // owner can see in front of them, not everything the chat ever carried.
-  const group = notes
-    .filter((n) => n.kind === "image" && imageSrc(n.path))
-    .map((n) => ({ src: imageSrc(n.path), name: n.name, file: n.path }));
-  for (const note of notes) {
-    const src = note.kind === "image" ? imageSrc(note.path) : null;
-    if (src) {
-      const thumb = document.createElement("img");
-      thumb.className = "msg-attachment-thumb";
-      thumb.src = src;
-      thumb.alt = note.name;
-      thumb.title = note.name;
-      // A file that has since been deleted must not leave a broken-image glyph
-      // where a photo was: fall back to naming it, which is still true.
-      thumb.onerror = () => thumb.replaceWith(attachmentChip(note));
-      thumb.onclick = () =>
-        openPreview(src, note.name, group, group.findIndex((g) => g.src === src));
-      strip.appendChild(thumb);
-    } else {
-      strip.appendChild(attachmentChip(note));
-    }
-  }
+  const group = messagePictures(notes);
+  for (const note of notes) strip.appendChild(attachmentNode(note, group, true));
   return strip;
 }
 
@@ -3939,26 +3944,53 @@ function attachmentChip(note) {
   return chip;
 }
 
-function addUserMsg(text, at, turn) {
+function addUserMsg(text, at, turn, real) {
   // The bubble is the RENDERED message: what was typed, with each attachment
   // shown as the thing it is rather than as the line that names it — the same
   // relationship Obsidian has between `![[cat.png]]` in the source and the
   // picture in the note.
-  const { body, attachments: notes } = splitAttachmentNotes(text);
-  const el = addMsg("user", body);
-  if (notes.length) {
-    el.appendChild(attachmentStrip(notes));
-    if (!body) el.classList.add("attachments-only");
+  const parts = messageParts(text, real);
+  const notes = parts.filter((p) => p.type === "file").map((p) => p.note);
+  const inline = parts.some((p) => p.type === "file" && !p.block);
+  // A message with no file INSIDE its text is the overwhelmingly common one, and
+  // it keeps exactly the DOM it always had: one text node, then a strip. Only a
+  // message that genuinely interleaves pays for the split (#233).
+  const el = addMsg("user", inline ? "" : messageBody(text, real));
+  const group = messagePictures(notes);
+  let strip = null;
+  const openStrip = () => {
+    if (!strip) {
+      strip = document.createElement("div");
+      strip.className = "msg-attachments";
+      el.appendChild(strip);
+    }
+    return strip;
+  };
+  for (const part of parts) {
+    if (part.type === "text") {
+      if (!inline) continue; // already the bubble's own text
+      strip = null;
+      const run = document.createElement("span");
+      run.className = "msg-run";
+      run.textContent = part.text;
+      el.appendChild(run);
+    } else if (part.block) {
+      openStrip().appendChild(attachmentNode(part.note, group, true));
+    } else {
+      strip = null;
+      el.appendChild(attachmentNode(part.note, group, false));
+    }
   }
+  if (notes.length && !stripAttachmentNotes(text, real)) el.classList.add("attachments-only");
   const tools = document.createElement("div");
   tools.className = "user-tools";
-  // Copy hands back the SOURCE — the words plus `![[cat.png]]` — so a message
-  // pasted into notes carries its pictures with it and comes back the same
-  // shape it left. Reuse hands back the same message as a message: words into
-  // the field, files into the strip ([REUSE-PROMPT]). Both read the split
-  // rather than the rendered node, which now carries chip text nobody typed.
-  const getSource = () => recordSource(body, notes);
-  const getText = () => body;
+  // Copy hands back the SOURCE — the words with `![[cat.png]]` still in them —
+  // so a message pasted into notes carries its pictures with it and comes back
+  // the same shape it left. Reuse hands back the same message as a message:
+  // source into the field, files into the strip ([REUSE-PROMPT]). Both read the
+  // parse rather than the rendered node, which carries chip text nobody typed.
+  const getSource = () => recordSource(messageBody(text, real), notes);
+  const getText = () => messageBody(text, real);
   const getNotes = () => notes;
   // A turn id exists only for a turn the server has logged, so a live turn gets
   // its remove control on the next replay rather than a control that would name
@@ -7406,13 +7438,17 @@ let historyDraft = "";
 // this says. They are still read and always will be: a chat log is never
 // rewritten, so the old shape has to keep rendering for as long as the chat
 // exists. They are never produced.
+const EMBED_RE = /!\[\[([^\]\n]+)\]\]/g;
+const EMBED_LINE_RE = /^!\[\[([^\]\n]+)\]\]$/;
+
+function embedNote(ref) {
+  const name = ref.split("/").pop() || ref;
+  return { kind: kindOfFile(name), name, path: resolveAttachment(ref), ref };
+}
+
 function parseAttachmentNote(line) {
-  const embed = /^!\[\[([^\]]+)\]\]$/.exec(line.trim());
-  if (embed) {
-    const ref = embed[1];
-    const name = ref.split("/").pop() || ref;
-    return { kind: kindOfFile(name), name, path: resolveAttachment(ref) };
-  }
+  const embed = EMBED_LINE_RE.exec(line.trim());
+  if (embed) return embedNote(embed[1]);
   const native =
     /^\[(image|document) attached: (.+?) — you can (?:see|read) it; file at (.+)\]$/
       .exec(line.trim());
@@ -7443,19 +7479,98 @@ function resolveAttachment(ref) {
 }
 
 // {body, attachments} — what the owner wrote, and what they attached.
-function splitAttachmentNotes(text) {
-  const body = [];
-  const attachments = [];
-  for (const line of String(text == null ? "" : text).split("\n")) {
-    const note = parseAttachmentNote(line);
-    if (note) attachments.push(note);
-    else body.push(line);
+// A message as an ordered SEQUENCE (#233): runs of text and files, in the order
+// they were written. `{type:"text"}` or `{type:"file", note, block}`, where
+// `block` marks a file that was alone on its line — an attached photo — as
+// against one sitting inside a sentence.
+//
+// The sequence is what lets the bubble draw a file where the owner put it,
+// which is the same relationship Obsidian has between `![[cat.png]]` in the
+// source and the picture in the note.
+// `real` — the `files` the server put on the event — is the list of references
+// in THIS message that name a file that exists. Only the server can know that,
+// and without it the browser guessed: someone writing ABOUT the notation got an
+// attachment chip drawn over their words. Absent (an older server, an offline
+// mirror written before this) means "no list", and every reference is taken at
+// face value — the behaviour from before, never worse than it.
+function messageParts(text, real) {
+  const known = real ? new Set(real.map((f) => f.path)) : null;
+  const isFile = (note) => !note.ref || !known || known.has(note.path);
+  const parts = [];
+  const lines = String(text == null ? "" : text).split("\n");
+  let buffer = [];
+  const flushText = () => {
+    const run = buffer.join("\n");
+    buffer = [];
+    if (run.trim()) parts.push({ type: "text", text: run });
+  };
+  for (const line of lines) {
+    const whole = parseAttachmentNote(line);
+    if (whole && isFile(whole)) {      // the file IS the line
+      flushText();
+      parts.push({ type: "file", note: whole, block: true });
+      continue;
+    }
+    if (!whole && line.includes("![[")) {
+      // One or more references inside a sentence: split the line around the
+      // ones that name a real file, so the words either side keep their place
+      // and the ones that name nothing stay words.
+      let last = 0;
+      EMBED_RE.lastIndex = 0;
+      let match;
+      let found = false;
+      while ((match = EMBED_RE.exec(line)) !== null) {
+        const note = embedNote(match[1]);
+        if (!isFile(note)) continue;
+        found = true;
+        const before = line.slice(last, match.index);
+        if (before) buffer.push(before);
+        flushText();
+        parts.push({ type: "file", note, block: false });
+        last = match.index + match[0].length;
+      }
+      if (found) {
+        const rest = line.slice(last);
+        if (rest) buffer.push(rest);
+        continue;
+      }
+    }
+    buffer.push(line);
   }
-  return { body: body.join("\n").trim(), attachments };
+  flushText();
+  return parts;
 }
 
-function stripAttachmentNotes(text) {
-  return splitAttachmentNotes(text).body;
+function splitAttachmentNotes(text, real) {
+  return {
+    body: stripAttachmentNotes(text, real),
+    attachments: messageParts(text, real)
+      .filter((p) => p.type === "file")
+      .map((p) => p.note),
+  };
+}
+
+// Lines that are nothing BUT a file, dropped. Everything else kept verbatim,
+// inline references included. This is the derivation that has to preserve the
+// message — reuse puts it back in the composer to be sent again — and it
+// matches `message_body` in session.py.
+function messageBody(text, real) {
+  return messageParts(text, real)
+    .filter((part) => part.type === "text" || !part.block)
+    .map((part) => (part.type === "text" ? part.text : `![[${part.note.ref}]]`))
+    .join("")
+    .trim();
+}
+
+// The DISPLAY derivation: same, except an inline reference becomes its name.
+// A chat title reading "the error in , the fix like " has had its subject taken
+// out, and one reading "the error in ![[shot.png]]" is showing notation. Matches
+// `strip_attachment_notes` in session.py, which differs from `message_body` for
+// exactly this reason — a title is read, a message is re-sent.
+function stripAttachmentNotes(text, real) {
+  return messageBody(text, real)
+    .replace(EMBED_RE, (_m, ref) => ref.split("/").pop() || ref)
+    .trim();
 }
 
 // The message back as SOURCE: what was typed, then one embed per file. Written
@@ -7464,7 +7579,16 @@ function stripAttachmentNotes(text) {
 // leaves this app, whatever shape it was read in.
 function recordSource(body, notes) {
   if (!notes || !notes.length) return body;
-  const lines = notes.map((note) => `![[${attachmentRef(note)}]]`);
+  // A file the body ALREADY names stays where it is; only files that had no
+  // place in the text get appended (#233). Without this, copying a message
+  // whose photo sits inside a sentence would hand back the photo twice.
+  const named = new Set(
+    messageParts(body).filter((p) => p.type === "file").map((p) => p.note.path),
+  );
+  const lines = notes
+    .filter((note) => !named.has(note.path))
+    .map((note) => `![[${attachmentRef(note)}]]`);
+  if (!lines.length) return body;
   return body ? `${body}\n\n${lines.join("\n")}` : lines.join("\n");
 }
 
@@ -9393,9 +9517,41 @@ async function uploadFile(file) {
   const { path } = await response.json();
   // Name it from the path the SERVER chose: a second cat.png is stored as
   // cat-1.png, and a chip still reading "cat.png" would name the wrong file.
-  attachments.push({ name: path.split("/").pop() || uploadName(file), path });
+  const name = path.split("/").pop() || uploadName(file);
+  attachments.push({ name, path });
+  insertEmbedAtCaret(name);
   renderAttachments();
 }
+
+// [EMBED-AT-CARET-START]
+// A file joins the message WHERE YOU ARE TYPING (#233).
+//
+// It used to join at the end, always, because the end was the only place an
+// attachment could be. Now that a reference means the same thing anywhere, the
+// natural thing is for ＋ to put it under the cursor — you write "the error in
+// ", attach the screenshot, and carry on with " and the fix should look like".
+//
+// Two rules keep it from being annoying. It never lands mid-word: a space is
+// added on whichever side is missing one. And an EMPTY composer gets nothing —
+// a photo sent with no words is a whole message by itself, the server appends
+// the reference on send, and typing `![[cat.png]]` into an empty box just to
+// delete it is a step nobody asked for.
+function insertEmbedAtCaret(name) {
+  if (!input.value.trim()) return;
+  const at = input.selectionStart ?? input.value.length;
+  const before = input.value.slice(0, at);
+  const after = input.value.slice(at);
+  const embed =
+    (before && !/\s$/.test(before) ? " " : "") +
+    `![[${name}]]` +
+    (after && !/^\s/.test(after) ? " " : "");
+  input.value = before + embed + after;
+  const caret = before.length + embed.length;
+  input.setSelectionRange(caret, caret);
+  resizeInput();
+  saveDraft();
+}
+// [EMBED-AT-CARET-END]
 
 // [SHARES-START]
 // What the iPhone share sheet handed over. The server holds the inbox and is
