@@ -481,6 +481,19 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       reloadThrottled: spy("reloadThrottled"),
       showToast: spy("showToast"),
       send: spy("send", () => true),
+      // The socket itself, for the paths that must NOT go through `send()`:
+      // flushing the seen ledger has to stay silent when it is down, because
+      // marking a chat read offline is a normal thing to do and `send()`
+      // toasts ([SEEN], #232). Null = disconnected; a scenario that wants a
+      // live one assigns `w.sandbox.ws` from `w.WebSocket`, which is the
+      // recording subclass this world already installs.
+      ws: null,
+      refreshBadge: spy("refreshBadge"),
+      renderSessionsFromCache: spy("renderSessionsFromCache"),
+      // The server's clock in this device's terms ([SEEN]). Zero skew here —
+      // a world that wants a skewed device loads the real block and sets it.
+      serverNow: () => Date.now(),
+      syncSeen: spy("syncSeen"),
       offlineLoad: spy("offlineLoad", () => Promise.resolve(null)),
       offlineList: spy("offlineList", () => Promise.resolve([])),
       freshPrefetch: spy("freshPrefetch", () => null),

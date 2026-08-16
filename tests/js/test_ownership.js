@@ -52,6 +52,21 @@ const OWNED = {
       + " attention band; a stray writer either hides activity or flags read chats forever"
       + " — deleting a chat's stamp is how a chat you deleted came BACK under 'Needs you'",
   },
+  pendingSeen: {
+    owners: ["SEEN"],
+    instead: "call markSeen(name) to add one, and let applySeenMarks() retire it",
+    why: "it is the outbox that carries a chat read OFFLINE to the other devices (#232);"
+      + " a writer that clears it without the server having confirmed the stamp loses the"
+      + " mark silently, and the dot the owner already answered comes back on every"
+      + " other screen they own",
+  },
+  clockSkew: {
+    owners: ["SEEN"],
+    instead: "let syncSeen(serverNow) / onSeenLedger() adopt it from a hello or the ledger",
+    why: "the last-output stamp and the last-look stamp have to be in ONE clock now that"
+      + " the ledger is shared (#232); a stray writer puts this device's optimistic marks"
+      + " in the wrong frame, and a mark from the FUTURE hides output nobody has seen",
+  },
   viewFp: {
     owners: ["SESSION-ENTER", "REPLAY-LANDING"],
     instead: "call enterSession() (a switch) or let onReplay stamp the landing",

@@ -2665,6 +2665,106 @@ class TestSessions:
                 assert "no such session" in error["text"]
 
 
+class TestSeenLedger:
+    """Unread belongs to the OWNER, not to a screen (#232).
+
+    The server half: it merges what a device offers, tells the OTHER devices,
+    and answers a connect with the whole ledger. The unit properties are in
+    `tests/test_seen.py`; what is pinned here is the wire — that a chat read on
+    one socket reaches the other one, and that the stamps every device compares
+    are all in the server's clock.
+    """
+
+    def test_reading_here_reaches_the_other_device(self, app_env):
+        # The whole point. Two sockets are two devices; nothing about this
+        # depends on the second one asking.
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (a, hello_a, _):
+            with client.websocket_connect("/ws") as b:
+                recv_until(b, "hello")
+                a.send_json({"type": "seen", "marks": {"chat.jsonl": None}})
+                event = recv_until(b, "seen_marked")
+                assert set(event["seen"]) == {"chat.jsonl"}
+                assert event["seen"]["chat.jsonl"] > 0
+            assert hello_a["type"] == "hello"
+
+    def test_the_sender_hears_its_own_mark_too(self, app_env):
+        # Deliberately not skipped: the merge is a max, so hearing it back
+        # cannot hurt, and remembering who to skip is the bookkeeping that goes
+        # wrong the first time a device has two tabs open.
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "seen", "marks": {"chat.jsonl": None}})
+            assert "chat.jsonl" in recv_until(ws, "seen_marked")["seen"]
+
+    def test_a_connect_gets_the_whole_ledger_back(self, app_env):
+        # One message, both directions: the device offers what it read while it
+        # was away and takes back what the owner read on the other one.
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "seen", "marks": {"read-here.jsonl": None}})
+            recv_until(ws, "seen_marked")
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "seen", "marks": {}, "full": True})
+            ledger = recv_until(ws, "seen_ledger")
+            assert "read-here.jsonl" in ledger["seen"]
+            assert ledger["now"] > 0
+
+    def test_an_unchanged_mark_publishes_nothing(self, app_env):
+        # What makes re-offering on every connect free — and therefore what
+        # makes a lost broadcast self-healing without a receipt.
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "seen", "marks": {"chat.jsonl": None}})
+            stamp = recv_until(ws, "seen_marked")["seen"]["chat.jsonl"]
+            ws.send_json({"type": "seen", "marks": {"chat.jsonl": stamp - 60}, "full": True})
+            # The ledger answer arrives; a second seen_marked never does.
+            assert recv_until(ws, "seen_ledger")["seen"]["chat.jsonl"] == stamp
+
+    def test_it_survives_a_restart(self, app_env):
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "seen", "marks": {"chat.jsonl": None}})
+            recv_until(ws, "seen_marked")
+        # A fresh app over the same state dir is what a launchd restart is.
+        again, _ = make_client(app_env, [model_says("hi")])
+        with again, connected(again) as (ws, _, _):
+            ws.send_json({"type": "seen", "marks": {}, "full": True})
+            assert "chat.jsonl" in recv_until(ws, "seen_ledger")["seen"]
+
+    def test_a_garbled_seen_message_is_ignored_not_fatal(self, app_env):
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "seen"})
+            ws.send_json({"type": "seen", "marks": "nonsense"})
+            ws.send_json({"type": "seen", "marks": {}, "full": True})
+            assert recv_until(ws, "seen_ledger")["seen"] == {}
+
+    def test_hello_carries_the_server_clock(self, app_env):
+        # The stamps a device compares — a row's last output, the owner's last
+        # look — are all written here now, so a device has to be able to
+        # correct its own clock against this one.
+        client, _ = make_client(app_env, [model_says("hi")])
+        with client, connected(client) as (_, hello, _):
+            assert hello["now"] > 0
+
+    def test_a_roster_transition_carries_the_time_it_happened(self, app_env, tmp_path):
+        # And it rides the EVENT, never the row: the row is what `_touch`
+        # diffs, so a clock inside it would differ every time and suppress
+        # nothing — the plane would republish every unchanged row forever.
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {tmp_path}/x")]),
+            model_says("done"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, hello, _):
+            session = hello["session"]
+            ws.send_json({"type": "task", "text": "go"})
+            event = recv_until_row(ws, session, "waiting")
+            assert event["at"] > 0
+            assert "at" not in event["row"]
+
+
 class TestPeek:
     """`peek` is the swipe-neighbor prefetch: a VIEW message answering another
     session's transcript snapshot WITHOUT switching to it, so a committed
