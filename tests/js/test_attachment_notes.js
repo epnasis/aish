@@ -226,6 +226,44 @@ const { splitAttachmentNotes, stripAttachmentNotes, recordSource, messageParts, 
   ok("the trailing file is a block", parts[1].type === "file" && parts[1].block === true);
 }
 
+// ---- what "inside a sentence" actually means (#234) -------------------------
+
+// THE REPORTED BUBBLE. A message that merely ENDS with a picture is one with an
+// attachment, whatever line the reference sits on — and it gets the thumbnail
+// an attachment has always had. This one was sent BEFORE the composer stopped
+// writing references onto the same line, and a log is never rewritten, so
+// deciding it here is the only thing that repairs it.
+{
+  const parts = messageParts("The url from notification does not open ![[shot.png]]");
+  const file = parts.find((p) => p.type === "file");
+  ok("a picture at the end of a message is an attachment", file.block === true);
+  ok("…and the words before it are still there",
+    parts[0].type === "text" && /does not open/.test(parts[0].text));
+}
+
+// Words AFTER it are what make it inline: that is a file in a sentence.
+{
+  const parts = messageParts("the error in ![[shot.png]] is here");
+  ok("a picture with words after it stays inline",
+    parts.find((p) => p.type === "file").block === false);
+}
+
+// A message WRITTEN in the inline style keeps its trailing picture inline too.
+// "compare A with B" is one thought; showing B at four times the size of A
+// would read as two different kinds of thing.
+{
+  const files = messageParts("compare ![[a.png]] with ![[b.png]]")
+    .filter((p) => p.type === "file");
+  ok("siblings in one sentence are sized alike",
+    files.length === 2 && files.every((f) => f.block === false));
+}
+
+// Two attached photos and no sentence: both are attachments, as always.
+{
+  const files = messageParts("![[a.png]]\n![[b.png]]").filter((p) => p.type === "file");
+  ok("plain attachments stay blocks", files.every((f) => f.block === true));
+}
+
 // Two derivations, and the difference is the audience. `messageBody` preserves
 // the message (reuse re-sends it); `stripAttachmentNotes` is for reading (a
 // title must not show notation, and must not have its subject cut out either).

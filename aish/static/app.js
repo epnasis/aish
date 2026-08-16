@@ -7538,6 +7538,32 @@ function messageParts(text, real) {
     buffer.push(line);
   }
   flushText();
+  // A picture a message merely ENDS with is an ATTACHMENT, whatever line it is
+  // on, and gets the full thumbnail an attachment has always had — not a
+  // picture shrunk to the height of the words beside it. A screenshot rendered
+  // two lines tall is unreadable, which is the one thing a screenshot is sent
+  // to be (#234).
+  //
+  // Unless the message is WRITTEN in the inline style — some file in it has
+  // words after it. Then a trailing one belongs to the same sentence and is
+  // sized like its siblings: "compare ![[a.png]] with ![[b.png]]" is one
+  // thought, and showing the second picture at four times the first would read
+  // as two different kinds of thing.
+  //
+  // Deciding this HERE rather than only in the composer is what makes it true
+  // of messages ALREADY SENT. The composer stopped producing them, but a log is
+  // never rewritten, so every message sent while it did would otherwise have
+  // stayed a smudge for good.
+  const written_inline = parts.some(
+    (part, i) =>
+      part.type === "file" && !part.block &&
+      parts.slice(i + 1).some((later) => later.type === "text"),
+  );
+  if (!written_inline) {
+    for (let i = parts.length - 1; i >= 0 && parts[i].type === "file"; i -= 1) {
+      parts[i].block = true;
+    }
+  }
   return parts;
 }
 
