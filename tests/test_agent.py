@@ -7516,6 +7516,127 @@ NARRATION = (
 )
 
 
+class TestAttachmentFormsAcrossTheSeam:
+    """The model's view and the owner's record diverge on purpose (#231), and
+    these pin the three places that could let the divergence go wrong.
+
+    The log must never keep the model's prose. The model must never be handed a
+    bare `![[cat.png]]` it was not taught. And a turn deleted from a phone must
+    still find itself in a conversation that is holding the other form.
+    """
+
+    def _agent(self, tmp_path, logged):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+        (uploads / "cat.png").write_bytes(b"\x89PNG")
+        agent, chat = make_agent(
+            [model_says("seen"), model_says("seen again")],
+            state_dir=tmp_path,
+            cwd=str(tmp_path),
+            on_message=logged.append,
+        )
+        return agent, uploads
+
+    GUIDANCE = "[image attached: cat.png — you can see it; file at {p}]"
+
+    def test_the_model_gets_guidance_and_the_log_gets_the_record(self, tmp_path):
+        logged: list[dict] = []
+        agent, uploads = self._agent(tmp_path, logged)
+        note = self.GUIDANCE.format(p=uploads / "cat.png")
+        agent.run_task(f"what is this?\n\n{note}", images=[str(uploads / "cat.png")])
+
+        sent = [m for m in agent.messages if m.get("role") == "user"][-1]
+        assert "you can see it" in sent["content"], "the model was told it may look"
+
+        stored = [m for m in logged if m.get("role") == "user"][-1]
+        assert stored["content"] == "what is this?\n\n![[cat.png]]"
+        assert "you can see it" not in stored["content"], (
+            "machine prose reached the log, which is what the owner then reads"
+        )
+
+    def test_a_restored_turn_reads_to_the_model_as_the_live_one_did(self, tmp_path):
+        logged: list[dict] = []
+        agent, uploads = self._agent(tmp_path, logged)
+        path = str(uploads / "cat.png")
+        agent.run_task(
+            f"what is this?\n\n{self.GUIDANCE.format(p=path)}", images=[path]
+        )
+        live = [m for m in agent.messages if m.get("role") == "user"][-1]["content"]
+
+        # Reopened cold: the log's record form goes back through load_history.
+        cold, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
+        cold.load_history([
+            {k: v for k, v in m.items() if k in ("role", "content", "images")}
+            for m in logged if m.get("role") == "user"
+        ])
+        restored = [m for m in cold.messages if m.get("role") == "user"][-1]["content"]
+        assert restored == live, (
+            "the model saw rich guidance live and a bare wiki-link on reopen"
+        )
+
+    def test_a_file_the_model_could_not_take_restores_as_a_path_to_open(self, tmp_path):
+        cold, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
+        cold.load_history([{"role": "user", "content": "look\n![[/tmp/x.zip]]"}])
+        content = cold.messages[-1]["content"]
+        assert content == "look\n\n[attached file: /tmp/x.zip]", (
+            "nothing said the bytes were delivered, so the model must be told to open it"
+        )
+
+    def test_the_picture_is_still_a_picture_through_a_symlink(self, tmp_path):
+        """Found in a browser run, not here: on macOS the state dir was reached
+        as /tmp/… and the delivered image recorded as /private/tmp/…. Same file,
+        two spellings, so the "was this delivered natively?" lookup missed and a
+        picture sitting IN the message was announced to the model as a file to
+        go and open. Silent, and the exact failure the split exists to avoid."""
+        real = tmp_path / "real"
+        (real / "uploads").mkdir(parents=True)
+        (real / "uploads" / "cat.png").write_bytes(b"\x89PNG")
+        link = tmp_path / "linked"
+        link.symlink_to(real)
+
+        cold, _ = make_agent([], state_dir=link, cwd=str(tmp_path))
+        cold.load_history([{
+            "role": "user",
+            "content": "what is this?\n![[cat.png]]",
+            # Spelled the OTHER way, as the sending side recorded it.
+            "images": [str(real / "uploads" / "cat.png")],
+        }])
+        assert "you can see it" in cold.messages[-1]["content"], (
+            "the model was told to open a picture it had already been handed"
+        )
+
+    def test_a_message_with_no_attachments_is_untouched(self, tmp_path):
+        cold, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
+        original = {"role": "user", "content": "just words"}
+        cold.load_history([original])
+        assert cold.messages[-1] is original, "the common message pays nothing"
+
+    def test_deleting_a_turn_finds_it_across_the_two_forms(self, tmp_path):
+        """The log names the turn by what IT holds (`![[cat.png]]`); the running
+        conversation holds the guidance. An exact match would never find it, and
+        the chat would go on quoting a message the owner had deleted."""
+        agent, uploads = self._agent(tmp_path, [])
+        path = str(uploads / "cat.png")
+        agent.run_task(f"the pin is 4417\n\n{self.GUIDANCE.format(p=path)}", images=[path])
+        assert agent.redact_turn("the pin is 4417\n\n![[cat.png]]") is True
+        assert not any(
+            "4417" in str(m.get("content", "")) for m in agent.messages
+        ), "the chat kept quoting a message the owner deleted"
+
+    def test_two_photos_with_no_words_are_told_apart(self, tmp_path):
+        """Both reduce to empty typed words, so on words alone deleting the
+        second would have dropped the FIRST from the model's context."""
+        agent, uploads = self._agent(tmp_path, [])
+        for name in ("cat.png", "dog.png"):
+            (uploads / name).write_bytes(b"\x89PNG")
+            note = f"[image attached: {name} — you can see it; file at {uploads / name}]"
+            agent.run_task(note, images=[str(uploads / name)])
+        assert agent.redact_turn("![[dog.png]]") is True
+        kept = [str(m.get("content", "")) for m in agent.messages]
+        assert any("cat.png" in c for c in kept), "the wrong turn was dropped"
+        assert not any("dog.png" in c for c in kept)
+
+
 class TestNarration:
     """#212. A long task used to be a spinner: the model's own commentary was
     captured, cut to one sentence at 120 characters for the trace header, and
@@ -7727,10 +7848,10 @@ def _recording_append(agent, sink):
     """Capture the user-slot text the harness writes back (Verify's goads)."""
     original = agent._append
 
-    def append(message, interim=False):
+    def append(message, interim=False, record_content=None):
         if message.get("role") == "user":
             sink.append(str(message.get("content", "")))
-        return original(message, interim)
+        return original(message, interim, record_content)
 
     return append
 

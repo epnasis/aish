@@ -51,7 +51,16 @@ from . import (
     web,
 )
 from .approval import Approved, Blocked, Denied, is_scratch_delete, path_within
-from .session import NOTE_MARKER, SessionLog
+from .session import (
+    NOTE_MARKER,
+    SessionLog,
+    attachment_guidance,
+    attachment_names,
+    attachment_refs,
+    resolve_attachment,
+    strip_attachment_notes,
+    to_record_form,
+)
 
 _PLATFORM_NOTES = {
     "darwin": (
@@ -1402,8 +1411,19 @@ class Agent:
 
     def load_history(self, messages: list[dict]) -> None:
         """Adopt messages from a previous session (already logged — appended
-        directly so they are not re-recorded)."""
-        self.messages.extend(m for m in messages if m.get("role") != "system")
+        directly so they are not re-recorded).
+
+        Attachment embeds are expanded back into the guidance the model was
+        given when the turn was live (#231). A stored turn says `![[cat.png]]`,
+        which is the owner's record; what a model needs is the sentence telling
+        it whether it can look at the picture or must open the file itself. That
+        sentence is rebuilt here rather than stored, so a restored turn reads to
+        the model exactly as a live one did — the alternative was a model that
+        saw rich guidance during the conversation and a bare wiki-link on every
+        reopen, and no test would have caught the difference."""
+        self.messages.extend(
+            self._restore_attachments(m) for m in messages if m.get("role") != "system"
+        )
         # Restore egress provenance (#178): user-role turns are owner-authored
         # by construction (typed messages, the trigger prompt, aish's own
         # notes) — tool results stay excluded, so a cold reopen neither widens
@@ -1411,6 +1431,50 @@ class Agent:
         for message in messages:
             if message.get("role") == "user" and isinstance(message.get("content"), str):
                 self.note_owner_hosts(message["content"])
+
+    @property
+    def uploads_dir(self) -> Path | None:
+        """Where aish keeps the files it was handed. A stored attachment embed
+        names a file without a path (#231) precisely because this folder is the
+        only place one can be, so this is what makes a bare name resolvable."""
+        return Path(self.state_dir) / "uploads" if self.state_dir else None
+
+    def _restore_attachments(self, message: dict) -> dict:
+        """One stored message, with any attachment embeds turned back into model
+        guidance. Untouched when it carries none, which is almost every message
+        and every message written before #231."""
+        content = message.get("content")
+        if message.get("role") != "user" or not isinstance(content, str):
+            return message
+        refs = attachment_refs(content)
+        if not refs:
+            return message
+        # Keyed by the file's REAL path, on both sides. A string comparison was
+        # wrong and quietly so: `/tmp/x.png` and `/private/tmp/x.png` are one
+        # file with two names, and any symlink on the way to the state
+        # directory makes the two sides spell it differently. The lookup then
+        # missed, and a picture sitting in the message was announced to the
+        # model as a file it should go and open — the failure the whole split
+        # exists to avoid, arriving silently.
+        def real(path: str) -> str:
+            try:
+                return str(Path(path).resolve())
+            except OSError:  # unreadable or absurd path — compare it as given
+                return path
+
+        native = {
+            **{real(p): "image" for p in message.get("images") or []},
+            **{real(p): "document" for p in message.get("documents") or []},
+        }
+        lines: list[str] = []
+        for ref, name in refs:
+            path = resolve_attachment(ref, self.uploads_dir)
+            lines.append(attachment_guidance(name, path, native.get(real(path), "")))
+        body = strip_attachment_notes(content)
+        return {
+            **message,
+            "content": f"{body}\n\n" + "\n".join(lines) if body else "\n".join(lines),
+        }
 
     def rewind_last_task(self) -> str | None:
         """Undo the most recent user turn: drop that user message and everything
@@ -1432,6 +1496,30 @@ class Agent:
                 return text if isinstance(text, str) else None
         return None
 
+    @staticmethod
+    def _same_turn(mine: object, theirs: str) -> bool:
+        """Is this the same user turn, given that the log and the model hold
+        different texts for one (#231)?
+
+        A turn with an attachment is stored as `![[cat.png]]` and given to the
+        model as a sentence about what it may do with the file, so an exact
+        comparison would never match one and a deletion made on the phone would
+        scrub the log while the running conversation kept quoting the message.
+        Both sides are reduced to the typed words PLUS the file names, which are
+        the same in both forms. The names are not decoration: two photos sent
+        with nothing typed both reduce to empty words, so on words alone
+        deleting the second would have dropped the FIRST from the model's
+        context. Turns identical in both are told apart by the occurrence
+        counter, exactly as two identical turns always were."""
+        if not isinstance(mine, str):
+            return False
+        if mine == theirs:
+            return True
+        return (
+            strip_attachment_notes(mine) == strip_attachment_notes(theirs)
+            and attachment_names(mine) == attachment_names(theirs)
+        )
+
     def redact_turn(self, text: str, occurrence: int = 1) -> bool:
         """Drop a removed turn from the model's context (#202): the user message
         itself, its TASK_REMINDER, and everything the assistant produced from it,
@@ -1447,7 +1535,7 @@ class Agent:
         for i in range(1, len(self.messages)):  # messages[0] is the system prompt
             if self.messages[i].get("role") != "user":
                 continue
-            if self.messages[i].get("content") != text:
+            if not self._same_turn(self.messages[i].get("content"), text):
                 continue
             seen += 1
             if seen < occurrence:
@@ -1470,10 +1558,18 @@ class Agent:
             return True
         return False
 
-    def _append(self, message: dict, interim: bool = False) -> None:
+    def _append(
+        self, message: dict, interim: bool = False, record_content: str | None = None
+    ) -> None:
         """`interim` stamps the LOG record as a delivery — something said on
         the way to the answer (#212) — without touching the message dict the
         backends receive, which must carry no key they did not ask for.
+
+        `record_content` is the OTHER half of that idea: the log keeps a
+        different text than the model was given. This is the single place the
+        two are allowed to diverge, and today the only caller is the attachment
+        record form (#231). The model's copy is authoritative for the
+        conversation; the log's is authoritative for what the owner sees.
 
         Readers that need "was this the turn's answer?" (the fork ordinal, the
         exporter) had only one signal: an interim turn is followed by a
@@ -1486,6 +1582,8 @@ class Agent:
             record = _serialize(message)
             if interim:
                 record["interim"] = True
+            if record_content is not None:
+                record["content"] = record_content
             self.on_message(record)
 
     def _note(self, text: str) -> None:
@@ -1867,7 +1965,16 @@ class Agent:
                 mode=preload.mode,
                 items=[{"label": it.pop("name"), **it} for it in preload.items],
             )
-        self._append(user_message)
+        # `task` is the guidance form — the sentences telling this backend what
+        # it may do with each attached file. The LOG gets the record form (#231),
+        # converted here rather than by each caller: the web launch, a retry
+        # rewinding the model's own context, a trigger and the CLI all reach this
+        # line, and a caller that forgot would write machine prose into a fresh
+        # log with nothing to catch it. Messages with no attachments convert to
+        # themselves, so this is inert for almost every turn.
+        self._append(
+            user_message, record_content=to_record_form(task, self.uploads_dir)
+        )
 
         task_started = time.perf_counter()
         tokens_in = tokens_out = 0

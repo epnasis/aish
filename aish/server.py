@@ -104,10 +104,12 @@ from .session import (
     RATINGS,
     RESUME_MARKER,
     SessionLog,
+    attachment_guidance,
     attachment_names,
     strip_attachment_notes,
     synthetic_kind,
     title_drifted,
+    to_record_form,
 )
 
 if TYPE_CHECKING:
@@ -1527,7 +1529,10 @@ The owner can TAP an attached picture or PDF in the chat to look at it \
 themselves (a PDF opens page by page), so naming a page number in your \
 answer points them at something they can check — and can save any attachment \
 to their device from the same place, so they never need you to copy a file \
-out for them."""
+out for them. In the owner's own copy of a message an attachment appears as \
+`![[cat.png]]` (wiki-link style, as in Obsidian) — that is what they see, \
+copy and paste, so if they quote a message back at you with `![[…]]` in it, \
+that is an attached file and the notes above are how it reached you."""
 
 
 class Client:
@@ -2010,6 +2015,11 @@ class WebServer:
             "session": session.name,
             "title": self._title(session),
             "log_path": str(session.logref.log.path),  # /session + "Copy log path" (#146)
+            # Where attachments live (#231). A stored message names a file
+            # without a path, so the browser needs this to turn `![[cat.png]]`
+            # back into something /file will serve. Server-owned and sent, never
+            # guessed: only the server knows where its own state directory is.
+            "uploads_dir": str(self.uploads_dir),
             "busy": session.busy,
             "cwd": session.agent.cwd,
             "roots": [str(root) for root in session.agent.roots],
@@ -2482,11 +2492,21 @@ class WebServer:
     def _classify_attachments(
         self, agent, paths: list[str]
     ) -> tuple[list[str], list[str], list[str]]:
-        """(native images, native documents, text notes). Only files inside
-        the uploads dir qualify for native delivery — an arbitrary client
-        path must never be silently base64'd off the machine. Everything
-        else (unsupported type/backend, oversized, outside uploads) becomes
-        a path note the agent handles through the normal gated tools.
+        """(native images, native documents, guidance lines).
+
+        GUIDANCE is what this model is told about each file — that it can look
+        at the picture, that it can read the PDF, or just where the file is so
+        it can open it itself. It depends on which backend is answering, so it
+        is built here at hand-over time and never written down. What the log
+        keeps instead is the RECORD form, `![[cat.png]]`, produced from this by
+        `to_record_form` (#231) — one function, so the copy the browser paints
+        and the copy the log stores cannot drift.
+
+        Only files inside the uploads dir qualify for native delivery — an
+        arbitrary client path must never be silently base64'd off the machine.
+        Everything else (unsupported type/backend, oversized, outside uploads)
+        gets guidance naming the path, which the agent handles through the
+        normal gated tools.
 
         A PDF is announced as readable whatever the backend (#219): native
         delivery is still the best fidelity and is preferred where it exists,
@@ -2498,7 +2518,7 @@ class WebServer:
         uploads = self.uploads_dir.resolve()
         images: list[str] = []
         documents: list[str] = []
-        notes: list[str] = []
+        guidance: list[str] = []
         for raw in paths:
             path = Path(raw)
             try:
@@ -2509,20 +2529,21 @@ class WebServer:
             suffix = path.suffix.lower()
             if in_uploads and size_ok and suffix in backends.IMAGE_SUFFIXES and "image" in support:
                 images.append(str(path))
-                # Full path (not just the name) so /feedback's classic flow can
-                # upload the file, not only see it (#152).
-                notes.append(f"[image attached: {path.name} — you can see it; file at {path}]")
+                kind = "image"
             elif in_uploads and suffix == ".pdf":
                 # Native delivery keeps the size cap (it is a base64 payload in
-                # every request from here on); the NOTE does not, because
+                # every request from here on); the GUIDANCE does not, because
                 # read_pdf reads from disk and a big scan is exactly the
                 # document that most needs reading.
                 if size_ok and "pdf" in support:
                     documents.append(str(path))
-                notes.append(f"[document attached: {path.name} — you can read it; file at {path}]")
+                kind = "document"
             else:
-                notes.append(f"[attached file: {path}]")
-        return images, documents, notes
+                kind = ""
+            # The full path, not just the name, so /feedback's classic flow can
+            # upload the file and not only see it (#152).
+            guidance.append(attachment_guidance(path.name, str(path), kind))
+        return images, documents, guidance
 
     async def _stop_task(self, client: Client) -> None:
         session = client.viewing
@@ -2777,11 +2798,20 @@ class WebServer:
             return
         # Attachments classify at start time so a model switch while queued
         # is honored (vision support is per-backend).
-        images, documents, notes = self._classify_attachments(session.agent, attachments)
-        if notes:
-            text = f"{text}\n\n" + "\n".join(notes) if text else "\n".join(notes)
+        images, documents, guidance = self._classify_attachments(
+            session.agent, attachments
+        )
+        if guidance:
+            text = f"{text}\n\n" + "\n".join(guidance) if text else "\n".join(guidance)
+        # Two forms from here on (#231). `text` goes to the MODEL and carries the
+        # guidance. What the browser paints — and, via run_task, what the log
+        # keeps — is the RECORD form, `![[cat.png]]`, from the same pure function
+        # the agent calls, so the two copies cannot drift. They used to be one
+        # string, and because that string had to be written for the model, every
+        # surface facing the owner had to undo it.
+        shown = to_record_form(text, self.uploads_dir)
         session.busy = True
-        session.open_turn(_turn_event(text))
+        session.open_turn(_turn_event(shown))
         if text.startswith("/"):
             # /learn and /feedback are the task-expanding slash commands on web:
             # the transcript shows what the user typed, the model gets the
