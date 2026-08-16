@@ -7618,6 +7618,17 @@ $("composer").addEventListener("submit", (e) => {
 // the fresh #input node terminal mode swaps in (attachInputListeners, #156).
 // [ENTER-START]
 function onInputKeydown(e) {
+  // Cmd/Ctrl+Enter SENDS, in either mode. Bare Enter deliberately does not in
+  // prose (#170) because autocorrect, IME and dictation all emit lone Returns
+  // that fired half-written messages — none of them can produce a modifier
+  // chord, so this gives the desktop a keyboard send path without reopening
+  // that. It runs ahead of the suggestion popup: holding a modifier means "send
+  // what I typed", not "complete it".
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.altKey) {
+    e.preventDefault();
+    submitInput();
+    return;
+  }
   if (!$("suggest").hidden) {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
@@ -11718,6 +11729,15 @@ document.addEventListener("keydown", (e) => {
 // Desktop only: auto-focusing on a phone would pop the keyboard over the
 // content on every reconnect.
 const FINE_POINTER = matchMedia("(pointer: fine)").matches;
+
+// The send chord is otherwise invisible — the button is the only send path a
+// reader can see, so it says so, on the pointer that has a modifier key. The
+// tooltip is the only place the platform's own glyph appears; the handler
+// accepts either modifier regardless of what is printed here.
+if (FINE_POINTER) {
+  const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
+  $("send").title = mac ? "send (⌘↩)" : "send (Ctrl+Enter)";
+}
 
 // Grabber: drag down to dismiss (pointer events cover touch and mouse).
 for (const sheet of document.querySelectorAll(".sheet")) {
