@@ -9524,30 +9524,46 @@ async function uploadFile(file) {
 }
 
 // [EMBED-AT-CARET-START]
-// A file joins the message WHERE YOU ARE TYPING (#233).
+// A file joins the message WHERE YOU ARE TYPING (#233) — but only when that is
+// somewhere you actually are.
 //
-// It used to join at the end, always, because the end was the only place an
-// attachment could be. Now that a reference means the same thing anywhere, the
-// natural thing is for ＋ to put it under the cursor — you write "the error in
-// ", attach the screenshot, and carry on with " and the fix should look like".
+// ATTACHING AT THE END IS STILL A PHOTO ON ITS OWN LINE, and that correction
+// matters more than the feature. Writing a question and then tapping ＋ leaves
+// the caret at the end, which is the ordinary way every attachment has ever
+// been made — and the first version put the reference on that same line, so an
+// ordinary photo came out rendered at text height. A smudge, in place of the
+// thumbnail that used to be there (#234). The end of the message is not "inside
+// the sentence"; it is the end.
 //
-// Two rules keep it from being annoying. It never lands mid-word: a space is
-// added on whichever side is missing one. And an EMPTY composer gets nothing —
+// So: a caret with nothing but whitespace after it appends a BLOCK — its own
+// line, its own big picture, exactly as before. Inline is what you get when the
+// cursor is genuinely in the middle of what you wrote, which is a deliberate
+// act and the only case position was ever the point of.
+//
+// Two rules keep the inline case from being annoying: it never lands mid-word
+// (a space on whichever side lacks one), and an EMPTY composer gets nothing —
 // a photo sent with no words is a whole message by itself, the server appends
-// the reference on send, and typing `![[cat.png]]` into an empty box just to
-// delete it is a step nobody asked for.
+// the reference on send, and typing one in just to delete it is a step nobody
+// asked for.
 function insertEmbedAtCaret(name) {
   if (!input.value.trim()) return;
   const at = input.selectionStart ?? input.value.length;
   const before = input.value.slice(0, at);
   const after = input.value.slice(at);
-  const embed =
-    (before && !/\s$/.test(before) ? " " : "") +
-    `![[${name}]]` +
-    (after && !/^\s/.test(after) ? " " : "");
-  input.value = before + embed + after;
-  const caret = before.length + embed.length;
-  input.setSelectionRange(caret, caret);
+  if (!after.trim()) {
+    // At the end: a block, on its own line, like every attachment before this.
+    input.value = `${before.replace(/\s+$/, "")}\n![[${name}]]`;
+    const caret = input.value.length;
+    input.setSelectionRange(caret, caret);
+  } else {
+    const embed =
+      (before && !/\s$/.test(before) ? " " : "") +
+      `![[${name}]]` +
+      (/^\s/.test(after) ? "" : " ");
+    input.value = before + embed + after;
+    const caret = before.length + embed.length;
+    input.setSelectionRange(caret, caret);
+  }
   resizeInput();
   saveDraft();
 }

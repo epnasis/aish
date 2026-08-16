@@ -6,10 +6,20 @@
 // anywhere, ＋ writes it under the cursor: you type "the error in ", attach the
 // screenshot, and carry on with " and the fix looks like".
 //
+// THE CORRECTION THIS FILE EXISTS FOR (#234): "at the caret" must not swallow
+// the ordinary case. Writing a question and then tapping ＋ leaves the caret at
+// the END, which is how every attachment has ever been made — and the first
+// version put the reference on that same line, so a plain photo came out
+// rendered at text height instead of as the thumbnail that had always been
+// there. The end of a message is not "inside the sentence"; it is the end, and
+// it gets a block on its own line.
+//
 // What is pinned here:
-//   - the reference lands at the caret, not at the end;
-//   - it never lands mid-word — a space is added on whichever side lacks one;
-//   - it does not double up spacing that is already there;
+//   - a caret at the END appends a BLOCK, on its own line (the old behaviour,
+//     and the one almost every attachment takes);
+//   - a caret genuinely INSIDE the text inserts inline, in place;
+//   - inline never lands mid-word — a space is added on whichever side lacks
+//     one — and does not double up spacing already there;
 //   - an EMPTY composer gets nothing, because a photo sent with no words is a
 //     whole message by itself and the server appends the reference on send;
 //   - the caret ends up AFTER what was inserted, so typing continues where the
@@ -58,7 +68,23 @@ function world(value, caret) {
   return { sandbox, input };
 }
 
-// 1. THE POINT: the file lands under the cursor, not at the end.
+// 1. THE REGRESSION: type a question, tap ＋. The caret is at the end, and what
+//    that has always meant is a photo on its own line — a real thumbnail, not a
+//    picture shrunk to the height of the text around it.
+{
+  const w = world("what is on this terrace?");
+  w.sandbox.insertEmbedAtCaret("taras.png");
+  ok("a file attached at the end gets its own line",
+    w.input.value === "what is on this terrace?\n![[taras.png]]");
+}
+{
+  const w = world("what is on this terrace?   ");
+  w.sandbox.insertEmbedAtCaret("taras.png");
+  ok("…trailing whitespace is still the end",
+    w.input.value === "what is on this terrace?\n![[taras.png]]");
+}
+
+// 2. THE FEATURE: a caret genuinely inside the text inserts in place.
 {
   const w = world("the error in  and the fix is obvious", 13);
   w.sandbox.insertEmbedAtCaret("shot.png");
@@ -66,27 +92,22 @@ function world(value, caret) {
     w.input.value === "the error in ![[shot.png]] and the fix is obvious");
 }
 
-// 2. Never mid-word: a space appears on the side that needs one.
-{
-  const w = world("look at", 7);
-  w.sandbox.insertEmbedAtCaret("cat.png");
-  ok("a space is added before", w.input.value === "look at ![[cat.png]]");
-}
+// 3. Inline never lands mid-word: a space appears on the side that needs one.
 {
   const w = world("look atplease", 7);
   w.sandbox.insertEmbedAtCaret("cat.png");
-  ok("…and after, when there is text on both sides",
+  ok("a space is added on both sides when the word is split",
     w.input.value === "look at ![[cat.png]] please");
 }
 
-// 3. Spacing already there is not doubled — the sentence must not gain gaps.
+// 4. Spacing already there is not doubled — the sentence must not gain gaps.
 {
   const w = world("look at  please", 8);
   w.sandbox.insertEmbedAtCaret("cat.png");
   ok("existing spaces are left alone", w.input.value === "look at ![[cat.png]] please");
 }
 
-// 4. An empty composer gets nothing: the photo IS the message, and the server
+// 5. An empty composer gets nothing: the photo IS the message, and the server
 //    appends the reference on send. Typing one in just to delete it is a step
 //    nobody asked for.
 {
@@ -100,7 +121,7 @@ function world(value, caret) {
   ok("…nor into one holding only whitespace", w.input.value === "   \n ");
 }
 
-// 5. The caret follows the insertion, so typing carries on where the sentence
+// 6. The caret follows the insertion, so typing carries on where the sentence
 //    does — not back at the point the file interrupted.
 {
   const w = world("the error in  is here", 13);
