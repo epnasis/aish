@@ -1481,6 +1481,9 @@ function handle(event) {
     case "session_state": onSessionState(event); break;
     case "session_deleted": onSessionDeleted(event); break;
     case "session_changed": onSessionChanged(event); break;
+    // The owner read a chat — here, or on the other device (#232).
+    case "seen_marked": applySeenMarks(event.seen); break;
+    case "seen_ledger": onSeenLedger(event); break;
     case "peek": onPeek(event); break;
     case "session_renamed": onSessionRenamed(event); break;
     case "role": onRole(event); break;
@@ -1523,11 +1526,17 @@ function onSessionRenamed(event) {
 // "nothing changed" and "I missed something" into different observations: a
 // gap asks for a snapshot rather than leaving a stale row on screen forever.
 //
-// THE TIMESTAMPS ARE STAMPED HERE, not carried. The server would have to parse
-// a session log to know them, and a chat that just did something has just
-// changed its file — so the parse cache is guaranteed to miss at exactly the
-// moment a transition fires. Stamping on arrival is also the more honest
-// clock: unread compares against THIS device's "I looked at it" map.
+// THE TIMESTAMPS ARE THE TRANSITION'S, carried on the event (#232). They were
+// stamped on arrival here, because unread compared them against THIS device's
+// "I looked at it" map and one clock was enough. The ledger is the owner's
+// now, so a comparison across two clocks is a device with a wrong one reading
+// dots that are not there — and the publishing instant is the same one arrival
+// was approximating, minus the skew. It is on the EVENT, never the row: the row
+// is what `_touch` diffs, and a clock inside it would differ every time and
+// suppress nothing. The LOG-derived stamps stay off it for the original reason
+// — the server would have to parse a session log, and a chat that just did
+// something has just changed its file, so the parse cache is guaranteed to miss
+// exactly then.
 let rosterSeq = 0;
 // Does this client hold every chat there is, or only the ones it has been told
 // about? The pager rows a hello carries are the recency HEAD, not the archive,
@@ -1569,7 +1578,7 @@ function onSessionChanged(event) {
       requestSessions($("sessions-search").value || "");
     }
   }
-  noteAttention(row);
+  noteAttention(row, event.at);
   if (event.notice) rosterNotice(event.notice, row);
   if (railIsOpen()) renderSessionsFromCache();
 }
@@ -2069,6 +2078,11 @@ function onHello(event) {
   // until you opened the rail ([ATTENTION]).
   setAttentionRows(event.pager || []);
   rosterBaseline(event.roster_seq); // and whether we missed anything while away
+  // Adopt the server's clock and reconcile the seen ledger (#232): hand over
+  // whatever this device read while it was away, take back what the owner read
+  // on the other one. A hello arrives on every switch too and this is not
+  // per-chat, but it is cheap and idempotent — the outbox is normally empty.
+  syncSeen(event.now);
   if (railIsOpen()) requestSessions($("sessions-search").value || ""); // docked: stay current
   currentLogPath = event.log_path || ""; // /session + "Copy log path" (#146)
   uploadsDir = event.uploads_dir || uploadsDir; // resolves `![[cat.png]]` (#231)
@@ -12353,19 +12367,48 @@ $("session-menu").addEventListener("click", (e) => {
 // much as your own chat that finished a long task while you were away, and a
 // three-week-old triggered chat about a receipt is just an old chat.
 //
-// "Unread" is per-DEVICE, because "I looked at it" is a fact about a screen, not
-// about the server: the same chat can be read here and unread on the phone, and
-// that is correct. The floor (`since`) is what keeps day one sane — without it
-// the entire archive would arrive unread on a new device and the attention band,
-// whose whole value is being short, would BE the list.
+// "Unread" belongs to the OWNER, not to this screen (#232). It used to be the
+// other way — each browser kept its own map and it never left, on the reasoning
+// that "I looked at it" is a fact about a screen — and for a product with many
+// users that is right. aish has one owner and one pair of eyes: a chat read on
+// the phone whose dot is still on the laptop is the app making a false claim
+// about the person using it, and the attention band, whose entire value is
+// being short and true, fills up with chats they already know about.
+//
+// So the ledger is the server's and this map is a CACHE plus an OUTBOX: it is
+// written optimistically the instant a chat is opened (that is what makes
+// reading one offline feel immediate, and what lets the rail paint with no
+// socket at all), and reconciled with the server's whenever there is one.
+//
+// Both directions merge by MAX, and everything rests on that. A stamp only
+// moves forward, so arrival order does not matter, a duplicate costs nothing, a
+// re-send is free, and nothing can ever UN-see a chat ([FORGET-SESSION] is
+// where that last tried to happen). It is also why marking seen needs no
+// receipt ([ACK-LEDGER]): the repair for a lost mark is the next connect, which
+// re-offers it, and re-offering can only ever be right.
+//
+// The floor (`since`) stays a fact about THIS device, deliberately. It exists
+// so a new phone does not render the whole archive unread, which is a claim
+// about what this screen has had a chance to show — and it can only ever move
+// something toward READ, never resurrect a dot.
 const SEEN_KEY = "aish-seen";
-const SEEN_MAX = 300; // names kept; oldest views dropped first
-let seenAt = {};      // name → ms this device last viewed it
+const SEEN_MAX = 300; // names kept; oldest views dropped first — matches aish/seen.py
+let seenAt = {};      // name → ms the OWNER last read it (server's ledger, cached)
 let seenSince = 0;    // this device started tracking here; older activity is read
+let pendingSeen = {}; // marks the server has not confirmed yet — offered on connect
+// The server's clock minus this device's, in ms. Every stamp unread compares —
+// a row's last output, the owner's last look — is written by the server now, so
+// a device with a wrong clock must not stamp its own optimistic "I read this"
+// in its own time and hide an answer it never saw. Zero until a hello says
+// otherwise, which is exactly the old behaviour.
+let clockSkew = 0;
 
 function saveSeen() {
-  try { localStorage.setItem(SEEN_KEY, JSON.stringify({ at: seenAt, since: seenSince })); }
-  catch { /* private mode: unread degrades to in-memory only */ }
+  try {
+    localStorage.setItem(SEEN_KEY, JSON.stringify({
+      at: seenAt, since: seenSince, pending: pendingSeen,
+    }));
+  } catch { /* private mode: unread degrades to in-memory only */ }
 }
 
 (function loadSeen() {
@@ -12374,6 +12417,11 @@ function saveSeen() {
     if (raw && raw.at && raw.since) {
       seenAt = raw.at;
       seenSince = raw.since;
+      // No `pending` key means this map was written by a build that kept
+      // unread to itself. Everything in it is therefore unknown to the server,
+      // and offering the lot is what SEEDS the ledger from whichever device
+      // connects first — the upgrade migrates itself, with no flag to forget.
+      pendingSeen = raw.pending || { ...seenAt };
       return;
     }
   } catch { /* private mode / corrupt — fall through to a fresh floor */ }
@@ -12381,20 +12429,86 @@ function saveSeen() {
   saveSeen();
 })();
 
+// The server's clock, in this device's terms. Used for the optimistic stamp
+// that stands until the ledger echoes back.
+function serverNow() {
+  return Date.now() + clockSkew;
+}
+
 // The ONLY writer of the seen map. Called from [SESSION-ENTER], because "the
 // view is now chat X" and "this device has looked at chat X" are the same event
 // — putting it there is what keeps a socket hello, a mirror read and the boot
 // paint from each having to remember it separately.
 function markSeen(name) {
   if (!name) return;
-  seenAt[name] = Date.now();
-  const names = Object.keys(seenAt);
-  if (names.length > SEEN_MAX) {
-    names.sort((a, b) => seenAt[b] - seenAt[a]);
-    for (const stale of names.slice(SEEN_MAX)) delete seenAt[stale];
-  }
+  const at = serverNow();
+  if (at <= (seenAt[name] || 0)) return; // monotonic: a stamp only moves forward
+  seenAt[name] = at;
+  pendingSeen[name] = at;
+  trimSeen();
   saveSeen();
   refreshBadge(); // reading a chat drops it from the count HERE, not a round trip later
+  flushSeen();    // …and off the OTHER device's count, as soon as it can be told
+}
+
+// Fold the server's ledger in. Max, not replace: a mark this device made after
+// the message was sent must survive it, or the chat you just opened flickers
+// back to unread when an older stamp for it arrives from somewhere else.
+// A stamp the server confirms is no longer pending — that is what stops the
+// outbox growing forever on a device that reads a lot.
+function applySeenMarks(seen) {
+  if (!seen) return;
+  let moved = false;
+  for (const [name, at] of Object.entries(seen)) {
+    const ms = Number(at) * 1000; // the ledger is in epoch SECONDS
+    if (!ms) continue;
+    if (ms > (seenAt[name] || 0)) { seenAt[name] = ms; moved = true; }
+    if (pendingSeen[name] && pendingSeen[name] <= ms) delete pendingSeen[name];
+  }
+  trimSeen();
+  saveSeen();
+  if (moved) {
+    refreshBadge();
+    if (railIsOpen()) renderSessionsFromCache();
+  }
+}
+
+// Hand over what the server has not confirmed, and on a connect ask for the
+// whole ledger back — one message, both directions. Deliberately NOT `send()`,
+// which toasts when the socket is down: marking a chat read offline is a normal
+// thing to do, and the outbox is what carries it across.
+function flushSeen(full) {
+  const marks = {};
+  for (const [name, at] of Object.entries(pendingSeen)) marks[name] = at / 1000;
+  if (!full && !Object.keys(marks).length) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "seen", marks, full: Boolean(full) }));
+}
+
+// A hello: adopt the server's clock, then reconcile. Both halves belong to a
+// CONNECT, not to a session switch — a hello also arrives on every switch, and
+// the ledger is not per-chat.
+function syncSeen(serverSeconds) {
+  if (Number(serverSeconds)) clockSkew = Number(serverSeconds) * 1000 - Date.now();
+  flushSeen(true);
+}
+
+// The answer to a `full` sync: the whole ledger, and the clock it was stamped
+// in. Re-adopting the clock here rather than only at hello keeps the two facts
+// arriving together — the stamps and the frame they mean anything in.
+function onSeenLedger(event) {
+  if (Number(event.now)) clockSkew = Number(event.now) * 1000 - Date.now();
+  applySeenMarks(event.seen);
+}
+
+function trimSeen() {
+  const names = Object.keys(seenAt);
+  if (names.length <= SEEN_MAX) return;
+  names.sort((a, b) => seenAt[b] - seenAt[a]);
+  for (const stale of names.slice(SEEN_MAX)) {
+    delete seenAt[stale];
+    delete pendingSeen[stale];
+  }
 }
 
 // PURE: the whole unread decision, testable with no DOM and no clock. `current`
@@ -12512,17 +12626,22 @@ function setAttentionRows(rows) {
   refreshBadge();
 }
 
-// One chat's state, pushed while you are elsewhere. Stamped with THIS device's
-// clock deliberately: `sessionUnread` compares it against the seen map, which
-// is this device's clock too, so a push cannot be read as already-seen by a
-// server whose clock runs behind. The push carries a title, so a chat this
-// device has never listed is still renderable when the count names it.
-// One pushed row, applied WHOLE — a row, never a patch, so a duplicate costs
-// nothing and a missed one is repaired by the next row for that chat.
-function noteAttention(pushed) {
+// One chat's state, pushed while you are elsewhere. Stamped with the SERVER's
+// clock — the instant the transition was published, carried on the event
+// (#232). It used to be stamped here, on the grounds that `sessionUnread`
+// compares it against the seen map and that map was this device's clock too.
+// That reasoning ended when the ledger became the owner's: the last-output
+// stamp and the last-look stamp have to be in one clock, and only one of them
+// can be. A server too old to send it falls back to this device's, corrected
+// by whatever skew the hello reported — which is the old behaviour when there
+// is none. The push carries a title, so a chat this device has never listed is
+// still renderable when the count names it. One pushed row, applied WHOLE — a
+// row, never a patch, so a duplicate costs nothing and a missed one is repaired
+// by the next row for that chat.
+function noteAttention(pushed, at) {
   const name = pushed && pushed.name;
   if (!name) return;
-  const now = Date.now() / 1000;
+  const now = Number(at) || serverNow() / 1000;
   // A push announcing a chat has STOPPED — finished, or holding — is announcing
   // that something landed in it, so it moves the OUTPUT stamp too. Without
   // that, unread would go on comparing against whatever the last list said and

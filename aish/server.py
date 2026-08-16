@@ -100,6 +100,7 @@ from .documents import DocumentError, page_count, page_png
 from .embeddings import SemanticIndex
 from .prompt import ATFILE_MAX_RESULTS, ATFILE_SCAN_CAP
 from .pty_session import PtySession
+from .seen import SeenLedger
 from .session import (
     RATINGS,
     RESUME_MARKER,
@@ -1682,6 +1683,13 @@ class WebServer:
         # transition would diff clean and never reach them.
         self._roster: dict[str, dict] = {}
         self._roster_seq = 0
+        # When the OWNER last read each chat (#232). Unread used to be a fact
+        # about a screen, kept in each browser and never shared, so a chat read
+        # on the phone kept its dot on the laptop. There is one owner here, so
+        # it is a fact about them — held where every device can agree with it.
+        # State, not config: `~/.config/aish` is auto-pushed to GitHub, and a
+        # record of when the owner read what has no business there.
+        self.seen = SeenLedger(state_dir / "seen.json")
         self._default: Session | None = None  # bare-connection landing session
         # The single GLOBAL interactive console (issue #148 follow-up), shared by
         # every connection. Held here, NEVER on a Session — the model has no
@@ -2030,6 +2038,12 @@ class WebServer:
             # was missed and the client asks for a snapshot rather than going
             # on believing a stale row.
             "roster_seq": self._roster_seq,
+            # The server's clock, so a device can correct its own against it
+            # (#232). Every stamp unread compares — a row's last output, the
+            # owner's last look — is now written here, so a phone running five
+            # minutes fast must not stamp its own optimistic "I read this" in
+            # its own time and hide an answer it never saw.
+            "now": time.time(),
             "pager": pages,
             # The user's own successful ! commands, cross-session, most-run first:
             # terminal-mode autocomplete draws from this personal palette (#104).
@@ -2267,6 +2281,9 @@ class WebServer:
             # messages, so exactly one answer() ever fills the blocked slot;
             # answer()'s pending-slot guard drops any duplicate.
             self._claim(client)
+        elif kind == "seen":
+            # VIEW message: reading a chat claims nothing.
+            await self._mark_seen(client, message)
         elif kind == "sessions":
             await self._send_sessions(client, str(message.get("query", "")))
         elif kind == "resume":
@@ -3296,10 +3313,62 @@ class WebServer:
             return
         self._roster[session.name] = row
         self._roster_seq += 1
-        event = {"type": "session_changed", "seq": self._roster_seq, "row": row}
+        # The transition's time, on the EVENT and not the row: the row is what
+        # gets diffed, and a clock inside it would differ every time and never
+        # suppress anything. The client used to stamp arrival with its own
+        # clock, which was self-consistent while "seen" was also its own — but
+        # the seen ledger is the SERVER's now (#232), and a comparison across
+        # two clocks is a device with a wrong one reading dots that are not
+        # there. This is the same instant the client was approximating, minus
+        # the skew.
+        event = {
+            "type": "session_changed",
+            "seq": self._roster_seq,
+            "at": time.time(),
+            "row": row,
+        }
         if notice:
             event["notice"] = notice
         self._broadcast(event)
+
+    # ---- the seen ledger (#232) ------------------------------------------
+    # Which chats the OWNER has read, shared by every device. It rides the
+    # roster plane because it is the same kind of fact — one that belongs to no
+    # single conversation and that every client needs whatever it is looking at
+    # — but it deliberately does NOT take a sequence number, and the difference
+    # is worth stating.
+    #
+    # A missed roster row is unrecoverable: it described a transition that has
+    # already happened, so a client that quietly carries on believes a stale
+    # row forever, and `seq` is what lets it notice and ask. A missed seen mark
+    # is not, because the ledger is MONOTONIC — re-offering a stamp that is
+    # already held changes nothing, so a client can simply hand over everything
+    # it knows whenever it reconnects and be right. That same property is why
+    # this needs no receipt (`[ACK-LEDGER]`): the repair for a lost mark is the
+    # next connect, and it costs one small message.
+    async def _mark_seen(self, client: Client, message: dict) -> None:
+        """Fold in what this device has read, tell the others, answer with the
+        ledger if it asked for it.
+
+        One message does both directions on connect: the client offers the
+        marks the server has not confirmed (possibly none) and asks for the
+        whole ledger back, which is what makes a device that read chats while
+        offline contribute them and a device that missed a broadcast catch up.
+        A live "I just opened this" is the same message without `full`, so it
+        costs one small broadcast rather than the ledger twice.
+        """
+        marks = message.get("marks")
+        changed = self.seen.merge(marks) if isinstance(marks, dict) else {}
+        if changed:
+            # To EVERY client, the sender included: it already holds these, and
+            # a merge that is a max cannot be hurt by hearing its own mark. The
+            # alternative — remembering who to skip — is the kind of bookkeeping
+            # that goes wrong the first time a device has two tabs open.
+            self._broadcast({"type": "seen_marked", "seen": changed})
+        if message.get("full"):
+            await client.ws.send_json(
+                {"type": "seen_ledger", "seen": self.seen.snapshot(), "now": time.time()}
+            )
 
     def _broadcast(self, event: dict) -> None:
         """Send to every connected client, viewer or not. Fire-and-forget on
