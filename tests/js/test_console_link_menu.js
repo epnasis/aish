@@ -85,11 +85,25 @@ function world() {
       right: COLS * CELL, bottom: ROWS * CELL,
     }),
   };
+  // Controllable timers: the menu arms itself on a delay, and "how long until
+  // the finger's own click can no longer act" is exactly what needs asserting.
+  const timers = [];
+  let nextTimer = 1;
+  const setTimeoutFake = (fn, ms) => { const id = nextTimer++; timers.push({ id, fn, ms }); return id; };
+  const clearTimeoutFake = (id) => {
+    const i = timers.findIndex((t) => t.id === id);
+    if (i >= 0) timers.splice(i, 1);
+  };
+  const fire = (ms) => {
+    for (const t of timers.filter((t) => t.ms <= ms)) { clearTimeoutFake(t.id); t.fn(); }
+  };
   const focused = { textarea: false, term: 0 };
   const textarea = { id: "xterm-helper-textarea", blur() { focused.textarea = false; } };
   const sandbox = {
     URL,
     $: el,
+    setTimeout: setTimeoutFake,
+    clearTimeout: clearTimeoutFake,
     consoleOpen: true,
     consoleTerm: { focus() { focused.term += 1; } },
     consoleTerminalTextarea: () => textarea,
@@ -112,7 +126,7 @@ function world() {
       .replace(/^const |^let /gm, "var "),
     sandbox,
   );
-  return { sandbox, el, opened, toasts, screen, store, focused };
+  return { sandbox, el, opened, toasts, screen, store, focused, fire };
 }
 
 const URL_TEXT = "https://accounts.example.com/o/oauth2/auth?code=ABCDEF0123456789";
@@ -243,6 +257,47 @@ function wrappedRows(prefix, url) {
   ok("choosing from the menu opens it", w.opened.join().includes(`aish:${URL_TEXT}`));
   ok("…and takes the menu down", w.el("clink-menu").hidden === true);
   ok("…and its scrim with it", w.el("clink-scrim").hidden === true);
+}
+
+// 6b. THE REPORTED BUG: "long press opens the menu, but when the finger is
+// released the menu disappears — unless I move while holding." WebKit
+// synthesises a click on release ONLY for a touch that did not move, and it
+// lands on the scrim the menu just raised. preventDefault on touchend did not
+// stop it on a real iPhone, so the menu refuses to act at all until the hold
+// that opened it has ENDED.
+{
+  const w = world();
+  const term = fakeTerm([{ text: `see ${URL_TEXT.slice(0, 30)}`, wrapped: false }]);
+  const on = pointAt(10, 0);
+  w.sandbox.consoleHoldAt(term, w.screen, on.x, on.y);
+  ok("while the finger is still down the menu answers nothing",
+    w.sandbox.consoleLinkMenuReady() === false);
+  w.fire(500);
+  ok("…and time alone does not arm it — the LIFT does",
+    w.sandbox.consoleLinkMenuReady() === false);
+
+  w.sandbox.consoleHoldEnded();
+  ok("the lift itself is still too early", w.sandbox.consoleLinkMenuReady() === false);
+  w.fire(400);
+  ok("a moment later the menu is live", w.sandbox.consoleLinkMenuReady() === true);
+}
+{
+  // A touch whose end never arrives must not leave a menu nothing can dismiss.
+  const w = world();
+  const term = fakeTerm([{ text: `see ${URL_TEXT.slice(0, 30)}`, wrapped: false }]);
+  const on = pointAt(10, 0);
+  w.sandbox.consoleHoldAt(term, w.screen, on.x, on.y);
+  w.fire(1500);
+  ok("a lost touch arms the menu anyway", w.sandbox.consoleLinkMenuReady() === true);
+}
+{
+  // Right-click has no gesture in flight, so it must not wait for one.
+  const w = world();
+  w.sandbox.openConsoleLinkMenu(URL_TEXT, 100, 100);
+  ok("a menu raised by right-click is live at once",
+    w.sandbox.consoleLinkMenuReady() === true);
+  w.sandbox.closeConsoleLinkMenu();
+  ok("closing disarms it again", w.sandbox.consoleLinkMenuReady() === false);
 }
 
 // ---- 7. the hold is not discoverable, so it is said once -----------------

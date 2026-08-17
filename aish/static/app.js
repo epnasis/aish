@@ -8690,6 +8690,47 @@ const CONSOLE_LINK_HINT_KEY = "aish-console-link-hint";
 let consoleLinkMenuUrl = ""; // the URL the open menu is about
 let consoleFocusReturn = false; // the terminal was being typed into when the browser took over
 
+// THE MENU DOES NOT ACT UNTIL THE GESTURE THAT RAISED IT IS OVER.
+//
+// It opens while the finger is still DOWN, and the lift arrives as a synthesised
+// click on whatever is under that finger — the scrim, or a row of the menu
+// itself where it is clamped up near the bottom of the screen. WebKit
+// synthesises that click only for a touch that did not MOVE, which is precisely
+// this gesture: the owner reported the menu vanishing the moment he let go, and
+// surviving only when he jiggled his finger while holding.
+//
+// `preventDefault` on touchend is the textbook fix and is still applied, but it
+// is not sufficient on a real iPhone (touchend is not always cancelable), and
+// nothing here should depend on WHICH event a platform decides to send. So the
+// menu simply refuses every dismissal and every choice until it is armed, which
+// the end of the touch does. `CONSOLE_LINK_MENU_LOST_MS` is the backstop for a
+// touch whose end never arrives — a stuck menu is worse than a slow one.
+const CONSOLE_LINK_MENU_ARM_MS = 400;
+const CONSOLE_LINK_MENU_LOST_MS = 1500;
+let consoleLinkMenuArmed = false;
+let consoleLinkMenuArmTimer = 0;
+
+function armConsoleLinkMenu(delay) {
+  clearTimeout(consoleLinkMenuArmTimer);
+  if (!delay) { consoleLinkMenuArmed = true; return; }
+  consoleLinkMenuArmTimer = setTimeout(() => { consoleLinkMenuArmed = true; }, delay);
+}
+
+function disarmConsoleLinkMenu() {
+  consoleLinkMenuArmed = false;
+  armConsoleLinkMenu(CONSOLE_LINK_MENU_LOST_MS);
+}
+
+/** Called by the console's touch handler when the hold that raised the menu
+ *  ends — the synthesised click follows within a frame or two of this. */
+function consoleHoldEnded() {
+  armConsoleLinkMenu(CONSOLE_LINK_MENU_ARM_MS);
+}
+
+function consoleLinkMenuReady() {
+  return consoleLinkMenuArmed;
+}
+
 function consoleLinkTarget() {
   try {
     return localStorage.getItem(CONSOLE_LINK_TARGET_KEY) === "aish" ? "aish" : "system";
@@ -8815,6 +8856,8 @@ function closeConsoleLinkMenu() {
   const scrim = $("clink-scrim");
   if (menu) menu.hidden = true;
   if (scrim) scrim.hidden = true;
+  clearTimeout(consoleLinkMenuArmTimer);
+  consoleLinkMenuArmed = false;
 }
 
 // Anchored at the finger, clamped inside the viewport. The URL is set as TEXT:
@@ -8837,6 +8880,9 @@ function openConsoleLinkMenu(url, x, y) {
   menu.style.left = `${Math.max(8, Math.min(x - w / 2, vw - w - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y + 14, vh - h - 8))}px`;
   menu.style.visibility = "";
+  // Usable at once for a caller with no gesture still in flight (a desktop
+  // right-click). The touch path disarms straight after — see consoleHoldAt.
+  armConsoleLinkMenu(0);
 }
 
 // What a stationary hold MEANS, decided in one place: the link menu when it
@@ -8846,14 +8892,17 @@ function consoleHoldAt(term, screen, x, y) {
   const url = consoleLinkAt(term, screen, x, y);
   if (!url) return "select";
   openConsoleLinkMenu(url, x, y);
+  disarmConsoleLinkMenu(); // the finger is still down; its lift is not a choice
   return "link";
 }
 // [CONSOLE-LINK-TARGET-END]
 
-$("clink-scrim").onclick = closeConsoleLinkMenu;
+// Both refuse while the menu is unarmed: that click is the tail of the hold
+// that opened it, not an answer to it.
+$("clink-scrim").onclick = () => { if (consoleLinkMenuReady()) closeConsoleLinkMenu(); };
 $("clink-menu").addEventListener("click", (e) => {
   const item = e.target.closest(".menu-item");
-  if (!item) return;
+  if (!item || !consoleLinkMenuReady()) return;
   switch (item.dataset.act) {
     case "aish": openConsoleLink(consoleLinkMenuUrl, "aish"); break;
     case "system": openConsoleLink(consoleLinkMenuUrl, "system"); break;
@@ -9414,6 +9463,7 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
     // clamped up under the finger, that stray click would land on a ROW and
     // open the link nobody chose.
     if ((consoleSelectMode || heldLink) && e && e.cancelable) e.preventDefault();
+    if (heldLink) consoleHoldEnded(); // the menu may act now — the lift is spent
     heldLink = false;
     scrolling = false; selAnchor = null; touching = false; clearTimeout(holdTimer);
   };
