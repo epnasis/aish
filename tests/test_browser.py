@@ -203,6 +203,60 @@ class TestReadUrlEscalation:
         assert "404" in web_module.read_url("https://example.com/gone")
         assert calls == []
 
+    def test_a_shell_of_invisible_characters_escalates_too(self, monkeypatch):
+        """The shape that got past the emptiness test entirely.
+
+        claude.ai/code serves its shell with a body of exactly one ZERO WIDTH
+        SPACE, which Python does not count as whitespace — so `text.strip()`
+        judged the page NON-empty and the browser never ran. Four reads in one
+        session (2026-08-17) returned 408 bytes of nothing, each in 0.15s,
+        while the owner was signed in to that very page in this very browser
+        and said so three times.
+        """
+        monkeypatch.setattr(
+            web_module,
+            "_fetch",
+            lambda url: ("<html><body>​</body></html>", "text/html"),
+        )
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text="the session transcript", title="", images=[], url=url, status=200
+            ),
+        )
+        out = web_module.read_url("https://claude.ai/code/session_01BvzQ")
+        assert "the session transcript" in out
+        assert "rendered in the browser" in out
+
+    def test_a_short_page_is_not_a_shell(self, monkeypatch):
+        """Empty means empty. A character floor was written here to catch a
+        spinner's 'Loading' and withdrawn: a false empty verdict costs a Chrome
+        launch AND writes the host into BROWSER_HOSTS, routing every later read
+        of it through the browser first."""
+        calls = []
+        monkeypatch.setattr(web_module, "BROWSER_HOSTS", set())
+        monkeypatch.setattr(
+            web_module, "_fetch", lambda url: ("<html><body>Loading…</body></html>", "text/html")
+        )
+        monkeypatch.setattr(browser, "read", lambda url, **kw: calls.append(url))
+        assert "Loading" in web_module.read_url("https://thin.example/x")
+        assert calls == []
+        assert web_module.BROWSER_HOSTS == set()
+
+    def test_a_browser_page_of_invisible_characters_is_still_an_error(self, monkeypatch):
+        """The same test, one layer up: a rendered page a person would see
+        nothing of must not be handed back as content either."""
+        monkeypatch.setattr(web_module, "_fetch", _http_error(403))
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text="​\n﻿", title="", images=[], url=url, status=200
+            ),
+        )
+        assert web_module.read_url("https://allegro.pl/x").startswith("ERROR")
+
     def test_a_browser_page_with_no_text_is_still_an_error(self, monkeypatch):
         monkeypatch.setattr(web_module, "_fetch", _http_error(403))
         monkeypatch.setattr(

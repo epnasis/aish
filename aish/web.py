@@ -778,6 +778,65 @@ WALLED = (
 )
 
 
+# Characters that occupy a string but nothing on the screen: the zero-width
+# family, the word joiner, and the byte-order mark. Python does not call any of
+# them whitespace, so `str.strip()` leaves them behind — which is the whole bug
+# below.
+#
+# A no-break space is NOT in the list: Python already counts it as whitespace,
+# so `strip()` handles it and adding it here would say otherwise.
+_INVISIBLE = dict.fromkeys(
+    [
+        0x00AD,  # SOFT HYPHEN
+        0x200B,  # ZERO WIDTH SPACE      — the one claude.ai serves
+        0x200C,  # ZERO WIDTH NON-JOINER
+        0x200D,  # ZERO WIDTH JOINER
+        0x2060,  # WORD JOINER
+        0xFEFF,  # ZERO WIDTH NO-BREAK SPACE / BOM
+    ]
+)
+
+
+def visible_text(text: str) -> str:
+    """`text` with the characters a person cannot see removed, then stripped.
+
+    What a read is worth is what a reader could SEE of it, and that is not the
+    same as what `strip()` leaves. `​`.isspace() is False in Python, so a
+    body that is one zero-width space survives stripping and reads as content.
+    """
+    return text.translate(_INVISIBLE).strip()
+
+
+def is_blank(text: str) -> bool:
+    """Would a person see nothing here?
+
+    The emptiness test that decides whether to escalate to the browser, and it
+    was wrong in the way that costs the most: it under-reports emptiness, so a
+    page with nothing in it is served as if it had something and the renderer
+    that could have read it never runs.
+
+    claude.ai/code serves its JS shell with a body of exactly one ZERO WIDTH
+    SPACE. `not text.strip()` judged that page NON-empty, so `read_url` handed
+    the model 408 bytes of nothing four times in one session (2026-08-17), each
+    read finishing in 0.15s because Chrome was never launched — while the owner
+    was signed in, in the very browser that renders that page, saying so three
+    times in a row. Worse than the wasted reads: a fetch that "succeeds" never
+    marks the host as one needing the browser, so every retry took the same
+    dead path. Asking harder could not reach the renderer.
+
+    EMPTY means empty, and a SHORT page is not empty. A character floor —
+    "under ~12 visible characters is a shell whatever it spells" — was written
+    here to catch a spinner's "Loading" and withdrawn: it rejected `<p>hello</p>`
+    as a shell, and escalation is not a free retry. A false empty verdict also
+    writes the host into BROWSER_HOSTS, which routes every LATER read of that
+    host through Chrome first, for the rest of the process. `browser.py` had
+    already reached the same conclusion from the other side — a thin page there
+    gets a second chance rather than a rejection, because a half-painted
+    listing is short too (`TestAThinPageGetsASecondChance`).
+    """
+    return not visible_text(text)
+
+
 def _remember_title(url: str, title: str) -> None:
     if not title:
         return
@@ -820,7 +879,7 @@ def _browser_read(url: str) -> tuple[tuple[str, list[str], list[str]] | None, st
     text = "\n".join(
         line for line in (ln.strip() for ln in page.text.splitlines()) if line
     )
-    if not text.strip():
+    if is_blank(text):
         return None, "the browser rendered an empty page"
     # A wall HAS text, so "non-empty" is not the same as "the page". Handing a
     # challenge screen back as content is the ORIGINAL failure rebuilt one layer
@@ -937,7 +996,7 @@ def read_url(url: str, topic: str | None = None) -> str:
             "page may require a CAPTCHA and gave no content). Use a different "
             "source, or ask the user to open the page in /browser"
         )
-    if not text.strip():
+    if is_blank(text):
         # A JavaScript-only page: the fetch succeeded and returned a shell.
         # This is the commonest browser win by far — far more of the web than
         # the sites that actively block automation.

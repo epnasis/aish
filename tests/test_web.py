@@ -205,6 +205,47 @@ class TestReadUrl:
         assert web.read_url("https://example.com/blank").startswith("ERROR")
 
 
+class TestWhatCountsAsEmpty:
+    """A page is empty when a PERSON would see nothing in it, which is not what
+    `str.strip()` says. Getting this wrong under-reports emptiness, and an
+    under-reported empty page is served as content while the browser that could
+    have read it never runs."""
+
+    def test_python_does_not_call_a_zero_width_space_whitespace(self):
+        """The premise, pinned: if this ever changes, the bug below is already
+        fixed by the language and this helper can go."""
+        assert not "​".isspace()
+        assert "​".strip() == "​"
+
+    def test_the_invisible_family_reads_as_empty(self):
+        for char in ("​", "‌", "‍", "⁠", "﻿", "­"):
+            assert web.is_blank(char), repr(char)
+            assert web.is_blank(f"  {char}\n\t{char} "), repr(char)
+
+    def test_ordinary_blank_and_absent_text_still_read_as_empty(self):
+        assert web.is_blank("")
+        assert web.is_blank("   \n\t ")
+        assert web.is_blank(" \xa0 ")   # no-break space: already whitespace to Python
+
+    def test_real_text_is_never_empty(self):
+        assert not web.is_blank("hi")
+        assert not web.is_blank("​ price: 63,19 zl ​")
+
+    def test_invisible_characters_inside_real_text_do_not_erase_it(self):
+        """`visible_text` measures, it does not launder: a page that mixes soft
+        hyphens into real words is a page."""
+        assert not web.is_blank("Krzy­ża­cy")
+        assert web.visible_text("Krzy­ża­cy") == "Krzyżacy"
+
+    def test_a_short_page_is_not_an_empty_one(self):
+        """Pinned because the opposite was written and withdrawn: a character
+        floor ('under ~12 visible characters is a shell') rejected `<p>hello</p>`
+        as empty, and a false empty verdict is sticky — it writes the host into
+        BROWSER_HOSTS for the rest of the process."""
+        assert not web.is_blank("hi")
+        assert not web.is_blank("Loading…")
+
+
 def http_error_fetch(code, reason):
     def raiser(url):
         raise urllib.error.HTTPError(url, code, reason, None, None)
