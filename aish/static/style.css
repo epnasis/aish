@@ -378,6 +378,24 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .fs-btn:active { opacity: 0.55; }
 #fs-state { min-width: 44px; text-align: center; }
+/* The console link menu is raised over the console overlay (z-index 60), since
+   that is what it is opened from, and its scrim goes just under it — #backdrop
+   sits at 19, below the console, so it could never catch the dismissing tap. */
+#clink-scrim { position: fixed; inset: 0; z-index: 61; }
+#clink-scrim[hidden] { display: none; }
+#clink-menu { z-index: 62; }
+/* The URL the menu is about: one line, ellipsised, and never a tap target. */
+.menu-url {
+  padding: 7px 12px 8px;
+  font-size: 13.5px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis; /* cuts the TAIL, so the host — the part that says
+                              where you are being sent — is what survives */
+  border-bottom: 0.5px solid var(--sep);
+  margin-bottom: 4px;
+}
 .menu-item.danger { color: var(--red); }
 .menu-item.danger svg { color: var(--red); }
 .menu-item.sep { margin-top: 5px; border-top: 0.5px solid var(--sep); padding-top: 13px; }

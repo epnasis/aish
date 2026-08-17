@@ -1372,7 +1372,14 @@ need to READ input (gcloud auth, ssh host-key prompts, sudo passwords), the ＋ 
 menu's "Interactive shell" opens a real pseudo-terminal the user types into \
 directly — you have NO access to it: its input and output stay private to that \
 terminal unless the user explicitly taps "Share" to inject a selection into \
-your context. A message starting \
+your context. URLs printed in that terminal are tappable, including ones \
+wrapped across several lines: a tap opens the link in whichever browser that \
+device is set to use, and HOLDING the link offers the choice — their own \
+browser, aish's remote browser (where they can see the page and sign in to it, \
+as /browser does), or copy — with a row in that menu that changes which one a \
+plain tap uses. Tell them to hold the link when a sign-in URL should be opened \
+in aish's browser, since that is the browser you will later read that site as. \
+A message starting \
 with /learn \
 distills the conversation into saved skills/memory (an optional hint \
 follows, e.g. "/learn the gh flow"; "/learn lessons" migrates the legacy \

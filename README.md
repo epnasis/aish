@@ -445,7 +445,12 @@ this UI. Highlights:
   needs approving, a glyph when a schedule or an email started it. Pin a chat to
   keep it above the fold and permanently on the device.
 - **Global interactive console.** The real TTY shell described above, openable
-  from any chat (`⌘/Ctrl+\`), `tmux`-backed for restart survival.
+  from any chat (`⌘/Ctrl+\`), `tmux`-backed for restart survival. URLs in its
+  output are tappable — including the ones an auth CLI wraps across several
+  lines — and **hold a link to choose where it opens**: your own browser, or
+  aish's remote browser, where you can see the page and sign in to it. The
+  choice sticks as that device's default for a plain tap, and the menu's own
+  row changes it back.
 - **Voice.** Mic dictation into the composer and hands-free read-aloud of
   replies — device-native speech, no cloud audio API, English/Polish. In the
   console, double-tap the arrows key for a dictation scratchpad: speech is

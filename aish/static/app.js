@@ -8671,6 +8671,196 @@ function consoleLinkProvider(term, onOpen) {
 }
 // [CONSOLE-LINKS-END]
 
+// [CONSOLE-LINK-TARGET-START]
+// WHERE a URL in the console opens. There are two browsers now — this device's
+// own, and aish's remote Chrome, the one that screenshots a page and is signed
+// in to sites — and which is wanted depends on the link, so the tap follows a
+// REMEMBERED default and a hold offers the choice.
+//
+// A hold on the console already means Select mode, so this claims the gesture
+// ONLY when it landed on a URL (L5 — a recognizer states what it decided the
+// touch is). Everywhere else the hold is exactly what it always was.
+//
+// The default is per DEVICE on purpose. "Your browser" is a different browser on
+// the phone than on the Mac, while the aish browser is one shared Chrome — so
+// this is a fact about the screen it was set on, not about the owner, and it is
+// the one shape of local state that is not a second copy of something shared.
+const CONSOLE_LINK_TARGET_KEY = "aish-console-link-target";
+const CONSOLE_LINK_HINT_KEY = "aish-console-link-hint";
+let consoleLinkMenuUrl = ""; // the URL the open menu is about
+
+function consoleLinkTarget() {
+  try {
+    return localStorage.getItem(CONSOLE_LINK_TARGET_KEY) === "aish" ? "aish" : "system";
+  } catch (e) {
+    return "system"; // no storage (private mode) → the browser you came from
+  }
+}
+
+function setConsoleLinkTarget(target) {
+  try {
+    localStorage.setItem(CONSOLE_LINK_TARGET_KEY, target === "aish" ? "aish" : "system");
+  } catch (e) { /* the menu still reads back what it just set */ }
+  const state = $("clink-default-state");
+  if (state) state.textContent = target === "aish" ? "aish browser" : "your browser";
+}
+
+// Which terminal cell a screen point sits on — 1-based, and in BUFFER rows,
+// which is what provideLinks is asked in. xterm lays its rows out as a uniform
+// grid inside .xterm-screen, so this needs no private API and no per-row
+// elements; that is also what makes it testable with no layout engine.
+function consoleCellAt(term, screen, x, y) {
+  if (!term || !screen || !term.cols || !term.rows) return null;
+  const box = (screen.querySelector && screen.querySelector(".xterm-screen")) || screen;
+  const r = box.getBoundingClientRect();
+  if (!r || !r.width || !r.height) return null;
+  if (x < r.left || x >= r.right || y < r.top || y >= r.bottom) return null;
+  const buf = term.buffer && term.buffer.active;
+  return {
+    x: Math.floor((x - r.left) / (r.width / term.cols)) + 1,
+    y: ((buf && buf.viewportY) || 0) + Math.floor((y - r.top) / (r.height / term.rows)) + 1,
+  };
+}
+
+// The URL under a point, or null. It asks the SAME provider the tap goes
+// through, so the menu can never disagree with the tap about where a link
+// starts and ends — including one joined back together across wrapped rows,
+// where a second implementation would offer the fragment on the row pressed.
+function consoleLinkAt(term, screen, x, y) {
+  const cell = consoleCellAt(term, screen, x, y);
+  if (!cell) return null;
+  let found = null;
+  try {
+    consoleLinkProvider(term, () => {}).provideLinks(cell.y, (links) => {
+      for (const link of links || []) {
+        const r = link.range;
+        if (cell.y < r.start.y || cell.y > r.end.y) continue;
+        if (cell.y === r.start.y && cell.x < r.start.x) continue;
+        if (cell.y === r.end.y && cell.x > r.end.x) continue;
+        found = link.text;
+      }
+    });
+  } catch (e) {
+    return null; // a hit test that throws must leave the hold meaning Select
+  }
+  return found;
+}
+
+function consoleLinkMenuOpen() {
+  const menu = $("clink-menu");
+  return Boolean(menu && !menu.hidden);
+}
+
+// The ONE place a console URL is opened (L1). `target` is an explicit choice
+// from the menu; without it the remembered default decides.
+function openConsoleLink(url, target) {
+  // A hold that opened the menu is followed by the lift's SYNTHESISED CLICK on
+  // the link underneath — which would open it in the default browser behind the
+  // menu still asking where to open it. An explicit choice is never refused.
+  if (!target && consoleLinkMenuOpen()) return null;
+  if (!url) return null;
+  const where = target === "aish" || target === "system" ? target : consoleLinkTarget();
+  closeConsoleLinkMenu();
+  if (where === "aish") {
+    // Sheets paint at z-index 20 and the console overlay at 60, so a browser
+    // opened behind the console is a browser nobody can see. The console keeps
+    // running server-side — this is its own Close button, not a kill.
+    hideConsole();
+    openBrowserView(url);
+  } else {
+    window.open(url, "_blank", "noopener");
+  }
+  // Only a TAP is told about the hold. An explicit target came from the menu,
+  // whose existence is the thing the hint is for.
+  if (!target) hintConsoleLinkHold();
+  return where;
+}
+
+// Holding a link is not a gesture anyone would guess at, and there is no widget
+// to advertise it (the console's own rule: a gesture over a widget). So it is
+// said ONCE, on the first console link this device ever opens.
+function hintConsoleLinkHold() {
+  try {
+    if (localStorage.getItem(CONSOLE_LINK_HINT_KEY)) return;
+    localStorage.setItem(CONSOLE_LINK_HINT_KEY, "1");
+  } catch (e) {
+    return; // no storage → no way to say it once, so don't say it at all
+  }
+  showToast("hold a link to choose where it opens");
+}
+
+function closeConsoleLinkMenu() {
+  const menu = $("clink-menu");
+  const scrim = $("clink-scrim");
+  if (menu) menu.hidden = true;
+  if (scrim) scrim.hidden = true;
+}
+
+// Anchored at the finger, clamped inside the viewport. The URL is set as TEXT:
+// it came out of a shell's output and is nobody's markup.
+function openConsoleLinkMenu(url, x, y) {
+  const menu = $("clink-menu");
+  if (!menu) return;
+  consoleLinkMenuUrl = url;
+  const label = $("clink-url");
+  if (label) label.textContent = url;
+  setConsoleLinkTarget(consoleLinkTarget()); // paint the current default on the toggle
+  const scrim = $("clink-scrim");
+  if (scrim) scrim.hidden = false;
+  menu.style.visibility = "hidden"; // measure before placing, as the ＋ menu does
+  menu.hidden = false;
+  const w = menu.offsetWidth || 240;
+  const h = menu.offsetHeight || 210;
+  const vw = window.innerWidth || w + 16;
+  const vh = window.innerHeight || h + 16;
+  menu.style.left = `${Math.max(8, Math.min(x - w / 2, vw - w - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y + 14, vh - h - 8))}px`;
+  menu.style.visibility = "";
+}
+
+// What a stationary hold MEANS, decided in one place: the link menu when it
+// landed on a URL, otherwise the Select mode the console has always had. The
+// caller keeps ownership of Select mode, so this can never half-enter it.
+function consoleHoldAt(term, screen, x, y) {
+  const url = consoleLinkAt(term, screen, x, y);
+  if (!url) return "select";
+  openConsoleLinkMenu(url, x, y);
+  return "link";
+}
+// [CONSOLE-LINK-TARGET-END]
+
+$("clink-scrim").onclick = closeConsoleLinkMenu;
+$("clink-menu").addEventListener("click", (e) => {
+  const item = e.target.closest(".menu-item");
+  if (!item) return;
+  switch (item.dataset.act) {
+    case "aish": openConsoleLink(consoleLinkMenuUrl, "aish"); break;
+    case "system": openConsoleLink(consoleLinkMenuUrl, "system"); break;
+    case "copy": {
+      const url = consoleLinkMenuUrl;
+      closeConsoleLinkMenu();
+      copyText(url).then((ok) => showToast(ok ? "copied" : "copy blocked"));
+      break;
+    }
+    // Changing the default is its OWN row and stays open showing its new state:
+    // a menu that silently rewrote the tap default as a side effect of one
+    // choice would send every later tap somewhere nobody asked it to go.
+    case "default":
+      setConsoleLinkTarget(consoleLinkTarget() === "aish" ? "system" : "aish");
+      break;
+  }
+});
+
+// Desktop: right-click ON a link offers the same choice. Off a link the browser
+// keeps its own menu — xterm rows are plain text, so nothing is taken away.
+$("pty-screen").addEventListener("contextmenu", (e) => {
+  if (!consoleOpen || !consoleTerm) return;
+  const url = consoleLinkAt(consoleTerm, $("pty-screen"), e.clientX, e.clientY);
+  if (!url) return;
+  e.preventDefault();
+  openConsoleLinkMenu(url, e.clientX, e.clientY);
+});
+
 // Reflow to the current overlay size and tell the server (TIOCSWINSZ), so the
 // program wraps where xterm shows it.
 function consoleFitAndResize() {
@@ -8798,8 +8988,10 @@ async function openConsole() {
   // (isWrapped) — but our console runs inside tmux, which repaints its pane with
   // absolute cursor moves, so a wrapped URL arrives as SEPARATE, non-wrapped
   // rows the addon can't join. consoleLinkProvider joins by GEOMETRY instead.
+  // A tap opens it wherever this device has been told to open links — see
+  // [CONSOLE-LINK-TARGET], which also owns the hold that offers the choice.
   consoleTerm.registerLinkProvider(
-    consoleLinkProvider(consoleTerm, (event, uri) => window.open(uri, "_blank", "noopener"))
+    consoleLinkProvider(consoleTerm, (event, uri) => openConsoleLink(uri))
   );
   // Clipboard bridge (#153): with tmux `set-clipboard on`, a copy on the REMOTE
   // terminal (a mouse-drag selection, `y` in copy-mode, vim, …) emits an OSC 52
@@ -8898,6 +9090,7 @@ async function openConsole() {
 function hideConsole() {
   if (!consoleOpen) return;
   if (padOpen()) closeConsolePad(); // never leave the mic live behind a hidden overlay
+  closeConsoleLinkMenu(); // it is raised over the console; it goes with it
   consoleOpen = false;
   send({ type: "console_close" });
   if (location.hash === "#console") history.replaceState(null, "", location.pathname + location.search);
@@ -9065,6 +9258,7 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
   // the timer fires cancels it, so scrolling wins whenever the finger is moving;
   // to leave Select mode and scroll again, tap the Select chip (it glows) or Copy.
   let holdTimer = 0, touching = false;
+  let heldLink = false; // this hold raised the link menu — the lift belongs to it
 
   // The text caret under a screen point (WebKit vs standard spelling).
   const caretAt = (x, y) => {
@@ -9133,9 +9327,18 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
     clearTimeout(holdTimer);
     holdTimer = setTimeout(() => {
       if (!touching || scrolling || consoleSelectMode || !consoleOpen) return;
+      if (navigator.vibrate) { try { navigator.vibrate(10); } catch (err) { /* ignore */ } }
+      // A hold that landed ON a URL asks where to open it instead; anywhere
+      // else the gesture still means Select mode. consoleHoldAt decides and
+      // opens the menu, so there is one answer to "was that a link?" and the
+      // tap's link provider is the thing that gives it.
+      if (consoleHoldAt(consoleTerm, screen, startX, startY) === "link") {
+        touching = false;
+        heldLink = true; // so the lift is swallowed below, as Select mode's is
+        return;
+      }
       setConsoleSelectMode(true);
       selAnchor = caretAt(startX, startY);
-      if (navigator.vibrate) { try { navigator.vibrate(10); } catch (err) { /* ignore */ } }
     }, HOLD_MS);
   }, { passive: false });
   screen.addEventListener("touchmove", (e) => {
@@ -9176,7 +9379,16 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
     // In Select mode, swallow the lift so iOS doesn't synthesize a click that
     // re-focuses the textarea (bringing the keyboard back). The focus guard
     // above is the backstop; this avoids the flash.
-    if (consoleSelectMode && e && e.cancelable) e.preventDefault();
+    //
+    // A hold that raised the LINK MENU swallows it for a sharper reason,
+    // measured in a real Chrome: the synthesised click lands on whatever is
+    // under the finger, which is now the menu's own scrim — so the menu was
+    // dismissed by the gesture that opened it, every time, and vanished before
+    // it could be read. Near the bottom of the screen, where the menu is
+    // clamped up under the finger, that stray click would land on a ROW and
+    // open the link nobody chose.
+    if ((consoleSelectMode || heldLink) && e && e.cancelable) e.preventDefault();
+    heldLink = false;
     scrolling = false; selAnchor = null; touching = false; clearTimeout(holdTimer);
   };
   screen.addEventListener("touchend", end, { passive: false });
@@ -11878,6 +12090,7 @@ function closeSheets() {
   if (active && active.closest(".sheet, #session-rail")) active.blur();
   if (micListening) stopMic(); // don't leave the mic live after closing /mic
   stopComposerMenuTracking(); // drop the #103 viewport listeners with the menu
+  closeConsoleLinkMenu(); // its scrim is its own element, so the loop below misses it
   for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
   for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
   closeSessionRail(); // the sessions rail is not a sheet, but Escape/backdrop close both
@@ -11932,6 +12145,9 @@ document.addEventListener("keydown", (e) => {
   // raised over it.
   if (e.key === "Escape" && closePreview()) { e.preventDefault(); return; }
   if (e.key === "Escape" && confirmIsOpen()) { e.preventDefault(); closeConfirm(); return; }
+  // The console link menu is raised OVER the console, so Escape dismisses it
+  // before Escape gets to mean anything to the terminal underneath.
+  if (e.key === "Escape" && consoleLinkMenuOpen()) { e.preventDefault(); closeConsoleLinkMenu(); return; }
   // Esc leaves terminal mode / the PTY overlay first (#143); only if neither is
   // active does it fall through to dismissing an open sheet.
   if (e.key === "Escape" && escapeExit()) { e.preventDefault(); return; }

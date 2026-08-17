@@ -326,6 +326,12 @@ Everything is now reachable down to a 200 px visual viewport, on every phone mea
 - **Closing is not called "Done".** It was, briefly, and that was a different mistake: "Done" reads as finishing a task, and this browser is not only for signing in. It is also for browsing so the profile's history looks human, for seeing what aish sees on a page, and in time for watching it act. The affordance should not imply the errand is over.
 - **Focusing the address selects all of it**, so the next keystroke replaces the URL and a long-press offers Copy on the whole thing.
 
+## The console is the second door into the view
+
+A URL printed by the interactive console (`gcloud auth login`, an `ssh` banner, a dev server) is the case the view exists for and the one it was hardest to reach: seeing it meant reading the URL off the terminal and typing it into the browser sheet by hand. A tap on it now opens it in whichever browser that device has been told to prefer, and a **hold** on the link offers the choice — aish's browser, the device's own, or copy.
+
+Which browser is right genuinely depends on the link, which is why this is a choice and not a redirect: an auth URL wants the browser aish will later *read that site as*, so the session lands in the profile that will use it (the rule the whole no-proxy design rests on), while a documentation link wants the phone's browser and its tabs. The client half — the gesture arbitration against the console's existing hold-to-select, and why the console is hidden before the sheet opens — is `[CONSOLE-LINK-TARGET]` in `docs/web-frontend.md`.
+
 ## Nothing answers "no remote view is open"
 
 That sentence is a statement about aish's bookkeeping, not about what the owner asked for — and he met it on a page still visible on his screen, after the idle reaper collected the view behind it. Any action now reopens at the last URL and shows him the page again. It stops there rather than replaying his tap, because a tap aimed at the old page would land somewhere arbitrary on a freshly loaded one.
