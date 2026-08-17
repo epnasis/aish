@@ -8688,6 +8688,7 @@ function consoleLinkProvider(term, onOpen) {
 const CONSOLE_LINK_TARGET_KEY = "aish-console-link-target";
 const CONSOLE_LINK_HINT_KEY = "aish-console-link-hint";
 let consoleLinkMenuUrl = ""; // the URL the open menu is about
+let consoleFocusReturn = false; // the terminal was being typed into when the browser took over
 
 function consoleLinkTarget() {
   try {
@@ -8762,10 +8763,20 @@ function openConsoleLink(url, target) {
   const where = target === "aish" || target === "system" ? target : consoleLinkTarget();
   closeConsoleLinkMenu();
   if (where === "aish") {
-    // Sheets paint at z-index 20 and the console overlay at 60, so a browser
-    // opened behind the console is a browser nobody can see. The console keeps
-    // running server-side — this is its own Close button, not a kill.
-    hideConsole();
+    // The console STAYS, and the browser opens OVER it: style.css raises the
+    // sheet and its backdrop above the overlay while `body.console-open`.
+    // Closing the browser therefore shows the terminal again — still running
+    // the command whose link you held, which for a sign-in is the whole point:
+    // you come back to the prompt that is waiting for the code.
+    //
+    // xterm's helper textarea keeps the keystrokes otherwise, so a URL typed
+    // into the browser's address bar would land in the terminal. Whether it
+    // HAD focus is remembered, so the console gets it back only if it was
+    // where you were typing — a phone with the keyboard down does not want it
+    // summoned on the way out.
+    const ta = consoleTerminalTextarea();
+    consoleFocusReturn = Boolean(ta && document.activeElement === ta);
+    if (ta) ta.blur();
     openBrowserView(url);
   } else {
     window.open(url, "_blank", "noopener");
@@ -8787,6 +8798,16 @@ function hintConsoleLinkHold() {
     return; // no storage → no way to say it once, so don't say it at all
   }
   showToast("hold a link to choose where it opens");
+}
+
+// Give the terminal the keyboard back when the browser over it goes away —
+// only if it was the thing being typed into. Hung off `bvEndIfOpen`, the one
+// funnel every dismissal of that sheet already goes through (the BROWSER-VIEW
+// end fence), rather than off the Close button alone.
+function restoreConsoleFocus() {
+  if (!consoleFocusReturn) return;
+  consoleFocusReturn = false;
+  if (consoleOpen && consoleTerm) consoleTerm.focus();
 }
 
 function closeConsoleLinkMenu() {
@@ -9200,6 +9221,11 @@ document.querySelector(".pty-keys").addEventListener("click", (e) => {
 // keeps its old cols/rows. Rotation comes through window resize/orientationchange.
 function consoleReflowViewport() {
   if (!consoleOpen) return;
+  // A browser opened OVER the console owns the screen and the keyboard while it
+  // is up. Reflowing here would resize the remote PTY (TIOCSWINSZ) to whatever
+  // the browser's own keyboard left — repainting a program behind a sheet
+  // nobody is looking through, for a keyboard that is not its.
+  if (!$("browser-sheet").hidden) return;
   const ov = $("pty-overlay");
   if (window.visualViewport) {
     ov.style.height = `${visualViewport.height}px`;
@@ -11110,6 +11136,7 @@ let bvBusyTimer = null;
  *  because a read refuses while the owner is driving the view, a stray swipe
  *  meant aish could not read ANY page until the 15-minute idle cap expired. */
 function bvEndIfOpen() {
+  restoreConsoleFocus(); // a browser opened over the console hands typing back
   if (!bvOpen) return;
   bvOpen = false;
   bvIdle();

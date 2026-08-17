@@ -3143,6 +3143,18 @@ body.console-open {
   padding-top: calc(6px + env(safe-area-inset-top));
 }
 
+/* Opened from a link held in the CONSOLE, the browser sits OVER the console
+   rather than replacing it: the command that printed the link keeps running,
+   so closing the browser comes back to the prompt waiting for the code. The
+   overlay is at 60, so the sheet and its backdrop are raised past it — but only
+   while the console is up, since a backdrop permanently above 60 would cover
+   the popover menus that live there. Above the console link menu (61/62) too,
+   which this supersedes. Kept BELOW the #browser-sheet rule above on purpose:
+   test_the_sheet_clears_the_status_bar matches the first `#browser-sheet {` in
+   this file and would read a raised-layer rule as the sheet's own. */
+body.console-open #browser-sheet { z-index: 64; }
+body.console-open #backdrop { z-index: 63; }
+
 .bv-body {
   flex: 1; min-height: 0; overflow: hidden;
   padding: 4px 12px 16px; display: flex; flex-direction: column; gap: 8px;

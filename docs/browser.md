@@ -330,7 +330,9 @@ Everything is now reachable down to a 200 px visual viewport, on every phone mea
 
 A URL printed by the interactive console (`gcloud auth login`, an `ssh` banner, a dev server) is the case the view exists for and the one it was hardest to reach: seeing it meant reading the URL off the terminal and typing it into the browser sheet by hand. A tap on it now opens it in whichever browser that device has been told to prefer, and a **hold** on the link offers the choice — aish's browser, the device's own, or copy.
 
-Which browser is right genuinely depends on the link, which is why this is a choice and not a redirect: an auth URL wants the browser aish will later *read that site as*, so the session lands in the profile that will use it (the rule the whole no-proxy design rests on), while a documentation link wants the phone's browser and its tabs. The client half — the gesture arbitration against the console's existing hold-to-select, and why the console is hidden before the sheet opens — is `[CONSOLE-LINK-TARGET]` in `docs/web-frontend.md`.
+Which browser is right genuinely depends on the link, which is why this is a choice and not a redirect: an auth URL wants the browser aish will later *read that site as*, so the session lands in the profile that will use it (the rule the whole no-proxy design rests on), while a documentation link wants the phone's browser and its tabs.
+
+The view opens **over** the console rather than replacing it, which is the whole shape of the sign-in flow: the CLI that printed the link is still running behind the browser, so signing in and closing the sheet returns to the prompt that is waiting for the code — one screen, one errand. The client half — the gesture arbitration against the console's existing hold-to-select, and the layering and keyboard handoff that let the two coexist — is `[CONSOLE-LINK-TARGET]` in `docs/web-frontend.md`.
 
 ## Nothing answers "no remote view is open"
 

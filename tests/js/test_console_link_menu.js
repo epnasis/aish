@@ -85,9 +85,15 @@ function world() {
       right: COLS * CELL, bottom: ROWS * CELL,
     }),
   };
+  const focused = { textarea: false, term: 0 };
+  const textarea = { id: "xterm-helper-textarea", blur() { focused.textarea = false; } };
   const sandbox = {
     URL,
     $: el,
+    consoleOpen: true,
+    consoleTerm: { focus() { focused.term += 1; } },
+    consoleTerminalTextarea: () => textarea,
+    document: { get activeElement() { return focused.textarea ? textarea : null; } },
     localStorage: {
       getItem: (k) => (store.has(k) ? store.get(k) : null),
       setItem: (k, v) => store.set(k, String(v)),
@@ -106,7 +112,7 @@ function world() {
       .replace(/^const |^let /gm, "var "),
     sandbox,
   );
-  return { sandbox, el, opened, toasts, screen, store };
+  return { sandbox, el, opened, toasts, screen, store, focused };
 }
 
 const URL_TEXT = "https://accounts.example.com/o/oauth2/auth?code=ABCDEF0123456789";
@@ -163,9 +169,33 @@ function wrappedRows(prefix, url) {
   w.opened.length = 0;
   w.sandbox.openConsoleLink(URL_TEXT);
   ok("with the default switched, a tap opens the remote browser",
-    w.opened.join() === `hide-console,aish:${URL_TEXT}`);
-  ok("and the console is hidden FIRST — a sheet paints under the console overlay",
-    w.opened.indexOf("hide-console") < w.opened.indexOf(`aish:${URL_TEXT}`));
+    w.opened.join() === `aish:${URL_TEXT}`);
+  ok("and the console is NOT closed under it — the browser opens OVER it, so the "
+    + "command that printed the link is still running when the browser goes away",
+    !w.opened.includes("hide-console"));
+}
+
+// 3b. The keyboard belongs to whatever is on top, and comes back only if the
+// console had it. Typing a URL into the browser's address bar otherwise goes to
+// xterm's helper textarea, which is still focused underneath.
+{
+  const w = world();
+  w.focused.textarea = true; // the console was being typed into
+  w.sandbox.openConsoleLink(URL_TEXT, "aish");
+  ok("the terminal gives up the keystrokes", w.focused.textarea === false);
+  ok("…and has not been handed them back yet", w.focused.term === 0);
+  w.sandbox.restoreConsoleFocus();
+  ok("closing the browser gives typing back to the console", w.focused.term === 1);
+  w.sandbox.restoreConsoleFocus();
+  ok("…once, not on every later dismissal", w.focused.term === 1);
+}
+{
+  const w = world();
+  w.focused.textarea = false; // keyboard down on a phone
+  w.sandbox.openConsoleLink(URL_TEXT, "aish");
+  w.sandbox.restoreConsoleFocus();
+  ok("a console that was not being typed into gets no keyboard summoned for it",
+    w.focused.term === 0);
 }
 
 // ---- 4. an explicit choice does not rewrite the default ------------------
