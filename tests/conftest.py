@@ -93,6 +93,21 @@ def no_real_browser(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_leaked_browser_hosts():
+    """`BROWSER_HOSTS` is process-global memory of "this host needed Chrome", and
+    nothing in the module ever clears it.
+
+    So a test that reads a host successfully through the patched browser routes
+    every LATER test's read of that host through the browser too — which is
+    precisely the routing #236 added for signed-in hosts, meaning a leak here can
+    make a read look correctly routed for entirely the wrong reason, and mask the
+    regression the routing exists to prevent."""
+    browser_module.BROWSER_HOSTS.clear()
+    yield
+    browser_module.BROWSER_HOSTS.clear()
+
+
+@pytest.fixture(autouse=True)
 def no_real_rule_compiler(monkeypatch):
     """The prose→rule compiler talks to a MODEL. Every test today injects
     `rule_compiler_ask`, so nothing reaches a backend — but that is per-test

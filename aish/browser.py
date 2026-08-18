@@ -47,6 +47,7 @@ import asyncio
 import base64
 import contextlib
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -162,6 +163,33 @@ def is_challenge(text: str, status: int | None) -> bool:
     return status in _BLOCK_STATUS
 
 
+# A page that wants a PASSWORD is asking who you are, which means what came back
+# is not the account. This is the login-wall twin of `is_challenge`, and it
+# exists because a login wall is indistinguishable from a good read by every
+# signal `read_url` had: HTTP 200, a full page of text, no error at all. On
+# 2026-08-18 the owner approved a card saying his E.ON read would carry his
+# session, was handed the logged-out login form, and the model concluded the
+# portal was inaccessible and asked him to upload the invoices by hand (#236).
+#
+# The evidence is the FIELD, never the wording. "Zaloguj się" / "Sign in" sits
+# in the navigation of half the logged-in web, so matching words would flag real
+# account pages — and would then need maintaining per language, on a corpus
+# where the owner's sites are Polish. A password input is the same markup in
+# every language, and it appears where a site is actually asking.
+_PASSWORD_INPUT = re.compile(r"""<input\b[^>]*\btype\s*=\s*["']?password""", re.I)
+
+
+def asks_to_sign_in(html: str) -> bool:
+    """Does this HTML put a password field in front of the reader?
+
+    The fetch path's version of the question `Page.signin` answers from the live
+    DOM. Weaker on purpose, and knowingly: an SPA that builds its form in
+    JavaScript serves HTML this cannot see. But a fetch is precisely where a
+    server-rendered login wall arrives fully formed in the markup, which is the
+    case a plain fetcher meets and the case this has to catch."""
+    return bool(_PASSWORD_INPUT.search(html or ""))
+
+
 # Anti-bot REPUTATION cookies. These are not the site's session and never the
 # owner's login — they are the scoring token a bot-management vendor issues,
 # and once it has decided against you it keeps deciding against you: measured
@@ -247,6 +275,11 @@ class Page:
     status: int | None
     links: list[tuple[str, str]] = field(default_factory=list)
     declared: list[str] = field(default_factory=list)
+    # The page asked for a password. Read off the DOM rather than guessed at
+    # from the text, and the caller's only way to tell a signed-in read that
+    # WORKED from one whose session has lapsed — the two are identical
+    # otherwise, right down to the status code.
+    signin: bool = False
 
 
 _OWNER: threading.Thread | None = None
@@ -457,6 +490,18 @@ async def _body_text(page: Any) -> str:
         return await page.inner_text("body")
     except Exception:  # noqa: BLE001 — no body is a real answer: no text
         return ""
+
+
+async def _has_password_field(page: Any) -> bool:
+    """Is the RENDERED page asking for a password?
+
+    Playwright's selector engine pierces open shadow roots, so this sees a form
+    the serialized HTML does not — the same reason `Page.text` is taken from the
+    DOM and not from `page.content()`."""
+    try:
+        return (await page.query_selector("input[type=password]")) is not None
+    except Exception:  # noqa: BLE001 — a page that will not answer is not a wall
+        return False
 
 
 # The page's own <main>, when it declares one. Purely a BUDGET decision: a read
@@ -887,6 +932,7 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
                 status=response.status if response is not None else None,
                 links=await _content_links(page),
                 declared=await _declared_data_async(page),
+                signin=await _has_password_field(page),
             )
         finally:
             try:

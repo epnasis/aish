@@ -9,9 +9,11 @@
 3. **The session must be created in the browser that will later use it**, by one identity. That is why there is no proxy and no mobile/desktop split.
 4. **Follow the conventions of a mobile browser.** If a browser does it with a gesture on the content, do not add a widget. Nearly every UI complaint here has been an invented widget.
 
-Open work is on GitHub: **#223** (correction frames double traffic), **#224** (round-trip economies), **#225** (verify Google sign-in; sign-in question blind spots — the JPEG-quality third is answered below under the frame-size measurements).
+Open work is on GitHub: **#223** (correction frames double traffic), **#224** (round-trip economies), **#225** (verify Google sign-in; sign-in question blind spots — the JPEG-quality third is answered below under the frame-size measurements), **#237** (the model cannot drive the browser at all — it reads a page, it cannot click one).
 
 `read_url` fetches with urllib: fast, cheap, anonymous, right for most of the web. Two kinds of page it cannot read **at all** — one rendered entirely by JavaScript, where the fetch returns an empty shell, and one behind a login, where the fetch is simply a different, logged-out client. This is the escalation for both: a real Chrome on this Mac, driven off-screen, with a profile that persists.
+
+The two are **not** detected the same way, and conflating them cost the feature its point for a year. A JavaScript shell announces itself — the body is empty. A login wall does not: it is 200, with a full page of text, and there is nothing in it a fetcher can tell apart from the page it asked for. So identity is decided by **routing**, before the fetch, from the login record — never by inspecting what came back (see *A signed-in host is ROUTED*, below).
 
 ---
 
@@ -76,6 +78,31 @@ The context stays warm between reads (a launch is ~2s) and closes after `IDLE_SE
 aish never types the owner's credentials — it hands them a browser and stays out of it. The window opens **on the Mac**, not on the phone that asked, so the web path acks that fact immediately and reports the result whenever they close the window (up to fifteen minutes later). It runs on the worker pool, not `to_thread`, because it parks for exactly that long.
 
 Which hosts count as signed-in is recorded from what the owner **navigated to** during a login window, not from the cookie jar: a jar is mostly third-party trackers, and "sites I logged into" is a claim only their own navigation supports (`TestLoginRecord`). Matching is on a dot boundary, so `evilallegro.pl` is not `allegro.pl`.
+
+## A signed-in host is ROUTED to the browser, not merely gated (#236)
+
+The login record has two jobs, and for a long time it only did one.
+
+Everywhere else in `read_url`, escalation is wired to a **failure**: a 403/429/503, a socket timeout, an empty shell. Wire it that way and a login wall never escalates, because a login wall is not a failure — `eon.pl/mojeon` answers **200 with a full page of Polish text and no error at all**. The fetch "succeeded", so Chrome never launched, for exactly the class of page the persistent profile exists to read.
+
+What that looked like from the owner's side (`session-20260818-174527`, #236) is the sharpest way to state it. He asked for his E.ON invoices. `_login_gate` drew a card — the card whose whole question is *"does this read carry your live session?"* — and he approved it. `read_url` then fetched the page **anonymously**, handed the model a login form, and Chrome did not launch once in the entire session. The gate and the read disagreed about what the read was, and the gate was the one telling the truth.
+
+Then it compounded, twice. The model, holding a login screen, reported the portal as inaccessible and asked him to download the PDFs by hand — and the `read-means-read` rule fired at it for saying so, because it *had* read eon.pl. A harness that hands over the wrong page also punishes the model for describing it accurately.
+
+So: **`browser.is_logged_in(url)` routes, exactly as `BROWSER_HOSTS` routes.** It was already consulted on this code path, for permission only. It is the strongest routing signal aish has and the owner supplied it himself, with his own hands, in a window aish opened for him.
+
+The cost is real and accepted: a public page on a signed-in host now pays a ~2s Chrome launch. That is the price of the gate not lying, it is bounded (the context stays warm, so it is paid once per idle period), and it lands on the same hosts the gate already stops to ask about. `TestASignedInHostIsReadAsTheOwner` pins the routing, the subdomain case, and the cost fence — a host with no account still goes straight to the fetch.
+
+**A read that falls back to the fetch says so, in aish's own voice.** The browser can be unavailable, or busy with the owner's own hands, and plenty of a signed-in host is public — so the fallback stays. Falling back *silently* is what cannot: the model has no other way to know it is looking at a stranger's view of an account it was asked about. Two notes, both **above** the untrusted-content banner, because they are statements about provenance and everything below that banner is declared to be page data:
+
+- **the session lapsed** — the browser rendered it, as him, and the site asked for a password anyway. Names the host and `/browser <host>` to sign in again.
+- **the read was anonymous** — with the *reason*, because "playwright is not installed" and "the browser is being driven by hand right now" ask for opposite things from the owner.
+
+Neither discards the page. A wall earns an ERROR because a challenge screen is worth nothing; a sign-in page is worth precisely one thing — knowing the session lapsed — and the model must be able to say which page it was looking at when it says so.
+
+**The evidence for "this is a door" is the password FIELD, never the wording.** *Zaloguj się* / *Sign in* sits in the navigation of half the logged-in web, so matching words would flag real account pages, and would then need maintaining per language on a corpus that is mostly Polish. `Page.signin` comes off the live DOM (Playwright's selectors pierce open shadow roots, the same reason `Page.text` does not come from `page.content()`); `browser.asks_to_sign_in` is the fetch path's weaker HTML-level twin, knowingly blind to a form built in JavaScript and aimed at the server-rendered wall a fetcher actually meets. `TestAskingForAPassword` pins both directions.
+
+One test-isolation note, because it can hide this whole section: `BROWSER_HOSTS` is process-global and nothing clears it, so a test that reads a host successfully routes every later test's read of that host through the browser too — masking the very regression the routing prevents. `conftest.no_leaked_browser_hosts` clears it around every test.
 
 ## The login gate — and why it is not the egress gate
 

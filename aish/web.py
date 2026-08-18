@@ -845,9 +845,11 @@ def _remember_title(url: str, title: str) -> None:
     PAGE_TITLES[url] = title
 
 
-def _browser_read(url: str) -> tuple[tuple[str, list[str], list[str]] | None, str]:
-    """(text, images, declared) as a REAL browser renders the page, or None
-    if it could
+def _browser_read(
+    url: str,
+) -> tuple[tuple[str, list[str], list[str], bool] | None, str]:
+    """(text, images, declared, signin) as a REAL browser renders the page, or
+    None if it could
     not be used. The escalation for the two pages a fetch cannot read at all:
     JavaScript-only (the fetch gets an empty shell) and login-walled (the fetch
     is a logged-out client).
@@ -893,7 +895,7 @@ def _browser_read(url: str) -> tuple[tuple[str, list[str], list[str]] | None, st
     _remember_title(url, page.title)
     if host:
         BROWSER_HOSTS.add(host)
-    return (text, page.images, page.declared), ""
+    return (text, page.images, page.declared, page.signin), ""
 
 
 def _worth_rendering(exc: Exception) -> bool:
@@ -915,20 +917,94 @@ def _worth_rendering(exc: Exception) -> bool:
     )
 
 
+# What the model is told when a read of a site the owner signed into came back
+# asking for a password. It is aish's own statement about PROVENANCE, so it sits
+# ABOVE the untrusted-content banner: everything below that banner is declared to
+# be page data, and this is the one line that must not be read as page data.
+#
+# It does not discard the page. A wall gets an ERROR because a challenge screen
+# is worth nothing; a sign-in page is worth exactly one thing — knowing that the
+# session lapsed — and the model needs to be able to say which page it was
+# looking at when it says so.
+STALE_SESSION_NOTE = (
+    "[aish: {host} is a site the user IS signed into in aish's own browser, but "
+    "this page came back asking for a password — that session has expired. What "
+    "follows is the SIGNED-OUT page, not the account: nothing in it is the "
+    "user's data. Tell them to run /browser https://{host} and sign in again, "
+    "then read this URL once more. Do not ask them to fetch or upload the "
+    "content by hand instead.]\n"
+)
+
+# The same read made with the WRONG IDENTITY rather than a lapsed one: the
+# browser could not be used at all, so the fetch went out as a stranger. Naming
+# the reason matters — "no browser available (not installed)" and "the browser is
+# being driven by hand right now" call for opposite things from the owner.
+ANONYMOUS_READ_NOTE = (
+    "[aish: {host} is a site the user is signed into, but aish could not use its "
+    "browser for this read ({why}), so this page was fetched ANONYMOUSLY — as a "
+    "stranger, not as them. Anything private is simply absent from it.{form} Tell "
+    "them this is the public view of the site and not their account; never "
+    "report a signed-out page as their data.]\n"
+)
+
+ANONYMOUS_READ_FORM = (
+    " This page is a sign-in form, so it carries no account content at all."
+)
+
+
+def _present_rendered(
+    url: str,
+    rendered: tuple[str, list[str], list[str], bool],
+    *,
+    topic: str | None,
+    login_host: str,
+) -> str:
+    """A browser read, presented — with the provenance note when the site the
+    owner is signed into answered with a password field anyway."""
+    text, images, declared, signin = rendered
+    note = STALE_SESSION_NOTE.format(host=login_host) if login_host and signin else ""
+    return note + _present(
+        url, text, images, declared, topic=topic, via_browser=True
+    )
+
+
 def read_url(url: str, topic: str | None = None) -> str:
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         return f"ERROR: read_url only fetches http(s) URLs (got {url!r})"
 
-    # A host already known to refuse plain fetches goes straight to the browser:
-    # the refusal is not always a prompt 403, and a tarpit costs the whole
-    # timeout before anything escalates (see BROWSER_HOSTS).
-    if browser.host_of(url) in BROWSER_HOSTS:
+    # Two kinds of host go through the browser BEFORE a fetch is attempted.
+    #
+    # One already refuses plain fetches: the refusal is not always a prompt 403,
+    # and a tarpit costs the whole timeout before anything escalates (see
+    # BROWSER_HOSTS).
+    #
+    # The other is one the OWNER SIGNED INTO, and that is the harder-won half
+    # (#236). Escalation everywhere else in this function is wired to a FAILURE
+    # — a block status, a timeout, an empty shell. A login wall is none of those:
+    # it is 200 with a full page of Polish text and no error at all, so the fetch
+    # "succeeded" and the renderer never ran for exactly the class of page the
+    # persistent profile exists to read. `_login_gate` had already asked the
+    # owner to approve a read that carried his session, and he approved it, and
+    # then the read went out anonymously — the gate and the read disagreeing
+    # about what the read was.
+    #
+    # `is_logged_in` was consulted on this path already, for PERMISSION only.
+    # It is also the strongest routing signal aish has, and the owner supplied it
+    # with his own hands. It costs a ~2s Chrome launch on a public page of a
+    # signed-in host, which is the price of the gate not lying; the context stays
+    # warm, so it is paid once per idle period and not per read.
+    login_host = browser.is_logged_in(url)
+    anonymous_why = ""
+    if browser.host_of(url) in BROWSER_HOSTS or login_host:
         rendered, why = _browser_read(url)
         if rendered is not None:
-            return _present(url, *rendered, topic=topic, via_browser=True)
+            return _present_rendered(url, rendered, topic=topic, login_host=login_host)
         if why == WALLED:
             return f"ERROR: {url} — {WALLED}"
+        # Remembered, not discarded: the fetch below is about to be made with the
+        # wrong identity, and the model can only say so if it is told why.
+        anonymous_why = why
 
     try:
         text, content_type = _fetch(url)
@@ -944,10 +1020,13 @@ def read_url(url: str, topic: str | None = None) -> str:
         # with no session at all, and against this class of site it returns an
         # empty page with a CAPTCHA warning (three calls, three empty pages, in
         # the session that prompted all this).
-        if exc.code in _JINA_BLOCK_CODES:
+        # `not anonymous_why`: the pre-fetch route already tried the browser and
+        # it did not work, and a second launch in one read buys nothing but
+        # seconds.
+        if exc.code in _JINA_BLOCK_CODES and not anonymous_why:
             rendered, why = _browser_read(url)
             if rendered is not None:
-                return _present(url, *rendered, topic=topic, via_browser=True)
+                return _present_rendered(url, rendered, topic=topic, login_host=login_host)
             if why == WALLED:
                 return f"ERROR: {url} — {WALLED}"
         hint = _blocked_note(url) if exc.code in _JINA_BLOCK_CODES else ""
@@ -959,20 +1038,24 @@ def read_url(url: str, topic: str | None = None) -> str:
         # address after a hand-rolled script hammered it, read_url died on a
         # socket timeout, and the escalation — wired only to 403/429/503 —
         # never ran.
-        if _worth_rendering(exc):
+        if _worth_rendering(exc) and not anonymous_why:
             rendered, why = _browser_read(url)
             if rendered is not None:
-                return _present(url, *rendered, topic=topic, via_browser=True)
+                return _present_rendered(url, rendered, topic=topic, login_host=login_host)
             if why == WALLED:
                 return f"ERROR: {url} — {WALLED}"
         return f"ERROR: could not fetch {url}: {exc}"
 
     images: list[str] = []
     declared: list[str] = []
+    login_form = False
     if content_type in ("text/html", "application/xhtml+xml"):
-        # Read off the RAW html, before extraction: the declaration lives in a
-        # <script>, which the text extractor skips by design.
+        # Both read off the RAW html, before extraction: the declaration lives in
+        # a <script>, which the text extractor skips by design, and a password
+        # field is markup the extractor drops entirely — it keeps what a reader
+        # would SEE, and an input is not text.
         declared = declared_data(text)
+        login_form = browser.asks_to_sign_in(text)
         text, title, images = _extract(text, base_url=url)
         _remember_title(url, title)
     elif content_type == "application/pdf":
@@ -1000,13 +1083,25 @@ def read_url(url: str, topic: str | None = None) -> str:
         # A JavaScript-only page: the fetch succeeded and returned a shell.
         # This is the commonest browser win by far — far more of the web than
         # the sites that actively block automation.
-        rendered, why = _browser_read(url)
-        if rendered is not None:
-            return _present(url, *rendered, topic=topic, via_browser=True)
-        if why == WALLED:
-            return f"ERROR: {url} — {WALLED}"
+        if not anonymous_why:
+            rendered, why = _browser_read(url)
+            if rendered is not None:
+                return _present_rendered(url, rendered, topic=topic, login_host=login_host)
+            if why == WALLED:
+                return f"ERROR: {url} — {WALLED}"
         return f"ERROR: {url} returned no readable text{_blocked_note(url)}"
 
+    if login_host:
+        # This read was made as a STRANGER at a site the owner has an account
+        # at, and nothing in the page itself says so. Saying it here is what
+        # stops the model reporting a logged-out page as the account — or, as it
+        # did on 2026-08-18, reporting the account as unreachable and asking him
+        # to upload the invoices by hand.
+        return ANONYMOUS_READ_NOTE.format(
+            host=login_host,
+            why=anonymous_why or "the browser was not used",
+            form=ANONYMOUS_READ_FORM if login_form else "",
+        ) + _present(url, text, images, declared, topic=topic)
     return _present(url, text, images, declared, topic=topic)
 
 
