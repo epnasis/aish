@@ -1132,6 +1132,10 @@ REASONING_CHARS = 262144
 # body does not put a second copy of the file in the log — the diff already
 # records that. Applied per value, so a long one never displaces its siblings.
 CALL_ARG_CHARS = 8000
+# How many stubbed-message references a `trim` record lists before it says how
+# many more there were. A trim that hits fifty results is real and the reader
+# needs to know its shape, not fifty rows of it.
+TRIM_STUBBED_MAX = 40
 
 
 def system_prompt(scratch_dir: os.PathLike | str | None = None) -> str:
@@ -2707,10 +2711,12 @@ class Agent:
         why its output was truncated, grepped aish's source, found a different
         truncator's marker and confidently blamed the wrong thing."""
         before = self._total_chars()
-        affected = sum(
-            1 for message in self.messages[1:task_start] if self._trim_tool_message(message)
-        )
-        self._record_trim("eager_stub", affected, before, budget=None)
+        stubbed = [
+            self._stub_ref(i)
+            for i in range(1, task_start)
+            if self._trim_tool_message(self.messages[i])
+        ]
+        self._record_trim("eager_stub", before, budget=None, stubbed=stubbed)
 
     def _trim_history_to_budget(self) -> None:
         """Shrink restored tool outputs oldest-first, but only as far as the
@@ -2719,25 +2725,40 @@ class Agent:
         needs verbatim to continue, so they are the last to go."""
         budget = self.num_ctx * CHARS_PER_TOKEN_BUDGET
         before = self._total_chars()
-        affected = 0
-        for message in self.messages[1:]:
+        stubbed: list[dict] = []
+        for i in range(1, len(self.messages)):
             if self._total_chars() <= budget:
                 break
-            affected += bool(self._trim_tool_message(message))
-        self._record_trim("budget_oldest_first", affected, before, budget=budget)
+            if self._trim_tool_message(self.messages[i]):
+                stubbed.append(self._stub_ref(i))
+        self._record_trim("budget_oldest_first", before, budget=budget, stubbed=stubbed)
 
-    def _record_trim(self, policy: str, affected: int, before: int, budget: int | None) -> None:
+    def _stub_ref(self, index: int) -> dict:
+        """Which message was stubbed, in terms a reader can act on: its position
+        in the conversation and which tool produced it. `affected: 3` said
+        something had been cut but never WHAT, so the log could show a complete
+        web page while the model had been handed 200 characters of it — a reader
+        concluding the model ignored what it read would be looking at evidence
+        the model never saw (#241)."""
+        message = self.messages[index]
+        return {"at": index, "tool": str(message.get("tool_name") or message.get("role") or "")}
+
+    def _record_trim(
+        self, policy: str, before: int, budget: int | None, stubbed: list[dict]
+    ) -> None:
         """The `trim` record (contract §3.5). Renderless — it edits history
         rather than describing a call, so it cannot ride the `tool` step.
         `budget: null` states the fact #192 says is wrong and which no record
         stated before: the trim was unconditional."""
-        if not affected:
+        if not stubbed:
             return
         _, cap_source = backends.context_window(self.provider, self.num_ctx)
         self._emit_record(
             kind="trim",
             policy=policy,
-            affected=affected,
+            affected=len(stubbed),
+            stubbed=stubbed[:TRIM_STUBBED_MAX],
+            stubbed_truncated=max(0, len(stubbed) - TRIM_STUBBED_MAX),
             bytes_before=before,
             bytes_after=self._total_chars(),
             keep_chars=TRIM_KEEP_CHARS,
@@ -2751,18 +2772,30 @@ class Agent:
 
     def _enforce_budget(self, task_start: int) -> None:
         """Trim this task's oldest tool outputs (never the 2 most recent)
-        until the conversation fits the character budget."""
+        until the conversation fits the character budget.
+
+        The THIRD trim site, and the one that recorded NOTHING until #241. The
+        other two run at task boundaries and have been recorded since #192; this
+        one fires MID-TASK, so a result the model read at step 2 could be a stub
+        by step 7 with no trace of when or why. That is worse than an unrecorded
+        omission: the log still holds the full text, so it positively suggests
+        the model had something it did not."""
         budget = self.num_ctx * CHARS_PER_TOKEN_BUDGET
         if self._total_chars() <= budget:
             return
+        before = self._total_chars()
         tool_indices = [
             i
             for i in range(task_start, len(self.messages))
             if self.messages[i].get("role") == "tool"
         ]
+        stubbed: list[dict] = []
         for i in tool_indices[:-2]:
-            if self._trim_tool_message(self.messages[i]) and self._total_chars() <= budget:
-                return
+            if self._trim_tool_message(self.messages[i]):
+                stubbed.append(self._stub_ref(i))
+                if self._total_chars() <= budget:
+                    break
+        self._record_trim("mid_task_budget", before, budget=budget, stubbed=stubbed)
 
     def expand_alias(self, command: str) -> str:
         """Rewrite the first word via the aish alias map, BEFORE approval sees
@@ -3237,6 +3270,12 @@ class Agent:
                 "model": self.model,
                 "num_ctx": self.num_ctx,
                 "think": bool(self.think),
+                # How this provider carries the per-task system reminder. On the
+                # OpenAI-shaped backends it is relabelled as a USER message
+                # (#74), so a dossier claiming a system-authority instruction was
+                # in force would be describing something the model never saw.
+                "system_role": backends.system_role_policy(self.provider),
+                "provider": self.provider,
             },
         )
 

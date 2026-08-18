@@ -133,7 +133,13 @@ class TestBriefWriter:
         )
         agent.run_task("hello")
         (brief,) = steps(log.path, "brief")
-        assert brief["options"] == {"model": "fake", "num_ctx": 4096, "think": True}
+        assert brief["options"]["model"] == "fake"
+        assert brief["options"]["num_ctx"] == 4096
+        assert brief["options"]["think"] is True
+        # How the provider carries the per-task reminder, recorded as a declared
+        # fact rather than left for a reader to infer (#241).
+        assert brief["options"]["system_role"] == "all_system"
+        assert brief["options"]["provider"] == "ollama"
 
     def test_written_once_per_session_not_once_per_call(self, tmp_path):
         """Interning: an unchanged menu is named once, however many model calls
@@ -387,17 +393,144 @@ class TestEmittedArguments:
         assert session_module.SessionLog.reconstruct_events(stripped) == full
 
 
+class TestCoverageHoles:
+    """#241. Each of these let a reader reach a confident FALSE conclusion,
+    which is worse than the gap it replaced."""
+
+    def test_the_mid_task_trim_is_recorded(self, tmp_path):
+        """The third trim site ran mid-task and recorded nothing, so a result the
+        model read at step 2 could be a stub by step 7 with no trace. The
+        transcript still holds the full text, so the log positively suggested
+        the model had something it did not."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path, num_ctx=1)
+        agent.messages.extend(
+            [
+                {"role": "user", "content": "go"},
+                {"role": "tool", "tool_name": "read_url", "content": "x" * 4000},
+                {"role": "tool", "tool_name": "web_search", "content": "y" * 4000},
+                {"role": "tool", "tool_name": "read_file", "content": "z" * 4000},
+                {"role": "tool", "tool_name": "recall", "content": "w" * 4000},
+            ]
+        )
+        agent._enforce_budget(1)
+        (record,) = [s for s in steps(log.path, "trim") if s["policy"] == "mid_task_budget"]
+        assert record["affected"] >= 1
+        assert record["budget"] is not None
+        assert [s["tool"] for s in record["stubbed"]]
+
+    def test_a_trim_names_which_results_were_stubbed(self, tmp_path):
+        """`affected: 3` said something was cut but never WHAT."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.messages.extend(
+            [
+                {"role": "user", "content": "go"},
+                {"role": "tool", "tool_name": "read_url", "content": "x" * 4000},
+            ]
+        )
+        agent._trim_eagerly(len(agent.messages))
+        (record,) = steps(log.path, "trim")
+        assert record["stubbed"] == [{"at": 2, "tool": "read_url"}]
+
+    def test_the_dossier_names_the_stubbed_results(self, tmp_path):
+        path = tmp_path / "session-stub.jsonl"
+        rows = [
+            {"kind": "task_start", "ts": "t", "prompt": "hi"},
+            {"kind": "trace", "step": {"kind": "trim", "policy": "eager_stub", "affected": 2,
+                                       "bytes_before": 9000, "bytes_after": 400, "turn": 1,
+                                       "stubbed": [{"at": 2, "tool": "read_url"},
+                                                   {"at": 4, "tool": "web_search"}]}},
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        out = explain_mod.explain(path, root=tmp_path)
+        assert "stubbed for the model" in out
+        assert "#2 read_url" in out and "#4 web_search" in out
+
+    def test_an_old_trim_record_says_which_messages_are_unknown(self, tmp_path):
+        """A log written before #241 has `affected` but no `stubbed`. That must
+        read as "not recorded", never as "nothing was stubbed"."""
+        path = tmp_path / "session-oldtrim.jsonl"
+        rows = [
+            {"kind": "task_start", "ts": "t", "prompt": "hi"},
+            {"kind": "trace", "step": {"kind": "trim", "policy": "eager_stub", "affected": 3,
+                                       "bytes_before": 900, "bytes_after": 400, "turn": 1}},
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        out = explain_mod.explain(path, root=tmp_path)
+        assert "which messages" in out and explain_mod.NOT_RECORDED in out
+
+    def test_steering_typed_mid_task_appears_in_the_dossier(self, tmp_path):
+        """It is folded into the model's messages without passing through the
+        recorder, and is not restored on resume — this trace step is the only
+        place it exists."""
+        path = tmp_path / "session-steer.jsonl"
+        rows = [
+            {"kind": "task_start", "ts": "t", "prompt": "find a hammock"},
+            {"kind": "trace", "step": {"kind": "injected", "text": "only Polish shops please"}},
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        out = explain_mod.explain(path, root=tmp_path)
+        assert "only Polish shops please" in out
+        assert "typed mid-task" in out
+
+    def test_the_reminder_reaching_the_model_as_a_user_message_is_stated(self, tmp_path):
+        """On the OpenAI-shaped backends aish's per-task reminder is relabelled
+        `user` (#74). A dossier claiming system authority was in force would be
+        describing something the model never saw."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.provider = "gemini"
+        agent.run_task("hello")
+        out = explain_mod.explain(log.path, root=tmp_path)
+        assert "reached this model as a USER message" in out
+
+    def test_declared_system_policy_matches_the_code(self):
+        """The record carries a DECLARED policy so a reader never has to infer
+        it from source. Declaring and doing must therefore be pinned together,
+        or the record becomes a confident lie the day the converter changes."""
+        from aish import backends
+
+        history = [
+            {"role": "system", "content": "base"},
+            {"role": "system", "content": "<system-reminder>per-task</system-reminder>"},
+            {"role": "user", "content": "hi"},
+        ]
+        converted = backends.convert_messages(history)
+        roles = [m["role"] for m in converted]
+        demoted = roles.count("system") == 1 and "user" in roles[1:2]
+        assert demoted, roles
+        for name in ("gemini", "openai"):
+            assert backends.system_role_policy(name) == "first_only"
+        assert backends.system_role_policy("ollama") == "all_system"
+        # An unknown provider goes through the same converter, so it inherits
+        # the demoting policy rather than the safe-sounding one.
+        assert backends.system_role_policy("something-new") == "first_only"
+
+
 class TestReaderIsPureAndHonest:
     def test_no_model_and_no_live_state_can_reach_the_reader(self):
         """§0: an explanation is assembled from recorded evidence, never
         re-derived from source. A reader that can reach a backend, a rule file
-        or the live tool table can answer with how aish behaves TODAY."""
-        source = (
-            __import__("pathlib").Path(explain_mod.__file__).read_text()
-        )
-        for forbidden in ("backends", "ollama", "import rules", "from .rules", "tool_plugins",
-                          "from .tools", "import tools", "skills"):
-            assert forbidden not in source, forbidden
+        or the live tool table can answer with how aish behaves TODAY.
+
+        Checked against the IMPORT GRAPH, not the source text. A substring scan
+        reads a module name in a comment as a violation, which teaches the next
+        author to reword the prose — and a test you satisfy by rewording is one
+        that will wave the real import through later.
+        """
+        import ast
+        import pathlib
+
+        forbidden = {"backends", "ollama", "rules", "rule_compiler", "tools",
+                     "tool_plugins", "skills", "embeddings", "web", "browser"}
+        tree = ast.parse(pathlib.Path(explain_mod.__file__).read_text())
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.update(alias.name for alias in node.names)
+                if node.module:
+                    imported.add(node.module.split(".")[-1])
+        assert not (imported & forbidden), imported & forbidden
 
     def test_a_turn_names_the_tools_that_were_on_the_menu(self, tmp_path):
         agent, _, log = make_logged_agent([model_says("done")], tmp_path)

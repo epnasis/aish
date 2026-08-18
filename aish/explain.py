@@ -475,6 +475,14 @@ def render(turn: Turn, log: Log, root: os.PathLike | str | None, show_tools: boo
             f"{options.get('num_ctx')} · think {'on' if options.get('think') else 'off'}"
             f" · at model call {brief.get('model_call', '?')}"
         )
+        if options.get("system_role") == "first_only":
+            # Not a footnote: "why did it ignore the reminder" has a mechanical
+            # answer on these backends, and it is invisible from aish's own view.
+            out.append(
+                f"  {'':<10} {BOLD}the per-task reminder reached this model as a USER "
+                f"message{RESET}{DIM} ({options.get('provider')} carries only the first "
+                f"system message as system){RESET}"
+            )
         out.append(
             f"  {'':<10} tools: {menu.get('count', '?')} on the menu "
             f"({str(menu.get('digest') or '')[:12]}… {status})"
@@ -515,12 +523,32 @@ def render(turn: Turn, log: Log, root: os.PathLike | str | None, show_tools: boo
     _rules_section(turn, log, out)
     _calls_section(turn, out)
 
+    # Steering text typed WHILE the task ran. It is folded into the model's
+    # messages mid-task without passing through the recorder, so this trace step
+    # is the only place it exists — and it is not restored when a session
+    # resumes, so a dossier that skipped it would show a turn the model was
+    # never actually given (#241).
+    for record in turn.of_kind("injected"):
+        out.append(f"  {'steering':<10} typed mid-task: {str(record.get('text') or '')[:300]}")
+
     for record in turn.of_kind("trim"):
         out.append(
             f"  {'trim':<10} {record.get('policy')}: {record.get('affected')} message(s), "
             f"{record.get('bytes_before')} → {record.get('bytes_after')} bytes "
             f"(keep {record.get('keep_chars')}, cap from {record.get('cap_source')})"
         )
+        # WHICH results were stubbed. Without this the transcript still shows the
+        # full text, so a reader can conclude the model ignored something it was
+        # never given.
+        if stubbed := record.get("stubbed"):
+            listed = ", ".join(f"#{s.get('at')} {s.get('tool')}" for s in stubbed)
+            out.append(f"  {'':<10} {BOLD}stubbed for the model{RESET}: {listed}")
+            if record.get("stubbed_truncated"):
+                out.append(f"  {'':<10} … and {record['stubbed_truncated']} more")
+        elif record.get("affected"):
+            out.append(
+                f"  {'':<10} {DIM}which messages: {NOT_RECORDED} (log predates #241){RESET}"
+            )
 
     _reasoning_section(turn, log, out)
 
