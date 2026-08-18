@@ -30,14 +30,15 @@ make ship-check    # the preflight alone: what would ship, and whether it may
 
 The remote equivalent is `scripts/deploy-web.sh <host>`, which ships the working tree ON PURPOSE (that is the remote dev loop) but asks first when the tree is dirty — and, with no tty to ask on, refuses rather than assuming consent.
 
-## Workflow: when to use a worktree
+## Workflow: always work in a worktree
 
-Before editing code, check `git status`. Work in a git worktree on a feature branch (via EnterWorktree) instead of this checkout when either:
+**Every change goes in a git worktree on a feature branch (via EnterWorktree), then merges to main. There is no trivial-enough exception.** This checkout is never edited directly — not for a one-line fix, not for a doc tweak.
 
-- the change is **non-trivial** — a multi-file feature or refactor, not a small fix; or
-- the tree is **not clean with changes you didn't make** — the user or another session is mid-work in this checkout.
+Why the rule has no exception: this checkout may hold the owner's or another session's in-flight work, and a `git add -A` sweeps it into an unrelated commit while a wheel built from that tree ships it silently (see Shipping). On 2026-08-18 a whole multi-file feature was built and committed straight to main while a worktree created for it sat unused — the tree happened to be clean, so nothing was captured, and nothing about the commands would have said otherwise. A rule with a "trivial" carve-out is a rule you decide about under time pressure; this one you do not.
 
-Merge back to main after tests pass, then remove the worktree. Trivial fixes on a clean tree go directly in this checkout. `make ship` always runs from this main checkout after merge — never from a worktree path, and never as a bare `uv tool install` (see Shipping).
+**The way this goes wrong is `cd`.** Prefixing a shell call with `cd /Users/epnasis/dev/aish` silently leaves the worktree, because the worktree lives *inside* that path. Confirm `pwd` is the worktree before the first edit, and keep it there.
+
+Merge back to main after tests pass, then remove the worktree. `make ship` always runs from this main checkout after merge — never from a worktree path, and never as a bare `uv tool install` (see Shipping).
 
 ## Never type into a chat you did not create
 
