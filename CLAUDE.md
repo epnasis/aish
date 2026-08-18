@@ -30,14 +30,15 @@ make ship-check    # the preflight alone: what would ship, and whether it may
 
 The remote equivalent is `scripts/deploy-web.sh <host>`, which ships the working tree ON PURPOSE (that is the remote dev loop) but asks first when the tree is dirty — and, with no tty to ask on, refuses rather than assuming consent.
 
-## Workflow: when to use a worktree
+## Workflow: always work in a worktree
 
-Before editing code, check `git status`. Work in a git worktree on a feature branch (via EnterWorktree) instead of this checkout when either:
+**Every change goes in a git worktree on a feature branch (via EnterWorktree), then merges to main. There is no trivial-enough exception.** This checkout is never edited directly — not for a one-line fix, not for a doc tweak.
 
-- the change is **non-trivial** — a multi-file feature or refactor, not a small fix; or
-- the tree is **not clean with changes you didn't make** — the user or another session is mid-work in this checkout.
+Why the rule has no exception: this checkout may hold the owner's or another session's in-flight work, and a `git add -A` sweeps it into an unrelated commit while a wheel built from that tree ships it silently (see Shipping). On 2026-08-18 a whole multi-file feature was built and committed straight to main while a worktree created for it sat unused — the tree happened to be clean, so nothing was captured, and nothing about the commands would have said otherwise. A rule with a "trivial" carve-out is a rule you decide about under time pressure; this one you do not.
 
-Merge back to main after tests pass, then remove the worktree. Trivial fixes on a clean tree go directly in this checkout. `make ship` always runs from this main checkout after merge — never from a worktree path, and never as a bare `uv tool install` (see Shipping).
+**The way this goes wrong is `cd`.** Prefixing a shell call with `cd /Users/epnasis/dev/aish` silently leaves the worktree, because the worktree lives *inside* that path. Confirm `pwd` is the worktree before the first edit, and keep it there.
+
+Merge back to main after tests pass, then remove the worktree. `make ship` always runs from this main checkout after merge — never from a worktree path, and never as a bare `uv tool install` (see Shipping).
 
 ## Never type into a chat you did not create
 
@@ -64,6 +65,7 @@ Merge back to main after tests pass, then remove the worktree. Trivial fixes on 
 | `skills.py`, `embeddings.py`, `curate.py`, `skill_import.py` | `docs/knowledge-layer.md` |
 | `rules.py`, `rule_compiler.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
 | `tool_plugins.py`, `secrets.py` | `docs/tools-layer.md` |
+| `explain.py`, `evidence.py`, the `brief` record | `docs/diagnostics.md` |
 | `export.py` | `docs/export-pdf.md` |
 
 **New rationale goes in the area's doc, never here.** This file spent a year as a decision log — a paragraph per issue — and grew past the 150k-char limit Claude Code warns at, which is the point where the whole thing stops being reliable context. `tests/test_claude_md_size.py` fails if it passes 40k. Add a line here only for a rule that applies to *every* task; everything else belongs in `docs/`.
@@ -107,6 +109,9 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`rule_compiler.py`** — the owner's plain language → rule field values (#205). Isolated because it is more accurate; safe because code validates it and the owner approves it. The acting model never learns the grammar. → `docs/rules-engine.md`
 - **`tool_plugins.py`** — droppable `TOOL.md` plugin tools, indistinguishable from native ones to the model and gated by the same `_dispatch`. → `docs/tools-layer.md`
 - **`secrets.py`** — local secret store backed by the macOS login Keychain; structurally un-committable. → `docs/tools-layer.md`
+- **`explain.py` + `evidence.py`** — reading back why a turn went the way it did: `aish explain` assembles a
+  dossier from recorded evidence only, and the content-addressed evidence store holds the bytes it points at,
+  purgeably. No model call, and it must never be able to re-derive behaviour from source. → `docs/diagnostics.md`
 - **`export.py`** — local Markdown → PDF for the web UI; the text never leaves the machine. → `docs/export-pdf.md`
 - **`dir_ignore.py`** — the configurable gitignore-style ignore list shared by the web folder browser and @-file completion. Name-level `fnmatch` on basenames only — it must never add a per-subfolder stat. → `docs/cli.md`
 

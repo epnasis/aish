@@ -510,6 +510,7 @@ RENDERLESS_STEPS = frozenset(
         "tool_check",  # #193
         "admission",  # #194
         "context",  # #208
+        "brief",  # #239
     }
 )
 
