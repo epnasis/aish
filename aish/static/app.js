@@ -8705,10 +8705,26 @@ let consoleFocusReturn = false; // the terminal was being typed into when the br
 // menu simply refuses every dismissal and every choice until it is armed, which
 // the end of the touch does. `CONSOLE_LINK_MENU_LOST_MS` is the backstop for a
 // touch whose end never arrives — a stuck menu is worse than a slow one.
+// And a WINDOW is not enough either, which the owner found next: with the
+// keyboard SHOWN the menu behaved, with it hidden the hold still dismissed
+// itself. That split is the tell — iOS spends the lift's click on dismissing
+// the keyboard when there is one, so the click only reaches the page when there
+// is not, and when it does reach it, it can arrive well after any window short
+// enough to keep the menu responsive.
+//
+// So the lift's click is identified by WHERE it lands rather than by when: it
+// is at the point the finger was, and there is exactly ONE of it. It is
+// swallowed once, whenever it turns up; `CONSOLE_LINK_MENU_STRAY_MS` only stops
+// the expectation lingering into a later, deliberate tap on the same spot.
+// Everything else stays instantly answerable, which a long arming delay would
+// have cost.
 const CONSOLE_LINK_MENU_ARM_MS = 400;
 const CONSOLE_LINK_MENU_LOST_MS = 1500;
+const CONSOLE_LINK_MENU_STRAY_MS = 1500;
+const CONSOLE_LINK_MENU_SLOP = 28; // px around the hold point the lift can land in
 let consoleLinkMenuArmed = false;
 let consoleLinkMenuArmTimer = 0;
+let consoleLinkMenuStray = null; // {x, y, until} — the lift's click, still owed
 
 function armConsoleLinkMenu(delay) {
   clearTimeout(consoleLinkMenuArmTimer);
@@ -8722,9 +8738,23 @@ function disarmConsoleLinkMenu() {
 }
 
 /** Called by the console's touch handler when the hold that raised the menu
- *  ends — the synthesised click follows within a frame or two of this. */
-function consoleHoldEnded() {
+ *  ends, with the point it was held at — the lift's own click is still owed. */
+function consoleHoldEnded(x, y) {
+  consoleLinkMenuStray = { x, y, until: Date.now() + CONSOLE_LINK_MENU_STRAY_MS };
   armConsoleLinkMenu(CONSOLE_LINK_MENU_ARM_MS);
+}
+
+/** Is this click the tail of the hold that opened the menu, rather than an
+ *  answer to it? One-shot: the lift owes exactly one click, so consuming it
+ *  hands the next one — a real tap, at the same spot or not — straight through. */
+function consoleLinkMenuStrayClick(x, y) {
+  const stray = consoleLinkMenuStray;
+  if (!stray) return false;
+  if (Date.now() > stray.until) { consoleLinkMenuStray = null; return false; }
+  if (Math.abs(x - stray.x) > CONSOLE_LINK_MENU_SLOP) return false;
+  if (Math.abs(y - stray.y) > CONSOLE_LINK_MENU_SLOP) return false;
+  consoleLinkMenuStray = null;
+  return true;
 }
 
 function consoleLinkMenuReady() {
@@ -8858,6 +8888,7 @@ function closeConsoleLinkMenu() {
   if (scrim) scrim.hidden = true;
   clearTimeout(consoleLinkMenuArmTimer);
   consoleLinkMenuArmed = false;
+  consoleLinkMenuStray = null;
 }
 
 // Anchored at the finger, clamped inside the viewport. The URL is set as TEXT:
@@ -8897,12 +8928,18 @@ function consoleHoldAt(term, screen, x, y) {
 }
 // [CONSOLE-LINK-TARGET-END]
 
-// Both refuse while the menu is unarmed: that click is the tail of the hold
-// that opened it, not an answer to it.
-$("clink-scrim").onclick = () => { if (consoleLinkMenuReady()) closeConsoleLinkMenu(); };
+// Both refuse the tail of the hold that opened the menu — the lift's own click,
+// wherever it lands and whenever it turns up — and anything at all until the
+// gesture is over.
+$("clink-scrim").onclick = (e) => {
+  if (consoleLinkMenuStrayClick(e.clientX, e.clientY)) return;
+  if (consoleLinkMenuReady()) closeConsoleLinkMenu();
+};
 $("clink-menu").addEventListener("click", (e) => {
   const item = e.target.closest(".menu-item");
-  if (!item || !consoleLinkMenuReady()) return;
+  if (!item) return;
+  if (consoleLinkMenuStrayClick(e.clientX, e.clientY)) return;
+  if (!consoleLinkMenuReady()) return;
   switch (item.dataset.act) {
     case "aish": openConsoleLink(consoleLinkMenuUrl, "aish"); break;
     case "system": openConsoleLink(consoleLinkMenuUrl, "system"); break;
@@ -9463,7 +9500,9 @@ document.addEventListener("gesturechange", (e) => e.preventDefault());
     // clamped up under the finger, that stray click would land on a ROW and
     // open the link nobody chose.
     if ((consoleSelectMode || heldLink) && e && e.cancelable) e.preventDefault();
-    if (heldLink) consoleHoldEnded(); // the menu may act now — the lift is spent
+    // The menu may act now — except for this lift's OWN click, which is still
+    // owed and is identified by the point the hold happened at.
+    if (heldLink) consoleHoldEnded(startX, startY);
     heldLink = false;
     scrolling = false; selAnchor = null; touching = false; clearTimeout(holdTimer);
   };

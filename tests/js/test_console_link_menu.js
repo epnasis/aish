@@ -95,8 +95,12 @@ function world() {
     if (i >= 0) timers.splice(i, 1);
   };
   const fire = (ms) => {
+    clock += ms;
     for (const t of timers.filter((t) => t.ms <= ms)) { clearTimeoutFake(t.id); t.fn(); }
   };
+  // A clock the test moves by hand: WHEN the lift's click lands is the whole
+  // question here, and on the phone it depends on whether the keyboard was up.
+  let clock = 1_000_000;
   const focused = { textarea: false, term: 0 };
   const textarea = { id: "xterm-helper-textarea", blur() { focused.textarea = false; } };
   const sandbox = {
@@ -104,6 +108,7 @@ function world() {
     $: el,
     setTimeout: setTimeoutFake,
     clearTimeout: clearTimeoutFake,
+    Date: { now: () => clock },
     consoleOpen: true,
     consoleTerm: { focus() { focused.term += 1; } },
     consoleTerminalTextarea: () => textarea,
@@ -276,10 +281,47 @@ function wrappedRows(prefix, url) {
   ok("…and time alone does not arm it — the LIFT does",
     w.sandbox.consoleLinkMenuReady() === false);
 
-  w.sandbox.consoleHoldEnded();
+  w.sandbox.consoleHoldEnded(on.x, on.y);
   ok("the lift itself is still too early", w.sandbox.consoleLinkMenuReady() === false);
   w.fire(400);
   ok("a moment later the menu is live", w.sandbox.consoleLinkMenuReady() === true);
+}
+
+// 6c. THE SECOND REPORT: "it works [when] the keyboard is shown, but when hidden
+// long press without finger drag makes the menu disappear." iOS spends the
+// lift's click on dismissing the keyboard when there is one — so with no
+// keyboard the click reaches the page, and by then any window short enough to
+// keep the menu responsive has closed. The lift's click is therefore identified
+// by WHERE it lands, not by when, and swallowed exactly once.
+{
+  const w = world();
+  const term = fakeTerm([{ text: `see ${URL_TEXT.slice(0, 30)}`, wrapped: false }]);
+  const on = pointAt(10, 0);
+  w.sandbox.consoleHoldAt(term, w.screen, on.x, on.y);
+  w.sandbox.consoleHoldEnded(on.x, on.y);
+  w.fire(400); // the menu is armed and answering again…
+  ok("the menu is armed", w.sandbox.consoleLinkMenuReady() === true);
+  ok("…and the LATE click from that same lift is still swallowed",
+    w.sandbox.consoleLinkMenuStrayClick(on.x + 3, on.y - 4) === true);
+  ok("but only once — the next tap on that very spot is a real one",
+    w.sandbox.consoleLinkMenuStrayClick(on.x, on.y) === false);
+}
+{
+  const w = world();
+  const on = pointAt(10, 0);
+  w.sandbox.consoleHoldEnded(on.x, on.y);
+  ok("a tap somewhere else is never mistaken for the lift",
+    w.sandbox.consoleLinkMenuStrayClick(on.x + 120, on.y + 90) === false);
+  ok("…and that leaves the lift's own click still owed",
+    w.sandbox.consoleLinkMenuStrayClick(on.x, on.y) === true);
+}
+{
+  const w = world();
+  const on = pointAt(10, 0);
+  w.sandbox.consoleHoldEnded(on.x, on.y);
+  w.fire(1600); // no click ever came
+  ok("the expectation does not linger into a later deliberate tap there",
+    w.sandbox.consoleLinkMenuStrayClick(on.x, on.y) === false);
 }
 {
   // A touch whose end never arrives must not leave a menu nothing can dismiss.
