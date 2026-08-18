@@ -56,6 +56,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import browse as browse_mod
+
 # A launch is ~2s, so the context is kept warm; an idle Chrome is ~400 MB, so
 # it does not stay warm for long. See the module docstring on the memory
 # ceiling this box actually runs against.
@@ -292,6 +294,17 @@ def state_dir() -> Path:
     )
 
 
+def downloads_dir() -> Path:
+    """Where a file the model downloaded lands.
+
+    Beside the profile, under the state dir, and NOT in the config tree for the
+    same reason the profile is not: that tree is auto-committed and pushed. It is
+    listed in `Agent.workspace_roots` so `read_pdf` can open what `browse_act`
+    just named — otherwise the tool tells the model to read a file the model is
+    not allowed to read, which is the #220 asymmetry all over again."""
+    return state_dir() / "browser" / "downloads"
+
+
 def profile_dir() -> Path:
     return state_dir() / "browser" / "profile"
 
@@ -418,7 +431,12 @@ async def _launch(
         ignore_default_args=omit,
         viewport=viewport,  # None = the real window size, for reads
         device_scale_factor=device_scale_factor,
-        accept_downloads=False,
+        # TRUE since #237: the document at the end of a signed-in flow is
+        # frequently the whole point ("Pobierz e-fakturę"), and the anonymous
+        # opener behind read_pdf could never fetch one. A download with no
+        # handler is written to a temp dir Playwright discards with the context,
+        # so this costs a read path nothing.
+        accept_downloads=True,
     )
 
 
@@ -767,6 +785,18 @@ class _Owner:
         self.pending_signin = ""   # host a password was submitted to
         self.pending_nav = -1      # the navigation count when that happened
         self.last_url = ""         # where the view was, so it can be reopened
+        # The page the MODEL is driving (#237). A second page on the same
+        # context, never the view's: the view is the owner's hands at a phone
+        # viewport, and the two must not fight over one page. Held on the owner
+        # because a browse session is exactly the thing that has to outlive a
+        # single job — click, read, click again, all on the same document.
+        self.browse_page: Any = None
+        self.browse_epoch = 0
+        # Downloads that arrived since the last action. Stashed by a SYNC event
+        # handler and saved afterwards inside the job: registering an async
+        # handler would need its own task, and wrapping every click in
+        # `expect_download` would make every ordinary click pay that timeout.
+        self.browse_downloads: list[Any] = []
 
     def run(self) -> None:
         import asyncio
@@ -833,6 +863,7 @@ class _Owner:
 
     async def _close(self) -> None:
         self.view = None  # a closed context has no page left to drive
+        self.browse_page = None
         if self._context is not None:
             try:
                 await self._context.close()
@@ -1577,6 +1608,269 @@ def view_act(action: str, **kwargs: Any) -> Frame:
         return frame
 
     return _submit(job, 120.0)
+
+
+# --------------------------------------------------- the model's own session
+
+# The last snapshot handed to the model, module-level so the APPROVAL GATE can
+# name the control before it runs — "click 'Zapłać' on eon.pl" is the review the
+# owner needs, and "click element 7" is not. Written on the owner thread, read
+# from the agent's; a stale read costs a less specific card, never a wrong act.
+_LAST_SNAPSHOT: browse_mod.Snapshot | None = None
+
+# aish types the owner's credentials NOWHERE, and a model-driven session is the
+# last place that could start. A page asking for one is handed back to him.
+NO_PASSWORDS = (
+    "aish never types passwords. Open /browser {host} and sign in yourself — "
+    "the session persists, and this page will be readable afterwards"
+)
+
+DRIVEN_BY_HAND = (
+    "the browser is being driven by hand right now (/browser) — it will be "
+    "available again once that window is closed"
+)
+
+NOTHING_OPEN = "nothing is open to act on — call browse(url) first"
+
+
+async def _settled_text(page: Any, *, tries: int = 3) -> str:
+    """The page's text, once it stops saying it is still fetching it.
+
+    A page mid-load HAS text — "Wczytywanie danych", a spinner's label, a
+    skeleton — so it passes the emptiness test and the thin-page retry both.
+    Measured on eon.pl/mojeon/Umowy-i-dane/Moje-Umowy, which came back as its own
+    loading message twice in one session while the owner watched (#237). Reads do
+    not pay this cost; a browse action is one of a handful in a flow, and the
+    thing being waited for is the answer."""
+    await page.wait_for_timeout(SETTLE_MS)
+    text = await _body_text(page)
+    for _ in range(tries - 1):
+        if text and not browse_mod.still_loading(text):
+            break
+        await page.wait_for_timeout(SETTLE_MS)
+        text = await _body_text(page) or text
+    return text
+
+
+async def _save_downloads(owner: _Owner) -> list[str]:
+    """Write whatever the last action downloaded, and say where it went."""
+    pending, owner.browse_downloads = owner.browse_downloads, []
+    if not pending:
+        return []
+    directory = downloads_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    for download in pending:
+        try:
+            name = browse_mod.safe_filename(download.suggested_filename or "")
+            target = directory / name
+            stem, suffix = target.stem, target.suffix
+            bump = 1
+            while target.exists():
+                target = directory / f"{stem}-{bump}{suffix}"
+                bump += 1
+            await download.save_as(str(target))
+        except Exception:  # noqa: BLE001 — a failed download is not a failed click
+            continue
+        if target.stat().st_size > browse_mod.DOWNLOAD_MAX_BYTES:
+            # Refused AFTER the write because the size is not known before it:
+            # Playwright streams to its own temp file and reports no length.
+            with contextlib.suppress(OSError):
+                target.unlink()
+            continue
+        saved.append(str(target))
+    browse_mod.prune_downloads(directory)
+    return saved
+
+
+async def _snapshot(owner: _Owner, page: Any, *, problem: str = "") -> browse_mod.Snapshot:
+    """The page as the model receives it: what it says, and what it can press."""
+    global _LAST_SNAPSHOT
+    text = await _settled_text(page)
+    try:
+        found = await page.evaluate(
+            browse_mod.CONTROLS_JS,
+            {"max": browse_mod.MAX_CONTROLS, "nameMax": browse_mod.NAME_MAX_CHARS},
+        )
+    except Exception:  # noqa: BLE001 — a page that will not answer still has text
+        found = {"controls": [], "matched": 0}
+    controls = browse_mod.controls_from(list(found.get("controls") or []))
+    matched = int(found.get("matched") or 0)
+    # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
+    # control the model is looking for is very often in the header the narrowing
+    # would drop — "Przełącz lokal" sits beside the account name, not in <main>.
+    snapshot = browse_mod.Snapshot(
+        url=str(page.url or ""),
+        title=str(await page.title() or ""),
+        text=text,
+        controls=controls,
+        hidden=max(0, matched - len(controls)),
+        epoch=owner.browse_epoch,
+        problem=problem,
+        downloads=await _save_downloads(owner),
+    )
+    _LAST_SNAPSHOT = snapshot
+    return snapshot
+
+
+async def _browse_page(owner: _Owner, *, opening: bool) -> Any:
+    if owner.view is not None:
+        # The owner's hands outrank the model's. Reusing his page would steal the
+        # login he is mid-way through, and his viewport would silently change
+        # what the model reads (the same reasoning as `read`).
+        raise BrowserUnavailable(DRIVEN_BY_HAND)
+    page = owner.browse_page
+    if page is not None and not page.is_closed():
+        return page
+    if not opening:
+        # The idle reaper can collect the context between turns. Nothing about
+        # that is the model's fault or the owner's business — but an index from
+        # the old document means nothing on a fresh one, so this is a refusal
+        # with instructions rather than a silent reopen at a guessed URL.
+        raise BrowserUnavailable(NOTHING_OPEN)
+    context = await owner.context()
+    page = await context.new_page()
+    # A lambda, not `list.append`: Playwright stamps an attribute onto the
+    # handler it is given, and a builtin method has no __dict__ to stamp.
+    page.on("download", lambda download: owner.browse_downloads.append(download))
+    owner.browse_page = page
+    return page
+
+
+async def _adopt_new_tab(owner: _Owner, page: Any, before: list[Any]) -> Any:
+    """A control that opened a new tab moves the session to it.
+
+    Otherwise the model presses "Pobierz e-fakturę", the document opens beside
+    it, and the snapshot faithfully reports the page it was already on — which
+    reads as "nothing happened"."""
+    try:
+        opened = [p for p in page.context.pages if p not in before and not p.is_closed()]
+    except Exception:  # noqa: BLE001 — no context to ask is no new tab
+        return page
+    if not opened:
+        return page
+    fresh = opened[-1]
+    try:
+        await fresh.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception:  # noqa: BLE001 — a tab that never settles is still the tab
+        pass
+    owner.browse_page = fresh
+    return fresh
+
+
+def browse_open(url: str, *, timeout: float = 120.0) -> browse_mod.Snapshot:
+    """Open `url` in the model's session and describe what is there."""
+    reason = unavailable_reason()
+    if reason:
+        raise BrowserUnavailable(reason)
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    async def job(owner: _Owner) -> browse_mod.Snapshot:
+        page = await _browse_page(owner, opening=True)
+        owner.browse_epoch += 1
+        await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        await _dismiss_consent(page)
+        return await _snapshot(owner, page)
+
+    return _submit(job, timeout)
+
+
+def browse_act(
+    n: int,
+    action: str,
+    *,
+    text: str = "",
+    value: str = "",
+    submit: bool = False,
+    timeout: float = 120.0,
+) -> browse_mod.Snapshot:
+    """Do one thing to control `n`, and hand back the page it produced.
+
+    Every action re-enumerates afterwards, so the numbers the model reads are
+    always the ones on the document in front of it."""
+    reason = unavailable_reason()
+    if reason:
+        raise BrowserUnavailable(reason)
+
+    async def job(owner: _Owner) -> browse_mod.Snapshot:
+        page = await _browse_page(owner, opening=False)
+        target = page.locator(f'[data-aish-n="{int(n)}"]').first
+        try:
+            count = await target.count()
+        except Exception:  # noqa: BLE001 — an unusable locator is a missing one
+            count = 0
+        if not count:
+            # The document changed under the numbering — an SPA re-render, a
+            # redirect, a timed refresh. Re-describing beats guessing.
+            owner.browse_epoch += 1
+            return await _snapshot(
+                owner,
+                page,
+                problem=(
+                    f"there is no control [{n}] on this page any more — it "
+                    "changed since you last saw it. Here it is as it is now; "
+                    "pick a number from THIS list."
+                ),
+            )
+        before = list(page.context.pages)
+        owner.browse_epoch += 1
+        if action == "click":
+            await target.click(timeout=NAV_TIMEOUT_MS)
+        elif action == "type":
+            # REAL KEYSTROKES, for the reason `view_act` records: fill() fires
+            # one input event and no key events, which breaks widgets that listen
+            # for typing — and breaks a 2FA box outright.
+            await target.click(timeout=NAV_TIMEOUT_MS)
+            await page.keyboard.press("ControlOrMeta+a")
+            if text:
+                await page.keyboard.type(text, delay=12)
+            else:
+                await page.keyboard.press("Delete")
+            if submit:
+                await page.keyboard.press("Enter")
+        elif action == "choose":
+            try:
+                await target.select_option(label=value, timeout=NAV_TIMEOUT_MS)
+            except Exception:  # noqa: BLE001 — a site may label by value
+                await target.select_option(value, timeout=NAV_TIMEOUT_MS)
+        else:
+            return await _snapshot(
+                owner, page, problem=f"unknown action {action!r}"
+            )
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001 — nothing navigated, which is common
+            pass
+        page = await _adopt_new_tab(owner, page, before)
+        return await _snapshot(owner, page)
+
+    return _submit(job, timeout)
+
+
+def browse_close() -> None:
+    """End the model's session. The context and the profile stay."""
+
+    async def job(owner: _Owner) -> None:
+        global _LAST_SNAPSHOT
+        page, owner.browse_page = owner.browse_page, None
+        _LAST_SNAPSHOT = None
+        if page is not None and not page.is_closed():
+            with contextlib.suppress(Exception):
+                await page.close()
+
+    with contextlib.suppress(Exception):
+        _submit(job, 30.0)
+
+
+def browse_current() -> browse_mod.Snapshot | None:
+    """The last page the model was shown — what the approval gate reads to name
+    the control it is asking about."""
+    return _LAST_SNAPSHOT
+
+
+def browse_is_open() -> bool:
+    return _LAST_SNAPSHOT is not None
 
 
 def view_close() -> list[str]:

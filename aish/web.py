@@ -1153,6 +1153,112 @@ def _present(
     return UNTRUSTED_NOTE + result + image_note(images)
 
 
+# ---------------------------------------------------------------- browsing
+
+# A browse result is page content like any other — attacker-controlled, and now
+# attacker-controlled in a session that can CLICK. So it carries the same
+# untrusted banner as a read, plus the one thing a read never had to say: the
+# control list is aish's own description of the DOM, not the page's words about
+# itself.
+BROWSE_CONTROLS_NOTE = (
+    "\n\n[controls on this page — act with browse_act(target=<number>). This "
+    "list is aish's reading of the page, not text from it.]\n"
+)
+
+BROWSE_TRUNCATION_HINT = (
+    "\n[page text truncated — the control list below is complete]"
+)
+
+
+def _present_snapshot(snapshot, *, topic: str | None = None) -> str:
+    """A driven page, as the model receives it.
+
+    The control list is appended AFTER truncation, for the same reason a read's
+    links and images are: the numbers are the entire point of the call, and a
+    12k cap that fell inside the page text would cut exactly the thing the model
+    is meant to act on."""
+    head = f"[{snapshot.url} — you are driving this page]"
+    if snapshot.title:
+        head += f"\n{snapshot.title}"
+    body = snapshot.text
+    hint = ""
+    if topic:
+        matched = _filter_topic(body, topic)
+        body = matched or (
+            f"NO LINES MATCH {topic!r}; start of page instead:\n{body}"
+        )
+    if len(body) > PAGE_MAX_CHARS:
+        body = truncate(body, head=PAGE_MAX_CHARS, tail=0)
+        hint = BROWSE_TRUNCATION_HINT
+    lines = [c.line() for c in snapshot.controls]
+    if snapshot.hidden:
+        # Never a silent cap: a model that cannot see a control concludes the
+        # page does not have one, and starts guessing URLs again.
+        lines.append(
+            f"[{snapshot.hidden} more control(s) not listed — narrow the page "
+            "first, or say what you are looking for]"
+        )
+    controls = BROWSE_CONTROLS_NOTE + "\n".join(lines) if lines else (
+        "\n\n[no controls found on this page]"
+    )
+    problem = f"[aish: {snapshot.problem}]\n" if snapshot.problem else ""
+    got = ""
+    if snapshot.downloads:
+        # aish's own words, above the untrusted banner: the file is real, the
+        # path is aish's, and the site had no say in either. Naming the reader
+        # matters — this is the one place a model reliably stops, having got the
+        # document it was sent for and no idea that it may open it.
+        files = "\n".join(f"  {path}" for path in snapshot.downloads)
+        got = (
+            "[aish: this action downloaded, through the user's signed-in "
+            f"session:\n{files}\nRead one with read_pdf(source=\"<path>\") — "
+            "it is already on this machine, so do NOT fetch it again.]\n"
+        )
+    return problem + got + UNTRUSTED_NOTE + head + "\n" + body + hint + controls
+
+
+def browse(url: str, topic: str | None = None) -> str:
+    """Open a page in the browser the owner is signed into, and describe what
+    can be pressed on it."""
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    try:
+        _require_public(url)
+    except BlockedURLError as exc:
+        return f"ERROR: {exc} — browse only reaches public internet hosts."
+    try:
+        snapshot = browser.browse_open(url)
+    except browser.BrowserUnavailable as exc:
+        return f"ERROR: cannot browse {url} — {exc}"
+    except Exception as exc:  # noqa: BLE001 — a nav failure reports, never crashes
+        return f"ERROR: could not open {url}: {type(exc).__name__}: {exc}"
+    return _present_snapshot(snapshot, topic=topic)
+
+
+def browse_act(
+    target: int,
+    action: str = "click",
+    text: str = "",
+    value: str = "",
+    submit: bool = False,
+    topic: str | None = None,
+) -> str:
+    """Do one thing to one numbered control, and hand back the page it made."""
+    try:
+        snapshot = browser.browse_act(
+            int(target), action, text=text, value=value, submit=submit
+        )
+    except browser.BrowserUnavailable as exc:
+        return f"ERROR: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return (
+            f"ERROR: could not {action} control [{target}]: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    return _present_snapshot(snapshot, topic=topic)
+
+
 class BlockedURLError(Exception):
     """URL refused by the SSRF guard (non-public target)."""
 

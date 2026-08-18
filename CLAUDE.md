@@ -53,7 +53,7 @@ Merge back to main after tests pass, then remove the worktree. `make ship` alway
 | Touching… | Read first |
 |---|---|
 | `agent.py`, `claude_max.py`, `approval.py`, `tools.py`, `files.py`, `web.py`, `backends.py` | `docs/agent-core.md` |
-| `browser.py`, `_browser_read`, `_login_gate`, anything that renders a page in Chrome | `docs/browser.md` |
+| `browser.py`, `browse.py`, `_browser_read`, `_login_gate`, `_browse_gate`, anything that renders or drives a page in Chrome | `docs/browser.md` |
 | `cli.py`, `prompt.py`, `aliases.py`, `dir_ignore.py`, `notify.py` | `docs/cli.md` |
 | `media.py`, `show_image`, anything that renders an image | `docs/media-and-images.md` |
 | `recordings.py`, `read_media`, anything that reads a video or audio file | `docs/recordings-and-video.md` |
@@ -88,6 +88,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`files.py`** — pure `plan_*` functions compute (old, new, diff) without touching disk; `commit()` writes. The gap between plan and commit is where the diff is shown and approval obtained — nothing is written unseen. → `docs/agent-core.md`
 - **`web.py`** — `web_search`/`read_url`/`fetch_binary`: auto-approved, but their inputs leave the machine, so every call is echoed and fetched content is wrapped in an untrusted-content banner. http/https only, one SSRF guard, one TLS trust store. → `docs/agent-core.md`
 - **`browser.py`** — the real Chrome behind `read_url` when a fetch is not enough: JavaScript-only pages and sites the owner is signed into. Headful but off-screen (headless is what such sites block), one owner thread, one persistent profile that is never in the git-backed config tree. Reading as the signed-in owner is gated in EVERY session. → `docs/browser.md`
+- **`browse.py`** — the model's own hands on a page (#237): a page as a NUMBERED LIST OF CONTROLS, and the labelling that decides which of them need their own approval card. The browser-free half of `browser.browse_*`. → `docs/browser.md`
 - **`media.py`** — the content-addressed, bounded-LRU media store behind `show_image`. → `docs/media-and-images.md`
 - **`recordings.py`** — video and audio read by TIME: probe once, then seek. Frames come from a range-seek into the stream, never a download, and each is stamped with the timestamp it was actually decoded at. → `docs/recordings-and-video.md`
 - **`documents.py`** — PDF → a page-marked markdown rendition behind `read_pdf`: convert once, then read it like a file. Every page is classified (text / columns / table / scan / figure) BEFORE it is read, so a hollow extraction can never pass as a complete one. → `docs/documents-and-pdf.md`

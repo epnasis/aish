@@ -36,6 +36,7 @@ import ollama
 from . import aliases as alias_map
 from . import (
     backends,
+    browse,
     browser,
     documents,
     evidence,
@@ -231,6 +232,19 @@ Rules:
    me again". You MUST NOT ask the user to copy, paste, screenshot or upload the
    content by hand instead, and you MUST NOT report a sign-in page's contents as
    their account.
+   WHEN THE THING YOU NEED IS A BUTTON, USE browse — NEVER GUESS ITS URL.
+   read_url reads a page; browse opens it in the user's own signed-in browser
+   and hands you a NUMBERED list of what can be pressed, and browse_act presses
+   one. A tab, a filter, a "show more", a control that switches which account
+   or property you are looking at — none of those are addresses, and a URL you
+   invent for one 404s. Example: the user says "switch apartments using the
+   'Przełącz lokal' button" — call browse("https://eon.pl/mojeon"), find
+   `[7] button 'Przełącz lokal'` in the list, then browse_act(target=7). You
+   MUST NOT answer that a portal cannot be navigated, or ask the user to click
+   through it and paste the result, until you have tried browse.
+   The numbers are only valid for the page you were JUST shown — the list comes
+   back after every action, so act on a number from the newest list. A control
+   marked "(needs approval)" will ask the user; that is expected, not an error.
    When researching, batch independent lookups: issue several web_search /
    read_url calls in a single reply — they run in parallel, which is much
    faster than one per turn.
@@ -924,6 +938,47 @@ LOGIN_READ_NO_APPROVER = (
     "source, or finish and report."
 )
 
+# DRIVING a site the owner is signed into (#237). A read carries his session;
+# driving carries his session AND presses things with it, so the gate is a
+# strictly bigger question than `_login_gate`'s and gets its own answers.
+#
+# The grant is per host per task, matching every other grant here (L4): a flow
+# that clicks through twenty pages of one portal asks once, because a card per
+# click is a card nobody reads. What that grant does NOT cover is the small set
+# of controls that spend money, end a contract, or throw something away — those
+# ask again, by name, every time.
+BROWSE_DENIED = (
+    "USER DENIED driving {host} — nothing was clicked and the page was not "
+    "opened. Do not retry it. Read what you can with read_url, or ask the user "
+    "to do this part themselves."
+)
+
+BROWSE_NO_APPROVER = (
+    "NOT EXECUTED: driving {host} clicks through the owner's signed-in session, "
+    "and an automated session may not do that with no approver available. Read "
+    "what you can with read_url, or finish and report."
+)
+
+BROWSE_ACTION_DENIED = (
+    "USER DENIED {what} — it was NOT clicked and nothing on the page changed. "
+    "Do not retry it or look for another control that does the same thing. Tell "
+    "the user what you were about to do and let them decide."
+)
+
+BROWSE_NO_PAGE = (
+    "NOT EXECUTED: nothing is open to act on. Call browse(url) first, then act "
+    "on a number from the list it gives you."
+)
+
+# aish types the owner's credentials nowhere, and this is the last door that
+# could have let it start. Structural, not a card: there is no yes that makes
+# this a good idea, and a card offering one would teach him there is.
+BROWSE_NO_PASSWORDS = (
+    "NOT EXECUTED: aish never types passwords. Control [{n}] is a password "
+    "field. Tell the user to run /browser {host} and sign in themselves — the "
+    "session persists, and this page will work afterwards."
+)
+
 # Origin-gated knowledge writes (#196). remember/forget_memory auto-approve, and
 # that is deliberate: capturing a fact must stay frictionless. The reasoning is
 # attended-only, though — unattended, the text proposing the write can be an
@@ -1255,6 +1310,7 @@ class Agent:
         # Session-scoped like every other grant (L4): a yes given in the chat
         # you leave must not follow you into the one you land in.
         self._approved_logins: set[str] = set()
+        self._approved_browsing: set[str] = set()
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
         self.task_sources: list[dict] = []  # pages read_url fetched for the current task
         self.approve = approve
@@ -2856,6 +2912,11 @@ class Agent:
             # model to read it. Outside this list that instruction would cost
             # an approval tap — the #220 asymmetry, reopened.
             self.transcripts_dir,
+            # …and browse_act names a file it just downloaded and tells the model
+            # to read_pdf it. Same asymmetry, same answer. The directory holds
+            # only what a browse action pulled down through a session the owner
+            # approved, so reading it back grants nothing new.
+            browser.downloads_dir(),
         ]
 
     def _execute_tool_calls(self, tool_calls: list[dict]) -> list[str]:
@@ -3177,6 +3238,34 @@ class Agent:
                 "num_ctx": self.num_ctx,
                 "think": bool(self.think),
             },
+        )
+
+    def _browse_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
+        """(echo label, execution thunk) for a browse call.
+
+        The label is the ECHO, and it matters more here than anywhere else in
+        this method: the owner grants a host once and then watches a flow of
+        clicks go past, so the transcript line is the only running account of
+        what aish is doing inside his account. It names the control, not the
+        number."""
+        if name == "browse":
+            url = str(args.get("url", ""))
+            topic = str(args.get("topic", "") or "")
+            label = f"→ browse: {url}" + (f" (topic: {topic})" if topic else "")
+            return label, lambda: web.browse(url, topic or None)
+        target = int(args.get("target", -1))
+        action = str(args.get("action", "click") or "click")
+        current = browser.browse_current()
+        control = current.control(target) if current is not None else None
+        what = f"[{target}]" if control is None else f"{control.kind} {control.name!r}"
+        label = f"→ browse: {action} {what}"
+        return label, lambda: web.browse_act(
+            target,
+            action,
+            text=str(args.get("text", "") or ""),
+            value=str(args.get("value", "") or ""),
+            submit=bool(args.get("submit")),
+            topic=str(args.get("topic", "") or "") or None,
         )
 
     def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
@@ -4165,6 +4254,90 @@ class Agent:
         self._approved_logins.add(host)
         return None
 
+    def _browse_host(self, name: str, args: dict) -> str:
+        """The host this browse call would drive, or "".
+
+        For `browse` it is the URL asked for; for `browse_act` it is wherever
+        the session already IS — the model never names a host when it presses a
+        button, and the card has to say where the button is."""
+        if name == "browse":
+            return browser.host_of(str(args.get("url", "")))
+        current = browser.browse_current()
+        return browser.host_of(current.url) if current is not None else ""
+
+    def _browse_gate(self, name: str, args: dict) -> str | None:
+        """Approval gate for driving a page (#237): None = proceed, else the
+        refusal text.
+
+        Two questions, not one. **May aish drive this host at all** — asked once
+        per host per task, because a card per click is a card nobody reads. And
+        **may it press THIS control** — asked every time for the ones that spend
+        money, end a contract or throw something away, and named, so the card
+        says `click "Zapłać"` rather than `click element 7`. A password field is
+        refused outright and never draws a card at all."""
+        if name not in ("browse", "browse_act"):
+            return None
+        host = self._browse_host(name, args)
+        if name == "browse_act":
+            current = browser.browse_current()
+            if current is None:
+                return _gate_outcome(BROWSE_NO_PAGE, decision="blocked")
+            target = int(args.get("target", -1))
+            control = current.control(target)
+            if control is not None and control.kind == browse.PASSWORD:
+                return _gate_outcome(
+                    BROWSE_NO_PASSWORDS.format(n=target, host=host or "the site"),
+                    decision="blocked",
+                )
+        if not host:
+            return None
+        if self.approve_tool is None:
+            return _gate_outcome(
+                BROWSE_NO_APPROVER.format(host=host), decision="blocked"
+            )
+        if host not in self._approved_browsing:
+            preview = (
+                f"drive {host} in your signed-in browser — aish will open pages "
+                "and click on them AS YOU, and can see private account data"
+            )
+            refusal = self._browse_approval(
+                name, args, preview, BROWSE_DENIED.format(host=host)
+            )
+            if refusal is not None:
+                return refusal
+            self._approved_browsing.add(host)
+        if name != "browse_act":
+            return None
+        current = browser.browse_current()
+        control = current.control(int(args.get("target", -1))) if current else None
+        if control is None or not control.mutating:
+            return None
+        # Named, every time, and never folded into the driving grant: this is
+        # the click the owner would want to have been asked about.
+        what = f"{args.get('action', 'click')} {control.kind} {control.name!r} on {host}"
+        return self._browse_approval(
+            name, args, what, BROWSE_ACTION_DENIED.format(what=what)
+        )
+
+    def _browse_approval(
+        self, name: str, args: dict, preview: str, denial: str
+    ) -> str | None:
+        """One approval card for a browse call. None = approved."""
+        decision = self.approve_tool(name, args, preview)  # type: ignore[misc]
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            return _gate_outcome(
+                _with_feedback(denial, decision.comment), decision="denied"
+            )
+        if isinstance(decision, Approved):
+            return _gate_outcome(
+                TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
+                decision="held",
+            )
+        if decision is None or decision is False:
+            return _gate_outcome(denial, decision="denied")
+        return None
+
     def _knowledge_gate(self, name: str, args: dict) -> str | None:
         """Gate for remember/forget_memory in a triggered session (#196): None
         = proceed, else the refusal/hold text for the model. An attended
@@ -5103,6 +5276,22 @@ class Agent:
             if reason is not None and not self.approve_read(path, reason):
                 return _gate_outcome(READ_DENIED, decision="denied")
             return thunk()
+
+        if name in ("browse", "browse_act"):
+            # Not a read-only tool and deliberately not on the parallel path:
+            # one page, one session, one action at a time. Two browse calls in
+            # flight would be two clicks on the same document in an order
+            # nobody chose.
+            refusal = self._browse_gate(name, args)
+            if refusal is not None:
+                return refusal
+            label, thunk = self._browse_call(name, args)
+            self._note(label)
+            self.status.start(name)
+            try:
+                return thunk()
+            finally:
+                self.status.stop()
 
         if name in READ_ONLY_TOOLS:
             # Outbound reads in a triggered session hold for approval when

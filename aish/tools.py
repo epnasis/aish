@@ -986,6 +986,97 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "browse",
+            "description": (
+                "Open a page in the user's OWN signed-in browser and get back its "
+                "text PLUS a numbered list of everything you can press on it — "
+                "links, buttons, fields, dropdowns. Use this instead of read_url "
+                "when what you need is behind a CONTROL rather than an address: a "
+                "button that switches account, a tab, a filter, a 'show more'. "
+                "NEVER guess a URL for something you saw as a button — press the "
+                "button with browse_act. The session persists, so the pages you "
+                "reach are the user's own account pages."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Full http(s) URL of the page to open.",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": (
+                            "Optional word or phrase: returns only matching lines "
+                            "of the page text. The control list always comes back "
+                            "in full."
+                        ),
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browse_act",
+            "description": (
+                "Do ONE thing to ONE numbered control on the page browse opened, "
+                "and get the resulting page back in the same shape. The numbers "
+                "come from the most recent browse/browse_act result and change "
+                "every time the page does — always act on a number you have just "
+                "been given. A control marked '(needs approval)' asks the user "
+                "first; a password field is never typed by aish at all."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "integer",
+                        "description": (
+                            "The [number] of the control, from the list you were "
+                            "just shown."
+                        ),
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["click", "type", "choose"],
+                        "description": (
+                            "click a link/button/checkbox, type into a field, or "
+                            "choose an option in a dropdown. Default: click."
+                        ),
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "What to type, for action=type.",
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": (
+                            "Which option to pick, for action=choose — the option "
+                            "text as shown in the control list."
+                        ),
+                    },
+                    "submit": {
+                        "type": "boolean",
+                        "description": (
+                            "For action=type: press Enter afterwards. Use it for a "
+                            "search box that has no visible button."
+                        ),
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "Optional filter on the resulting page text.",
+                    },
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "show_video",
             "description": (
                 "Show the user a video they can play. Call this whenever a video "

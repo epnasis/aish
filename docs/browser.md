@@ -114,6 +114,56 @@ Approval is per host and lasts the session (`_approved_logins`), matching the eg
 
 Only `read_url` can carry a session; `show_image` / `read_pdf` / `read_media` fetch bytes through the anonymous opener, so they are never gated here and must not draw a card claiming they are. `TestLoginGate` pins all of it, including the seam that matters most: `_read_needs_prompt` routes a gated read **off** the parallel path, which has no gate at all and would otherwise bypass approval entirely.
 
+## Driving a page, not reading one (#237)
+
+`read_url` has one verb: navigate to a URL and extract text. That is the whole web of documents and none of the web of applications, where what you want sits behind a control instead of an address. Two sessions on the same portal measured the gap. Asked for his E.ON invoices, the model read the dashboard and then *guessed* — `/mojeon/faktury`, `/rozliczenia`, `/pulpit`, three 404s. With the signed-in read fixed (#236) it got the real dashboard, the invoice table, the five properties and the PDF links, and stopped in exactly the same place: `Przełącz lokal` is `<a href="#">`, and no URL in the world is that button. Both times it then flailed — `osascript` at Chrome's tabs, `ls`, a Gmail search, `uv pip list` — because a system with no click verb guesses.
+
+`browse.py` holds the parts that need no browser (the control model, the labelling, the loading test); `browser.browse_*` drives; `web.browse` / `web.browse_act` are what the model calls; `Agent._browse_gate` decides.
+
+**A page is a NUMBERED LIST OF CONTROLS, not an image.** The remote view maps a tap from a JPEG because a human is looking at it; a model estimating (x, y) mis-clicks constantly and worst at the edges. The DOM already knows where every control is and what it is called, so the model reads `[7] button 'Przełącz lokal'` — the same words the owner used to ask for it — and the click lands on the element rather than on a coordinate that used to be over it.
+
+**The element is TAGGED, not remembered.** Enumeration stamps `data-aish-n`; acting re-queries by it. Playwright handles go stale on every re-render, which on an SPA is constantly; an attribute survives a re-render and dies with the document, which is exactly the lifetime the numbering has. **Each pass clears the previous pass's tags first** — not doing so was a real defect and a subtle one: numbering shifts when a menu opens, so the element that was `[4]` kept its tag while a different element became `[4]`, and `locator(...).first` then picked whichever came first in the document. Two elements, one number, silently, and only on a page that changes shape — which is every page this feature exists for.
+
+**A plain navigation is never mutating, whatever it is called.** The word list's first act was to flag the link named *Faktury i płatności*, because it contains the word for payment. An `<a>` with a real href is a GET to another page — what `read_url` does under auto-approval — so gating it asks permission to read what aish may already read. What makes it safe is that it NAVIGATES, and `el.href` resolves `href="#"` to the page's own absolute URL, so a naive "starts with http" test calls every JavaScript control a navigation. Real Chrome duly reported `<a href="#">Zapłać</a>` as a link to the current page, which would have walked it straight past the gate. Same document, fragment aside, is not going anywhere.
+
+**A page mid-load has TEXT**, so neither the emptiness test nor the thin-page retry catches it — `Moje Umowy` came back as its own "Wczytywanie danych" twice in one session while the owner watched. `still_loading` decides only whether to WAIT longer: a false positive costs a couple of seconds, a false negative hands over the page that was about to contain the answer. Reads do not pay this; a browse action is one of a handful in a flow and the thing being waited for is the point.
+
+`TestWhatCountsAsMutating`, `TestTheControlList`, `TestStillLoading` and `TestBrowseDispatch` pin the parts that need no browser.
+
+## The browse gate — two questions, not one
+
+Reading a signed-in site carries the owner's session. Driving one carries it AND presses things with it, which is the largest blast radius aish has: a button can pay a bill, cancel a contract, or delete something. So the gate is part of the feature and not a follow-up.
+
+**May aish drive this host at all** — asked once per host per task, session-scoped like every other grant (L4), because a card per click is a card nobody reads and a flow through one portal is twenty clicks. The card says it acts AS HIM, because that is the part he is agreeing to.
+
+**May it press THIS control** — asked every time for anything that spends, ends or deletes, and named: `click button 'Zapłać' on eon.pl`, never `click element 7`. The match is a broad, dumb word list (Polish first — that is the owner's web) plus every form submit, because the nondescript "Dalej" that posts the form is the dangerous one and the obvious "Zapłać" is not. It costs a prompt when it is wrong and costs a paid bill when it is missing; `approval.py` settled that trade the same way years ago.
+
+**A password field is refused outright and never draws a card.** aish types the owner's credentials nowhere, and this is the last door that could have started. There is no yes that makes it a good idea, and offering one would teach him there is — he is handed `/browser <host>` instead, which is the same answer the whole feature gives.
+
+With no approver it fails closed, like the login gate. The echo line is not decoration either: the owner grants a host once and then watches a flow go past, so `→ browse: click button 'Przełącz lokal'` is his only running account of what aish is doing inside his account. `TestBrowseGate` pins all of it.
+
+Two fences worth keeping: browse is **not** in `READ_ONLY_TOOLS`, so it never rides the parallel read path — one page, one session, one action at a time, or two clicks land on one document in an order nobody chose. And `web.browse` keeps the same SSRF fence as `read_url`: a driven page is still a model-chosen URL, and this one can click.
+
+## The document at the end of the flow
+
+Driving the portal gets you to the invoice; it does not get you the invoice. The E.ON session ended holding real `…/ebokapi/GetDocument?objectId=…` URLs it could do nothing with, because `read_pdf` and `fetch_binary` go through the anonymous opener — the same identity gap #236 closed for reads, one tool over. So `accept_downloads` is now **True** (it was deliberately False), and a click that produces a file saves it under `~/.local/state/aish/browser/downloads`.
+
+**Stashed by a sync handler, saved inside the job.** `page.on("download", …)` gets a plain callback that appends the object; the awaiting and writing happen in the action's own coroutine afterwards. The two obvious alternatives are worse: an async handler needs a task of its own on a loop this module is careful about, and wrapping every click in `expect_download` makes every *ordinary* click pay that timeout. (The callback must be a lambda, not `list.append` — Playwright stamps an attribute onto the handler it is given, and a builtin method has no `__dict__` to stamp.)
+
+**The site never chooses where the write lands.** `safe_filename` strips separators, parent references and leading dots rather than escaping them: the suggested filename is page content like any other, and here the instruction would be a path. Two bounds, neither precious: one file may not exceed `DOWNLOAD_MAX_BYTES` (checked *after* the write, because Playwright streams to its own temp file and reports no length beforehand), and the directory is pruned oldest-first to `DOWNLOADS_KEEP_BYTES` — this box runs a Home Assistant VM against a 16 GB ceiling and a year of monthly invoices is a real amount of disk.
+
+Pruning is oldest-first rather than the media store's content-addressed LRU, deliberately: these are the owner's own documents under their own names, and the name is the only handle he has on one.
+
+The directory is in `Agent.workspace_roots`, so `read_pdf` may open what `browse_act` just named. Without that the tool would name a file and instruct the model to read it, and the read would cost an approval tap — the #220 asymmetry, reopened. `TestDownloads` pins the naming, the bounds, the location and that last seam.
+
+Not yet done, and tracked on #237: the file is not surfaced in the web UI as an attachment the owner can tap. Today he gets the path and whatever the model reads out of it.
+
+## What the fake portal is for
+
+`scripts/verify_browse.py` serves a local page shaped like the one that failed — an `<a href="#">Przełącz lokal</a>` that opens a menu, a table that swaps when a property is chosen, a search field, a hidden CSRF input, a panel that says "Wczytywanie danych" for a second, and a real (tiny) PDF behind a *Pobierz e-fakturę* link — and drives it with real Chrome on a throwaway profile, through the whole flow the E.ON session could not complete: switch property, read the swapped table, type in the search box, download the invoice.
+
+It is not in the pytest suite because it launches Chrome, which `conftest.no_real_browser` forbids on purpose. It earns its place anyway: **both** of the bugs above were found by it and neither was reachable from a test that patches the browser away. Run it after touching `CONTROLS_JS` or the labelling.
+
 ## The remote view — because this Mac is headless
 
 `open_for_login` opens a window **on the Mac**, which assumes somebody is sitting at it. The owner is not: mm is a headless server they reach as a PWA from a phone, so that window is one nobody can get to. The remote view is the same act done remotely — aish screenshots its own browser, the owner taps and types in the PWA, and each action returns a fresh frame.
