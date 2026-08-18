@@ -1666,11 +1666,48 @@ def _skill_cli(args: list[str]) -> int:
     return 2
 
 
+def _explain_cli(args: list[str]) -> int:
+    """`aish explain <session> [turn] [--tools]` — what governed a turn (#214).
+
+    Pure read: no model call, no rule file opened, nothing that could report how
+    aish behaves TODAY instead of how it behaved then (docs/trace-contract.md §0).
+    """
+    from . import explain as explain_mod
+
+    usage = "usage: aish explain <session-name-or-path> [turn] [--tools]"
+    show_tools = "--tools" in args
+    rest = [a for a in args if a != "--tools"]
+    if not rest:
+        print(usage)
+        return 2
+    turn = None
+    if len(rest) > 1:
+        try:
+            turn = int(rest[1])
+        except ValueError:
+            print(usage)
+            return 2
+    matches = explain_mod.resolve(rest[0])
+    if not matches:
+        print(f"no session log matching {rest[0]!r} in {explain_mod.state_dir()}")
+        return 1
+    if len(matches) > 1:
+        # Never guess: a diagnosis about the wrong chat is worse than no answer.
+        print(f"{len(matches)} sessions match {rest[0]!r} — be more specific:")
+        for path in matches[-20:]:
+            print(f"  {path.name}")
+        return 2
+    print(explain_mod.explain(matches[0], turn, show_tools=show_tools))
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "secret":
         return _secret_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "skill":
         return _skill_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "explain":
+        return _explain_cli(sys.argv[2:])
 
     config_path = Path(
         os.environ.get("AISH_CONFIG", str(Path.home() / ".config" / "aish" / "config.toml"))

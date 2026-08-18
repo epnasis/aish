@@ -38,6 +38,7 @@ from . import (
     backends,
     browser,
     documents,
+    evidence,
     files,
     media,
     recordings,
@@ -1102,6 +1103,19 @@ def _remove_scratch(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _menu_names(menu: list[dict]) -> list[str]:
+    """Tool names off a provider tool-schema list, defensively: a plugin
+    manifest is owner-authored and a malformed one must not break the record
+    that would explain it."""
+    names = []
+    for entry in menu:
+        function = entry.get("function") if isinstance(entry, dict) else None
+        name = (function or {}).get("name") if isinstance(function, dict) else None
+        if name:
+            names.append(str(name))
+    return names
+
+
 def _serialize(message: dict) -> dict:
     keys = ("role", "content", "tool_name", "images", "documents", "interim")
     return {k: message[k] for k in keys if k in message}
@@ -1222,6 +1236,12 @@ class Agent:
         # Session store for the search_sessions tool; current_session is
         # excluded from ranking (its content is already this conversation).
         self.state_dir = state_dir
+        # The tool menu digest last written to the log. SESSION-scoped, not
+        # per-task: interning is "once per log file", so this must survive
+        # across turns. A reopened session gets a fresh Agent and therefore
+        # re-writes the reference, which is correct — the menu it is about to
+        # use has not been named in this run of the process.
+        self._brief_digest = ""
         self.rule_compiler = rule_compiler_ask
         self.current_session = current_session
         # Embedding-based preflight selection (issue #43); opt-in from the
@@ -1833,6 +1853,10 @@ class Agent:
         # A new task starts un-gated: any pending comment belonged to the last
         # task and would otherwise stall the first tool call of this one.
         self._pending_comment_response = False
+        # Which model call within this turn (#239). Distinct from `call`,
+        # which numbers TOOL calls: one turn makes many model calls and the
+        # brief can change between them.
+        self._model_call = 0
 
     def run_task(
         self,
@@ -2299,10 +2323,13 @@ class Agent:
         content through on_token when set. Retries once on a transport error (a
         busy/overloaded local Ollama commonly drops or refuses a request)."""
         self._refresh_plugin_tools()
+        menu = tools.TOOL_SCHEMAS + self._plugin_defs
+        self._model_call += 1
+        self._record_brief(menu)
         kwargs = dict(
             model=self.model,
             messages=self.messages,
-            tools=tools.TOOL_SCHEMAS + self._plugin_defs,
+            tools=menu,
             options={"num_ctx": self.num_ctx},
             think=self.think,
         )
@@ -2942,6 +2969,52 @@ class Agent:
             step["status"] = tools.STATUS_FAILED
             step["verdict_by"] = tools.VERDICT_GATE
         self._sink_step(step)
+
+    def _record_brief(self, menu: list[dict]) -> None:
+        """The capability surface this model call is being handed (#239).
+
+        The owner's recurring failure is a model that works around a capability
+        instead of using it, and the decisive evidence is never the reasoning —
+        it is what the model was HOLDING: which tools were on the menu, under
+        what descriptions, with what argument schemas. None of that was recorded
+        anywhere, so "was the tool absent, mis-described, or never offered?" was
+        answerable only by reading the installed wheel and the plugin directory
+        as they are TODAY, which is re-derivation (contract §0).
+
+        PER MODEL CALL, not per turn. The menu is not a per-turn fact:
+        _refresh_plugin_tools runs at the top of every call, so a tool written
+        or dropped in mid-task changes it between one step of a turn and the
+        next. A per-turn record would let a reader conclude that the call which
+        misbehaved held a menu it never held — the confident-false-conclusion
+        class this record exists to prevent.
+
+        Written only when the digest CHANGES, so an ordinary session logs one of
+        these and a session whose capabilities moved logs one per move, naming
+        the call it moved at. The bytes go to the evidence store rather than
+        into the log; aish/evidence.py says why that is not a second log.
+        """
+        if self.step_log is None:
+            return
+        blob = json.dumps(menu, sort_keys=True, ensure_ascii=False)
+        digest = evidence.digest_of(blob)
+        if digest == self._brief_digest:
+            return
+        evidence.put(blob, self.state_dir)
+        self._brief_digest = digest
+        self._emit_record(
+            kind="brief",
+            model_call=self._model_call,
+            tools={
+                "digest": digest,
+                "count": len(menu),
+                "names": sorted(_menu_names(menu)),
+            },
+            options={
+                "model": self.model,
+                "num_ctx": self.num_ctx,
+                "think": bool(self.think),
+            },
+        )
 
     def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
         """(echo label, execution thunk) for a READ_ONLY_TOOLS member — split
