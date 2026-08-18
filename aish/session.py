@@ -511,6 +511,8 @@ RENDERLESS_STEPS = frozenset(
         "admission",  # #194
         "context",  # #208
         "brief",  # #239
+        "reasoning",  # #240
+        "call",  # #240
     }
 )
 

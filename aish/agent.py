@@ -1065,6 +1065,18 @@ CHARS_PER_TOKEN_BUDGET = 3
 # Command output carried in an activity-trace step is a preview (the trace
 # collapses it); the full result still reaches the model and streams live.
 STEP_OUTPUT_CAP = 8000
+# The reasoning cap (#240, contract §8.5: a named constant, and a truncated
+# record says which cap cut it). Deliberately far above anything reachable: a
+# turn cannot generate more than num_ctx tokens, so at 32k context this is ~2x
+# the largest physically possible reasoning burst. It is a backstop against a
+# pathological loop or a much larger future window, not a limit on capture —
+# the whole point of the record is that nothing is thrown away.
+REASONING_CHARS = 262144
+# Per-ARGUMENT cap on the `call` record. Generous enough that a URL, a search
+# query or a shell command is always whole, bounded enough that a write_file
+# body does not put a second copy of the file in the log — the diff already
+# records that. Applied per value, so a long one never displaces its siblings.
+CALL_ARG_CHARS = 8000
 
 
 def system_prompt(scratch_dir: os.PathLike | str | None = None) -> str:
@@ -1110,6 +1122,47 @@ def _remove_scratch(path: Path) -> None:
     """Delete the per-session scratch workspace, ignoring errors — cleanup is
     best-effort and must never raise from a finalizer/close()."""
     shutil.rmtree(path, ignore_errors=True)
+
+
+def _stop_reason(message: Any, envelope: Any) -> str:
+    """Why the provider stopped, wherever it chose to put it: the adapted
+    backends set it on the message (`stop`, from Anthropic's stop_reason and
+    OpenAI's finish_reason), ollama sets `done_reason` on the response."""
+    for owner, field in ((message, "stop"), (envelope, "done_reason"), (message, "done_reason")):
+        if value := getattr(owner, field, "") or "":
+            return str(value)
+    return ""
+
+
+def _safe_args(args: dict, cap: int) -> tuple[dict, int]:
+    """(arguments, characters dropped) — the model's own argument dict, bounded
+    PER VALUE rather than as one JSON blob, so a huge `content` on a write can
+    never push the `path` beside it out of the record. A value the log cannot
+    represent is kept as its repr instead of dropping the key: which argument
+    was passed matters even when what it held does not serialise."""
+    out: dict = {}
+    dropped = 0
+    for key, value in (args or {}).items():
+        if isinstance(value, str):
+            text, cut = _capped(value, cap)
+            dropped += cut
+            out[str(key)] = text
+            continue
+        try:
+            json.dumps(value)
+            out[str(key)] = value
+        except (TypeError, ValueError):
+            out[str(key)] = repr(value)[:cap]
+    return out, dropped
+
+
+def _capped(text: str, cap: int) -> tuple[str, int]:
+    """(text, characters dropped). Contract §8.5 wants both halves: the cut
+    text, and how much went — a record that is silently short is
+    indistinguishable from a model that was silently brief."""
+    if len(text) <= cap:
+        return text, 0
+    return text[:cap], len(text) - cap
 
 
 def _menu_names(menu: list[dict]) -> list[str]:
@@ -1251,6 +1304,7 @@ class Agent:
         # re-writes the reference, which is correct — the menu it is about to
         # use has not been named in this run of the process.
         self._brief_digest = ""
+        self._response_meta: dict = {}
         self.rule_compiler = rule_compiler_ask
         self.current_session = current_session
         # Embedding-based preflight selection (issue #43); opt-in from the
@@ -2345,20 +2399,82 @@ class Agent:
         last_error: Exception | None = None
         for attempt in range(2):
             try:
-                return self._one_chat(kwargs)
+                turn = self._one_chat(kwargs)
             except TaskCancelled:
                 raise  # a user stop is not a transport error — never retry
             except Exception as exc:  # noqa: BLE001 — surface, don't crash the REPL
                 last_error = exc
                 if attempt == 0:
                     self.echo(f"model call failed ({exc}); retrying once…")
+            else:
+                # The ONE emit point for what the model produced, so no caller
+                # can forget it: _chat_turn is reached by the tool-call path,
+                # the text-only path and the final no-tools turn alike.
+                self._record_reasoning(turn)
+                return turn
         raise ModelUnavailable(str(last_error)) from last_error
+
+    def _record_reasoning(self, turn: tuple) -> None:
+        """Everything the model produced on one call, in full (#240).
+
+        The rendered `thinking` step keeps a 120-character snippet for a live
+        status ticker, and that fragment — 26 characters on average across a
+        month of real logs — was the ONLY durable record of the model's
+        reasoning. The full text was received and discarded, so "why did it go
+        that way?" could only ever be answered by re-deriving from source,
+        which is the failure §0 of the contract exists to stop.
+
+        RENDERLESS, and that is not optional: the rendered `thinking` step
+        crosses the wire to a live client and into replay, so hanging a
+        quarter-megabyte of reasoning off it would put it in both. This record
+        is log-only, so nothing about the live UI changes.
+        """
+        content, _calls, usage, _blocks, thinking_text = turn
+        meta = self._response_meta or {}
+        text, dropped = _capped(thinking_text, REASONING_CHARS)
+        record: dict[str, Any] = {
+            "kind": "reasoning",
+            "model_call": self._model_call,
+            "tokens": list(usage),
+        }
+        if text:
+            record["text"] = text
+        if dropped:
+            # §8.5: a truncated record says which cap cut it, and by how much.
+            record["truncated"] = dropped
+            record["cap_source"] = "constant:REASONING_CHARS"
+        if said := content.strip():
+            # What it SAID on this call, complete — the rendered step keeps
+            # only a snippet of this too.
+            said_text, said_dropped = _capped(said, REASONING_CHARS)
+            record["said"] = said_text
+            if said_dropped:
+                record["said_truncated"] = said_dropped
+        for key in ("stop", "blocks", "malformed"):
+            if meta.get(key):
+                record[key] = meta[key]
+        if meta.get("synthesized"):
+            # The content is aish's sentence, not the model's.
+            record["synthesized"] = True
+        self._emit_record(**record)
 
     def _one_chat(
         self, kwargs: dict
     ) -> tuple[str, list[dict], tuple[int, int], list | None, str]:
         raw_blocks = None
         thinking = ""
+        # Bound before either branch: a stream that yields nothing would leave
+        # this unbound, and the metadata read below must not raise inside the
+        # one path whose job is to explain what went wrong.
+        message = None
+        # Reset first: a call that raises must not let the PREVIOUS call's stop
+        # reason be recorded against it.
+        self._response_meta = {}
+        # Where the stop reason lives is provider-shaped: the adapted backends
+        # put it on the message, ollama puts `done_reason` on the RESPONSE. Read
+        # both, or every local-model turn records nothing and the absence reads
+        # as "the provider did not say" when in fact nobody looked.
+        stop = ""
         if self.on_token is None:
             response = self.chat(**kwargs)
             message = response.message
@@ -2367,6 +2483,7 @@ class Agent:
             usage = _usage(response)
             raw_blocks = getattr(message, "raw_blocks", None)
             thinking = getattr(message, "thinking", None) or ""
+            stop = _stop_reason(message, response)
         else:
             parts: list[str] = []
             thinking_parts: list[str] = []
@@ -2411,10 +2528,30 @@ class Agent:
                     raw_blocks = message.raw_blocks
                 if _usage(chunk) != (0, 0):  # counts arrive on the final chunk
                     usage = _usage(chunk)
+                # Last non-empty wins: like usage, the reason arrives on the
+                # final chunk, and an earlier chunk must not blank it.
+                stop = _stop_reason(message, chunk) or stop
             content = "".join(parts)
             thinking = "".join(thinking_parts)
             if content and self._held_answer is None:
                 self.on_token("\n")
+        self._response_meta = {
+            "stop": stop,
+            "synthesized": bool(getattr(message, "synthesized", False)),
+            # Block TYPES only, never their content: this is what reveals a
+            # provider-redacted thinking block without storing anything.
+            "blocks": sorted(
+                {str(b.get("type")) for b in (raw_blocks or []) if isinstance(b, dict)}
+            ),
+            # Names whose argument JSON did not parse. A property of the model's
+            # OUTPUT, so it belongs with the reasoning rather than with the
+            # execution — the raw string never reaches the dispatcher.
+            "malformed": [
+                str(getattr(c.function, "name", ""))
+                for c in raw_calls
+                if getattr(getattr(c, "function", None), "malformed", False)
+            ],
+        }
         return content, [self._normalize_call(c) for c in raw_calls], usage, raw_blocks, thinking
 
     @staticmethod
@@ -2873,6 +3010,23 @@ class Agent:
             summary=self._arg_summary(name, args),
             command=str(args.get("command", "")) if name == "run_command" else "",
         )
+        # The call AS THE MODEL EMITTED IT (#240). The rendered step above keeps
+        # `summary`, a human label built per tool — the query for a search, the
+        # path for an edit — so "it called the tool, but with arguments that
+        # made it fail" was invisible for every tool except run_command, whose
+        # command survives in the audit line. Renderless and emitted BEFORE the
+        # call runs, so arguments are recorded even when the call then crashes.
+        emitted, args_dropped = _safe_args(args, CALL_ARG_CHARS)
+        call_record: dict[str, Any] = {
+            "kind": "call",
+            "call": call_no,
+            "name": name,
+            "args": emitted,
+        }
+        if args_dropped:
+            call_record["truncated"] = args_dropped
+            call_record["cap_source"] = "constant:CALL_ARG_CHARS"
+        self._emit_record(**call_record)
         try:
             result, elapsed = fn()
         except ModuleNotFoundError as exc:
