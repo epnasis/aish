@@ -110,10 +110,28 @@ Before this, the rendered `thinking` step kept a 120-character snippet for a liv
 
 ---
 
+## The channels that could make a reader wrong (#241)
+
+Everything above is about recording what happened. These four are different in kind: each let a reader reach a **confident false conclusion**, which is worse than the gap it replaced. `TestCoverageHoles`.
+
+**The third trim site.** Two trim policies run at task boundaries and have been recorded since #192. A third — `_enforce_budget` — fires **mid-task** and recorded nothing at all, so a result the model read at step 2 could be a 200-character stub by step 7 with no trace of when or why. This is the sharpest case in the whole file: the transcript still holds the **full** text, so the log did not merely omit the truncation, it positively suggested the model had something it never got. Now recorded as `mid_task_budget`.
+
+**Which results were stubbed.** `affected: 3` said something had been cut but never what. All three sites now record `stubbed: [{at, tool}]`, capped by `TRIM_STUBBED_MAX` = 40 with the overflow counted. A log written before this has `affected` and no `stubbed`, and the reader says *which messages: not recorded* — never "nothing was stubbed".
+
+**Steering typed mid-task.** Text typed while a task runs is folded into the model's messages **without passing through the recorder**, and it is not restored when a session resumes. The rendered `injected` trace step is the only place it exists, so the dossier reads it from there. (Note for anyone adding a renderless kind: that name is already taken by this rendered step — 36 instances in the live corpus — and moving it into the renderless registry would make every one of them vanish from cold replay while still rendering live.)
+
+**The reminder is not a system message everywhere.** On the OpenAI-shaped backends, aish's second system message — the per-task reminder carrying the knowledge index, the preloaded skills and the rule prose — is relabelled `user`, because Gemini's compat gateway drops *all* system instructions when more than one is present (#74). A dossier claiming a system-authority instruction was in force would be describing something the model never saw.
+
+`backends.system_role_policy()` **declares** this per provider and the brief records the declared value, rather than leaving a reader to infer it from the converter's source (§0). Declaring and doing are pinned together by `test_declared_system_policy_matches_the_code` — a declared policy that drifts from the code is not a missing record, it is a confident lie. An unknown provider inherits `first_only`, because it goes through the same converter; defaulting to the safe-sounding value would be the wrong way to be wrong.
+
+---
+
 ## What is still missing
 
 The reader reports each of these as *not recorded* rather than guessing:
 
 - **the rest of the brief** (#239) — the system prompt, and the injected knowledge and rule text. The per-turn records name what was injected; the bytes are not stored yet.
-- **coverage holes** (#241) — a third trim site that records nothing, steering text typed mid-task, and the backend adapter that demotes system authority to a user message on some providers.
+- **attachment guidance** (#241) — the sentences telling the model what it may do with each attached file are still built at hand-over and never stored.
+- **consumed vs sent** (#243) — the prompt-token count is on the `reasoning` record and `num_ctx` on the `brief`, so a context that filled up is derivable, but nothing flags it. That belongs in the suspicion list, not in another record.
+- **a web view** (#243) — `aish explain` is CLI-only. The contract's §8.7 already says a UI needs a deliberate new endpoint, because none of this is client-side and the offline mirror must not start caching reasoning onto every device.
 - **claude-max** (#242) — its SDK loop emits none of these records and drops thinking blocks entirely. A dossier for one of its turns must say so wholesale rather than assembling something half-plausible.

@@ -149,6 +149,31 @@ def context_window(provider_name: str, num_ctx: int = 0) -> tuple[int, str]:
     return window, f"backend:{provider_name}:{window}"
 
 
+# How each provider carries aish's SECOND system message — the per-task
+# reminder holding the knowledge index, the preloaded skills and the rule prose.
+# "first_only" means it reaches the model relabelled as a USER message.
+#
+# Declared here rather than inferred by a reader, because a dossier that says
+# "a system-authority instruction was in force" when the model received an
+# ordinary user message is exactly the confident-wrong-conclusion this record
+# set exists to prevent (#241). `test_declared_system_policy_matches_the_code`
+# pins these values against what the converters actually do, so the two cannot
+# drift apart silently.
+SYSTEM_ROLE_POLICY = {
+    "gemini": "first_only",  # #74: the compat gateway drops ALL system messages when >1
+    "openai": "first_only",
+    "claude": "hoisted",  # every system message is hoisted into the `system` parameter
+    "ollama": "all_system",
+}
+DEFAULT_SYSTEM_ROLE_POLICY = "first_only"  # every other provider goes through convert_messages
+
+
+def system_role_policy(provider_name: str) -> str:
+    """How this provider carries the per-task system reminder, as a declared
+    fact recorded with the turn it governed."""
+    return SYSTEM_ROLE_POLICY.get(provider_name, DEFAULT_SYSTEM_ROLE_POLICY)
+
+
 # What each provider's API accepts as native user-message media. Ollama is
 # best-effort: the images key only helps on vision models (llava, qwen-vl,
 # gemma3, …) — text-only models ignore it. Gemini's OpenAI-compat layer
