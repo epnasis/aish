@@ -298,12 +298,23 @@ def _gate_line(gate: dict) -> str:
     return f"{who} at {gate.get('at')} → {verdict}" + (f" — {detail}" if detail else "")
 
 
+PASSED_VERDICTS = ("allowed", "allow", "ok", "pass")
+# `advised` is an answer that WAS DELIVERED, carrying a not-followed note — not
+# a termination. The contract records that conflating the two had the ledger
+# counting shipped answers as stops, so it is worth reading but must never be
+# summarised as a refusal.
+ADVISED_VERDICTS = ("advised",)
+
+
+def _verdict_of(gate: dict) -> str:
+    return str(gate.get("verdict", gate.get("decision", ""))).lower()
+
+
 def _refused(gate: dict) -> bool:
     """A verdict worth reading. 'allowed' is the overwhelming majority — one per
     always-rule per call — and printing all of them buries the one that stopped
     something, which is the only reason anyone opened this."""
-    verdict = str(gate.get("verdict", gate.get("decision", ""))).lower()
-    return verdict not in ("allowed", "allow", "ok", "pass")
+    return _verdict_of(gate) not in PASSED_VERDICTS
 
 
 def _calls_section(turn: Turn, out: list[str]) -> None:
@@ -318,6 +329,11 @@ def _calls_section(turn: Turn, out: list[str]) -> None:
         else:
             per_call.setdefault(int(gate["call"]), []).append(gate)
 
+    # The arguments as the model emitted them, joined by call id (#240). The
+    # rendered step carries only a per-tool label, which is a rendering of one
+    # argument and silent about the rest.
+    emitted = {int(c.get("call") or 0): c for c in turn.of_kind("call")}
+
     lines: list[str] = []
     for step in turn.of_kind("tool"):
         call = int(step.get("call") or 0)
@@ -326,6 +342,13 @@ def _calls_section(turn: Turn, out: list[str]) -> None:
         if step.get("summary"):
             head += f" {DIM}{str(step['summary'])[:90]}{RESET}"
         lines.append(head)
+        if record := emitted.pop(call, None):
+            lines.append(f"     args: {json.dumps(record.get('args') or {}, ensure_ascii=False)}")
+            if record.get("truncated"):
+                lines.append(
+                    f"     {BOLD}… {record['truncated']} argument characters cut by "
+                    f"{record.get('cap_source', 'a cap')}{RESET}"
+                )
         detail = f"     → {status}, {step.get('secs', 0):.1f}s"
         if step.get("verdict_by"):
             detail += f", verdict by {step['verdict_by']}"
@@ -345,14 +368,85 @@ def _calls_section(turn: Turn, out: list[str]) -> None:
     for call, orphans in sorted(per_call.items()):
         for gate in orphans:
             lines.append(f"  #{call} gate {_gate_line(gate)} {DIM}(no tool step recorded){RESET}")
+    # A call whose arguments were recorded but which produced no tool step: the
+    # call is emitted before it runs precisely so a crash still leaves its
+    # arguments, and losing it here would waste that.
+    for call, record in sorted(emitted.items()):
+        lines.append(
+            f"  #{call} {record.get('name')} "
+            f"{json.dumps(record.get('args') or {}, ensure_ascii=False)}"
+        )
+        lines.append(f"     {BOLD}never completed{RESET} {DIM}— no tool step recorded{RESET}")
     _block(out, "calls", lines or [f"{DIM}no tool calls{RESET}"])
 
     if turn_level:
-        refused = [g for g in turn_level if _refused(g)]
-        vlines = [f"{_gate_line(g)}" for g in refused] or []
-        if len(turn_level) > len(refused):
-            vlines.append(f"{DIM}{len(turn_level) - len(refused)} check(s) passed{RESET}")
+        # Three buckets, not two. An `advised` answer SHIPPED — folding it in
+        # with refusals is the conflation the contract calls out by name.
+        stopped = [g for g in turn_level if _refused(g) and _verdict_of(g) not in ADVISED_VERDICTS]
+        advised = [g for g in turn_level if _verdict_of(g) in ADVISED_VERDICTS]
+        vlines = [_gate_line(g) for g in stopped]
+        for gate in advised:
+            vlines.append(f"{_gate_line(gate)} {DIM}(answer delivered, with a note){RESET}")
+        passed = len(turn_level) - len(stopped) - len(advised)
+        if passed:
+            vlines.append(f"{DIM}{passed} check(s) passed{RESET}")
         _block(out, "verify", vlines)
+
+
+def _reasoning_section(turn: Turn, log: Log, out: list[str]) -> None:
+    """What the model produced on each call of this turn (#240).
+
+    Falls back to the rendered `thinking` step's fragment for logs written
+    before the full record existed — and says which one it is showing, because
+    a 26-character snippet presented as "the reasoning" is how someone concludes
+    the model barely thought about it.
+    """
+    records = turn.of_kind("reasoning")
+    if not records:
+        gists = [s.get("gist") for s in turn.of_kind("thinking") if s.get("gist")]
+        if not gists:
+            out.append(f"  {'reasoning':<10} {DIM}{NOT_RECORDED}{RESET}")
+            return
+        out.append(f"  {'reasoning':<10} {DIM}fragments only — this log predates #240{RESET}")
+        for gist in gists[:20]:
+            out.append(f"  {'':<10} {DIM}· {str(gist)[:160]}{RESET}")
+        return
+
+    lines: list[str] = []
+    for record in records:
+        head = f"call {record.get('model_call', '?')}"
+        if record.get("stop"):
+            head += f" · stopped: {record['stop']}"
+        if record.get("tokens"):
+            head += f" · tokens {record['tokens']}"
+        if record.get("blocks"):
+            head += f" · blocks {', '.join(str(b) for b in record['blocks'])}"
+        lines.append(head)
+        if record.get("synthesized"):
+            lines.append(f"  {BOLD}the text below is aish's sentence, not the model's{RESET}")
+        if record.get("malformed"):
+            # Different repair from "called with no arguments", which is what
+            # this looked like before the flag existed.
+            lines.append(
+                f"  {BOLD}arguments did not parse{RESET} for: "
+                f"{', '.join(str(n) for n in record['malformed'])}"
+            )
+        for label, key, cut in (
+            ("thought", "text", "truncated"),
+            ("said", "said", "said_truncated"),
+        ):
+            body = str(record.get(key) or "")
+            if not body:
+                continue
+            lines.append(f"  {label}:")
+            for para in body.splitlines():
+                lines.append(f"    {para}")
+            if record.get(cut):
+                lines.append(
+                    f"    {BOLD}… {record[cut]} more characters cut by "
+                    f"{record.get('cap_source', 'a cap')}{RESET}"
+                )
+    _block(out, "reasoning", lines)
 
 
 def _block(out: list[str], label: str, lines: list[str]) -> None:
@@ -428,14 +522,7 @@ def render(turn: Turn, log: Log, root: os.PathLike | str | None, show_tools: boo
             f"(keep {record.get('keep_chars')}, cap from {record.get('cap_source')})"
         )
 
-    gists = [s.get("gist") for s in turn.of_kind("thinking") if s.get("gist")]
-    out.append(
-        f"  {'reasoning':<10} {DIM}fragments only — full capture is #240{RESET}"
-        if gists
-        else f"  {'reasoning':<10} {DIM}{NOT_RECORDED}{RESET}"
-    )
-    for gist in gists[:20]:
-        out.append(f"  {'':<10} {DIM}· {str(gist)[:160]}{RESET}")
+    _reasoning_section(turn, log, out)
 
     answers = [
         str(m.get("content") or "")

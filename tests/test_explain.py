@@ -20,8 +20,8 @@ def tool_call(name: str, **arguments):
     return SimpleNamespace(function=SimpleNamespace(name=name, arguments=arguments))
 
 
-def model_says(content: str = "", tool_calls: list | None = None):
-    message = SimpleNamespace(content=content, tool_calls=tool_calls or None)
+def model_says(content: str = "", tool_calls: list | None = None, **extra):
+    message = SimpleNamespace(content=content, tool_calls=tool_calls or None, **extra)
     return SimpleNamespace(message=message)
 
 
@@ -196,6 +196,197 @@ class TestBriefWriter:
         assert session_module.SessionLog.reconstruct_events(stripped) == with_brief
 
 
+class TestReasoningCapture:
+    """#240. The rendered `thinking` step keeps a snippet for a status ticker —
+    26 characters on average across a real month — and that was the only durable
+    record of how the model decided."""
+
+    def test_both_new_kinds_are_registered_renderless(self):
+        assert {"reasoning", "call"} <= RENDERLESS_STEPS
+
+    def test_full_thinking_is_kept_not_a_snippet(self, tmp_path):
+        essay = "I should check the Polish shops first. " * 40
+        agent, _, log = make_logged_agent(
+            [model_says("here you go", thinking=essay)], tmp_path
+        )
+        agent.run_task("find me a hammock")
+        (record,) = steps(log.path, "reasoning")
+        assert record["text"] == essay
+        assert "truncated" not in record
+        # …and the rendered step still carries only its snippet, unchanged.
+        (rendered,) = steps(log.path, "thinking_cancel") or steps(log.path, "thinking")
+        assert len(str(rendered.get("gist", ""))) <= 120
+
+    def test_reasoning_never_reaches_a_renderer(self, tmp_path):
+        """A quarter megabyte of reasoning hung off the rendered step would
+        cross the wire live AND land in replay."""
+        rendered = []
+        agent, _, log = make_logged_agent([model_says("ok", thinking="lots")], tmp_path)
+        agent.on_step = rendered.append
+        agent.run_task("hello")
+        assert steps(log.path, "reasoning")
+        assert not [s for s in rendered if s.get("kind") == "reasoning"]
+
+    def test_the_cap_is_named_and_says_how_much_it_cut(self, tmp_path):
+        """Contract §8.5: a named constant, and a truncated record says which
+        cap cut it — a silently short record is indistinguishable from a model
+        that was silently brief."""
+        from aish import agent as agent_module
+
+        monkey = agent_module.REASONING_CHARS
+        agent_module.REASONING_CHARS = 50
+        try:
+            agent, _, log = make_logged_agent([model_says("ok", thinking="x" * 130)], tmp_path)
+            agent.run_task("hello")
+        finally:
+            agent_module.REASONING_CHARS = monkey
+        (record,) = steps(log.path, "reasoning")
+        assert len(record["text"]) == 50
+        assert record["truncated"] == 80
+        assert record["cap_source"] == "constant:REASONING_CHARS"
+
+    def test_the_default_cap_cannot_bite_at_the_default_context(self):
+        """The cap is a backstop, not a limit: a turn cannot generate more than
+        num_ctx tokens, so at 32k context it is unreachable by ~2x."""
+        from aish.agent import REASONING_CHARS
+
+        assert REASONING_CHARS >= 32768 * 4
+
+    def test_a_turn_records_one_reasoning_per_model_call(self, tmp_path):
+        agent, _, log = make_logged_agent(
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="ls")], thinking="first"),
+                model_says("done", thinking="second"),
+            ],
+            tmp_path,
+        )
+        agent.run_task("go")
+        got = steps(log.path, "reasoning")
+        assert [r["text"] for r in got] == ["first", "second"]
+        assert [r["model_call"] for r in got] == [1, 2]
+
+    def test_the_stop_reason_is_recorded(self, tmp_path):
+        agent, _, log = make_logged_agent(
+            [model_says("cut off", stop="max_tokens")], tmp_path
+        )
+        agent.run_task("hello")
+        (record,) = steps(log.path, "reasoning")
+        assert record["stop"] == "max_tokens"
+
+    def test_ollama_puts_the_reason_somewhere_else_and_it_is_still_found(self, tmp_path):
+        """The adapted backends set it on the message; ollama sets `done_reason`
+        on the RESPONSE. Reading only one place records nothing for every local
+        model, and the absence reads as "the provider did not say" when in fact
+        nobody looked."""
+        response = model_says("done")
+        response.done_reason = "stop"
+        agent, _, log = make_logged_agent([response], tmp_path)
+        agent.run_task("hello")
+        (record,) = steps(log.path, "reasoning")
+        assert record["stop"] == "stop"
+
+    def test_aishs_own_sentence_is_not_attributed_to_the_model(self, tmp_path):
+        """The Anthropic path fabricates a refusal sentence and logs it as model
+        content. Unmarked, a dossier credits the harness's words to the model."""
+        agent, _, log = make_logged_agent(
+            [model_says("(the model declined this request…)", synthesized=True)], tmp_path
+        )
+        agent.run_task("hello")
+        (record,) = steps(log.path, "reasoning")
+        assert record["synthesized"] is True
+        assert "aish's sentence" in explain_mod.explain(log.path, root=tmp_path)
+
+    def test_block_types_are_recorded_without_their_content(self, tmp_path):
+        """Enough to see a provider-redacted thinking block; not enough to
+        store a second copy of the turn."""
+        blocks = [{"type": "redacted_thinking", "data": "opaque"}, {"type": "text", "text": "hi"}]
+        agent, _, log = make_logged_agent([model_says("hi", raw_blocks=blocks)], tmp_path)
+        agent.run_task("hello")
+        (record,) = steps(log.path, "reasoning")
+        assert record["blocks"] == ["redacted_thinking", "text"]
+        assert "opaque" not in json.dumps(record)
+
+
+class TestEmittedArguments:
+    def test_the_exact_arguments_are_recorded(self, tmp_path):
+        """The rendered step keeps a per-tool label — the query for a search,
+        the path for an edit — and is silent about every other argument."""
+        agent, _, log = make_logged_agent(
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="tar", topic="--exclude")]),
+                model_says("done"),
+            ],
+            tmp_path,
+        )
+        agent.run_task("go")
+        (record,) = steps(log.path, "call")
+        assert record["args"] == {"command": "tar", "topic": "--exclude"}
+        assert record["name"] == "read_docs"
+
+    def test_arguments_are_capped_per_value_not_per_blob(self, tmp_path):
+        """A huge body on a write must not push the path beside it out."""
+        from aish import agent as agent_module
+
+        args, dropped = agent_module._safe_args(
+            {"path": "/tmp/x", "content": "y" * 9000}, agent_module.CALL_ARG_CHARS
+        )
+        assert args["path"] == "/tmp/x"
+        assert len(args["content"]) == agent_module.CALL_ARG_CHARS
+        assert dropped == 9000 - agent_module.CALL_ARG_CHARS
+
+    def test_a_value_that_cannot_serialise_keeps_its_key(self, tmp_path):
+        """Which argument was passed matters even when what it held does not
+        survive JSON — dropping the key loses the more important half."""
+        from aish import agent as agent_module
+
+        args, _ = agent_module._safe_args({"fn": object()}, 100)
+        assert "fn" in args and isinstance(args["fn"], str)
+
+    def test_malformed_arguments_are_distinguished_from_no_arguments(self, tmp_path):
+        """A JSON decode failure becomes `{}` downstream, which is exactly what
+        a deliberate no-argument call looks like — and the two route to
+        different repairs."""
+        from aish.backends import _parse_args, _tool_function
+
+        assert _parse_args("{not json") == ({}, True)
+        assert _parse_args("") == ({}, False)
+        assert _parse_args("[1,2]") == ({}, True)
+        assert _tool_function("t", "{bad").malformed is True
+        assert _tool_function("t", '{"a":1}').malformed is False
+
+    def test_a_malformed_call_is_named_on_the_turn_that_emitted_it(self, tmp_path):
+        broken = SimpleNamespace(
+            function=SimpleNamespace(name="read_docs", arguments={}, malformed=True)
+        )
+        agent, _, log = make_logged_agent(
+            [model_says(tool_calls=[broken]), model_says("done")], tmp_path
+        )
+        agent.run_task("go")
+        first = steps(log.path, "reasoning")[0]
+        assert first["malformed"] == ["read_docs"]
+        assert "did not parse" in explain_mod.explain(log.path, root=tmp_path)
+
+    def test_replay_ignores_both_new_kinds(self, tmp_path):
+        agent, _, log = make_logged_agent(
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="ls")], thinking="why"),
+                model_says("done"),
+            ],
+            tmp_path,
+        )
+        agent.run_task("go")
+        full = session_module.SessionLog.reconstruct_events(log.path)
+        lines = [
+            line
+            for line in log.path.read_text().splitlines()
+            if (json.loads(line).get("step") or {}).get("kind")
+            not in ("reasoning", "call", "brief")
+        ]
+        stripped = tmp_path / "stripped.jsonl"
+        stripped.write_text("\n".join(lines) + "\n")
+        assert session_module.SessionLog.reconstruct_events(stripped) == full
+
+
 class TestReaderIsPureAndHonest:
     def test_no_model_and_no_live_state_can_reach_the_reader(self):
         """§0: an explanation is assembled from recorded evidence, never
@@ -283,6 +474,23 @@ class TestReaderIsPureAndHonest:
         out = explain_mod.explain(path, root=tmp_path)
         assert "no tool step" not in out
         assert "verify" in out
+
+    def test_an_advised_verdict_is_not_summarised_as_a_refusal(self, tmp_path):
+        """`advised` means the answer WAS delivered, carrying a not-followed
+        note. The contract records that conflating it with a termination had the
+        ledger counting shipped answers as stops."""
+        path = tmp_path / "session-advised.jsonl"
+        rows = [
+            {"kind": "task_start", "ts": "2026-01-01T00:00:00", "prompt": "hi"},
+            {"kind": "trace", "step": {"kind": "gate", "at": "verify", "gate": "rule.verify",
+                                       "rule": "live-price", "verdict": "advised", "turn": 1}},
+            {"kind": "trace", "step": {"kind": "gate", "at": "verify", "gate": "rule.verify",
+                                       "rule": "no-flattery", "verdict": "allowed", "turn": 1}},
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        out = explain_mod.explain(path, root=tmp_path)
+        assert "answer delivered, with a note" in out
+        assert "1 check(s) passed" in out  # the advised row is not counted as failed
 
     def test_a_redaction_is_announced(self, tmp_path):
         path = tmp_path / "session-redacted.jsonl"

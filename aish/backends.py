@@ -28,6 +28,12 @@ from typing import Any
 class ToolFunction:
     name: str
     arguments: dict
+    # Did the provider's argument JSON parse? A decode failure yields `{}`,
+    # which is indistinguishable downstream from a call the model deliberately
+    # made with no arguments — and the two route to completely different
+    # repairs (#240). The raw string dies here, so the fact has to be recorded
+    # here too.
+    malformed: bool = False
 
 
 @dataclass
@@ -50,6 +56,13 @@ class ChatMessage:
     # thinking blocks; Ollama's Message.thinking). Display-only — never echoed
     # back to the API (raw_blocks carries the canonical copy for Anthropic).
     thinking: str = ""
+    # Why the provider stopped (Anthropic stop_reason, OpenAI finish_reason).
+    # A turn cut off at the token limit and a turn that finished are the same
+    # shape downstream without this (#240).
+    stop: str = ""
+    # True when `content` is aish's sentence, not the model's. Without it a
+    # dossier attributes the harness's own words to the model.
+    synthesized: bool = False
 
 
 @dataclass
@@ -402,7 +415,7 @@ class OpenAICompatBackend:
         # every provider; mixed key types make sorting impossible anyway.
         tool_calls = [
             ToolCall(
-                ToolFunction(name=slot["name"], arguments=_parse_args(slot["arguments"])),
+                _tool_function(slot["name"], slot["arguments"]),
                 extra_content=slot["extra"],
             )
             for slot in pending.values()
@@ -508,12 +521,23 @@ def _openai_media_parts(message: dict) -> list[dict]:
     return parts
 
 
-def _parse_args(raw: str) -> dict:
+def _parse_args(raw: str) -> tuple[dict, bool]:
+    """(arguments, malformed). Malformed means the model emitted something that
+    is not a JSON object — a truncated blob, prose, a bare list. It still runs
+    as `{}` because refusing the whole turn is worse, but the log must not say
+    the model called the tool with no arguments when it did not."""
     try:
         parsed = json.loads(raw) if raw else {}
     except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        return {}, True
+    return (parsed, False) if isinstance(parsed, dict) else ({}, True)
+
+
+def _tool_function(name: str, raw: str) -> ToolFunction:
+    """The one place a provider's argument string becomes a ToolFunction, so
+    the malformed flag cannot be dropped at one call site and kept at another."""
+    arguments, malformed = _parse_args(raw)
+    return ToolFunction(name=name, arguments=arguments, malformed=malformed)
 
 
 def _extra_content(tool_call) -> dict | None:
@@ -531,17 +555,22 @@ def _extra_content(tool_call) -> dict | None:
 
 
 def _from_completion(response) -> ChatChunk:
-    message = response.choices[0].message
+    choice = response.choices[0]
+    message = choice.message
     tool_calls = [
         ToolCall(
-            ToolFunction(name=tc.function.name, arguments=_parse_args(tc.function.arguments)),
+            _tool_function(tc.function.name, tc.function.arguments),
             extra_content=_extra_content(tc),
         )
         for tc in (message.tool_calls or [])
     ]
     usage = getattr(response, "usage", None)
     return ChatChunk(
-        message=ChatMessage(content=message.content or "", tool_calls=tool_calls),
+        message=ChatMessage(
+            content=message.content or "",
+            tool_calls=tool_calls,
+            stop=str(getattr(choice, "finish_reason", "") or ""),
+        ),
         prompt_eval_count=(usage.prompt_tokens or 0) if usage else 0,
         eval_count=(usage.completion_tokens or 0) if usage else 0,
     )
@@ -758,8 +787,13 @@ def _from_anthropic(response) -> ChatChunk:
                 ToolCall(ToolFunction(name=block.name, arguments=dict(block.input or {})))
             )
     content = "".join(text_parts)
-    if not content and not tool_calls and getattr(response, "stop_reason", None) == "refusal":
+    stop = str(getattr(response, "stop_reason", "") or "")
+    synthesized = False
+    if not content and not tool_calls and stop == "refusal":
         content = "(the model declined this request for safety reasons)"
+        # aish's sentence, not the model's. Recorded as such so a dossier can
+        # never attribute the harness's words to the model (#240).
+        synthesized = True
     usage = getattr(response, "usage", None)
     prompt_tokens = 0
     if usage:
@@ -772,6 +806,8 @@ def _from_anthropic(response) -> ChatChunk:
         message=ChatMessage(
             content=content,
             tool_calls=tool_calls,
+            stop=stop,
+            synthesized=synthesized,
             raw_blocks=raw_blocks or None,
             thinking="\n".join(part for part in thinking_parts if part),
         ),

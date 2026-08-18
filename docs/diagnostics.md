@@ -58,7 +58,7 @@ Three reasons the bytes are **not** in the log, in order of importance:
 
 **A blob is re-hashed on read.** A file that does not hash to its own name has been truncated or tampered with, and handing it back would let a reader quote evidence that is not what was recorded — so it reads as absent instead. **`put` with no state dir still returns the digest**, so a caller with nowhere to write records a reference the reader reports as unresolvable rather than as never recorded.
 
-`TestEvidenceStore` pins the round trip, the single-copy guarantee, purging, and the tamper check.
+`TestEvidenceStore` pins the round trip, the single-copy guarantee, purging, and the tamper check; `TestReasoningCapture` and `TestEmittedArguments` pin the two #240 records, including that the default cap cannot bite at the default context window.
 
 This is **not a second log.** It has no records, no ordering and no clock; the digest is the entire join. The argument against a parallel debug log — two files correlated by timestamp, which is the positional correlation the trace contract exists to kill — does not apply to something joined by content address.
 
@@ -89,11 +89,31 @@ Verdicts are grouped by outcome rather than printed in file order — bound, une
 
 ---
 
+## Reasoning and the arguments (#240)
+
+Two renderless records, both written per model call, both emitted from the ONE point every path goes through — the tool-call path, the text-only path and the final no-tools turn alike, so no caller can forget one.
+
+**`reasoning`** carries what the model produced: the full thinking text, what it said on that call, the provider's stop reason, whether the arguments of any tool call failed to parse, and the *types* of the provider-native blocks it returned. Block **types only** — that is what reveals a provider-redacted thinking block without storing a second copy of the turn.
+
+Before this, the rendered `thinking` step kept a 120-character snippet for a live status ticker, and it averaged **26 characters** across a real month of logs. That fragment was the only durable record of how the model decided. It stays exactly as it was: the full text hangs off a renderless record instead, because the rendered step crosses the wire to a live client and lands in replay, and a quarter-megabyte of reasoning would go into both.
+
+**`call`** carries the tool call as the model emitted it: name and the exact argument dict. The rendered step keeps `summary`, a human label built per tool — the query for a search, the path for an edit — so *"it called the tool, but with arguments that made it fail"* was invisible for every tool except `run_command`, whose command already survives in the audit line. It is emitted **before** the call runs, so a call that then crashes still has its arguments recorded, and the reader reports such a call as *never completed*.
+
+**Two caps, both named constants** (contract §8.5, and a truncated record says which cap cut it):
+
+- `REASONING_CHARS` = 262144 characters, i.e. 256 KB — a backstop, not a limit. A turn cannot generate more than `num_ctx` tokens, so at 32k context this is unreachable by roughly 2×. It exists for a pathological loop or a much larger future window.
+- `CALL_ARG_CHARS` = 8000 characters — applied **per argument value**, never to the whole JSON, so a large `content` on a write can't push the `path` beside it out of the record.
+
+**Malformed arguments are a fact about the model's output, not about execution.** A JSON decode failure becomes `{}` inside the backend adapter, which downstream is indistinguishable from a call the model deliberately made with no arguments — and the two route to completely different repairs. The raw string dies in the adapter, so the flag is set there and reported on the `reasoning` record for the call that emitted it.
+
+**A synthesized sentence is marked.** The Anthropic path fabricates *"(the model declined this request for safety reasons)"* on a refusal and logs it as model content; unmarked, a dossier credits the harness's own words to the model.
+
+---
+
 ## What is still missing
 
 The reader reports each of these as *not recorded* rather than guessing:
 
 - **the rest of the brief** (#239) — the system prompt, and the injected knowledge and rule text. The per-turn records name what was injected; the bytes are not stored yet.
-- **reasoning** (#240) — a 26-character fragment of the model's thinking is kept for a status ticker; the full text is received and discarded. Also the tool arguments as the model emitted them, which the message serializer drops.
 - **coverage holes** (#241) — a third trim site that records nothing, steering text typed mid-task, and the backend adapter that demotes system authority to a user message on some providers.
 - **claude-max** (#242) — its SDK loop emits none of these records and drops thinking blocks entirely. A dossier for one of its turns must say so wholesale rather than assembling something half-plausible.
