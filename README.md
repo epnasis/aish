@@ -146,7 +146,7 @@ unless you explicitly *Share* a selection.
 | `read_file` | read a file | auto inside the project; **prompts outside it and on secret paths** (`~/.ssh`, `.env*`, `*.pem`…) |
 | `read_media` | look at a video or audio recording — a YouTube link, any media URL, or a file on disk. Returns a map (length, chapters, captions) and frames from any moment, each labelled with the time it actually came from | auto |
 | `read_pdf` | read a PDF — attached, on disk, or linked — keeping columns, tables and page numbers; `pages=` and `search=` for a long one | auto |
-| `web_search` / `read_url` | DuckDuckGo + fetch a page as readable text; a bot-blocked or JavaScript-only page is re-read in a **real browser** on your machine | auto; every query/URL echoed; public hosts only (SSRF-guarded); **reading a site you're signed into asks first** |
+| `web_search` / `read_url` | DuckDuckGo + fetch a page as readable text; a bot-blocked or JavaScript-only page is re-read in a **real browser** on your machine, and a site you're signed into is read **through your signed-in session** from the start | auto; every query/URL echoed; public hosts only (SSRF-guarded); **reading a site you're signed into asks first** |
 | `read_docs` | man page → `--help` fallback, full-text topic search | auto |
 | `remember` / `forget_memory` | save or prune one fact in structured memory | auto (echoed) |
 | `read_skill` / `recall` | load a playbook; ranked search across skills, memory & past sessions | auto (echoed) |

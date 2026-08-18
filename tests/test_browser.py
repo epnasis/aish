@@ -775,6 +775,238 @@ class TestTheReadingContract:
         assert "blocks automated reading" in prompt
 
 
+class TestASignedInHostIsReadAsTheOwner:
+    """#236 — the login gate promised a session-carrying read and read_url made
+    an anonymous one.
+
+    Escalation everywhere else is wired to a FAILURE: a block status, a timeout,
+    an empty shell. A login wall is none of those — it is 200 with a full page of
+    text — so the fetch "succeeded" and Chrome never launched for exactly the
+    class of page the persistent profile exists to read.
+    """
+
+    # A server-rendered login wall, as a plain fetch receives it. The password
+    # field is the evidence; the Polish is the corpus this was measured on.
+    LOGIN_HTML = (
+        "<html><body><h1>Mój E.ON</h1><form>"
+        '<input type="email" name="login">'
+        '<input type="password" name="haslo">'
+        "<button>Zaloguj się</button>"
+        "<a href='/PrzypomnienieHasla'>Nie pamiętasz hasła?</a>"
+        "</form></body></html>"
+    )
+
+    def _no_fetch(self, monkeypatch):
+        """A fetch on this path is the bug — record it instead of allowing it."""
+        fetched = []
+
+        def fetch(url):
+            fetched.append(url)
+            return (self.LOGIN_HTML, "text/html")
+
+        monkeypatch.setattr(web_module, "_fetch", fetch)
+        return fetched
+
+    def test_the_eon_session_reads_the_account_not_the_login_form(
+        self, state, monkeypatch
+    ):
+        """The exact shape of session-20260818-174527: eon.pl signed in, the
+        owner approves a card saying the read carries his session, and the fetch
+        would hand back the login screen with HTTP 200."""
+        browser._remember_logins({"eon.pl"})
+        fetched = self._no_fetch(monkeypatch)
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text=page_sized("Faktura 09/2026 — Kraków, ul. Długa 5 — 214,60 zł"),
+                title="Mój E.ON",
+                images=[],
+                url=url,
+                status=200,
+            ),
+        )
+        out = web_module.read_url("https://eon.pl/mojeon")
+        assert "214,60 zł" in out
+        assert "rendered in the browser" in out
+        assert fetched == []  # the anonymous fetch never happened
+
+    def test_a_host_with_no_account_still_goes_straight_to_the_fetch(
+        self, state, monkeypatch
+    ):
+        """The cost fence. Routing on the login record means a ~2s Chrome launch,
+        so it must apply to signed-in hosts ONLY — every other read stays on the
+        0.3s path it was on."""
+        browser._remember_logins({"eon.pl"})
+        launched = []
+        monkeypatch.setattr(
+            web_module, "_fetch", lambda url: ("<html><body>news</body></html>", "text/html")
+        )
+        monkeypatch.setattr(browser, "read", lambda url, **kw: launched.append(url))
+        assert "news" in web_module.read_url("https://example.com/article")
+        assert launched == []
+
+    def test_a_subdomain_of_a_signed_in_host_routes_too(self, state, monkeypatch):
+        browser._remember_logins({"eon.pl"})
+        fetched = self._no_fetch(monkeypatch)
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text=page_sized("dashboard"), title="", images=[], url=url, status=200
+            ),
+        )
+        assert "dashboard" in web_module.read_url("https://moje.eon.pl/faktury")
+        assert fetched == []
+
+    def test_an_expired_session_says_so_instead_of_serving_the_login_page(
+        self, state, monkeypatch
+    ):
+        """The browser DID render it, as the owner, and the site asked for a
+        password anyway. That is a lapsed session, and it is the one thing the
+        model cannot work out for itself — the page is a valid 200 either way."""
+        browser._remember_logins({"eon.pl"})
+        self._no_fetch(monkeypatch)
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text="Zaloguj się\nWpisz hasło",
+                title="Mój E.ON",
+                images=[],
+                url=url,
+                status=200,
+                signin=True,
+            ),
+        )
+        out = web_module.read_url("https://eon.pl/mojeon")
+        assert "that session has expired" in out
+        assert "/browser https://eon.pl" in out
+        # The page is NOT discarded: a wall is worth nothing, a sign-in page is
+        # worth knowing you are looking at one.
+        assert "Wpisz hasło" in out
+
+    def test_the_provenance_note_sits_above_the_untrusted_banner(
+        self, state, monkeypatch
+    ):
+        """aish's own statement about WHO made the read must not sit under a
+        banner declaring everything below it to be page data."""
+        browser._remember_logins({"eon.pl"})
+        self._no_fetch(monkeypatch)
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text="Zaloguj się", title="", images=[], url=url, status=200, signin=True
+            ),
+        )
+        out = web_module.read_url("https://eon.pl/mojeon")
+        assert out.index("[aish:") < out.index("untrusted web content")
+
+    def test_a_working_signed_in_read_says_nothing_extra(self, state, monkeypatch):
+        """No false alarms: the note exists for the case that went wrong, and a
+        page that came back as the owner must read exactly as it did before."""
+        browser._remember_logins({"eon.pl"})
+        self._no_fetch(monkeypatch)
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text=page_sized("Faktura 09/2026"), title="", images=[], url=url,
+                status=200, signin=False,
+            ),
+        )
+        assert "[aish:" not in web_module.read_url("https://eon.pl/mojeon")
+
+    def test_no_browser_says_the_read_was_made_anonymously(self, state, monkeypatch):
+        """Falling back to the fetch is right — plenty of a signed-in host is
+        public. Falling back SILENTLY is the bug: the model then reports a
+        stranger's view of the site as the owner's account."""
+        browser._remember_logins({"eon.pl"})
+        monkeypatch.setattr(
+            web_module,
+            "_fetch",
+            lambda url: ("<html><body>public tariff page</body></html>", "text/html"),
+        )
+
+        def unavailable(url, **kw):
+            raise browser.BrowserUnavailable("playwright is not installed")
+
+        monkeypatch.setattr(browser, "read", unavailable)
+        out = web_module.read_url("https://eon.pl/cennik")
+        assert "fetched ANONYMOUSLY" in out
+        assert "playwright is not installed" in out   # the reason, not just the fact
+        assert "public tariff page" in out
+        assert "sign-in form" not in out              # this page was not one
+
+    def test_an_anonymous_read_that_lands_on_a_login_form_says_that_too(
+        self, state, monkeypatch
+    ):
+        """Anonymous AND walled: the page carries no account content at all, so
+        the model must not mine it for one."""
+        browser._remember_logins({"eon.pl"})
+        monkeypatch.setattr(
+            web_module, "_fetch", lambda url: (self.LOGIN_HTML, "text/html")
+        )
+
+        def unavailable(url, **kw):
+            raise browser.BrowserUnavailable("the browser is being driven by hand")
+
+        monkeypatch.setattr(browser, "read", unavailable)
+        out = web_module.read_url("https://eon.pl/mojeon")
+        assert "fetched ANONYMOUSLY" in out
+        assert "This page is a sign-in form" in out
+        assert "driven by hand" in out
+
+    def test_the_browser_is_launched_at_most_once_per_read(self, state, monkeypatch):
+        """The pre-fetch route and the failure routes are the same escalation. A
+        signed-in host that 403s used to reach `_browser_read` twice."""
+        browser._remember_logins({"eon.pl"})
+        launches = []
+
+        def once(url, **kw):
+            launches.append(url)
+            raise browser.BrowserUnavailable("not installed")
+
+        monkeypatch.setattr(browser, "read", once)
+        monkeypatch.setattr(web_module, "_fetch", _http_error(403))
+        assert web_module.read_url("https://eon.pl/mojeon").startswith("ERROR")
+        assert len(launches) == 1
+
+
+class TestAskingForAPassword:
+    """`asks_to_sign_in` — the fetch path's evidence that a page is a door.
+
+    The FIELD, never the wording: "Zaloguj się" / "Sign in" sits in the nav of
+    half the logged-in web, and matching words would need maintaining per
+    language on a corpus that is mostly Polish."""
+
+    @pytest.mark.parametrize(
+        "html",
+        [
+            '<input type="password" name="x">',
+            "<input type=password>",
+            "<INPUT TYPE='PASSWORD'>",
+            '<input class="field" type = "password" required>',
+        ],
+    )
+    def test_a_password_field_in_any_spelling(self, html):
+        assert browser.asks_to_sign_in(html) is True
+
+    @pytest.mark.parametrize(
+        "html",
+        [
+            "",
+            "<p>Zaloguj się</p>",                       # the word alone is not a form
+            '<a href="/login">Sign in</a>',             # a nav link is not a form
+            '<input type="email"><input type="text">',
+            "the word password in prose",
+        ],
+    )
+    def test_everything_else_is_not_a_sign_in_page(self, html):
+        assert browser.asks_to_sign_in(html) is False
+
+
 class TestSheddingASouredReputation:
     """A wall on a warm profile is usually the SCORE, not the page (#221).
 
