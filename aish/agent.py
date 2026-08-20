@@ -345,9 +345,8 @@ NOT_EXECUTED = "(not executed — the user stopped the task)"
 # show_* tool hands back; far short of a page of fetched text.
 CALL_RESULT_CHARS = 600
 
-# Below this length a "secret" is too short to match a command without firing on
-# ordinary words. A four-character secret is not one worth protecting anyway.
-SECRET_MIN_MATCH = 8
+# Both directions of the secret join use one threshold, owned by the store.
+SECRET_MIN_MATCH = secrets.MIN_MATCH
 
 # Loop detection: the exact same tool call returning the exact same output is
 # not progress. At WARN repeats the model gets one nudge to change approach;
@@ -1323,7 +1322,9 @@ class Agent:
         self.approve_tool = approve_tool
         self.approve_import = approve_import
         self.echo = echo
-        self.stream = stream
+        # Wrapped once here rather than at each `on_line=` site, so a new
+        # streaming caller cannot be the one that forgets.
+        self.stream = self._scrubbed_stream(stream)
         self.chat = client_chat
         # aish-owned command aliases, expanded on the first word BEFORE the
         # approval gate (see aliases.py and expand_alias). Sanitized so a
@@ -3079,6 +3080,61 @@ class Agent:
         # the payload. Shape is the trace contract's (§3.4): `url=https://…`.
         return Agent._kv_summary(a)
 
+    def _scrub_result(self, result: str) -> str:
+        """A stored secret must not survive a tool's OUTPUT.
+
+        The gate has always refused a command that CARRIES one of his values
+        (`_command_has_a_secret`). A command that PRINTS one was the same leak
+        by the other route, and it reached further: the model's context, the
+        trace, and the append-only log — the copy that outlives the session and
+        syncs to every device. A real token left that way, and the session that
+        did it had the no-inline-secrets rule bound the whole time; the rule was
+        watching the argument while the value came back in the result.
+
+        Scrubbing HERE, in the single funnel every tool call passes through, is
+        what makes "a secret cannot reach the log" a property of the runtime
+        rather than of the model's discipline. It runs before `_observe_for_rules`,
+        `_note_turn_call` and `_emit_tool_step`, so the turn record, the log and
+        the model's context all see the scrubbed text.
+
+        It is NOT the only copy, and assuming it was is how the first version of
+        this shipped half-done: `run_command` also stashes its output in
+        `_run_meta` inside `_dispatch`, upstream of here, and that copy becomes
+        the trace step's `output`. It is scrubbed where the meta is consumed.
+        Anything else that takes a result BEFORE this point owes the same.
+
+        The envelope is rebuilt, never carried: a string operation on a
+        `ToolOutcome` returns a plain `str` and silently drops `meta`, so it is
+        constructed LAST, exactly as that caveat requires (tools.py).
+        """
+        text = str(result)
+        scrubbed = secrets.scrub(text)
+        if scrubbed == text:
+            return result  # untouched, envelope intact
+        meta = getattr(result, "meta", None)
+        return tools.ToolOutcome(scrubbed, **meta) if meta else scrubbed
+
+    def _scrubbed_stream(
+        self, sink: "Callable[[str], None] | None"
+    ) -> "Callable[[str], None] | None":
+        """The live output path is not the return path.
+
+        `tools.run_command` streams lines through `on_line` as they arrive, so
+        scrubbing the returned result alone would keep a printed secret out of
+        the log and still paint it on the screen.
+
+        Best-effort by construction, and the funnel is what makes that
+        acceptable: a value split across two streamed lines survives here and
+        is still caught in `_scrub_result` before anything durable is written.
+        """
+        if sink is None:
+            return None
+
+        def scrubbed(line: str) -> None:
+            sink(secrets.scrub(line))
+
+        return scrubbed
+
     def _call_result(
         self,
         name: str,
@@ -3146,7 +3202,10 @@ class Agent:
             )
             return result
         except Exception as exc:  # noqa: BLE001 — a tool bug must not kill the session
-            result = f"ERROR: tool '{name}' failed internally: {exc!r}"
+            # Scrubbed like any other result: a plugin tool is handed its
+            # declared secrets in its environment, so its crash is a place one
+            # can surface (tool_plugins.execute).
+            result = self._scrub_result(f"ERROR: tool '{name}' failed internally: {exc!r}")
             self.echo(result)
             self._emit_step(
                 kind="tool",
@@ -3159,6 +3218,7 @@ class Agent:
                 summary="failed",
             )
             return result
+        result = self._scrub_result(result)
         self._note(f"{mark} {name} {format_secs(elapsed)}")
         # The single funnel every tool call passes through, parallel path
         # included — so a binding's view of "was the routed tool tried, and did
@@ -3209,9 +3269,19 @@ class Agent:
         if self._run_meta is not None:  # run_command: command, decision, output
             step.update(self._run_meta)
             self._run_meta = None
-            output = step.get("output") or ""
-            if len(output) > STEP_OUTPUT_CAP:  # the trace shows a preview, not the full log
-                step["output"] = output[:STEP_OUTPUT_CAP] + "\n… (truncated)"
+            # `output` is a SECOND copy of the result, taken inside _dispatch
+            # before the funnel scrubbed the value it returned — so the trace
+            # kept a printed secret the model itself never saw. Scrubbed on the
+            # way in here, where the meta is consumed, rather than at each of
+            # the four sites that build it: same reasoning as the ok/status rule
+            # below, which replaced ten scattered fixes with one applied last.
+            output = step.get("output")
+            if output:  # only ever rewritten, never added — the shape is contract
+                output = secrets.scrub(output)
+                # the trace shows a preview, not the full log
+                if len(output) > STEP_OUTPUT_CAP:
+                    output = output[:STEP_OUTPUT_CAP] + "\n… (truncated)"
+                step["output"] = output
         # ONE rule, applied last, over every path that can refuse: if the
         # action did not happen, the step is not green. This is wider than the
         # five plugin constants the contract enumerates (§6.13) — `run_command`
@@ -5009,20 +5079,14 @@ class Agent:
 
         A join against his own keychain, not a pattern he has to write — the
         alternative would have him paste the secret into a rule file, which is
-        exactly what the rule exists to stop. Values are read here and
-        discarded; nothing is logged, and the rule records only that a match
-        happened.
+        exactly what the rule exists to stop. Values are matched inside the
+        store and discarded; nothing is logged, and the rule records only that
+        a match happened.
+
+        This is the INPUT half. `_scrub_result` is the output half, and it
+        exists because this one alone was never enough.
         """
-        if not command.strip():
-            return False
-        try:
-            for name in secrets.names():
-                value = secrets.get(name)
-                if value and len(value) >= SECRET_MIN_MATCH and value in command:
-                    return True
-        except Exception:  # noqa: BLE001 — no keychain is "no match", never a crash
-            return False
-        return False
+        return secrets.contains(command)
 
     def _speak_first_gate(self, name: str) -> str | None:
         """`must_first: answer` — say something before running anything.

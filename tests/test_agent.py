@@ -17,9 +17,11 @@ import pytest
 
 from aish import agent as agent_module
 from aish import rules as rules_module
+from aish import secrets as secrets_module
 from aish import session as session_module
 from aish import skills as skills_module
 from aish import tool_plugins
+from aish import tools as tools_module
 from aish.agent import AISH_NOTE, DENIED_RESULT, Agent
 from aish.approval import Approved, Blocked, Denied
 from aish.session import SessionLog
@@ -8192,3 +8194,172 @@ class TestReadPdf:
         assert agent._egress_novel_hosts("read_pdf", {"source": "https://x.test/a.pdf"}) == [
             "x.test"
         ]
+
+
+class TestSecretScrub:
+    """A stored secret must not survive a tool's OUTPUT.
+
+    The gate has always refused a command CARRYING one of his values. A command
+    that PRINTS one was the same leak by the other route, and it reached
+    further: the model's context, the trace, and the append-only log — the copy
+    that outlives the session and syncs to every device. It happened. A live
+    Pushover token came back from `security find-generic-password -w`, was
+    logged verbatim, and the no-inline-secrets rule was bound the whole time —
+    watching the argument while the value came back in the result.
+    """
+
+    TOKEN = "awov6ybawmor59a9d7u926vk1yfdsm"
+
+    @pytest.fixture
+    def stored(self, monkeypatch, tmp_path):
+        index = tmp_path / "names.txt"
+        index.write_text("PUSHOVER_TOKEN\nTINY\n", encoding="utf-8")
+        monkeypatch.setattr(secrets_module, "NAMES_INDEX", index)
+        monkeypatch.setattr(
+            secrets_module,
+            "get",
+            lambda name: {"PUSHOVER_TOKEN": self.TOKEN, "TINY": "abc"}.get(name),
+        )
+        secrets_module._invalidate()
+        yield
+        secrets_module._invalidate()
+
+    def _leaky_command(self, tmp_path):
+        """A command whose OUTPUT holds the secret while its text does not —
+        the shape the input-side check is blind to by construction."""
+        leaked = tmp_path / "leaked"
+        leaked.write_text(self.TOKEN + "\n", encoding="utf-8")
+        return f"cat {leaked}"
+
+    def test_a_printed_secret_reaches_neither_the_model_nor_the_record(
+        self, stored, tmp_path
+    ):
+        steps: list[dict] = []
+        logged: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("run_command", command=self._leaky_command(tmp_path))
+                    ]
+                ),
+                model_says("done"),
+            ],
+            step_log=steps.append,
+            on_message=logged.append,
+        )
+        agent.run_task("read that file")
+
+        result = tool_messages(agent.messages)[0]["content"]
+        assert self.TOKEN not in result  # the model's own context
+        assert self.TOKEN not in json.dumps(steps)  # the trace
+        assert self.TOKEN not in json.dumps(logged)  # everything the log persists
+
+    def test_the_placeholder_names_the_secret(self, stored, tmp_path):
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("run_command", command=self._leaky_command(tmp_path))
+                    ]
+                ),
+                model_says("done"),
+            ]
+        )
+        agent.run_task("read that file")
+        # Naming it is the point: a bare *** says something was removed, this
+        # says aish already HOLDS the thing — which is what stops the next
+        # attempt to go and fetch it by hand.
+        assert "[secret PUSHOVER_TOKEN — redacted by aish]" in (
+            tool_messages(agent.messages)[0]["content"]
+        )
+
+    def test_the_live_stream_is_scrubbed_too(self, stored, tmp_path):
+        """run_command streams via on_line as lines arrive: scrubbing only the
+        returned result keeps a printed secret off disk and still paints it on
+        the screen."""
+        streamed: list[str] = []
+        agent, _ = make_agent(
+            [
+                model_says(
+                    tool_calls=[
+                        tool_call("run_command", command=self._leaky_command(tmp_path))
+                    ]
+                ),
+                model_says("done"),
+            ],
+            stream=streamed.append,
+        )
+        agent.run_task("read that file")
+        assert streamed  # the path actually ran
+        assert self.TOKEN not in "".join(streamed)
+
+    def test_the_envelope_survives_the_scrub(self, stored):
+        """A string operation on a ToolOutcome returns a plain str and drops
+        `meta`, so the scrub must rebuild it — or every scrubbed result would
+        silently fall back to the legacy prefix sniff."""
+        agent, _ = make_agent([model_says("hi")])
+        outcome = tools_module.ToolOutcome(
+            f"token {self.TOKEN}",
+            status=tools_module.STATUS_OK,
+            verdict_by=tools_module.VERDICT_EXIT_CODE,
+        )
+        scrubbed = agent._scrub_result(outcome)
+        assert self.TOKEN not in scrubbed
+        assert scrubbed.meta["status"] == tools_module.STATUS_OK
+        assert scrubbed.meta["verdict_by"] == tools_module.VERDICT_EXIT_CODE
+
+    def test_an_untouched_result_keeps_its_identity(self, stored):
+        """No match must cost nothing — the same object back, envelope and all."""
+        agent, _ = make_agent([model_says("hi")])
+        outcome = tools_module.ToolOutcome("nothing secret here", status="ok")
+        assert agent._scrub_result(outcome) is outcome
+
+    def test_a_value_too_short_to_match_is_left_alone(self, stored):
+        """Scrubbing a 3-character 'secret' would corrupt ordinary output far
+        more often than it would protect anything."""
+        assert secrets_module.scrub("abc is the alphabet") == "abc is the alphabet"
+
+    def test_the_longest_secret_is_replaced_first(self, monkeypatch, tmp_path):
+        """One value can be a substring of another; replacing the short one
+        first leaves a fragment of the long one with a placeholder inside it."""
+        index = tmp_path / "names.txt"
+        index.write_text("SHORT\nLONG\n", encoding="utf-8")
+        monkeypatch.setattr(secrets_module, "NAMES_INDEX", index)
+        monkeypatch.setattr(
+            secrets_module,
+            "get",
+            lambda name: {"SHORT": "abcdefgh", "LONG": "abcdefgh12345"}.get(name),
+        )
+        secrets_module._invalidate()
+        assert secrets_module.scrub("x abcdefgh12345 y") == (
+            "x [secret LONG — redacted by aish] y"
+        )
+        secrets_module._invalidate()
+
+    def test_the_input_half_still_refuses_a_carried_secret(self, stored):
+        """Regression: both halves now share one cached matcher."""
+        agent, _ = make_agent([model_says("hi")])
+        assert agent._command_has_a_secret(f"curl -H 'Bearer {self.TOKEN}' x.test") is True
+        assert agent._command_has_a_secret("curl x.test") is False
+
+    def test_the_suite_never_reads_the_real_keychain(self, monkeypatch, tmp_path):
+        """Pins the conftest guard, with nothing here stubbed but the probe.
+
+        The scrub runs on EVERY tool result, so without an empty name index a
+        suite run would shell out to `security` once per stored secret per tool
+        call — reading the developer's live credentials thousands of times to
+        decide that a fixture's output does not contain them.
+        """
+        reached: list = []
+        monkeypatch.setattr(
+            secrets_module, "_security", lambda *a, **k: reached.append(a)
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo hi")]),
+                model_says("done"),
+            ]
+        )
+        agent.run_task("say hi")
+        assert reached == []

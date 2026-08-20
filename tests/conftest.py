@@ -9,6 +9,7 @@ from aish import browser as browser_module
 from aish import notify as notify_module
 from aish import rule_compiler as rule_compiler_module
 from aish import rules as rules_module
+from aish import secrets as secrets_module
 from aish import skills as skills_module
 from aish import tool_plugins as tool_plugins_module
 
@@ -61,6 +62,32 @@ def no_real_notifications(monkeypatch):
     """
     monkeypatch.setenv("AISH_NOTIFY", "0")
     assert not notify_module.enabled()
+
+
+@pytest.fixture(autouse=True)
+def no_real_secrets(tmp_path_factory, monkeypatch):
+    """Never read the developer's real login Keychain.
+
+    Same reasoning as the notifier guard, and now on a much hotter path: the
+    secret scrub joins against the stored values on EVERY tool result, and the
+    name index it starts from is a real file in the developer's state dir. Left
+    alone, a suite run would shell out to `security` once per stored secret per
+    tool call — reading their live credentials thousands of times to decide
+    that a test fixture's output does not contain them.
+
+    Pointing the index at an empty tmp file makes the answer "no secrets
+    stored", which costs nothing and reaches nothing. test_secrets patches the
+    same constant itself (plus the `security` binary), so it still exercises
+    the store; that patch lands inside the test and wins.
+    """
+    monkeypatch.setattr(
+        secrets_module,
+        "NAMES_INDEX",
+        tmp_path_factory.mktemp("secret-names") / "secret-names.txt",
+    )
+    secrets_module._invalidate()  # the cache outlives a test; the patch does not
+    yield
+    secrets_module._invalidate()
 
 
 @pytest.fixture(autouse=True)

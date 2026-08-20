@@ -27,12 +27,18 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 from pathlib import Path
 
 SERVICE = "aish"
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # env-var-shaped
 NAMES_INDEX = Path.home() / ".local" / "state" / "aish" / "secret-names.txt"
 _SECURITY = "/usr/bin/security"
+
+# Below this length a stored "secret" collides with ordinary text — scrubbing
+# every occurrence of a 3-character value would corrupt output rather than
+# protect anything. A real token clears it by an order of magnitude.
+MIN_MATCH = 8
 
 
 class SecretError(RuntimeError):
@@ -73,6 +79,7 @@ def put(name: str, value: str) -> None:
     if proc.returncode != 0:
         raise SecretError(proc.stderr.strip() or "failed to store secret")
     _index_add(name)
+    _invalidate()
 
 
 def delete(name: str) -> bool:
@@ -81,6 +88,7 @@ def delete(name: str) -> bool:
         return False
     proc = _security(["delete-generic-password", "-a", name, "-s", SERVICE])
     _index_remove(name)
+    _invalidate()
     return proc.returncode == 0
 
 
@@ -115,3 +123,75 @@ def _write_index(name_set: set[str]) -> None:
         NAMES_INDEX.write_text("\n".join(sorted(name_set)) + "\n", encoding="utf-8")
     except OSError:
         pass
+
+
+# --- Matching stored values in arbitrary text ------------------------------
+#
+# Two callers, one on each side of a tool call: the rule gate refuses a COMMAND
+# carrying one of his values, and the runtime scrubs a RESULT that printed one.
+# Both run on every call, and a Keychain read is a subprocess each — so the
+# values are cached rather than re-read per call.
+#
+# Holding them in process memory for the session does not move the boundary
+# this module states: the ceiling is FileVault plus OS access control, and an
+# attacker already running as the user can read the Keychain directly.
+
+_CACHE_TTL = 30.0
+_cache: dict = {"names": None, "at": 0.0, "pairs": []}
+
+
+def _invalidate() -> None:
+    _cache.update(names=None, at=0.0, pairs=[])
+
+
+def _matchable() -> list[tuple[str, str]]:
+    """(name, value) for every stored secret long enough to match on.
+
+    Refreshed when the NAME set changes or the TTL lapses. The TTL is what
+    covers a ROTATED value that kept its name: nothing on disk changes in that
+    case, so a names-only key would keep matching the dead value and miss the
+    live one for the rest of the session.
+    """
+    current = tuple(names())
+    now = time.monotonic()
+    if _cache["names"] != current or now - _cache["at"] > _CACHE_TTL:
+        pairs = []
+        for name in current:
+            value = get(name)
+            if value and len(value) >= MIN_MATCH:
+                pairs.append((name, value))
+        # Longest first: one secret can be a substring of another, and
+        # replacing the short one first would leave a fragment of the long one
+        # in the text with its placeholder wrapped around the middle.
+        pairs.sort(key=lambda pair: len(pair[1]), reverse=True)
+        _cache.update(names=current, at=now, pairs=pairs)
+    return _cache["pairs"]
+
+
+def contains(text: str) -> bool:
+    """Does this text carry one of his stored secrets, verbatim?"""
+    if not text or not text.strip():
+        return False
+    try:
+        return any(value in text for _, value in _matchable())
+    except Exception:  # noqa: BLE001 — no keychain is "no match", never a crash
+        return False
+
+
+def scrub(text: str) -> str:
+    """`text` with every stored secret replaced by a placeholder naming it.
+
+    Naming the secret is deliberate: a bare `***` tells a reader that something
+    was removed but not that aish already HOLDS the thing, which is the fact
+    that stops the next attempt to go and fetch it by hand.
+    """
+    if not text:
+        return text
+    try:
+        pairs = _matchable()
+    except Exception:  # noqa: BLE001 — a broken keychain must not break a tool
+        return text
+    for name, value in pairs:
+        if value in text:
+            text = text.replace(value, f"[secret {name} — redacted by aish]")
+    return text
