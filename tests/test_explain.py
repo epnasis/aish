@@ -868,7 +868,9 @@ class TestWorthALook:
         rows = self._doc(log, tmp_path)["notes"]["rows"]
         failed = [r for r in rows if r["check"] == "tool_failed"]
         assert failed, rows
-        assert failed[0]["where"] == {"section": "did", "call": 1}
+        # The section a READER sees, not the record kind it came from: the
+        # panel's three parts are given / flow / produced.
+        assert failed[0]["where"] == {"section": "flow", "call": 1}
         assert "read_docs" in failed[0]["text"]
 
     def test_every_row_cites_where_it_came_from(self, tmp_path):
@@ -877,7 +879,7 @@ class TestWorthALook:
         agent, _, log = make_logged_agent([model_says("done")], tmp_path)
         agent.run_task("hello")
         for row in self._doc(log, tmp_path)["notes"]["rows"]:
-            assert row["where"].get("section") in {"given", "thought", "did", "produced"}
+            assert row["where"].get("section") in {"given", "flow", "produced"}
             assert row["text"].strip()
 
     def test_the_empty_case_names_the_checks_rather_than_claiming_all_clear(
@@ -934,3 +936,159 @@ class TestWorthALook:
         doc = self._doc(log, tmp_path)
         again = explain_mod.notes(doc)
         assert again["rows"] == doc["notes"]["rows"]
+
+
+class TestTheFlow:
+    """A turn read in the order it happened (#243 follow-up).
+
+    Sectioned by record kind, a dossier cannot answer "what did it think after
+    it got that result" — which is the question people open one to ask. The
+    owner put it plainly: "I don't know which information was retrieved after
+    which tool."
+    """
+
+    def _flow(self, log, tmp_path, ordinal=0):
+        lg = explain_mod.load(log.path)
+        return explain_mod.dossier(lg.turns[ordinal], lg, tmp_path)
+
+    def test_each_call_sits_under_the_thinking_that_issued_it(self, tmp_path):
+        agent, _, log = make_logged_agent(
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="ls")],
+                           thinking="check the docs first"),
+                model_says(tool_calls=[tool_call("read_docs", command="grep")],
+                           thinking="now the other one"),
+                model_says("done", thinking="ready to answer"),
+            ],
+            tmp_path,
+        )
+        agent.run_task("go")
+        doc = self._flow(log, tmp_path)
+        flow = doc["flow"]
+        assert flow["grouping"] == explain_mod.GROUPING_RECORDED
+        assert flow["unplaced"] == []
+        rounds = {r["model_call"]: r for r in flow["rounds"]}
+        assert rounds[1]["calls"] == [1]
+        assert rounds[2]["calls"] == [2]
+        assert rounds[3]["calls"] == []
+        thoughts = {t["model_call"]: t["text"] for t in doc["thought"]["calls"]}
+        assert thoughts[1] == "check the docs first"
+        assert thoughts[3] == "ready to answer"
+
+    def test_rounds_reference_by_id_and_never_copy(self, tmp_path):
+        """Tool output is the bulk of the payload and this is fetched to a
+        phone; copying it into the rounds would double the response."""
+        agent, _, log = make_logged_agent(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("ok")],
+            tmp_path,
+        )
+        agent.run_task("go")
+        flow = self._flow(log, tmp_path)["flow"]
+        for rnd in flow["rounds"]:
+            assert all(isinstance(c, int) for c in rnd["calls"])
+            assert rnd["thought"] is None or isinstance(rnd["thought"], int)
+
+    def test_a_log_without_the_stamp_is_labelled_inferred(self, tmp_path):
+        """File order is the real chronology within a turn, so attaching a call
+        to the preceding reasoning is right for these files — but it is still an
+        inference, and a reader must never see inference wearing a record's
+        clothes."""
+        agent, _, log = make_logged_agent(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("ok")],
+            tmp_path,
+        )
+        agent.run_task("go")
+        stripped = tmp_path / "unstamped.jsonl"
+        kept = []
+        for line in log.path.read_text().splitlines():
+            record = json.loads(line)
+            step = record.get("step") or {}
+            if step.get("kind") == "call":
+                step.pop("model_call", None)
+                line = json.dumps(record)
+            kept.append(line)
+        stripped.write_text("\n".join(kept) + "\n")
+        lg = explain_mod.load(stripped)
+        flow = explain_mod.dossier(lg.turns[0], lg, tmp_path)["flow"]
+        assert flow["grouping"] == explain_mod.GROUPING_INFERRED
+        assert flow["rounds"][0]["calls"] == [1], "the fallback did not attach it"
+        assert "inferred" in explain_mod.explain(stripped, root=tmp_path)
+
+    def test_a_call_with_no_round_to_belong_to_is_not_folded_into_round_one(self, tmp_path):
+        """claude-max routes tool calls straight into _call_result without ever
+        entering the model loop, so nothing recorded issued them. Filing them
+        under round 1 would be a fabricated join."""
+        # The claude-max shape for real: tool calls, and no `reasoning` record
+        # anywhere to infer an order from.
+        path = tmp_path / "session-sdk.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            {"ts": "t", "kind": "trace",
+             "step": {"kind": "call", "call": 1, "name": "read_docs", "args": {"command": "ls"}}},
+            {"ts": "t", "kind": "trace",
+             "step": {"kind": "tool", "call": 1, "name": "read_docs", "ok": True, "secs": 0.1}},
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ]) + "\n")
+        lg = explain_mod.load(path)
+        flow = explain_mod.dossier(lg.turns[0], lg, tmp_path)["flow"]
+        assert flow["grouping"] == explain_mod.GROUPING_NONE
+        assert flow["unplaced"] == [1], "the call vanished"
+        assert flow["rounds"] == [], "a round was invented for a backend that records none"
+        assert "records no model calls" in explain_mod.explain(path, root=tmp_path)
+
+    def test_the_claude_max_path_records_no_model_call_at_all(self, tmp_path):
+        """A zero would say "round zero"; absence says "this backend records no
+        model calls". They route to different repairs."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        agent._call_result("read_docs", lambda: ("out", 0.1), args={"command": "ls"})
+        emitted = steps(log.path, "call")
+        assert "model_call" not in emitted[-1], emitted[-1]
+
+    def test_a_mid_task_stub_shows_up_where_it_happened(self, tmp_path):
+        """The sharpest between-round event: a result the model had already read
+        was replaced with a stub before the next call. Sectioned by kind, that
+        fact sat nowhere near the thinking it explains."""
+        agent, _, log = make_logged_agent(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("ok")],
+            tmp_path,
+        )
+        agent.run_task("go")
+        rows = log.path.read_text().splitlines()
+        # A mid-task trim, written where the agent writes one: before a call.
+        for index, line in enumerate(rows):
+            if (json.loads(line).get("step") or {}).get("model_call") == 2:
+                rows.insert(index, json.dumps({
+                    "ts": "t", "kind": "trace",
+                    "step": {"kind": "trim", "policy": "mid_task_budget", "affected": 1,
+                             "stubbed": [{"at": 3, "tool": "read_docs"}]},
+                }))
+                break
+        path = tmp_path / "trimmed.jsonl"
+        path.write_text("\n".join(rows) + "\n")
+        lg = explain_mod.load(path)
+        flow = explain_mod.dossier(lg.turns[0], lg, tmp_path)["flow"]
+        events = [e for r in flow["rounds"] for e in r["before"]]
+        loose = flow["loose"]
+        assert events or loose, "the trim disappeared from the flow"
+        out = explain_mod.explain(path, root=tmp_path)
+        assert "were stubbed for the model" in out
+
+    def test_a_seed_time_trim_stays_out_of_the_flow(self, tmp_path):
+        """It happened before the first model call, so it shaped what the turn
+        STARTED from. Putting it in a round asserts a causality that is false."""
+        path = tmp_path / "session-seed.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            {"ts": "t", "kind": "trace", "step": {"kind": "trim", "policy": "eager_stub",
+                                                  "affected": 2, "bytes_before": 10,
+                                                  "bytes_after": 5}},
+            {"ts": "t", "kind": "trace", "step": {"kind": "reasoning", "model_call": 1,
+                                                  "text": "thinking"}},
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ]) + "\n")
+        lg = explain_mod.load(path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        assert doc["given"]["trims"], "the seed trim was dropped"
+        assert not [e for r in doc["flow"]["rounds"] for e in r["before"]]
+        assert "eager_stub" in explain_mod.explain(path, root=tmp_path)
