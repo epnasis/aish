@@ -299,6 +299,13 @@ def check_hard(url: str) -> None:
     assert "Portugalia" not in kraj.detail, kraj.detail
     print(f"long dropdown → {kraj.line()}")
 
+    # And it is out of the page TEXT too, which is the bigger half: inner_text
+    # includes every option of a closed <select>, and this one was 3 500 of the
+    # 4 176 characters the model was being handed.
+    assert "Kraj 200" not in page.text, page.text[:400]
+    assert "250 options — see the control list" in page.text, page.text[:400]
+    print(f"page text without the option flood → {len(page.text)} characters")
+
     chosen = browser.browse_act(kraj.n, "choose", value="niemcy")
     assert "Niemcy (+49)" in named(chosen, "kraj").detail, named(chosen, "kraj").detail
     print(f"chose by folded name → {named(chosen, 'kraj').detail}")

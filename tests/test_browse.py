@@ -7,6 +7,8 @@ verified against real Chrome by `scripts/verify_browse.py`.
 """
 
 import os
+import shutil
+import subprocess
 
 import pytest
 
@@ -594,3 +596,61 @@ class TestAPageThatSaysItIsStillLoading:
 
     def test_a_page_that_leads_with_it_still_counts(self):
         assert browse.still_loading("Wczytywanie danych\n" + "x" * 5000) is True
+
+
+class TestADropdownIsNotThePage:
+    """`inner_text` includes every option of a closed <select>. Measured: a
+    250-option country picker was 3 500 of a 4 176-character page — 84% of it,
+    and on a real portal most of the read budget spent on one control the model
+    has not reached yet."""
+
+    def test_the_whole_block_is_replaced_by_a_count(self):
+        text = "Wybierz kraj\nPolska\nPortugalia\nPeru\nDalej"
+        out = browse.strip_option_floods(
+            text, [{"text": "Polska\nPortugalia\nPeru", "count": 250, "name": "kraj"}]
+        )
+        assert out == "Wybierz kraj\n[dropdown 'kraj': 250 options — see the control list]\nDalej"
+
+    def test_a_line_elsewhere_on_the_page_survives(self):
+        """Never line by line: the page's own sentence about Poland is not the
+        dropdown's option for it."""
+        text = "Faktura dla: Polska\nPolska\nPortugalia\nPeru\nRazem"
+        out = browse.strip_option_floods(
+            text, [{"text": "Polska\nPortugalia\nPeru", "count": 250, "name": ""}]
+        )
+        assert "Faktura dla: Polska" in out
+        assert "Portugalia" not in out
+
+    def test_a_block_that_does_not_match_is_left_alone(self):
+        """The worst this can do is nothing."""
+        text = "Polska | Portugalia"
+        assert browse.strip_option_floods(text, [{"text": "Polska\nPortugalia"}]) == text
+
+    def test_nothing_to_strip_changes_nothing(self):
+        assert browse.strip_option_floods("hello", []) == "hello"
+
+    def test_an_unnamed_dropdown_is_still_counted(self):
+        out = browse.strip_option_floods("a\nb\nc", [{"text": "a\nb", "count": 9}])
+        assert out == "[dropdown: 9 options — see the control list]\nc"
+
+
+class TestTheInjectedJavaScriptParses:
+    """A backslash that survives one layer of quoting and not the other is a
+    syntax error the PAGE reports and nothing else does — `FLOOD_JS` shipped
+    with a literal newline inside a string literal, the evaluate threw, the
+    caller swallowed it as "a page that will not answer", and the only symptom
+    was that nothing happened."""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["CONTROLS_JS", "REACHABLE_JS", "CENTRE_JS", "OPTIONS_JS", "FLOOD_JS"],
+    )
+    def test_every_injected_script_is_valid_javascript(self, name):
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("node is not installed")
+        source = f"const f = {getattr(browse, name)};"
+        result = subprocess.run(
+            [node, "--check", "-"], input=source, text=True, capture_output=True
+        )
+        assert result.returncode == 0, f"{name} does not parse:\n{result.stderr}"
