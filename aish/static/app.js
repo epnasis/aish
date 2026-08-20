@@ -4740,6 +4740,37 @@ function renderMarkdownBlocks(text) {
       frag.appendChild(holder);
       continue;
     }
+    // [RULE-VERDICT-START]
+    // aish's OWN verdict on the answer, not a paragraph of it.
+    //
+    // When a rule fails, the harness goads the model to fix its answer a bounded
+    // number of times and then delivers it anyway rather than wedging the turn —
+    // carrying a line the harness writes saying what was not followed. That line
+    // is the point: a rule that was tried and failed has to be visible to the
+    // owner and not only to automation.
+    //
+    // It arrived in the same font, the same colour and the same paragraph flow as
+    // the answer, so it read as though the model had said it — an accusation in
+    // the voice of the accused. Everything else aish says in its own voice is
+    // marked and rendered as a system row; this one spells the marker `[aish]`
+    // rather than `[aish:` and so matched nothing.
+    //
+    // Parsed HERE rather than sent as its own event, for the reason the
+    // attachment notes record: the prose is not a display string that leaked, it
+    // IS the record. It goes into the session log and into the model
+    // conversation, so a structured field would describe only turns logged after
+    // today and this parser would still be needed for every older one.
+    const verdict = line.match(/^\[aish\]\s+(.*)$/);
+    if (verdict) {
+      flush();
+      const row = document.createElement("div");
+      row.className = "rule-verdict";
+      row.appendChild(inlineMd(verdict[1]));
+      frag.appendChild(row);
+      i++;
+      continue;
+    }
+    // [RULE-VERDICT-END]
     const heading = line.match(/^ {0,3}(#{1,6})\s+(.*)$/);
     if (heading) {
       flush();
@@ -4881,7 +4912,20 @@ const INLINE_RE = new RegExp(
   "|(~~[^~]+~~)" +
   "|\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)" +
   "|\\[([^\\]\\n]+)\\]\\(aish-reply:\\/\\/([^)\\n]*)\\)" +
-  "|!\\[([^\\]\\n]*)\\]\\(([^)\\s]+)\\)"
+  "|!\\[([^\\]\\n]*)\\]\\(([^)\\s]+)\\)" +
+  // A link to a file on THIS machine — last, so http, aish-reply and images
+  // are all read as themselves first, and appended rather than inserted so no
+  // existing branch's group number moves. Spaces are allowed inside the
+  // parentheses on purpose: the site names the file, and "faktura 09-2026.pdf"
+  // is what a real invoice is called.
+  //
+  // `file://` is accepted and thrown away. aish never writes it — the tool
+  // hands the model the exact line — but a model reaching for "a link to a file
+  // on your machine" reaches for `file://` on its own, and did: seven invoices
+  // in one real answer, every one of them inert, because a page cannot link to
+  // the filesystem. A chat log is never rewritten, so that answer has to keep
+  // rendering for as long as the chat exists — and now it renders as the files.
+  "|\\[([^\\]\\n]+)\\]\\((?:file:\\/\\/)?(\\/[^)\\n]+)\\)"
 );
 
 // Every external http(s) link the transcript renders opens in the user's real
@@ -5247,6 +5291,41 @@ function embedForLink(label, url, poster) {
   }
   return null;
 }
+
+// [FILE-LINK-START]
+// A link to a file ON THIS MACHINE is not a link — it is the file, and it draws
+// the way every other file in the transcript draws (#237).
+//
+// The gap this closes: aish drives the owner's signed-in portal, clicks
+// "Pobierz e-fakturę", and the invoice lands in its downloads folder. The model
+// could then say where it was and read it aloud, and that was all — the owner
+// had a path in a sentence and no way to touch the document aish had just
+// fetched for him. `/download` would have served it the whole time; nothing in
+// an ANSWER could ask.
+//
+// It goes through `embedForLink` because that is already the seam for "this
+// link is really something else": a YouTube URL becomes a player, a Maps URL
+// becomes a map, and an absolute local path becomes the file. And it hands off
+// to `attachmentChip`, so there is ONE answer to what a file looks like and
+// what tapping it does — a PDF opens onto its pages, anything else saves.
+//
+// A file EXTENSION is required, so a site-relative link the model wrote by hand
+// (`[the docs](/help)`) stays an anchor rather than becoming a chip for a file
+// that does not exist. Both were broken before; only one of them is a file.
+const LOCAL_FILE_RE = /^\/[^\n]*\.[A-Za-z0-9]{1,8}$/;
+
+function fileChip(label, url) {
+  if (!LOCAL_FILE_RE.test(url)) return null;
+  const name = url.split("/").pop() || url;
+  // An image is a picture, not a chip — the same call `attachmentNode` makes.
+  // Written as an ordinary link by a model that had a path and no picture, it
+  // still shows the picture.
+  if (ATTACH_IMAGE_RE.test(name) && imageSrc(url)) return inlineImage(label || name, url);
+  const chip = attachmentChip({ kind: kindOfFile(name), name, path: url });
+  chip.classList.add("md-file-chip");
+  return chip;
+}
+// [FILE-LINK-END]
 
 // How long the player gets before the card admits nothing is happening.
 //
@@ -5631,6 +5710,12 @@ function inlineMd(text) {
       frag.appendChild(quickReplyChip(match[7], match[8]));
     } else if (match[10] !== undefined) {
       frag.appendChild(inlineImage(match[9], match[10]));
+    } else if (match[12] !== undefined) {
+      // Not a file after all (a site-relative link the model wrote by hand):
+      // leave the source visible rather than render an anchor that 404s on our
+      // own origin, which is what it did before.
+      frag.appendChild(fileChip(match[11], match[12])
+                       || document.createTextNode(match[0]));
     } else {
       const embed = embedForLink(match[5], match[6]);
       if (embed) {

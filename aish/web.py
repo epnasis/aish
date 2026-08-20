@@ -850,15 +850,39 @@ def downloaded_note(paths: list[str], what: str) -> str:
     is aish's, and the site had no say in either.
 
     Naming the reader matters — this is the one place a model reliably stops,
-    having got the document it was sent for and no idea that it may open it."""
+    having got the document it was sent for and no idea that it may open it.
+
+    And so does naming the LINE (#237). The file was fetched for the user, not
+    for the model: it lands in a folder only aish knows about, and everything
+    downstream — the chip in the web app, the tap that opens a PDF onto its
+    pages, the tap that saves anything else — hangs off that line appearing in
+    the answer. Without it he was told where his invoice was and could not
+    touch it. Built HERE rather than left to the model for the same reason
+    `show_image` builds its own: a bracket or a newline in a filename the SITE
+    chose would silently break the markdown."""
     if not paths:
         return ""
     files = "\n".join(f"  {path}" for path in paths)
+    lines = "\n".join(_file_link(path) for path in paths)
     return (
         f"[aish: {what}, through the user's signed-in session:\n{files}\n"
         'Read one with read_pdf(source="<path>") — it is already on this '
-        "machine, so do NOT fetch it again.]\n"
+        "machine, so do NOT fetch it again.\nYou MUST also give the user the "
+        "file itself: put the line(s) below in your answer EXACTLY as written, "
+        "on their own line. That is what makes it something they can open — a "
+        f"path in a sentence is not.\n{lines}]\n"
     )
+
+
+def _file_link(path: str) -> str:
+    """One markdown line that renders as the file itself.
+
+    Ordinary markdown, deliberately: it degrades to a readable name and path
+    everywhere that is not the web app, and the app already knows that a link to
+    an absolute local path is a file rather than an address. Brackets in the
+    name are dropped rather than escaped — the SITE chose that name."""
+    name = path.replace("\\", "/").split("/")[-1].replace("[", "").replace("]", "")
+    return f"[{name}]({path})"
 
 
 def _browser_read(

@@ -4669,14 +4669,17 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         machine over plain HTTP — so it is the same gate, plus a rule about
         WHICH files, which is deliberately narrow and states itself:
 
-        **you may save what aish can already show you, and what you attached.**
+        **you may save what aish can already show you, what you attached, and
+        what you sent aish to fetch.**
 
-        Images and PDFs are the first half (`/file` renders one inline,
-        `/pdf/page` renders the other page by page), the uploads dir is the
-        second — the owner put those there, and an attachment nobody can open is
-        the gap this closes. Everything else in the roots stays unreachable
-        here: a source tree full of files aish has never shown anyone is not
-        what "download the attachment" means.
+        Images and PDFs are the first (`/file` renders one inline, `/pdf/page`
+        renders the other page by page), the uploads dir is the second — the
+        owner put those there, and an attachment nobody can open is the gap this
+        closes. The browse downloads folder is the third: he asked aish to press
+        the button that produced that file, through his own signed-in session,
+        and a document only aish can open is aish keeping it. Everything else in
+        the roots stays unreachable here: a source tree full of files aish has
+        never shown anyone is not what "download the attachment" means.
 
         `Content-Disposition: attachment` + `nosniff` on every response, so a
         `.html` in uploads is saved rather than rendered as same-origin markup.
@@ -4694,7 +4697,15 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return JSONResponse({"error": "outside session roots"}, status_code=403)
         suffix = path.suffix.lower()
         shown = suffix in IMAGE_TYPES or suffix == ".pdf"
-        if not shown and not path.is_relative_to(self.uploads_dir.resolve()):
+        # And what aish FETCHED for him, through his own session, because he
+        # asked it to (#237). A browse click that lands an invoice is the same
+        # relationship as an upload with the direction reversed: he chose the
+        # file, it is his, and a document he cannot open is aish keeping it.
+        mine = (
+            path.is_relative_to(self.uploads_dir.resolve())
+            or path.is_relative_to(browser.downloads_dir().resolve())
+        )
+        if not shown and not mine:
             return JSONResponse({"error": "not a downloadable file"}, status_code=415)
         if not path.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)

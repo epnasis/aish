@@ -149,6 +149,18 @@ Every chip above the composer names a message THIS chat's agent is holding, and 
 ### `[SYNTHETIC]` — logged user messages that are not your bubble
 **L2.** `_user_event()` tags a live `user` event with the classification `session.synthetic_kind` will reach on replay; `addSystemMsg` renders it as a quiet system row. The only producers are the resume note and `/trigger` — what you type is never routed through it. A synthetic turn IS a real turn (all `case "user"` side effects stand) except that it seeds neither the chat title nor the composer's prompt history. — `test_synthetic_user_turn.js`
 
+### `[RULE-VERDICT]` — aish's verdict is not a paragraph of the answer
+**L2.** When a rule fails, the harness goads the model a bounded number of times and then delivers the answer anyway rather than wedging the turn, carrying a line it writes itself: `[aish] rule 'X' not followed: …`. That line is the point — `_verify_answer` records it as the reason: a rule that was tried and failed must be visible to the OWNER, not only to automation.
+
+It rendered in the same font, colour and paragraph flow as the answer, so it read as though the model had said it — an accusation in the voice of the accused, and the owner circled it in a screenshot and asked why it was in his answer (#250). Everything else aish says in its own voice is marked and rendered as a system row (`[SYNTHETIC]`, via `synthetic_kind`'s `[aish: ` marker); this one spells its marker `[aish]`, square bracket and no colon, so it matched nothing.
+
+A block-level rule in `renderMarkdownBlocks`, not a new event on the wire. The prose is not a display string that leaked — it IS the record, in the session log and in the model conversation — so a structured field would describe only turns logged after today while this parser would still be needed for every older one. Two owners of one fact, which `[ATTACHMENT-NOTES]` already settled the other way. — `test_rule_verdict.js`
+
+### `[FILE-LINK]` — a link to a file on this machine is the file
+**L2.** aish drives the owner's signed-in portal, presses *Pobierz e-fakturę*, and the invoice lands in its downloads folder — and the answer could only say WHERE it was. `/download` would have served it the whole time; nothing in an ANSWER could ask, because `INLINE_RE`'s plain-link branch is http-only and a local path matched no branch at all.
+
+An absolute path with a file extension now becomes the file. It hands off to `attachmentChip`, so there is ONE answer to what a file looks like and what tapping it does — a PDF opens onto its pages, an image is a picture, anything else saves. Three details are load-bearing: **spaces are allowed** inside the parentheses, because the site names the file and `faktura 09-2026.pdf` is what a real invoice is called; a **file extension is required**, so a site-relative link the model wrote by hand (`[the docs](/help)`) stays text rather than becoming a chip for a file that does not exist; and **`file://` is accepted and thrown away** — aish never writes it, but a model reaching for "a link to a file on your machine" reaches for it unprompted and did, seven inert links in one real answer, and a chat log is never rewritten. — `test_file_link_chip.js`
+
 ### `[FORK-ANCHOR]` — which answer a fork branches from
 **L2.** The fork point NAMES the answer: the id of the assistant record behind it, minted where it was written and carried on `done` both live and on replay.
 

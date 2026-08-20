@@ -755,6 +755,50 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 }
 .msg.md .img-broken { color: var(--dim); font-size: 15px; }
 
+/* ---- aish's verdict on the answer (#250) ---- */
+/* Not a paragraph of the answer: it is the harness reporting on the model, over
+   the model's head. It reads as one — set apart, dimmer, with a rule down the
+   side — so it can never again be mistaken for the last thing aish said. Amber
+   rather than red: a rule that was tried and failed is worth seeing, and it is
+   not an error. */
+.msg.md .rule-verdict {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--orange);
+  background: var(--bg-elev);
+  border-radius: 0 8px 8px 0;
+  color: var(--dim);
+  font-size: calc(15px * var(--fs));
+  line-height: 1.45;
+}
+.msg.md .rule-verdict a { color: var(--dim); }
+
+/* ---- a file in an answer (#237) ---- */
+/* The same chip the blue bubble uses, restyled for the answer's background:
+   `.msg-attachment-chip` is tuned for white-on-blue and would be invisible
+   here. Deliberately NOT a quick-reply pill — tapping this opens a document
+   rather than sending a message, and two things that do different things must
+   not look identical. It reads as what it is: a file, with its name. */
+.msg.md .md-file-chip {
+  display: inline-block;
+  max-width: 100%;
+  margin: 2px 0;
+  padding: 5px 12px 5px 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--sep);
+  border-radius: 10px;
+  color: inherit;
+  font-size: calc(15.5px * var(--fs));
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+.msg.md .md-file-chip::before { content: "📄 "; }
+.msg.md .md-file-chip.attachment-openable { cursor: pointer; }
+.msg.md .md-file-chip.attachment-openable:active { background: var(--bg-elev2); }
+
 /* ---- quick-reply chips (aish-reply:// links) ---- */
 .msg.md .quick-reply {
   display: inline-block;
