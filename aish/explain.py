@@ -727,16 +727,24 @@ def _rounds(turn: Turn, doc: dict) -> dict:
     }
 
 
-def _event_note(rows: list[dict], event: dict, model_call: int | None) -> None:
-    """One between-round event as a row worth looking at.
+def _event_note(
+    rows: list[dict], event: dict, model_call: int | None, section: str = "flow"
+) -> None:
+    """One event as a row worth looking at.
 
     `model_call` is the round it happened before, so the row deep-links to that
     round rather than to the top of the stream. None when no round could be
-    named, and then the text says so instead of implying a position."""
-    where: dict = {"section": "flow"}
+    named, and then the text says so instead of implying a position — a seed
+    trim happened before the model was called at all, so it says that."""
+    where: dict = {"section": section}
     if model_call is not None:
         where["model_call"] = model_call
-    when = f"before model call {model_call}" if model_call else "at some point in this turn"
+    if model_call:
+        when = f"before model call {model_call}"
+    elif section == "given":
+        when = "before the model was called at all"
+    else:
+        when = "at some point in this turn"
     if event["kind"] == "trim":
         record = event["record"]
         if stubbed := record.get("stubbed"):
@@ -846,6 +854,12 @@ def notes(doc: dict) -> dict:
             _event_note(rows, event, model_call=rnd["model_call"])
     for event in doc["flow"]["loose"]:
         _event_note(rows, event, model_call=None)
+    # …and the trims that fired at task SEED, which are not events in the flow
+    # but are the same fact about the same turn: the model did not have what the
+    # transcript still shows it having. Reading events off the flow alone lost
+    # these, which on a real turn was the sharpest row on the list.
+    for record in doc["given"].get("trims") or []:
+        _event_note(rows, {"kind": "trim", "record": record}, model_call=None, section="given")
 
     briefs = doc["given"]["briefs"]
     for brief in briefs:
