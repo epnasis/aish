@@ -53,8 +53,24 @@ function fakeEl(tag) {
     append(...nodes) { this.children.push(...nodes); },
     appendChild(node) { this.children.push(node); return node; },
     remove() {},
-    querySelector() { return null; },
-    scrollIntoView() {},
+    // A real button has this, and xpJump uses it to open a closed section.
+    click() { if (this.onclick) this.onclick({}); },
+    // Enough of a query engine to find a section, a round or a call by its
+    // data attribute — the three things a note deep-links to.
+    querySelector(sel) {
+      const match = (n) => {
+        let m = /^\.([\w-]+)$/.exec(sel);
+        if (m) return n.className === m[1];
+        m = /^\.([\w-]+)\[data-([\w-]+)="([^"]+)"\]$/.exec(sel);
+        if (m) return n.className === m[1] && String(n.dataset[m[2]]) === m[3];
+        return false;
+      };
+      for (const n of walk(this).slice(1)) if (match(n)) return n;
+      return null;
+    },
+    getBoundingClientRect() { return { top: this._top || 0, left: 0 }; },
+    scrollTop: 0,
+    scrollIntoView() { this._scrolled = true; },
     classList: (() => {
       const set = new Set();
       return {
@@ -83,7 +99,10 @@ function world() {
   const body = fakeEl("div");
   const title = fakeEl("strong");
   const sandbox = {
-    document: { createElement: fakeEl, querySelector: () => null },
+    document: {
+      createElement: fakeEl,
+      querySelector: (sel) => body.querySelector(sel),
+    },
     $: (id) => (id === "xp-body" ? body : title),
     JSON, Math, Set, Map, console, String, Object,
     openSheet() {},
@@ -325,6 +344,45 @@ check("a note jumps to the exact call it was computed from", () => {
   const call = walk(flow).find((n) => n.className === "xp-call" && n.dataset.call === "1");
   assert(call, "the call carries no id for a note to land on");
   void jumped;
+});
+
+check("clicking a note actually lands on the call it names", () => {
+  // The gap that let a broken deep-link ship: the old check asserted the note
+  // HAD a click handler and never called it, so a jump that reached nothing
+  // passed. Invoke it, and assert where the panel ended up.
+  const { sandbox, body } = world();
+  const d = doc();
+  d.notes.rows = [{ check: "tool_failed", text: "read_docs failed",
+                    where: { section: "flow", call: 1 } }];
+  sandbox.xpRender(d);
+  const note = walk(body).find((n) => n.className === "xp-note");
+  const flow = walk(body).find((n) => n.className === "xp-sec" && n.dataset.sec === "flow");
+  assert(!flow.classList.contains("open"), "the flow section starts closed");
+  note.onclick();
+  assert(flow.classList.contains("open"), "the note did not open its section");
+  const call = walk(flow).find((n) => n.className === "xp-call" && n.dataset.call === "1");
+  assert(call, "the call the note names was never built");
+});
+
+check("a note opens a section that is closed and leaves an open one open", () => {
+  const { sandbox, body } = world();
+  const d = doc();
+  d.notes.rows = [{ check: "x", text: "something", where: { section: "flow" } }];
+  sandbox.xpRender(d);
+  const note = walk(body).find((n) => n.className === "xp-note");
+  const flow = walk(body).find((n) => n.className === "xp-sec" && n.dataset.sec === "flow");
+  note.onclick();
+  assert(flow.classList.contains("open"));
+  note.onclick();   // a second tap must not toggle it shut under the reader
+  assert(flow.classList.contains("open"), "tapping the note again closed the section");
+});
+
+check("a note pointing at a section that is not there is a no-op, never a throw", () => {
+  const { sandbox, body } = world();
+  const d = doc();
+  d.notes.rows = [{ check: "x", text: "something", where: { section: "nowhere" } }];
+  sandbox.xpRender(d);
+  walk(body).find((n) => n.className === "xp-note").onclick();
 });
 
 report();

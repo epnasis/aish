@@ -11259,9 +11259,24 @@ function xpNotes(doc, into) {
   into.appendChild(box);
 }
 
-// A note is a shortcut INTO the evidence, so it opens the section AND scrolls to
+// Put `el` at the top of the panel's own scroller.
+//
+// NOT scrollIntoView. That scrolls every scrollable ancestor — including the
+// transcript behind the sheet — and its smooth behaviour turns a long jump into
+// an animation that races whatever the reader does next; measured, a jump of
+// 8000px had not arrived a second and a half later, which reads as a dead
+// control. Setting scrollTop on the one scroller that owns this content is
+// deterministic and instant, which is what navigating inside a panel should be.
+function xpScrollTo(el) {
+  const body = $("xp-body");
+  if (!body || !el) return;
+  const top = el.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop;
+  body.scrollTop = Math.max(0, top - 6);
+}
+
+// A note is a shortcut INTO the evidence, so it opens the section AND lands on
 // the exact round or call it was computed from. Landing at the top of a long
-// stream would make the citation decorative.
+// stream makes the citation decorative.
 function xpJump(where) {
   where = where || {};
   const target = document.querySelector(`.xp-sec[data-sec="${where.section}"]`);
@@ -11273,7 +11288,7 @@ function xpJump(where) {
   } else if (where.model_call !== undefined) {
     inner = target.querySelector(`.xp-round[data-round="${where.model_call}"]`);
   }
-  (inner || target).scrollIntoView({ behavior: "smooth", block: "start" });
+  xpScrollTo(inner || target);
 }
 
 function xpRender(doc) {
