@@ -42,7 +42,19 @@ The failure this exists for: a model that produces a workaround instead of using
 
 This **amends `docs/trace-contract.md` §2 design fork 1(b)**, which deliberately left the high-volume kinds unstamped. The amendment is narrow: `brief` carries `model_call`; `thinking` is still untouched.
 
-**Written only when the digest changes.** An ordinary session logs one brief; a session whose capabilities moved logs one per move, naming the call it moved at. That is the interning rule — *present at or before first reference*, not "exactly once", because the log is not append-only (below). `TestBriefWriter` pins both halves of renderlessness, the per-call grain, and replay byte-identity.
+**Written only when the STAMP changes** — the menu digest and the system text together. Both are "what it was handed", and a reader asking why a turn went wrong cannot know in advance which of the two moved. That is the interning rule — *present at or before first reference*, not "exactly once", because the log is not append-only (below). `TestBriefWriter` pins both halves of renderlessness, the per-call grain, and replay byte-identity.
+
+In practice the menu is near-constant and the system side is what paces the record: the per-task reminder carries the current time, so one brief lands per task, and more when a tool or a rule moves mid-task. What makes that rate affordable is content addressing rather than restraint — the standing prompt is the bulk of the text and is on disk once, however many tasks quote it.
+
+## What it was TOLD — the system text (#239)
+
+Recorded as **the bytes that go out**, not as a list of contributors. The system content is assembled from four sources that each change on their own schedule — the static prompt, the caller's environment context, the live skills/memory index, and the per-task reminder carrying preloaded knowledge and the rules in force — and recording them separately would make the reader reassemble them in the right order to answer *"what was it actually told"*. That reassembly is a re-derivation, and it would be wrong the first time any of the four changed shape.
+
+The `context` and `knowledge` records already name **which** memory or skill was injected. They cannot answer the question the owner actually asks, which is not "which memory" but *"did the belief it acted on come from a rule, from a memory, or from nowhere"* — a model that decided it must only consult one kind of source, and a reader who cannot tell whether a rule said so. Only the text settles that.
+
+**No cap, deliberately.** Everything here is about to be sent to a model, so it already fits in `num_ctx` by construction; a cap could only truncate evidence the model itself received whole. This is the one place in the trace where §8.5's named-constant cap rule does not apply, because the constraint is upstream and tighter.
+
+`_system_evidence` records the position, the length, and the digest of each system-role message as it stands in `messages` at the moment of the call. `TestBriefWriter` pins that the stored bytes are byte-identical to what was sent, that a changed memory or rule writes a new brief while the menu digest stays put, and that the parts are in send order.
 
 ---
 
@@ -81,6 +93,7 @@ Note the name collision the log itself warns about (`docs/session-log.md`): `mes
 ```sh
 aish explain <session-name-or-path> [turn]     # one turn, or all of them
 aish explain 20260814-131203 2 --tools         # …plus every tool description and schema
+aish explain 20260814-131203 2 --context       # …plus the system text as the model got it
 ```
 
 `TestSubcommand` drives this through `main()` rather than calling the reader directly, so the argv wiring is covered too. An ambiguous name **lists candidates and stops**. Guessing would produce a confident diagnosis about the wrong chat, which is worse than no answer.
@@ -130,7 +143,7 @@ Everything above is about recording what happened. These four are different in k
 
 The reader reports each of these as *not recorded* rather than guessing:
 
-- **the rest of the brief** (#239) — the system prompt, and the injected knowledge and rule text. The per-turn records name what was injected; the bytes are not stored yet.
+- **attachment guidance** — see below; it is the last piece of the brief that is still unstored.
 - **attachment guidance** (#241) — the sentences telling the model what it may do with each attached file are still built at hand-over and never stored.
 - **consumed vs sent** (#243) — the prompt-token count is on the `reasoning` record and `num_ctx` on the `brief`, so a context that filled up is derivable, but nothing flags it. That belongs in the suspicion list, not in another record.
 - **a web view** (#243) — `aish explain` is CLI-only. The contract's §8.7 already says a UI needs a deliberate new endpoint, because none of this is client-side and the offline mirror must not start caching reasoning onto every device.

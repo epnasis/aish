@@ -207,6 +207,51 @@ def _menu(step: dict, root: os.PathLike | str | None) -> tuple[str, list[dict] |
     return "resolved", parsed if isinstance(parsed, list) else None
 
 
+def _system_text(part: dict, root: os.PathLike | str | None) -> tuple[str, str | None]:
+    """(status, text) for one recorded system message.
+
+    Same three states as the menu, and for the same reason: a log that predates
+    the record, bytes that were purged, and bytes that are here differ in what a
+    reader may conclude, and only the last one entitles anyone to quote it."""
+    digest = str(part.get("digest") or "")
+    if not digest:
+        return NOT_RECORDED, None
+    text = evidence.get(digest, root)
+    if text is None:
+        return "bytes purged or stored elsewhere", None
+    return "resolved", text
+
+
+def _system_section(
+    brief: dict, root: os.PathLike | str | None, show_context: bool, out: list[str]
+) -> None:
+    """What the model was TOLD, as the bytes that went out.
+
+    Printed before the tool menu: the menu answers "could it have done that",
+    this answers "why did it think it should". A turn where the model acted on a
+    constraint nobody wrote is only visible here."""
+    parts = brief.get("system")
+    if parts is None:
+        out.append(f"  {'':<10} {DIM}system text: {NOT_RECORDED} (log predates #239){RESET}")
+        return
+    if not parts:
+        # Recorded and empty is a real answer, not a gap: a backend that hoists
+        # the system content out of `messages` legitimately has none here.
+        out.append(f"  {'':<10} {DIM}system text: recorded, and there was none{RESET}")
+        return
+    total = sum(int(p.get("chars") or 0) for p in parts)
+    out.append(f"  {'':<10} system: {len(parts)} message(s), {total} chars")
+    for part in parts:
+        status, text = _system_text(part, root)
+        head = f"  {'':<10}   #{part.get('at')} · {part.get('chars')} chars · {status}"
+        if not show_context or text is None:
+            out.append(head)
+            continue
+        out.append(head)
+        for line in text.splitlines():
+            out.append(f"  {'':<10}   {DIM}│{RESET} {line}")
+
+
 def _fmt_evidence(ev: dict) -> str:
     """A rule verdict's evidence, as recorded. Scored verdicts carry the floor
     that was IN FORCE, which is the whole point — the floor in the file today
@@ -454,7 +499,13 @@ def _block(out: list[str], label: str, lines: list[str]) -> None:
         out.append(f"  {label if i == 0 else '':<10} {line.strip() if i == 0 else line}")
 
 
-def render(turn: Turn, log: Log, root: os.PathLike | str | None, show_tools: bool = False) -> str:
+def render(
+    turn: Turn,
+    log: Log,
+    root: os.PathLike | str | None,
+    show_tools: bool = False,
+    show_context: bool = False,
+) -> str:
     out: list[str] = []
     label = f"turn {turn.ordinal}"
     if turn.counter is not None and turn.counter != turn.ordinal:
@@ -483,6 +534,7 @@ def render(turn: Turn, log: Log, root: os.PathLike | str | None, show_tools: boo
                 f"message{RESET}{DIM} ({options.get('provider')} carries only the first "
                 f"system message as system){RESET}"
             )
+        _system_section(brief, root, show_context, out)
         out.append(
             f"  {'':<10} tools: {menu.get('count', '?')} on the menu "
             f"({str(menu.get('digest') or '')[:12]}… {status})"
@@ -572,6 +624,7 @@ def explain(
     turn: int | None = None,
     root: os.PathLike | str | None = None,
     show_tools: bool = False,
+    show_context: bool = False,
 ) -> str:
     root = Path(root) if root is not None else state_dir()
     log = load(target)
@@ -589,5 +642,5 @@ def explain(
     if not wanted:
         head.append(f"{DIM}no turn {turn} in this log ({len(log.turns)} turns){RESET}")
         return "\n".join(head)
-    body = [render(t, log, root, show_tools) for t in wanted]
+    body = [render(t, log, root, show_tools, show_context) for t in wanted]
     return "\n".join(head + [""] + body)

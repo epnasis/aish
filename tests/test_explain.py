@@ -8,6 +8,7 @@ removed" — the three states redaction and a purgeable evidence store create.
 import json
 from types import SimpleNamespace
 
+from aish import agent as agent_module
 from aish import evidence
 from aish import explain as explain_mod
 from aish import session as session_module
@@ -141,20 +142,35 @@ class TestBriefWriter:
         assert brief["options"]["system_role"] == "all_system"
         assert brief["options"]["provider"] == "ollama"
 
-    def test_written_once_per_session_not_once_per_call(self, tmp_path):
-        """Interning: an unchanged menu is named once, however many model calls
-        and turns the session makes."""
+    def test_written_once_per_task_not_once_per_model_call(self, tmp_path):
+        """Interning within a task: several model calls that were handed the
+        same menu and the same system text name it once."""
         agent, _, log = make_logged_agent(
             [
                 model_says(tool_calls=[tool_call("read_docs", command="ls")]),
                 model_says("first"),
-                model_says("second"),
             ],
             tmp_path,
         )
         agent.run_task("one")
-        agent.run_task("two")
+        assert agent._model_call == 2, "the task must make more than one call"
         assert len(steps(log.path, "brief")) == 1
+
+    def test_the_menu_bytes_are_stored_once_however_many_briefs(self, tmp_path):
+        """What interning is FOR. The system text moves every task (the reminder
+        carries the current time), so a second task writes a second brief — but
+        the menu is ~31 KB and unchanged, and content addressing means it is on
+        disk once. Asserting the record count here would pin the clock."""
+        agent, _, log = make_logged_agent(
+            [model_says("first"), model_says("second")], tmp_path
+        )
+        agent.run_task("one")
+        agent.run_task("two")
+        digests = {b["tools"]["digest"] for b in steps(log.path, "brief")}
+        assert len(digests) == 1
+        digest = digests.pop()
+        stored = [p for p in (tmp_path / "evidence").rglob("*") if p.is_file()]
+        assert sum(1 for p in stored if p.name == digest) == 1
 
     def test_a_menu_change_mid_turn_is_recorded_at_the_call_it_changed_at(self, tmp_path):
         """The reason this is per model call and not per turn: the plugin menu
@@ -185,6 +201,50 @@ class TestBriefWriter:
         assert briefs[0]["model_call"] == 1 and briefs[1]["model_call"] == 2
         assert "late_tool" not in briefs[0]["tools"]["names"]
         assert "late_tool" in briefs[1]["tools"]["names"]
+
+    def test_the_system_text_is_stored_and_resolves(self, tmp_path):
+        """The question this exists for: a model acting on a constraint nobody
+        can find. The `context` record names WHICH memory was injected; only the
+        bytes say what it told the model."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        (brief,) = steps(log.path, "brief")
+        texts = [evidence.get(part["digest"], tmp_path) for part in brief["system"]]
+        assert all(t is not None for t in texts), "a digest did not resolve"
+        joined = "\n".join(texts)
+        # The standing prompt and the per-task reminder are both in there.
+        assert "aish" in joined
+        assert agent_module.TASK_REMINDER_MARK in joined
+        assert [part["chars"] for part in brief["system"]] == [len(t) for t in texts]
+
+    def test_system_evidence_is_the_bytes_as_sent(self, tmp_path):
+        """Recorded as what went out, not as a list of contributors — so the
+        reader never has to reassemble four sources in the right order to answer
+        "what was it actually told"."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        (brief,) = steps(log.path, "brief")
+        sent = [m for m in agent.messages if m.get("role") == "system"]
+        assert len(brief["system"]) == len(sent)
+        for part, message in zip(brief["system"], sent, strict=True):
+            assert evidence.get(part["digest"], tmp_path) == message["content"]
+            assert agent.messages[part["at"]] is message
+
+    def test_a_changed_rule_or_memory_writes_a_new_brief(self, tmp_path):
+        """The menu can be identical while what the model was TOLD is not. A
+        stamp over only the tools would let a reader conclude the turn was
+        handed what the previous one was."""
+        agent, _, log = make_logged_agent(
+            [model_says("first"), model_says("second")], tmp_path
+        )
+        agent.run_task("one")
+        first = steps(log.path, "brief")[-1]
+        agent.base_context = "the shop closes at 18:00"
+        agent.run_task("two")
+        second = steps(log.path, "brief")[-1]
+        assert first["tools"]["digest"] == second["tools"]["digest"]
+        assert first["system"] != second["system"]
+        assert "18:00" in evidence.get(second["system"][0]["digest"], tmp_path)
 
     def test_replay_ignores_the_brief(self, tmp_path):
         """Renderless on both paths: a log carrying a brief must reconstruct to

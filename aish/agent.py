@@ -1363,7 +1363,7 @@ class Agent:
         # across turns. A reopened session gets a fresh Agent and therefore
         # re-writes the reference, which is correct — the menu it is about to
         # use has not been named in this run of the process.
-        self._brief_digest = ""
+        self._brief_stamp: tuple = ()
         self._response_meta: dict = {}
         self.rule_compiler = rule_compiler_ask
         self.current_session = current_session
@@ -3227,6 +3227,43 @@ class Agent:
             step["verdict_by"] = tools.VERDICT_GATE
         self._sink_step(step)
 
+    def _system_evidence(self) -> list[dict]:
+        """The system-role messages as they are about to be SENT (#239).
+
+        Recorded as the bytes that go out, not as a list of contributors. The
+        system content is assembled from four sources that each change on their
+        own schedule — the static prompt, the caller's environment context, the
+        live skills/memory index, and the per-task reminder carrying preloaded
+        knowledge and the rules in force — and recording them separately would
+        make the reader reassemble them in the right order to answer "what was
+        it actually told". That reassembly is a re-derivation, and it would be
+        wrong the first time any of the four changed shape.
+
+        The owner's question is not "which memory was injected" (the `context`
+        and `knowledge` records already name that) but "did the belief it acted
+        on come from a rule, from a memory, or from nowhere" — and only the
+        text can answer that.
+
+        No cap, deliberately. Everything here is about to be sent to a model, so
+        it already fits in `num_ctx` by construction; a cap could only truncate
+        evidence that the model itself received whole. The bytes go to the
+        evidence store, so the standing prompt is stored once however many
+        sessions quote it, and `purge` still reaches every copy.
+        """
+        parts: list[dict] = []
+        for index, message in enumerate(self.messages):
+            if message.get("role") != "system":
+                continue
+            text = str(message.get("content") or "")
+            parts.append(
+                {
+                    "at": index,
+                    "chars": len(text),
+                    "digest": evidence.put(text, self.state_dir),
+                }
+            )
+        return parts
+
     def _record_brief(self, menu: list[dict]) -> None:
         """The capability surface this model call is being handed (#239).
 
@@ -3245,22 +3282,32 @@ class Agent:
         misbehaved held a menu it never held — the confident-false-conclusion
         class this record exists to prevent.
 
-        Written only when the digest CHANGES, so an ordinary session logs one of
-        these and a session whose capabilities moved logs one per move, naming
-        the call it moved at. The bytes go to the evidence store rather than
-        into the log; aish/evidence.py says why that is not a second log.
+        Written only when the STAMP changes — the menu digest and the system
+        text together, because both are "what it was handed" and a reader asking
+        why a turn went wrong cannot know in advance which of the two moved. The
+        menu is near-constant, so what actually paces this record is the system
+        side: the per-task reminder carries the current time, so in practice one
+        brief lands per task, and more when a tool or a rule moves mid-task.
+
+        The bytes go to the evidence store rather than into the log;
+        aish/evidence.py says why that is not a second log. Content addressing
+        is what makes the per-task rate affordable — the standing prompt is the
+        bulk of the text and is stored once, however many tasks quote it.
         """
         if self.step_log is None:
             return
         blob = json.dumps(menu, sort_keys=True, ensure_ascii=False)
         digest = evidence.digest_of(blob)
-        if digest == self._brief_digest:
+        system = self._system_evidence()
+        stamp = (digest, tuple(part["digest"] for part in system))
+        if stamp == self._brief_stamp:
             return
         evidence.put(blob, self.state_dir)
-        self._brief_digest = digest
+        self._brief_stamp = stamp
         self._emit_record(
             kind="brief",
             model_call=self._model_call,
+            system=system,
             tools={
                 "digest": digest,
                 "count": len(menu),
