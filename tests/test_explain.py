@@ -736,6 +736,23 @@ class TestSubcommand:
         assert "no session log matching" in capsys.readouterr().out
 
 
+def _only_first_brief(path):
+    """The log as an interned session writes it: one brief, at the turn it
+    changed at. `make_logged_agent` writes one per task because the per-task
+    reminder carries the clock, so the case has to be made rather than waited
+    for."""
+    kept, seen = [], False
+    for line in path.read_text().splitlines():
+        if (json.loads(line).get("step") or {}).get("kind") == "brief":
+            if seen:
+                continue
+            seen = True
+        kept.append(line)
+    trimmed = path.with_name("interned.jsonl")
+    trimmed.write_text("\n".join(kept) + "\n")
+    return trimmed
+
+
 class TestDossier:
     """The single assembly both renderers read (#243)."""
 
@@ -771,6 +788,39 @@ class TestDossier:
         assert parts[0]["state"] == explain_mod.PURGED
         assert parts[0]["text"] is None
         assert "purged" in explain_mod.explain(log.path, root=tmp_path)
+
+    def test_a_turn_with_no_brief_of_its_own_is_shown_the_one_in_force(self, tmp_path):
+        """The brief is interned, so most turns have none of their own. A panel
+        that rendered only this turn's brief would show an empty "what it was
+        given" on nearly every turn — the one screen the feature exists for."""
+        agent, _, log = make_logged_agent(
+            [model_says("first"), model_says("second")], tmp_path
+        )
+        agent.run_task("one")
+        agent.run_task("two")
+        # The interned case: the second turn's brief is dropped, which is what
+        # a session whose tools and system text did not move actually writes.
+        lg = explain_mod.load(_only_first_brief(log.path))
+        first = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        second = explain_mod.dossier(lg.turns[1], lg, tmp_path)
+        assert first["given"]["briefs"][0]["written_here"] is True
+        assert second["given"]["briefs"], "the turn was shown no brief at all"
+        assert second["given"]["briefs"][0]["written_here"] is False
+        assert second["given"]["briefs"][0]["in_force_since"] == 1
+        assert second["given"]["carried"] is True
+        # …and the tools are actually THERE, which is the point of carrying it.
+        assert second["given"]["briefs"][0]["tools"]["count"]
+
+    def test_carried_forward_is_never_confused_with_written_here(self, tmp_path):
+        """A reader who cannot tell them apart concludes "the tools changed at
+        turn 2" off a record that only says they had not changed since turn 1."""
+        agent, _, log = make_logged_agent(
+            [model_says("first"), model_says("second")], tmp_path
+        )
+        agent.run_task("one")
+        agent.run_task("two")
+        out = explain_mod.explain(_only_first_brief(log.path), 2, root=tmp_path)
+        assert "unchanged since turn 1" in out
 
     def test_a_log_predating_the_record_says_not_recorded(self, tmp_path):
         """Absence must never be the evidence: a log with no brief at all is a
@@ -847,6 +897,34 @@ class TestWorthALook:
         text = explain_mod.explain(log.path, root=tmp_path)
         assert "nothing flagged by the 4 checks this reader runs" in text
         assert "nothing unusual" not in text.lower()
+
+    def test_only_a_NEAR_abstention_is_worth_a_look(self, tmp_path):
+        """The rule corpus is evaluated in full against every turn, so "this
+        rule did not apply" is the ordinary case for almost all of them. Listing
+        them all put six rows of noise above the two real findings on the first
+        live turn this ran against."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        doc["given"]["rules"] = {
+            "state": explain_mod.RECORDED,
+            "corpus": {},
+            "skipped": [],
+            "dropped": 0,
+            "groups": {
+                "abstain": [
+                    {"rule": "far-off", "evidence": {"sim": 0.10, "floor": 0.62}},
+                    {"rule": "near-miss", "evidence": {"sim": 0.58, "floor": 0.62}},
+                    {"rule": "no-distance", "evidence": {}},
+                ]
+            },
+        }
+        rows = [r for r in explain_mod.notes(doc)["rows"] if r["check"] == "rule_abstained"]
+        assert len(rows) == 1, rows
+        assert "near-miss" in rows[0]["text"]
+        assert "far-off" not in rows[0]["text"]
+        assert "no-distance" not in rows[0]["text"]
 
     def test_notes_are_a_pure_function_of_the_dossier(self, tmp_path):
         """So the terminal and the panel surface the same list, and neither

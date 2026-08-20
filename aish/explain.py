@@ -314,6 +314,14 @@ CHECKS: tuple[tuple[str, str], ...] = (
 # nothing else in the log flags it (docs/diagnostics.md, "consumed vs sent").
 CONTEXT_FULL_FRACTION = 0.85
 
+# How close to its floor an abstention has to be before it is worth a look. A
+# rule corpus is evaluated in FULL against every turn, so "this rule did not
+# apply" is the ordinary case for almost all of them — listing them all put six
+# rows of noise above the two real findings on the first live turn this was run
+# against. A near miss is a different thing: it is the shape of "the rule you
+# wrote did not fire and you expected it to".
+ABSTAIN_NEAR_FLOOR = 0.12
+
 # Stop reasons that mean "the model finished its turn". Anything else is worth
 # a look, and is listed rather than judged.
 ORDINARY_STOPS = frozenset({"", "stop", "end_turn", "stop_sequence", "tool_use", "tool_calls"})
@@ -330,11 +338,38 @@ def _blob(digest: str, root: os.PathLike | str | None) -> tuple[str, str | None]
     return RECORDED, text
 
 
+def _brief_in_force(turn: Turn, log: Log) -> tuple[dict | None, int | None]:
+    """The most recent brief at or before this turn, and the turn it was written
+    at.
+
+    The brief is interned — written only when what the model was handed CHANGES
+    — so most turns have none of their own, and a panel that rendered only its
+    own turn's brief would show an empty "what it was given" on nearly every
+    turn, which is the one screen the whole feature exists for.
+
+    Carrying it forward is not the same as it being written here, and the two
+    must stay distinguishable: a reader who cannot tell them apart can conclude
+    "the tools changed at turn 7" off a record that merely says they had not
+    changed since turn 3.
+    """
+    for candidate in reversed(log.turns[: turn.ordinal]):
+        found = candidate.of_kind("brief")
+        if found:
+            return found[-1], candidate.ordinal
+    return None, None
+
+
 def _given(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
     """What the model was handed: the system text, the tool menu, the knowledge
     offered and preloaded, and the rules in force."""
+    own = turn.of_kind("brief")
+    carried_from = None
+    records = list(own)
+    if not records:
+        carried, carried_from = _brief_in_force(turn, log)
+        records = [carried] if carried else []
     briefs = []
-    for record in turn.of_kind("brief"):
+    for record in records:
         parts = []
         for part in record.get("system") or []:
             state, text = _blob(str(part.get("digest") or ""), root)
@@ -355,6 +390,10 @@ def _given(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         briefs.append(
             {
                 "model_call": record.get("model_call"),
+                # Written FOR this turn, or the one still in force from an
+                # earlier one. The panel says which; they are different facts.
+                "written_here": carried_from is None,
+                "in_force_since": carried_from,
                 "options": record.get("options") or {},
                 "system": {"state": system_state, "parts": parts},
                 "tools": {
@@ -370,11 +409,9 @@ def _given(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
             }
         )
     given: dict = {
-        "state": RECORDED if briefs else (MISSING if not log.wrote("brief") else EMPTY),
+        "state": RECORDED if briefs else MISSING,
         "briefs": briefs,
-        # An empty `briefs` with state EMPTY means the menu and system text were
-        # unchanged since an earlier turn — the interning rule, not a gap.
-        "carried": bool(not briefs and log.wrote("brief")),
+        "carried": carried_from is not None,
     }
     contexts = turn.of_kind("context")
     given["context"] = {
@@ -609,13 +646,18 @@ def notes(doc: dict) -> dict:
                   phrasing.format(n=len(gates), rules=", ".join(sorted(set(named)))),
                   section="produced")
 
+    near = []
     for row in doc["given"]["rules"].get("groups", {}).get("abstain", []):
         ev = row.get("evidence") or {}
-        detail = ""
-        if "sim" in ev and "floor" in ev:
-            detail = f" (similarity {ev['sim']} against a floor of {ev['floor']})"
+        try:
+            gap = float(ev["floor"]) - float(ev["sim"])
+        except (KeyError, TypeError, ValueError):
+            continue  # no distance recorded — nothing to call near
+        if 0 <= gap <= ABSTAIN_NEAR_FLOOR:
+            near.append(f"{row.get('rule')} ({ev['sim']} against a floor of {ev['floor']})")
+    if near:
         _note(rows, "rule_abstained",
-              f"the rule {row.get('rule')} was evaluated and did not bind{detail}",
+              f"{len(near)} rule(s) came close to applying and did not: " + ", ".join(near),
               section="given")
 
     for call in doc["thought"]["calls"]:
@@ -759,14 +801,18 @@ def _state_note(state: str, kind_note: str) -> str:
 
 def _given_lines(given: dict, show_tools: bool, show_context: bool, out: list[str]) -> None:
     if not given["briefs"]:
-        why = " (unchanged since an earlier turn)" if given["carried"] else ""
-        out.append(f"  {'brief':<10} {_state_note(given['state'], why)}")
+        out.append(f"  {'brief':<10} {_state_note(given['state'], ' (log predates #239)')}")
     for brief in given["briefs"]:
         options = brief["options"]
+        where = (
+            f"at model call {brief.get('model_call', '?')}"
+            if brief["written_here"]
+            else f"{DIM}unchanged since turn {brief['in_force_since']}{RESET}"
+        )
         out.append(
             f"  {'brief':<10} model {options.get('model')} · num_ctx "
             f"{options.get('num_ctx')} · think {'on' if options.get('think') else 'off'}"
-            f" · at model call {brief.get('model_call', '?')}"
+            f" · {where}"
         )
         if options.get("system_role") == "first_only":
             # Not a footnote: "why did it ignore the reminder" has a mechanical
