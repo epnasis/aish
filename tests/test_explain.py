@@ -963,6 +963,29 @@ class TestWorthALook:
         assert "model_call" not in steering[0]["where"]
         assert "at some point in this turn" in steering[0]["text"]
 
+    def test_a_seed_trim_still_earns_a_row(self, tmp_path):
+        """It is not an event in the flow, but it is the same fact about the
+        same turn — the model did not have what the transcript still shows it
+        having. Reading events off the flow alone dropped these, and on a real
+        turn it was the sharpest row on the list."""
+        path = tmp_path / "session-seedtrim.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            {"ts": "t", "kind": "trace", "step": {
+                "kind": "trim", "policy": "eager_stub", "affected": 2,
+                "stubbed": [{"at": 3, "tool": "web_search"}]}},
+            {"ts": "t", "kind": "trace", "step": {"kind": "reasoning", "model_call": 1,
+                                                  "text": "thinking"}},
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ]) + "\n")
+        lg = explain_mod.load(path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        stub = [r for r in doc["notes"]["rows"] if r["check"] == "result_stubbed"]
+        assert stub, doc["notes"]["rows"]
+        assert stub[0]["where"] == {"section": "given"}
+        assert "before the model was called at all" in stub[0]["text"]
+        assert "web_search" in stub[0]["text"]
+
     def test_notes_are_a_pure_function_of_the_dossier(self, tmp_path):
         """So the terminal and the panel surface the same list, and neither
         re-reads the log to build it."""
