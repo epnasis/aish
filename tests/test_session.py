@@ -2088,3 +2088,69 @@ class TestRedaction:
         log.redact_turn(self._turns(log)[1])
         log.close()
         assert SessionLog.info(log.path).activity > quiet
+
+
+class TestOneBadLogCannotTakeTheAppDown:
+    """A log line that PARSES but is not a record.
+
+    Every reader here tolerated a torn line and none of them tolerated this,
+    because they all call `.get()` on whatever came back. On 2026-08-20 a single
+    reformatted log raised inside `_parse`, which `pager_titles` calls for EVERY
+    session, so the socket closed on attach and every client sat on the boot
+    spinner with no chat list at all. A bad log must cost its own chat only.
+    """
+
+    def _mangled(self, tmp_path):
+        path = tmp_path / "session-20260820-000000-000000.jsonl"
+        path.write_text(
+            json.dumps({"ts": "2026-08-20T00:00:00", "kind": "model", "model": "m"}) + "\n"
+            # A bare JSON string on its own line: valid JSON, not a record.
+            + '"somewhere quiet to stay with a private pool"\n'
+            + "42\n"
+            + "[1, 2, 3]\n"
+            + "{not json at all\n"
+            + json.dumps(
+                {"ts": "2026-08-20T00:00:01", "kind": "message", "role": "user",
+                 "content": "hello"}
+            )
+            + "\n"
+        )
+        return path
+
+    def test_parse_skips_the_bad_lines_and_keeps_the_good_ones(self, tmp_path):
+        parsed = SessionLog._parse(self._mangled(tmp_path))
+        assert parsed.model == "m"
+        assert [m["content"] for m in parsed.messages] == ["hello"]
+
+    def test_the_session_list_survives_one_unreadable_log(self, tmp_path):
+        """The actual outage: this is called for every session on attach."""
+        self._mangled(tmp_path)
+        good = tmp_path / "session-20260820-000001-000000.jsonl"
+        good.write_text(
+            json.dumps({"ts": "2026-08-20T00:00:02", "kind": "message", "role": "user",
+                        "content": "a real chat"}) + "\n"
+        )
+        titles = SessionLog.pager_titles(tmp_path)
+        assert len(titles) == 2, titles
+
+    def test_no_reader_parses_a_log_line_on_its_own(self):
+        """Ten call sites, nine with the same bug and one that already had the
+        guard — so it is ONE helper, and staying one is the property. A reader
+        that grows its own `json.loads` back re-opens the outage silently."""
+        source = (Path(__file__).resolve().parents[1] / "aish/session.py").read_text()
+        assert source.count("json.loads(") == 1, "a log line is being parsed outside the helper"
+        helper = source.split("def _record_or_none")[1].split("\ndef ")[0]
+        assert "json.loads(" in helper
+
+    def test_reconstruct_events_survives_it_too(self, tmp_path):
+        path = self._mangled(tmp_path)
+        # …with a trace record, so this exercises the replay path rather than
+        # its documented pre-trace fallback.
+        with path.open("a") as fh:
+            fh.write(json.dumps({"ts": "2026-08-20T00:00:03", "kind": "trace",
+                                 "step": {"kind": "thinking", "secs": 1}}) + "\n")
+            fh.write(json.dumps({"ts": "2026-08-20T00:00:04", "kind": "message",
+                                 "role": "assistant", "content": "hi back"}) + "\n")
+        events = SessionLog.reconstruct_events(path)
+        assert events is not None
+        assert any(e.get("type") == "user" for e in events), events

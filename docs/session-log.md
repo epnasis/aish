@@ -115,6 +115,16 @@ Consequences, each a false unread that is now gone: renaming or redacting a turn
 
 ---
 
+## One unreadable log costs its own chat and nothing else
+
+Every reader here walks a file line by line and skips a line it cannot parse. None of them survived a line that **parses to something that is not a record** — a bare JSON string, a number — because they all call `.get()` on whatever comes back.
+
+That second mode is not hypothetical. On 2026-08-20 one session log's lines had been reformatted, so a bare string sat on a line of its own; `_parse` raised `AttributeError`, `pager_titles` calls `_parse` for **every** session on attach, so the websocket closed during the handshake and every client — the owner's phone included — sat on the boot spinner with no chat list at all. One corrupted file, and the whole app was unreachable.
+
+`_record_or_none` is now the only place a log line is parsed, and it answers `None` for both failure modes. Ten call sites shared this walk; nine had the bug and **one already had the `isinstance` guard**, which is the argument for one helper rather than nine fixes — the guard existed, it just was not where the crash was. `TestOneBadLogCannotTakeTheAppDown` pins the recovery, that the session list survives a bad log beside a good one, and — at the source level — that no reader has grown its own `json.loads` back.
+
+The general rule this is an instance of: **a reader of many files must fail per file.** Anything that walks the whole state directory on a hot path (attach, the rail, search) turns one bad file into a total outage unless the failure is contained where it happens.
+
 ## Parse caches (L5)
 
 The read-only listing paths — `info`/`list_sessions`, `load_entries`, `_peek`/`pager_titles`, `user_command_history` — serve from stat-keyed module caches (`_PARSE_CACHE`/`_ENTRY_CACHE`, key `(mtime_ns, size)`), because re-parsing hundreds of JSONL logs on every session switch was the bulk of a switch's server time, and the parsing holds the GIL.

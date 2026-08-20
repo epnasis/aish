@@ -607,6 +607,28 @@ class SessionEntry:
     model_cf: str = ""
 
 
+def _record_or_none(line: str) -> dict | None:
+    """One log line as a record, or None — tolerant of BOTH failure modes.
+
+    A torn line does not parse. A line that PARSES but yields a bare JSON value
+    (a string, a number) is not a record either, and every reader here calls
+    `.get()` on what it gets back. That second mode is the one that hurt: on
+    2026-08-20 a single log whose lines had been reformatted raised
+    `AttributeError` inside `_parse`, which `pager_titles` calls for EVERY
+    session, so the websocket closed on attach and every client — phone
+    included — sat on the boot spinner with no chat list at all.
+
+    One unreadable log must cost its own chat and nothing else. Skipping is
+    already what a torn line gets, and every reader is written to tolerate a
+    missing record; none of them can tolerate a raise.
+    """
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
 class SessionLog:
     def __init__(self, path: Path):
         self.path = path
@@ -664,9 +686,8 @@ class SessionLog:
         output_ts: int | None = None
         pending_cmd: str | None = None  # a user ! command awaiting its exit status
         for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                record = json.loads(line)
-            except ValueError:
+            record = _record_or_none(line)
+            if record is None:
                 continue
             kind = record.get("kind")
             if SessionLog._is_activity(record):
@@ -827,9 +848,8 @@ class SessionLog:
         cwd: str | None = None
         trusted: list[str] = []
         for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                record = json.loads(line)
-            except ValueError:
+            record = _record_or_none(line)
+            if record is None:
                 continue
             kind = record.get("kind")
             if kind == "cwd":
@@ -861,9 +881,8 @@ class SessionLog:
         """
         last = 0
         for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                record = json.loads(line)
-            except ValueError:
+            record = _record_or_none(line)
+            if record is None:
                 continue
             step = record.get("step")
             turn = step.get("turn") if isinstance(step, dict) else None
@@ -891,9 +910,8 @@ class SessionLog:
         attempts = 0
         started: list[dict] = []
         for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                record = json.loads(line)
-            except ValueError:
+            record = _record_or_none(line)
+            if record is None:
                 continue
             kind = record.get("kind")
             if kind == "task_start":
@@ -1111,9 +1129,8 @@ class SessionLog:
             pending_start = pending_end = None
 
         for index, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
-            try:
-                record = json.loads(line)
-            except ValueError:
+            record = _record_or_none(line)
+            if record is None:
                 continue
             kind = record.get("kind")
             if kind == REDACT_KIND:
@@ -1284,9 +1301,8 @@ class SessionLog:
         # the fork ordinal drifted off by one per narrated turn.
         msgs: list[tuple[int, str, bool]] = []
         for i, line in enumerate(lines):
-            try:
-                record = json.loads(line)
-            except ValueError:
+            record = _record_or_none(line)
+            if record is None:
                 continue
             if record.get("kind") == "message" and record.get("role") in (
                 "user", "assistant", "tool",
@@ -1321,9 +1337,8 @@ class SessionLog:
         Returns None when no assistant record answers to that name."""
         lines = text.splitlines()
         for i, line in enumerate(lines):
-            try:
-                record = json.loads(line)
-            except ValueError:
+            record = _record_or_none(line)
+            if record is None:
                 continue
             if (
                 record.get("kind") == "message"
@@ -1342,9 +1357,8 @@ class SessionLog:
         reconstruct as a dangling step."""
         end = len(lines)
         for i in range(cut + 1, len(lines)):
-            try:
-                record = json.loads(lines[i])
-            except ValueError:
+            record = _record_or_none(lines[i])
+            if record is None:
                 continue
             if record.get("kind") == "message" and record.get("role") == "user":
                 end = i
@@ -1365,9 +1379,8 @@ class SessionLog:
             lines = self.path.read_text(encoding="utf-8").splitlines()
             cut: int | None = None
             for i, line in enumerate(lines):
-                try:
-                    record = json.loads(line)
-                except ValueError:
+                record = _record_or_none(line)
+                if record is None:
                     continue
                 if record.get("kind") == "message" and record.get("role") == "user":
                     cut = i
@@ -1410,11 +1423,9 @@ class SessionLog:
             lines = self.path.read_text(encoding="utf-8").splitlines()
             records: list[dict] = []
             for line in lines:
-                try:
-                    parsed = json.loads(line)
-                except ValueError:
-                    parsed = {}
-                records.append(parsed if isinstance(parsed, dict) else {})
+                # This site alone already guarded the non-dict case; the other
+                # nine did not, which is why it is one helper now.
+                records.append(_record_or_none(line) or {})
 
             def is_user(record: dict) -> bool:
                 return record.get("kind") == "message" and record.get("role") == "user"
