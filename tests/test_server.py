@@ -9,6 +9,7 @@ import base64
 import contextlib
 import json
 import os
+import pathlib
 import re
 import shlex
 import threading
@@ -7711,3 +7712,124 @@ class TestBrowserView:
             event = recv_until(ws, "browser_view")
             assert event["action"] == "error"
             assert "Playwright" in event["error"]
+
+
+class TestExplainEndpoint:
+    """One turn's dossier over HTTP (#243) — the consumption half of the reader.
+
+    Deliberately not transcript events: the offline mirror writes those into
+    IndexedDB on every device, and reasoning quotes fetched pages, file contents
+    and mail bodies."""
+
+    def test_it_returns_the_turn_the_id_names(self, app_env):
+        client, _ = make_client(app_env, [model_says("the recommendation")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "what should I do?"})
+            recv_until(ws, "done")
+            doc = client.get(f"/explain?session={hello['session']}").json()
+
+        assert doc["prompt"] == "what should I do?"
+        assert doc["produced"]["answer"] == "the recommendation"
+        assert doc["session"] == hello["session"]
+        assert doc["turns"] == 1
+        # Addressable by the id it reports, which is the point of reporting it.
+        assert doc["turn_id"]
+
+    def test_the_turn_id_is_what_addresses_a_turn(self, app_env):
+        """An ordinal cannot be computed by a browser — its first paint is
+        bounded, so "turn 4" on screen is not turn 4 in the log on a long chat.
+        An id cannot be counted wrong."""
+        client, _ = make_client(app_env, [model_says("first"), model_says("second")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "one"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "two"})
+            recv_until(ws, "done")
+            base = f"/explain?session={hello['session']}"
+            second = client.get(f"{base}&turn=2").json()
+            by_id = client.get(f"{base}&turn={second['turn_id']}").json()
+
+        assert second["prompt"] == "two"
+        assert by_id["prompt"] == "two"
+        assert by_id["turn_id"] == second["turn_id"]
+
+    def test_no_turn_ref_gives_the_LAST_turn(self, app_env):
+        """What the panel opens to when you tap the newest answer."""
+        client, _ = make_client(app_env, [model_says("first"), model_says("second")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "one"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "two"})
+            recv_until(ws, "done")
+            doc = client.get(f"/explain?session={hello['session']}").json()
+
+        assert doc["prompt"] == "two"
+
+    def test_it_is_unreachable_without_the_token(self, app_env):
+        client, _ = make_client(app_env, [model_says("done")], token="secret")
+        with client, connected(client, "/ws?token=secret") as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+            assert client.get(f"/explain?session={hello['session']}").status_code == 403
+            ok = client.get(f"/explain?session={hello['session']}&token=secret")
+            assert ok.status_code == 200
+
+    def test_nothing_from_it_may_be_cached_on_the_device(self, app_env):
+        """Two client caches, and the service worker's NEVER_CACHE list closes
+        only one — it makes the SW pass the request through, and the response
+        then meets the browser's own HTTP cache."""
+        client, _ = make_client(app_env, [model_says("done")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+            response = client.get(f"/explain?session={hello['session']}")
+
+        assert response.headers["cache-control"] == "no-store"
+        sw = (pathlib.Path(__file__).resolve().parents[1] / "aish/static/sw.js").read_text()
+        never = sw.split("const NEVER_CACHE = ")[1].split("\n")[0]
+        assert '"/explain"' in never
+
+    def test_unknown_session_and_traversal_are_refused(self, app_env):
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.get("/explain?session=nope.jsonl").status_code == 404
+            assert client.get(
+                "/explain?session=session-../../etc/passwd"
+            ).status_code == 404
+
+    def test_an_unknown_turn_is_404_and_says_how_many_there_are(self, app_env):
+        client, _ = make_client(app_env, [model_says("done")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+            missing = client.get(f"/explain?session={hello['session']}&turn=9")
+
+        assert missing.status_code == 404
+        assert missing.json()["turns"] == 1
+
+    def test_raw_records_are_opt_in_and_report_what_they_elided(self, app_env):
+        """The section exists so a rendering can be checked against its source,
+        so a truncated list presented as the whole would defeat it."""
+        client, _ = make_client(app_env, [model_says("done")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+            plain = client.get(f"/explain?session={hello['session']}").json()
+            raw = client.get(f"/explain?session={hello['session']}&raw=1").json()
+
+        assert "raw" not in plain
+        assert raw["raw"]["records"]
+        assert raw["raw"]["elided"] == 0
+
+    def test_running_is_stamped_by_the_server_not_the_reader(self, app_env):
+        """A turn with no task_end was interrupted OR is still going, and the
+        log cannot tell them apart. Only the live server knows, so it rides the
+        envelope — teaching the reader to ask would break its purity."""
+        client, _ = make_client(app_env, [model_says("done")])
+        with client, connected(client) as (ws, hello, _):
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+            doc = client.get(f"/explain?session={hello['session']}").json()
+
+        assert doc["running"] is False
+        assert "running" not in doc["produced"]

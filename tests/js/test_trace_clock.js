@@ -89,6 +89,7 @@ function makeSandbox() {
     messagesEl: makeElement("div"),
     replaying: false,
     turnStart: 0,
+    currentTurnId: "",
     currentTrace: null,
     turnAnchorEl: null,
     sawAnswer: true, // onDone must not try to render a fallback answer bubble

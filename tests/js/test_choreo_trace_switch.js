@@ -64,6 +64,7 @@ function traceWorld() {
       FINE_POINTER: false,
       replaying: false,
       turnStart: 0, // the live card's clock origin (0 = derive it from now)
+      currentTurnId: "", // the turn a card is stamped with at creation (#243)
       currentTrace: null,
       turnAnchorEl: null,
       lastUserPrompt: "",

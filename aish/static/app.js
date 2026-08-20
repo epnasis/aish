@@ -2710,6 +2710,12 @@ function ensureTrace() {
     // it into the past twice).
     originKnown: !!turnStart,
     timer: null,
+    // Which TURN this card belongs to (#243). Stamped at creation from the id
+    // #202 already mints, so the "Full record" row addresses the turn by id
+    // rather than by a position the browser would have to count — and it binds
+    // the card to the turn that made it, not to whatever is current when it
+    // finishes.
+    turnId: currentTurnId || "",
     autoCollapsed: false, // collapsed by an approval card, to be restored after
     // Live-status DATA for the header line — strings are derived only in
     // traceStatusLine (the choreo tests run these handlers with the header
@@ -3563,6 +3569,11 @@ function updateTraceHead(t) {
       const st = t.body.querySelector(".step.active-step .step-timer");
       if (st) st.textContent = `${Math.floor((Date.now() - t.activeStartedAt) / 1000)}s`;
     }
+  } else if (!t.started) {
+    // A turn that ran nothing: "Worked for 0.0s · 0 steps" reads as a broken
+    // card. It answered, and its record is still worth opening.
+    title.textContent = "Answered";
+    sub.textContent = tok;
   } else {
     title.textContent = `Worked for ${fmtSecs(t.secs)}`;
     sub.textContent = `${t.started} step${t.started === 1 ? "" : "s"}` + (tok ? ` · ${tok}` : "");
@@ -3615,13 +3626,25 @@ function finishTrace(errored) {
       main.appendChild(note);
     }
   });
-  // A pure-answer turn leaves no steps — drop the empty trace box entirely,
-  // unless it still carries token usage (#84): that's the only place those
-  // counts are shown, so an empty-but-billed turn must keep its header.
-  if (!t.body.querySelector(".step") && !t.tokensIn && !t.tokensOut) {
+  // A pure-answer turn leaves no steps. The box used to be dropped entirely
+  // unless it carried token usage (#84) — but the box is now also the door to
+  // the turn's full record (#243), and a turn that answered without running
+  // anything is exactly the one worth asking about ("why did it just answer?").
+  // So it is kept whenever there is a turn to open; with no id there is nothing
+  // to open and the old removal stands.
+  if (!t.body.querySelector(".step") && !t.tokensIn && !t.tokensOut && !t.turnId) {
     t.el.remove();
     refreshStatusline();
     return;
+  }
+  if (t.turnId && !t.el.querySelector(".trace-explain")) {
+    const door = document.createElement("button");
+    door.type = "button";
+    door.className = "trace-explain";
+    door.dataset.turn = t.turnId;
+    door.innerHTML = '<span>Full record</span><span class="trace-explain-chev">\u203a</span>';
+    door.onclick = (e) => { e.stopPropagation(); openExplain(t.turnId); };
+    t.inner.appendChild(door);
   }
   t.el.classList.remove("live", "stopping");
   t.el.classList.remove("open"); // collapse to the summary; tap to expand
@@ -7816,6 +7839,7 @@ const SLASH_COMMANDS = [
   ["/browser", "sign in to a site in aish's own browser (window opens on the Mac)"],
   ["/session", "show this session's log path (copyable)"],
   ["/mic", "test speech recognition (mic diagnostic)"],
+  ["/explain", "the full record of a turn — what it was given, thought, ran and answered"],
   ["/help", "about aish web"],
 ];
 
@@ -8226,6 +8250,11 @@ function handleSlash(text) {
     }
     case "/session": copyLogPath(); return true; // path came in on hello (#146)
     case "/mic": openMicSheet(); return true;
+    // The second door to the dossier, and not a fallback: a turn that ran
+    // nothing may have no trace card, and a turn older than the bounded first
+    // paint is not on screen to tap. Bare form opens the LAST turn; an
+    // argument is a turn id or, for a log written before ids, an ordinal.
+    case "/explain": openExplain(arg || ""); return true;
     case "/help": openSheet("workspace-sheet"); return true;
     case "/quit": case "/exit": showToast("just close the tab — sessions persist"); return true;
     case "/debug": reportViewport("manual"); showToast("viewport state sent to server log"); return true;
@@ -10867,6 +10896,408 @@ function shortName(name, max = NAME_MAX) {
   const tail = max - 1 - head;
   return `${name.slice(0, head)}…${name.slice(-tail)}`;
 }
+
+
+// ---- the dossier ---------------------------------------------------------
+//
+// [EXPLAIN-START]
+// One turn, read back from /explain: what it was given, what it was thinking,
+// what it ran, what it produced. The panel exists because the answer to "why
+// did it do that" is usually "it was not given what you think it was", and
+// that evidence is recorded but was reachable only from a terminal.
+//
+// EVERY string here is set as TEXT, never as markup. Reasoning quotes fetched
+// pages, file contents and mail bodies — this panel renders the untrusted half
+// of the machine, and the one place it must not be rendered is as HTML.
+//
+// Nothing from here is cached: the response is `no-store` and the service
+// worker passes /explain through (NEVER_CACHE), so the bodies never reach the
+// device's disk the way transcript events do.
+let xpAbort = null;   // in-flight fetch, so a second open cancels the first
+
+function xpEl(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+// The three states, on screen. A blank is what lets someone read "it was told
+// nothing" off a log that predates the record, or off bytes deliberately
+// purged, so each says which one it is.
+const XP_STATE_WORDS = {
+  not_recorded: "not recorded — the aish that wrote this log did not keep it",
+  empty: "recorded, and there was none",
+  purged: "recorded, then deleted",
+  unreadable: "recorded, but the stored bytes are unreadable",
+  fragments: "only a fragment was kept — this log predates the full record",
+};
+
+function xpState(state, into) {
+  const word = XP_STATE_WORDS[state];
+  if (word) into.appendChild(xpEl("p", "xp-state", word));
+  return !word;   // true when the state is `recorded` and there is content
+}
+
+function xpSection(title, summary, fill) {
+  const wrap = xpEl("section", "xp-sec");
+  const head = xpEl("button", "xp-sechead");
+  head.type = "button";
+  head.appendChild(xpEl("span", "xp-secname", title));
+  head.appendChild(xpEl("span", "xp-secsum", summary));
+  head.appendChild(xpEl("span", "xp-chev", "›"));
+  const body = xpEl("div", "xp-secbody");
+  let filled = false;
+  head.onclick = () => {
+    // Built on first open, not on render: a turn's system text alone is tens of
+    // thousands of characters, and four sections of it laid out up front is a
+    // panel that takes a visible beat to appear.
+    if (!filled) { filled = true; fill(body); }
+    wrap.classList.toggle("open");
+  };
+  wrap.append(head, body);
+  return wrap;
+}
+
+function xpRow(into, label, value) {
+  const row = xpEl("div", "xp-row");
+  row.appendChild(xpEl("span", "xp-key", label));
+  row.appendChild(xpEl("span", "xp-val", value));
+  into.appendChild(row);
+}
+
+// A long body (reasoning, a page a tool read, the system prompt) folded to a
+// few lines with the rest one tap away. Not truncated — the whole point of the
+// record is that it is whole; only the first look is short.
+function xpLong(into, text, lines = 6) {
+  const all = String(text || "");
+  const pre = xpEl("pre", "xp-pre", all);
+  const split = all.split("\n");
+  if (split.length > lines || all.length > 600) {
+    pre.classList.add("xp-clamped");
+    const more = xpEl("button", "xp-more", `show all (${all.length} characters)`);
+    more.type = "button";
+    more.onclick = () => {
+      pre.classList.remove("xp-clamped");
+      more.remove();
+    };
+    into.append(pre, more);
+  } else {
+    into.appendChild(pre);
+  }
+}
+
+function xpGiven(doc, into) {
+  const given = doc.given;
+  if (!given.briefs.length) {
+    if (given.carried) {
+      into.appendChild(xpEl("p", "xp-state",
+        "unchanged since an earlier turn — the same tools and the same system text"));
+    } else {
+      xpState(given.state, into);
+    }
+  }
+  for (const brief of given.briefs) {
+    const options = brief.options || {};
+    xpRow(into, "model", `${options.model} · context ${options.num_ctx} · thinking ${options.think ? "on" : "off"}`);
+    if (options.system_role === "first_only") {
+      into.appendChild(xpEl("p", "xp-warn",
+        `on ${options.provider} the per-task reminder — which carries the rules in force — `
+        + "reached the model as one of your own messages, not as a system instruction"));
+    }
+    const sys = xpEl("div", "xp-sub");
+    sys.appendChild(xpEl("h4", null, "What it was told"));
+    if (xpState(brief.system.state, sys)) {
+      for (const part of brief.system.parts) {
+        const box = xpEl("div", "xp-part");
+        box.appendChild(xpEl("h5", null, `message ${part.at} · ${part.chars} characters`));
+        if (xpState(part.state, box)) xpLong(box, part.text);
+        sys.appendChild(box);
+      }
+    }
+    into.appendChild(sys);
+
+    const menu = xpEl("div", "xp-sub");
+    menu.appendChild(xpEl("h4", null, `Tools it could use (${brief.tools.count})`));
+    if (xpState(brief.tools.state, menu)) {
+      const search = xpEl("input", "xp-search");
+      search.type = "search";
+      search.placeholder = "Search tools";
+      const list = xpEl("div", "xp-tools");
+      const entries = brief.tools.entries || [];
+      const draw = (needle) => {
+        list.textContent = "";
+        for (const entry of entries) {
+          const fn = entry.function || {};
+          const name = String(fn.name || "");
+          const desc = String(fn.description || "");
+          if (needle && !(name + " " + desc).toLowerCase().includes(needle)) continue;
+          const item = xpEl("div", "xp-tool");
+          item.appendChild(xpEl("code", null, name));
+          item.appendChild(xpEl("p", null, desc));
+          list.appendChild(item);
+        }
+        if (!list.children.length) list.appendChild(xpEl("p", "xp-state", "no tool matches that"));
+      };
+      if (entries.length) {
+        search.oninput = () => draw(search.value.trim().toLowerCase());
+        draw("");
+        menu.append(search, list);
+      } else {
+        // Names without descriptions: the record has them, the bytes are gone.
+        menu.appendChild(xpEl("p", "xp-val", (brief.tools.names || []).join(", ")));
+      }
+    }
+    into.appendChild(menu);
+  }
+
+  for (const record of given.context.records || []) {
+    const preload = record.preload || {};
+    xpRow(into, "knowledge",
+      `${((record.index || {}).items || []).length} offered, ${preload.count || 0} injected`
+      + (preload.names && preload.names.length ? ` — ${preload.names.join(", ")}` : ""));
+  }
+  const rules = given.rules || {};
+  const bound = ((rules.groups || {}).bind) || [];
+  const abstained = ((rules.groups || {}).abstain) || [];
+  if (rules.state === "recorded") {
+    xpRow(into, "rules", `${bound.length} in force, ${abstained.length} evaluated and not applied`);
+    for (const row of bound) {
+      const item = xpEl("div", "xp-part");
+      item.appendChild(xpEl("h5", null, String(row.rule || "")));
+      for (const ob of (row.binding || {}).obligations || []) {
+        item.appendChild(xpEl("pre", "xp-pre", JSON.stringify(ob)));
+      }
+      into.appendChild(item);
+    }
+  }
+  for (const note of doc.steering || []) {
+    xpRow(into, "you typed", note.text);
+  }
+}
+
+function xpThought(doc, into) {
+  const thought = doc.thought;
+  if (thought.state === "fragments") {
+    xpState("fragments", into);
+    for (const gist of thought.fragments || []) into.appendChild(xpEl("pre", "xp-pre", gist));
+    return;
+  }
+  if (!xpState(thought.state, into)) return;
+  for (const call of thought.calls) {
+    const box = xpEl("div", "xp-part");
+    let head = `model call ${call.model_call}`;
+    if (call.stop) head += ` · stopped: ${call.stop}`;
+    if (call.tokens && call.tokens.length) head += ` · ${call.tokens[0]} in, ${call.tokens[1]} out`;
+    box.appendChild(xpEl("h5", null, head));
+    if (call.synthesized) {
+      box.appendChild(xpEl("p", "xp-warn", "the text below is aish's own sentence, not the model's"));
+    }
+    if (call.text) xpLong(box, call.text, 10);
+    else box.appendChild(xpEl("p", "xp-state", "this call recorded no thinking"));
+    if (call.truncated) {
+      box.appendChild(xpEl("p", "xp-warn",
+        `${call.truncated} characters were cut from this record by ${call.cap_source || "a cap"}`));
+    }
+    if (call.said) {
+      box.appendChild(xpEl("h5", null, "said alongside the call"));
+      xpLong(box, call.said);
+    }
+    if (call.malformed && call.malformed.length) {
+      box.appendChild(xpEl("p", "xp-warn",
+        "arguments did not parse for: " + call.malformed.join(", ")));
+    }
+    into.appendChild(box);
+  }
+}
+
+function xpDid(doc, into) {
+  const calls = doc.did.calls || [];
+  if (!calls.length) {
+    into.appendChild(xpEl("p", "xp-state", "this turn ran no tools"));
+    return;
+  }
+  for (const call of calls) {
+    const box = xpEl("div", "xp-part");
+    const head = xpEl("h5", null, `${call.call}. ${call.name}`);
+    if (!call.completed) head.appendChild(xpEl("span", "xp-bad", " never completed"));
+    else if (!call.ok) head.appendChild(xpEl("span", "xp-bad", ` failed (${call.status})`));
+    box.appendChild(head);
+    if (call.args_state === "recorded") {
+      box.appendChild(xpEl("h6", null, "arguments"));
+      xpLong(box, JSON.stringify(call.args, null, 1), 6);
+      if (call.args_truncated) {
+        box.appendChild(xpEl("p", "xp-warn",
+          `${call.args_truncated} characters of these arguments were cut from the record`));
+      }
+    } else {
+      xpState("not_recorded", box);
+    }
+    for (const gate of call.refused || []) {
+      box.appendChild(xpEl("p", "xp-warn",
+        `refused by ${gate.rule || gate.at}${gate.why ? ` — ${gate.why}` : ""}`));
+    }
+    if (call.error) box.appendChild(xpEl("p", "xp-bad", call.error));
+    if (call.output) {
+      box.appendChild(xpEl("h6", null, "what came back"));
+      xpLong(box, call.output, 8);
+    }
+    into.appendChild(box);
+  }
+  for (const record of doc.trim || []) {
+    const stubbed = (record.stubbed || []).map((s) => `${s.tool} (#${s.at})`).join(", ");
+    into.appendChild(xpEl("p", "xp-warn",
+      `${record.affected} earlier result(s) were replaced with a stub before a later call`
+      + (stubbed ? `: ${stubbed}` : " — which ones was not recorded")));
+  }
+}
+
+function xpProduced(doc, into) {
+  const produced = doc.produced;
+  if (produced.answer) xpLong(into, produced.answer, 10);
+  else into.appendChild(xpEl("p", "xp-state", "no answer was recorded for this turn"));
+  const verify = produced.verify || {};
+  for (const gate of verify.stopped || []) {
+    into.appendChild(xpEl("p", "xp-warn", `held by ${gate.rule || "a check"}`));
+  }
+  for (const gate of verify.advised || []) {
+    into.appendChild(xpEl("p", "xp-val", `delivered with a note from ${gate.rule || "a check"}`));
+  }
+  if (verify.passed) into.appendChild(xpEl("p", "xp-state", `${verify.passed} check(s) passed`));
+  if (produced.status && produced.status !== "ok") {
+    into.appendChild(xpEl("p", "xp-bad", `the task ended ${produced.status}: ${produced.error}`));
+  }
+}
+
+// Facts about this turn worth reading first — computed in Python over the same
+// document, so this is a renderer and never a second opinion. Rows state what
+// happened and where it came from; none of them says WHY.
+function xpNotes(doc, into) {
+  const notes = doc.notes || { rows: [], checks: [] };
+  const box = xpEl("section", "xp-notes");
+  box.appendChild(xpEl("h4", null, "Worth a look"));
+  if (!notes.rows.length) {
+    // NOT "nothing unusual": a checker knows only the classes someone coded,
+    // so on the one turn whose cause is an uncoded class that sentence would
+    // state the opposite of the truth, above the evidence.
+    box.appendChild(xpEl("p", "xp-state",
+      `nothing flagged by the ${notes.checks.length} checks this reader runs`));
+  }
+  for (const row of notes.rows) {
+    const item = xpEl("button", "xp-note", row.text);
+    item.type = "button";
+    item.onclick = () => xpJump(row.where && row.where.section);
+    box.appendChild(item);
+  }
+  into.appendChild(box);
+}
+
+function xpJump(section) {
+  const target = document.querySelector(`.xp-sec[data-sec="${section}"]`);
+  if (!target) return;
+  if (!target.classList.contains("open")) target.querySelector(".xp-sechead").click();
+  target.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function xpRender(doc) {
+  const body = $("xp-body");
+  body.textContent = "";
+  $("xp-title").textContent = "Full record";
+
+  const head = xpEl("header", "xp-head");
+  head.appendChild(xpEl("p", "xp-prompt", doc.prompt || "(no prompt recorded)"));
+  const options = ((doc.given.briefs[0] || {}).options) || {};
+  const bits = [options.model, doc.ts].filter(Boolean);
+  head.appendChild(xpEl("p", "xp-meta", bits.join(" · ")));
+  if (doc.running) {
+    head.appendChild(xpEl("p", "xp-warn",
+      "this turn is still running — showing what has been recorded so far"));
+  }
+  body.appendChild(head);
+
+  xpNotes(doc, body);
+
+  const sections = [
+    ["given", "What it was given", xpGivenSummary(doc), (into) => xpGiven(doc, into)],
+    ["thought", "What it was thinking", xpThoughtSummary(doc), (into) => xpThought(doc, into)],
+    ["did", "What it ran", xpDidSummary(doc), (into) => xpDid(doc, into)],
+    ["produced", "What it answered", xpProducedSummary(doc), (into) => xpProduced(doc, into)],
+  ];
+  for (const [key, title, summary, fill] of sections) {
+    const section = xpSection(title, summary, fill);
+    section.dataset.sec = key;
+    body.appendChild(section);
+  }
+}
+
+function xpGivenSummary(doc) {
+  const brief = doc.given.briefs[0];
+  if (!brief) return doc.given.carried ? "unchanged since earlier" : "not recorded";
+  const rules = ((doc.given.rules || {}).groups || {}).bind || [];
+  return `${brief.tools.count} tools · ${rules.length} rules`;
+}
+
+function xpThoughtSummary(doc) {
+  if (doc.thought.state !== "recorded") return XP_STATE_WORDS[doc.thought.state] || "";
+  const n = doc.thought.calls.length;
+  return `${n} model call${n === 1 ? "" : "s"}`;
+}
+
+function xpDidSummary(doc) {
+  const calls = doc.did.calls || [];
+  if (!calls.length) return "no tools";
+  const bad = calls.filter((c) => !c.ok || !c.completed).length;
+  return `${calls.length} call${calls.length === 1 ? "" : "s"}` + (bad ? ` · ${bad} failed` : "");
+}
+
+function xpProducedSummary(doc) {
+  const produced = doc.produced;
+  if (produced.status && produced.status !== "ok") return `ended ${produced.status}`;
+  const held = (produced.verify || {}).stopped || [];
+  return held.length ? `${held.length} check(s) held it` : "answered";
+}
+
+// [EXPLAIN-OPEN-START]
+// The one entry point. `ref` is the #202 string turn id, or empty for the
+// session's LAST turn — never a client-counted ordinal, because the first paint
+// is bounded and a browser's fourth turn is not the log's fourth on a long chat
+// ([FORK-ANCHOR]'s lesson: an id cannot be counted wrong).
+async function openExplain(ref) {
+  if (!currentSession) return;
+  if (xpAbort) xpAbort.abort();
+  xpAbort = new AbortController();
+  openSheet("explain-sheet");
+  const body = $("xp-body");
+  body.textContent = "";
+  $("xp-title").textContent = "Full record";
+  body.appendChild(xpEl("p", "xp-state", "reading the record…"));
+  const url = new URL(BASE + "explain", location.href);
+  url.searchParams.set("session", currentSession);
+  if (ref) url.searchParams.set("turn", ref);
+  if (token) url.searchParams.set("token", token);
+  try {
+    const response = await fetch(url.toString(), { cache: "no-store", signal: xpAbort.signal });
+    if (!response.ok) {
+      // A screen that cannot show the truth SAYS so (L7) rather than leaving
+      // the spinner up. Offline is the common case here: the transcript paints
+      // from the mirror, so the door is visible when the fetch cannot work.
+      body.textContent = "";
+      body.appendChild(xpEl("p", "xp-state",
+        response.status === 404
+          ? "there is no record of that turn in this chat's log"
+          : `the record could not be read (${response.status})`));
+      return;
+    }
+    xpRender(await response.json());
+  } catch (err) {
+    if (err && err.name === "AbortError") return;
+    body.textContent = "";
+    body.appendChild(xpEl("p", "xp-state",
+      "the record could not be read — this device may be offline"));
+  }
+}
+// [EXPLAIN-OPEN-END]
+// [EXPLAIN-END]
 
 // ---- sheets --------------------------------------------------------------
 function openSheet(id) {

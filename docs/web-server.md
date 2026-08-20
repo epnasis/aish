@@ -233,6 +233,7 @@ Message shapes in: `console_open` (no command — the console's command is fixed
 | `/upload` | `POST ?name=<filename>`, raw body |
 | `/share` | `POST ?name=&text=&source=`, raw body — the share-sheet inbox |
 | `/dirs` | the folder browser |
+| `/explain` | one turn's dossier — see below |
 | `/export/answer` · `/export/session` | PDF |
 | `/offline/index` · `/offline/session` | the offline mirror |
 | `/trigger` | programmatic ingress |
@@ -264,6 +265,20 @@ Message shapes in: `console_open` (no command — the console's command is fixed
 **Offline endpoints.** `GET /offline/index` (rev + every session's `name/title/snippet/ts/origin`) and `GET /offline/session` deliberately construct NO Agent and take NO session slot, mirroring `handle_export_session`'s token-check + name-safety + `asyncio.to_thread` shape. `/offline/session` has three "don't resend what they have" layers, cheapest first: a matching `If-None-Match` against a weak mtime+size ETag → **304, empty body**; a `since`/`sig` pair whose prefix still verifies → only events after it; otherwise the whole stream. `sig` is `_prefix_sig`, a hash of the first `since` events computed by the SERVER both times and echoed back opaquely, so there is no cross-language canonical-JSON agreement to get wrong. It exists because reconstruction is NOT purely append-only: a command still running at sync time later reconstructs as `command_start → stream → command_end`, splicing events mid-stream, which a naive `since` would silently corrupt. `offline_events()` caps bulk output on `stream.text` and `step.output` — the conversation stays verbatim, the noise shrinks ~10x, and that asymmetry is what makes a full local archive affordable; a pre-trace log falls back to the flat `history` blob. `TestOfflineMirror`. Client half: `docs/web-frontend.md`.
 
 ---
+
+## `/explain` — one turn's dossier (#243)
+
+`GET /explain?session=<name>&turn=<id-or-ordinal>&raw=1`, token-gated like every other surface, returning `explain.dossier()` as JSON.
+
+**A deliberate endpoint, not transcript events.** The trace contract §8.7 anticipated this and named the three reasons: the frontend opens a trace card *before* it dispatches on step kind, so pushing renderless kinds down that channel draws empty cards with running tickers rather than nothing; **the offline mirror writes transcript events into IndexedDB on every device**, and reasoning quotes fetched pages, file contents and mail bodies, which must not land on a phone's disk; and the transcript is the hot path while a dossier is not.
+
+**Two client caches, and `NEVER_CACHE` closes only one.** That list makes the service worker *pass the request through* — the response then meets the browser's ordinary HTTP cache and the bfcache. `no-store` is what closes the second, exactly as the three offline-mirror responses already do. `TestExplainEndpoint` asserts both, because asserting the service-worker list alone tests half the claim.
+
+**Turns are addressed by the `#202` string turn id**, with the ordinal kept only for logs written before ids existed and for typing a number at a terminal. A browser cannot count turns: its first paint is bounded (`TRANSCRIPT_KEEP` = 500 events), so the turn a long chat shows fourth is not the log's fourth — the same trap `[FORK-ANCHOR]` fixed, where *an id cannot be counted wrong*. With no `turn` at all the endpoint answers the LAST turn, which is what the panel opens to.
+
+**`running` is stamped by the endpoint, into the envelope.** A turn with no `task_end` was either interrupted or is still going, and the log genuinely cannot tell the two apart — only the live server knows. Putting it in the dossier would teach the reader to ask about live state, which is precisely what its purity test exists to prevent.
+
+`load()` re-parses the whole file, mid-write, so the build runs in a thread. Raw records are opt-in and capped at `EXPLAIN_RAW_RECORDS`, reporting what they elided: the section exists so a rendering can be checked against its own source, and a truncated list presented as the whole would defeat that.
 
 ## Feedback → GitHub issue
 

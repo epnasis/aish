@@ -734,3 +734,125 @@ class TestSubcommand:
         monkeypatch.setattr("sys.argv", ["aish", "explain", "nothing-like-this"])
         assert cli.main() == 1
         assert "no session log matching" in capsys.readouterr().out
+
+
+class TestDossier:
+    """The single assembly both renderers read (#243)."""
+
+    def test_it_serialises_whole(self, tmp_path):
+        """The web panel fetches this as JSON. A field that cannot cross the
+        wire is a field the phone silently does not have."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        assert json.loads(json.dumps(doc))["prompt"] == "hello"
+
+    def test_the_system_text_rides_along_resolved(self, tmp_path):
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        system = doc["given"]["briefs"][0]["system"]
+        assert system["state"] == explain_mod.RECORDED
+        assert all(part["state"] == explain_mod.RECORDED for part in system["parts"])
+        assert any(agent_module.TASK_REMINDER_MARK in part["text"] for part in system["parts"])
+
+    def test_purged_bytes_are_purged_not_missing(self, tmp_path):
+        """The distinction the whole reader exists for. A purged blob must not
+        read as a turn that was told nothing."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        (brief,) = steps(log.path, "brief")
+        evidence.purge(brief["system"][0]["digest"], tmp_path)
+        lg = explain_mod.load(log.path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        parts = doc["given"]["briefs"][0]["system"]["parts"]
+        assert parts[0]["state"] == explain_mod.PURGED
+        assert parts[0]["text"] is None
+        assert "purged" in explain_mod.explain(log.path, root=tmp_path)
+
+    def test_a_log_predating_the_record_says_not_recorded(self, tmp_path):
+        """Absence must never be the evidence: a log with no brief at all is a
+        different answer from a turn whose brief was unchanged."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        stripped = tmp_path / "old.jsonl"
+        stripped.write_text(
+            "\n".join(
+                line
+                for line in log.path.read_text().splitlines()
+                if (json.loads(line).get("step") or {}).get("kind") != "brief"
+            )
+            + "\n"
+        )
+        lg = explain_mod.load(stripped)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        assert doc["given"]["state"] == explain_mod.MISSING
+        assert doc["given"]["carried"] is False
+
+
+class TestWorthALook:
+    """Facts about a turn, never causes — and never a claim of "all clear"."""
+
+    def _doc(self, log, tmp_path):
+        lg = explain_mod.load(log.path)
+        return explain_mod.dossier(lg.turns[0], lg, tmp_path)
+
+    def test_a_failed_call_is_flagged_and_cites_the_call(self, tmp_path, monkeypatch):
+        agent, _, log = make_logged_agent(
+            [
+                model_says(tool_calls=[tool_call("read_docs", command="nope")]),
+                model_says("gave up"),
+            ],
+            tmp_path,
+        )
+        monkeypatch.setattr(
+            agent_module.tools,
+            "read_docs",
+            lambda *a, **k: agent_module.tools.ToolOutcome(
+                "no such page", ok=False, status="not_found"
+            ),
+        )
+        agent.run_task("go")
+        rows = self._doc(log, tmp_path)["notes"]["rows"]
+        failed = [r for r in rows if r["check"] == "tool_failed"]
+        assert failed, rows
+        assert failed[0]["where"] == {"section": "did", "call": 1}
+        assert "read_docs" in failed[0]["text"]
+
+    def test_every_row_cites_where_it_came_from(self, tmp_path):
+        """A row the reader cannot follow back to a record is an assertion, not
+        evidence."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        for row in self._doc(log, tmp_path)["notes"]["rows"]:
+            assert row["where"].get("section") in {"given", "thought", "did", "produced"}
+            assert row["text"].strip()
+
+    def test_the_empty_case_names_the_checks_rather_than_claiming_all_clear(
+        self, tmp_path, monkeypatch
+    ):
+        """"Nothing unusual in this turn" is a claim a checker is not entitled
+        to make: it only knows the classes somebody coded, so on the one turn
+        whose cause is an uncoded class it would state the opposite of the
+        truth, directly above the evidence."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        monkeypatch.setattr(
+            explain_mod,
+            "notes",
+            lambda doc: {"rows": [], "checks": [{"id": "x", "label": "y"}] * 4},
+        )
+        text = explain_mod.explain(log.path, root=tmp_path)
+        assert "nothing flagged by the 4 checks this reader runs" in text
+        assert "nothing unusual" not in text.lower()
+
+    def test_notes_are_a_pure_function_of_the_dossier(self, tmp_path):
+        """So the terminal and the panel surface the same list, and neither
+        re-reads the log to build it."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hello")
+        doc = self._doc(log, tmp_path)
+        again = explain_mod.notes(doc)
+        assert again["rows"] == doc["notes"]["rows"]

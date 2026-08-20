@@ -74,7 +74,7 @@ const SHELL_ASSETS = [
 // stale answer would silently shorten a document — one query, cheap to repeat.
 // Kept on ONE line: test_sw_routes.js pulls this declaration out of the file by
 // a single-line regex to give routeFor the constant it closes over.
-const NEVER_CACHE = ["/ws", "/offline/", "/upload", "/trigger", "/export/", "/dirs", "/pdf/info", "/download"];
+const NEVER_CACHE = ["/ws", "/offline/", "/upload", "/trigger", "/export/", "/dirs", "/pdf/info", "/download", "/explain"];
 
 // [SW-ROUTE-START]
 // Which strategy a request gets. Kept as a pure function returning a string so

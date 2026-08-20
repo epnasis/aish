@@ -139,6 +139,25 @@ Everything above is about recording what happened. These four are different in k
 
 ---
 
+## One assembly, two renderers (#243)
+
+`render` prints for a terminal; the web panel draws DOM. If each walked the records itself there would be two implementations of *"what does this log say"*, and they would disagree about **absence** first — which is this reader's entire subject. So the walk happens once, in `dossier()`, and produces plain JSON-serialisable data that both renderers consume. `render` is a dumb renderer over it, and the endpoint serialises it.
+
+The three states are machine values on the data (`RECORDED` / `MISSING` / `EMPTY` / `PURGED`, plus `FRAGMENTS` for a log written before the full reasoning record, whose rendered `thinking` step kept a snippet). A snippet shown as "the reasoning" is how someone concludes the model barely thought about it, so it says which one it is rather than presenting one as the other.
+
+`TestDossier` pins that the whole document serialises, that resolved and purged bytes stay distinguishable, and that a log predating the brief reports `not_recorded` rather than a carried-forward one.
+
+## Worth a look — facts, never causes
+
+A turn with a two-dozen-rule corpus produces dozens of verdicts, and on a phone the line that matters is buried. `notes()` ranks what is worth reading first. Four properties make that safe, and each is a test:
+
+- **Rows are observations.** "read_url returned 403", never "the 403 is why it improvised". A confident wrong cause wearing evidence styling is the failure this whole feature exists to end.
+- **Every row cites where it came from** — section, and call or model call — so it is a shortcut into the evidence rather than a substitute for it.
+- **The empty state names the checks it ran.** *"Nothing unusual in this turn"* is a claim a checker is not entitled to make: it knows only the classes someone coded, so on the one turn whose cause is an uncoded class it would state the opposite of the truth, above the evidence.
+- **It is a pure function of the `Dossier`**, not of the log, so the terminal and the panel surface the same list and neither re-derives it.
+
+Rows are collapsed per outcome rather than per rule — ten verify verdicts are one row naming the rules, not ten rows — because a list as long as the evidence is not a shortcut. `TestWorthALook` pins the citation, the collapse and the empty state. The web half of all this is `docs/web-server.md`'s `/explain`, tested by `TestExplainEndpoint`.
+
 ## What is still missing
 
 The reader reports each of these as *not recorded* rather than guessing:
