@@ -1667,16 +1667,18 @@ def _skill_cli(args: list[str]) -> int:
 
 
 def _explain_cli(args: list[str]) -> int:
-    """`aish explain <session> [turn] [--tools]` — what governed a turn (#214).
+    """`aish explain <session> [turn] [--tools] [--context]` — what governed a turn (#214).
 
     Pure read: no model call, no rule file opened, nothing that could report how
     aish behaves TODAY instead of how it behaved then (docs/trace-contract.md §0).
     """
     from . import explain as explain_mod
 
-    usage = "usage: aish explain <session-name-or-path> [turn] [--tools]"
+    usage = "usage: aish explain <session-name-or-path> [turn] [--tools] [--context]"
+    flags = {"--tools", "--context"}
     show_tools = "--tools" in args
-    rest = [a for a in args if a != "--tools"]
+    show_context = "--context" in args
+    rest = [a for a in args if a not in flags]
     if not rest:
         print(usage)
         return 2
@@ -1697,7 +1699,11 @@ def _explain_cli(args: list[str]) -> int:
         for path in matches[-20:]:
             print(f"  {path.name}")
         return 2
-    print(explain_mod.explain(matches[0], turn, show_tools=show_tools))
+    print(
+        explain_mod.explain(
+            matches[0], turn, show_tools=show_tools, show_context=show_context
+        )
+    )
     return 0
 
 
