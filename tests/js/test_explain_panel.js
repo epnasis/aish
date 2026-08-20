@@ -98,6 +98,7 @@ function textOf(node) {
 function world() {
   const body = fakeEl("div");
   const title = fakeEl("strong");
+  const frames = [];
   const sandbox = {
     document: {
       createElement: fakeEl,
@@ -105,6 +106,9 @@ function world() {
     },
     $: (id) => (id === "xp-body" ? body : title),
     JSON, Math, Set, Map, console, String, Object,
+    // Collected, never drained — a hidden page runs no frames, and the jump
+    // must land on its FIRST pass rather than relying on the settle pass.
+    requestAnimationFrame: (fn) => { frames.push(fn); return frames.length; },
     openSheet() {},
     currentSession: "session-x.jsonl",
     BASE: "/", token: "", location: { href: "http://x/" },
@@ -115,7 +119,7 @@ function world() {
     surface(extract(appSource(), "// [EXPLAIN-START]", "// [EXPLAIN-END]")),
     sandbox
   );
-  return { sandbox, body, title };
+  return { sandbox, body, title, frames };
 }
 
 function doc(overrides = {}) {
@@ -375,6 +379,22 @@ check("a note opens a section that is closed and leaves an open one open", () =>
   assert(flow.classList.contains("open"));
   note.onclick();   // a second tap must not toggle it shut under the reader
   assert(flow.classList.contains("open"), "tapping the note again closed the section");
+});
+
+check("the jump lands on its first pass, without waiting for a frame", () => {
+  // The settle pass is insurance, not the mechanism: a hidden page runs no
+  // frames at all, and a jump that only works once one fires is a jump that
+  // sometimes does not.
+  const { sandbox, body, frames } = world();
+  const d = doc();
+  d.notes.rows = [{ check: "tool_failed", text: "read_docs failed",
+                    where: { section: "flow", call: 1 } }];
+  sandbox.xpRender(d);
+  const flow = walk(body).find((n) => n.className === "xp-sec" && n.dataset.sec === "flow");
+  walk(body).find((n) => n.className === "xp-note").onclick();
+  assert(flow.classList.contains("open"));
+  assert.equal(frames.length, 1, "no settle pass was armed");
+  frames[0]();   // and draining it must not throw
 });
 
 check("a note pointing at a section that is not there is a no-op, never a throw", () => {

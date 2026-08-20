@@ -11355,7 +11355,16 @@ function xpNotes(doc, into) {
 function xpScrollTo(el) {
   const body = $("xp-body");
   if (!body || !el) return;
-  const top = el.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop;
+  // offsetTop accumulation, NOT getBoundingClientRect. A rect is measured
+  // against the viewport, so turning it into a content offset needs
+  // `+ scrollTop` — and that term makes the answer depend on the layout being
+  // settled at the instant of measurement. Measured on a real turn: a round
+  // whose true offset was 10812 read as 361 while the section that had just
+  // been filled was still being laid out, so the panel scrolled 355px and the
+  // reader landed in the middle of the wrong section. offsetTop is
+  // scroll-independent, so there is no term to be stale.
+  let top = 0;
+  for (let node = el; node && node !== body; node = node.offsetParent) top += node.offsetTop;
   body.scrollTop = Math.max(0, top - 6);
 }
 
@@ -11373,7 +11382,13 @@ function xpJump(where) {
   } else if (where.model_call !== undefined) {
     inner = target.querySelector(`.xp-round[data-round="${where.model_call}"]`);
   }
-  xpScrollTo(inner || target);
+  const landing = inner || target;
+  xpScrollTo(landing);
+  // …and again once the browser has laid the new section out. Filling a section
+  // adds thousands of pixels above the landing spot, and the first pass can
+  // measure before that settles; a second pass on the next frame is cheap and
+  // makes the jump land whether or not it did.
+  requestAnimationFrame(() => xpScrollTo(landing));
 }
 
 function xpRender(doc) {
