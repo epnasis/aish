@@ -74,6 +74,7 @@ function makeSandbox() {
     replaying: false,
     turnStart: 0, // the live card's clock origin (0 = derive it from now)
     currentTrace: null,
+    currentTurnId: "",
     turnAnchorEl: null,
     SPINNER: "",
     TOOL_META: {},

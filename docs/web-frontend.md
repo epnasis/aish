@@ -183,6 +183,31 @@ Fires once at the transition so the answer isn't buried under a tall step list, 
 
 ---
 
+## The dossier panel
+
+### `[EXPLAIN]` / `[EXPLAIN-OPEN]` — one turn, read back from the record
+The consumption half of `aish explain` (#243). `openExplain(ref)` fetches `/explain` and draws four sections — what it was **given**, what it was **thinking**, what it **ran**, what it **answered** — over the document the server assembled. Nothing here re-derives: the ranking, the three states and the summaries all arrive as data, so the panel and the terminal can never disagree about what a log says (`docs/diagnostics.md`).
+
+Four things are load-bearing:
+
+- **Everything is set as TEXT.** This panel renders the untrusted half of the machine: reasoning quotes fetched pages, a tool result is whatever a command printed, and the system text carries the owner's own rules. One `innerHTML` here executes a page aish read. `test_explain_panel.js` asserts no node's `innerHTML` is ever written.
+- **The three states are never a blank.** *Not recorded* / *recorded and empty* / *recorded, then deleted* route to three different repairs, and a blank cell reads as the first whatever the truth was. There is a fourth for a log predating the full reasoning record, which kept only a fragment — shown as a fragment, because a snippet presented as "the reasoning" is how someone concludes the model barely thought.
+- **The empty notes list never says the turn is fine.** It names how many checks ran. A checker knows only the classes somebody coded, so "nothing unusual" would state the opposite of the truth on the one turn whose cause is an uncoded class — above the evidence.
+- **Section bodies are built on first open.** One turn's system text alone is tens of thousands of characters; laying out four sections of it up front costs a visible beat on the phone this is for.
+
+Long bodies are **folded, not truncated** — the record's whole point is that it is whole, so only the first look is short. `xpAbort` cancels an in-flight read when a second turn is opened, and a failed fetch **says so** (L7) rather than leaving the spinner up; offline is the ordinary case, since the transcript paints from the mirror while `/explain` cannot be served. — `test_explain_panel.js`
+
+### The door is the finished trace card
+The card is already the turn's footnote, it already replays cold, and it already means "what it did", so it gains one row — `Full record ›` — rather than the answer's tool row gaining a tenth chip for something that is not about the answer.
+
+**The row is added in `finishTrace` and nowhere else.** Both the live path and cold replay reach that function, which is what makes hot and cold render identically (L2); adding it from the `done` handler instead would miss every replayed card and still pass the node checks. It writes DOM only — `currentTrace` stays owned by `[TRACE-OPEN]`/`[TRACE-CLOSE]` (L1).
+
+The card carries the turn id it was **created** with, so the row addresses a turn by id rather than by a position the browser would have to count — the first paint is bounded, so the fourth card on screen is not the log's fourth turn ([FORK-ANCHOR]: *an id cannot be counted wrong*).
+
+**A step-less card is no longer dropped.** It used to be removed unless it carried token usage (#84), which is right when the box only shows steps and wrong once the box is also the door: a turn that answered without running anything is exactly the one worth asking about. It is kept whenever there is a turn to open, and its finished header reads `Answered` rather than `Worked for 0.0s · 0 steps`, which reads as a broken card. `/explain` in the composer is the second door, for turns older than the bounded first paint and for logs written before cards existed.
+
+---
+
 ## The session rail
 
 ### `[RAIL]` — the slide-over chat list

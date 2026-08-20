@@ -481,6 +481,18 @@
 
 <!-- mic / speech-recognition diagnostic (/mic) — tests webkitSpeechRecognition
      in this exact context (must run in the installed PWA to be a valid test) -->
+<!-- The dossier for one turn (#243). Built entirely in JS from /explain, and
+     deliberately empty here: nothing about a turn may sit in the app shell,
+     which is cached, while the dossier itself must never be. -->
+<div id="explain-sheet" class="sheet" hidden>
+  <div class="grabber"></div>
+  <div class="sheet-head">
+    <strong class="grow" id="xp-title">Full record</strong>
+    <button class="close" aria-label="close" data-close="explain-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
+  </div>
+  <div class="xp-body" id="xp-body"></div>
+</div>
+
 <div id="mic-sheet" class="sheet" hidden>
   <div class="grabber"></div>
   <div class="sheet-head">
