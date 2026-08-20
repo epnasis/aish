@@ -593,6 +593,50 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
 }"""
 
 
+# What a long dropdown contributes to the page TEXT, so it can be taken back
+# out. `inner_text` includes every option of a closed `<select>` — measured: a
+# 250-option country picker was 3 500 of a 4 176-character page, 84% of it, and
+# on a real portal that is most of the read budget spent on one control the model
+# has not even reached yet. The options come back as one contiguous block, in
+# document order, exactly as they appear in the text.
+FLOOD_JS = """(opts) => {
+  const out = [];
+  for (const sel of document.querySelectorAll('select')) {
+    const list = Array.from(sel.options || []);
+    if (list.length <= opts.inlineChoices) continue;
+    out.push({
+      count: list.length,
+      name: (sel.getAttribute('name') || sel.id || '').slice(0, 60),
+      // String.fromCharCode(10) rather than an escape: this JS lives inside a
+      // Python string, and a backslash that survives one layer and not the
+      // other is a syntax error only the page reports.
+      text: list.map((o) => (o.text || '').trim()).join(String.fromCharCode(10)),
+    });
+  }
+  return out;
+}"""
+
+
+def strip_option_floods(text: str, floods: list[dict[str, Any]]) -> str:
+    """Take a long dropdown's options back out of the page text.
+
+    The whole contiguous block, replaced by a count — never line by line, which
+    would also delete the legitimate line elsewhere on the page that happens to
+    read "Poland". A block that does not match exactly is left alone, so the
+    worst this can do is nothing."""
+    for flood in floods:
+        block = str(flood.get("text") or "")
+        if not block or block not in text:
+            continue
+        name = str(flood.get("name") or "")
+        count = int(flood.get("count") or 0)
+        named = f" '{name}'" if name else ""
+        text = text.replace(
+            block, f"[dropdown{named}: {count} options — see the control list]", 1
+        )
+    return text
+
+
 # The same predicate, run on ONE element at act time. The tag outlives the
 # reachability: `_settled_text` waits, the model thinks, and a menu that closes
 # on scroll or on a timer leaves its entries tagged and unpressable. Asking again

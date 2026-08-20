@@ -128,7 +128,7 @@ Only `read_url` can carry a session; `show_image` / `read_pdf` / `read_media` fe
 
 **A page mid-load has TEXT**, so neither the emptiness test nor the thin-page retry catches it — `Moje Umowy` came back as its own "Wczytywanie danych" twice in one session while the owner watched. `still_loading` decides only whether to WAIT longer: a false positive costs a couple of seconds, a false negative hands over the page that was about to contain the answer. Reads do not pay this; a browse action is one of a handful in a flow and the thing being waited for is the point.
 
-`TestWhatCountsAsMutating`, `TestTheControlList`, `TestStillLoading`, `TestAPageThatSaysItIsStillLoading` and `TestBrowseDispatch` pin the parts that need no browser; `TestWhatTheModelIsToldItCannotSee`, `TestHowItWasPressedIsNotWhetherItWorked` and `TestChoosingWithoutReadingTheList` pin what #244 and #245 changed about them, and `TestTheSiteSaysWhereYouActuallyAre` the redirect line.
+`TestWhatCountsAsMutating`, `TestTheControlList`, `TestStillLoading`, `TestAPageThatSaysItIsStillLoading` and `TestBrowseDispatch` pin the parts that need no browser; `TestWhatTheModelIsToldItCannotSee`, `TestHowItWasPressedIsNotWhetherItWorked` and `TestChoosingWithoutReadingTheList` and `TestADropdownIsNotThePage` pin what #244 and #245 changed about them, and `TestTheSiteSaysWhereYouActuallyAre` the redirect line.
 
 ## The browse gate — two questions, not one
 
@@ -196,6 +196,8 @@ Then: a real click. Then the **keyboard**, which is not a workaround — it is t
 
 An airport picker is 312 options and a country-code picker is 250. Inlining them spent the control budget on data the model does not need until it chooses: on one qatarairways.com snapshot the option dump pushed **51 real controls off the end of the list**. A `choice` line now carries what the owner can see without opening it — how many options, and which is selected — with the full list inlined only up to `CHOICE_INLINE_MAX`, because a yes/no/maybe select is better read than counted.
 
+**The bigger half is the page TEXT, not the control line.** `inner_text` includes every option of a *closed* `<select>` — measured on one fixture, 3 500 of 4 176 characters, 84% of the page. `strip_option_floods` takes the whole contiguous block back out and leaves a count, and it does that as a block rather than line by line on purpose: the page's own sentence "Faktura dla: Polska" is not the dropdown's option for Poland. A block that does not match exactly is left alone, so the worst it can do is nothing.
+
 The options are fetched at CHOOSE time and matched in Python, where the tests are. `match_option` is a ladder, tightest first — label verbatim, label folded, value verbatim, folded substring — and it stops at the first rung yielding exactly one. Folding is NFKD plus a hand-mapped `ł`, because this is the owner's web and "Lodz" has to find "Łódź".
 
 **Deliberately not fuzzy.** Edit-distance matching silently picks, and a `choose` is very often followed by a form submit; "Iran" quietly standing in for "Irak" is exactly the class of wrong this module exists to prevent. Ambiguity and no-match both fail loudly *with the candidates* — which is what makes collapsing the list on the snapshot affordable in the first place: the failure message is the option list the model needed. A `role=combobox` with no `<option>` children is a search box wearing a dropdown's clothes, and says so instead of spending two `select_option` timeouts finding out.
@@ -207,6 +209,8 @@ Custom dropdowns need none of this. Their popup entries are unreachable while cl
 `scripts/verify_browse.py` serves two local pages and drives them with a real Chrome and a throwaway profile. It is not in the pytest suite (conftest forbids launching Chrome on purpose) and it is where every real bug in this feature has been found — the unit tests were green for all of them.
 
 One page is shaped like eon.pl/mojeon. The other is every way a control can be listed and unpressable, each fixture taken from a session that failed: a nav rendered twice with the mobile copy off-canvas, a folded accordion, a dialog that pins the page, a checkbox hidden under a styled label, a 250-option select, a button under a transparent sheet, a control inside an iframe, a `Content-Disposition` download behind a `target=_blank` link, and a URL that redirects. It also asserts the ladder is *bounded* — a covered button must be pressed in seconds, not in the time it takes to give up.
+
+One more guard came out of building this: every injected script is node `--check`ed by `TestTheInjectedJavaScriptParses`. A backslash that survives one layer of quoting and not the other is a syntax error the PAGE reports and nothing else does — `FLOOD_JS` shipped for an hour with a literal newline inside a string literal, the `evaluate` threw, the caller swallowed it as "a page that will not answer", and the only symptom was that nothing happened.
 
 Three bugs it caught that nothing else did: `el.href` resolving `href="#"` to the page's own URL, which would have walked `<a href="#">Zapłać</a>` past the gate; stale `data-aish-n` tags giving two elements one number; and the shared-edge overlap that called a folded accordion's contents pressable.
 

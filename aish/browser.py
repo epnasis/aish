@@ -540,6 +540,23 @@ async def _body_text(page: Any) -> str:
         return ""
 
 
+async def _without_option_floods(page: Any, text: str) -> str:
+    """The page text with long dropdowns collapsed to a count.
+
+    Applied to what is HANDED OVER and never to what a judgement is made on:
+    `is_challenge` and the thin-page test were measured on whole bodies, and a
+    page that shrinks by 3 500 characters here would cross both."""
+    if not text:
+        return text
+    try:
+        floods = await page.evaluate(
+            browse_mod.FLOOD_JS, {"inlineChoices": browse_mod.CHOICE_INLINE_MAX}
+        )
+    except Exception:  # noqa: BLE001 — a page that will not answer keeps its text
+        return text
+    return browse_mod.strip_option_floods(text, list(floods or []))
+
+
 async def _has_password_field(page: Any) -> bool:
     """Is the RENDERED page asking for a password?
 
@@ -1059,7 +1076,9 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
             # Narrowing happens AFTER every judgement above, so <main> can never
             # move a threshold that was measured on a whole body.
             return Page(
-                text=(await _main_text(page, text)) or text,
+                text=await _without_option_floods(
+                    page, (await _main_text(page, text)) or text
+                ),
                 title=(await page.title()) or "",
                 images=await _declared_images_async(page),
                 url=page.url or url,
@@ -1859,7 +1878,7 @@ async def _snapshot(
 ) -> browse_mod.Snapshot:
     """The page as the model receives it: what it says, and what it can press."""
     global _LAST_SNAPSHOT
-    text = await _settled_text(page)
+    text = await _without_option_floods(page, await _settled_text(page))
     raw, matched, unreached = await _enumerate(page)
     controls = browse_mod.controls_from(raw)
     # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
@@ -2030,6 +2049,8 @@ async def _press(page: Any, target: Any, *, mutating: bool, href: str) -> str:
                 "press"
             )
     raise Stuck()
+
+
 class Refused(Exception):
     """The action was understood and NOT performed — an ambiguous choice, a
     control that is not what the model took it for. The message is for the
