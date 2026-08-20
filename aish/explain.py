@@ -429,6 +429,12 @@ def _given(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         for record in turn.of_kind("knowledge")
     ]
     given["rules"] = _rules_data(turn, log)
+    # Trims that fired at task SEED, not mid-task. They shaped what the model
+    # started from, so they belong here; `mid_task_budget` is an event in the
+    # flow and is rendered between rounds instead.
+    given["trims"] = [
+        dict(r) for r in turn.of_kind("trim") if r.get("policy") != "mid_task_budget"
+    ]
     return given
 
 
@@ -593,6 +599,134 @@ def _produced(turn: Turn, did: dict) -> dict:
     }
 
 
+# Which model call issued a tool call, and whether that is RECORDED or merely
+# inferred from the order the log was written in. Chosen per TURN, not per file:
+# one session can hold both local turns (which record it) and claude-max turns
+# (whose SDK loop records no model calls at all), so a file-level answer would
+# label one of them wrongly.
+GROUPING_RECORDED = "recorded"
+GROUPING_INFERRED = "inferred"
+GROUPING_NONE = "none"
+
+
+def _walk_rounds(turn: Turn) -> dict[int, int]:
+    """Which model call each step of the turn sat under, by file order.
+
+    File order IS the chronology within a turn — every one of these records is
+    emitted from the main thread in sequence, including the parallel batch,
+    whose `call` records are written at collection. So this is not a guess about
+    ordering; it is reading the order that was written. It IS an inference about
+    ATTACHMENT, which is why anything relying on it is labelled `inferred`.
+    """
+    at: dict[int, int] = {}
+    seen = 0
+    for index, step in enumerate(turn.steps):
+        kind = step.get("kind")
+        if kind == "reasoning":
+            seen = int(step.get("model_call") or seen + 1)
+        elif kind == "thinking" and not seen:
+            # Pre-#240 logs have no reasoning record; the rendered thinking step
+            # is the only round boundary they kept.
+            seen = 1
+        at[index] = seen
+    return at
+
+
+def _rounds(turn: Turn, doc: dict) -> dict:
+    """The turn as it actually happened: think, call, get results, think again.
+
+    The panel and the reader were organised by RECORD KIND, which is how a file
+    is organised and not how a turn is. Reading them, the owner could not tell
+    which thinking followed which result — "I don't know which information was
+    retrieved after which tool" — and that causal chain is the whole reason to
+    open a dossier at all.
+
+    Rounds reference `thought` and `did` by id rather than copying them: tool
+    output is the bulk of the payload and this document is fetched to a phone.
+
+    Events that sit BETWEEN rounds ride here too, because they are exactly the
+    "what changed between two thoughts" facts that were invisible: text typed
+    while the task ran, a mid-task trim that stubbed a result the model had
+    already read, and a change to what the model was being handed.
+    """
+    thoughts = doc["thought"]["calls"]
+    calls = doc["did"]["calls"]
+    at = _walk_rounds(turn)
+
+    placed: dict[int, int] = {}   # call id -> model call
+    inferred_any = False
+    for index, step in enumerate(turn.steps):
+        if step.get("kind") != "call" or not step.get("call"):
+            continue
+        recorded = step.get("model_call")
+        if recorded:
+            placed[int(step["call"])] = int(recorded)
+        elif at.get(index):
+            placed[int(step["call"])] = at[index]
+            inferred_any = True
+
+    if not thoughts and not calls:
+        grouping = GROUPING_NONE
+    elif calls and not any(s.get("model_call") for s in turn.of_kind("call")):
+        # Nothing stamped: either a log older than the stamp, or a backend whose
+        # loop records no model calls at all (claude-max).
+        grouping = GROUPING_INFERRED if inferred_any else GROUPING_NONE
+    elif inferred_any:
+        grouping = GROUPING_INFERRED
+    else:
+        grouping = GROUPING_RECORDED
+
+    # Between-round events, by the LAST COMPLETED model call at the time they
+    # were written. Never "the next one": both are emitted before a call that a
+    # cancel can stop from ever happening, and an event naming a round that
+    # never occurred is a lie.
+    after: dict[int, list[dict]] = {}
+    for index, step in enumerate(turn.steps):
+        kind = step.get("kind")
+        if kind == "trim" and step.get("policy") == "mid_task_budget":
+            after.setdefault(at.get(index, 0), []).append({"kind": "trim", "record": dict(step)})
+        elif kind == "injected":
+            after.setdefault(at.get(index, 0), []).append(
+                {"kind": "steering", "text": str(step.get("text") or "")}
+            )
+
+    numbers = sorted({int(t["model_call"]) for t in thoughts if t.get("model_call")} | set(
+        placed.values()
+    ))
+    rounds = []
+    for number in numbers:
+        events = list(after.get(number - 1, []))
+        for brief in doc["given"]["briefs"]:
+            if brief["written_here"] and brief.get("model_call") == number and number > 1:
+                events.append({"kind": "brief_changed", "model_call": number})
+        rounds.append(
+            {
+                "model_call": number,
+                # References, never copies.
+                "thought": next(
+                    (t["model_call"] for t in thoughts if t.get("model_call") == number), None
+                ),
+                "calls": [c["call"] for c in calls if placed.get(c["call"]) == number],
+                "before": events,
+            }
+        )
+    # Calls belonging to no round — claude-max, or a log with neither the stamp
+    # nor any reasoning to infer from. Listed flat rather than folded into round
+    # one, which would be a fabricated join.
+    unplaced = [c["call"] for c in calls if c["call"] not in placed]
+    # Events whose round never got rendered — a turn with no reasoning records
+    # at all still has steering and trims, and dropping them would hide the one
+    # place some of them exist (steering is not restored on resume).
+    consumed = {number - 1 for number in numbers}
+    loose = [event for key, events in after.items() if key not in consumed for event in events]
+    return {
+        "grouping": grouping,
+        "rounds": rounds,
+        "unplaced": unplaced,
+        "loose": loose,
+    }
+
+
 def _note(rows: list[dict], check: str, text: str, **where) -> None:
     rows.append({"check": check, "text": text, "where": where})
 
@@ -616,20 +750,20 @@ def notes(doc: dict) -> dict:
         if not call["completed"]:
             _note(rows, "call_incomplete",
                   f"{call['name']} was proposed but no result was recorded",
-                  section="did", call=call["call"])
+                  section="flow", call=call["call"])
         elif not call["ok"]:
             _note(rows, "tool_failed",
                   f"{call['name']} failed ({call['status']})",
-                  section="did", call=call["call"])
+                  section="flow", call=call["call"])
         for gate in call["refused"]:
             _note(rows, "gate_refused",
                   f"{call['name']} was refused by {gate.get('rule') or gate.get('at')}",
-                  section="did", call=call["call"])
+                  section="flow", call=call["call"])
         if call["args_truncated"]:
             _note(rows, "args_truncated",
                   f"{call['args_truncated']} characters of {call['name']}'s arguments were "
                   f"cut from the record by {call['cap_source'] or 'a cap'}",
-                  section="did", call=call["call"])
+                  section="flow", call=call["call"])
 
     # One row per OUTCOME, not per rule. A corpus of two dozen rules produces a
     # dozen verify verdicts on an ordinary turn, and a list that long is the
@@ -665,16 +799,16 @@ def notes(doc: dict) -> dict:
             _note(rows, "reasoning_truncated",
                   f"{call['truncated']} characters of reasoning were cut from the record "
                   f"by {call['cap_source'] or 'a cap'}",
-                  section="thought", model_call=call["model_call"])
+                  section="flow", model_call=call["model_call"])
         if call["malformed"]:
             _note(rows, "args_malformed",
                   "the model's arguments did not parse for: "
                   + ", ".join(str(n) for n in call["malformed"]),
-                  section="thought", model_call=call["model_call"])
+                  section="flow", model_call=call["model_call"])
         if call["stop"] and call["stop"] not in ORDINARY_STOPS:
             _note(rows, "stop_unusual",
                   f"the model stopped with reason {call['stop']!r}",
-                  section="thought", model_call=call["model_call"])
+                  section="flow", model_call=call["model_call"])
 
     for record in doc["trim"]:
         if record.get("stubbed"):
@@ -684,12 +818,12 @@ def notes(doc: dict) -> dict:
             _note(rows, "result_stubbed",
                   f"{record.get('affected')} earlier result(s) were replaced with a stub "
                   f"before this call: {listed}",
-                  section="did")
+                  section="flow")
         elif record.get("affected"):
             _note(rows, "result_stubbed",
                   f"{record.get('affected')} earlier result(s) were stubbed; which ones "
                   f"was not recorded",
-                  section="did")
+                  section="flow")
 
     for record in doc["steering"]:
         _note(rows, "steering",
@@ -724,7 +858,7 @@ def notes(doc: dict) -> dict:
         _note(rows, "context_full",
               f"the prompt reached {fullest['tokens'][0]} tokens against a "
               f"{window}-token window",
-              section="thought", model_call=fullest["model_call"])
+              section="flow", model_call=fullest["model_call"])
 
     status = doc["produced"]["status"]
     if status is None:
@@ -778,6 +912,8 @@ def dossier(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
         ],
         "trim": [dict(r) for r in turn.of_kind("trim")],
     }
+    # After `given`/`thought`/`did` exist, because it references into them.
+    doc["flow"] = _rounds(turn, doc)
     doc["notes"] = notes(doc)
     return doc
 
@@ -872,6 +1008,22 @@ def _given_lines(given: dict, show_tools: bool, show_context: bool, out: list[st
             for it in record["items"]
         )
         out.append(f"  {'knowledge':<10} {record['mode']}: {chosen or '(none)'}")
+
+    for record in given.get("trims") or []:
+        out.append(
+            f"  {'trim':<10} {record.get('policy')}: {record.get('affected')} message(s), "
+            f"{record.get('bytes_before')} → {record.get('bytes_after')} bytes "
+            f"(keep {record.get('keep_chars')}, cap from {record.get('cap_source')})"
+        )
+        if stubbed := record.get("stubbed"):
+            listed = ", ".join(f"#{x.get('at')} {x.get('tool')}" for x in stubbed)
+            out.append(f"  {'':<10} {BOLD}stubbed for the model{RESET}: {listed}")
+            if record.get("stubbed_truncated"):
+                out.append(f"  {'':<10} … and {record['stubbed_truncated']} more")
+        elif record.get("affected"):
+            out.append(
+                f"  {'':<10} {DIM}which messages: {NOT_RECORDED} (log predates #241){RESET}"
+            )
 
     _rules_lines(given["rules"], out)
 
@@ -1034,6 +1186,150 @@ def _thought_lines(thought: dict, out: list[str]) -> None:
     _block(out, "reasoning", lines)
 
 
+GROUPING_WORDS = {
+    GROUPING_INFERRED: "round order inferred from the order the log was written "
+                       "— this log predates the by-id record",
+    GROUPING_NONE: "this backend's loop records no model calls, so the turn "
+                   "cannot be shown as rounds",
+}
+
+
+def _flow_lines(doc: dict, out: list[str]) -> None:
+    """The turn in the order it happened, which is the order a reader needs.
+
+    Organised by record kind, a dossier cannot answer "what did it think after
+    it got that result" — the owner's actual question. Rounds put each thought
+    beside the calls it issued and the results they returned."""
+    flow = doc["flow"]
+    thoughts = {t["model_call"]: t for t in doc["thought"]["calls"]}
+    calls = {c["call"]: c for c in doc["did"]["calls"]}
+    lines: list[str] = []
+    # Whether the reasoning is here at all, said once at the top rather than
+    # once per round. A log written before the full record kept only a rendered
+    # fragment, and a 26-character snippet shown as "the reasoning" is how
+    # someone concludes the model barely thought about it.
+    thought_state = doc["thought"]["state"]
+    if thought_state == FRAGMENTS:
+        lines.append(f"{DIM}reasoning: fragments only — this log predates #240{RESET}")
+        for gist in doc["thought"]["fragments"][:20]:
+            lines.append(f"  {DIM}· {gist[:160]}{RESET}")
+    elif thought_state != RECORDED:
+        lines.append(f"  {'':<0}reasoning: {_state_note(thought_state, ' (log predates #240)')}")
+    if word := GROUPING_WORDS.get(flow["grouping"]):
+        lines.append(f"{DIM}{word}{RESET}")
+    for rnd in flow["rounds"]:
+        for event in rnd["before"]:
+            lines.extend(_event_lines(event, placed=True))
+        thought = thoughts.get(rnd["thought"])
+        head = f"{BOLD}round {rnd['model_call']}{RESET}"
+        if thought:
+            if thought["stop"]:
+                head += f" · stopped: {thought['stop']}"
+            if thought["tokens"]:
+                head += f" · tokens {thought['tokens']}"
+        lines.append(head)
+        if thought is None:
+            lines.append(f"  {DIM}no response was recorded for this call{RESET}")
+        else:
+            if thought["synthesized"]:
+                lines.append(f"  {BOLD}the text below is aish's sentence, not the model's{RESET}")
+            if thought["text"]:
+                lines.append("  thought:")
+                lines.extend(f"    {line}" for line in thought["text"].splitlines())
+            else:
+                lines.append(f"  {DIM}this call recorded no thinking{RESET}")
+            if thought["truncated"]:
+                lines.append(
+                    f"    {BOLD}… {thought['truncated']} more characters cut by "
+                    f"{thought['cap_source'] or 'a cap'}{RESET}"
+                )
+            if thought["said"]:
+                lines.append("  said:")
+                lines.extend(f"    {line}" for line in thought["said"].splitlines())
+            if thought["malformed"]:
+                lines.append(
+                    f"  {BOLD}arguments did not parse{RESET} for: "
+                    f"{', '.join(str(n) for n in thought['malformed'])}"
+                )
+        if not rnd["calls"] and thought is not None:
+            lines.append(f"  {DIM}no tool calls ran under this one{RESET}")
+        for number in rnd["calls"]:
+            lines.extend(_call_lines(calls[number]))
+    if flow["unplaced"]:
+        lines.append(f"{BOLD}calls that name no model call{RESET}")
+        for number in flow["unplaced"]:
+            lines.extend(_call_lines(calls[number]))
+    for event in flow["loose"]:
+        lines.extend(_event_lines(event, placed=False))
+    _block(out, "what happened", lines or [f"{DIM}nothing was recorded for this turn{RESET}"])
+
+
+def _event_lines(event: dict, placed: bool) -> list[str]:
+    """Something that happened BETWEEN two thoughts.
+
+    These are the "what changed while it was running" facts that a kind-sliced
+    dossier hid: a result the model had already read replaced by a stub, text
+    typed mid-task, a change to what it was being handed. `placed` is False when
+    no round could be named — the event still shows, without a claim about when.
+    """
+    where = "before this call" if placed else "at some point in this turn"
+    if event["kind"] == "trim":
+        record = event["record"]
+        stubbed = ", ".join(
+            f"#{x.get('at')} {x.get('tool')}" for x in record.get("stubbed") or []
+        )
+        detail = f": {stubbed}" if stubbed else f" ({NOT_RECORDED} which)"
+        return [
+            f"  {BOLD}⚠ {where}{RESET} {record.get('affected')} earlier result(s) "
+            f"were stubbed for the model{detail}"
+        ]
+    if event["kind"] == "steering":
+        return [f"  {BOLD}⚠ you typed mid-task{RESET}: {event['text'][:200]}"]
+    if event["kind"] == "brief_changed":
+        return [f"  {BOLD}⚠ what the model was handed changed here{RESET}"]
+    return []
+
+
+def _call_lines(call: dict) -> list[str]:
+    """One tool call: what was asked, what governed it, what came back."""
+    lines: list[str] = []
+    if not call["completed"]:
+        lines.append(
+            f"  → #{call['call']} {call['name']} "
+            f"{json.dumps(call['args'], ensure_ascii=False)}"
+        )
+        lines.append(f"     {BOLD}never completed{RESET} {DIM}— no tool step recorded{RESET}")
+        return lines
+    status = "ok" if call["ok"] else f"{BOLD}FAILED{RESET} ({call['status']})"
+    head = f"  → #{call['call']} {call['name']}"
+    if call["summary"]:
+        head += f" {DIM}{str(call['summary'])[:90]}{RESET}"
+    lines.append(head)
+    if call["args_state"] == RECORDED:
+        lines.append(f"     args: {json.dumps(call['args'], ensure_ascii=False)}")
+        if call["args_truncated"]:
+            lines.append(
+                f"     {BOLD}… {call['args_truncated']} argument characters cut by "
+                f"{call['cap_source'] or 'a cap'}{RESET}"
+            )
+    detail = f"     {status}, {call['secs']:.1f}s"
+    if call["verdict_by"]:
+        detail += f", verdict by {call['verdict_by']}"
+    if call["decision"]:
+        detail += f", decision {call['decision']}"
+    lines.append(detail)
+    if call["command"]:
+        lines.append(f"     command: {call['command']}")
+    if call["error"]:
+        lines.append(f"     error: {str(call['error'])[:200]}")
+    for gate in call["refused"]:
+        lines.append(f"     {BOLD}gate{RESET} {_gate_line(gate)}")
+    allowed = len(call["gates"]) - len(call["refused"])
+    if allowed:
+        lines.append(f"     {DIM}{allowed} gate(s) allowed{RESET}")
+    return lines
+
+
 def render(
     turn: Turn,
     log: Log,
@@ -1041,7 +1337,14 @@ def render(
     show_tools: bool = False,
     show_context: bool = False,
 ) -> str:
-    """The terminal rendering of one turn — a dumb renderer over `dossier`."""
+    """The terminal rendering of one turn — a dumb renderer over `dossier`.
+
+    Three parts, in the shape a turn actually has: what it was given before it
+    started, what happened while it ran, and what it produced. Organised by
+    RECORD KIND — which is how a file is organised, and how this used to read —
+    a dossier cannot answer "what did it think after it got that result", which
+    is the question people open one to ask.
+    """
     doc = dossier(turn, log, root)
     out: list[str] = []
     label = f"turn {doc['ordinal']}"
@@ -1050,49 +1353,8 @@ def render(
     out.append(f"{BOLD}── {label} ── {doc['ts']} {'─' * max(0, 40 - len(label))}{RESET}")
     out.append(f"  {'prompt':<10} {doc['prompt'].strip()[:400] or DIM + '(empty)' + RESET}")
 
-    _given_lines(doc["given"], show_tools, show_context, out)
-    _did_lines(doc["did"], out)
-
-    # Steering text typed WHILE the task ran. It is folded into the model's
-    # messages mid-task without passing through the recorder, so its trace step
-    # is the only place it exists — and it is not restored when a session
-    # resumes, so a dossier that skipped it would show a turn the model was
-    # never actually given (#241).
-    for record in doc["steering"]:
-        out.append(f"  {'steering':<10} typed mid-task: {record['text'][:300]}")
-
-    for record in doc["trim"]:
-        out.append(
-            f"  {'trim':<10} {record.get('policy')}: {record.get('affected')} message(s), "
-            f"{record.get('bytes_before')} → {record.get('bytes_after')} bytes "
-            f"(keep {record.get('keep_chars')}, cap from {record.get('cap_source')})"
-        )
-        # WHICH results were stubbed. Without this the transcript still shows the
-        # full text, so a reader can conclude the model ignored something it was
-        # never given.
-        if stubbed := record.get("stubbed"):
-            listed = ", ".join(f"#{s.get('at')} {s.get('tool')}" for s in stubbed)
-            out.append(f"  {'':<10} {BOLD}stubbed for the model{RESET}: {listed}")
-            if record.get("stubbed_truncated"):
-                out.append(f"  {'':<10} … and {record['stubbed_truncated']} more")
-        elif record.get("affected"):
-            out.append(
-                f"  {'':<10} {DIM}which messages: {NOT_RECORDED} (log predates #241){RESET}"
-            )
-
-    _thought_lines(doc["thought"], out)
-    _produced_lines(doc["produced"], out)
-
-    produced = doc["produced"]
-    answer = produced["answer"][:400] if produced["answer"] else DIM + "(none)" + RESET
-    out.append(f"  {'answer':<10} {answer}")
-    if produced["status"] and produced["status"] != "ok":
-        out.append(f"  {'':<10} task ended {produced['status']}: {produced['error'][:300]}")
-    elif produced["status"] is None:
-        out.append(f"  {'':<10} {DIM}no task_end — interrupted, or still running{RESET}")
-
-    # Facts about this turn that are worth a look, computed over the dossier and
-    # never over the log — so the terminal and the panel say the same things.
+    # Facts worth reading first, computed over the dossier and never over the
+    # log — so the terminal and the panel say the same things, in the same order.
     rows = doc["notes"]["rows"]
     if rows:
         _block(out, "worth a look", [f"{BOLD}·{RESET} {row['text']}" for row in rows])
@@ -1103,6 +1365,18 @@ def render(
             [f"{DIM}nothing flagged by the {len(doc['notes']['checks'])} checks this "
              f"reader runs{RESET}"],
         )
+
+    _given_lines(doc["given"], show_tools, show_context, out)
+    _flow_lines(doc, out)
+    _produced_lines(doc["produced"], out)
+
+    produced = doc["produced"]
+    answer = produced["answer"][:400] if produced["answer"] else DIM + "(none)" + RESET
+    out.append(f"  {'answer':<10} {answer}")
+    if produced["status"] and produced["status"] != "ok":
+        out.append(f"  {'':<10} task ended {produced['status']}: {produced['error'][:300]}")
+    elif produced["status"] is None:
+        out.append(f"  {'':<10} {DIM}no task_end — interrupted, or still running{RESET}")
     return "\n".join(out)
 
 

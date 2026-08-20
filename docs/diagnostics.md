@@ -149,6 +149,38 @@ The three states are machine values on the data (`RECORDED` / `MISSING` / `EMPTY
 
 `TestDossier` pins that the whole document serialises, that resolved and purged bytes stay distinguishable, that a log predating the brief reports `not_recorded` rather than a carried-forward one, and that the carried case is labelled.
 
+## The flow — a turn in the order it happened
+
+Organised by RECORD KIND, a dossier cannot answer *"what did it think after it got that result"*, which is the question people open one to ask. The owner put it plainly after the first day of use: *"I don't know which information was retrieved after which tool."* Kind is how a **file** is organised; it is not how a turn is.
+
+So both renderers now tell one story in three parts, matching the shape a turn actually has:
+
+1. **Before it started** — the brief in force, the knowledge and rules seeded, and any trim that fired at task seed.
+2. **What happened** — **rounds**. Round N is model call N's reasoning, the tool calls it issued, their arguments, the verdicts that governed them and what came back. Then round N+1.
+3. **What it answered** — the answer, the delivering pass's verify verdicts, the task status.
+
+**Rounds reference `thought` and `did` by id and never copy them.** Tool output is the bulk of the payload and this document is fetched to a phone.
+
+**Between-round events ride here**, because they are exactly the "what changed between two thoughts" facts a kind-sliced dossier hid: text typed while the task ran, a `mid_task_budget` trim that stubbed a result the model had already read, and a change to what the model was being handed. They are keyed by the last **completed** model call, never the next one — both are written before a call that a cancel can stop from happening, and an event naming a round that never occurred is a lie. A seed-time trim is not an event in the flow and stays in part 1: putting it in a round would assert a causality that is false.
+
+### How a call finds its round, and the three answers
+
+`model_call` is recorded on the `call` record, **captured where the model call happens and passed as an argument** into `_call_result`. Reading `self._model_call` inside the executor happens to be correct today, but only because nothing calls the model between issuing a batch and running it — a property of the loop's shape rather than a join, and the contract's whole posture is that a join must not rest on emit order.
+
+`grouping` is a per-**turn** machine state, because one session can hold both kinds of turn:
+
+| state | when | what the reader shows |
+|---|---|---|
+| `recorded` | every call names its model call | the rounds, unqualified |
+| `inferred` | no stamp, but there is reasoning to attach to | the rounds, **labelled as inferred** |
+| `none` | nothing recorded issues a call — claude-max (#242) | no rounds at all; the calls listed flat |
+
+The `inferred` fallback attaches each call to the most recent preceding `reasoning` record in file order. That is *correct* for files this code wrote — every one of these records is emitted from the main thread in sequence, including the parallel batch, whose `call` records are written at collection — but it is an inference about attachment, and a reader must never be shown inference wearing a record's clothes.
+
+`none` is why the fallback is per turn: claude-max routes SDK tool calls straight into `_call_result` without ever entering the model loop, so nothing recorded issued them. Its calls are listed flat rather than folded into round 1, and the stamp is **omitted** rather than written as `0` — absence says "this backend records no model calls", a zero would say "round zero", and those route to different repairs.
+
+`TestTheFlow` pins the grouping, the by-id references, the labelled fallback, the claude-max shape, and both sides of the seed-versus-mid-task trim split.
+
 ## Worth a look — facts, never causes
 
 A turn with a two-dozen-rule corpus produces dozens of verdicts, and on a phone the line that matters is buried. `notes()` ranks what is worth reading first. Four properties make that safe, and each is a test:

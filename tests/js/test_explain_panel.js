@@ -136,7 +136,19 @@ function doc(overrides = {}) {
                   said: "", said_truncated: 0, stop: "stop", tokens: [10, 5], blocks: [],
                   malformed: [], synthesized: false }],
       },
-      did: { calls: [], orphan_gates: [], verify: [] },
+      did: {
+        calls: [{ call: 1, name: "read_docs", summary: "ls", args: { command: "ls" },
+                  args_state: "recorded", args_truncated: 0, cap_source: null, ok: true,
+                  status: null, secs: 0.2, command: "", error: "", output: "total 4",
+                  decision: null, verdict_by: null, gates: [], refused: [], completed: true,
+                  model_call: 1 }],
+        orphan_gates: [], verify: [],
+      },
+      flow: {
+        grouping: "recorded",
+        rounds: [{ model_call: 1, thought: 1, calls: [1], before: [] }],
+        unplaced: [], loose: [],
+      },
       produced: { answer: "here it is", answer_state: "recorded", status: "ok", error: "",
                   verify: { stopped: [], advised: [], passed: 0 } },
       notes: { rows: [], checks: [{ id: "a" }, { id: "b" }, { id: "c" }] },
@@ -168,7 +180,7 @@ check("section bodies are built on first open, not on render", () => {
   const { sandbox, body } = world();
   sandbox.xpRender(doc());
   const sections = walk(body).filter((n) => n.className === "xp-sec");
-  assert.equal(sections.length, 4);
+  assert.equal(sections.length, 3);
   const given = sections[0];
   const secbody = given.children.find((c) => c.className === "xp-secbody");
   assert.equal(secbody.children.length, 0, "built before it was opened");
@@ -186,13 +198,17 @@ check("purged bytes say deleted, and never render as a blank", () => {
   assert(textOf(body).includes("recorded, then deleted"));
 });
 
-check("a log predating the record says so rather than showing nothing", () => {
+check("a log predating the reasoning record says so, once, at the top", () => {
   const { sandbox, body } = world();
   const d = doc();
   d.thought = { state: "not_recorded", fragments: [], calls: [] };
+  d.flow.rounds[0].thought = null;
   sandbox.xpRender(d);
   for (const node of walk(body)) if (node.className === "xp-sechead") node.onclick();
-  assert(textOf(body).includes("not recorded"));
+  const text = textOf(body);
+  assert(text.includes("not recorded"), text.slice(0, 300));
+  // …and the calls it made are still shown, under their round.
+  assert(text.includes("read_docs"));
 });
 
 check("an empty notes list names its checks and never says all clear", () => {
@@ -241,6 +257,74 @@ check("long text is folded, never truncated", () => {
   assert(pre.textContent.includes("line 39"), "the whole text must be present, just clamped");
   const more = walk(body).find((n) => n.className === "xp-more");
   assert(more && more.textContent.startsWith("show all"));
+});
+
+check("a round shows the thought and the calls it issued, together", () => {
+  const { sandbox, body } = world();
+  sandbox.xpRender(doc());
+  const flow = walk(body).find((n) => n.className === "xp-sec" && n.dataset.sec === "flow");
+  flow.children.find((c) => c.className === "xp-sechead").onclick();
+  const round = walk(flow).find((n) => n.className === "xp-round");
+  assert(round, "no round rendered");
+  const text = textOf(round);
+  assert(text.includes("Rules say YouTube only"), "the thought is not in the round");
+  assert(text.includes("read_docs"), "the call it issued is not in the round");
+  assert(text.includes("total 4"), "what came back is not in the round");
+});
+
+check("inferred round order says it was inferred", () => {
+  const { sandbox, body } = world();
+  const d = doc();
+  d.flow.grouping = "inferred";
+  sandbox.xpRender(d);
+  const flow = walk(body).find((n) => n.className === "xp-sec" && n.dataset.sec === "flow");
+  flow.children.find((c) => c.className === "xp-sechead").onclick();
+  assert(textOf(flow).includes("inferred from the order the log was written"));
+});
+
+check("a backend that records no rounds says so instead of faking one", () => {
+  const { sandbox, body } = world();
+  const d = doc();
+  d.flow = { grouping: "none", rounds: [], unplaced: [1], loose: [] };
+  sandbox.xpRender(d);
+  const flow = walk(body).find((n) => n.className === "xp-sec" && n.dataset.sec === "flow");
+  flow.children.find((c) => c.className === "xp-sechead").onclick();
+  const text = textOf(flow);
+  assert(text.includes("records no model calls"), text.slice(0, 200));
+  // …and the call is still shown, just not filed under a round that never was.
+  assert(text.includes("read_docs"));
+  assert(!walk(flow).some((n) => n.className === "xp-round"), "a round was invented");
+});
+
+check("an event between rounds is shown as an interruption", () => {
+  const { sandbox, body } = world();
+  const d = doc();
+  d.flow.rounds[0].before = [
+    { kind: "trim", record: { affected: 2, stubbed: [{ tool: "web_search", at: 25 }] } },
+    { kind: "steering", text: "only Polish shops please" },
+  ];
+  sandbox.xpRender(d);
+  const flow = walk(body).find((n) => n.className === "xp-sec" && n.dataset.sec === "flow");
+  flow.children.find((c) => c.className === "xp-sechead").onclick();
+  const events = walk(flow).filter((n) => n.className === "xp-event");
+  assert.equal(events.length, 2, textOf(flow).slice(0, 300));
+  assert(events[0].textContent.includes("web_search"));
+  assert(events[1].textContent.includes("only Polish shops"));
+});
+
+check("a note jumps to the exact call it was computed from", () => {
+  const { sandbox, body } = world();
+  const jumped = [];
+  const d = doc();
+  d.notes.rows = [{ check: "tool_failed", text: "read_docs failed",
+                    where: { section: "flow", call: 1 } }];
+  sandbox.xpRender(d);
+  // The flow section must open and the call must be findable by its id.
+  const flow = walk(body).find((n) => n.className === "xp-sec" && n.dataset.sec === "flow");
+  flow.children.find((c) => c.className === "xp-sechead").onclick();
+  const call = walk(flow).find((n) => n.className === "xp-call" && n.dataset.call === "1");
+  assert(call, "the call carries no id for a note to land on");
+  void jumped;
 });
 
 report();

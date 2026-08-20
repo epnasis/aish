@@ -3467,6 +3467,22 @@ body.console-open #backdrop { z-index: 63; }
 .xp-part h5 { margin: 0 0 5px; font-size: 13px; font-weight: 600; }
 .xp-part h6 { margin: 7px 0 3px; font-size: 11px; font-weight: 600; color: var(--dim); }
 
+/* One round of the loop: the thought, then the calls it issued. Indented as a
+   unit so the flow reads as a sequence rather than a flat list of parts. */
+.xp-round { margin: 0 0 12px; padding: 9px 10px; background: var(--bg); border-radius: 9px; }
+.xp-round > h5 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--dim);
+                 letter-spacing: 0.04em; text-transform: uppercase; }
+.xp-call { margin: 8px 0 0; padding: 7px 9px; background: var(--bg-elev); border-radius: 8px; }
+.xp-call > h6 { margin: 0 0 4px; font-size: 12.5px; font-weight: 600; color: var(--fg); }
+.xp-dim { color: var(--dim); font-weight: 400; }
+/* Something that happened BETWEEN two thoughts — set apart from the rounds so
+   it reads as an interruption, which is what it is. */
+.xp-event {
+  margin: 8px 0; padding: 7px 10px; font-size: 12.5px;
+  color: var(--amber, #d08726); background: var(--bg);
+  border-left: 2.5px solid var(--amber, #d08726); border-radius: 0 8px 8px 0;
+}
+
 .xp-row { display: flex; gap: 10px; padding: 4px 0; font-size: 13px; }
 .xp-key { flex: 0 0 84px; color: var(--dim); }
 .xp-val { flex: 1; min-width: 0; overflow-wrap: anywhere; }

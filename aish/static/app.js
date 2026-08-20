@@ -11077,80 +11077,146 @@ function xpGiven(doc, into) {
   }
 }
 
-function xpThought(doc, into) {
-  const thought = doc.thought;
-  if (thought.state === "fragments") {
+// How the round grouping was arrived at. `recorded` needs no words; the other
+// two do, because a reader must never be shown an inference wearing a record's
+// clothes.
+const XP_GROUPING_WORDS = {
+  inferred: "round order inferred from the order the log was written — this log predates the by-id record",
+  none: "this backend's loop records no model calls, so this turn cannot be shown as rounds",
+};
+
+// The turn in the order it happened. Sectioning by record kind could not answer
+// "what did it think after it got that result", which is the question people
+// open a dossier to ask — so the thought, the calls it issued and the results
+// they returned sit together, round by round.
+//
+// The SKELETON is open and the bodies are folded: the skeleton IS the flow, and
+// if reading it costs a tap per round the reorganisation bought nothing.
+function xpFlow(doc, into) {
+  const flow = doc.flow || { grouping: "none", rounds: [], unplaced: [], loose: [] };
+  // Whether the reasoning is here at all — said once, at the top, rather than
+  // once per round. A log written before the full record kept only a rendered
+  // fragment, and a snippet shown as "the reasoning" is how someone concludes
+  // the model barely thought about it.
+  if (doc.thought.state === "fragments") {
     xpState("fragments", into);
-    for (const gist of thought.fragments || []) into.appendChild(xpEl("pre", "xp-pre", gist));
-    return;
+    for (const gist of doc.thought.fragments || []) into.appendChild(xpEl("pre", "xp-pre", gist));
+  } else if (doc.thought.state !== "recorded") {
+    xpState(doc.thought.state, into);
   }
-  if (!xpState(thought.state, into)) return;
-  for (const call of thought.calls) {
-    const box = xpEl("div", "xp-part");
-    let head = `model call ${call.model_call}`;
-    if (call.stop) head += ` · stopped: ${call.stop}`;
-    if (call.tokens && call.tokens.length) head += ` · ${call.tokens[0]} in, ${call.tokens[1]} out`;
+  const word = XP_GROUPING_WORDS[flow.grouping];
+  if (word) into.appendChild(xpEl("p", "xp-state", word));
+  const thoughts = new Map((doc.thought.calls || []).map((t) => [t.model_call, t]));
+  const calls = new Map((doc.did.calls || []).map((c) => [c.call, c]));
+
+  for (const round of flow.rounds) {
+    for (const event of round.before || []) xpEvent(event, true, into);
+    const box = xpEl("div", "xp-round");
+    const thought = thoughts.get(round.thought);
+    let head = `Round ${round.model_call}`;
+    if (thought && thought.tokens && thought.tokens.length) {
+      head += ` · ${thought.tokens[0]} in, ${thought.tokens[1]} out`;
+    }
+    if (thought && thought.stop && thought.stop !== "stop") head += ` · ${thought.stop}`;
     box.appendChild(xpEl("h5", null, head));
-    if (call.synthesized) {
-      box.appendChild(xpEl("p", "xp-warn", "the text below is aish's own sentence, not the model's"));
+    if (!thought) {
+      box.appendChild(xpEl("p", "xp-state", "no response was recorded for this call"));
+    } else {
+      if (thought.synthesized) {
+        box.appendChild(xpEl("p", "xp-warn",
+          "the text below is aish's own sentence, not the model's"));
+      }
+      if (thought.text) xpLong(box, thought.text, 6);
+      else box.appendChild(xpEl("p", "xp-state", "this call recorded no thinking"));
+      if (thought.truncated) {
+        box.appendChild(xpEl("p", "xp-warn",
+          `${thought.truncated} characters were cut from this record by ${thought.cap_source || "a cap"}`));
+      }
+      if (thought.said) {
+        box.appendChild(xpEl("h6", null, "said alongside the call"));
+        xpLong(box, thought.said, 4);
+      }
+      if (thought.malformed && thought.malformed.length) {
+        box.appendChild(xpEl("p", "xp-warn",
+          "arguments did not parse for: " + thought.malformed.join(", ")));
+      }
     }
-    if (call.text) xpLong(box, call.text, 10);
-    else box.appendChild(xpEl("p", "xp-state", "this call recorded no thinking"));
-    if (call.truncated) {
-      box.appendChild(xpEl("p", "xp-warn",
-        `${call.truncated} characters were cut from this record by ${call.cap_source || "a cap"}`));
+    for (const number of round.calls || []) {
+      const call = calls.get(number);
+      if (call) box.appendChild(xpCall(call));
     }
-    if (call.said) {
-      box.appendChild(xpEl("h5", null, "said alongside the call"));
-      xpLong(box, call.said);
+    if (thought && !(round.calls || []).length) {
+      box.appendChild(xpEl("p", "xp-state", "no tool calls ran under this one"));
     }
-    if (call.malformed && call.malformed.length) {
-      box.appendChild(xpEl("p", "xp-warn",
-        "arguments did not parse for: " + call.malformed.join(", ")));
-    }
+    box.dataset.round = String(round.model_call);
     into.appendChild(box);
+  }
+
+  if ((flow.unplaced || []).length) {
+    into.appendChild(xpEl("h5", null, "calls that name no model call"));
+    for (const number of flow.unplaced) {
+      const call = calls.get(number);
+      if (call) into.appendChild(xpCall(call));
+    }
+  }
+  for (const event of flow.loose || []) xpEvent(event, false, into);
+  if (!flow.rounds.length && !(flow.unplaced || []).length) {
+    into.appendChild(xpEl("p", "xp-state", "nothing was recorded for this turn"));
   }
 }
 
-function xpDid(doc, into) {
-  const calls = doc.did.calls || [];
-  if (!calls.length) {
-    into.appendChild(xpEl("p", "xp-state", "this turn ran no tools"));
-    return;
-  }
-  for (const call of calls) {
-    const box = xpEl("div", "xp-part");
-    const head = xpEl("h5", null, `${call.call}. ${call.name}`);
-    if (!call.completed) head.appendChild(xpEl("span", "xp-bad", " never completed"));
-    else if (!call.ok) head.appendChild(xpEl("span", "xp-bad", ` failed (${call.status})`));
-    box.appendChild(head);
-    if (call.args_state === "recorded") {
-      box.appendChild(xpEl("h6", null, "arguments"));
-      xpLong(box, JSON.stringify(call.args, null, 1), 6);
-      if (call.args_truncated) {
-        box.appendChild(xpEl("p", "xp-warn",
-          `${call.args_truncated} characters of these arguments were cut from the record`));
-      }
-    } else {
-      xpState("not_recorded", box);
-    }
-    for (const gate of call.refused || []) {
-      box.appendChild(xpEl("p", "xp-warn",
-        `refused by ${gate.rule || gate.at}${gate.why ? ` — ${gate.why}` : ""}`));
-    }
-    if (call.error) box.appendChild(xpEl("p", "xp-bad", call.error));
-    if (call.output) {
-      box.appendChild(xpEl("h6", null, "what came back"));
-      xpLong(box, call.output, 8);
-    }
-    into.appendChild(box);
-  }
-  for (const record of doc.trim || []) {
+// Something that happened BETWEEN two thoughts — the "what changed while it was
+// running" facts a kind-sliced dossier hid. `placed` is false when no round
+// could be named: the event still shows, without a claim about when.
+function xpEvent(event, placed, into) {
+  const when = placed ? "before this call" : "at some point in this turn";
+  if (event.kind === "trim") {
+    const record = event.record || {};
     const stubbed = (record.stubbed || []).map((s) => `${s.tool} (#${s.at})`).join(", ");
-    into.appendChild(xpEl("p", "xp-warn",
-      `${record.affected} earlier result(s) were replaced with a stub before a later call`
+    into.appendChild(xpEl("p", "xp-event",
+      `⚠ ${when}, ${record.affected} earlier result(s) were replaced with a stub for the model`
       + (stubbed ? `: ${stubbed}` : " — which ones was not recorded")));
+  } else if (event.kind === "steering") {
+    into.appendChild(xpEl("p", "xp-event", `⚠ you typed ${when}: ${event.text}`));
+  } else if (event.kind === "brief_changed") {
+    into.appendChild(xpEl("p", "xp-event", `⚠ ${when}, what the model was handed changed`));
   }
+}
+
+function xpCall(call) {
+  const box = xpEl("div", "xp-call");
+  box.dataset.call = String(call.call);
+  const head = xpEl("h6", null, `→ ${call.name}`);
+  if (!call.completed) head.appendChild(xpEl("span", "xp-bad", " never completed"));
+  else if (!call.ok) head.appendChild(xpEl("span", "xp-bad", ` failed (${call.status})`));
+  else if (call.summary) head.appendChild(xpEl("span", "xp-dim", ` ${call.summary}`));
+  box.appendChild(head);
+  if (call.args_state === "recorded") xpLong(box, JSON.stringify(call.args, null, 1), 4);
+  else xpState("not_recorded", box);
+  if (call.args_truncated) {
+    box.appendChild(xpEl("p", "xp-warn",
+      `${call.args_truncated} characters of these arguments were cut from the record`));
+  }
+  for (const gate of call.refused || []) {
+    box.appendChild(xpEl("p", "xp-warn",
+      `refused by ${gate.rule || gate.at}${gate.why ? ` — ${gate.why}` : ""}`));
+  }
+  if (call.error) box.appendChild(xpEl("p", "xp-bad", call.error));
+  if (call.output) {
+    box.appendChild(xpEl("h6", null, "what came back"));
+    xpLong(box, call.output, 6);
+  }
+  return box;
+}
+
+function xpFlowSummary(doc) {
+  const flow = doc.flow || { rounds: [], unplaced: [] };
+  const rounds = flow.rounds.length;
+  const calls = (doc.did.calls || []).length;
+  if (!rounds && !calls) return "not recorded";
+  const bad = (doc.did.calls || []).filter((c) => !c.ok || !c.completed).length;
+  return `${rounds} round${rounds === 1 ? "" : "s"} · ${calls} call${calls === 1 ? "" : "s"}`
+    + (bad ? ` · ${bad} failed` : "");
 }
 
 function xpProduced(doc, into) {
@@ -11187,17 +11253,27 @@ function xpNotes(doc, into) {
   for (const row of notes.rows) {
     const item = xpEl("button", "xp-note", row.text);
     item.type = "button";
-    item.onclick = () => xpJump(row.where && row.where.section);
+    item.onclick = () => xpJump(row.where);
     box.appendChild(item);
   }
   into.appendChild(box);
 }
 
-function xpJump(section) {
-  const target = document.querySelector(`.xp-sec[data-sec="${section}"]`);
+// A note is a shortcut INTO the evidence, so it opens the section AND scrolls to
+// the exact round or call it was computed from. Landing at the top of a long
+// stream would make the citation decorative.
+function xpJump(where) {
+  where = where || {};
+  const target = document.querySelector(`.xp-sec[data-sec="${where.section}"]`);
   if (!target) return;
   if (!target.classList.contains("open")) target.querySelector(".xp-sechead").click();
-  target.scrollIntoView({ behavior: "smooth", block: "start" });
+  let inner = null;
+  if (where.call !== undefined) {
+    inner = target.querySelector(`.xp-call[data-call="${where.call}"]`);
+  } else if (where.model_call !== undefined) {
+    inner = target.querySelector(`.xp-round[data-round="${where.model_call}"]`);
+  }
+  (inner || target).scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function xpRender(doc) {
@@ -11218,10 +11294,12 @@ function xpRender(doc) {
 
   xpNotes(doc, body);
 
+  // Three parts, in the shape a turn actually has. Sectioning by record kind is
+  // how a FILE is organised, and it left the reader unable to tell which
+  // thinking followed which result.
   const sections = [
-    ["given", "What it was given", xpGivenSummary(doc), (into) => xpGiven(doc, into)],
-    ["thought", "What it was thinking", xpThoughtSummary(doc), (into) => xpThought(doc, into)],
-    ["did", "What it ran", xpDidSummary(doc), (into) => xpDid(doc, into)],
+    ["given", "Before it started", xpGivenSummary(doc), (into) => xpGiven(doc, into)],
+    ["flow", "What happened", xpFlowSummary(doc), (into) => xpFlow(doc, into)],
     ["produced", "What it answered", xpProducedSummary(doc), (into) => xpProduced(doc, into)],
   ];
   for (const [key, title, summary, fill] of sections) {
@@ -11236,19 +11314,6 @@ function xpGivenSummary(doc) {
   if (!brief) return "not recorded";
   const rules = ((doc.given.rules || {}).groups || {}).bind || [];
   return `${brief.tools.count} tools · ${rules.length} rules`;
-}
-
-function xpThoughtSummary(doc) {
-  if (doc.thought.state !== "recorded") return XP_STATE_WORDS[doc.thought.state] || "";
-  const n = doc.thought.calls.length;
-  return `${n} model call${n === 1 ? "" : "s"}`;
-}
-
-function xpDidSummary(doc) {
-  const calls = doc.did.calls || [];
-  if (!calls.length) return "no tools";
-  const bad = calls.filter((c) => !c.ok || !c.completed).length;
-  return `${calls.length} call${calls.length === 1 ? "" : "s"}` + (bad ? ` · ${bad} failed` : "");
 }
 
 function xpProducedSummary(doc) {

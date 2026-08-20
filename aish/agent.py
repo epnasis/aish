@@ -2308,7 +2308,13 @@ class Agent:
                     )
                 return self._finish_cancelled()
 
-            results = self._execute_tool_calls(tool_calls)
+            # The model call that ISSUED these — captured here rather than
+            # read off self inside the executor. Reading the attribute happens
+            # to be right today only because nothing calls the model between
+            # issuing a batch and running it; that is a property of this loop's
+            # shape, not a join, and the contract's whole posture is that a join
+            # must not rest on emit-order luck (§0, §2).
+            results = self._execute_tool_calls(tool_calls, self._model_call)
             warn = stuck = progressed = False
             for call, result in zip(tool_calls, results, strict=True):
                 self._append(
@@ -2952,7 +2958,7 @@ class Agent:
             browser.downloads_dir(),
         ]
 
-    def _execute_tool_calls(self, tool_calls: list[dict]) -> list[str]:
+    def _execute_tool_calls(self, tool_calls: list[dict], model_call: int = 0) -> list[str]:
         """Run one model turn's tool calls; results keep the call order.
 
         Read-only tools (no side effects, no approval prompt) run concurrently
@@ -2987,7 +2993,10 @@ class Agent:
         ):
             return [
                 self._call_result(
-                    name, partial(self._timed, partial(self._dispatch, name, args)), args=args
+                    name,
+                    partial(self._timed, partial(self._dispatch, name, args)),
+                    args=args,
+                    model_call=model_call,
                 )
                 for name, args in calls
             ]
@@ -3012,7 +3021,11 @@ class Agent:
                     # ⇉ marks overlapped runtimes: they exceed wall time when
                     # summed, so only the batch ✓ line below counts toward ∑.
                     results[i] = self._call_result(
-                        calls[i][0], futures[i].result, mark="⇉", args=calls[i][1]
+                        calls[i][0],
+                        futures[i].result,
+                        mark="⇉",
+                        args=calls[i][1],
+                        model_call=model_call,
                     )
             finally:
                 self.status.stop()
@@ -3023,7 +3036,10 @@ class Agent:
             for i, (name, args) in enumerate(calls):
                 if i not in futures:
                     results[i] = self._call_result(
-                        name, partial(self._timed, partial(self._dispatch, name, args)), args=args
+                        name,
+                        partial(self._timed, partial(self._dispatch, name, args)),
+                        args=args,
+                        model_call=model_call,
                     )
         return results
 
@@ -3085,6 +3101,14 @@ class Agent:
         fn: Callable[[], tuple[str, float]],
         mark: str = "✓",
         args: dict | None = None,
+        # Which model call issued this, so a reader can put a tool call under
+        # the thinking that asked for it (#243) — passed IN, never read off
+        # self. 0 means "no recorded model call issued this", which is the
+        # honest answer on the claude-max path: it routes SDK tool calls
+        # straight into _call_result without ever entering _chat_turn, so the
+        # counter is still at its reset value and a stamped 0 would invent a
+        # round that was never recorded.
+        model_call: int = 0,
     ) -> str:
         args = args or {}
         self._run_meta = None
@@ -3117,6 +3141,11 @@ class Agent:
             "name": name,
             "args": emitted,
         }
+        # Omitted rather than zeroed when nothing recorded issued it: absence
+        # says "this backend records no model calls", a zero would say "round
+        # zero", and those route to different repairs (contract corollary 2).
+        if model_call:
+            call_record["model_call"] = model_call
         if args_dropped:
             call_record["truncated"] = args_dropped
             call_record["cap_source"] = "constant:CALL_ARG_CHARS"
