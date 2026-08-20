@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 from starlette.testclient import TestClient
 
+import aish.browser as browser_module
 import aish.notify as notify_module
 import aish.server as server_module
 import aish.session as session_module
@@ -4273,6 +4274,39 @@ class TestDownloadEndpoint:
             assert shown.status_code == 200
             assert shown.content == b"\x89PNG-chart"
             assert shown.headers["content-type"] == "image/png"
+
+    def test_serves_what_the_owner_sent_aish_to_fetch(self, app_env, monkeypatch):
+        """The third half of the rule (#237). He asked aish to press the button
+        that produced this file, through his own signed-in session — a document
+        only aish can open is aish keeping it. A PDF was already servable by
+        type; this is what makes the rest of a portal's downloads reachable."""
+        downloads = Path(app_env["cwd"]) / "browser" / "downloads"
+        downloads.mkdir(parents=True)
+        monkeypatch.setattr(browser_module, "downloads_dir", lambda: downloads)
+        archive = downloads / "rozliczenie.zip"
+        archive.write_bytes(b"PK\x03\x04zip")
+        client, _ = make_client(app_env, [])
+        with client:
+            got = client.get("/download", params={"path": str(archive)})
+            assert got.status_code == 200
+            assert got.content == b"PK\x03\x04zip"
+            assert 'filename="rozliczenie.zip"' in got.headers["content-disposition"]
+
+    def test_the_downloads_folder_is_not_a_hole_in_the_root_scope(
+        self, app_env, monkeypatch, tmp_path_factory
+    ):
+        """It widens WHICH KINDS of file may be saved, never WHERE from: the
+        root check runs first and is untouched."""
+        downloads = Path(app_env["cwd"]) / "browser" / "downloads"
+        downloads.mkdir(parents=True)
+        monkeypatch.setattr(browser_module, "downloads_dir", lambda: downloads)
+        outside = tmp_path_factory.mktemp("elsewhere") / "downloads"
+        outside.mkdir()
+        secret = outside / "notes.zip"
+        secret.write_bytes(b"PK\x03\x04")
+        client, _ = make_client(app_env, [])
+        with client:
+            assert client.get("/download", params={"path": str(secret)}).status_code == 403
 
     def test_refuses_a_file_no_chat_ever_displayed(self, app_env):
         """The roots hold a project tree. `/file` has always answered 415 for a

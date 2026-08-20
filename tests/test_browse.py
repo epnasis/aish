@@ -712,3 +712,44 @@ class TestHidingAControlNeverRoutesAroundItsCard:
         monkeypatch.setattr(browser, "browse_act", fake_act)
         web_module.browse_act(1, "click")
         assert seen["href"] == ""
+
+
+class TestTheFileIsHandedOverNotDescribed:
+    """A path in a sentence is not a document (#237). aish drove the portal,
+    clicked "Pobierz e-fakturę" seven times and got seven invoices, and the
+    owner was told a folder name — then the model reached for `file://` on its
+    own, which is dead on a web page."""
+
+    PDF = "/Users/e/.local/state/aish/browser/downloads/dokument_229500955650.pdf"
+
+    def test_the_note_carries_the_line_the_answer_needs(self):
+        note = web_module.downloaded_note([self.PDF], "this action downloaded")
+        assert f"[dokument_229500955650.pdf]({self.PDF})" in note
+
+    def test_the_model_is_told_it_MUST_pass_it_on(self):
+        """Capability phrasing gets ignored; MUST plus the literal line works."""
+        note = web_module.downloaded_note([self.PDF], "this action downloaded")
+        assert "MUST" in note
+        assert "EXACTLY as written" in note
+
+    def test_every_file_gets_its_own_line(self):
+        note = web_module.downloaded_note(
+            ["/d/a.pdf", "/d/b.pdf"], "this action downloaded"
+        )
+        assert "[a.pdf](/d/a.pdf)" in note and "[b.pdf](/d/b.pdf)" in note
+
+    def test_a_space_in_the_name_is_left_alone(self):
+        """"faktura 09-2026.pdf" is what a real invoice is called, and the
+        renderer allows spaces inside the parentheses for exactly this."""
+        assert "[faktura 09-2026.pdf](/d/faktura 09-2026.pdf)" in web_module.downloaded_note(
+            ["/d/faktura 09-2026.pdf"], "x"
+        )
+
+    def test_a_bracket_the_SITE_chose_cannot_break_the_line(self):
+        """Built here rather than left to the model, for the reason show_image
+        builds its own: the filename is page content."""
+        line = web_module.downloaded_note(["/d/faktura [2026].pdf"], "x")
+        assert "[faktura 2026.pdf](/d/faktura [2026].pdf)" in line
+
+    def test_no_download_no_line(self):
+        assert web_module.downloaded_note([], "x") == ""

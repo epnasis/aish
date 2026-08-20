@@ -254,6 +254,11 @@ Rules:
    A long dropdown shows only how many options it has. You do NOT need to see
    them: browse_act(target=N, action="choose", value="Poland") matches on what
    you say, and if it matches more than one or none you get the candidates back.
+   WHEN A CLICK DOWNLOADS A FILE, PUT THE LINE aish GIVES YOU IN YOUR ANSWER,
+   EXACTLY AS WRITTEN. It looks like [invoice.pdf](/Users/…/downloads/x.pdf) and
+   it is what turns the file into something the user can tap and open. A path
+   inside a sentence is not. NEVER write a file:// link — it is dead on a web
+   page — and never tell them where a file is instead of giving it to them.
    When researching, batch independent lookups: issue several web_search /
    read_url calls in a single reply — they run in parallel, which is much
    faster than one per turn.

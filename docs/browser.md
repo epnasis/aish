@@ -158,7 +158,9 @@ Driving the portal gets you to the invoice; it does not get you the invoice. The
 
 Pruning is oldest-first rather than the media store's content-addressed LRU, deliberately: these are the owner's own documents under their own names, and the name is the only handle he has on one.
 
-`TestWhoseDownloadIsIt` pins who a file belongs to and `TestTheSessionOutlivesTheOwnerReading` the reaper's second flow. The directory is in `Agent.workspace_roots`, so `read_pdf` may open what `browse_act` just named. Without that the tool would name a file and instruct the model to read it, and the read would cost an approval tap — the #220 asymmetry, reopened. `TestDownloads` pins the naming, the bounds, the location and that last seam.
+`TestWhoseDownloadIsIt` pins who a file belongs to and `TestTheSessionOutlivesTheOwnerReading` the reaper's second flow. **And the file is handed to the OWNER, not just described to the model** (`TestTheFileIsHandedOverNotDescribed`). Seven invoices came down in one real session and he was told a folder name; the model then reached for `file://` on its own, which is dead on a web page. `downloaded_note` now carries the markdown line that renders as the file itself, built here rather than left to the model for the reason `show_image` builds its own — a bracket or a newline in a name the SITE chose would silently break it. The web app's half is `[FILE-LINK]` in `docs/web-frontend.md`, and `/download` serves this folder because he asked aish to press the button that produced the file.
+
+The directory is in `Agent.workspace_roots`, so `read_pdf` may open what `browse_act` just named. Without that the tool would name a file and instruct the model to read it, and the read would cost an approval tap — the #220 asymmetry, reopened. `TestDownloads` pins the naming, the bounds, the location and that last seam.
 
 Not yet done, and tracked on #237: the file is not surfaced in the web UI as an attachment the owner can tap. Today he gets the path and whatever the model reads out of it.
 
