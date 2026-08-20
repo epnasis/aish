@@ -570,7 +570,9 @@ class TestAThinPageGetsASecondChance:
             async def new_page(self):
                 return FakePage()
 
-        class FakeOwner:
+        class FakeOwner(browser._Owner):
+            # The REAL owner, so a test double cannot quietly diverge from the
+            # bookkeeping `read` depends on (download stashes, page ownership).
             view = None
 
             async def context(self, **k):
@@ -622,7 +624,9 @@ class TestLinksSurviveTheRender:
             async def new_page(self):
                 return FakePage()
 
-        class FakeOwner:
+        class FakeOwner(browser._Owner):
+            # The REAL owner, so a test double cannot quietly diverge from the
+            # bookkeeping `read` depends on (download stashes, page ownership).
             view = None
 
             async def context(self, **k):

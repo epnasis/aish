@@ -845,6 +845,22 @@ def _remember_title(url: str, title: str) -> None:
     PAGE_TITLES[url] = title
 
 
+def downloaded_note(paths: list[str], what: str) -> str:
+    """aish's own words, above the untrusted banner: the file is real, the path
+    is aish's, and the site had no say in either.
+
+    Naming the reader matters — this is the one place a model reliably stops,
+    having got the document it was sent for and no idea that it may open it."""
+    if not paths:
+        return ""
+    files = "\n".join(f"  {path}" for path in paths)
+    return (
+        f"[aish: {what}, through the user's signed-in session:\n{files}\n"
+        'Read one with read_pdf(source="<path>") — it is already on this '
+        "machine, so do NOT fetch it again.]\n"
+    )
+
+
 def _browser_read(
     url: str,
 ) -> tuple[tuple[str, list[str], list[str], bool] | None, str]:
@@ -878,6 +894,17 @@ def _browser_read(
     except Exception as exc:  # noqa: BLE001 — a launch/nav failure falls back, never crashes
         return None, f"the browser could not load it ({type(exc).__name__})"
     host = browser.host_of(url)
+    if page.downloads:
+        # A URL whose response is a DOCUMENT renders as nothing, and "nothing"
+        # used to mean "fall back to an anonymous fetch" — so aish fetched seven
+        # of the owner's own invoices as a stranger and told him it could not
+        # get them, while holding the files (#246). A file IS the answer here.
+        if host:
+            BROWSER_HOSTS.add(host)
+        return (
+            downloaded_note(page.downloads, "this link is a file, and aish saved it"),
+            [], [], False,
+        ), ""
     text = "\n".join(
         line for line in (ln.strip() for ln in page.text.splitlines()) if line
     )
@@ -1191,6 +1218,15 @@ def _present_snapshot(snapshot, *, topic: str | None = None) -> str:
         body = truncate(body, head=PAGE_MAX_CHARS, tail=0)
         hint = BROWSE_TRUNCATION_HINT
     lines = [c.line() for c in snapshot.controls]
+    if getattr(snapshot, "unreachable", 0):
+        # The sentence a small model needs in order to do the right thing: not
+        # "that control does not exist" (which sends it back to guessing URLs)
+        # but "find the thing that opens it".
+        lines.append(
+            f"[{snapshot.unreachable} more control(s) are on this page but "
+            "closed away — in a collapsed menu, an off-screen panel, or behind "
+            "a dialog. Press whatever opens them first.]"
+        )
     if snapshot.hidden:
         # Never a silent cap: a model that cannot see a control concludes the
         # page does not have one, and starts guessing URLs again.
@@ -1202,18 +1238,17 @@ def _present_snapshot(snapshot, *, topic: str | None = None) -> str:
         "\n\n[no controls found on this page]"
     )
     problem = f"[aish: {snapshot.problem}]\n" if snapshot.problem else ""
-    got = ""
-    if snapshot.downloads:
-        # aish's own words, above the untrusted banner: the file is real, the
-        # path is aish's, and the site had no say in either. Naming the reader
-        # matters — this is the one place a model reliably stops, having got the
-        # document it was sent for and no idea that it may open it.
-        files = "\n".join(f"  {path}" for path in snapshot.downloads)
-        got = (
-            "[aish: this action downloaded, through the user's signed-in "
-            f"session:\n{files}\nRead one with read_pdf(source=\"<path>\") — "
-            "it is already on this machine, so do NOT fetch it again.]\n"
+    if getattr(snapshot, "notice", ""):
+        problem += f"[aish: {snapshot.notice}]\n"
+    if getattr(snapshot, "asked", ""):
+        # Above the untrusted banner, because it is aish's statement and not the
+        # site's: the model asked for one page and is standing on another.
+        problem += (
+            f"[aish: you asked for {snapshot.asked} and the site sent you to "
+            f"{snapshot.url} instead. You are reading THAT page. Whatever you "
+            "wanted from the address you typed may not be here.]\n"
         )
+    got = downloaded_note(snapshot.downloads, "this action downloaded")
     return problem + got + UNTRUSTED_NOTE + head + "\n" + body + hint + controls
 
 
@@ -1245,9 +1280,26 @@ def browse_act(
     topic: str | None = None,
 ) -> str:
     """Do one thing to one numbered control, and hand back the page it made."""
+    # Read off the SNAPSHOT, not the live DOM: `_press` may fall back to a link's
+    # own destination, and the thing the gate classified has to be the thing that
+    # runs. A destination the SSRF guard would refuse is simply not offered as a
+    # fallback — the same fence `browse` itself applies to a model-chosen URL.
+    href, mutating = "", False
+    current = browser.browse_current()
+    control = current.control(int(target)) if current else None
+    if control is not None:
+        mutating = control.mutating
+        if control.kind == "link" and control.detail.startswith(("http://", "https://")):
+            try:
+                _require_public(control.detail)
+            except BlockedURLError:
+                href = ""
+            else:
+                href = control.detail
     try:
         snapshot = browser.browse_act(
-            int(target), action, text=text, value=value, submit=submit
+            int(target), action, text=text, value=value, submit=submit,
+            href=href, mutating=mutating,
         )
     except browser.BrowserUnavailable as exc:
         return f"ERROR: {exc}"

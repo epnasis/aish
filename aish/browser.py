@@ -63,6 +63,12 @@ from . import browse as browse_mod
 # ceiling this box actually runs against.
 IDLE_SECONDS = 180.0
 NAV_TIMEOUT_MS = 45_000
+# What an ELEMENT gets to become actionable, which is a different question
+# from how long a page may take to load. One 45-second click was the whole
+# of the act path, and a control that would never become clickable cost the
+# lot — six times across two sessions (#244). What 5 seconds cannot do, 45
+# will not do either; the escalation in `_press` is what covers the rest.
+ACT_TIMEOUT_MS = 5_000
 SETTLE_MS = 2_500
 LOGIN_WINDOW_TIMEOUT = 15 * 60.0
 # An open view suppresses the idle reaper, so it needs its own ceiling: a client
@@ -70,11 +76,28 @@ LOGIN_WINDOW_TIMEOUT = 15 * 60.0
 # socket) would otherwise hold Chrome and the profile lock forever. Generous,
 # because a paused 2FA login is the case the reaper must not interrupt.
 VIEW_MAX_IDLE = 15 * 60.0
+# And an open browse session needs its own, for the same reason (#248). The
+# reaper protected a live view and not the model's page, so three minutes of the
+# owner READING an answer collected the browser, and his next message — "Provide
+# pdf for each" — got "nothing is open to act on". Shorter than the view's
+# ceiling because the wait is different: a paused login is a human at a keyboard
+# part-way through a task, and this is a human reading a paragraph.
+BROWSE_MAX_IDLE = 10 * 60.0
 
 # Off the visible desktop. The window is REAL — that is the whole reason this
 # works where headless does not — it simply is not parked where the owner is
 # looking. A login window is launched on-screen instead (`_LOGIN_ARGS`).
-_OFFSCREEN_ARGS = ["--window-position=-4000,-4000", "--window-size=1440,900"]
+# The last two are not cosmetic. macOS reports a fully off-screen window as
+# OCCLUDED, and Chrome backgrounds an occluded window: rAF throttles to about a
+# frame a second or stops. A menu that opens through a JS animation then freezes
+# part-way — permanently half-open, permanently off-canvas — which is one of the
+# ways a control can be listed and unpressable (#244).
+_OFFSCREEN_ARGS = [
+    "--window-position=-4000,-4000",
+    "--window-size=1440,900",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+]
 _LOGIN_ARGS = ["--window-position=80,60", "--window-size=1280,900"]
 
 # Chrome advertises itself as automated by default, and sites that block
@@ -282,6 +305,13 @@ class Page:
     # WORKED from one whose session has lapsed — the two are identical
     # otherwise, right down to the status code.
     signin: bool = False
+    # Files this read produced, as local paths. A URL whose response is a
+    # DOCUMENT rather than a page renders as nothing at all, and aish used to
+    # conclude "the browser rendered an empty page", refetch anonymously, and
+    # tell the owner it could not get his invoices — while holding all seven of
+    # them (#246). A navigation that becomes a download is a read that
+    # succeeded, with the answer in a file.
+    downloads: list[str] = field(default_factory=list)
 
 
 _OWNER: threading.Thread | None = None
@@ -792,11 +822,42 @@ class _Owner:
         # single job — click, read, click again, all on the same document.
         self.browse_page: Any = None
         self.browse_epoch = 0
-        # Downloads that arrived since the last action. Stashed by a SYNC event
+        self.browse_touched = 0.0
+        # Downloads that arrived, as (page, download). Stashed by a SYNC event
         # handler and saved afterwards inside the job: registering an async
         # handler would need its own task, and wrapping every click in
         # `expect_download` would make every ordinary click pay that timeout.
-        self.browse_downloads: list[Any] = []
+        #
+        # Keyed by PAGE because the tab that downloads is very often not the tab
+        # that was clicked: a `target=_blank` download link opens a fresh tab
+        # which Chrome closes the instant the transfer starts. Listening on the
+        # one tab aish opened missed every invoice on eon.pl — the file arrived
+        # in a tab nobody was listening to, and the snapshot faithfully reported
+        # that nothing had happened (#246). So the listener goes on the CONTEXT,
+        # and who a download belongs to is decided here instead.
+        self.downloads: list[tuple[Any, Any]] = []
+        # Pages a `read` owns. Everything else on the context is the browse
+        # session's — including a popup that lived for half a second.
+        self.read_pages: set[Any] = set()
+
+    def watch_downloads(self, page: Any) -> None:
+        """Record what this page downloads. Registered for EVERY page."""
+        page.on("download", lambda download: self.downloads.append((page, download)))
+
+    def take_downloads(self, *, read_page: Any = None) -> list[Any]:
+        """Drain the downloads belonging to one caller.
+
+        A read takes its own page's; the browse session takes everything that is
+        not some read's page, which is what makes an ephemeral popup count."""
+        keep: list[tuple[Any, Any]] = []
+        mine: list[Any] = []
+        for page, download in self.downloads:
+            if page is read_page or (read_page is None and page not in self.read_pages):
+                mine.append(download)
+            else:
+                keep.append((page, download))
+        self.downloads = keep
+        return mine
 
     def run(self) -> None:
         import asyncio
@@ -818,9 +879,27 @@ class _Owner:
             await asyncio.sleep(IDLE_SECONDS)
             if self.busy:
                 continue
-            idle_for = time.monotonic() - self.view_touched
-            if self.view is None or idle_for > VIEW_MAX_IDLE:
+            if not self.held():
                 await self._close()
+
+    def held(self) -> bool:
+        """Is somebody part-way through something? Then this browser stays.
+
+        Two flows outlive a single job and both die if the context goes: the
+        owner's own window, and the model's browse session. Each gets a ceiling
+        so an abandoned one cannot hold Chrome forever — this box runs a Home
+        Assistant VM and Colima under a 16 GB roof, and an idle Chrome is not
+        free."""
+        now = time.monotonic()
+        if self.view is not None and now - self.view_touched <= VIEW_MAX_IDLE:
+            return True
+        page = self.browse_page
+        if page is not None and now - self.browse_touched <= BROWSE_MAX_IDLE:
+            try:
+                return not page.is_closed()
+            except Exception:  # noqa: BLE001 — a page that cannot answer is gone
+                return False
+        return False
 
     async def context(
         self,
@@ -859,11 +938,20 @@ class _Owner:
                 if not _clear_stale_lock(exc):
                     raise
                 self._context = await launch()
+            # On the CONTEXT, so a tab aish never opened still reports what it
+            # downloaded — see `_Owner.downloads`.
+            self._context.on("page", self.watch_downloads)
+            for page in list(self._context.pages):
+                self.watch_downloads(page)
             return self._context
 
     async def _close(self) -> None:
+        global _LAST_SNAPSHOT
         self.view = None  # a closed context has no page left to drive
         self.browse_page = None
+        # The snapshot is what `browse_is_open` answers from, and a page that no
+        # longer exists must not read as an open session (#248).
+        _LAST_SNAPSHOT = None
         if self._context is not None:
             try:
                 await self._context.close()
@@ -924,6 +1012,7 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
             )
         context = await owner.context()
         page = await context.new_page()
+        owner.read_pages.add(page)
 
         async def attempt() -> tuple[Any, str]:
             response = await page.goto(
@@ -934,7 +1023,21 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
             return response, await _body_text(page)
 
         try:
-            response, text = await attempt()
+            try:
+                response, text = await attempt()
+            except Exception:  # noqa: BLE001 — a download aborts the navigation
+                # Chrome does not render a `Content-Disposition: attachment`; it
+                # downloads it and leaves the navigation aborted. That is not a
+                # failed read, so give the transfer a moment to register and
+                # judge on whether a FILE arrived.
+                await page.wait_for_timeout(SETTLE_MS)
+                saved = await _save_downloads(owner, read_page=page)
+                if not saved:
+                    raise
+                return Page(
+                    text="", title="", images=[], url=page.url or url,
+                    status=None, downloads=saved,
+                )
             # A wall on a profile that has been reading for a while is usually
             # the SCORE, not the page: the vendor's token has soured. Shed it
             # and ask once more. This is what makes a real browser strictly
@@ -964,8 +1067,10 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
                 links=await _content_links(page),
                 declared=await _declared_data_async(page),
                 signin=await _has_password_field(page),
+                downloads=await _save_downloads(owner, read_page=page),
             )
         finally:
+            owner.read_pages.discard(page)
             try:
                 await page.close()
             except Exception:  # noqa: BLE001
@@ -1641,8 +1746,16 @@ async def _settled_text(page: Any, *, tries: int = 3) -> str:
     Measured on eon.pl/mojeon/Umowy-i-dane/Moje-Umowy, which came back as its own
     loading message twice in one session while the owner watched (#237). Reads do
     not pay this cost; a browse action is one of a handful in a flow, and the
-    thing being waited for is the answer."""
-    await page.wait_for_timeout(SETTLE_MS)
+    thing being waited for is the answer.
+
+    `_settle` first, and that is the load-bearing half (#247). A driven page used
+    to wait a flat SETTLE_MS and then judge, while an ordinary read waits for the
+    network to go quiet — so a table filled by a later request read as an EMPTY
+    TABLE, and an empty table was reported to the owner as "this property has no
+    invoices". Twice, on two of five properties, and a second run twenty minutes
+    later found them all. A page that has not said anything is the case the
+    loading-word test cannot see; the mutation observer inside `_settle` can."""
+    await _settle(page)
     text = await _body_text(page)
     for _ in range(tries - 1):
         if text and not browse_mod.still_loading(text):
@@ -1652,9 +1765,9 @@ async def _settled_text(page: Any, *, tries: int = 3) -> str:
     return text
 
 
-async def _save_downloads(owner: _Owner) -> list[str]:
-    """Write whatever the last action downloaded, and say where it went."""
-    pending, owner.browse_downloads = owner.browse_downloads, []
+async def _save_downloads(owner: _Owner, *, read_page: Any = None) -> list[str]:
+    """Write whatever this caller downloaded, and say where it went."""
+    pending = owner.take_downloads(read_page=read_page)
     if not pending:
         return []
     directory = downloads_dir()
@@ -1683,19 +1796,72 @@ async def _save_downloads(owner: _Owner) -> list[str]:
     return saved
 
 
-async def _snapshot(owner: _Owner, page: Any, *, problem: str = "") -> browse_mod.Snapshot:
+# How many documents one page may be enumerated across. A page is often several:
+# a consent wall, a login form, a card field and a chat widget are all iframes,
+# and `page.evaluate` reaches only the main one — so browse reported "no controls
+# found" on pages visibly full of them (#244). Bounded because an ad-heavy page
+# can carry dozens of frames and each is a round trip.
+MAX_FRAMES = 12
+
+
+async def _enumerate(page: Any) -> tuple[list[dict], int, int]:
+    """Every control on the page, across its frames, in one numbering.
+
+    The count continues across frames rather than restarting, so `[14]` means
+    one thing on this page however many documents it is made of — and acting
+    finds it by searching the frames for the tag."""
+    raw: list[dict] = []
+    matched = unreached = 0
+    options = {
+        "max": browse_mod.MAX_CONTROLS,
+        "nameMax": browse_mod.NAME_MAX_CHARS,
+        "inlineChoices": browse_mod.CHOICE_INLINE_MAX,
+        "offset": 0,
+    }
+    try:
+        frames = list(page.frames)[:MAX_FRAMES]
+    except Exception:  # noqa: BLE001 — a page that will not list frames has one
+        frames = [page.main_frame]
+    for frame in frames:
+        options["offset"] = len(raw)
+        try:
+            found = await frame.evaluate(browse_mod.CONTROLS_JS, options)
+        except Exception:  # noqa: BLE001 — a frame that will not answer has none
+            continue
+        raw += list(found.get("controls") or [])
+        matched += int(found.get("matched") or 0)
+        unreached += int(found.get("unreachable") or 0)
+    return raw, matched, unreached
+
+
+async def _find(page: Any, n: int) -> tuple[Any, bool]:
+    """(locator, is_in_the_main_frame) for control `n`, or (None, False).
+
+    Whether it is the main frame decides one thing: the link fallback in
+    `_press` navigates the TOP page, which would be the wrong surface for a link
+    inside a consent or payment iframe."""
+    try:
+        frames = list(page.frames)[:MAX_FRAMES]
+    except Exception:  # noqa: BLE001
+        frames = [page.main_frame]
+    for frame in frames:
+        target = frame.locator(f'[data-aish-n="{int(n)}"]').first
+        try:
+            if await target.count():
+                return target, frame is page.main_frame
+        except Exception:  # noqa: BLE001 — an unusable frame carries nothing
+            continue
+    return None, False
+
+
+async def _snapshot(
+    owner: _Owner, page: Any, *, problem: str = "", notice: str = "", asked: str = ""
+) -> browse_mod.Snapshot:
     """The page as the model receives it: what it says, and what it can press."""
     global _LAST_SNAPSHOT
     text = await _settled_text(page)
-    try:
-        found = await page.evaluate(
-            browse_mod.CONTROLS_JS,
-            {"max": browse_mod.MAX_CONTROLS, "nameMax": browse_mod.NAME_MAX_CHARS},
-        )
-    except Exception:  # noqa: BLE001 — a page that will not answer still has text
-        found = {"controls": [], "matched": 0}
-    controls = browse_mod.controls_from(list(found.get("controls") or []))
-    matched = int(found.get("matched") or 0)
+    raw, matched, unreached = await _enumerate(page)
+    controls = browse_mod.controls_from(raw)
     # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
     # control the model is looking for is very often in the header the narrowing
     # would drop — "Przełącz lokal" sits beside the account name, not in <main>.
@@ -1705,11 +1871,15 @@ async def _snapshot(owner: _Owner, page: Any, *, problem: str = "") -> browse_mo
         text=text,
         controls=controls,
         hidden=max(0, matched - len(controls)),
+        unreachable=unreached,
         epoch=owner.browse_epoch,
         problem=problem,
+        notice=notice,
         downloads=await _save_downloads(owner),
+        asked=asked if browse_mod.landed_elsewhere(asked, str(page.url or "")) else "",
     )
     _LAST_SNAPSHOT = snapshot
+    owner.browse_touched = time.monotonic()
     return snapshot
 
 
@@ -1730,9 +1900,6 @@ async def _browse_page(owner: _Owner, *, opening: bool) -> Any:
         raise BrowserUnavailable(NOTHING_OPEN)
     context = await owner.context()
     page = await context.new_page()
-    # A lambda, not `list.append`: Playwright stamps an attribute onto the
-    # handler it is given, and a builtin method has no __dict__ to stamp.
-    page.on("download", lambda download: owner.browse_downloads.append(download))
     owner.browse_page = page
     return page
 
@@ -1771,9 +1938,149 @@ def browse_open(url: str, *, timeout: float = 120.0) -> browse_mod.Snapshot:
         owner.browse_epoch += 1
         await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         await _dismiss_consent(page)
-        return await _snapshot(owner, page)
+        return await _snapshot(owner, page, asked=url)
 
     return _submit(job, timeout)
+
+
+class Stuck(Exception):
+    """Listed, still on the page, and it will not take the action."""
+
+
+async def _reachable_now(target: Any) -> str:
+    """Why this control cannot be pressed AT THIS MOMENT, or ''.
+
+    The tag outlives the reachability. `_settled_text` waits, the model thinks,
+    and a menu that closes on scroll or on a timer leaves its entries tagged and
+    unpressable — which used to be discovered by spending 45 seconds. A control
+    aish cannot ask about gets the benefit of the doubt: the ladder below is
+    bounded anyway, and refusing on a failed question would be a new way to
+    refuse a control that is perfectly fine."""
+    try:
+        return str(await target.evaluate(browse_mod.REACHABLE_JS) or "")
+    except Exception:  # noqa: BLE001 — an unanswerable element is not a verdict
+        return ""
+
+
+async def _centre(target: Any) -> None:
+    with contextlib.suppress(Exception):
+        await target.evaluate(browse_mod.CENTRE_JS)
+
+
+async def _focus(target: Any) -> bool:
+    """Focus it, and say whether focus actually landed.
+
+    Never assumed: a blind `keyboard.press("Enter")` after a focus that did not
+    take goes to the document, and on a page with a form that is a submit
+    nobody asked for."""
+    try:
+        return bool(
+            await target.evaluate(
+                "(el) => { el.focus(); return document.activeElement === el"
+                " || el.contains(document.activeElement); }"
+            )
+        )
+    except Exception:  # noqa: BLE001 — an element that will not focus has not
+        return False
+
+
+async def _press(page: Any, target: Any, *, mutating: bool, href: str) -> str:
+    """Press it, escalating cheaply. Returns a note about HOW, or raises Stuck.
+
+    One 45-second click used to be the whole of this, and a control that would
+    never become clickable cost the full timeout — three times in one session,
+    on three unrelated sites (#244). Every stage here is bounded and every
+    failure falls through in seconds, so the worst case is about ten.
+
+    The order is not arbitrary. A real click first, because it is the real
+    thing. Then the KEYBOARD, which is not a workaround at all — it is the other
+    first-class way people press things, it fires trusted events, and `focus()`
+    scrolls natively even inside a container Playwright's scroller cannot move.
+    Then, for a LINK, the destination the page itself declared: the href was
+    read off the DOM at enumeration and is the same fact the gate used to
+    classify this control as a plain navigation, so following it is the approved
+    act by another route — and it is not the URL GUESSING this project forbids,
+    because nothing here was remembered or composed.
+
+    `force=True` appears nowhere, at any stage, ever. It clicks a COORDINATE and
+    presses whatever happens to be on top of it, which is the one press that can
+    land on a control the owner never approved. A dispatched event is the
+    opposite: it activates exactly the element the model named and the gate saw.
+    It is still a lie about physics, so it is last, it is never used on
+    something that spends or deletes, and the snapshot says it happened."""
+    with contextlib.suppress(Exception):
+        await target.click(timeout=ACT_TIMEOUT_MS)
+        return ""
+    if await _focus(target):
+        with contextlib.suppress(Exception):
+            await page.keyboard.press("Enter")
+            return "the click would not land, so aish pressed it with the keyboard"
+    if href:
+        await page.goto(href, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        return (
+            "the link would not click, so aish opened the destination the page "
+            f"declares for it ({href})"
+        )
+    if not mutating:
+        with contextlib.suppress(Exception):
+            await target.dispatch_event("click")
+            return (
+                "the click would not land, so aish dispatched the event straight "
+                "to the control — the page may not have registered it as a real "
+                "press"
+            )
+    raise Stuck()
+class Refused(Exception):
+    """The action was understood and NOT performed — an ambiguous choice, a
+    control that is not what the model took it for. The message is for the
+    model, and it carries what it needs to try again."""
+
+
+async def _type(page: Any, target: Any, *, text: str, submit: bool) -> str:
+    """REAL KEYSTROKES, for the reason `view_act` records: fill() fires one input
+    event and no key events, which breaks widgets that listen for typing — and
+    breaks a 2FA box outright. Only the way focus is obtained escalates."""
+    note = ""
+    try:
+        await target.click(timeout=ACT_TIMEOUT_MS)
+    except Exception:  # noqa: BLE001 — a field that will not click may still focus
+        if not await _focus(target):
+            raise Stuck() from None
+        note = "the field would not click, so aish focused it with the keyboard"
+    await page.keyboard.press("ControlOrMeta+a")
+    if text:
+        await page.keyboard.type(text, delay=12)
+    else:
+        await page.keyboard.press("Delete")
+    if submit:
+        await page.keyboard.press("Enter")
+    return note
+
+
+async def _choose(target: Any, value: str) -> str:
+    """Pick one option, having matched it HERE rather than on the snapshot.
+
+    The options are read at choose time because carrying 312 of them on every
+    snapshot is what pushed 51 real controls off the end of a page (#245)."""
+    try:
+        options = [
+            (str(pair[0]), str(pair[1]))
+            for pair in await target.evaluate(browse_mod.OPTIONS_JS)
+        ]
+    except Exception:  # noqa: BLE001 — an element with no options answers as one
+        options = []
+    if not options:
+        # A `role=combobox` with no <option> children is a search box wearing a
+        # dropdown's clothes. Saying so beats two select_option timeouts.
+        raise Refused(
+            "this is a search box, not a fixed list of options — type into it "
+            "instead, and press the option that appears"
+        )
+    picked = browse_mod.match_option(options, value)
+    if picked.problem:
+        raise Refused(picked.problem)
+    await target.select_option(value=picked.value, timeout=ACT_TIMEOUT_MS)
+    return f"chose {picked.label!r}"
 
 
 def browse_act(
@@ -1783,24 +2090,31 @@ def browse_act(
     text: str = "",
     value: str = "",
     submit: bool = False,
+    href: str = "",
+    mutating: bool = False,
     timeout: float = 120.0,
 ) -> browse_mod.Snapshot:
     """Do one thing to control `n`, and hand back the page it produced.
 
     Every action re-enumerates afterwards, so the numbers the model reads are
-    always the ones on the document in front of it."""
+    always the ones on the document in front of it.
+
+    `href` and `mutating` come from the SNAPSHOT's control, never from the live
+    DOM: the thing the gate classified has to be the thing that runs, or the
+    fallback in `_press` becomes a way around the card.
+
+    Nothing in here raises for a page reason. Every ending is a snapshot with a
+    line saying what happened — a bare error string used to leave the model
+    holding no page at all, which is how one stuck control turned into a lost
+    session."""
     reason = unavailable_reason()
     if reason:
         raise BrowserUnavailable(reason)
 
     async def job(owner: _Owner) -> browse_mod.Snapshot:
         page = await _browse_page(owner, opening=False)
-        target = page.locator(f'[data-aish-n="{int(n)}"]').first
-        try:
-            count = await target.count()
-        except Exception:  # noqa: BLE001 — an unusable locator is a missing one
-            count = 0
-        if not count:
+        target, top = await _find(page, n)
+        if target is None:
             # The document changed under the numbering — an SPA re-render, a
             # redirect, a timed refresh. Re-describing beats guessing.
             owner.browse_epoch += 1
@@ -1813,37 +2127,61 @@ def browse_act(
                     "pick a number from THIS list."
                 ),
             )
+        if action not in ("click", "type", "choose"):
+            return await _snapshot(owner, page, problem=f"unknown action {action!r}")
+        gone = await _reachable_now(target)
+        if gone:
+            owner.browse_epoch += 1
+            return await _snapshot(
+                owner,
+                page,
+                problem=(
+                    f"control [{n}] is still on the page but cannot be pressed "
+                    f"now ({gone}) — the menu or panel holding it has closed "
+                    "since you last saw it. Here is the page as it is now; pick "
+                    "a number from THIS list."
+                ),
+            )
+        await _centre(target)
         before = list(page.context.pages)
         owner.browse_epoch += 1
-        if action == "click":
-            await target.click(timeout=NAV_TIMEOUT_MS)
-        elif action == "type":
-            # REAL KEYSTROKES, for the reason `view_act` records: fill() fires
-            # one input event and no key events, which breaks widgets that listen
-            # for typing — and breaks a 2FA box outright.
-            await target.click(timeout=NAV_TIMEOUT_MS)
-            await page.keyboard.press("ControlOrMeta+a")
-            if text:
-                await page.keyboard.type(text, delay=12)
+        notice = ""
+        try:
+            if action == "click":
+                notice = await _press(
+                    page, target, mutating=mutating, href=href if top else ""
+                )
+            elif action == "type":
+                notice = await _type(page, target, text=text, submit=submit)
             else:
-                await page.keyboard.press("Delete")
-            if submit:
-                await page.keyboard.press("Enter")
-        elif action == "choose":
-            try:
-                await target.select_option(label=value, timeout=NAV_TIMEOUT_MS)
-            except Exception:  # noqa: BLE001 — a site may label by value
-                await target.select_option(value, timeout=NAV_TIMEOUT_MS)
-        else:
+                notice = await _choose(target, value)
+        except Refused as exc:
+            return await _snapshot(owner, page, problem=str(exc))
+        except Stuck:
             return await _snapshot(
-                owner, page, problem=f"unknown action {action!r}"
+                owner,
+                page,
+                problem=(
+                    f"aish could not {action} control [{n}] — it is on the page "
+                    "and would not take the action, by click, by keyboard, or "
+                    "otherwise. Something may be covering it. Try the control "
+                    "that closes whatever is over the page, or another route to "
+                    "the same thing."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
+            return await _snapshot(
+                owner,
+                page,
+                problem=f"could not {action} control [{n}]: {type(exc).__name__}",
             )
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
         except Exception:  # noqa: BLE001 — nothing navigated, which is common
             pass
+        await _dismiss_consent(page)
         page = await _adopt_new_tab(owner, page, before)
-        return await _snapshot(owner, page)
+        return await _snapshot(owner, page, notice=notice)
 
     return _submit(job, timeout)
 
