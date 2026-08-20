@@ -654,3 +654,61 @@ class TestTheInjectedJavaScriptParses:
             [node, "--check", "-"], input=source, text=True, capture_output=True
         )
         assert result.returncode == 0, f"{name} does not parse:\n{result.stderr}"
+
+
+class TestHidingAControlNeverRoutesAroundItsCard:
+    """The one thing #244 could have broken. Reachability filters what the
+    model is OFFERED; the gate decides what it may press. If those two could
+    disagree, "closed away" would become a way to press something the owner
+    never approved."""
+
+    def test_not_listed_means_not_tagged_means_not_actable(self):
+        """The chain, in the enumeration itself: the over-cap `continue` and the
+        unreachable `continue` both sit BEFORE the setAttribute, and acting
+        resolves the tag and nothing else."""
+        walk = browse.CONTROLS_JS[browse.CONTROLS_JS.index("const walk ="):]
+        emits = walk.index("emit(el, tagOn,")
+        assert walk.index("if (unreachable(el))") < emits
+        assert walk.index("if (opts.offset + out.length >= opts.max) continue;") < emits
+        # And `emit` is the only thing that writes a tag.
+        assert browse.CONTROLS_JS.count("setAttribute('data-aish-n'") == 1
+
+    def test_a_mutating_control_that_is_hidden_cannot_be_reached_by_number(self):
+        """A control the page has closed away is not in the snapshot, so the
+        fallbacks in `_press` are handed nothing to act on — `mutating` and
+        `href` both come from the snapshot's control, never from the live DOM."""
+        snap = snapshot(controls=[control(n=0, name="Pokaż szczegóły")], unreachable=1)
+        assert snap.control(7) is None
+
+    def test_the_press_fallbacks_read_the_snapshot_the_gate_read(self, monkeypatch):
+        """web.browse_act must pass the classification the CARD was drawn from,
+        so a control the gate saw as a payment cannot be dispatched as if it
+        were an ordinary link."""
+        seen = {}
+
+        def fake_act(n, action, **kw):
+            seen.update(kw)
+            return snapshot()
+
+        monkeypatch.setattr(
+            browser, "browse_current",
+            lambda: snapshot(controls=[control(n=2, name="Zapłać", kind=browse.LINK)]),
+        )
+        monkeypatch.setattr(browser, "browse_act", fake_act)
+        web_module.browse_act(2, "click")
+        assert seen["mutating"] is True
+
+    def test_a_destination_the_ssrf_guard_refuses_is_never_offered(self, monkeypatch):
+        """The link fallback navigates, so it keeps the fence `browse` itself
+        applies to a model-chosen URL."""
+        seen = {}
+
+        def fake_act(n, action, **kw):
+            seen.update(kw)
+            return snapshot()
+
+        local = control(n=1, name="Panel", kind=browse.LINK, href="http://127.0.0.1/admin")
+        monkeypatch.setattr(browser, "browse_current", lambda: snapshot(controls=[local]))
+        monkeypatch.setattr(browser, "browse_act", fake_act)
+        web_module.browse_act(1, "click")
+        assert seen["href"] == ""
