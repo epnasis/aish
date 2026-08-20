@@ -58,7 +58,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from . import backends, browser, dir_ignore, export, notify, tools
+from . import backends, browser, dir_ignore, explain, export, notify, tools
 from .agent import (
     CANCELLED_RESULT,
     FEEDBACK_SWITCH_NOTE,
@@ -4961,6 +4961,75 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return None
         return path
 
+    # How many raw records the panel is handed in one response. The panel's
+    # "raw records" section exists so a rendering can be checked against its own
+    # source, and a turn with one large run_command holds megabytes of output —
+    # which is a fetch a phone should not be made to do just to open a section.
+    # The elision is REPORTED, never silent: a truncated list presented as the
+    # whole is the confident-false-conclusion class this reader exists to kill.
+    EXPLAIN_RAW_RECORDS = 200
+
+    async def handle_explain(self, request) -> JSONResponse:
+        """GET /explain?session=<name>&turn=<id-or-ordinal>&token=… — one turn's
+        dossier, assembled from the log (#243).
+
+        A deliberate endpoint rather than transcript events, for three reasons
+        the trace contract §8.7 already anticipated: the frontend opens a trace
+        card BEFORE it dispatches on step kind, so pushing renderless kinds down
+        that channel draws empty cards; the offline mirror writes transcript
+        events into IndexedDB on EVERY device, and reasoning quotes fetched
+        pages, file contents and mail bodies, which must not land on a phone;
+        and the transcript is the hot path while a dossier is not.
+
+        `running` is stamped HERE, not by the reader. A turn with no `task_end`
+        was either interrupted or is still going, and the log genuinely cannot
+        tell the two apart — only the live server knows, and teaching the reader
+        to ask it is exactly what its purity test exists to prevent. So it rides
+        the envelope, outside the dossier.
+        """
+        if not self._token_ok(request.query_params.get("token")):
+            return JSONResponse({"error": "bad token"}, status_code=403)
+        path = self._offline_path(request)
+        if path is None:
+            name = request.query_params.get("session", "").strip()
+            return JSONResponse({"error": f"no such session: {name}"}, status_code=404)
+        ref = request.query_params.get("turn") or ""
+        want_raw = request.query_params.get("raw") == "1"
+
+        def build() -> dict:
+            log = explain.load(path)
+            turns = explain.find(log, ref or None)
+            if not turns:
+                return {"error": "no such turn", "turns": len(log.turns)}
+            turn = turns[-1] if not ref else turns[0]
+            doc = explain.dossier(turn, log, self.state_dir)
+            doc["session"] = path.name
+            doc["title"] = log.title
+            doc["turn_id"] = turn.turn_id
+            doc["turns"] = len(log.turns)
+            doc["redactions"] = log.redactions
+            if want_raw:
+                records = turn.records
+                doc["raw"] = {
+                    "records": records[: self.EXPLAIN_RAW_RECORDS],
+                    "elided": max(0, len(records) - self.EXPLAIN_RAW_RECORDS),
+                }
+            return doc
+
+        # `load` re-parses the whole file, mid-write — off the event loop.
+        doc = await asyncio.to_thread(build)
+        if "error" in doc:
+            return JSONResponse(doc, status_code=404, headers={"Cache-Control": "no-store"})
+        session = self.sessions.get(path.name)
+        doc["running"] = bool(session is not None and session.busy)
+        return JSONResponse(
+            doc,
+            # Two client caches, and NEVER_CACHE only closes one. `no-store`
+            # closes the browser's own HTTP cache and the bfcache; without it
+            # the payload persists on the device anyway.
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def handle_offline_index(self, request) -> JSONResponse:
         """GET /offline/index — the mirror's catalogue: every session's
         identity and last-modified stamp. The client diffs it against what it
@@ -5449,6 +5518,7 @@ def create_app(
             Route("/export/answer", server.handle_export_answer, methods=["POST"]),
             Route("/export/session", server.handle_export_session, methods=["GET"]),
             Route("/dirs", server.handle_dirs, methods=["GET"]),
+            Route("/explain", server.handle_explain, methods=["GET"]),
             Route("/offline/index", server.handle_offline_index, methods=["GET"]),
             Route("/offline/session", server.handle_offline_session, methods=["GET"]),
             Route("/fonts/{name}", serve_config_font, methods=["GET"]),

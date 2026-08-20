@@ -62,6 +62,12 @@ class Turn:
 
     ordinal: int
     counter: int | None = None
+    # The client-minted STRING event id (#202) carried on this turn's user
+    # message — the only identity that is stable live, on replay, and in the
+    # log. The web panel addresses turns by it: a browser cannot count
+    # ordinals, because its first paint is capped and its "turn 4" is not the
+    # log's turn 4 on any long chat. An id cannot be counted wrong.
+    turn_id: str = ""
     ts: str = ""
     prompt: str = ""
     status: str | None = None
@@ -170,6 +176,8 @@ def load(path: os.PathLike | str) -> Log:
             current.messages.append(record)
             if record.get("role") == "user" and not current.prompt:
                 current.prompt = str(record.get("content") or "")
+            if record.get("role") == "user" and not current.turn_id:
+                current.turn_id = str(record.get("turn") or "")
         elif kind == "trace":
             step = record.get("step")
             if isinstance(step, dict):
@@ -689,6 +697,28 @@ def notes(doc: dict) -> dict:
     return {"rows": rows, "checks": [{"id": i, "label": lb} for i, lb in CHECKS]}
 
 
+def find(log: Log, ref: str | int | None) -> list[Turn]:
+    """The turns a reference names — by turn id first, ordinal second.
+
+    The id is preferred because it is the only identity that cannot be counted
+    wrong: the web transcript's first paint is bounded, so a browser's "turn 4"
+    is not the log's turn 4 on a long chat, and a diagnosis about the wrong turn
+    is worse than none. The ordinal and the agent's own counter remain, for logs
+    written before ids existed and for typing a number at a terminal.
+    """
+    if ref is None or ref == "":
+        return list(log.turns)
+    text = str(ref)
+    by_id = [t for t in log.turns if t.turn_id and t.turn_id == text]
+    if by_id:
+        return by_id
+    try:
+        number = int(text)
+    except ValueError:
+        return []
+    return [t for t in log.turns if t.ordinal == number or t.counter == number]
+
+
 def dossier(turn: Turn, log: Log, root: os.PathLike | str | None) -> dict:
     """One turn, assembled from its records — the data both renderers read."""
     did = _did(turn)
@@ -1032,7 +1062,7 @@ def render(
 
 def explain(
     target: os.PathLike | str,
-    turn: int | None = None,
+    turn: int | str | None = None,
     root: os.PathLike | str | None = None,
     show_tools: bool = False,
     show_context: bool = False,
@@ -1049,7 +1079,7 @@ def explain(
     if not log.turns:
         head.append(f"{DIM}no turns in this log{RESET}")
         return "\n".join(head)
-    wanted = [t for t in log.turns if turn is None or t.ordinal == turn or t.counter == turn]
+    wanted = find(log, turn)
     if not wanted:
         head.append(f"{DIM}no turn {turn} in this log ({len(log.turns)} turns){RESET}")
         return "\n".join(head)
