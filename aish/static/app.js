@@ -10989,16 +10989,17 @@ function xpLong(into, text, lines = 6) {
 
 function xpGiven(doc, into) {
   const given = doc.given;
-  if (!given.briefs.length) {
-    if (given.carried) {
-      into.appendChild(xpEl("p", "xp-state",
-        "unchanged since an earlier turn — the same tools and the same system text"));
-    } else {
-      xpState(given.state, into);
-    }
-  }
+  if (!given.briefs.length) xpState(given.state, into);
   for (const brief of given.briefs) {
     const options = brief.options || {};
+    // A brief is written only when what the model was handed CHANGES, so most
+    // turns are shown the one still in force. That is a different fact from one
+    // written here, and collapsing them would let a reader conclude the tools
+    // changed at this turn when the record only says they had not changed since.
+    if (!brief.written_here) {
+      into.appendChild(xpEl("p", "xp-state",
+        `unchanged since turn ${brief.in_force_since} — this is what was still in force`));
+    }
     xpRow(into, "model", `${options.model} · context ${options.num_ctx} · thinking ${options.think ? "on" : "off"}`);
     if (options.system_role === "first_only") {
       into.appendChild(xpEl("p", "xp-warn",
@@ -11232,7 +11233,7 @@ function xpRender(doc) {
 
 function xpGivenSummary(doc) {
   const brief = doc.given.briefs[0];
-  if (!brief) return doc.given.carried ? "unchanged since earlier" : "not recorded";
+  if (!brief) return "not recorded";
   const rules = ((doc.given.rules || {}).groups || {}).bind || [];
   return `${brief.tools.count} tools · ${rules.length} rules`;
 }

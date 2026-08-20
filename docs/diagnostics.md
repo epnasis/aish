@@ -145,7 +145,9 @@ Everything above is about recording what happened. These four are different in k
 
 The three states are machine values on the data (`RECORDED` / `MISSING` / `EMPTY` / `PURGED`, plus `FRAGMENTS` for a log written before the full reasoning record, whose rendered `thinking` step kept a snippet). A snippet shown as "the reasoning" is how someone concludes the model barely thought about it, so it says which one it is rather than presenting one as the other.
 
-`TestDossier` pins that the whole document serialises, that resolved and purged bytes stay distinguishable, and that a log predating the brief reports `not_recorded` rather than a carried-forward one.
+**The brief is carried forward.** It is written only when what the model was handed *changes*, so most turns have none of their own — and a panel that rendered only its own turn's brief would show an empty "what it was given" on nearly every turn, which is the one screen this feature exists for. `_brief_in_force` walks back to the most recent one. Carried forward is **not** the same as written here and the two stay distinguishable (`written_here`, `in_force_since`): a reader who cannot tell them apart concludes "the tools changed at turn 7" off a record that only says they had not changed since turn 3.
+
+`TestDossier` pins that the whole document serialises, that resolved and purged bytes stay distinguishable, that a log predating the brief reports `not_recorded` rather than a carried-forward one, and that the carried case is labelled.
 
 ## Worth a look — facts, never causes
 
@@ -155,6 +157,8 @@ A turn with a two-dozen-rule corpus produces dozens of verdicts, and on a phone 
 - **Every row cites where it came from** — section, and call or model call — so it is a shortcut into the evidence rather than a substitute for it.
 - **The empty state names the checks it ran.** *"Nothing unusual in this turn"* is a claim a checker is not entitled to make: it knows only the classes someone coded, so on the one turn whose cause is an uncoded class it would state the opposite of the truth, above the evidence.
 - **It is a pure function of the `Dossier`**, not of the log, so the terminal and the panel surface the same list and neither re-derives it.
+
+**Only a NEAR abstention is worth a look.** The rule corpus is evaluated in full against every turn, so *"this rule did not apply"* is the ordinary case for almost all of them — on the first live turn this ran against, six rows of that sat above the two real findings. A near miss (`ABSTAIN_NEAR_FLOOR`) is a different thing: it is the shape of *"the rule you wrote did not fire and you expected it to"*.
 
 Rows are collapsed per outcome rather than per rule — ten verify verdicts are one row naming the rules, not ten rows — because a list as long as the evidence is not a shortcut. `TestWorthALook` pins the citation, the collapse and the empty state. The web half of all this is `docs/web-server.md`'s `/explain`, tested by `TestExplainEndpoint`.
 
