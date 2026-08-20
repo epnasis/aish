@@ -928,6 +928,41 @@ class TestWorthALook:
         assert "far-off" not in rows[0]["text"]
         assert "no-distance" not in rows[0]["text"]
 
+    def test_an_event_note_names_the_round_it_happened_before(self, tmp_path):
+        """A row citing only "the flow" lands the reader on a section header,
+        which is indistinguishable from the tap doing nothing."""
+        path = tmp_path / "session-ev.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            {"ts": "t", "kind": "trace", "step": {"kind": "reasoning", "model_call": 1,
+                                                  "text": "first"}},
+            {"ts": "t", "kind": "trace", "step": {"kind": "injected",
+                                                  "text": "only Polish shops please"}},
+            {"ts": "t", "kind": "trace", "step": {"kind": "reasoning", "model_call": 2,
+                                                  "text": "second"}},
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ]) + "\n")
+        lg = explain_mod.load(path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        steering = [r for r in doc["notes"]["rows"] if r["check"] == "steering"]
+        assert steering, doc["notes"]["rows"]
+        assert steering[0]["where"] == {"section": "flow", "model_call": 2}
+        assert "before model call 2" in steering[0]["text"]
+
+    def test_an_event_with_no_round_says_so_instead_of_implying_one(self, tmp_path):
+        path = tmp_path / "session-loose.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in [
+            {"ts": "t", "kind": "task_start", "prompt": "go"},
+            {"ts": "t", "kind": "trace", "step": {"kind": "injected", "text": "wait"}},
+            {"ts": "t", "kind": "task_end", "status": "ok"},
+        ]) + "\n")
+        lg = explain_mod.load(path)
+        doc = explain_mod.dossier(lg.turns[0], lg, tmp_path)
+        steering = [r for r in doc["notes"]["rows"] if r["check"] == "steering"]
+        assert steering, doc["notes"]["rows"]
+        assert "model_call" not in steering[0]["where"]
+        assert "at some point in this turn" in steering[0]["text"]
+
     def test_notes_are_a_pure_function_of_the_dossier(self, tmp_path):
         """So the terminal and the panel surface the same list, and neither
         re-reads the log to build it."""

@@ -727,6 +727,33 @@ def _rounds(turn: Turn, doc: dict) -> dict:
     }
 
 
+def _event_note(rows: list[dict], event: dict, model_call: int | None) -> None:
+    """One between-round event as a row worth looking at.
+
+    `model_call` is the round it happened before, so the row deep-links to that
+    round rather than to the top of the stream. None when no round could be
+    named, and then the text says so instead of implying a position."""
+    where: dict = {"section": "flow"}
+    if model_call is not None:
+        where["model_call"] = model_call
+    when = f"before model call {model_call}" if model_call else "at some point in this turn"
+    if event["kind"] == "trim":
+        record = event["record"]
+        if stubbed := record.get("stubbed"):
+            listed = ", ".join(f"{x.get('tool')} (#{x.get('at')})" for x in stubbed)
+            rows.append({"check": "result_stubbed", "where": where,
+                         "text": f"{record.get('affected')} earlier result(s) were replaced "
+                                 f"with a stub {when}: {listed}"})
+        elif record.get("affected"):
+            rows.append({"check": "result_stubbed", "where": where,
+                         "text": f"{record.get('affected')} earlier result(s) were stubbed "
+                                 f"{when}; which ones was not recorded"})
+    elif event["kind"] == "steering":
+        rows.append({"check": "steering", "where": where,
+                     "text": "you typed while the task was running and it was folded into "
+                             f"the model's messages, {when}: {event['text'][:120]}"})
+
+
 def _note(rows: list[dict], check: str, text: str, **where) -> None:
     rows.append({"check": check, "text": text, "where": where})
 
@@ -810,26 +837,15 @@ def notes(doc: dict) -> dict:
                   f"the model stopped with reason {call['stop']!r}",
                   section="flow", model_call=call["model_call"])
 
-    for record in doc["trim"]:
-        if record.get("stubbed"):
-            listed = ", ".join(
-                f"{s.get('tool')} (#{s.get('at')})" for s in record["stubbed"]
-            )
-            _note(rows, "result_stubbed",
-                  f"{record.get('affected')} earlier result(s) were replaced with a stub "
-                  f"before this call: {listed}",
-                  section="flow")
-        elif record.get("affected"):
-            _note(rows, "result_stubbed",
-                  f"{record.get('affected')} earlier result(s) were stubbed; which ones "
-                  f"was not recorded",
-                  section="flow")
-
-    for record in doc["steering"]:
-        _note(rows, "steering",
-              "you typed while the task was running and it was folded into the model's "
-              f"messages: {record['text'][:120]}",
-              section="given")
+    # Read off the FLOW, not the raw records, so each row can name the round it
+    # happened before. A row citing only "the flow" lands the reader on a
+    # section header, which is indistinguishable from the tap doing nothing —
+    # and the steering row was pointing at the wrong section entirely.
+    for rnd in doc["flow"]["rounds"]:
+        for event in rnd["before"]:
+            _event_note(rows, event, model_call=rnd["model_call"])
+    for event in doc["flow"]["loose"]:
+        _event_note(rows, event, model_call=None)
 
     briefs = doc["given"]["briefs"]
     for brief in briefs:

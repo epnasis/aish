@@ -186,7 +186,7 @@ The `inferred` fallback attaches each call to the most recent preceding `reasoni
 A turn with a two-dozen-rule corpus produces dozens of verdicts, and on a phone the line that matters is buried. `notes()` ranks what is worth reading first. Four properties make that safe, and each is a test:
 
 - **Rows are observations.** "read_url returned 403", never "the 403 is why it improvised". A confident wrong cause wearing evidence styling is the failure this whole feature exists to end.
-- **Every row cites where it came from** — section, and call or model call — so it is a shortcut into the evidence rather than a substitute for it.
+- **Every row cites where it came from** — section, and call or model call — so it is a shortcut into the evidence rather than a substitute for it. Rows about between-round events are read off the **flow** rather than off the raw records, so each one names the round it happened before; citing only the section lands the reader on a header, which is indistinguishable from the tap doing nothing.
 - **The empty state names the checks it ran.** *"Nothing unusual in this turn"* is a claim a checker is not entitled to make: it knows only the classes someone coded, so on the one turn whose cause is an uncoded class it would state the opposite of the truth, above the evidence.
 - **It is a pure function of the `Dossier`**, not of the log, so the terminal and the panel surface the same list and neither re-derives it.
 
