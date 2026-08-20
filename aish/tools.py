@@ -1027,7 +1027,10 @@ TOOL_SCHEMAS = [
                 "come from the most recent browse/browse_act result and change "
                 "every time the page does — always act on a number you have just "
                 "been given. A control marked '(needs approval)' asks the user "
-                "first; a password field is never typed by aish at all."
+                "first; a password field is never typed by aish at all. If the "
+                "control you want is not in the list, it is closed away: press "
+                "whatever opens it (a menu, a tab, a dialog) and look again. Never "
+                "guess a URL instead."
             ),
             "parameters": {
                 "type": "object",
@@ -1054,8 +1057,12 @@ TOOL_SCHEMAS = [
                     "value": {
                         "type": "string",
                         "description": (
-                            "Which option to pick, for action=choose — the option "
-                            "text as shown in the control list."
+                            "Which option to pick, for action=choose. Say what you "
+                            "want in words — 'Poland', 'wrzesien' — you do not need "
+                            "the exact text and you do not need to have seen the "
+                            "list. A long dropdown shows only how many options it "
+                            "has; if what you say matches more than one, or none, "
+                            "you get the candidates back and can say which."
                         ),
                     },
                     "submit": {

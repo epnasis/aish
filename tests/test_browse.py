@@ -355,3 +355,242 @@ class TestBrowseDispatch:
         out = web_module.browse("http://169.254.169.254/latest/meta-data/")
         assert out.startswith("ERROR")
         assert "public internet hosts" in out
+
+
+class TestWhoseDownloadIsIt:
+    """The tab that downloads is very often not the tab that was clicked (#246).
+
+    E.ON's `Pobierz e-fakturę` is a `target=_blank` link: Chrome opens a fresh
+    tab, starts the transfer, and closes the tab. Four clicks across two real
+    sessions produced four page snapshots and no file, because the listener was
+    bound to the one tab aish opened."""
+
+    def test_a_popup_download_belongs_to_the_browse_session(self):
+        owner = browser._Owner()
+        popup, file = object(), object()
+        owner.downloads.append((popup, file))
+        assert owner.take_downloads() == [file]
+
+    def test_a_reads_download_is_not_swept_up_by_a_click(self):
+        owner = browser._Owner()
+        read_page, browse_file, read_file = object(), object(), object()
+        owner.read_pages.add(read_page)
+        owner.downloads += [(object(), browse_file), (read_page, read_file)]
+        assert owner.take_downloads() == [browse_file]
+        # And the read's own is still there for the read to claim.
+        assert owner.take_downloads(read_page=read_page) == [read_file]
+
+    def test_draining_takes_each_file_once(self):
+        owner = browser._Owner()
+        owner.downloads.append((object(), object()))
+        assert len(owner.take_downloads()) == 1
+        assert owner.take_downloads() == []
+
+    def test_a_read_that_lands_on_a_file_says_so_instead_of_going_anonymous(self):
+        """The failure this replaces: aish held seven of the owner's invoices,
+        refetched every one as a stranger, and told him it could not get them."""
+        note = web_module.downloaded_note(
+            ["/state/browser/downloads/faktura.pdf"], "this link is a file"
+        )
+        assert "/state/browser/downloads/faktura.pdf" in note
+        assert 'read_pdf(source="<path>")' in note
+
+    def test_no_files_is_no_note(self):
+        assert web_module.downloaded_note([], "this link is a file") == ""
+
+
+class TestTheSiteSaysWhereYouActuallyAre:
+    """A redirect is not an error, and silence about it is (#247). The model
+    asked for qatarairways.com/en-pl/help/feedback.retrieve.html, was handed
+    /en-pl/help.html, and reasoned about the form for the rest of the turn."""
+
+    @pytest.mark.parametrize(
+        "asked, got",
+        [
+            ("https://eon.pl/mojeon", "https://eon.pl/mojeon/"),
+            ("https://eon.pl/mojeon/", "https://eon.pl/mojeon"),
+            ("https://eon.pl/mojeon", "https://eon.pl/mojeon#faktury"),
+            ("eon.pl/mojeon", "https://eon.pl/mojeon"),
+            ("https://EON.pl/mojeon", "https://eon.pl/mojeon"),
+        ],
+    )
+    def test_the_same_page_by_another_spelling_is_not_a_redirect(self, asked, got):
+        assert browse.landed_elsewhere(asked, got) is False
+
+    @pytest.mark.parametrize(
+        "asked, got",
+        [
+            ("https://q.com/help/feedback.retrieve.html", "https://q.com/help.html"),
+            ("https://eon.pl/mojeon", "https://eon.pl/mojeon/Logowanie"),
+            ("https://eon.pl/x", "https://other.pl/x"),
+            ("https://eon.pl/x", "https://eon.pl/x?session=expired"),
+        ],
+    )
+    def test_a_different_page_is_reported(self, asked, got):
+        assert browse.landed_elsewhere(asked, got) is True
+
+    def test_nothing_to_compare_is_not_a_redirect(self):
+        assert browse.landed_elsewhere("", "https://eon.pl") is False
+        assert browse.landed_elsewhere("https://eon.pl", "") is False
+
+    def test_the_model_is_told_which_page_it_is_standing_on(self):
+        out = web_module._present_snapshot(
+            snapshot(url="https://q.com/help.html", asked="https://q.com/feedback.html")
+        )
+        assert "you asked for https://q.com/feedback.html" in out
+        assert "https://q.com/help.html instead" in out
+        assert out.index("[aish: you asked for") < out.index("untrusted web")
+
+    def test_an_ordinary_page_carries_no_such_note(self):
+        assert "you asked for" not in web_module._present_snapshot(snapshot())
+
+
+class TestTheSessionOutlivesTheOwnerReading:
+    """Three minutes of him reading collected the browser, and his next message
+    got "nothing is open to act on" (#248)."""
+
+    def owner(self, *, page=None, touched=0.0):
+        owner = browser._Owner()
+        owner.browse_page = page
+        owner.browse_touched = touched
+        return owner
+
+    def open_page(self, closed=False):
+        return type("P", (), {"is_closed": lambda self: closed})()
+
+    def test_an_open_browse_session_holds_the_browser(self, monkeypatch):
+        monkeypatch.setattr(browser.time, "monotonic", lambda: 100.0)
+        assert self.owner(page=self.open_page(), touched=99.0).held() is True
+
+    def test_an_abandoned_one_does_not_hold_it_forever(self, monkeypatch):
+        monkeypatch.setattr(browser.time, "monotonic", lambda: 100.0)
+        stale = 100.0 - browser.BROWSE_MAX_IDLE - 1
+        assert self.owner(page=self.open_page(), touched=stale).held() is False
+
+    def test_a_closed_page_is_not_a_session(self, monkeypatch):
+        monkeypatch.setattr(browser.time, "monotonic", lambda: 100.0)
+        held = self.owner(page=self.open_page(closed=True), touched=99.0).held()
+        assert held is False
+
+    def test_an_idle_browser_with_nothing_open_is_still_collected(self):
+        assert browser._Owner().held() is False
+
+    def test_the_owners_own_window_still_outranks_everything(self, monkeypatch):
+        monkeypatch.setattr(browser.time, "monotonic", lambda: 100.0)
+        owner = browser._Owner()
+        owner.view = object()
+        owner.view_touched = 99.0
+        assert owner.held() is True
+
+    def test_a_reaped_session_stops_reading_as_open(self):
+        """`browse_is_open` answers from a module-level snapshot that used to
+        survive the reaper, so it said yes for a page that no longer existed."""
+        import asyncio
+
+        browser._LAST_SNAPSHOT = snapshot()
+        assert browser.browse_is_open() is True
+        asyncio.run(browser._Owner()._close())
+        assert browser.browse_is_open() is False
+
+
+class TestChoosingWithoutReadingTheList:
+    """A 312-option airport picker is not the page (#245). The line says how
+    many there are; saying what you want is how you get one."""
+
+    OPTIONS = [
+        ("Polska (+48)", "48"),
+        ("Portugalia (+351)", "351"),
+        ("Peru (+51)", "51"),
+        ("Iran (+98)", "98"),
+        ("Irak (+964)", "964"),
+        ("Łódź", "LDZ"),
+    ]
+
+    def test_the_exact_label(self):
+        assert browse.match_option(self.OPTIONS, "Peru (+51)").value == "51"
+
+    def test_the_case_it_was_not_written_in(self):
+        assert browse.match_option(self.OPTIONS, "polska (+48)").value == "48"
+
+    def test_the_value_when_that_is_what_the_site_labels_by(self):
+        assert browse.match_option(self.OPTIONS, "351").value == "351"
+
+    def test_a_substring_of_one_option(self):
+        assert browse.match_option(self.OPTIONS, "Portug").value == "351"
+
+    @pytest.mark.parametrize("asked", ["Lodz", "lodz", "ŁÓDŹ"])
+    def test_the_owners_alphabet_without_the_owners_keyboard(self, asked):
+        """This is the owner's web: "Lodz" has to find "Łódź"."""
+        assert browse.match_option(self.OPTIONS, asked).value == "LDZ"
+
+    def test_two_matches_is_a_question_not_a_guess(self):
+        """A choose is very often followed by a submit, so 'Iran' quietly
+        standing in for 'Irak' is the kind of wrong this cannot make."""
+        picked = browse.match_option(self.OPTIONS, "Ira")
+        assert picked.value == ""
+        assert "matches 2 options" in picked.problem
+        assert "Iran (+98)" in picked.problem and "Irak (+964)" in picked.problem
+
+    def test_no_match_hands_back_the_list_it_needed(self):
+        picked = browse.match_option(self.OPTIONS, "Atlantyda")
+        assert picked.value == ""
+        assert "no option matches" in picked.problem
+        assert "Polska (+48)" in picked.problem
+
+    def test_the_candidate_list_is_itself_bounded(self):
+        many = [(f"Kraj {i}", str(i)) for i in range(250)]
+        picked = browse.match_option(many, "Kraj")
+        assert picked.problem.count("'Kraj ") == browse.CANDIDATES_SHOWN
+        assert "and 238 more" in picked.problem
+
+    def test_a_short_list_is_still_shown_in_full_on_the_page(self):
+        """Up to CHOICE_INLINE_MAX, reading the options beats counting them."""
+        assert browse.CHOICE_INLINE_MAX == 8
+
+
+class TestWhatTheModelIsToldItCannotSee:
+    """A model that cannot see the control it wants concludes the page has none
+    and goes back to guessing URLs — which is the failure browse exists to end."""
+
+    def test_closed_away_controls_are_counted_not_dropped(self):
+        out = web_module._present_snapshot(snapshot(unreachable=19))
+        assert "19 more control(s) are on this page but closed away" in out
+        assert "Press whatever opens them first" in out
+
+    def test_a_page_hiding_nothing_says_nothing(self):
+        assert "closed away" not in web_module._present_snapshot(snapshot())
+
+    def test_the_cap_and_the_hiding_are_different_facts(self):
+        out = web_module._present_snapshot(snapshot(unreachable=3, hidden=5))
+        assert "3 more control(s) are on this page but closed away" in out
+        assert "5 more control(s) not listed" in out
+
+
+class TestHowItWasPressedIsNotWhetherItWorked:
+    """`notice` and `problem` mean opposite things, and a press aish did not
+    physically make must never be reported as one it did."""
+
+    def test_an_escalated_press_says_so(self):
+        out = web_module._present_snapshot(
+            snapshot(notice="the click would not land, so aish pressed it with the keyboard")
+        )
+        assert "[aish: the click would not land" in out
+        assert out.index("[aish: the click") < out.index("untrusted web")
+
+    def test_an_ordinary_press_is_silent(self):
+        assert "[aish:" not in web_module._present_snapshot(snapshot())
+
+    def test_a_failure_and_a_notice_are_both_reportable(self):
+        out = web_module._present_snapshot(snapshot(problem="stuck", notice="by keyboard"))
+        assert "[aish: stuck]" in out and "[aish: by keyboard]" in out
+
+
+class TestAPageThatSaysItIsStillLoading:
+    def test_only_the_top_of_the_page_counts(self):
+        """A finished article with "Loading comments…" halfway down is not a
+        page that has not finished, and paying the retry for it is seconds."""
+        article = "Faktura 09/2026 — 226,89 zl\n" * 40 + "Loading comments…"
+        assert browse.still_loading(article) is False
+
+    def test_a_page_that_leads_with_it_still_counts(self):
+        assert browse.still_loading("Wczytywanie danych\n" + "x" * 5000) is True

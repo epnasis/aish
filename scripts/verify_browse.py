@@ -1,12 +1,21 @@
 #!/usr/bin/env -S uv run python
-"""Drive a real Chrome through a fake portal shaped like the one that failed.
+"""Drive a real Chrome through fake portals shaped like the ones that failed.
 
 Everything in tests/test_browse.py patches the browser away, which leaves one
 thing unverified and it is the load-bearing one: whether `CONTROLS_JS` finds, on
-a REAL page, the control the model needs. So this serves a local page built like
-eon.pl/mojeon — a `<a href="#">Przełącz lokal</a>` that opens a menu, a table
-that swaps when a property is chosen, a search field, and a panel that says
-"Wczytywanie danych" for a second before its content arrives — and drives it.
+a REAL page, the control the model needs — and whether pressing it works. So
+this serves two local pages and drives them.
+
+`PORTAL` is shaped like eon.pl/mojeon: a `<a href="#">Przełącz lokal</a>` that
+opens a menu, a table that swaps when a property is chosen, a search field, and
+a panel that says "Wczytywanie danych" for a second before its content arrives.
+
+`HARD` is every way a control can be listed and unpressable, each one taken from
+a real session this week (#244, #245, #246): a responsive nav rendered twice with
+the mobile copy parked off-canvas, a collapsed accordion, a dialog that pins the
+page, a native checkbox hidden under a styled label, a 250-option dropdown, a
+button under a transparent sheet, a control inside an iframe, and a download link
+that opens in a tab Chrome closes the moment the transfer starts.
 
 Run it directly; it is NOT part of the pytest suite (it launches Chrome, which
 conftest forbids on purpose). A throwaway profile in a temp state dir: this must
@@ -23,6 +32,7 @@ import socketserver
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 os.environ["AISH_STATE_DIR"] = tempfile.mkdtemp(prefix="verify-browse-")
@@ -71,11 +81,126 @@ PORTAL = """<!doctype html>
 </body></html>
 """
 
+HARD = """<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"><title>Trudna strona (atrapa)</title>
+<style>
+  /* The responsive duplicate: the nav is rendered twice and the mobile copy is
+     parked off-canvas. BOTH copies pass "has a box, is not display:none". */
+  #drawer { position: fixed; top: 0; left: 0; width: 280px; height: 100%;
+            transform: translateX(-100%); background: #eee; }
+  /* The collapsed accordion: overflow hidden and nothing to scroll. */
+  #folded { height: 0; overflow: hidden; }
+  /* The modal that pins the page — which is what puts everything below the
+     fold permanently out of reach, however hard Playwright scrolls. */
+  body.locked { position: fixed; width: 100%; }
+  #dialog { position: fixed; top: 10px; left: 10px; background: #fff; }
+  #tall { height: 3000px; }
+  /* The styled checkbox: the native input is invisible and the label IS the
+     control. Every custom toggle on the web is shaped like this. */
+  #agree { opacity: 0; position: absolute; width: 1px; height: 1px; }
+  #wrap { position: relative; display: inline-block; }
+  #sheet { position: absolute; inset: 0; background: transparent; }
+</style></head>
+<body>
+  <nav id="bar"><a href="/hard.html?from=bar" id="nav-desktop">Faktury i płatności</a></nav>
+  <nav id="drawer"><a href="/hard.html?from=drawer" id="nav-mobile">Faktury i płatności</a></nav>
+
+  <div id="folded"><button id="in-accordion">Szczegóły rozliczenia</button></div>
+  <button id="unfold">Pokaż szczegóły</button>
+
+  <label id="agree-label" for="agree">Akceptuję regulamin</label>
+  <input type="checkbox" id="agree">
+
+  <select id="kraj" name="kraj">OPTIONS</select>
+
+  <p><a id="pobierz" href="/faktura.pdf" target="_blank">Pobierz e-fakturę</a></p>
+
+  <div id="wrap"><button id="covered">Wyślij zgłoszenie</button><div id="sheet"></div></div>
+
+  <div id="tall">przewijana treść</div>
+  <button id="deep">Na samym dole</button>
+
+  <iframe id="ramka" src="/frame.html" width="300" height="120"></iframe>
+
+  <div id="dialog" hidden>
+    <button id="close-dialog">Zamknij okno</button>
+    <input type="text" id="ref" placeholder="Numer rezerwacji">
+  </div>
+  <button id="open-dialog">Otwórz okno</button>
+
+  <script>
+    document.getElementById('unfold').onclick = () => {
+      document.getElementById('folded').style.height = 'auto';
+    };
+    document.getElementById('covered').onclick = () => {
+      document.getElementById('covered').textContent = 'Wysłano zgłoszenie';
+    };
+    document.getElementById('open-dialog').onclick = () => {
+      document.getElementById('dialog').hidden = false;
+      document.body.classList.add('locked');
+    };
+    document.getElementById('close-dialog').onclick = () => {
+      document.getElementById('dialog').hidden = true;
+      document.body.classList.remove('locked');
+    };
+  </script>
+</body></html>
+"""
+
+FRAME = """<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"></head><body>
+  <button id="w-ramce">Akceptuj wszystkie</button>
+</body></html>
+"""
+
+# Long enough to be collapsed, with the shapes `match_option` has to get right:
+# an unambiguous name, a shared prefix, a diacritic, and two that differ by one
+# letter ("Iran" must never quietly stand in for "Irak").
+NAMED = [
+    "Polska (+48)", "Portugalia (+351)", "Peru (+51)", "Łódź (+00)",
+    "Niemcy (+49)", "Norwegia (+47)", "Katar (+974)", "Iran (+98)",
+    "Irak (+964)", "Hiszpania (+34)", "Francja (+33)", "Włochy (+39)",
+]
+OPTIONS = "".join(f"<option>{name}</option>" for name in NAMED) + "".join(
+    f"<option>Kraj {i} (+{900 + i})</option>" for i in range(238)
+)
+
+PDF = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    """Serves the fixtures, and serves the invoice as a DOWNLOAD.
+
+    `Content-Disposition: attachment` is the whole point: Chrome does not render
+    it, so a `target=_blank` link opens a tab, starts the transfer, and closes
+    the tab — which is exactly how four real clicks produced four page snapshots
+    and no file."""
+
+    def log_message(self, *a):  # noqa: D102 — quiet
+        pass
+
+    def do_GET(self):  # noqa: N802 — http.server's spelling
+        path = self.path.split("?", 1)[0]
+        if path == "/faktura.pdf":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header(
+                "Content-Disposition", 'attachment; filename="faktura 09-2026.pdf"'
+            )
+            self.send_header("Content-Length", str(len(PDF)))
+            self.end_headers()
+            self.wfile.write(PDF)
+            return
+        if path == "/przekierowanie":
+            self.send_response(302)
+            self.send_header("Location", "/hard.html")
+            self.end_headers()
+            return
+        super().do_GET()
+
 
 def serve(directory: str) -> int:
-    handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(  # noqa: E731
-        *a, directory=directory, **kw
-    )
+    handler = lambda *a, **kw: Handler(*a, directory=directory, **kw)  # noqa: E731
     httpd = socketserver.TCPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd.server_address[1]
@@ -91,45 +216,34 @@ def named(snapshot, name):
     )
 
 
-def main() -> int:
-    assert "verify-browse-" in str(browser.profile_dir()), "refusing the real profile"
-    root = tempfile.mkdtemp(prefix="portal-")
-    Path(root, "index.html").write_text(PORTAL, encoding="utf-8")
-    # A real (tiny) PDF, so the download path is exercised end to end.
-    Path(root, "faktura.pdf").write_bytes(
-        b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"
-    )
-    port = serve(root)
-    url = f"http://127.0.0.1:{port}/"
+def absent(snapshot, name):
+    hits = [c for c in snapshot.controls if c.name == name]
+    assert not hits, f"{name!r} should not be listed, got {[c.line() for c in hits]}"
 
-    print(f"profile: {browser.profile_dir()}")
+
+def check_portal(url: str) -> None:
+    """The flow the whole feature exists for, end to end."""
     page = browser.browse_open(url)
     print(f"opened {page.url}: {len(page.controls)} controls")
-    for control in page.controls:
-        print("   ", control.line())
 
-    # 1. The control the whole feature exists for is found, and named as the
-    #    owner names it.
     switch = named(page, "Przełącz lokal")
     assert switch.mutating is False, "switching property is not a mutation"
     # `<a href="#">` goes nowhere, so it carries no destination and is
     # word-matched like the JavaScript control it is.
     assert switch.detail == "", switch
 
-    # 2. A page that says it is still loading is WAITED for, not reported.
     assert "226,89" in page.text, f"panel never settled: {page.text!r}"
     assert not browse.still_loading(page.text)
 
-    # 3. Labelling, on real markup.
     assert named(page, "Zapłać").mutating is True, "an href=# 'Zapłać' must be gated"
     assert named(page, "Faktury i płatności").mutating is False, "a GET link is not"
     assert named(page, "Filtruj").mutating is True, "a form submit is gated"
     assert named(page, "Szukaj faktury").kind == browse.FIELD
-    assert all(c.name != "csrf" for c in page.controls), "a hidden input is not a control"
+    absent(page, "csrf")
 
-    # 4. Press it. The menu it opens is not in the first snapshot at all — this
-    #    is the round trip that no URL could have replaced.
-    assert all(c.name != "Bluszczanska" for c in page.controls), "menu starts hidden"
+    # The menu is not in the first snapshot at all — this is the round trip that
+    # no URL could have replaced.
+    absent(page, "Bluszczanska")
     after = browser.browse_act(switch.n, "click")
     chosen = named(after, "Bluszczanska")
     print(f"clicked 'Przełącz lokal' → {len(after.controls)} controls, menu is open")
@@ -139,26 +253,138 @@ def main() -> int:
     assert "118,40" in final.text, f"the table never switched: {final.text!r}"
     print(f"clicked 'Bluszczanska' → {final.text.splitlines()[-1]}")
 
-    # 5. Typing, with real keystrokes.
     typed = browser.browse_act(named(final, "Szukaj faktury").n, "type", text="wrzesień")
     field = named(typed, "Szukaj faktury")
     assert "wrzesień" in field.detail, field.detail
     print(f"typed into the search box → {field.line()}")
 
-    # 6. A number from a page that has moved on is refused, not pressed blind.
     stale = browser.browse_act(9999, "click")
     assert "no control [9999]" in stale.problem, stale.problem
     print("stale index refused:", stale.problem.splitlines()[0])
 
-    # 7. The document at the end of the flow: clicked through the session,
-    #    saved locally, and named so read_pdf can open it.
-    got = browser.browse_act(named(typed, "Pobierz e-fakturę").n, "click")
+
+def check_hard(url: str) -> None:
+    """Every way a control can be listed and unpressable."""
+    page = browser.browse_open(url + "hard.html")
+    print(f"\nopened {page.url}: {len(page.controls)} controls, "
+          f"{page.unreachable} closed away")
+
+    # 1. The responsive duplicate. Both copies are named the same and only one
+    #    can be pressed; the drawer copy is what burned 45 seconds on eon.pl.
+    navs = [c for c in page.controls if c.name == "Faktury i płatności"]
+    assert len(navs) == 1, f"the off-canvas copy is still listed: {navs}"
+    assert navs[0].detail.endswith("from=bar"), navs[0].detail
+    print("responsive duplicate → only the on-screen copy is listed")
+
+    # 2. A collapsed accordion is not a control list.
+    absent(page, "Szczegóły rozliczenia")
+    assert page.unreachable >= 2, page.unreachable
+    opened = browser.browse_act(named(page, "Pokaż szczegóły").n, "click")
+    named(opened, "Szczegóły rozliczenia")
+    print("collapsed accordion → hidden until opened, then listed")
+
+    # 3. The styled checkbox: the input is invisible, the label is the control.
+    agree = named(opened, "Akceptuję regulamin")
+    assert agree.kind == browse.CHECK, agree
+    assert agree.detail == "unchecked", agree
+    ticked = browser.browse_act(agree.n, "click")
+    after = named(ticked, "Akceptuję regulamin")
+    assert after.detail == "checked", f"the label click did not toggle it: {after}"
+    print("styled checkbox → pressing the label toggled the hidden input")
+
+    # 4. A 250-option dropdown says how many it has, not what they are.
+    kraj = named(ticked, "kraj")
+    assert kraj.kind == browse.CHOICE, kraj
+    assert "250 options" in kraj.detail, kraj.detail
+    assert "Portugalia" not in kraj.detail, kraj.detail
+    print(f"long dropdown → {kraj.line()}")
+
+    chosen = browser.browse_act(kraj.n, "choose", value="niemcy")
+    assert "Niemcy (+49)" in named(chosen, "kraj").detail, named(chosen, "kraj").detail
+    print(f"chose by folded name → {named(chosen, 'kraj').detail}")
+
+    lodz = browser.browse_act(kraj.n, "choose", value="Lodz")
+    assert "Łódź" in named(lodz, "kraj").detail, named(lodz, "kraj").detail
+    print("chose 'Lodz' → matched 'Łódź (+00)'")
+
+    ambiguous = browser.browse_act(kraj.n, "choose", value="Ira")
+    assert "matches 2 options" in ambiguous.problem, ambiguous.problem
+    assert "Irak" in ambiguous.problem and "Iran" in ambiguous.problem
+    print("ambiguous choice refused:", ambiguous.problem.splitlines()[0][:80])
+
+    missing = browser.browse_act(kraj.n, "choose", value="Atlantyda")
+    assert "no option matches" in missing.problem, missing.problem
+    print("unmatched choice refused, with candidates")
+
+    # 5. A control inside an iframe exists. It did not, before.
+    frame_button = named(page, "Akceptuj wszystkie")
+    print(f"iframe → {frame_button.line()}")
+
+    # 6. A button under a transparent sheet. A real click cannot land; the
+    #    keyboard can, and 'Wyślij' is mutating so the synthetic stage is off.
+    covered = named(chosen, "Wyślij zgłoszenie")
+    assert covered.mutating is True, covered
+    started = time.monotonic()
+    pressed = browser.browse_act(covered.n, "click", mutating=True)
+    took = time.monotonic() - started
+    assert "Wysłano zgłoszenie" in pressed.text, (pressed.problem, pressed.notice)
+    assert took < 20, f"a covered control took {took:.0f}s — the ladder is not bounded"
+    print(f"covered button → pressed in {took:.1f}s ({pressed.notice or 'plain click'})")
+
+    # 7. The dialog that pins the page.
+    deep = named(pressed, "Na samym dole")
+    locked = browser.browse_act(named(pressed, "Otwórz okno").n, "click")
+    absent(locked, "Na samym dole")
+    named(locked, "Numer rezerwacji")
+    print(f"dialog opened → [{deep.n}] 'Na samym dole' is now out of reach, "
+          f"{locked.unreachable} closed away")
+
+    # The numbering is re-issued for what is reachable NOW, so the control that
+    # was [n] before the dialog is not [n] behind it. That is the contract — the
+    # gate reads the same fresh snapshot, so the card names what is really there.
+    assert not any(c.n == deep.n and c.name == deep.name for c in locked.controls)
+
+    unlocked = browser.browse_act(named(locked, "Zamknij okno").n, "click")
+    named(unlocked, "Na samym dole")
+    print("dialog closed → the page is reachable again")
+
+    # 8. The download that opens in a tab Chrome closes.
+    got = browser.browse_act(named(unlocked, "Pobierz e-fakturę").n, "click")
     assert got.downloads, f"nothing was downloaded: {got.problem or 'no problem reported'}"
     saved = Path(got.downloads[0])
     assert saved.exists() and saved.read_bytes().startswith(b"%PDF"), saved
     assert saved.name == "faktura 09-2026.pdf", saved.name
     assert saved.parent == browser.downloads_dir(), saved.parent
-    print(f"downloaded → {saved} ({saved.stat().st_size} bytes)")
+    print(f"target=_blank download → {saved} ({saved.stat().st_size} bytes)")
+
+    # 9. A READ that lands on a file keeps the file. This is the one that ended
+    #    the E.ON task: aish held seven invoices, refetched every one
+    #    anonymously, and told the owner it could not get them.
+    read = browser.read(url + "faktura.pdf")
+    assert read.downloads, f"a read that downloads must keep the file: {read.text!r}"
+    assert Path(read.downloads[0]).read_bytes().startswith(b"%PDF")
+    print(f"read_url on a file → {Path(read.downloads[0]).name}")
+
+    # 10. The site sends you somewhere else and says so.
+    moved = browser.browse_open(url + "przekierowanie")
+    assert moved.asked.endswith("/przekierowanie"), moved.asked
+    assert moved.url.endswith("/hard.html"), moved.url
+    print(f"redirect → asked for {moved.asked}, landed on {moved.url}")
+
+
+def main() -> int:
+    assert "verify-browse-" in str(browser.profile_dir()), "refusing the real profile"
+    root = tempfile.mkdtemp(prefix="portal-")
+    Path(root, "index.html").write_text(PORTAL, encoding="utf-8")
+    Path(root, "hard.html").write_text(HARD.replace("OPTIONS", OPTIONS), encoding="utf-8")
+    Path(root, "frame.html").write_text(FRAME, encoding="utf-8")
+    Path(root, "faktura.pdf").write_bytes(PDF)
+    port = serve(root)
+    url = f"http://127.0.0.1:{port}/"
+
+    print(f"profile: {browser.profile_dir()}")
+    check_portal(url)
+    check_hard(url)
 
     browser.browse_close()
     browser.shutdown()

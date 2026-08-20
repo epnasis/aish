@@ -245,6 +245,15 @@ Rules:
    The numbers are only valid for the page you were JUST shown — the list comes
    back after every action, so act on a number from the newest list. A control
    marked "(needs approval)" will ask the user; that is expected, not an error.
+   IF THE CONTROL YOU WANT IS NOT IN THE LIST, IT IS CLOSED AWAY — NOT ABSENT.
+   The list ends with a line saying how many controls are shut in a collapsed
+   menu, an off-screen panel or behind a dialog. Press the thing that opens
+   them — the menu, the tab, the "pokaż"/"more" control, the dialog's close
+   button — and look again. You MUST NOT go back to guessing URLs because a
+   control was not listed.
+   A long dropdown shows only how many options it has. You do NOT need to see
+   them: browse_act(target=N, action="choose", value="Poland") matches on what
+   you say, and if it matches more than one or none you get the candidates back.
    When researching, batch independent lookups: issue several web_search /
    read_url calls in a single reply — they run in parallel, which is much
    faster than one per turn.
