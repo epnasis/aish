@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 
+from aish import session as session_module
 from aish.session import (
     CLOSEST_MAX,
     SessionLog,
@@ -811,6 +812,33 @@ def test_a_row_does_not_quote_its_own_title_back(tmp_path):
     [row] = SessionLog.search_sessions(tmp_path, "tefal")
     assert row.title.startswith("I have been looking at the Tefal")
     assert "Cosori" in row.snippet  # the OTHER mention, the one not already shown
+
+
+def test_an_excerpt_is_words_not_markdown(tmp_path):
+    """A row answering a toaster query read "…ual-zone-7w1-17379918218) * **…"
+    (#266): a link is its label on screen, and the href is machinery."""
+    make_session(
+        tmp_path,
+        "session-20260101-000000-000000.jsonl",
+        ("user", "porownaj frytkownice"),
+        ("assistant", "* **Tefal SW852D** — patrz [oferta](https://x.pl/zone-7w1-17379918218)"),
+    )
+    [row] = SessionLog.search_sessions(tmp_path, "tefal")
+    assert row.snippet == "Tefal SW852D — patrz oferta"
+
+
+def test_the_match_lands_near_the_start_of_the_excerpt(tmp_path):
+    """A rail row is ONE truncated line: a long run-up spends the whole visible
+    width on context and the searched word never reaches the screen."""
+    make_session(
+        tmp_path,
+        "session-20260101-000000-000000.jsonl",
+        ("user", "co polecasz"),
+        ("assistant", "W poprzedniej rozmowie byla mowa o wczesniejszym opiekaczu "
+                      "marki Tefal, model SW852D, ktory kupiles kilka lat temu."),
+    )
+    [row] = SessionLog.search_sessions(tmp_path, "tefal")
+    assert row.snippet.casefold().index("tefal") <= session_module.SNIPPET_LEAD + 1
 
 
 def test_a_title_match_keeps_its_preview(tmp_path):

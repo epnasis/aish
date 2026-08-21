@@ -179,7 +179,8 @@ check("a row quotes the line it matched on (#266)", () => {
     + " · Everything considered, the Cosori is the better buy.";
   const line = offlineMatchSnippet(text, ["tefal"]);
   assert.ok(line.includes("Tefal"), `expected the match quoted, got ${line}`);
-  assert.ok(!line.includes("Cosori"), "the last thing said is not the answer here");
+  assert.ok(line.toLowerCase().indexOf("tefal") < 25,
+            `the match must land near the start of a one-line row, got ${line}`);
   assert.ok(line.endsWith("…"), "a window that stops early says so");
 });
 
@@ -204,6 +205,13 @@ check("the ranked answer says when it is only the closest (#266)", () => {
   assert.strictEqual(offlineRanked(corpus, "certificats").approximate, true);
   assert.strictEqual(offlineRanked(corpus, "").approximate, false);
   assert.strictEqual(offlineRanked(corpus, "zzzzqqqq").approximate, true);
+});
+
+check("markdown is formatting, not words (#266)", () => {
+  const text = offlineSearchText([
+    { type: "done", result: "* **Tefal SW852D** — see [the deal](https://x.pl/deal-7w1-17379)" },
+  ]);
+  assert.strictEqual(text, "Tefal SW852D — see the deal");
 });
 
 check("the index separates one turn from the next", () => {

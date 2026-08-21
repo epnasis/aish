@@ -14,6 +14,10 @@ from typing import NamedTuple, TextIO
 
 TITLE_MAX = 60
 SNIPPET_MAX = 90  # preview line under the title in the web sessions drawer
+# Characters of run-up before the hit in a search excerpt. Deliberately short:
+# a rail row is one truncated line, so a long run-up spends the entire visible
+# width on context and the word you typed never makes it onto the screen (#266).
+SNIPPET_LEAD = 15
 # What separates one turn from the next in the searchable text. Not a space: a
 # phrase query would otherwise match across the boundary between what was asked
 # and what was answered — words nobody said in that order — and an excerpt
@@ -229,6 +233,29 @@ def _embedded(line: str) -> str | None:
     return match.group(1) if match else None
 
 
+# What a rendered chat bubble shows, from what the log stores: markdown is
+# formatting, not words. Conservative on purpose — `**` and backticks go because
+# they are noise in an excerpt, single `*` and `_` stay because they live inside
+# identifiers (`run_command`) far more often than they mean italics.
+_MD_LINE_PREFIX_RE = re.compile(r"^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+|>\s?)+")
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_MARKS_RE = re.compile(r"\*\*|`")
+
+
+def plain_text(content: str) -> str:
+    """One message as WORDS: markdown syntax removed, its text kept.
+
+    A link becomes its label, which is what the bubble displays — the href is
+    machinery, and a search excerpt that quoted one showed a row reading
+    "…ual-zone-7w1-17379918218) * **…" for a query about a toaster (#266)."""
+    lines = [_MD_LINE_PREFIX_RE.sub("", line) for line in (content or "").split("\n")]
+    text = "\n".join(lines)
+    text = _MD_IMAGE_RE.sub(r"\1", text)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    return _MD_MARKS_RE.sub("", text)
+
+
 def message_body(content: str) -> str:
     """The message with its attachment LINES removed and its inline references
     left exactly where they are.
@@ -294,7 +321,7 @@ def visible_messages(messages: list[dict]) -> list[tuple[str, str]]:
         raw = message.get("content") or ""
         # Notes out BEFORE the whitespace flatten, or the line boundary they are
         # identified by is gone.
-        content = " ".join(strip_attachment_notes(raw).split())
+        content = " ".join(plain_text(strip_attachment_notes(raw)).split())
         if not content:
             # A wordless turn still said something: a photo sent with nothing
             # typed is about its file, and that name is a thing people search for.
@@ -2046,7 +2073,13 @@ class SessionLog:
         pos = min((p for w in words if (p := flat_cf.find(w)) >= 0), default=-1)
         if pos < 0:
             return None
-        start = max(0, pos - width // 3)
+        # Start close to the hit, and never mid-word: the excerpt has one
+        # truncated line to make its case, and it makes it with the match.
+        start = max(0, pos - SNIPPET_LEAD)
+        if start:
+            space = flat.find(" ", start)
+            if 0 <= space < pos:
+                start = space + 1
         end = min(len(flat), start + width)
         prefix = "…" if start > 0 else ""
         suffix = "…" if end < len(flat) else ""
