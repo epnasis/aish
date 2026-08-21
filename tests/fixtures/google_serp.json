@@ -1,0 +1,134 @@
+{
+ "_comment": "A real google.com results page, captured through aish's own browser on 2026-08-21 with scripts/probe_search.py. The query is the one from the session that filed #249, and every trap serp_results has to survive is in here as it really appeared: ten language/time filter links on the engine's own /search path, a support.google.com accessibility link, and every result listed TWICE — once as its title and once as Google's 'Tłumaczenie strony' link on the same href.",
+ "query": "site:careers.google.com \"product management\" Poland",
+ "url": "https://www.google.com/search?q=site%3Acareers.google.com+%22product+management%22+Poland",
+ "status": 200,
+ "title": "site:careers.google.com \"product management\" Poland - Szukaj w Google",
+ "text": "Web results\nProduct Manager, Wear\n\nGoogle\nhttps://careers.google.com › results\n·\nTłumaczenie strony\nMinimum qualifications: · Bachelor's degree or equivalent practical experience. · 5 years of experience in product management, or a related technical role.\nProduct Manager I, XR Experience\n\nGoogle\nhttps://careers.google.com › results\n·\nTłumaczenie strony\nBachelor's degree or equivalent practical experience. · 3 years of product management experience building and launching customer-facing software products.\nSenior Product Manager, Google Workspace\n\nGoogle\nhttps://careers.google.com › results\n·\nTłumaczenie strony\nMinimum qualifications: · Bachelor's degree or equivalent practical experience. · 8 years of experience in product management or related technical role. · 3 years ...\nProduct Manager, Enterprise Migration and Growth\n\nGoogle\nhttps://careers.google.com › results\n·\nTłumaczenie strony\nMinimum qualifications: · Bachelor's degree or equivalent practical experience. · 5 years of experience in product management or a related technical role.\nProduct Manager, Google Cloud Observability\n\nGoogle\nhttps://careers.google.com › results\n·\nTłumaczenie strony\nMinimum qualifications: Bachelor's degree or equivalent practical experience. 5 years of experience in product management or a related technical role. 2 years ...\nGroup Product Manager, Applied AI, Generative Media and ...\n\nGoogle\nhttps://careers.google.com › results\n·\nTłumaczenie strony\n... Product Management. Our team works closely with creative engineers, designers, marketers, etc. to help design and develop technologies that improve access ...\nProduct Manager, Pixel Connectivity Experiences\n\nGoogle\nhttps://careers.google.com › results\n·\nTłumaczenie strony\nMinimum qualifications: · Bachelor's degree or equivalent practical experience. · 5 years of experience in product management or related technical role. · 2 years ...\nRegional Product Lead, Display and Video Specialist ...\n\nGoogle\nhttps://careers.google.com › results\n·\nTłumaczenie strony\nBachelor's degree or equivalent practical experience. · 6 years of experience in advertising, marketing technology, management consulting, or product management.\nProduct Marketing Manager, Fitbit Hardware\n\nGoogle\nhttps://careers.google.com › results\n·\nTłumaczenie strony\nIn this role, you will partner closely with Product Management, Engineering, Industrial Design, PR, GTM, Brand, Business Development, and Sales to shape the ...\nModel Product Manager, Gemini for Enterprise\n\nGoogle\nhttps://careers.google.com › results\n·\nTłumaczenie strony\nMinimum qualifications: · Bachelor's degree or equivalent practical experience. · 5 years of experience in product management or a related technical role.\nNawigacja na stronie\n\t\n1\t\n2\n\t\n3\n\t\n4\n\t\n5\n\t\nNastępna",
+ "links": [
+  [
+   "Ułatwienia dostępu – pomoc",
+   "https://support.google.com/websearch/answer/181196?hl=pl"
+  ],
+  [
+   "Dowolny język",
+   "https://www.google.com/search?q=site%3Acareers.google.com+%22product+management%22+Poland#"
+  ],
+  [
+   "Tylko język polski",
+   "https://www.google.com/search?q=site:careers.google.com+%22product+management%22+Poland&sca_esv=182ba94e7364ae48&sxsrf=APpeQnuKHciL-Df8Akj9gbFPugYnK9cgFg:1787323492212&source=lnt&tbs=lr:lang_1pl&lr=lang_pl&sa=X&ved=2ahUKEwjk7-fu-rGWAxW1VfEDHSZDF0wQpwV6BAgGEAY"
+  ],
+  [
+   "Kiedykolwiek",
+   "https://www.google.com/search?q=site%3Acareers.google.com+%22product+management%22+Poland#"
+  ],
+  [
+   "Ostatnia godzina",
+   "https://www.google.com/search?q=site:careers.google.com+%22product+management%22+Poland&sca_esv=182ba94e7364ae48&sxsrf=APpeQnuKHciL-Df8Akj9gbFPugYnK9cgFg:1787323492212&source=lnt&tbs=qdr:h&sa=X&ved=2ahUKEwjk7-fu-rGWAxW1VfEDHSZDF0wQpwV6BAgGEAo"
+  ],
+  [
+   "Ostatnie 24 godziny",
+   "https://www.google.com/search?q=site:careers.google.com+%22product+management%22+Poland&sca_esv=182ba94e7364ae48&sxsrf=APpeQnuKHciL-Df8Akj9gbFPugYnK9cgFg:1787323492212&source=lnt&tbs=qdr:d&sa=X&ved=2ahUKEwjk7-fu-rGWAxW1VfEDHSZDF0wQpwV6BAgGEAs"
+  ],
+  [
+   "Ostatni tydzień",
+   "https://www.google.com/search?q=site:careers.google.com+%22product+management%22+Poland&sca_esv=182ba94e7364ae48&sxsrf=APpeQnuKHciL-Df8Akj9gbFPugYnK9cgFg:1787323492212&source=lnt&tbs=qdr:w&sa=X&ved=2ahUKEwjk7-fu-rGWAxW1VfEDHSZDF0wQpwV6BAgGEAw"
+  ],
+  [
+   "Ostatni miesiąc",
+   "https://www.google.com/search?q=site:careers.google.com+%22product+management%22+Poland&sca_esv=182ba94e7364ae48&sxsrf=APpeQnuKHciL-Df8Akj9gbFPugYnK9cgFg:1787323492212&source=lnt&tbs=qdr:m&sa=X&ved=2ahUKEwjk7-fu-rGWAxW1VfEDHSZDF0wQpwV6BAgGEA0"
+  ],
+  [
+   "Ostatni rok",
+   "https://www.google.com/search?q=site:careers.google.com+%22product+management%22+Poland&sca_esv=182ba94e7364ae48&sxsrf=APpeQnuKHciL-Df8Akj9gbFPugYnK9cgFg:1787323492212&source=lnt&tbs=qdr:y&sa=X&ved=2ahUKEwjk7-fu-rGWAxW1VfEDHSZDF0wQpwV6BAgGEA4"
+  ],
+  [
+   "Wszystkie wyniki",
+   "https://www.google.com/search?q=site%3Acareers.google.com+%22product+management%22+Poland#"
+  ],
+  [
+   "Dokładnie",
+   "https://www.google.com/search?q=site:careers.google.com+%22product+management%22+Poland&sca_esv=182ba94e7364ae48&sxsrf=APpeQnuKHciL-Df8Akj9gbFPugYnK9cgFg:1787323492212&source=lnt&tbs=li:1&sa=X&ved=2ahUKEwjk7-fu-rGWAxW1VfEDHSZDF0wQpwV6BAgGEBU"
+  ],
+  [
+   "Product Manager, Wear",
+   "https://careers.google.com/jobs/results/109346212930298566-product-manager/"
+  ],
+  [
+   "Tłumaczenie strony",
+   "https://careers.google.com/jobs/results/109346212930298566-product-manager/"
+  ],
+  [
+   "Product Manager I, XR Experience",
+   "https://careers.google.com/jobs/results/142834622693024454-product-manager-i/"
+  ],
+  [
+   "Tłumaczenie strony",
+   "https://careers.google.com/jobs/results/142834622693024454-product-manager-i/"
+  ],
+  [
+   "Senior Product Manager, Google Workspace",
+   "https://careers.google.com/jobs/results/117300037095957190-senior-product-manager/"
+  ],
+  [
+   "Tłumaczenie strony",
+   "https://careers.google.com/jobs/results/117300037095957190-senior-product-manager/"
+  ],
+  [
+   "Product Manager, Enterprise Migration and Growth",
+   "https://careers.google.com/jobs/results/119957805808394950-product-manager/"
+  ],
+  [
+   "Tłumaczenie strony",
+   "https://careers.google.com/jobs/results/119957805808394950-product-manager/"
+  ],
+  [
+   "Product Manager, Google Cloud Observability",
+   "https://careers.google.com/jobs/results/142437424117490374-product-manager/"
+  ],
+  [
+   "Tłumaczenie strony",
+   "https://careers.google.com/jobs/results/142437424117490374-product-manager/"
+  ],
+  [
+   "Group Product Manager, Applied AI, Generative Media and ...",
+   "https://careers.google.com/jobs/results/81812680834196166-group-product-manager/"
+  ],
+  [
+   "Tłumaczenie strony",
+   "https://careers.google.com/jobs/results/81812680834196166-group-product-manager/"
+  ],
+  [
+   "Product Manager, Pixel Connectivity Experiences",
+   "https://careers.google.com/jobs/results/122348719612797638-product-manager/"
+  ],
+  [
+   "Tłumaczenie strony",
+   "https://careers.google.com/jobs/results/122348719612797638-product-manager/"
+  ],
+  [
+   "Regional Product Lead, Display and Video Specialist ...",
+   "https://careers.google.com/jobs/results/102006654987313862-regional-product-lead/"
+  ],
+  [
+   "Tłumaczenie strony",
+   "https://careers.google.com/jobs/results/102006654987313862-regional-product-lead/"
+  ],
+  [
+   "Product Marketing Manager, Fitbit Hardware",
+   "https://careers.google.com/jobs/results/90450955283112646-product-marketing-manager/"
+  ],
+  [
+   "Tłumaczenie strony",
+   "https://careers.google.com/jobs/results/90450955283112646-product-marketing-manager/"
+  ],
+  [
+   "Model Product Manager, Gemini for Enterprise",
+   "https://careers.google.com/jobs/results/85250059125301958-model-product-manager/"
+  ],
+  [
+   "Tłumaczenie strony",
+   "https://careers.google.com/jobs/results/85250059125301958-model-product-manager/"
+  ]
+ ]
+}

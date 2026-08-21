@@ -23,13 +23,14 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import urllib.parse
 from pathlib import Path
 
 MODE = (sys.argv[1] if len(sys.argv) > 1 else "cold").lower()
-if MODE not in ("cold", "warm"):
-    sys.exit("usage: probe_search.py [cold|warm]")
-if MODE == "cold":
+if MODE not in ("cold", "warm", "compare"):
+    sys.exit("usage: probe_search.py [cold|warm|compare]")
+if MODE in ("cold", "compare"):
     os.environ["AISH_STATE_DIR"] = tempfile.mkdtemp(prefix="probe-search-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -111,8 +112,63 @@ def probe(engine: str, template: str, query: str) -> None:
         print(f"      text head: {' '.join(text.split())[:300]}")
 
 
-for engine, template in ENGINES.items():
-    for query in QUERIES:
-        probe(engine, template, query)
+# --------------------------------------------------------------- compare
+
+# Whether Google should be the FIRST index rather than the fallback is a
+# question about quality and about COST, and only one of those is visible from
+# a results page. `compare` runs the same queries through both and times them,
+# on a throwaway profile, so the trade is measured rather than argued.
+COMPARE_QUERIES = [
+    'site:careers.google.com "product management" Poland',
+    "kurs USD NBP 14 sierpnia 2026",
+    "playwright persistent context user_data_dir",
+    "filmweb Krzyżacy 1960 obsada",
+    "chusta kółkowa dla niemowlaka opinie",
+    '"progressive disclosure" agent skills anthropic',
+]
+
+
+def ddgs_results(query: str) -> tuple[float, list[tuple[str, str]]]:
+    from ddgs import DDGS
+
+    start = time.monotonic()
+    try:
+        raw = DDGS().text(query, max_results=5)
+    except Exception as exc:  # noqa: BLE001
+        return time.monotonic() - start, [("!! " + type(exc).__name__ + ": " + str(exc), "")]
+    return time.monotonic() - start, [
+        (" ".join((r.get("title") or "").split()), r.get("href") or "") for r in raw
+    ]
+
+
+def google_results(query: str) -> tuple[float, list[tuple[str, str]]]:
+    url = ENGINES["google"].format(q=urllib.parse.quote_plus(query))
+    start = time.monotonic()
+    try:
+        page = browser.read(url, timeout=60.0)
+    except Exception as exc:  # noqa: BLE001
+        return time.monotonic() - start, [("!! " + type(exc).__name__ + ": " + str(exc), "")]
+    if browser.is_challenge(page.text or "", page.status):
+        return time.monotonic() - start, [("!! WALL", page.url)]
+    return time.monotonic() - start, candidates(page, url)[:6]
+
+
+def compare() -> None:
+    for query in COMPARE_QUERIES:
+        print(f"\n=== {query!r}")
+        for name, fn in (("ddgs", ddgs_results), ("google", google_results)):
+            secs, rows = fn(query)
+            print(f"  {name:<7} {secs:5.2f}s  {len(rows)} results")
+            for label, href in rows[:5]:
+                print(f"      · {label[:66]}")
+                print(f"        {href[:100]}")
+
+
+if MODE == "compare":
+    compare()
+else:
+    for engine, template in ENGINES.items():
+        for query in QUERIES:
+            probe(engine, template, query)
 
 browser.shutdown()
