@@ -18,7 +18,7 @@
 
 **3 · Files are content-addressed and the store is bounded LRU** (`store` / `prune`, `MEDIA_MAX_*`). A retry is free, duplicates are impossible, and a re-fetch restores anything evicted. `TestStore`, `TestPrune`.
 
-The store is `state_dir/media`, deliberately **not** the scratch workspace: scratch is deleted at session end and a transcript is permanent, so a picture left there is a broken image on every reopen. Different lifetimes, different directories.
+The store is `state_dir/media`, deliberately **not** the scratch workspace: a picture an answer displays must outlive the chat that displayed it — an exported PDF, a transcript read months later — and scratch dies with its chat (#258; before that it died at session end, which broke the image on every reopen). The store is also shared across chats and content-addressed, which scratch must never be. Different lifetimes, different directories.
 
 ---
 

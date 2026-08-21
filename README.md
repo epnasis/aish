@@ -399,9 +399,10 @@ thousands of entries without bloating the context.
    devices, `git push --force`…) are blocked outright, even if you'd approve
    them; edited commands are re-checked. Only *you* can run them, via `!`.
    Extend in `~/.config/aish/deny.txt`.
-3. **A private scratch workspace.** A per-session temp directory the model may
+3. **A private scratch workspace.** A per-chat directory the model may
    freely create, edit, delete **and read** throwaway files in without prompting
-   — deleted when the session ends. The same applies to aish's other own
+   — it belongs to the chat, survives reconnects and restarts, and is deleted
+   when you delete the chat. The same applies to aish's other own
    directories (the media store, the converted-document store, the tool-output
    cache): reading back what the process already writes unprompted grants
    nothing new. Your files are unaffected — anywhere else still prompts, and a

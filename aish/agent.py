@@ -312,7 +312,7 @@ Rules:
    omitted part.{scratch_note}
 """
 
-# Per-session scratch workspace (issue #70). Injected only when a path is
+# The chat's scratch workspace (issues #70, #258). Injected only when a path is
 # known, so the static prompt stays byte-identical for callers that render it
 # without one. Imperative phrasing on purpose — small local models ignore
 # capability-style hints (the "prompt hints must be imperative" convention).
@@ -321,10 +321,11 @@ SCRATCH_RULE = """
    MUST use it for throwaway files — staging a gh issue or PR body, a commit
    message, an intermediate patch or artifact — instead of writing them into
    the project tree. Creating, editing, AND deleting files inside that
-   directory is AUTO-APPROVED (no prompt); the whole directory is deleted
-   automatically when the session ends, so never leave anything there you need
-   to keep. Writing or deleting ANYWHERE ELSE still requires user approval
-   exactly as above — the auto-approval applies ONLY inside this directory."""
+   directory is AUTO-APPROVED (no prompt). It belongs to THIS CHAT and is
+   deleted with it, so a file you staged earlier in this conversation is still
+   there, and nothing you leave there outlives the chat. Writing or deleting
+   ANYWHERE ELSE still requires user approval exactly as above — the
+   auto-approval applies ONLY inside this directory."""
 
 DENIED_RESULT = (
     "USER DENIED this command — it was NOT executed. "
@@ -1215,9 +1216,70 @@ def environment_context(cwd: str) -> str:
 
 
 def _remove_scratch(path: Path) -> None:
-    """Delete the per-session scratch workspace, ignoring errors — cleanup is
-    best-effort and must never raise from a finalizer/close()."""
+    """Delete a scratch workspace, ignoring errors — cleanup is best-effort
+    and must never raise from a finalizer/close()."""
     shutil.rmtree(path, ignore_errors=True)
+
+
+def chat_scratch_dir(state_dir: os.PathLike | str, session_path: os.PathLike | str) -> Path:
+    """Where one CHAT's scratch workspace lives — keyed on its session log.
+
+    ONE definition, shared by the Agent that opens it and the server that
+    collects it, so the two can never key it differently.
+    """
+    return Path(state_dir) / "scratch" / Path(session_path).stem
+
+
+def _open_scratch(
+    state_dir: os.PathLike | str | None, current_session: Callable[[], Path] | None
+) -> tuple[Path, bool]:
+    """(workspace, ephemeral) — the chat's own scratch dir when this agent is
+    backed by a session log, a throwaway temp dir when it is not.
+
+    Resolved so it matches operand realpaths on macOS (/var -> /private): the
+    approval gate compares this against resolved command operands.
+
+    An unwritable state dir falls back to the temp dir rather than raising: a
+    scratch workspace is never a reason for a session not to start.
+    """
+    if state_dir is not None and current_session is not None:
+        try:
+            target = chat_scratch_dir(state_dir, current_session())
+            target.mkdir(parents=True, exist_ok=True)
+            return target.resolve(), False
+        except OSError:
+            pass
+    return Path(tempfile.mkdtemp(prefix="aish-scratch-")).resolve(), True
+
+
+def remove_chat_scratch(
+    state_dir: os.PathLike | str, session_path: os.PathLike | str
+) -> None:
+    """Collect one chat's scratch workspace. The chat owns it, so deleting the
+    chat is what deletes it (#258)."""
+    _remove_scratch(chat_scratch_dir(state_dir, session_path))
+
+
+def prune_chat_scratch(state_dir: os.PathLike | str) -> list[Path]:
+    """Delete every chat scratch workspace whose session log is gone, and
+    return what went (#258).
+
+    The log IS the owner: a workspace with no log has nobody left to collect
+    it — a chat deleted before this existed, or a process killed between the
+    two. Call it while no session is open (server start), so a live chat that
+    has not yet written its first record cannot be mistaken for an orphan.
+    """
+    root = Path(state_dir) / "scratch"
+    removed: list[Path] = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return removed
+    for entry in entries:
+        if entry.is_dir() and not (Path(state_dir) / f"{entry.name}.jsonl").exists():
+            _remove_scratch(entry)
+            removed.append(entry)
+    return removed
 
 
 def _stop_reason(message: Any, envelope: Any) -> str:
@@ -1519,21 +1581,35 @@ class Agent:
         # armed, _stop_gate refuses every tool call.
         self._pending_comment_response = False
         self.base_context = context
-        # Per-session scratch workspace (issue #70): a private temp dir where
-        # the model may create AND delete throwaway files without prompting.
-        # Resolved so it matches operand realpaths on macOS (/var → /private).
-        # A weakref.finalize cleans it up when the Agent is dropped or at
-        # interpreter exit; server sessions also close() it on eviction.
-        self.scratch_dir = Path(tempfile.mkdtemp(prefix="aish-scratch-")).resolve()
-        self._scratch_finalizer = weakref.finalize(
-            self, _remove_scratch, self.scratch_dir
+        # The scratch workspace (issue #70): a private dir where the model may
+        # create AND delete throwaway files without prompting.
+        #
+        # It belongs to the CHAT, not to this object (#258). The conversation
+        # that remembers a scratch path outlives every Agent built behind it —
+        # a reconnect, an eviction, a model switch or a restart makes a new one
+        # — and when the two disagreed the model kept writing to the PREVIOUS
+        # agent's dir, so aish raised an approval card for its own throwaway
+        # file half an hour into a task that had been running unprompted. The
+        # session log is the identity that survives all of that, the same
+        # reasoning that puts the media/tool-output/document stores under the
+        # state dir rather than in here.
+        self.scratch_dir, ephemeral_scratch = _open_scratch(state_dir, current_session)
+        # Only the throwaway fallback is collected when this object dies. A
+        # chat's workspace must survive eviction and restart, so it is deleted
+        # with the chat (server._delete_session) or, if that never happened,
+        # swept as an orphan at server start (prune_chat_scratch).
+        self._scratch_finalizer = (
+            weakref.finalize(self, _remove_scratch, self.scratch_dir)
+            if ephemeral_scratch
+            else None
         )
         # The media store (#188): where show_image puts pictures an answer
-        # displays. Deliberately NOT the scratch dir — scratch is deleted when
-        # the session ends and a transcript is permanent, so an image left there
-        # is a broken picture on every reopen. Shared across sessions (it is
-        # content-addressed and self-pruning); falls back to scratch only when
-        # there is no state dir at all, where nothing is durable anyway.
+        # displays. Deliberately NOT the scratch dir — a picture must outlive
+        # the chat that showed it (an exported PDF, a transcript read months
+        # later) and scratch dies with its chat, plus this store is SHARED
+        # across chats and content-addressed, which a private workspace must
+        # never be. Falls back to scratch only when there is no state dir at
+        # all, where nothing is durable anyway.
         self.media_dir = (
             Path(state_dir) / "media" if state_dir is not None else self.scratch_dir / "media"
         )
@@ -1579,10 +1655,15 @@ class Agent:
         self.messages: list[dict] = [{"role": "system", "content": content}]
 
     def close(self) -> None:
-        """Best-effort scratch-workspace cleanup. Idempotent; also runs
-        automatically when the Agent is garbage-collected or the interpreter
-        exits (weakref.finalize)."""
-        self._scratch_finalizer()
+        """Best-effort cleanup of an EPHEMERAL scratch workspace. Idempotent;
+        also runs automatically when the Agent is garbage-collected or the
+        interpreter exits (weakref.finalize).
+
+        A chat-scoped workspace is deliberately untouched: it outlives this
+        object (#258), and evicting an agent must not delete the directory the
+        conversation still refers to."""
+        if self._scratch_finalizer is not None:
+            self._scratch_finalizer()
 
     def cancel(self) -> None:
         """Stop the running task at the next boundary: mid-stream (the token
