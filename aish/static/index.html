@@ -272,6 +272,19 @@
     <!-- "2 / 3" while there is a set to move through; silent for a lone
          picture, where it would imply a swipe does something. -->
     <span id="preview-count" hidden></span>
+    <!-- Hand the file to whoever it is FOR, in one tap: on a phone "get this
+         off the chat" usually means Messages, Mail or another app, and going
+         via Files is a detour through a second app that then has to find the
+         file again. Hidden where the browser cannot share FILES (probed, not
+         assumed — sharing text and URLs is a different capability with the
+         same name), because a share button that shares nothing is worse than
+         no share button. -->
+    <button id="preview-share" type="button" aria-label="share this file" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 15V3.2M8.2 7 12 3.2 15.8 7M8 10H6a1.5 1.5 0 0 0-1.5 1.5v7.3A1.5 1.5 0 0 0 6 20.3h12a1.5 1.5 0 0 0 1.5-1.5v-7.3A1.5 1.5 0 0 0 18 10h-2"/>
+      </svg>
+    </button>
     <!-- Saves the FILE, never what is on screen: for a PDF that is the document,
          not the page being read. Hidden when the preview was opened from
          something with no file behind it. It sits BEFORE the ✕, which keeps the

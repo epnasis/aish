@@ -475,10 +475,13 @@ this UI. Highlights:
   the same way, page by page: swipe to turn the page, pinch to read the small
   print, and the counter tells you where you are in the document. It opens in
   place rather than in a new tab, so looking at your own file never means
-  leaving the app. **Save it** with the ⤓ in the preview bar — that saves the
-  *file* (for a PDF, the whole document, not the page you were reading) — and
-  attachments with nothing to show them in, like a spreadsheet or a zip, save
-  straight from their chip.
+  leaving the app. **Share it** with the ⇪ or **save it** with the ⤓ in
+  the preview bar — share opens your device's own share sheet (Messages, Mail,
+  Photos, AirDrop) with the file in it, save puts it in Files; both take the
+  *file* (for a PDF, the whole document, not the page you were reading). The
+  share button appears only where the browser can hand a file to a share sheet,
+  which on a phone it can. Attachments with nothing to show them in, like a
+  spreadsheet or a zip, save straight from their chip.
 - **Export to PDF, copy anything.** Per-answer or whole-session
   PDF export (rendered locally), copy chips on every code block / table / answer.
   A single-answer

@@ -8044,6 +8044,17 @@ $("preview-save").onclick = () => {
   const target = previewSaveTarget();
   if (target) saveAttachment(target.file, target.name);
 };
+// Share starts fetching on the PRESS and opens the sheet on the release, which
+// is what keeps the sheet inside the gesture iOS will open one for. Both read
+// the target at the moment of the touch — a swipe moves the file under them.
+$("preview-share").addEventListener("pointerdown", () => {
+  const target = previewSaveTarget();
+  if (target) primeShare(target.file, target.name);
+});
+$("preview-share").onclick = () => {
+  const target = previewSaveTarget();
+  if (target) shareAttachment(target.file, target.name);
+};
 $("preview").addEventListener("pointerdown", previewDown);
 $("preview").addEventListener("pointermove", previewMove, { passive: false });
 $("preview").addEventListener("pointerup", previewUp);
@@ -10282,6 +10293,113 @@ async function saveAttachment(path, name) {
 }
 // [ATTACH-SAVE-END]
 
+// [ATTACH-SHARE-START]
+// Save puts the file in Files. Share hands it to whoever it is FOR — Messages,
+// Mail, Photos, AirDrop, another app — which on a phone is what "get this off
+// the chat" nearly always means, and doing it through Files is a detour via a
+// second app that then has to find the file again. iOS's own sheet does all of
+// it in one tap, and the Web Share API can hand that sheet a real File.
+//
+// Whether the button is drawn at all is PROBED, never assumed: `navigator.share`
+// on its own is text-and-URL sharing (every desktop browser has it), and a
+// share button that opens a sheet with no file in it is worse than no share
+// button. The probe is a dummy File through `canShare`, answered once — the
+// answer cannot change within a page.
+//
+// What is shared is the FILE, never what is on screen — the same object Save
+// saves, for the same reason: a PDF shares as the document, not as the PNG of
+// page 7.
+let shareFilesSupported = null;
+
+function canShareFiles() {
+  if (shareFilesSupported === null) {
+    try {
+      const probe = new File(["aish"], "probe.txt", { type: "text/plain" });
+      shareFilesSupported = !!(
+        navigator.share && navigator.canShare && navigator.canShare({ files: [probe] })
+      );
+    } catch {
+      shareFilesSupported = false;
+    }
+  }
+  return shareFilesSupported;
+}
+
+// The bytes of the file the share sheet is being opened on, kept because the
+// sheet may be asked for twice — see the NotAllowedError case below.
+let sharePrimed = { path: "", file: null, pending: null };
+
+// Fetch once, keep the File. A rejection is NOT kept: a failed fetch is a
+// server that was unreachable a second ago, and a cached rejection would make
+// every later tap fail without asking again.
+function attachmentFile(path, name) {
+  if (sharePrimed.path === path && (sharePrimed.file || sharePrimed.pending)) {
+    return sharePrimed.file ? Promise.resolve(sharePrimed.file) : sharePrimed.pending;
+  }
+  const cell = { path, file: null, pending: null };
+  sharePrimed = cell;
+  cell.pending = (async () => {
+    const response = await fetch(downloadSrc(path));
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(String(body.error || response.status));
+    }
+    const blob = await response.blob();
+    // Named and typed for the RECEIVING app: the name is the chat's (the
+    // header's is an ASCII transliteration, as [ATTACH-SAVE] explains), and
+    // the type decides which apps the sheet even offers.
+    const file = new File([blob], name, { type: blob.type || "application/octet-stream" });
+    if (sharePrimed === cell) cell.file = file;
+    return file;
+  })();
+  cell.pending.catch(() => {
+    if (sharePrimed === cell) sharePrimed = { path: "", file: null, pending: null };
+  });
+  return cell.pending;
+}
+
+// Start the download while the finger is still DOWN. iOS only allows a share
+// sheet to open for a tap that is still current, and a multi-megabyte PDF
+// arriving over the tunnel outlives that window — so the press begins the
+// fetch and the release usually has an already-resolved File to hand over.
+// Fire-and-forget on purpose: a failure here is reported by the tap that
+// follows, which is the one the owner is watching.
+function primeShare(path, name) {
+  if (path) attachmentFile(path, name || String(path).split("/").pop()).catch(() => {});
+}
+
+async function shareAttachment(path, name) {
+  const label = name || String(path).split("/").pop();
+  const ready = sharePrimed.path === path && !!sharePrimed.file;
+  let file;
+  try {
+    file = await attachmentFile(path, label);
+  } catch (err) {
+    showToast(`couldn't share ${label}: ${(err && err.message) || "unreachable"}`);
+    return false;
+  }
+  // Asked again for THIS file: a browser can share files in general and refuse
+  // a particular type, and finding that out from an empty sheet is no answer.
+  if (!navigator.canShare || !navigator.canShare({ files: [file] })) {
+    showToast(`${label} can't be shared — Save puts it in Files`);
+    return false;
+  }
+  try {
+    await navigator.share({ files: [file], title: label });
+    return true;
+  } catch (err) {
+    // Dismissing the sheet is a decision, not a failure — it says nothing.
+    if (err && err.name === "AbortError") return false;
+    // The one tap that had to wait for the bytes can outlive the gesture iOS
+    // will open a sheet for. The file is HERE now, so the honest ask is to tap
+    // again — the second tap opens the sheet with nothing to wait for.
+    const stale = !ready && err && err.name === "NotAllowedError";
+    showToast(stale ? `${label} is ready — tap share again` : `couldn't share ${label}`);
+    return false;
+  }
+}
+// [ATTACH-SHARE-END]
+
 // [PREVIEW-START]
 // Tap a picture, see the picture. It opens from three places — a composer
 // attachment chip, an attachment on a sent message, and an inline image the
@@ -10416,6 +10534,13 @@ function previewShow(i) {
   if (save) {
     save.hidden = !item.file;
     save.title = item.file ? `Save ${item.name || "this file"}` : "";
+  }
+  // Share rides along with Save — same file, same moment — but is drawn only
+  // where the browser can actually hand a FILE to a share sheet ([ATTACH-SHARE]).
+  const share = $("preview-share");
+  if (share) {
+    share.hidden = !item.file || !canShareFiles();
+    share.title = item.file ? `Share ${item.name || "this file"}` : "";
   }
   const counter = $("preview-count");
   if (counter) {
