@@ -9,6 +9,7 @@ from aish.approval import (
     load_prefixes,
     looks_destructive,
     path_within,
+    prefix_suggestions,
     save_prefix,
     split_chain,
     suggest_prefix,
@@ -62,9 +63,11 @@ def test_unsafe_commands_require_prompt(command):
     assert not is_read_only(command), command
 
 
-def test_quoted_pipe_falls_back_to_prompt():
-    """Raw '|' split breaks quoting — must fail closed, not approve blindly."""
-    assert not is_read_only('grep "a|b" file.txt')
+def test_quoted_pipe_is_an_argument_not_a_chain():
+    """The pipe belongs to grep's pattern, so there is no second segment to
+    vet — reading it as one was #265."""
+    assert split_chain('grep "a|b" file.txt') == ['grep "a|b" file.txt']
+    assert is_read_only('grep "a|b" file.txt')
 
 
 class TestChaining:
@@ -719,3 +722,116 @@ class TestScratchWorkspace:
 
     def test_metacharacter_prompts(self, scratch):
         assert not is_scratch_delete(f"rm {scratch / 'a'}; rm /etc/passwd", str(scratch), scratch)
+
+
+class TestQuoteAwareParsing:
+    """#265. The gate reads a command the way /bin/sh -c will, so a
+    metacharacter inside a quoted argument is the text it really is. The owner
+    approved `jq` 118 times in one session with `jq` already in allow.txt,
+    because every filter he used contained a brace or a pipe."""
+
+    JQ_PIPE = "jq '.listings[0] | keys' data.json"
+    JQ_BRACES = "jq '.listings[] | {title, photos: .photos[:2]}' data.json"
+
+    def test_quoted_pipe_does_not_cut_the_command_in_half(self):
+        assert split_chain(self.JQ_PIPE) == [self.JQ_PIPE]
+
+    def test_braces_inside_single_quotes_no_longer_defeat_the_parser(self):
+        assert split_chain(self.JQ_BRACES) == [self.JQ_BRACES]
+
+    def test_allowlisted_binary_now_actually_auto_approves(self):
+        """The bug in one line: `jq` was allowlisted and asked anyway, because
+        the parser gave up before the allowlist was ever consulted."""
+        for command in (self.JQ_PIPE, self.JQ_BRACES):
+            assert is_auto_approvable(command, ["jq"]), command
+
+    def test_single_quotes_make_every_metacharacter_inert(self):
+        for command in (
+            "grep '$(whoami)' file",
+            "grep '`whoami`' file",
+            "echo 'hello; goodbye'",
+            "grep -r 'a && b' .",
+            "find . -name '*.py'",
+        ):
+            assert is_read_only(command), command
+
+    def test_double_quotes_still_expand_so_dollar_and_backtick_stay_forbidden(self):
+        assert split_chain('grep "$(whoami)" file') is None
+        assert split_chain('grep "`whoami`" file') is None
+        assert split_chain('echo "$HOME"') is None
+
+    def test_double_quotes_do_not_expand_the_rest(self):
+        assert split_chain('echo "a; b {c} (d) <e>"') == ['echo "a; b {c} (d) <e>"']
+
+    def test_escaped_operator_is_an_argument_not_a_separator(self):
+        assert split_chain("echo \\| literal") == ["echo \\| literal"]
+        assert split_chain("echo \\; literal") == ["echo \\; literal"]
+
+    def test_unquoted_metacharacters_are_refused_exactly_as_before(self):
+        for command in (
+            "cat f; rm bar",
+            "ls > /etc/passwd",
+            "ls < input",
+            "cat `whoami`",
+            "echo $HOME",
+            "echo $(whoami)",
+            "ls {a,b}",
+            "sleep 1 &",
+        ):
+            assert split_chain(command) is None, command
+
+    def test_unterminated_quoting_fails_closed(self):
+        assert split_chain("ls 'unbalanced") is None
+        assert split_chain('ls "unbalanced') is None
+        assert split_chain("ls trailing\\") is None
+
+    def test_operators_outside_quotes_still_split(self):
+        assert split_chain("ls -la | grep foo") == ["ls -la", "grep foo"]
+        assert split_chain("ls && cat f") == ["ls", "cat f"]
+        assert split_chain("ls || cat f") == ["ls", "cat f"]
+        assert split_chain("ls | | wc") is None  # empty segment
+
+    def test_widened_parsing_does_not_widen_execution(self):
+        """More commands are now understood; none of them are newly trusted.
+        A quoted argument is an argument — it never becomes a command."""
+        assert not is_read_only("sh -c 'rm -rf /'")
+        assert not is_auto_approvable("sh -c 'rm -rf /'", ["sh"])  # EXEC_WRAPPERS
+        assert not is_auto_approvable("awk '{print $1}' f", ["awk"])
+        assert not is_read_only("jq '.a' f")  # jq is not a SAFE_COMMAND by itself
+        assert not is_auto_approvable("jq '.a' f | rm x", ["jq"])
+
+
+class TestPrefixSuggestions:
+    """What the 'Always'/'Session' buttons are allowed to promise (#265)."""
+
+    def test_a_quoted_word_never_becomes_part_of_the_rule(self):
+        """`jq keys` would need re-approving on the very next filter."""
+        assert suggest_prefix("jq 'keys' data.json") == "jq"
+        assert suggest_prefix('jq "keys" data.json') == "jq"
+        assert suggest_prefix("jq '.listings[] | keys' data.json") == "jq"
+
+    def test_unquoted_subcommands_still_scope_the_rule(self):
+        assert suggest_prefix("gh issue create --title x") == "gh issue create"
+        assert suggest_prefix("python manage.py migrate") == "python manage.py"
+
+    def test_the_orphan_fragment_that_poisoned_the_allowlist_is_gone(self):
+        """Splitting inside the filter read `keys' data.json` as a binary named
+        `keys'` and wrote that rule to allow.txt, permanently."""
+        assert prefix_suggestions("jq '.listings[0] | keys' data.json", []) == ["jq"]
+
+    def test_nothing_is_offered_when_no_prefix_could_ever_work(self):
+        """A command the parser cannot model is refused before the allowlist is
+        read, so offering to save a rule for it is a promise the gate breaks."""
+        assert prefix_suggestions("jq '.a' f > out.json", []) == []
+        assert prefix_suggestions("echo $(whoami)", []) == []
+
+    def test_nothing_is_offered_when_every_segment_is_already_vetted(self):
+        """Reached when the prompt came from a root escape or --ask-all: the
+        allowlist is not what is holding the command, so it is not the fix."""
+        assert prefix_suggestions("cat /etc/hosts", []) == []
+        assert prefix_suggestions("jq '.a' f", ["jq"]) == []
+
+    def test_one_suggestion_per_unvetted_segment(self):
+        assert prefix_suggestions("git status && cargo build | wc -l", ["git status"]) == [
+            "cargo build"
+        ]

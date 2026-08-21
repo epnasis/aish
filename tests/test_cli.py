@@ -42,6 +42,32 @@ def test_always_persists_per_segment_and_future_auto_approves(tmp_path, monkeypa
     assert approve("git status && cargo build --release") == "git status && cargo build --release"
 
 
+def test_always_says_so_when_no_prefix_could_ever_help(tmp_path, monkeypatch, capsys):
+    """#265: a command the gate cannot model is refused before the allowlist is
+    read. Running the save loop anyway wrote junk rules to disk and reported
+    'approved+allowlisted' for a rule that does nothing. Only ONE input is
+    scripted — a per-prefix prompt would raise StopIteration."""
+    allow = tmp_path / "allow.txt"
+    approve = make_approver(False, allow, None)
+    scripted_input(monkeypatch, ["a"])
+    assert approve("echo $(whoami)") == "echo $(whoami)"
+    assert load_prefixes(allow) == []
+    assert "no saved prefix" in capsys.readouterr().out
+
+
+def test_always_on_a_quoted_filter_saves_the_binary_not_the_filter(tmp_path, monkeypatch):
+    """`jq keys` would need re-approving on the very next filter, and the
+    orphan fragment `keys'` used to land in allow.txt permanently (#265)."""
+    allow = tmp_path / "allow.txt"
+    approve = make_approver(False, allow, None)
+    scripted_input(monkeypatch, ["a", ""])  # 'always', accept the suggestion
+    command = "jq '.listings[0] | keys' data.json"
+    assert approve(command) == command
+    assert load_prefixes(allow) == ["jq"]
+    # the next filter is a different command entirely — and now needs no prompt
+    assert approve("jq '.listings[] | {title}' data.json")
+
+
 def test_session_allow_auto_approves_without_persisting(tmp_path, monkeypatch):
     allow = tmp_path / "allow.txt"
     approve = make_approver(False, allow, None)

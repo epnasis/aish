@@ -32,9 +32,8 @@ from .approval import (
     is_auto_approvable,
     load_prefixes,
     looks_destructive,
+    prefix_suggestions,
     save_prefix,
-    suggest_prefix,
-    unvetted_segments,
 )
 from .embeddings import SemanticIndex
 from .session import SessionInfo, SessionLog, attachment_names, strip_attachment_notes
@@ -321,11 +320,25 @@ def edit_line(initial: str) -> str:
         return input(f"{YELLOW}edit ({initial})>{RESET} ").strip()
 
 
-def allow_segments_flow(command: str, allow_path: Path) -> None:
-    """'always allow' asks about each unvetted chained segment independently."""
-    prefixes = load_prefixes(allow_path)
-    for segment in unvetted_segments(command, prefixes) or [command]:
-        suggestion = suggest_prefix(segment)
+# Printed when 'a'/'s' has nothing to offer. A command the gate cannot model,
+# or one whose paths escape the session roots, is refused BEFORE the allowlist
+# is read, so a prefix saved for it would sit in allow.txt doing nothing — and
+# saying so is the whole point of #265, where the button looked like it worked.
+NO_PREFIX_NOTE = (
+    "no saved prefix can silence this one — the gate refuses it before it "
+    "reads the allowlist. Approving just this once."
+)
+
+
+def allow_segments_flow(command: str, allow_path: Path) -> bool:
+    """'always allow' asks about each unvetted chained segment independently.
+    False when there was nothing worth saving."""
+    suggestions = prefix_suggestions(command, load_prefixes(allow_path))
+    if not suggestions:
+        print(f"{DIM}  {NO_PREFIX_NOTE}{RESET}")
+        return False
+    saved = False
+    for suggestion in suggestions:
         answer = input(
             f"{YELLOW}always allow prefix{RESET} [{BOLD}{suggestion}{RESET}] "
             f"(enter=yes, s=skip, or type a different prefix): "
@@ -334,6 +347,8 @@ def allow_segments_flow(command: str, allow_path: Path) -> None:
             continue
         save_prefix(allow_path, answer or suggestion)
         print(f"{DIM}  saved: {answer or suggestion} → {allow_path}{RESET}")
+        saved = True
+    return saved
 
 
 def print_intent(said: str) -> None:
@@ -436,12 +451,15 @@ def make_approver(
             record(command, f"approved+trusted:{','.join(escapes)}")
             return command
         if answer == "a":
-            allow_segments_flow(command, allow_path)
-            record(command, "approved+allowlisted")
+            saved = allow_segments_flow(command, allow_path)
+            record(command, "approved+allowlisted" if saved else "approved")
             return command
         if answer == "s":
-            for segment in unvetted_segments(command, known_prefixes()) or [command]:
-                suggestion = suggest_prefix(segment)
+            suggestions = prefix_suggestions(command, known_prefixes())
+            if not suggestions:
+                print(f"{DIM}  {NO_PREFIX_NOTE}{RESET}")
+            saved = False
+            for suggestion in suggestions:
                 typed = input(
                     f"{YELLOW}allow prefix for THIS SESSION{RESET} "
                     f"[{BOLD}{suggestion}{RESET}] "
@@ -451,7 +469,8 @@ def make_approver(
                     continue
                 session_prefixes().add(typed or suggestion)
                 print(f"{DIM}  session-allowed: {typed or suggestion}{RESET}")
-            record(command, "approved+session")
+                saved = True
+            record(command, "approved+session" if saved else "approved")
             return command
         if answer == "e":
             edited = edit_line(command)

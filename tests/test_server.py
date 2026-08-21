@@ -874,6 +874,45 @@ class TestCommandApproval:
             assert auto is not None
             assert (tmp_path / "b").exists()
 
+    def test_allowlisted_binary_auto_approves_a_quoted_filter(self, app_env, tmp_path):
+        """#265, replayed end to end: `jq` in allow.txt, a real jq filter from
+        the session that asked 118 times — and NO card. The parser used to cut
+        the command inside its own filter and give up before reading the file."""
+        app_env["allow_path"].write_text("ls\njq\n", encoding="utf-8")
+        command = "jq '.listings[] | {title, photos: .photos[:2]}' data.json"
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command=command)]),
+            model_says("done"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "read the listings"})
+            auto = None
+            for _ in range(200):
+                event = ws.receive_json()
+                if event["type"] == "done":
+                    break
+                assert event["type"] != "approval_request", "asked despite the allowlist"
+                if event["type"] == "echo" and "auto-approved" in event["text"]:
+                    auto = event
+            assert auto is not None and command in auto["text"]
+
+    def test_card_offers_no_prefix_when_no_prefix_could_work(self, app_env, tmp_path):
+        """A command the parser cannot model is refused before the allowlist is
+        consulted, so the card must not offer to save a rule for it — the
+        frontend hides Session/Always on an empty `prefixes` (#265)."""
+        responses = [
+            model_says(tool_calls=[tool_call("run_command", command="echo $(whoami)")]),
+            model_says("done"),
+        ]
+        client, _ = make_client(app_env, responses)
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "who am i"})
+            request = recv_until(ws, "approval_request")
+            assert request["prefixes"] == []
+            ws.send_json({"type": "approval", "id": request["id"], "action": "deny"})
+            recv_until(ws, "done")
+
     def test_edit_with_comment_holds_for_adjustment(self, app_env, tmp_path):
         """#81: an edit that ALSO carries a comment is still a commented
         approval, so it holds — neither the original nor the edited form runs;
