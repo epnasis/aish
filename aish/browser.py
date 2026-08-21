@@ -178,7 +178,18 @@ _CHALLENGE_MARKERS = (
     "unusual traffic from your computer network",
     "nietypowy ruch z twojej sieci",
 )
-_BLOCK_STATUS = (401, 403, 405, 429, 503)
+# The statuses that mean "refused", not "not here" — the ONE authority on that
+# question, shared with `web.read_url`, whose escalation to this browser fires
+# on exactly this set. It was two lists for a while, and they drifted: this one
+# had 401, the fetch side had only 403/429/503, and ticketmaster.pl's event
+# pages answer a plain fetch with `401 {"response":"identify"}` — a bot wall
+# wearing an auth code. So the fetch failed in 0.2s, the renderer never ran, and
+# eight event pages came back as ERROR while the very same browser rendered them
+# in full when the owner pasted one in by hand (#257). A status is a wall or it
+# is not; there is no version of that fact that differs by which half of the
+# read path is asking. 404 and friends stay out on purpose — nothing is there
+# to render, and a Chrome launch to prove it costs seconds.
+BLOCK_STATUS = (401, 403, 405, 429, 503)
 
 
 def is_challenge(text: str, status: int | None) -> bool:
@@ -195,7 +206,7 @@ def is_challenge(text: str, status: int | None) -> bool:
     lowered = body.lower()
     if any(marker in lowered for marker in _CHALLENGE_MARKERS):
         return True
-    return status in _BLOCK_STATUS
+    return status in BLOCK_STATUS
 
 
 # A page that wants a PASSWORD is asking who you are, which means what came back
