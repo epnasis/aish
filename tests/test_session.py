@@ -766,6 +766,102 @@ def test_search_fuzzy_matches_typoed_words_in_contents(tmp_path):
     assert [r.path for r in results] == [hit]
 
 
+def test_a_search_row_quotes_the_line_it_matched(tmp_path):
+    """#266: a result row that previews the chat's LAST message says nothing
+    about why the chat is in the list."""
+    make_session(
+        tmp_path,
+        "session-20260101-000000-000000.jsonl",
+        ("user", "which sandwich toaster should I buy"),
+        ("assistant", "Of the ones still sold, the Tefal SW852D is closest to yours."),
+        ("user", "ok thanks"),
+    )
+    [row] = SessionLog.search_sessions(tmp_path, "tefal")
+    assert "Tefal SW852D" in row.snippet  # quoted in the case it was written in
+    assert not row.snippet.startswith("You: ok thanks")  # not the plain preview
+
+
+def test_a_phrase_spanning_two_turns_is_not_a_phrase_match(tmp_path):
+    """The question and its answer are different sentences, so words that meet
+    only across the gap are scattered words (tier 2), never the phrase someone
+    said (tier 3) — `TURN_SEP`."""
+    make_session(
+        tmp_path,
+        "session-20260102-000000-000000.jsonl",  # newer, and only looks like a phrase
+        ("user", "which toaster"),
+        ("assistant", "the Tefal one"),
+    )
+    said_it = make_session(
+        tmp_path,
+        "session-20260101-000000-000000.jsonl",
+        ("user", "I asked for a toaster the tefal shop had"),
+    )
+    assert SessionLog.search_sessions(tmp_path, "toaster the tefal")[0].path == said_it
+
+
+def test_a_row_does_not_quote_its_own_title_back(tmp_path):
+    """The chat is NAMED after the question, so quoting the question again
+    would spend the row's second line saying the same thing twice."""
+    make_session(
+        tmp_path,
+        "session-20260101-000000-000000.jsonl",
+        ("user", "I have been looking at the Tefal one for weeks and cannot decide"),
+        ("assistant", "The Tefal is fine; the Cosori is better value."),
+    )
+    [row] = SessionLog.search_sessions(tmp_path, "tefal")
+    assert row.title.startswith("I have been looking at the Tefal")
+    assert "Cosori" in row.snippet  # the OTHER mention, the one not already shown
+
+
+def test_a_title_match_keeps_its_preview(tmp_path):
+    """Nothing to quote — the words are in the name, which the row already
+    shows, so the second line is better spent on where the chat got to."""
+    log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+    log.message({"role": "user", "content": "kitchen plans"})
+    log.set_title("toaster hunt")
+    log.message({"role": "assistant", "content": "Narrowed it to three."})
+    [row] = SessionLog.search_sessions(tmp_path, "toaster hunt")
+    assert row.snippet == "Narrowed it to three."
+
+
+def test_a_mention_only_in_the_derived_title_keeps_the_preview(tmp_path):
+    """The chat is named after the question, so the row is already showing the
+    match — repeating it would cost the line that says what happened next."""
+    make_session(
+        tmp_path,
+        "session-20260101-000000-000000.jsonl",
+        ("user", "is the Tefal one still sold"),
+        ("assistant", "It was discontinued in 2024."),
+    )
+    [row] = SessionLog.search_sessions(tmp_path, "tefal")
+    assert row.snippet == "It was discontinued in 2024."
+
+
+def test_a_search_row_never_writes_its_answer_onto_the_cache(tmp_path):
+    """The info belongs to a cached entry: writing the excerpt onto it would
+    leave one search's answer on the row after the search was cleared."""
+    make_session(
+        tmp_path,
+        "session-20260101-000000-000000.jsonl",
+        ("user", "which toaster"),
+        ("assistant", "The Tefal one, if you can still find it."),
+        ("user", "ok thanks"),
+    )
+    entries = SessionLog.load_entries(tmp_path)
+    assert "Tefal" in SessionLog.rank(entries, "tefal")[0].snippet
+    assert SessionLog.rank(entries, "")[0].snippet == "You: ok thanks"
+
+
+def test_ranked_says_when_it_is_only_the_closest(tmp_path):
+    make_session(
+        tmp_path, "session-20260101-000000-000000.jsonl", ("user", "restart the server")
+    )
+    entries = SessionLog.load_entries(tmp_path)
+    assert SessionLog.ranked(entries, "restart").approximate is False
+    assert SessionLog.ranked(entries, "restrat").approximate is True
+    assert SessionLog.ranked(entries, "").approximate is False
+
+
 def test_search_ties_break_newest_first(tmp_path):
     older = make_session(
         tmp_path, "session-20260101-000000-000000.jsonl", ("user", "fix the build")

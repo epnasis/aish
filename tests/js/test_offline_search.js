@@ -36,7 +36,10 @@ const snippet = [
 const sandbox = {};
 vm.createContext(sandbox);
 vm.runInContext(snippet, sandbox);
-const { offlineRank, lcsRatio, offlineSearchText } = sandbox;
+const {
+  offlineRank, offlineRanked, offlineMatchSnippet, offlineMatchLine, lcsRatio,
+  offlineSearchText,
+} = sandbox;
 assert(typeof offlineRank === "function", "offlineRank not extracted");
 assert(typeof lcsRatio === "function", "lcsRatio not extracted");
 assert(typeof offlineSearchText === "function", "offlineSearchText not extracted");
@@ -168,6 +171,47 @@ check("the legacy history blob is filtered by role too (#266)", () => {
   ]);
   assert.ok(text.includes("sandwich toaster"));
   assert.ok(!text.includes("tefal"), "tool records must not enter the index");
+});
+
+check("a row quotes the line it matched on (#266)", () => {
+  const text =
+    "I have been looking at the Tefal one for weeks now and still cannot decide"
+    + " · Everything considered, the Cosori is the better buy.";
+  const line = offlineMatchSnippet(text, ["tefal"]);
+  assert.ok(line.includes("Tefal"), `expected the match quoted, got ${line}`);
+  assert.ok(!line.includes("Cosori"), "the last thing said is not the answer here");
+  assert.ok(line.endsWith("…"), "a window that stops early says so");
+});
+
+check("a row does not quote its own title back (#266)", () => {
+  const row = meta(
+    "x.jsonl",
+    "I have been looking at the Tefal one for weeks",
+    "I have been looking at the Tefal one for weeks · The Tefal is fine; the Cosori is better value.",
+    1
+  );
+  const line = offlineMatchLine(row, ["tefal"]);
+  assert.ok(line.includes("Cosori"), `expected the other mention, got ${line}`);
+});
+
+check("nothing to quote is empty, not a guess", () => {
+  assert.strictEqual(offlineMatchSnippet("a chat about tiles", ["deploy"]), "");
+  assert.strictEqual(offlineMatchSnippet("", ["deploy"]), "");
+});
+
+check("the ranked answer says when it is only the closest (#266)", () => {
+  assert.strictEqual(offlineRanked(corpus, "certificates").approximate, false);
+  assert.strictEqual(offlineRanked(corpus, "certificats").approximate, true);
+  assert.strictEqual(offlineRanked(corpus, "").approximate, false);
+  assert.strictEqual(offlineRanked(corpus, "zzzzqqqq").approximate, true);
+});
+
+check("the index separates one turn from the next", () => {
+  const text = offlineSearchText([
+    { type: "user", text: "which toaster" },
+    { type: "done", result: "the Tefal one" },
+  ]);
+  assert.strictEqual(text, "which toaster · the Tefal one");
 });
 
 check("a missing search index degrades to title-only, never throws", () => {

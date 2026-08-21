@@ -3508,9 +3508,10 @@ class WebServer:
 
         def load():
             entries = SessionLog.load_entries(state_dir)
-            return SessionLog.rank(entries, query)
+            return SessionLog.ranked(entries, query)
 
-        infos = await asyncio.to_thread(load)
+        found = await asyncio.to_thread(load)
+        infos = found.sessions
         open_states = {name: s.state() for name, s in self.sessions.items()}
         # The working directory labels a row so parallel agents are legible at a
         # glance. A session open in memory answers live (it may have moved since
@@ -3527,6 +3528,10 @@ class WebServer:
                 # snapshot in flight cannot overwrite newer rows.
                 "seq": self._roster_seq,
                 "current": current,
+                # Nothing matched literally and these are the nearest chats
+                # (#266) — the rows will not contain the query, so the list has
+                # to say so rather than look like the search failed.
+                **({"approx": True} if found.approximate else {}),
                 "sessions": [
                     {
                         "name": info.path.name,
