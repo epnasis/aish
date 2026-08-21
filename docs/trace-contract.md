@@ -82,6 +82,12 @@ One set, one skip, named at the top of the module — not a growing chain of `if
 
 **A pre-contract log is byte-identical.** Old logs contain none of these kinds, so every new branch is inert on them; `has_trace` is already set by the `kind == "trace"` arm before the skip, exactly as `render_error` does today, so a log containing *only* governance records still reconstructs rather than falling back to a flat history blob. This must be pinned by a test that replays a fixture log captured before the change and asserts byte-identical event output.
 
+**Amendment (#243): `trim` LEAVES this set.** It is the one governance record that is about something the reader can *see*. Everything else here describes a decision that can be looked up on demand; `trim` **contradicts what is in front of him** — the transcript still shows the whole page while the model was handed 200 characters of it, and the transcript is what he is reading. A record that only a dossier can surface leaves the screen quietly wrong.
+
+So it is emitted through `_emit_step` (both logged and rendered), joins `TURN_STAMPED_STEPS`, and gains a renderer in `traceStep` — all three, because either half alone is the empty-live-card bug this registry exists to prevent. Hot/cold parity is preserved by the same construction as before, in the other direction: rendered live, and no longer skipped on replay. `TestTrimReplaysLikeItRendered`, `tests/js/test_trim_row.js`.
+
+The row states only what the record holds — how many results were shortened, and whether the model can page them back — and never why. Which results, and their keys, stay in the dossier one tap below.
+
 ---
 
 ## 2 · Turn identity and call identity

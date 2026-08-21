@@ -2154,3 +2154,34 @@ class TestOneBadLogCannotTakeTheAppDown:
         events = SessionLog.reconstruct_events(path)
         assert events is not None
         assert any(e.get("type") == "user" for e in events), events
+
+
+class TestTrimReplaysLikeItRendered:
+    """`trim` left RENDERLESS_STEPS in #243, so it must now replay too.
+
+    A kind that renders live and is skipped on replay is the hot/cold divergence
+    L2 exists to prevent: the same turn would show a row when you watched it
+    happen and no row when you opened the chat again."""
+
+    def test_a_trim_survives_replay(self, tmp_path):
+        path = tmp_path / "session-20260821-000000-000000.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in [
+            {"ts": "2026-08-21T00:00:00", "kind": "message", "role": "user", "content": "go"},
+            {"ts": "2026-08-21T00:00:01", "kind": "trace", "step": {
+                "kind": "trim", "policy": "budget_oldest_first", "affected": 2,
+                "stubbed": [{"at": 1, "tool": "read_url", "continuation": "abc"}]}},
+            {"ts": "2026-08-21T00:00:02", "kind": "trace",
+             "step": {"kind": "thinking", "secs": 1}},
+            {"ts": "2026-08-21T00:00:03", "kind": "message", "role": "assistant",
+             "content": "done"},
+        ]) + "\n")
+        events = SessionLog.reconstruct_events(path)
+        trims = [e for e in events if e.get("type") == "step" and e.get("kind") == "trim"]
+        assert len(trims) == 1, events
+        # …carrying what the row needs to say whether it can be undone.
+        assert trims[0]["stubbed"][0]["continuation"] == "abc"
+
+    def test_it_is_no_longer_registered_renderless(self):
+        from aish.session import RENDERLESS_STEPS
+
+        assert "trim" not in RENDERLESS_STEPS

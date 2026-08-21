@@ -506,7 +506,12 @@ RENDERLESS_STEPS = frozenset(
         "rule_eval",  # #191
         "binding",  # #191
         "gate",  # #191
-        "trim",  # #192
+        # `trim` LEFT this set in #243. It is the one governance record that is
+        # about something the reader can SEE: the transcript still shows the
+        # full page while the model holds 200 characters of it, and the screen
+        # is what he is reading. Everything else here describes a decision he
+        # can look up on demand; this one contradicts what is in front of him,
+        # so it draws a row on the turn it prepared.
         "tool_check",  # #193
         "admission",  # #194
         "context",  # #208
