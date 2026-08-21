@@ -956,3 +956,102 @@ class TestRatingLedger:
         ratings = scan_ratings(tmp_path, now=NOW)
         assert "t1" not in ratings
         assert ratings["t2"]["rating"] == "up"
+
+
+class TestContextScan:
+    """Did the history policy change actually help? (#243)
+
+    The claim is testable from recorded evidence: if discarding every prior
+    tool result at the start of every task was wrong, trims per task and
+    characters destroyed should fall. Measuring beats asserting — and the pass
+    reports the numbers without attaching a conclusion to them.
+    """
+
+    def _log(self, tmp_path, name, records):
+        path = tmp_path / name
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        return path
+
+    def _trim(self, policy, before, after, stubbed):
+        return {"kind": "trace", "step": {
+            "kind": "trim", "policy": policy, "affected": len(stubbed),
+            "bytes_before": before, "bytes_after": after, "stubbed": stubbed}}
+
+    def _call(self, name, args):
+        return {"kind": "trace", "step": {"kind": "call", "call": 1, "name": name, "args": args}}
+
+    def test_it_counts_trims_by_policy_and_what_they_destroyed(self, tmp_path):
+        self._log(tmp_path, "session-20990101-000000-000000.jsonl", [
+            {"kind": "task_start", "prompt": "one"},
+            self._trim("eager_stub", 10_000, 2_000, [{"at": 1, "tool": "read_url"}]),
+            {"kind": "task_start", "prompt": "two"},
+            self._trim("mid_task_budget", 5_000, 4_000, [{"at": 2, "tool": "web_search"}]),
+        ])
+        stats = curate_module.scan_context(tmp_path, days=99999)
+        assert stats.sessions == 1 and stats.tasks == 2
+        assert stats.trims == 2 and stats.tasks_with_trim == 2
+        assert stats.chars_destroyed == 8_000 + 1_000
+        assert stats.by_policy == {"eager_stub": 1, "mid_task_budget": 1}
+        assert stats.stubbed_messages == 2
+
+    def test_it_separates_recoverable_stubs_from_lost_ones(self, tmp_path):
+        """"Trimmed" and "trimmed but the model can page it back" are different
+        facts about the same turn — only the second means the history is
+        bounded rather than lossy."""
+        self._log(tmp_path, "session-20990101-000000-000000.jsonl", [
+            {"kind": "task_start", "prompt": "one"},
+            self._trim("budget_oldest_first", 10, 5, [
+                {"at": 1, "tool": "read_url", "continuation": "abc123"},
+                {"at": 2, "tool": "run_command"},
+            ]),
+        ])
+        stats = curate_module.scan_context(tmp_path, days=99999)
+        assert stats.stubbed_messages == 2
+        assert stats.recoverable == 1
+        assert stats.recoverable_share == 0.5
+
+    def test_a_repeated_call_is_counted_and_located(self, tmp_path):
+        """The "searched again" signature: the same tool with the same
+        arguments twice in one task. Reported BESIDE the trim count, never as a
+        verdict — it is the shape of a model that lost what it found, not proof
+        of it."""
+        self._log(tmp_path, "session-20990101-000000-000000.jsonl", [
+            {"kind": "task_start", "prompt": "one"},
+            self._call("web_search", {"query": "kraków"}),
+            self._trim("eager_stub", 10, 5, [{"at": 1, "tool": "web_search"}]),
+            self._call("web_search", {"query": "kraków"}),
+            self._call("web_search", {"query": "different"}),
+            {"kind": "task_start", "prompt": "two"},
+            self._call("web_search", {"query": "kraków"}),   # a new task: not a repeat
+        ])
+        stats = curate_module.scan_context(tmp_path, days=99999)
+        assert stats.repeat_calls == 1
+        assert stats.repeats_after_trim == 1
+
+    def test_a_repeat_before_any_trim_is_not_attributed_to_one(self, tmp_path):
+        self._log(tmp_path, "session-20990101-000000-000000.jsonl", [
+            {"kind": "task_start", "prompt": "one"},
+            self._call("web_search", {"query": "x"}),
+            self._call("web_search", {"query": "x"}),
+        ])
+        stats = curate_module.scan_context(tmp_path, days=99999)
+        assert stats.repeat_calls == 1
+        assert stats.repeats_after_trim == 0
+
+    def test_one_unreadable_log_does_not_take_the_report_down(self, tmp_path):
+        """The same rule the session readers learned the hard way: a pass over
+        many files must fail per file."""
+        self._log(tmp_path, "session-20990101-000000-000000.jsonl", [
+            {"kind": "task_start", "prompt": "one"},
+            self._trim("eager_stub", 10, 5, [{"at": 1, "tool": "read_url"}]),
+        ])
+        bad = tmp_path / "session-20990102-000000-000000.jsonl"
+        bad.write_text('"a bare string"\n42\n{not json\n', encoding="utf-8")
+        stats = curate_module.scan_context(tmp_path, days=99999)
+        assert stats.sessions == 2
+        assert stats.trims == 1
+
+    def test_the_report_says_nothing_when_there_is_nothing(self, tmp_path):
+        assert curate_module.context_report(curate_module.scan_context(tmp_path, days=99999)) == (
+            "no sessions in the window"
+        )
