@@ -6041,6 +6041,30 @@ class TestApprovalIntentOnTheCard:
         assert log.records[-1][1] == "auto"
         assert log.records[-1][2] == INCIDENT_INTENT
 
+    def test_every_card_kind_carries_it(self):
+        """A reason on some cards and not others is worse than none: the owner
+        cannot tell "it gave no reason" from "this kind never shows one"."""
+        approve, approve_tool, bridge, _log = self._approvers(INCIDENT_INTENT)
+        approvers = server_module.make_web_approvers(
+            bridge, _FakeLog(), Path("/x/allow"), Path("/x/deny"),
+            ask_all=True, get_scope=lambda: (".", []),
+            trust_dir=lambda p: "", get_intent=lambda: INCIDENT_INTENT,
+        )
+        _approve, approve_write, approve_read, _tool, approve_import = approvers
+        plan = SimpleNamespace(
+            is_new=False, target=Path("/x/a.py"), diff="+1", note="", rule="",
+            rule_verb="", added=1, removed=0,
+        )
+        approve_write(plan)
+        approve_read("/etc/hosts", "sensitive")
+        approve_import("skill", "desc", [], [], [], "/dest")
+        approve("ls -la /")
+        approve_tool("browse", {"url": "https://example.invalid/"})
+        kinds = {request["kind"]: request for request in bridge.asked}
+        assert set(kinds) == {"write", "read", "import", "command", "tool"}
+        for kind, request in kinds.items():
+            assert request.get("intent") == INCIDENT_INTENT, f"{kind} card lost it"
+
     def test_the_reason_never_leaves_the_machine_in_a_push(self):
         """The push body transits a third-party service, and narration carries
         far more incidental detail than the arguments do — the very step this

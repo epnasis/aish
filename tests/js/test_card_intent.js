@@ -44,7 +44,11 @@ function makeEl(tag) {
     classList: {
       add(...names) { el._class = (el._class + " " + names.join(" ")).trim(); },
       contains(name) { return el._class.split(/\s+/).includes(name); },
-      toggle() {},
+      toggle(name) {
+        if (el.classList.contains(name)) { el.classList.remove(name); return false; }
+        el.classList.add(name);
+        return true;
+      },
       remove(...names) {
         el._class = el._class.split(/\s+/).filter((c) => !names.includes(c)).join(" ");
       },
@@ -82,6 +86,10 @@ const sandbox = {
   feedbackExtra: () => ({}),
   escapeNote: () => makeEl("div"),
   abbreviatePath: (p) => p,
+  renderDiff: (text) => { const d = makeEl("pre"); d.className = "diff"; d.textContent = text; return d; },
+  svgIcon: () => makeEl("svg"),
+  relTarget: (t) => t,
+  highlightFences: () => {},
   currentCwd: "/tmp/project",
   scopeExplain: () => makeEl("div"),
   toolArgRow: (k, v) => {
@@ -100,16 +108,31 @@ const sandbox = {
 vm.createContext(sandbox);
 // intentBlock + buildCommandCard sit together; buildToolCard is separate.
 vm.runInContext(
-  extract("function intentBlock", "function buildWriteCard").replace(/\bconst\b/g, "var"),
+  extract("const INTENT_FOLD_CHARS", "function buildWriteCard").replace(/\bconst\b/g, "var"),
   sandbox
 );
 vm.runInContext(
   extract("function buildToolCard", "function toolArgRow").replace(/\bconst\b/g, "var"),
   sandbox
 );
+vm.runInContext(
+  extract("function buildWriteCard", "function buildToolCard").replace(/\bconst\b/g, "var"),
+  sandbox
+);
+vm.runInContext(
+  extract("function buildImportCard", "function wrenchIcon").replace(/\bconst\b/g, "var"),
+  sandbox
+);
+vm.runInContext(
+  extract("function buildReadCard", "function onApprovalResolved").replace(/\bconst\b/g, "var"),
+  sandbox
+);
 assert(sandbox.intentBlock, "failed to extract intentBlock from app.js");
 assert(sandbox.buildCommandCard, "failed to extract buildCommandCard from app.js");
 assert(sandbox.buildToolCard, "failed to extract buildToolCard from app.js");
+assert(sandbox.buildWriteCard, "failed to extract buildWriteCard from app.js");
+assert(sandbox.buildImportCard, "failed to extract buildImportCard from app.js");
+assert(sandbox.buildReadCard, "failed to extract buildReadCard from app.js");
 
 let failures = 0;
 function check(name, fn) {
@@ -216,6 +239,92 @@ check("the reason sits above the comment field, where it can still be read", () 
   const feedbackAt = card.children.findIndex((c) => c._class === "feedback");
   assert(feedbackAt !== -1, "the comment field went missing");
   assert(intentAt < feedbackAt, "the reason is below the comment box");
+});
+
+const BUILDERS = {
+  command: (c) => sandbox.buildCommandCard(c, { ...CMD_EVENT, intent: INTENT }),
+  tool: (c) => sandbox.buildToolCard(c, { ...TOOL_EVENT, intent: INTENT }),
+  write: (c) => sandbox.buildWriteCard(c,
+    { verb: "edit", target: "a.py", diff: "+1", added: 1, removed: 0, intent: INTENT }),
+  read: (c) => sandbox.buildReadCard(c,
+    { path: "/etc/hosts", reason: "sensitive", escapes: [], intent: INTENT }),
+  import: (c) => sandbox.buildImportCard(c,
+    { skill: "x", description: "d", files: [], skipped: [], flags: [], dest: "/d",
+      intent: INTENT }),
+};
+
+check("EVERY card kind carries it — the gate is one gate", () => {
+  // A reason on some cards and not others is worse than none: the owner cannot
+  // tell "it gave no reason" from "this kind of card never shows one".
+  for (const [kind, build] of Object.entries(BUILDERS)) {
+    const card = makeEl("div");
+    build(card);
+    assert.strictEqual(intentText(card), INTENT, `the ${kind} card lost the reason`);
+  }
+});
+
+check("an import card puts the reason ABOVE the file listing", () => {
+  // The consolidated review (#139) shows whole files. A reason below them is a
+  // reason nobody scrolls back up from.
+  const card = makeEl("div");
+  sandbox.buildImportCard(card, {
+    skill: "x", description: "d", dest: "/d", flags: [], skipped: [],
+    files: [{ path: "run.sh", content: "echo hi", executable: true }], intent: INTENT,
+  });
+  const intentAt = card.children.indexOf(find(card, "card-intent"));
+  const firstFileAt = card.children.findIndex((c) => c._class === "import-file-head mono");
+  assert(firstFileAt !== -1, "the file listing went missing");
+  assert(intentAt < firstFileAt, "the reason is buried under the files");
+});
+
+check("a write card puts the reason after the diff, before the comment", () => {
+  const card = makeEl("div");
+  sandbox.buildWriteCard(card,
+    { verb: "edit", target: "a.py", diff: "+1", added: 1, removed: 0, intent: INTENT });
+  const diffAt = card.children.findIndex((c) => c._class === "diff");
+  const intentAt = card.children.indexOf(find(card, "card-intent"));
+  const feedbackAt = card.children.findIndex((c) => c._class === "feedback");
+  assert(diffAt !== -1 && intentAt > diffAt, "the claim precedes the diff");
+  assert(intentAt < feedbackAt, "the reason is below the comment box");
+});
+
+// --- the fold ------------------------------------------------------------
+const LONG = (INTENT + " "
+  + "It also needs the payment history for the period. ".repeat(12)).trim();
+
+check("a short reason is never folded — including the incident's own", () => {
+  assert(INTENT.length < sandbox.INTENT_FOLD_CHARS,
+    `the case this feature exists for (${INTENT.length} chars) would need a tap`);
+  const card = makeEl("div");
+  sandbox.buildToolCard(card, { ...TOOL_EVENT, intent: INTENT });
+  const box = find(card, "card-intent");
+  assert(!box.classList.contains("folded"), "a short reason grew a fold");
+  assert(!box.children.some((c) => c._class === "card-intent-more"), "an unneeded control");
+});
+
+check("a long reason folds — and keeps every character in the DOM", () => {
+  const card = makeEl("div");
+  sandbox.buildToolCard(card, { ...TOOL_EVENT, intent: LONG });
+  const box = find(card, "card-intent");
+  assert(box.classList.contains("folded"), "a wall of text was left unfolded");
+  // The whole point: the clamp is CSS, the text is complete. Cutting the
+  // string here would be the truncation bug this feature was built against.
+  assert.strictEqual(intentText(card), LONG);
+});
+
+check("the fold opens and closes, and says which it will do", () => {
+  const card = makeEl("div");
+  sandbox.buildToolCard(card, { ...TOOL_EVENT, intent: LONG });
+  const box = find(card, "card-intent");
+  const more = box.children.find((c) => c._class === "card-intent-more");
+  assert(more, "a folded reason has no way to open it");
+  assert.strictEqual(more.textContent, "Show more");
+  more.onclick();
+  assert(box.classList.contains("open"), "tapping it did not open the fold");
+  assert.strictEqual(more.textContent, "Show less");
+  more.onclick();
+  assert(!box.classList.contains("open"), "tapping it again did not close the fold");
+  assert.strictEqual(more.textContent, "Show more");
 });
 
 if (failures) {

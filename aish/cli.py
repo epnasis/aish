@@ -502,9 +502,11 @@ def _plain(text: str) -> str:
     return _CONTROL_CHARS.sub("\ufffd", text)
 
 
-def make_write_approver(log):
+def make_write_approver(log, get_intent=None):
     def approve_write(plan) -> bool:
         verb = "create" if plan.is_new else "edit"
+        said = (get_intent() if get_intent else "") or ""
+        print_intent(said)
         if plan.rule:
             # A rule is not a file, to the person approving it.
             head = {"Created": "new rule", "Updated": "rule change",
@@ -532,18 +534,22 @@ def make_write_approver(log):
             answer = ""
         approved = answer in ("y", "yes")
         if log:
-            log.command(f"{verb} {plan.target}", "approved" if approved else "denied")
+            log.command(
+                f"{verb} {plan.target}", "approved" if approved else "denied", said
+            )
         return approved
 
     return approve_write
 
 
-def make_import_approver(log):
+def make_import_approver(log, get_intent=None):
     """Consolidated review for a skill import (#139): the WHOLE skill in one
     decision — name, description, risk flags, and every file's contents — so
     untrusted code is reviewed properly, not rubber-stamped file-by-file."""
 
     def approve_import(name, description, files, skipped, flags, dest) -> bool:
+        said = (get_intent() if get_intent else "") or ""
+        print_intent(said)
         print(f"\n{YELLOW}{BOLD}▶ import skill?{RESET} {BOLD}{name}{RESET}")
         print(f"{DIM}  {description}{RESET}")
         print(f"{DIM}  → {dest}  ({len(files)} files){RESET}")
@@ -563,7 +569,9 @@ def make_import_approver(log):
             answer = ""
         approved = answer in ("y", "yes")
         if log:
-            log.command(f"import skill {name}", "approved" if approved else "denied")
+            log.command(
+                f"import skill {name}", "approved" if approved else "denied", said
+            )
         return approved
 
     return approve_import
@@ -596,7 +604,7 @@ def make_tool_approver(log, get_intent=None):
     return approve_tool
 
 
-def make_read_approver(log, trust_dir=None):
+def make_read_approver(log, trust_dir=None, get_intent=None):
     """Prompt before an auto-approved read_file touches a secret-bearing path
     or one outside the session roots, so an injected read_file can't silently
     pull keys — or arbitrary files elsewhere on the machine — into context.
@@ -604,6 +612,8 @@ def make_read_approver(log, trust_dir=None):
     (via trust_dir, same late binding as make_approver's)."""
 
     def approve_read(path: str, reason: str = "sensitive") -> bool:
+        said = (get_intent() if get_intent else "") or ""
+        print_intent(said)
         offer_trust = reason == "outside" and trust_dir is not None
         if reason == "outside":
             print(f"\n{YELLOW}{BOLD}▶ read file outside the project?{RESET} "
@@ -620,11 +630,11 @@ def make_read_approver(log, trust_dir=None):
             directory = os.path.dirname(os.path.expanduser(path)) or "."
             print(f"{DIM}  {trust_dir(directory)}{RESET}")
             if log:
-                log.command(f"read {path}", f"approved+trusted:{directory}")
+                log.command(f"read {path}", f"approved+trusted:{directory}", said)
             return True
         approved = answer in ("y", "yes")
         if log:
-            log.command(f"read {path}", "approved" if approved else "denied")
+            log.command(f"read {path}", "approved" if approved else "denied", said)
         return approved
 
     return approve_read
@@ -1934,10 +1944,12 @@ def main() -> int:
                 args.ask_all, allow_path, logref, deny_path, get_scope,
                 get_session_prefixes, trust_dir=trust_dir, get_intent=get_intent,
             ),
-            approve_write=make_write_approver(logref),
-            approve_read=make_read_approver(logref, trust_dir=trust_dir),
+            approve_write=make_write_approver(logref, get_intent),
+            approve_read=make_read_approver(
+                logref, trust_dir=trust_dir, get_intent=get_intent
+            ),
             approve_tool=make_tool_approver(logref, get_intent),
-            approve_import=make_import_approver(logref),
+            approve_import=make_import_approver(logref, get_intent),
             echo=echo,
             stream=stream_line,
             max_steps=args.max_steps,
@@ -1968,10 +1980,12 @@ def main() -> int:
                 args.ask_all, allow_path, logref, deny_path, get_scope,
                 get_session_prefixes, trust_dir=trust_dir, get_intent=get_intent,
             ),
-            approve_write=make_write_approver(logref),
-            approve_read=make_read_approver(logref, trust_dir=trust_dir),
+            approve_write=make_write_approver(logref, get_intent),
+            approve_read=make_read_approver(
+                logref, trust_dir=trust_dir, get_intent=get_intent
+            ),
             approve_tool=make_tool_approver(logref, get_intent),
-            approve_import=make_import_approver(logref),
+            approve_import=make_import_approver(logref, get_intent),
             echo=echo,
             stream=stream_line,
             num_ctx=args.num_ctx,

@@ -1093,9 +1093,9 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     trust_dir(path) -> note widens the live roots when the card's "Trust
     directory" button answers a command or read escaping them.
     get_intent() -> what the model said it was doing on the step that proposed
-    this action (#252), late-bound off the agent like the rest. It rides the
+    this action (#252), late-bound off the agent like the rest. It rides EVERY
     card so the owner decides on a stated reason instead of a guessed one, and
-    it is recorded with EVERY decision — including auto ones — so the audit
+    it is recorded with every decision — including auto ones — so the audit
     trail can be asked what was claimed, not just what was allowed."""
     own_prefixes: set[str] = set()
 
@@ -1228,6 +1228,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             "added": plan.added,
             "removed": plan.removed,
         }
+        carry_intent(request)
         answer = bridge.ask(request)
         approved = answer.get("action") == "approve"
         comment = str(answer.get("comment") or "").strip()
@@ -1251,6 +1252,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             "reason": reason,
             "escapes": escapes,
         }
+        carry_intent(request)
         answer = bridge.ask(request)
         action = answer.get("action")
         if action == "approve_trust" and escapes:
@@ -1318,6 +1320,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             "flags": flags,
             "dest": dest,
         }
+        carry_intent(request)
         answer = bridge.ask(request)
         approved = answer.get("action") == "approve"
         comment = str(answer.get("comment") or "").strip()

@@ -59,6 +59,8 @@ const sandbox = {
   relTarget: (t) => t,
   renderDiff: (text) => { const d = makeEl("pre"); d.className = "diff"; d.textContent = text; return d; },
   feedbackField: () => { const f = makeEl("div"); f.className = "feedback"; return f; },
+  // #252's reason block, stubbed: this test is about the note/diff order.
+  intentBlock: () => { const i = makeEl("div"); i.className = "card-intent"; return i; },
   FINE_POINTER: false,
 };
 vm.createContext(sandbox);
