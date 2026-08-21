@@ -194,6 +194,40 @@ class TestReadUrlEscalation:
         monkeypatch.setattr(browser, "read", boom)
         assert web_module.read_url("https://allegro.pl/x").startswith("ERROR")
 
+    def test_a_401_escalates_to_the_browser(self, monkeypatch):
+        """ticketmaster.pl answers a plain fetch for an EVENT page with
+        `401 {"response":"identify"}` — a bot wall wearing an auth code, and the
+        only 4xx in this family that is not 403. The escalation set omitted it,
+        so eight event reads failed in 0.2s apiece without Chrome ever starting,
+        while the same URL pasted into /browser rendered dates, prices and
+        resale seats in full (#257). Search pages on the same host are served
+        to a fetcher normally, which is why it looked like a partial outage
+        rather than a wall."""
+        monkeypatch.setattr(web_module, "_fetch", _http_error(401))
+        monkeypatch.setattr(
+            browser,
+            "read",
+            lambda url, **kw: browser.Page(
+                text=page_sized("PLN 253,34 each"), title="OMD", images=[], url=url,
+                status=200,
+            ),
+        )
+        out = web_module.read_url("https://www.ticketmaster.pl/event/omd-tickets/559325393")
+        assert "PLN 253,34 each" in out
+        assert "rendered in the browser" in out
+
+    def test_the_two_halves_of_the_read_path_agree_on_what_a_wall_is(self):
+        """One fact, one list. `is_challenge` (the browser's verdict on a page
+        it rendered) and read_url's escalation trigger (the fetch's verdict on a
+        status it got) are the same question asked from opposite ends, and they
+        drifted: 401 and 405 were a wall to one and an ordinary error to the
+        other. A second copy is how the ticketmaster gap opened, so the copy is
+        gone rather than corrected."""
+        assert web_module._BLOCKED_CODES is browser.BLOCK_STATUS
+        for code in (401, 403, 405, 429, 503):
+            assert browser.is_challenge("short body", code)
+            assert code in web_module._BLOCKED_CODES
+
     def test_a_404_does_not_escalate(self, monkeypatch):
         """The browser is for blocks and shells, not for every failure — a
         genuinely missing page must not cost a 2s Chrome launch."""

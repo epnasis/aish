@@ -39,7 +39,8 @@ PAGE_TRUNCATION_HINT = (
     "to search the full page text]"
 )
 
-# Sites behind bot protection 403/429/503 a plain urllib fetch, and JS-only
+# Sites behind bot protection refuse a plain urllib fetch (403/429/503 — and
+# 401, which is how ticketmaster.pl words it), and JS-only
 # SPAs return an empty shell. The answer to both is now the browser on this
 # machine (`_browser_read`), which has a real renderer and a real session.
 #
@@ -57,7 +58,11 @@ PAGE_TRUNCATION_HINT = (
 # (rendering a rendering-service's stub proves nothing) or have its stub
 # laundered into content (_JINA_STUB).
 JINA_READER_PREFIX = "https://r.jina.ai/"
-_JINA_BLOCK_CODES = (403, 429, 503)
+# Which HTTP statuses mean "the site refused us" — and so which ones escalate
+# to the renderer. NOT a second list: `browser.BLOCK_STATUS` is the authority,
+# and the copy that used to live here is what let ticketmaster.pl through the
+# gap (#257).
+_BLOCKED_CODES = browser.BLOCK_STATUS
 _JINA_STUB = "maybe requiring CAPTCHA"
 
 
@@ -1412,13 +1417,13 @@ def read_url(url: str, topic: str | None = None) -> str:
         # `not anonymous_why`: the pre-fetch route already tried the browser and
         # it did not work, and a second launch in one read buys nothing but
         # seconds.
-        if exc.code in _JINA_BLOCK_CODES and not anonymous_why:
+        if exc.code in _BLOCKED_CODES and not anonymous_why:
             rendered, why = _browser_read(url)
             if rendered is not None:
                 return _present_rendered(url, rendered, topic=topic, login_host=login_host)
             if why == WALLED:
                 return f"ERROR: {url} — {WALLED}"
-        hint = _blocked_note(url) if exc.code in _JINA_BLOCK_CODES else ""
+        hint = _blocked_note(url) if exc.code in _BLOCKED_CODES else ""
         return f"ERROR: {url} returned HTTP {exc.code} {exc.reason}{hint}"
     except Exception as exc:  # noqa: BLE001 — DNS, TLS, timeouts: report, don't crash
         # A site that stops ANSWERING a plain fetcher is the same problem as one
