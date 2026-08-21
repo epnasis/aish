@@ -395,7 +395,10 @@ thousands of entries without bloating the context.
    allowed. `a` saves the command's *prefix*
    (e.g. `gh issue create`, never a blanket `gh`) to a persistent allowlist; `s`
    allows it for this chat only — `/new`, `/clear` or resuming another chat
-   forgets it, and it is never written to disk.
+   forgets it, and it is never written to disk. Both are offered only when a
+   prefix could actually silence the command: some commands are refused before
+   the allowlist is even read (see below), and a rule saved for one of those
+   would sit in the file doing nothing.
    Auto-approval covers only a conservatively
    parsed set of read-only commands, and is **scoped to the project directory** —
    commands whose paths escape it (absolute, `~`, `..`, resolved symlinks) prompt

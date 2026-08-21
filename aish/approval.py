@@ -3,9 +3,13 @@
 Philosophy: prompting on a safe command costs one keystroke; auto-approving
 an unsafe one costs data. So this parser only approves what it positively
 understands — anything ambiguous (unusual metacharacters, unknown binaries,
-quoting it can't parse, a quoted '|' that confuses the raw split) falls
-through to the interactive prompt. False negatives are fine; false
-positives are not.
+quoting it can't parse) falls through to the interactive prompt. False
+negatives are fine; false positives are not.
+
+Understanding is quote-aware, because `/bin/sh -c` is what runs the command:
+a metacharacter inside a single-quoted argument is inert text the shell will
+never act on, so refusing it buys no safety and costs every tool whose
+argument is a quoted mini-language (jq, awk, find -name).
 
 Chained commands (a | b, a && b, a || b) are split and every segment is
 evaluated independently: ALL segments must be read-only or user-allowlisted
@@ -124,25 +128,133 @@ EXEC_WRAPPERS = frozenset(
 )
 
 # Anything enabling redirection, substitution, expansion, or sequencing we
-# don't model. Scanned on the raw string, so quoting or escaping can't hide
-# these from us (at worst we reject a safe command). '&' and '|' are handled
-# by the chain splitter, ';' stays forbidden.
+# don't model — judged PER QUOTING CONTEXT, never on the raw string. What runs
+# the command is `/bin/sh -c` (tools.run_command), so the shell's own rules are
+# the only ones that decide whether a character does anything: inside single
+# quotes every character is inert, inside double quotes only $ and ` still
+# expand, and a backslash-escaped character is literal text. '&' and '|' are
+# handled by the chain splitter, ';' stays forbidden unquoted.
 FORBIDDEN_CHARS = frozenset(";<>`$(){}\n")
+FORBIDDEN_IN_DOUBLE_QUOTES = frozenset("`$")
 
-_CHAIN_SPLIT = re.compile(r"\|\||&&|\|")
+# How the shell will treat one character.
+_BARE, _ESCAPED, _SINGLE, _DOUBLE = "bare", "escaped", "single", "double"
+
+# Inside double quotes a backslash escapes only these; before anything else it
+# is a literal backslash. Matching the shell here rather than guessing keeps
+# the token values identical to what the command will actually receive.
+_DOUBLE_QUOTE_ESCAPES = '$`"\\\n'
+
+
+class _MalformedCommand(ValueError):
+    """A quote or a backslash that never closes. Everything after it means
+    something different depending on how it would have closed, so callers fail
+    closed rather than guess."""
+
+
+def _shell_marks(command: str):
+    """Yield (position, character, context) for every character the shell will
+    see, where context says how it will be treated. The position indexes the
+    ORIGINAL string, so a caller can slice raw text back out with its quoting
+    intact."""
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if ch == "\\":
+            if i + 1 >= n:
+                raise _MalformedCommand("trailing backslash")
+            yield i, command[i + 1], _ESCAPED
+            i += 2
+        elif ch == "'":
+            end = command.find("'", i + 1)
+            if end < 0:
+                raise _MalformedCommand("unterminated single quote")
+            for offset in range(i + 1, end):
+                yield offset, command[offset], _SINGLE
+            i = end + 1
+        elif ch == '"':
+            i += 1
+            while True:
+                if i >= n:
+                    raise _MalformedCommand("unterminated double quote")
+                if command[i] == '"':
+                    i += 1
+                    break
+                if command[i] == "\\" and i + 1 < n and command[i + 1] in _DOUBLE_QUOTE_ESCAPES:
+                    yield i, command[i + 1], _ESCAPED
+                    i += 2
+                    continue
+                yield i, command[i], _DOUBLE
+                i += 1
+        else:
+            yield i, ch, _BARE
+            i += 1
 
 
 def split_chain(command: str) -> list[str] | None:
     """Split on | , && , || into independently-evaluated segments.
-    None means the command uses constructs we don't model — fail closed."""
-    if any(ch in FORBIDDEN_CHARS for ch in command):
+    None means the command uses constructs we don't model — fail closed.
+
+    Quote-aware (#265): an operator separates segments only where the shell
+    would treat it as one, so the pipe inside `jq '.listings[0] | keys'` stays
+    part of the argument instead of cutting the command into two fragments that
+    match nothing.
+    """
+    try:
+        marks = list(_shell_marks(command))
+    except _MalformedCommand:
         return None
-    if "&" in command.replace("&&", ""):  # stray single & = backgrounding
-        return None
-    segments = [s.strip() for s in _CHAIN_SPLIT.split(command)]
+    segments: list[str] = []
+    start = index = 0
+    while index < len(marks):
+        position, ch, context = marks[index]
+        if context == _DOUBLE and ch in FORBIDDEN_IN_DOUBLE_QUOTES:
+            return None
+        if context != _BARE:
+            index += 1
+            continue
+        if ch in FORBIDDEN_CHARS:
+            return None
+        if ch in "|&":
+            doubled = index + 1 < len(marks) and marks[index + 1] == (position + 1, ch, _BARE)
+            if ch == "&" and not doubled:  # stray single & = backgrounding
+                return None
+            segments.append(command[start:position])
+            width = 2 if doubled else 1
+            start = position + width
+            index += width
+            continue
+        index += 1
+    segments.append(command[start:])
+    segments = [s.strip() for s in segments]
     if not segments or any(not s for s in segments):
         return None
     return segments
+
+
+def _tokens_with_quoting(segment: str) -> list[tuple[str, bool]] | None:
+    """(token, was_quoted) pairs. A quoted word is an ARGUMENT however
+    word-shaped it looks — the distinction `suggest_prefix` needs and the one
+    shlex throws away. None when the quoting doesn't parse."""
+    try:
+        marks = list(_shell_marks(segment))
+    except _MalformedCommand:
+        return None
+    tokens: list[tuple[str, bool]] = []
+    chars: list[str] = []
+    quoted = started = False
+    for _position, ch, context in marks:
+        if context == _BARE and ch.isspace():
+            if started:
+                tokens.append(("".join(chars), quoted))
+                chars, quoted, started = [], False, False
+            continue
+        started = True
+        chars.append(ch)
+        quoted = quoted or context != _BARE
+    if started:
+        tokens.append(("".join(chars), quoted))
+    return tokens
 
 
 def _has_unsafe_flag(name: str, tokens: list[str]) -> bool:
@@ -674,20 +786,41 @@ def suggest_prefix(segment: str) -> str:
     basename plus its subcommand words ('gh issue create'), stopping at the
     first flag or dynamic argument. Scopes the rule to a subcommand instead
     of a whole binary, so allowlisting 'gh issue create' never waves through
-    'gh repo delete'."""
-    try:
-        tokens = shlex.split(segment)
-    except ValueError:
-        tokens = segment.split()
-    if not tokens:
+    'gh repo delete'.
+
+    A QUOTED word is an argument however word-shaped it looks, so it never
+    becomes part of the rule: `jq 'keys' data.json` suggests `jq`, not the
+    per-invocation `jq keys` that would need re-approving on the next filter.
+    """
+    quoted_tokens = _tokens_with_quoting(segment)
+    if quoted_tokens is None:  # unparseable quoting — best effort, still asked
+        quoted_tokens = [(word, False) for word in segment.split()]
+    if not quoted_tokens:
         return segment.strip()
-    binary = tokens[0].rsplit("/", 1)[-1]
+    binary = quoted_tokens[0][0].rsplit("/", 1)[-1]
     parts = [binary]
-    for token in tokens[1 : 1 + SUBCOMMAND_DEPTH.get(binary, 1)]:
-        if not _SUBCOMMAND_WORD.match(token):
+    for token, was_quoted in quoted_tokens[1 : 1 + SUBCOMMAND_DEPTH.get(binary, 1)]:
+        if was_quoted or not _SUBCOMMAND_WORD.match(token):
             break
         parts.append(token)
     return " ".join(parts)
+
+
+def prefix_suggestions(command: str, prefixes: Collection[str]) -> list[str]:
+    """The 'always allow' / 'allow this session' rules to offer for a command
+    that prompted — EMPTY when no rule could ever silence it.
+
+    A command the parser cannot model is refused BEFORE the allowlist is
+    consulted, and so is one whose paths escape the session roots. Offering
+    'Always' there promises something the gate will not honour, and the prefix
+    it derives from an unparsed command is junk that lands in allow.txt
+    forever: `jq '.listings[0] | keys' f.json` was cut inside its own filter
+    and saved a rule named `keys'` (#265). Both callers show the buttons only
+    when this returns something.
+    """
+    if split_chain(command) is None:
+        return []
+    return [suggest_prefix(segment) for segment in unvetted_segments(command, prefixes)]
 
 
 def load_prefixes(path: Path) -> list[str]:

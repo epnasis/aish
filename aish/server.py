@@ -79,9 +79,8 @@ from .approval import (
     is_auto_approvable,
     load_prefixes,
     looks_destructive,
+    prefix_suggestions,
     save_prefix,
-    suggest_prefix,
-    unvetted_segments,
 )
 from .cli import (
     DEFAULT_LESSONS,
@@ -1146,10 +1145,10 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             record(command, "auto")
             return command
 
-        suggestions = [
-            suggest_prefix(segment)
-            for segment in unvetted_segments(command, known_prefixes()) or [command]
-        ]
+        # Empty when no prefix could ever silence this command — the frontend
+        # then omits the Session/Always buttons rather than offering a rule the
+        # gate will not honour (#265).
+        suggestions = prefix_suggestions(command, known_prefixes())
         escapes = escaping_dirs(command, cwd, roots) if cwd and roots else []
         request: dict[str, Any] = {
             "type": "approval_request",
