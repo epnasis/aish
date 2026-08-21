@@ -86,6 +86,34 @@ def test_the_full_record_is_sized_as_a_document() -> None:
     assert "max-height" in body, "the dossier no longer claims extra height"
 
 
+def test_one_glyph_at_a_time_can_actually_win() -> None:
+    """The chats button carries BOTH glyphs and lets CSS pick (design Screen 0).
+
+    Picking is `display`, and the shared sizing rule `.back-ico > svg` already
+    sets `display: block` at specificity (0,1,1) — so a bare `.ico-menu` /
+    `.ico-sidebar` rule (0,1,0) loses and hides nothing. That failure is
+    invisible everywhere except a real browser: the node checks read app.js,
+    the vocabulary check reads text, and both glyphs painting side by side in
+    the top-left corner passed every one of them. Measured, then pinned.
+    """
+    sizing = re.search(r"\.back-ico\s*>\s*svg\s*\{([^}]*)\}", CSS)
+    assert sizing and "display" in sizing.group(1), (
+        "the sizing rule no longer sets display — re-check whether the glyph "
+        "rules below still need their extra specificity"
+    )
+    for glyph in (".ico-menu", ".ico-sidebar"):
+        # (?![\w-]) so `.ico-sidebar-fill` — a <rect>, not a direct svg child,
+        # and therefore not in this contest — does not match `.ico-sidebar`.
+        rules = re.findall(
+            rf"([^{{}};]*{re.escape(glyph)}(?![\w-])[^{{}}]*)\{{([^}}]*display[^}}]*)\}}", CSS)
+        assert rules, f"nothing sets display on {glyph}"
+        for selector, _ in rules:
+            assert ".back-ico" in selector, (
+                f"`{selector.strip()}` sets display on {glyph} at lower specificity "
+                f"than `.back-ico > svg`, so it is a no-op and both glyphs paint"
+            )
+
+
 def test_only_the_toggle_files_the_sidebar_away() -> None:
     """`closeSessionRail` is the slide-over's dismiss — the scrim, Escape,
     picking a chat, starting a new one. If it wrote the preference, opening any

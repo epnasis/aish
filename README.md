@@ -428,7 +428,7 @@ thousands of entries without bloating the context.
 installable as a PWA via "Add to Home Screen"). The screenshots above are all
 this UI. Highlights:
 
-- **Tap-able approvals.** Approve / Allow this session / Always allow / Deny,
+- **Tap-able approvals.** Approve / This chat / Always / Deny,
   with a pencil to edit a command first and an optional comment field whose text
   travels with whichever button you press — *approve + comment* means "rework it
   this way and re-propose", *deny + comment* means "stop and explain".
@@ -436,7 +436,7 @@ this UI. Highlights:
   including any approval still waiting. Survives server restarts too. Every turn
   carries the time it happened — including chats from long before the feature
   existed, since the logs always recorded it.
-- **Parallel sessions.** Several chats open at once, each with its own agent,
+- **Parallel chats.** Several chats open at once, each with its own agent,
   model, directory, and running task; live badges for running / needs-approval,
   a toast when a background task finishes. Chats live in a **session rail** —
   swipe right anywhere on the conversation (or tap the button) and it slides
@@ -708,7 +708,7 @@ half-typed one an autocorrect Return sent, or a secret pasted into the composer
 hand. Deleting a chat asks the same way.
 
 **Resuming always switches, never merges.** `aish --resume`, `/resume` in the
-terminal and the web session drawer all mean the same thing: the chosen session
+terminal and the web chat list all mean the same thing: the chosen chat
 becomes the current one — its conversation, its log file, the model it last used
 and the directory it was working in. The chat you leave is untouched and can be
 resumed back the same way. Nothing is ever copied from one session's log into

@@ -88,6 +88,11 @@ function railWorld({ width = 420, stored = {} } = {}) { // phone by default
   const search = { value: "", focus() {}, closest: () => null };
   const calls = [];
   const resizeHandlers = [];
+  const chip = {
+    title: "", attrs: {},
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    removeAttribute(k) { delete this.attrs[k]; },
+  };
   const sandbox = {
     innerWidth: width,
     document: {
@@ -105,6 +110,7 @@ function railWorld({ width = 420, stored = {} } = {}) { // phone by default
       "session-rail": rail,
       "rail-scrim": scrim,
       "sessions-search": search,
+      "back-chip": chip,
       backdrop: { hidden: true },
     }[id]),
     FINE_POINTER: false,
@@ -123,7 +129,7 @@ function railWorld({ width = 420, stored = {} } = {}) { // phone by default
   };
   vm.createContext(sandbox);
   vm.runInContext(extract("// [RAIL-START]", "// [RAIL-END]"), sandbox);
-  return { s: sandbox, classes, rail, scrim, calls, listeners, stored };
+  return { s: sandbox, classes, rail, scrim, calls, listeners, stored, chip };
 }
 
 // A drag that is released past the threshold leaves the rail OPEN and, crucially,
@@ -264,6 +270,64 @@ function railWorld({ width = 420, stored = {} } = {}) { // phone by default
     (w.listeners.touchstart || []).length === 1
     && (w.listeners.touchmove || []).length === 1
     && (w.listeners.touchend || []).length === 1);
+}
+
+// ---- 3c. the control says which state it is in ---------------------------
+// Design Screen 0 (#57): docked, the button is a SWITCH, so it names what the
+// tap will do and reports pressed-ness. As a slide-over it is not a switch —
+// the scrim and a swipe also close the panel — so it keeps one name and claims
+// no toggle state a screen reader would then have to reconcile.
+//
+// The glyph, its fill and its tint are CSS off `body.rail-open` on purpose:
+// this function must never become a second opinion about which state is
+// painted, only the words for it.
+{
+  const w = railWorld({ width: 1400 });
+  ok("docked and showing, the button offers to hide",
+    w.chip.title === "Hide chats" && w.chip.attrs["aria-label"] === "Hide chats");
+  ok("…and reports itself pressed", w.chip.attrs["aria-pressed"] === "true");
+
+  w.s.toggleSessionRail();
+  ok("put away, it offers to show", w.chip.title === "Show chats");
+  ok("…and reports itself unpressed", w.chip.attrs["aria-pressed"] === "false");
+
+  w.s.toggleSessionRail();
+  ok("and back again", w.chip.title === "Hide chats"
+    && w.chip.attrs["aria-pressed"] === "true");
+}
+{
+  const phone = railWorld({ width: 420 });
+  ok("as a slide-over the button is just the way to the chats",
+    phone.chip.title === "Chats");
+  ok("…and claims no pressed state, because it is not a switch there",
+    !("aria-pressed" in phone.chip.attrs));
+  phone.s.openSessionRail("");
+  ok("…even with the panel open", phone.chip.title === "Chats"
+    && !("aria-pressed" in phone.chip.attrs));
+}
+// Crossing the breakpoint changes what the control IS, not just its state, so
+// the wording is re-derived on resize even when nothing opened or closed.
+{
+  const w = railWorld({ width: 420 });
+  w.s.openSessionRail("");
+  w.s.innerWidth = 1400;
+  w.s.dispatchResize();
+  ok("growing into a docked layout turns the button into a switch",
+    w.chip.title === "Hide chats" && w.chip.attrs["aria-pressed"] === "true");
+  w.s.innerWidth = 420;
+  w.s.dispatchResize();
+  ok("…and shrinking turns it back", w.chip.title === "Chats"
+    && !("aria-pressed" in w.chip.attrs));
+}
+
+// ---- 3d. the words are CHATS, not sessions -------------------------------
+// "Session" is the machine's word for it — a log file, a process lifetime.
+// The button said Sessions while the panel it opened said Chats.
+{
+  const region = extract("// [RAIL-START]", "// [RAIL-END]");
+  ok("nothing this control says to the owner calls a chat a session",
+    !/"[^"]*\bSessions?\b[^"]*"/.test(
+      region.replace(/\/\/[^\n]*/g, "").replace(/"(sessions?-[a-z-]+|#session[a-z-]*)"/g, '""')));
 }
 
 // ---- 4. the wiring's guards ----------------------------------------------
