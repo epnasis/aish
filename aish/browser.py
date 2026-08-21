@@ -349,6 +349,25 @@ def profile_dir() -> Path:
     return state_dir() / "browser" / "profile"
 
 
+def search_profile_dir() -> Path:
+    """Where the SEARCH browser lives — beside the owner's profile, never it.
+
+    A separate directory is the whole mechanism behind reading a results page
+    with no gate and no card. `_login_gate` asks one question — does this read
+    carry the owner's session? — and a profile that has never signed into
+    anything answers it `no` by construction, which is a stronger answer than
+    any allowlist could give: an exemption is a claim about a URL, checked
+    before navigation and false the moment Google 302s to `accounts.google.com`,
+    whereas an empty cookie jar stays empty down every redirect.
+
+    It is ONE extra profile and it stays one. Chrome is not free on a box also
+    running a Home Assistant VM and Colima under 16 GB, and "a profile per
+    situation" is the fingerprint-rotation arms race `docs/browser.md` already
+    refuses. Two identities, each with a reason to exist: the owner's, and
+    nobody's."""
+    return state_dir() / "browser" / "search-profile"
+
+
 def logins_file() -> Path:
     return state_dir() / "browser" / "logins.txt"
 
@@ -453,10 +472,11 @@ async def _launch(
     playwright: Any,
     *,
     args: list[str],
+    profile: Path | None = None,
     viewport: dict | None = None,
     device_scale_factor: float | None = None,
 ) -> Any:
-    profile = profile_dir()
+    profile = profile or profile_dir()
     profile.mkdir(parents=True, exist_ok=True)
     launch_args = list(args)
     omit: list[str] = []
@@ -823,6 +843,12 @@ class _Owner:
     def __init__(self) -> None:
         self._playwright: Any = None
         self._context: Any = None
+        # The SEARCH browser: a second Chrome on `search_profile_dir()`, signed
+        # into nothing. Held beside the owner's rather than replacing it because
+        # the two answer different questions — one reads the web AS HIM, this
+        # one reads it as nobody — and a single context could only ever be one
+        # of those at a time.
+        self._cold: Any = None
         self.loop: Any = None
         self._ready = threading.Event()
         self._lock: Any = None  # created on the loop: guards context setup
@@ -928,6 +954,48 @@ class _Owner:
                 return False
         return False
 
+    async def _open(
+        self,
+        profile: Path,
+        *,
+        args: list[str] | None = None,
+        viewport: dict | None = None,
+        device_scale_factor: float | None = None,
+    ) -> Any:
+        """Launch one persistent context on `profile`. Caller holds the lock."""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as exc:  # pragma: no cover — see unavailable_reason
+            raise BrowserUnavailable(str(exc)) from exc
+        if self._playwright is None:
+            self._playwright = await async_playwright().start()
+
+        async def launch():
+            return await _launch(
+                self._playwright,
+                args=args or _OFFSCREEN_ARGS,
+                profile=profile,
+                viewport=viewport,
+                device_scale_factor=device_scale_factor,
+            )
+
+        try:
+            context = await launch()
+        except Exception as exc:  # noqa: BLE001 — one specific, recoverable cause
+            # Chrome leaves a SingletonLock in the profile when it dies badly.
+            # Every later launch then fails, so every read AND every view fails
+            # until somebody kills Chrome by hand — on a headless server with
+            # nobody in front of it.
+            if not _clear_stale_lock(exc):
+                raise
+            context = await launch()
+        # On the CONTEXT, so a tab aish never opened still reports what it
+        # downloaded — see `_Owner.downloads`.
+        context.on("page", self.watch_downloads)
+        for page in list(context.pages):
+            self.watch_downloads(page)
+        return context
+
     async def context(
         self,
         *,
@@ -938,39 +1006,22 @@ class _Owner:
         # Under the lock: concurrent reads arriving cold would otherwise each
         # launch a Chrome against a profile only one of them can hold.
         async with self._lock:
-            if self._context is not None:
-                return self._context
-            try:
-                from playwright.async_api import async_playwright
-            except ImportError as exc:  # pragma: no cover — see unavailable_reason
-                raise BrowserUnavailable(str(exc)) from exc
-            if self._playwright is None:
-                self._playwright = await async_playwright().start()
-
-            async def launch():
-                return await _launch(
-                    self._playwright,
-                    args=args or _OFFSCREEN_ARGS,
+            if self._context is None:
+                self._context = await self._open(
+                    profile_dir(),
+                    args=args,
                     viewport=viewport,
                     device_scale_factor=device_scale_factor,
                 )
-
-            try:
-                self._context = await launch()
-            except Exception as exc:  # noqa: BLE001 — one specific, recoverable cause
-                # Chrome leaves a SingletonLock in the profile when it dies
-                # badly. Every later launch then fails, so every read AND every
-                # view fails until somebody kills Chrome by hand — on a headless
-                # server with nobody in front of it.
-                if not _clear_stale_lock(exc):
-                    raise
-                self._context = await launch()
-            # On the CONTEXT, so a tab aish never opened still reports what it
-            # downloaded — see `_Owner.downloads`.
-            self._context.on("page", self.watch_downloads)
-            for page in list(self._context.pages):
-                self.watch_downloads(page)
             return self._context
+
+    async def cold_context(self) -> Any:
+        """The search browser. Never the owner's profile, and no argument that
+        could make it one."""
+        async with self._lock:
+            if self._cold is None:
+                self._cold = await self._open(search_profile_dir())
+            return self._cold
 
     async def _close(self) -> None:
         global _LAST_SNAPSHOT
@@ -979,12 +1030,15 @@ class _Owner:
         # The snapshot is what `browse_is_open` answers from, and a page that no
         # longer exists must not read as an open session (#248).
         _LAST_SNAPSHOT = None
-        if self._context is not None:
+        for name in ("_context", "_cold"):
+            context = getattr(self, name)
+            if context is None:
+                continue
             try:
-                await self._context.close()
+                await context.close()
             except Exception:  # noqa: BLE001 — a dead browser is already closed
                 pass
-            self._context = None
+            setattr(self, name, None)
 
     async def close_now(self) -> None:
         await self._close()
@@ -1017,8 +1071,27 @@ def _submit(job: Callable[[_Owner], Any], timeout: float) -> Any:
 
 # -------------------------------------------------------------- the reads
 
-def read(url: str, *, timeout: float = 90.0) -> Page:
+def read_cold(url: str, *, timeout: float = 60.0) -> Page:
+    """Render `url` as NOBODY: the search profile, signed into nothing.
+
+    The identity is the point, not an optimisation. `_login_gate` exists to stop
+    a model-proposed URL being read with the owner's session attached, and this
+    is how a results page is read without ever raising that question — see
+    `search_profile_dir()`.
+
+    Measured 2026-08-21, and the cost is real: same IP, same minute, the signed-in
+    profile got 200 and full results while this one got 429 and `/sorry`. Google
+    scores the IDENTITY, and reading as nobody is the identity it likes least. So
+    a wall here is an ordinary outcome rather than a surprise, and the caller is
+    expected to have somewhere to fall back to."""
+    return read(url, timeout=timeout, cold=True)
+
+
+def read(url: str, *, timeout: float = 90.0, cold: bool = False) -> Page:
     """Render `url` in the persistent browser and hand back its HTML.
+
+    `cold` reads on the search profile instead of the owner's — prefer the named
+    `read_cold`, which is the only thing that should ever pass it.
 
     Raises BrowserUnavailable when there is no browser to use; every other
     failure arrives as the underlying Playwright error."""
@@ -1027,7 +1100,7 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
         raise BrowserUnavailable(reason)
 
     async def job(owner: _Owner) -> Page:
-        if owner.view is not None:
+        if owner.view is not None and not cold:
             # The owner is driving the browser by hand. Reusing that context
             # would read the site at their PHONE's viewport and hand back a
             # mobile layout as if it were the page — quietly different results
@@ -1037,7 +1110,7 @@ def read(url: str, *, timeout: float = 90.0) -> Page:
                 "the browser is being driven by hand right now (/browser) — "
                 "the page will be readable again once that window is closed"
             )
-        context = await owner.context()
+        context = await (owner.cold_context() if cold else owner.context())
         page = await context.new_page()
         owner.read_pages.add(page)
 

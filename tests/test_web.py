@@ -95,10 +95,41 @@ def fake_ddgs(results):
     return module
 
 
+def serp_page():
+    """The real google.com results page captured on 2026-08-21 — see the
+    fixture's own `_comment` for what it is a fixture OF."""
+    raw = json.loads(
+        (pathlib.Path(__file__).parent / "fixtures" / "google_serp.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return raw, browser.Page(
+        text=raw["text"], title=raw["title"], images=[], url=raw["url"],
+        status=raw["status"], links=[tuple(link) for link in raw["links"]],
+    )
+
+
 class TestWebSearch:
     @pytest.fixture(autouse=True)
     def clean_ddgs(self, monkeypatch):
         self.monkeypatch = monkeypatch
+        # Module state: a wall recorded by one test must not stand the next
+        # test's browser down.
+        monkeypatch.setattr(web, "_search_walled_at", 0.0)
+        # No second index unless a test asks for one. conftest forbids reaching
+        # the real browser, and this is also the honest default: most machines
+        # running this have no Chrome to escalate to.
+        monkeypatch.setattr(
+            web.browser,
+            "read_cold",
+            lambda url, **kw: (_ for _ in ()).throw(
+                browser.BrowserUnavailable("no browser in tests")
+            ),
+        )
+
+    @pytest.fixture
+    def second_index(self, monkeypatch):
+        monkeypatch.setattr(web.browser, "read_cold", lambda url, **kw: serp_page()[1])
 
     def install(self, results):
         self.monkeypatch.setitem(sys.modules, "ddgs", fake_ddgs(results))
@@ -148,6 +179,100 @@ class TestWebSearch:
         result = web.web_search("python")
         assert result.startswith("ERROR")
         assert "rate limited" in result
+
+    def test_escalates_when_the_first_index_found_nothing(self, second_index):
+        self.install([])
+        result = web.web_search("zzz")
+        assert "Product Manager, Wear" in result
+        assert "careers.google.com/jobs/results/" in result
+
+    def test_escalates_when_the_first_index_was_stonewalled(self, second_index):
+        """The case that filed this: not "nothing matches" but "we were
+        refused". One index has bad days; that is what a second one is for."""
+        self.install(DDGSException(RuntimeError("connection reset by peer")))
+        assert "Product Manager, Wear" in web.web_search("anything")
+
+    def test_escalates_when_the_results_ignore_the_query_s_own_operator(
+        self, second_index
+    ):
+        """Count is not quality (#249).
+
+        Five results that quietly answer a different question look exactly like
+        success to an is-it-empty test. `site:` is a constraint the query STATES
+        and the URLs can be checked against, so it is checked."""
+        self.install(
+            [{"title": "What is Product?", "href": "https://economictimes.example/x"}]
+        )
+        result = web.web_search('site:careers.google.com "product management"')
+        assert "ignored `site:careers.google.com`" in result
+        assert "Product Manager, Wear" in result
+
+    def test_does_not_escalate_when_the_constraint_is_actually_met(
+        self, second_index, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(web.browser, "read_cold", lambda url, **kw: calls.append(url))
+        self.install(
+            [{"title": "PM, Wear", "href": "https://careers.google.com/jobs/results/1"}]
+        )
+        result = web.web_search("site:careers.google.com product")
+        assert "PM, Wear" in result
+        assert calls == []  # the browser must stay shut on the common path
+
+    def test_results_from_the_second_index_say_where_they_came_from(
+        self, second_index
+    ):
+        """Provenance and identity, in aish's own words — the pair `read_url`
+        states whenever either changes. "Signed into nothing" is the fact that
+        makes this read gate-free, so it is the fact that gets said."""
+        self.install([])
+        result = web.web_search("zzz")
+        assert result.startswith("[aish:")
+        assert "google.com" in result.split("\n")[0]
+        assert "signed into nothing" in result.split("\n")[0]
+
+    def test_a_wall_is_never_served_as_results(self, monkeypatch):
+        """Google answers a profile it dislikes with /sorry, and that page has
+        TEXT. Handing it back as results is the laundering failure the challenge
+        detector exists to prevent, one host over."""
+        wall = browser.Page(
+            text="Our systems have detected unusual traffic from your computer network.",
+            title="", images=[], url="https://www.google.com/sorry/index", status=429,
+        )
+        monkeypatch.setattr(web.browser, "read_cold", lambda url, **kw: wall)
+        self.install([])
+        result = web.web_search("zzz")
+        assert "unusual traffic" not in result
+        assert "No results" in result
+
+    def test_a_wall_stands_down_the_second_index_for_a_while(self, monkeypatch):
+        """A wall is a decision, not a blip. Without the cooldown every empty
+        search would pay ~6s of Chrome to be refused again."""
+        reads = []
+
+        def walled(url, **kw):
+            reads.append(url)
+            return browser.Page(
+                text="Please solve the challenge below to continue",
+                title="", images=[], url=url, status=200,
+            )
+
+        monkeypatch.setattr(web.browser, "read_cold", walled)
+        self.install([])
+        web.web_search("zzz")
+        web.web_search("zzz again")
+        assert len(reads) == 1
+
+    def test_an_unusable_browser_leaves_the_honest_no_results(self, monkeypatch):
+        monkeypatch.setattr(
+            web.browser,
+            "read_cold",
+            lambda url, **kw: (_ for _ in ()).throw(browser.BrowserUnavailable("no chrome")),
+        )
+        self.install([])
+        result = web.web_search("zzz")
+        assert "No results" in result
+        assert not result.startswith("ERROR")
 
     def test_ddgs_still_says_it_the_way_we_match_it(self):
         """The canary on the string match above.
@@ -1072,3 +1197,60 @@ class TestStripTracking:
         must not produce a link the frontend then refuses."""
         cleaned = web.strip_tracking("https://www.youtube.com/watch?v=ORziFM6lseY&si=abc")
         assert web.video_id(cleaned) == "ORziFM6lseY"
+
+
+class TestTheSecondIndex:
+    """Reading a search engine's OWN results page, as nobody (#249)."""
+
+    def test_a_real_results_page_becomes_titles_urls_and_snippets(self):
+        raw, page = serp_page()
+        rows = web.serp_results(page, raw["url"])
+        assert len(rows) == 10
+        title, url, snippet = rows[0]
+        assert title == "Product Manager, Wear"
+        assert url.startswith("https://careers.google.com/jobs/results/")
+        assert "Bachelor's degree" in snippet
+
+    def test_a_result_is_listed_once_though_the_page_links_it_twice(self):
+        """Google renders every result a second time as its "translate this
+        page" link, on the same href."""
+        raw, page = serp_page()
+        urls = [url for _, url, _ in web.serp_results(page, raw["url"])]
+        assert len(urls) == len(set(urls))
+        assert "Tłumaczenie strony" not in [t for t, _, _ in web.serp_results(page, raw["url"])]
+
+    def test_the_engines_own_furniture_is_not_a_result(self):
+        raw, page = serp_page()
+        urls = [url for _, url, _ in web.serp_results(page, raw["url"])]
+        assert not [u for u in urls if "support.google.com" in u]
+        assert not [u for u in urls if "/search?" in u]
+
+    def test_a_subdomain_of_the_engine_is_still_a_result(self):
+        """The naive filter — "drop google.com" — throws away the answer.
+
+        The first real use of this was `site:careers.google.com`, where every
+        correct result is a google.com subdomain. The first version of the probe
+        that produced this fixture scored that perfect page as ZERO results."""
+        raw, page = serp_page()
+        urls = [url for _, url, _ in web.serp_results(page, raw["url"])]
+        assert all("careers.google.com" in u for u in urls)
+
+    def test_a_page_of_that_engines_own_pages_is_still_readable(self):
+        """`www.google.com/about/careers/...` is a real page and a real result;
+        only the SERP's own controls sit on `/search`."""
+        assert web._is_serp_chrome("https://www.google.com/search?q=x", "www.google.com")
+        assert not web._is_serp_chrome(
+            "https://www.google.com/about/careers/applications/", "www.google.com"
+        )
+        assert web._is_serp_chrome(
+            "https://policies.google.com/terms", "www.google.com"
+        )
+
+    def test_an_unmet_constraint_is_a_fact_about_the_results(self):
+        hits = [{"href": "https://example.com/a"}]
+        assert "site:python.org" in web.unmet_constraint("site:python.org x", hits)
+        assert web.unmet_constraint(
+            "site:python.org x", [{"href": "https://docs.python.org/3/"}]
+        ) == ""
+        assert "filetype:pdf" in web.unmet_constraint("filetype:pdf x", hits)
+        assert web.unmet_constraint("plain query", hits) == ""

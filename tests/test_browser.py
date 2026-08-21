@@ -1524,3 +1524,60 @@ class TestEveryActionActuallyRuns:
         self._run(owner, monkeypatch, "fill", text="pw", secret=True, submit=True)
         assert owner.pending_signin == "example.com"
         assert owner.pending_nav == owner.navigations
+
+
+class TestTheSearchProfile:
+    """The second identity, and the fence that keeps it at two (#249).
+
+    Reading a results page needs a browser but must never need the owner's
+    SESSION — a signed-in read is what `_login_gate` exists to stop, and a
+    profile that has signed into nothing answers that gate's question by
+    construction. Measured 2026-08-21: same IP, same minute, the signed-in
+    profile got 200 and full results while this one got 429 and `/sorry`. The
+    cost is real; carrying his session to dodge it is not the trade."""
+
+    def test_the_search_profile_is_never_the_owners(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        search = browser.search_profile_dir()
+        assert search != browser.profile_dir()
+        assert browser.profile_dir() not in search.parents
+        assert tmp_path in search.parents
+
+    def test_the_search_profile_is_not_in_the_git_backed_config_tree(
+        self, tmp_path, monkeypatch
+    ):
+        """The same reason the owner's profile is not: `~/.config/aish` is
+        auto-committed and pushed, and a profile directory is made of cookies."""
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        assert ".config" not in browser.search_profile_dir().parts
+
+    def test_a_cold_context_opens_the_search_profile_and_nothing_else(self):
+        import asyncio
+
+        owner = browser._Owner()
+        opened = []
+
+        async def drive():
+            owner._lock = asyncio.Lock()
+
+            async def fake_open(profile, **kwargs):
+                opened.append(profile)
+                return object()
+
+            owner._open = fake_open  # type: ignore[method-assign]
+            await owner.cold_context()
+            await owner.cold_context()  # a second caller reuses it
+
+        asyncio.run(drive())
+        assert opened == [browser.search_profile_dir()]
+        assert owner._context is None  # the owner's browser was never launched
+
+    def test_read_cold_is_the_only_thing_that_asks_for_the_cold_profile(
+        self, monkeypatch
+    ):
+        seen = {}
+        monkeypatch.setattr(
+            browser, "read", lambda url, **kw: seen.update(kw) or "page"
+        )
+        browser.read_cold("https://example.com")
+        assert seen["cold"] is True

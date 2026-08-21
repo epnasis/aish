@@ -16,6 +16,7 @@ import json
 import re
 import socket
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -763,29 +764,218 @@ NO_RESULTS = (
 )
 
 
+# ---------------------------------------------------------- the second index
+#
+# `web_search` has one index behind it, and one index has bad days. Reading a
+# search engine's OWN results page in the browser is the second — measured
+# against the alternatives on 2026-08-21 before it was built, because the
+# obvious choices are worse than they look: Bing IGNORES `site:` outright (it
+# answered `site:careers.google.com "product management" Poland` with a
+# dictionary definition of "product"), and DuckDuckGo's own page is the index
+# that already came back empty. Google was the only one that answered.
+#
+# It is a FALLBACK and not the front door, and that is measured too, not
+# squeamishness. Google costs ~3.2s against ddgs's ~1.2-2.6s, plus ~3.5s the
+# first time Chrome starts; it serialises through the one browser thread while
+# `web_search` otherwise fans out in parallel; and it WALLS — a fresh profile
+# doing ~25 automated queries in a day got `/sorry` and a 429. Put it in front
+# and a wall takes all search down. Put it behind and a wall costs nothing,
+# because the first index has already answered.
+SEARCH_ENGINE = "google.com"
+SEARCH_ENGINE_URL = "https://www.google.com/search?q={q}"
+
+# Google's own furniture, which appears in the link list exactly like a result.
+# Hosts, then the engine's own paths — SEPARATELY, because the naive filter
+# ("drop google.com") throws away the answer: the first real use of this was a
+# `site:careers.google.com` query whose every correct result is a google.com
+# subdomain, and `www.google.com/about/careers/...` is a real page too. What is
+# never a result is the SERP's own controls, and those are `/search` on the
+# engine's own host.
+_SERP_CHROME_HOSTS = {
+    "support.google.com",
+    "policies.google.com",
+    "accounts.google.com",
+    "translate.google.com",
+    "consent.google.com",
+}
+_SERP_CHROME_PATHS = ("/search", "/preferences", "/advanced_search", "/setprefs", "/url", "/")
+
+# A wall is not a transient failure, it is a decision the engine has made about
+# us, and it stands for a while. Without this every empty search would pay ~6s
+# of Chrome to be refused again. Cleared by time only — nothing else knows when
+# Google has changed its mind.
+SEARCH_WALL_COOLDOWN = 1800.0
+_search_walled_at = 0.0
+
+
+def _is_serp_chrome(href: str, engine_host: str) -> bool:
+    parts = urllib.parse.urlsplit(href)
+    host = (parts.hostname or "").lower()
+    if host in _SERP_CHROME_HOSTS:
+        return True
+    if host in (engine_host, engine_host.removeprefix("www.")):
+        return parts.path in _SERP_CHROME_PATHS
+    return False
+
+
+def serp_results(page: browser.Page, engine_url: str) -> list[tuple[str, str, str]]:
+    """(title, url, snippet) for each result on a rendered results page.
+
+    Built from the LINKS for title and URL, and from the rendered text for the
+    snippet, because that is where each of the three actually lives. A results
+    page is regular in a way an ordinary page is not: every result is a titled
+    anchor followed by its own block of text, so the snippet is found by
+    locating the title as a line and taking the block up to the next title.
+
+    Within that block the snippet is the LONGEST line, which is language-
+    independent on purpose — the alternative is matching the site name, the
+    breadcrumb and "Tłumaczenie strony" by wording, and the owner's results come
+    back in Polish. Every other line in the block is short by construction."""
+    engine_host = (urllib.parse.urlsplit(engine_url).hostname or "").lower()
+    ordered: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw_label, href in page.links:
+        label = " ".join(raw_label.split())
+        # Every result is listed twice, the second time as Google's "translate
+        # this page" link on the same href.
+        if not label or href in seen or _is_serp_chrome(href, engine_host):
+            continue
+        seen.add(href)
+        ordered.append((label, href))
+
+    lines = [ln.strip() for ln in page.text.splitlines()]
+    at = {}
+    for i, line in enumerate(lines):
+        for label, _ in ordered:
+            if line == label and label not in at:
+                at[label] = i
+    out: list[tuple[str, str, str]] = []
+    for n, (label, href) in enumerate(ordered):
+        start = at.get(label)
+        if start is None:
+            out.append((label, href, ""))
+            continue
+        following = [at[o] for o, _ in ordered[n + 1:] if at.get(o, -1) > start]
+        end = min(following) if following else len(lines)
+        block = [ln for ln in lines[start + 1:end] if ln]
+        snippet = max(block, key=len) if block else ""
+        out.append((label, href, snippet[:SNIPPET_MAX_CHARS]))
+    return out
+
+
+def search_page(query: str) -> tuple[list[tuple[str, str, str]], str]:
+    """Ask the engine directly, as nobody. `([], why)` when that was not possible.
+
+    The reason is returned rather than swallowed for the same reason
+    `_browser_read` returns one: "no second index" and "the second index refused
+    us" call for different things from the model, and a bare empty list says
+    neither."""
+    global _search_walled_at
+    if time.monotonic() - _search_walled_at < SEARCH_WALL_COOLDOWN:
+        return [], f"{SEARCH_ENGINE} walled aish's browser a moment ago"
+    url = SEARCH_ENGINE_URL.format(q=urllib.parse.quote_plus(query))
+    try:
+        page = browser.read_cold(url)
+    except browser.BrowserUnavailable as exc:
+        return [], f"no browser available ({exc})"
+    except Exception as exc:  # noqa: BLE001 — a launch/nav failure falls back
+        return [], f"the browser could not load it ({type(exc).__name__})"
+    if browser.is_challenge(page.text or "", page.status):
+        # Handing a `/sorry` page back as results is the laundering failure the
+        # challenge detector exists to prevent — one host over.
+        _search_walled_at = time.monotonic()
+        return [], f"{SEARCH_ENGINE} served a verification wall instead of results"
+    return serp_results(page, url), ""
+
+
+# What a result set that came from the second index is labelled with. aish's own
+# words about PROVENANCE and about IDENTITY, the same pair `read_url` states
+# when it changes either: the model must be able to say where a URL came from,
+# and "signed into nothing" is the fact that makes this read gate-free.
+SECOND_INDEX_NOTE = (
+    "[aish: {why}, so these results come from {engine} instead, read in aish's "
+    "own browser signed into nothing.]\n"
+)
+
+
+def _site_filters(query: str) -> list[str]:
+    return [m.group(1).lower().strip(".") for m in _SITE_OPERATOR.finditer(query)]
+
+
+_SITE_OPERATOR = re.compile(r"\bsite:([^\s\"']+)", re.I)
+_FILETYPE_OPERATOR = re.compile(r"\bfiletype:([A-Za-z0-9]+)")
+
+
+def unmet_constraint(query: str, hits: list[dict]) -> str:
+    """The thing this query ASKED FOR that these results do not satisfy, or "".
+
+    Count is not quality, and an index that quietly ignores an operator returns
+    a full five results that answer a different question — which no
+    "did it come back empty?" test can see. `site:` and `filetype:` are the two
+    constraints a query states in a form code can CHECK against the URLs that
+    came back, so they are the two checked. Nothing here guesses at relevance:
+    an unmet constraint is a fact about the results, not an opinion of them."""
+    urls = [str(h.get("href") or h.get("url") or "") for h in hits]
+    for site in _site_filters(query):
+        hosts = [(urllib.parse.urlsplit(u).hostname or "").lower() for u in urls]
+        if not any(h == site or h.endswith("." + site) for h in hosts):
+            return f"the first index ignored `site:{site}`"
+    for match in _FILETYPE_OPERATOR.finditer(query):
+        want = "." + match.group(1).lower()
+        if not any(urllib.parse.urlsplit(u).path.lower().endswith(want) for u in urls):
+            return f"the first index ignored `filetype:{match.group(1)}`"
+    return ""
+
+
+def _numbered(rows: list[tuple[str, str, str]]) -> str:
+    lines = [
+        f"{i}. {title or '(untitled)'}\n   {url}\n   {snippet}"
+        for i, (title, url, snippet) in enumerate(rows, 1)
+    ]
+    lines.append("[call read_url on the most promising URL to read the page]")
+    return truncate("\n".join(lines))
+
+
 def web_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> str:
     query = query.strip()
     if not query:
         return "ERROR: empty search query"
     from ddgs import DDGS  # deferred: keeps aish startup fast when unused
 
+    failure = ""
     try:
         results = DDGS().text(query, max_results=max_results)
     except Exception as exc:  # noqa: BLE001 — network/rate-limit errors are routine
-        if not found_nothing(exc):
-            return f"ERROR: web search failed ({exc}) — retry once, or answer without the web"
         results = []
-    if not results:
-        return NO_RESULTS.format(query=query)
+        failure = "" if found_nothing(exc) else f"the first index failed ({exc})"
 
-    lines = []
-    for i, hit in enumerate(results, 1):
-        title = " ".join((hit.get("title") or "(untitled)").split())
-        url = hit.get("href") or hit.get("url") or ""
-        snippet = " ".join((hit.get("body") or "").split())[:SNIPPET_MAX_CHARS]
-        lines.append(f"{i}. {title}\n   {url}\n   {snippet}")
-    lines.append("[call read_url on the most promising URL to read the page]")
-    return truncate("\n".join(lines))
+    rows = [
+        (
+            " ".join((hit.get("title") or "").split()),
+            hit.get("href") or hit.get("url") or "",
+            " ".join((hit.get("body") or "").split())[:SNIPPET_MAX_CHARS],
+        )
+        for hit in results
+    ]
+    # Three reasons to ask the second index, and only the first is about count:
+    # nothing came back, the index errored, or what came back does not satisfy
+    # what the query asked for (#249).
+    why = failure or ("" if results else "the first index found nothing")
+    why = why or unmet_constraint(query, results)
+    if why:
+        better, blocked = search_page(query)
+        if better:
+            return SECOND_INDEX_NOTE.format(why=why, engine=SEARCH_ENGINE) + _numbered(
+                better[:max_results]
+            )
+        if not rows:
+            if failure:
+                return (
+                    f"ERROR: web search failed ({failure}; {blocked}) — retry "
+                    "once, or answer without the web"
+                )
+            return NO_RESULTS.format(query=query)
+    return _numbered(rows)
 
 
 # Hosts that have needed the browser in THIS process. A site that blocks a
