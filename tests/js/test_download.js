@@ -129,11 +129,12 @@ const okResponse = (body = "BYTES") => ({
     const els = {};
     const { fakeElement } = require("./harness");
     for (const id of ["preview", "preview-img", "preview-name", "preview-count",
-                      "preview-status", "preview-save"]) {
+                      "preview-status", "preview-save", "preview-share"]) {
       els[id] = fakeElement(id === "preview-img" ? "img" : "div");
     }
     els.preview.hidden = true;
     els["preview-img"].removeAttribute = function (attr) { delete this[attr]; };
+    let canShare = true;
     const sandbox = {
       $: (id) => els[id] || null,
       token: "t0ken",
@@ -143,6 +144,7 @@ const okResponse = (body = "BYTES") => ({
       clearTimeout: () => {},
       previewReset: () => {},
       previewSnapshot: () => {},
+      canShareFiles: () => canShare,
     };
     vm.createContext(sandbox);
     vm.runInContext(
@@ -153,6 +155,8 @@ const okResponse = (body = "BYTES") => ({
     sandbox.previewAdoptPages("/u/uploads/guide.pdf", "guide.pdf", 9);
     ok("the Save button is offered for a document", els["preview-save"].hidden === false);
     ok("…naming what it would save", els["preview-save"].title === "Save guide.pdf");
+    ok("…and Share rides along with it, on the same file",
+      els["preview-share"].hidden === false && els["preview-share"].title === "Share guide.pdf");
     sandbox.previewShow(6);
     ok("…and on page 7 it still saves the DOCUMENT, not the page",
       sandbox.previewSaveTarget().file === "/u/uploads/guide.pdf");
@@ -161,8 +165,15 @@ const okResponse = (body = "BYTES") => ({
     // than a button that would 404.
     sandbox.openPreview("/file?path=/tmp/x.png", "x.png");
     ok("a picture with no file behind it hides the button",
-      els["preview-save"].hidden === true);
+      els["preview-save"].hidden === true && els["preview-share"].hidden === true);
     ok("…and has nothing to hand over either", sandbox.previewSaveTarget() === null);
+
+    // Where the browser cannot hand a FILE to a share sheet, Save is still the
+    // whole answer — a share button there opens a sheet with nothing in it.
+    canShare = false;
+    sandbox.openPdfPreview("/u/uploads/guide.pdf", "guide.pdf");
+    ok("a browser that cannot share files still saves them",
+      els["preview-save"].hidden === false && els["preview-share"].hidden === true);
   }
 
   report("test_download.js");
