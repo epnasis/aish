@@ -376,7 +376,13 @@ thousands of entries without bloating the context.
 ## The safety model
 
 1. **Approval gate.** Every proposed command is shown verbatim and waits for
-   `y` / `n` / `a`lways / `s`ession / `e`dit. `a` saves the command's *prefix*
+   `y` / `n` / `a`lways / `s`ession / `e`dit. The prompt (and the web card) also
+   shows **why** — what aish said it was doing on the step that proposed the
+   action, quoted whole and labelled as its claim, so you decide on a stated
+   reason instead of reverse-engineering one from the command. When it said
+   nothing, the card says that too. The reason is recorded alongside your
+   decision, so `aish explain` can be asked what was claimed, not just what was
+   allowed. `a` saves the command's *prefix*
    (e.g. `gh issue create`, never a blanket `gh`) to a persistent allowlist; `s`
    allows it for this chat only — `/new`, `/clear` or resuming another chat
    forgets it, and it is never written to disk.

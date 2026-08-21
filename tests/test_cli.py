@@ -3,7 +3,7 @@
 import builtins
 
 from aish.approval import load_prefixes
-from aish.cli import make_approver, make_read_approver
+from aish.cli import make_approver, make_read_approver, make_tool_approver
 
 
 def scripted_input(monkeypatch, answers):
@@ -1559,3 +1559,53 @@ class TestLaunchResume:
         reaches the banner and then exits the REPL on end-of-input."""
         self.launch(monkeypatch, tmp_path, [])
         assert "model qwen3.6:35b-a3b" in capsys.readouterr().out
+
+
+# --- The gate says why (#252) ---------------------------------------------
+#
+# The terminal and the web card gate identically, so the terminal shows the
+# same reason. Printed WHOLE: the reason in the incident is the second
+# sentence, and every one-line summary of that narration stops before it.
+INCIDENT_INTENT = (
+    'I am going to open the "Faktury i platnosci" page in the browser again. '
+    "This will let us see if there is any credit, overpayment, or adjusting "
+    "transaction on the account balance that explains why the portal asks for "
+    "354.56 while the PDF invoice itself shows 356.46."
+)
+
+
+def test_the_command_prompt_prints_the_reason(tmp_path, monkeypatch, capsys):
+    approve = make_approver(
+        False, tmp_path / "allow.txt", None, get_intent=lambda: INCIDENT_INTENT
+    )
+    scripted_input(monkeypatch, ["y"])
+    approve("touch note.txt")
+    printed = capsys.readouterr().out
+    assert "aish says" in printed.lower()
+    # The whole reason, not its first sentence.
+    assert "credit, overpayment" in printed
+    assert "356.46" in printed
+
+
+def test_the_tool_prompt_prints_it_too(tmp_path, monkeypatch, capsys):
+    approve_tool = make_tool_approver(None, get_intent=lambda: INCIDENT_INTENT)
+    scripted_input(monkeypatch, ["y"])
+    assert approve_tool("browse", {"url": "https://example.invalid/"}) is True
+    assert "credit, overpayment" in capsys.readouterr().out
+
+
+def test_a_silent_step_prints_no_empty_box(tmp_path, monkeypatch, capsys):
+    """No reason means nothing extra on the prompt — a labelled blank line is
+    noise in a terminal, where the missing line is itself legible."""
+    approve = make_approver(False, tmp_path / "allow.txt", None, get_intent=lambda: "")
+    scripted_input(monkeypatch, ["y"])
+    approve("touch note.txt")
+    assert "aish says" not in capsys.readouterr().out.lower()
+
+
+def test_an_unwired_approver_still_works(tmp_path, monkeypatch):
+    """get_intent is late-bound and optional — the CLI builds approvers before
+    the agent exists, and every existing caller passes nothing."""
+    approve = make_approver(False, tmp_path / "allow.txt", None)
+    scripted_input(monkeypatch, ["y"])
+    assert approve("touch note.txt") == "touch note.txt"

@@ -30,6 +30,10 @@
 
 ---
 
+## The gate says why (#252)
+
+`print_intent` puts the model's stated reason above the command and tool prompts, dimmed and attributed, before the y/N line. The terminal and the web card gate identically, so they show the same reason — and it is printed whole for the same reason the card renders it whole: the one-line snippet the trace keeps cuts the sentence that motivated the feature at an abbreviation and loses all of it. The rationale, the incident, and why nothing tells the model where this lands are in `docs/agent-core.md`.
+
 ## Models
 
 `available_models` merges local Ollama models with the cloud catalog; `cloud_model_catalog` caches provider API results for `CATALOG_TTL` and will only wait `CATALOG_FETCH_WAIT` for them, so the picker never hangs on a slow network. `rank_models` orders them, `switch_model` swaps the backend live, `model_spec` parses the `--model` string, and `save_default_model` persists the choice. `TestModels`, `TestModelPicker`, `TestModelAndJobs`, `TestModelSave`.

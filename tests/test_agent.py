@@ -7669,6 +7669,186 @@ class TestAttachmentFormsAcrossTheSeam:
         assert not any("dog.png" in c for c in kept)
 
 
+# The step that was refused in the incident behind #252, with the owner's
+# personal details taken out. Two sentences: the first names the ACTION, the
+# second is the entire reason — which is what makes it the right fixture.
+INCIDENT_NARRATION = (
+    'I am going to open the "Faktury i platnosci" page in the browser again. '
+    "This will let us see if there is any credit, overpayment, or adjusting "
+    "transaction on the account balance that explains why the portal asks for "
+    "354.56 while the PDF invoice itself shows 356.46."
+)
+
+
+class TestApprovalIntent:
+    """#252. The gate said WHAT and never WHY, so the owner reverse-engineered
+    the purpose from a command. He guessed "it wants to re-download the file it
+    already has", refused a legitimate verification step, and the answer that
+    followed was invented in its place.
+
+    The words that would have prevented it existed the whole time. #212 caps
+    the CHAT at one narration per task, so the second step's prose — the one
+    holding the reason — went to the log and nowhere else. These pin that the
+    cap keeps its scope and the gate gets the words anyway."""
+
+    def _run(self, responses, task="why is there a difference?"):
+        """Capture what the approver could see at the moment it was asked."""
+        seen: list[str] = []
+        holder: list = []
+
+        def approve(command):
+            seen.append(holder[0].turn_intent())
+            return command
+
+        agent, _ = make_agent(responses, approve=approve)
+        holder.append(agent)
+        answer = agent.run_task(task)
+        return agent, seen, answer
+
+    def test_the_gate_sees_the_step_the_chat_dropped(self):
+        _agent, seen, _ = self._run(
+            [
+                model_says("I will read the downloaded PDF invoice.",
+                           tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says(INCIDENT_NARRATION,
+                           tool_calls=[tool_call("run_command", command="echo two")]),
+                model_says("done"),
+            ]
+        )
+        assert seen[0] == "I will read the downloaded PDF invoice."
+        # THE test. Step two is where the chat goes quiet and where the owner
+        # was left guessing; its reason has to reach the card intact.
+        assert seen[1] == INCIDENT_NARRATION
+
+    def test_the_reason_is_the_second_sentence_the_trace_snippet_loses(self):
+        """Why the card cannot reuse the status line's text. `_status_snippet`
+        keeps the first sentence at 120 characters — on this narration it stops
+        at the action and carries none of the reason, so a snippet on the card
+        would have changed nothing about the incident."""
+        _agent, seen, _ = self._run(
+            [
+                model_says(INCIDENT_NARRATION,
+                           tool_calls=[tool_call("run_command", command="echo two")]),
+                model_says("done"),
+            ]
+        )
+        assert "credit, overpayment" in seen[0]
+        assert "356.46" in seen[0]
+        snippet = agent_module._status_snippet(INCIDENT_NARRATION)
+        assert "credit" not in snippet, (
+            "the trace snippet now carries the reason — re-check whether the "
+            "card still needs its own copy"
+        )
+
+    def test_a_silent_step_clears_the_previous_reason(self):
+        """Staleness is the dangerous failure: a plausible reason belonging to
+        the PREVIOUS action is worse than none, because the owner cannot tell.
+        The stash is written on every model response, so silence clears it and
+        the card falls back to saying so."""
+        _agent, seen, _ = self._run(
+            [
+                model_says("I will read the invoice.",
+                           tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says("", tool_calls=[tool_call("run_command", command="echo two")]),
+                model_says("done"),
+            ]
+        )
+        assert seen[0] == "I will read the invoice."
+        assert seen[1] == ""
+
+    def test_one_reason_covers_the_calls_of_its_own_step(self):
+        """A step may propose several actions under one narration. Each card
+        gets the same turn-level text rather than none — hiding it on the
+        second card hides information — and the label on the card is what keeps
+        that honest."""
+        _agent, seen, _ = self._run(
+            [
+                model_says(
+                    "I will check both files.",
+                    tool_calls=[
+                        tool_call("run_command", command="echo one"),
+                        tool_call("run_command", command="echo two"),
+                    ],
+                ),
+                model_says("done"),
+            ]
+        )
+        assert seen == ["I will check both files.", "I will check both files."]
+
+    def test_a_reason_never_leaks_into_the_next_task(self):
+        seen: list[str] = []
+        holder: list = []
+
+        def approve(command):
+            seen.append(holder[0].turn_intent())
+            return command
+
+        agent, _ = make_agent(
+            [
+                model_says("I will read the invoice.",
+                           tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says("done"),
+                model_says("", tool_calls=[tool_call("run_command", command="echo two")]),
+                model_says("done again"),
+            ],
+            approve=approve,
+        )
+        holder.append(agent)
+        agent.run_task("first")
+        agent.run_task("second")
+        assert seen == ["I will read the invoice.", ""]
+
+    def test_a_reworked_action_carries_the_reworked_reason(self):
+        """The incident's own continuation. An approve-with-comment HOLDS the
+        action and sends the model back to rework it (#81); the re-proposed
+        action gets its own card, and the reason on it must be what the model
+        says NOW — the rework addressing the comment — not the reason the owner
+        already objected to."""
+        seen: list[str] = []
+        holder: list = []
+
+        def approve(command):
+            said = holder[0].turn_intent()
+            seen.append(said)
+            if len(seen) == 1:
+                return Approved("You already have the file!!!!")
+            return command
+
+        agent, _ = make_agent(
+            [
+                model_says(INCIDENT_NARRATION,
+                           tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says("You are right that I have the file — I will look at "
+                           "the balance on the portal instead.",
+                           tool_calls=[tool_call("run_command", command="echo two")]),
+                model_says("done"),
+            ],
+            approve=approve,
+        )
+        holder.append(agent)
+        agent.run_task("why is there a difference?")
+        assert seen[0] == INCIDENT_NARRATION
+        assert seen[1].startswith("You are right that I have the file")
+
+    def test_the_chat_cap_is_untouched(self):
+        """The gate reads the same words the chat suppresses; it must not
+        UN-suppress them. Nineteen "I will search…" bubbles on one question is
+        what the cap exists for (#212)."""
+        delivered: list[str] = []
+        agent, _ = make_agent(
+            [
+                model_says("I will read the invoice.",
+                           tool_calls=[tool_call("run_command", command="echo one")]),
+                model_says(INCIDENT_NARRATION,
+                           tool_calls=[tool_call("run_command", command="echo two")]),
+                model_says("done"),
+            ],
+            on_delivered=delivered.append,
+        )
+        agent.run_task("why is there a difference?")
+        assert delivered == ["I will read the invoice."]
+
+
 class TestNarration:
     """#212. A long task used to be a spinner: the model's own commentary was
     captured, cut to one sentence at 120 characters for the trace header, and

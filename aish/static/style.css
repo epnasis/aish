@@ -1229,6 +1229,14 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .card-fold > summary::before { content: "▸ "; }
 .card-fold[open] > summary::before { content: "▾ "; }
 .card-note { margin: 0; padding: 12px 14px; border-bottom: 0.5px solid var(--sep); font-size: 14.5px; line-height: 1.5; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The model's stated reason (#252). Deliberately NOT the .tool-preview look:
+   that box is blue-accented ground truth the tool computed, this is a claim the
+   model made, and the label + neutral rule keep the two readable as different
+   kinds of thing. */
+.card-intent { margin: 10px 0 0; padding: 9px 11px; background: rgba(127,127,127,0.06); border-left: 3px solid var(--sep, rgba(127,127,127,0.35)); border-radius: 6px; }
+.card-intent-label { margin-bottom: 3px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--dim); }
+.card-intent-text { font-size: 13.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.card-intent.empty .card-intent-text { color: var(--dim); font-style: italic; }
 .tool-preview { margin: 10px 0 0; padding: 9px 11px; background: rgba(127,127,127,0.10); border-left: 3px solid var(--blue, #0a84ff); border-radius: 6px; font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
 .tool-args { margin: 10px 0 0; display: flex; flex-direction: column; gap: 6px; }
 .tool-args.secondary { margin-top: 8px; opacity: 0.72; }

@@ -206,6 +206,13 @@ class ClaudeMaxAgent:
     def trust_root(self, target: str) -> str:
         return self.inner.trust_root(target)
 
+    def turn_intent(self) -> str:
+        # The approvers read this off whichever agent the session holds (#252),
+        # and this class delegates by hand — an omission here is not a missing
+        # reason on the card, it is an AttributeError inside the gate on every
+        # approval this backend ever shows.
+        return self.inner.turn_intent()
+
     def restore_workspace(self, cwd: str | None, trusted: list[str]) -> None:
         self.inner.restore_workspace(cwd, trusted)
 
@@ -464,6 +471,15 @@ class ClaudeMaxAgent:
                         # record BEFORE the tool's trace steps, so a cold
                         # reload replays the narration above the work it
                         # announced instead of below it.
+                        #
+                        # The gate's copy is taken FIRST and outside the
+                        # one-bubble cap (#252): narration suppressed from the
+                        # chat must still reach the card of the action it
+                        # explains. `pending` is emptied by close_pending, so
+                        # a following tool-only message notes an empty intent
+                        # and clears this one — the same self-clearing the
+                        # native loop gets from assigning on every response.
+                        self.inner.note_intent(pending)
                         close_pending()
                 elif isinstance(message, sdk.ResultMessage):
                     self._session_id = message.session_id or self._session_id

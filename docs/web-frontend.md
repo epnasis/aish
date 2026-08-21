@@ -46,6 +46,18 @@ Three properties are load-bearing, and each is pinned:
 - **It is keyed by the turn id `#202` already mints** for removal — stable live and on replay, so no second identity scheme. The answer element carries it in `data-turn`, populated from `currentTurnId`, which `addUserMsg` sets on both the live and the replay path exactly as `prompt` and `answerTiming` already are.
 - **Ratings replay LAST.** `reconstruct_events` defers them to the end of the stream: a rating decorates a turn rather than being one, it is applied by id rather than position, and it can be written long after the turn it names. In file order the frontend would receive a decoration for a turn it has not rendered yet. `TestRateAnswer`.
 
+### The card says why, not just what (#252)
+
+A card showed the action and nothing else, so the owner reverse-engineered its purpose from a tool name and its arguments. One wrong guess held a legitimate verification step and left a fabricated answer in its place (`docs/agent-core.md` for the incident and the agent half). `intentBlock` renders the model's own words for the step, on the `tool` and `command` cards, from the request's `intent` key.
+
+- **Its own box, never the preview.** `.tool-preview` is ground truth the tool computed (#157); this is the model's word for it. They get different visual registers — a labelled, neutral-ruled quote versus the blue-accented fact — because one box for both would lend the claim the authority of the fact.
+- **Attributed.** The label says *aish says*, so the card reads as quoting a claim rather than stating a reason.
+- **Facts first.** The command (or the args) precede it and the comment field follows it: the owner sees what will happen, then what it is claimed for, then the box that acts on the answer — the comment being how a misread became a refusal in the first place.
+- **Absence is rendered.** No reason produces *"It gave no reason for this step"*, not a missing box. That tells the owner he is back to guessing, and it is what makes the silence visible if the model ever stops narrating — narration exists because of an installed rule, not a prompt, and measured 0/0/0 narrated turns with that rule off.
+- **Never truncated.** The 120-character snippet the trace already keeps cuts the incident's sentence at an abbreviation and drops the entire reason, which is exactly why the card needs its own copy.
+
+`tests/js/test_card_intent.js`.
+
 ### The approval card for a rule shows what it MEANS
 
 A write approval card renders the plan's diff. For a rule that diff is YAML **the owner did not write** — the model named field values and the harness rendered the file — so approving the diff would mean approving an implementation detail he has no reason to audit. The card therefore carries an optional `note`, the compiled meaning in English (*when this, then that*) plus which of his recent turns the rule would have bound, and it renders **above** the diff rather than instead of it: the YAML stays one glance away for anyone who wants it. Set as text, never markup — the words are the owner's own description coming back to him. An ordinary file write sends no note and is unchanged, with no empty box. `tests/js/test_rule_card_note.js`.

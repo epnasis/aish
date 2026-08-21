@@ -700,6 +700,62 @@ class TestQuickReplyNet:
             assert "tell me more" not in done["result"].lower()
 
 
+class TestApprovalIntentEndToEnd:
+    """The wiring, through the REAL app: agent -> approver -> card -> log.
+
+    Unit-testing the approvers against a fake log missed that the web server
+    reaches the session log through `cli.LogRef`, not `SessionLog` directly —
+    so widening only the inner signature turned every gated command into
+    `TypeError: LogRef.command() takes 3 positional arguments but 4 were
+    given`, surfaced to the model as a failed tool and to the owner as nothing
+    at all. Both halves were green. Driving the real page is what found it, and
+    this is that check as a test."""
+
+    def _intent_records(self, app_env):
+        records = []
+        for log in sorted((app_env["state_dir"]).glob("session-*.jsonl")):
+            for line in log.read_text(encoding="utf-8").splitlines():
+                record = json.loads(line)
+                if record.get("kind") == "command":
+                    records.append(record)
+        return records
+
+    def test_the_reason_rides_the_card_and_lands_in_the_log(self, app_env, tmp_path):
+        marker = tmp_path / "checked"
+        client, _chat = make_client(app_env, [
+            model_says(INCIDENT_INTENT,
+                       tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+            model_says("finished"),
+        ])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "why the difference?"})
+            request = recv_until(ws, "approval_request")
+            assert request["intent"] == INCIDENT_INTENT
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+            assert marker.exists(), "the approved command never ran"
+        [record] = self._intent_records(app_env)
+        assert record["decision"] == "approved"
+        assert record["intent"] == INCIDENT_INTENT
+
+    def test_a_silent_step_records_no_reason_at_all(self, app_env, tmp_path):
+        """Absent, not empty: the key's absence is what keeps an older log
+        replaying byte-identically."""
+        marker = tmp_path / "quiet"
+        client, _chat = make_client(app_env, [
+            model_says(tool_calls=[tool_call("run_command", command=f"touch {marker}")]),
+            model_says("finished"),
+        ])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "task", "text": "just do it"})
+            request = recv_until(ws, "approval_request")
+            assert "intent" not in request
+            ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
+            recv_until(ws, "done")
+        [record] = self._intent_records(app_env)
+        assert "intent" not in record
+
+
 class TestCommandApproval:
     def responses(self, command):
         return [
@@ -5900,8 +5956,100 @@ class _FakeLog:
     def __init__(self):
         self.records: list = []
 
-    def command(self, command, decision):
-        self.records.append((command, decision))
+    def command(self, command, decision, intent=""):
+        self.records.append((command, decision, intent))
+
+
+# The step refused in the incident behind #252, personal details removed. The
+# reason is the SECOND sentence, which is what kills every first-sentence
+# summary of it (see tests/test_agent.py::TestApprovalIntent).
+INCIDENT_INTENT = (
+    'I am going to open the "Faktury i platnosci" page in the browser again. '
+    "This will let us see if there is any credit, overpayment, or adjusting "
+    "transaction on the account balance that explains why the portal asks for "
+    "354.56 while the PDF invoice itself shows 356.46."
+)
+
+
+class TestApprovalIntentOnTheCard:
+    """#252. The card carries the model's stated reason beside the action, and
+    the decision record keeps it — so a reason that does not match what it rode
+    on is a queryable artifact rather than something reconstructed from raw
+    JSONL, which is what the incident actually cost."""
+
+    def _approvers(self, intent="", answer=None):
+        bridge, log = _FakeBridge(answer), _FakeLog()
+        approvers = server_module.make_web_approvers(
+            bridge, log, Path("/x/allow"), Path("/x/deny"),
+            ask_all=True, get_scope=lambda: (".", []),
+            trust_dir=lambda p: "", get_intent=lambda: intent,
+        )
+        approve, _write, _read, approve_tool, _import = approvers
+        return approve, approve_tool, bridge, log
+
+    def test_a_tool_card_carries_the_reason_whole(self):
+        _approve, approve_tool, bridge, _log = self._approvers(INCIDENT_INTENT)
+        approve_tool("browse", {"url": "https://example.invalid/invoices"})
+        [request] = bridge.asked
+        assert request["intent"] == INCIDENT_INTENT
+        assert "credit, overpayment" in request["intent"], "the reason was cut"
+
+    def test_a_command_card_carries_it_too(self):
+        approve, _tool, bridge, _log = self._approvers(INCIDENT_INTENT)
+        approve("grep -R nadplata .")
+        [request] = bridge.asked
+        assert request["intent"] == INCIDENT_INTENT
+
+    def test_the_reason_is_its_own_key_never_the_preview(self):
+        """`preview` is ground truth the tool computed (#157); the reason is
+        the model's word for it. One slot for both would lend the claim the
+        authority of the fact."""
+        _approve, approve_tool, bridge, _log = self._approvers(INCIDENT_INTENT)
+        approve_tool("remember", {"note": "a fact"}, "preview text")
+        [request] = bridge.asked
+        assert request["preview"] == "preview text"
+        assert request["intent"] == INCIDENT_INTENT
+
+    def test_no_reason_means_no_key(self):
+        """Absence is rendered client-side, not wired as an empty string — the
+        trace contract's byte-identical replay depends on the key being absent
+        when there is nothing to say."""
+        _approve, approve_tool, bridge, _log = self._approvers("")
+        approve_tool("browse", {"url": "https://example.invalid/"})
+        assert "intent" not in bridge.asked[0]
+
+    def test_the_decision_record_keeps_what_was_shown(self):
+        for action, expected in (("approve", "approved"), ("deny", "denied")):
+            _approve, approve_tool, _bridge, log = self._approvers(
+                INCIDENT_INTENT, answer={"action": action}
+            )
+            approve_tool("browse", {"url": "https://example.invalid/"})
+            assert log.records[-1][1] == expected
+            assert log.records[-1][2] == INCIDENT_INTENT
+
+    def test_an_auto_approved_command_records_its_reason_too(self):
+        """Nothing is shown (no card), but the audit trail should still be able
+        to say what the model claimed it was doing when the gate let it past."""
+        bridge, log = _FakeBridge(), _FakeLog()
+        approve, *_ = server_module.make_web_approvers(
+            bridge, log, Path("/x/allow"), Path("/x/deny"),
+            ask_all=False, get_scope=lambda: (str(Path.cwd()), [Path.cwd()]),
+            trust_dir=lambda p: "", get_intent=lambda: INCIDENT_INTENT,
+        )
+        approve("ls")
+        assert bridge.asked == []  # auto-approved, no human asked
+        assert log.records[-1][1] == "auto"
+        assert log.records[-1][2] == INCIDENT_INTENT
+
+    def test_the_reason_never_leaves_the_machine_in_a_push(self):
+        """The push body transits a third-party service, and narration carries
+        far more incidental detail than the arguments do — the very step this
+        exists for named a home address."""
+        _approve, approve_tool, bridge, _log = self._approvers(INCIDENT_INTENT)
+        approve_tool("browse", {"url": "https://example.invalid/"})
+        body = server_module._describe_hold(bridge.asked[0])
+        assert INCIDENT_INTENT not in body
+        assert "credit" not in body
 
 
 class TestTriggeredCapabilityPolicy:
