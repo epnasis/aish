@@ -358,6 +358,19 @@ class TestChallengeDetection:
         ):
             assert browser.is_challenge(wording, 200) is True, wording
 
+    def test_a_search_engine_wall_is_caught_too(self):
+        """Neither search engine says "captcha", and a search fallback reads
+        exactly these two hosts.
+
+        Bing's is measured, not imagined: 105 characters with a 200 on
+        2026-08-21, scored as content by the detector as it then stood."""
+        for wording in (
+            "One last step Please solve the challenge below to continue",
+            "Our systems have detected unusual traffic from your computer network.",
+            "Nietypowy ruch z Twojej sieci komputerowej",
+        ):
+            assert browser.is_challenge(wording, 200) is True, wording
+
     def test_a_short_ordinary_page_is_not_a_challenge(self):
         """A brief article must not be discarded just for being brief."""
         assert browser.is_challenge("A short but real note about hammocks.", 200) is False

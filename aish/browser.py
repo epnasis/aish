@@ -167,6 +167,16 @@ _CHALLENGE_MARKERS = (
     "access to this page has been denied",
     "zweryfikuj, że jesteś człowiekiem",
     "potwierdź, że nie jesteś robotem",
+    # The two SEARCH ENGINES word it their own way, and neither says captcha.
+    # Measured 2026-08-21 while probing whether the browser could read a
+    # results page: bing.com served 105 characters — "One last step. Please
+    # solve the challenge below to continue" — with a 200, and `is_challenge`
+    # called it CONTENT. Google's /sorry page is the same shape, and it is the
+    # one that matters: the day it decides against us, a search fallback would
+    # hand the model a wall as if it were the results.
+    "solve the challenge",
+    "unusual traffic from your computer network",
+    "nietypowy ruch z twojej sieci",
 )
 _BLOCK_STATUS = (401, 403, 405, 429, 503)
 
