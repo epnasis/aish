@@ -223,7 +223,14 @@ function offlineSearchText(events) {
       }
     }
   }
-  return parts.join("\n").slice(0, OFFLINE_SEARCH_CHARS).toLowerCase();
+  // In the case it was WRITTEN in: a row now quotes the line it matched on, and
+  // an answer rendered in lower case would be the search's machinery on screen.
+  // Matching lower-cases it where it compares. Metas written before this hold
+  // the old lower-cased text; they still rank, and heal on their next sync.
+  // " · " and not a newline: it survives the whitespace flatten an excerpt does,
+  // so a quoted match never reads as one sentence spoken by nobody — and a
+  // phrase cannot match across the gap between a question and its answer.
+  return parts.join(" · ").slice(0, OFFLINE_SEARCH_CHARS);
 }
 // [OFFLINE-INDEX-END]
 
@@ -334,14 +341,64 @@ function lcsRatio(a, b) {
   return (2 * prev[b.length]) / (a.length + b.length);
 }
 
+// One flattened line of context around the first query-word hit, or "" when the
+// chat holds none of them (a title or model match, or a closest-chats row) —
+// SessionLog._snippet / _match_row. A search row whose preview is the chat's
+// LAST message says nothing about why the chat is in the list, which on screen
+// is indistinguishable from the search being wrong (#266).
+const OFFLINE_SNIPPET_CHARS = 90;
+
+function offlineMatchSnippet(text, words) {
+  const flat = (text || "").split(/\s+/).filter(Boolean).join(" ");
+  const flatCf = flat.toLowerCase();
+  let pos = -1;
+  for (const word of words) {
+    const at = flatCf.indexOf(word);
+    if (at >= 0 && (pos < 0 || at < pos)) pos = at;
+  }
+  if (pos < 0) return "";
+  const start = Math.max(0, pos - Math.floor(OFFLINE_SNIPPET_CHARS / 3));
+  const end = Math.min(flat.length, start + OFFLINE_SNIPPET_CHARS);
+  return (start > 0 ? "…" : "") + flat.slice(start, end) + (end < flat.length ? "…" : "");
+}
+
+// The line to show under one row's title — SessionLog._match_row. Quote only
+// what the row is NOT already showing: a hit inside the chat's own name is on
+// screen already, so when the name is the opening of the conversation only a hit
+// past it earns a line, and a sole mention there leaves the preview alone.
+function offlineMatchLine(meta, words) {
+  let text = meta.text || "";
+  const title = (meta.title || "").replace(/…+$/, "");
+  if (title && text.startsWith(title)) {
+    text = text.slice(title.length);
+    if (text.startsWith(" · ")) text = text.slice(3);
+  }
+  return offlineMatchSnippet(text, words);
+}
+
+// The ranked rows alone, for callers with nowhere to say how they were found —
+// SessionLog.rank.
 function offlineRank(metas, query) {
+  return offlineRanked(metas, query).sessions;
+}
+
+// The ranked rows AND what kind of answer they are: `approximate` means nothing
+// matched literally, so the rows will not contain the query and the list has to
+// say so — SessionLog.ranked.
+function offlineRanked(metas, query) {
   const queryCf = query.split(/\s+/).filter(Boolean).join(" ").toLowerCase();
   const words = queryCf ? queryCf.split(" ") : [];
-  if (!words.length) return metas.slice().sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  if (!words.length) {
+    return {
+      sessions: metas.slice().sort((a, b) => (b.ts || 0) - (a.ts || 0)),
+      approximate: false,
+      words,
+    };
+  }
   const scored = [];
   for (const meta of metas) {
     const titleCf = (meta.title || "").toLowerCase();
-    const contentCf = meta.text || "";
+    const contentCf = (meta.text || "").toLowerCase();
     let score;
     if (titleCf === queryCf) score = 5;
     else if (titleCf.includes(queryCf)) score = 4;
@@ -353,11 +410,13 @@ function offlineRank(metas, query) {
   // Nothing you typed is in any chat — a different question, answered
   // separately, and only then (#266). Mixed into a search that worked, the
   // approximate tier was most of what came back.
-  if (!scored.length) return offlineClosest(metas, queryCf, words);
+  if (!scored.length) {
+    return { sessions: offlineClosest(metas, queryCf, words), approximate: true, words };
+  }
   // Newest-first within a tier, matching the server (whose input is already
   // recency-ordered and whose sort is stable).
   scored.sort((a, b) => b.score - a.score || (b.meta.ts || 0) - (a.meta.ts || 0));
-  return scored.map((s) => s.meta);
+  return { sessions: scored.map((s) => s.meta), approximate: false, words };
 }
 
 // The chats nearest a query nothing matched, closest first and capped —
@@ -378,7 +437,8 @@ function offlineClosest(metas, queryCf, words) {
 function offlineCloseness(meta, queryCf, words) {
   const titleCf = (meta.title || "").toLowerCase();
   const vocab = new Set(
-    (meta.text || "").split(/\s+/).map((w) => w.replace(OFFLINE_PUNCT_RE, "")).filter(Boolean)
+    (meta.text || "").toLowerCase()
+      .split(/\s+/).map((w) => w.replace(OFFLINE_PUNCT_RE, "")).filter(Boolean)
   );
   let weakest = 1;
   for (const word of words) {
@@ -14231,10 +14291,14 @@ let lastSessionEvent = null; // last session_list, so re-renders work offline
 // rail with no `Active now` band and no sign of whatever the count is counting.
 async function renderOfflineSessions(query) {
   const metas = await offlineList();
-  const cached = offlineRank(metas || [], query || "").map((meta) => ({
+  const found = offlineRanked(metas || [], query || "");
+  const cached = found.sessions.map((meta) => ({
     name: meta.name,
     title: meta.title,
-    snippet: meta.snippet,
+    // The line the match is ON, when there is one — same rule as the server's
+    // rows (`SessionLog._match_row`), so a row does not change its story when
+    // the authoritative list lands over the cached one.
+    snippet: offlineMatchLine(meta, found.words) || meta.snippet,
     ts: meta.ts,
     out: meta.out || 0, // last output as of the last sync (#203)
     state: "", // liveness is a server fact; a mirror can only lie about it
@@ -14250,6 +14314,7 @@ async function renderOfflineSessions(query) {
     type: "session_list",
     current: currentSession,
     fromCache: true,
+    approx: found.approximate,
     sessions,
   });
   return true;
@@ -14771,6 +14836,11 @@ function renderSessions(event) {
   // lie about why a row is where it is. Render a flat list.
   if (searching) {
     if (!event.sessions.length) { list.textContent = "no matching chats"; return; }
+    // These rows do NOT contain what was typed — they are the nearest chats to a
+    // query nothing matched (#266). Unlabelled, the honest answer to a typo is
+    // indistinguishable from the search being broken, which is the complaint
+    // this whole change came from.
+    if (event.approx) list.appendChild(sectionLabel("No exact match — closest chats"));
     for (const info of event.sessions) {
       list.appendChild(sessionRow(info, current, { unread: sessionUnread(info, unreadState) }));
     }

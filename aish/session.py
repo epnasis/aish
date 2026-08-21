@@ -8,12 +8,17 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import NamedTuple, TextIO
 
 TITLE_MAX = 60
 SNIPPET_MAX = 90  # preview line under the title in the web sessions drawer
+# What separates one turn from the next in the searchable text. Not a space: a
+# phrase query would otherwise match across the boundary between what was asked
+# and what was answered — words nobody said in that order — and an excerpt
+# quoting the match would read as one sentence spoken by nobody.
+TURN_SEP = " · "
 FUZZY_THRESHOLD = 0.55  # whole query vs whole title
 FUZZY_WORD_CUTOFF = 0.75  # single query word vs single session word
 # A typo keeps a word roughly its own length, so a candidate that is much
@@ -641,6 +646,16 @@ class SessionInfo:
     cwd: str = ""  # last logged working directory; "" when the chat never moved
 
 
+class Ranked(NamedTuple):
+    """A ranked answer and WHAT KIND of answer it is. Approximate results are a
+    different statement — "nothing you typed is in any chat, here are the
+    closest" — and a list that cannot say which of the two it is puts rows on
+    screen that do not contain the query with nothing to explain them (#266)."""
+
+    sessions: list[SessionInfo]
+    approximate: bool
+
+
 @dataclass
 class SessionEntry:
     """A session preloaded for searching: display info plus casefolded
@@ -652,6 +667,10 @@ class SessionEntry:
     content_cf: str
     words: frozenset
     model_cf: str = ""
+    # The same text as `content_cf` in the case it was WRITTEN in. Matching
+    # reads the casefold; a result row quotes this, and a row that answered a
+    # search in lower case would be the search's own machinery on screen.
+    content: str = ""
 
 
 def _record_or_none(line: str) -> dict | None:
@@ -1820,9 +1839,8 @@ class SessionLog:
             # WHAT THE CHAT SHOWS, not what the log holds (#266) — see
             # `visible_messages`. Tool output is most of the bytes in a busy
             # session and none of what a person searches for.
-            content_cf = " ".join(
-                text for _, text in visible_messages(messages)
-            ).casefold()
+            content = TURN_SEP.join(text for _, text in visible_messages(messages))
+            content_cf = content.casefold()
             model_cf = model.casefold()
             # Model tokens ("gemini", "2.5", "pro") join the fuzzy vocabulary
             # so a typo like "gemni" still filters by model.
@@ -1837,6 +1855,7 @@ class SessionLog:
                 ),
                 title_cf=title_cf,
                 content_cf=content_cf,
+                content=content,
                 words=(
                     frozenset(w.strip(_PUNCT) for w in content_cf.split()) - {""}
                 ) | model_words,
@@ -1898,6 +1917,12 @@ class SessionLog:
 
     @staticmethod
     def rank(entries: list["SessionEntry"], query: str) -> list[SessionInfo]:
+        """The ranked sessions alone, for callers with nowhere to say how they
+        were found (the CLI picker, the model-facing search)."""
+        return SessionLog.ranked(entries, query).sessions
+
+    @staticmethod
+    def ranked(entries: list["SessionEntry"], query: str) -> Ranked:
         """Deterministic ranking over titles, model names and the visible
         conversation — no LLM. Tiers: exact title, phrase in title or model,
         phrase in contents, all words in contents/model. Ties keep newest-first
@@ -1914,7 +1939,7 @@ class SessionLog:
         query_cf = " ".join(query.split()).casefold()
         words = query_cf.split()
         if not words:
-            return [entry.info for entry in entries]
+            return Ranked([entry.info for entry in entries], False)
         ranked = []
         for entry in entries:
             if entry.title_cf == query_cf:
@@ -1927,11 +1952,37 @@ class SessionLog:
                 score = 2
             else:
                 continue
-            ranked.append((score, entry.info))
+            ranked.append((score, SessionLog._match_row(entry, words)))
         if not ranked:
-            return SessionLog._closest(entries, query_cf, words)
+            return Ranked(SessionLog._closest(entries, query_cf, words), True)
         ranked.sort(key=lambda pair: -pair[0])  # stable: newest first within a tier
-        return [info for _, info in ranked]
+        return Ranked([info for _, info in ranked], False)
+
+    @staticmethod
+    def _match_row(entry: "SessionEntry", words: list[str]) -> SessionInfo:
+        """A result row: the session, with its preview line replaced by the line
+        the match is ON.
+
+        A row that answers a search with the chat's LAST message says nothing
+        about why that chat is in the list, which on screen is indistinguishable
+        from the search being wrong — and it was the other half of what made a
+        polluted result set unreadable (#266). A match in the title or the model
+        name has nothing to quote, so those keep the preview.
+
+        `replace` and not assignment: the info belongs to a CACHED entry, and
+        writing a query's answer onto it would leave the last search's excerpt
+        on the row long after the search was cleared."""
+        # QUOTE ONLY WHAT THE ROW IS NOT ALREADY SHOWING. A hit inside the chat's
+        # own name is on screen already, so when the name is the opening of the
+        # conversation (the derived title, i.e. most chats) only a hit PAST it is
+        # worth a line; if that is the sole mention, the preview stays and the
+        # row says what happened next instead of the same sentence twice.
+        title = entry.info.title.rstrip("…")
+        content = entry.content
+        if title and content.startswith(title):
+            content = content[len(title):].removeprefix(TURN_SEP)
+        line = SessionLog._snippet(content, words, width=SNIPPET_MAX)
+        return entry.info if line is None else replace(entry.info, snippet=line)
 
     @staticmethod
     def _closest(

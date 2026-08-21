@@ -2050,6 +2050,36 @@ class TestSessions:
             assert fresh["session"] not in names
             assert session_a in names
 
+    def test_a_searched_row_quotes_its_match_and_says_when_it_is_only_close(
+        self, app_env
+    ):
+        # #266: the rail's answer to a search has to show WHY each row is in it,
+        # and say so when it is showing the closest chats rather than matches.
+        client, _ = make_client(app_env, [
+            model_says("Of the ones still sold, the Tefal SW852D is closest to yours."),
+            model_says("A simple moka pot."),
+        ])
+        with client, connected(client) as (ws, _hello, _):
+            ws.send_json({"type": "task", "text": "which sandwich toaster should I buy"})
+            recv_until(ws, "done")
+            ws.send_json({"type": "task", "text": "and for coffee"})
+            recv_until(ws, "done")
+
+            ws.send_json({"type": "sessions", "query": "tefal"})
+            listing = recv_until(ws, "session_list")
+            assert "approx" not in listing
+            assert "Tefal SW852D" in listing["sessions"][0]["snippet"]
+
+            ws.send_json({"type": "sessions", "query": "tefla"})  # typo: nothing matches
+            listing = recv_until(ws, "session_list")
+            assert listing["approx"] is True
+            assert len(listing["sessions"]) == 1
+
+            ws.send_json({"type": "sessions", "query": ""})  # unsearched: where it got to
+            listing = recv_until(ws, "session_list")
+            assert "approx" not in listing
+            assert listing["sessions"][0]["snippet"] == "A simple moka pot."
+
     def test_session_list_labels_directory_from_the_log_when_cold(self, app_env):
         # The row's directory used to come ONLY from sessions still open in
         # memory, so it showed on a handful of rows and silently vanished from
