@@ -382,11 +382,15 @@ REACH_JS = """
         // -accordion idiom. The element must ALREADY be inside the clip box.
         if (!meets(box, pr)) return 'clipped';
       }
-      // Above this container the element appears somewhere inside its box once
-      // scrolled to, so carry the clamped box upward.
-      box = {left: Math.max(box.left, pr.left), top: Math.max(box.top, pr.top),
-             right: Math.min(box.right, pr.right),
-             bottom: Math.min(box.bottom, pr.bottom)};
+      // From here up, the question is about the CONTAINER, not about where the
+      // element currently sits inside it: once scrolled to, it appears within
+      // this box. Intersecting the two instead was wrong in exactly the case
+      // that matters — an entry below a dropdown's scroll fold has NO overlap
+      // with the visible container, so the intersection came out inverted and
+      // every ancestor test after it failed. On the real portal that hid the
+      // fifth of five properties in the account switcher, and the model went
+      // back to guessing a URL for it (#251).
+      box = {left: pr.left, top: pr.top, right: pr.right, bottom: pr.bottom};
     }
     const doc = document.scrollingElement || document.documentElement;
     const absL = box.left + scrollX;

@@ -753,3 +753,40 @@ class TestTheFileIsHandedOverNotDescribed:
 
     def test_no_download_no_line(self):
         assert web_module.downloaded_note([], "x") == ""
+
+
+class TestScrollingIsWhatMakesAThingReachable:
+    """The predicate's whole question is "could the owner scroll to this and
+    press it", and a list that scrolls is the commonest way the answer is yes
+    while the element is nowhere near the screen (#251).
+
+    The geometry itself is only checkable in a real browser — that is what
+    `scripts/verify_browse.py` is for, and it now serves a five-entry scrollable
+    list inside a fixed header, which is the account switcher that hid the
+    owner's fifth property. What is checkable here is that the rule the fix
+    turns on is the one written down."""
+
+    def test_a_clipping_ancestor_hands_its_OWN_box_upward(self):
+        """Not the intersection. An entry below the scroll fold has no overlap
+        with the visible container, so the intersection came out inverted —
+        bottom above top — and every ancestor test above it was then asked about
+        a negative-height box. The fixed header refused it as off-canvas."""
+        js = browse.REACH_JS
+        walk = js[js.index("const unreachable"):]
+        carry = walk.index("box = {left: pr.left, top: pr.top")
+        assert walk.index("return 'clipped'") < carry
+        assert "Math.min(box.bottom, pr.bottom)" not in walk
+
+    def test_a_real_overlap_is_what_the_clipped_test_demands(self):
+        """The other half, and they must not be confused: a container that
+        cannot be scrolled has to ALREADY contain the element."""
+        assert "if (!meets(box, pr)) return 'clipped';" in browse.REACH_JS
+
+    def test_being_below_the_scroll_range_is_still_out_of_reach(self):
+        """The range check is what separates "scroll to it" from "it is not in
+        there at all", and it runs before anything is carried upward."""
+        js = browse.REACH_JS
+        assert "return 'outside-scroll-range'" in js
+        assert js.index("return 'outside-scroll-range'") < js.index(
+            "box = {left: pr.left, top: pr.top"
+        )
