@@ -222,6 +222,12 @@ class ClaudeMaxAgent:
         # the thing that stamps the records.
         self.inner.resume_turns(last)
 
+    def restore_opened_links(self, calls: list[tuple[dict, int]]) -> None:
+        # Same reason as resume_turns: the ledger lives on the inner agent
+        # because _locked_dispatch routes through it, so that is the object
+        # whose verify pass reads it.
+        self.inner.restore_opened_links(calls)
+
     @staticmethod
     def _load_sdk():
         try:

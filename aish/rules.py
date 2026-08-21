@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -1941,6 +1942,12 @@ class TurnEvidence:
     # is what every caller predating narration passes.
     final: str | None = None
     calls: tuple[dict, ...] = ()  # {"tool", "args", "status"} per call, in order
+    # URLs this CHAT has already opened, normalised — every earlier turn's
+    # successful fetches, not just this one's (#267). Provenance is a fact
+    # about the fetch, and a fetch does not stop having happened when the turn
+    # ends; scoping it to the turn made the link rule demand the same page be
+    # re-read on every turn that cited it. See _acted_on.
+    opened_before: frozenset[str] = frozenset()
     # Sentence-similarity, when a check needs meaning. None is a real answer:
     # the check abstains rather than passing quietly.
     meaning: Any = None
@@ -2306,7 +2313,7 @@ UNVERIFIED_LINKS_ASK = (
 )
 
 
-def _normalise_url(url: str) -> str:
+def normalise_url(url: str) -> str:
     """A URL as an identity, for comparing what was linked against what was
     opened. Fragment and trailing slash dropped, because `#section` and a
     trailing `/` are the same page and a rule that fired on either would be
@@ -2326,29 +2333,52 @@ def _normalise_url(url: str) -> str:
     return url.rstrip("/").casefold()
 
 
-def _acted_on(evidence: TurnEvidence) -> set[str]:
-    """URLs a SUCCESSFUL call this turn actually acted on.
+def urls_acted_on(calls: Iterable[dict]) -> set[str]:
+    """URLs a SUCCESSFUL call in these records actually acted on, normalised.
 
     Args, never output. A URL in a tool's output was merely seen — which is
     precisely what a search-result snippet does, and quoting one is the move
     being prevented. A failed call does not count either: a 404 is not a link
     you can hand someone.
+
+    Public because the agent feeds the same records into the chat's opened
+    ledger as they happen (#267): "what counts as opened" must have ONE
+    definition, or the ledger and the check would disagree about the same call.
     """
     acted: set[str] = set()
-    for call in evidence.calls:
+    for call in calls:
         if not _ran(call):
             continue
         args = call.get("args") or {}
         for key in _URL_ARGS:
             if value := str(args.get(key, "") or "").strip():
-                acted.add(_normalise_url(value))
+                acted.add(normalise_url(value))
     return acted
+
+
+def _acted_on(evidence: TurnEvidence) -> set[str]:
+    """Everything that counts as opened when this answer is graded: what ran
+    THIS turn, plus what this CHAT opened before it (#267).
+
+    The turn boundary was doing work it has no business doing. Opening a page
+    is a fact about the fetch — it happened, it returned, the URL is real — and
+    that fact does not expire when the model finishes speaking. Scoped to the
+    turn, the rule refused a link aish had opened four turns earlier and sent
+    the model to fetch the same page again: 53 of 129 firings in the logs on
+    the machine that filed this, one chat doing it twelve times.
+
+    Freshness is a different property and it is NOT this rule's. `live-price`
+    and `availability-is-checked` are the rules that need a fetch to have
+    happened NOW, and both stay turn-scoped — see _pages_read, which
+    deliberately does not read the ledger.
+    """
+    return urls_acted_on(evidence.calls) | set(evidence.opened_before)
 
 
 def _verify_links(
     binding: Binding, obligation: dict, evidence: TurnEvidence, common: dict,
 ) -> VerifyFailure | None:
-    """Every http(s) link in the answer must be one aish opened this turn.
+    """Every http(s) link in the answer must be one aish opened in this chat.
 
     A join, so the model cannot argue with it: the harness writes the record of
     what was fetched. This is the general form of the rule the owner kept
@@ -2364,12 +2394,15 @@ def _verify_links(
     if not linked:
         return None  # nothing claimed, nothing to verify
     acted = _acted_on(evidence)
-    unverified = [url for url in linked if _normalise_url(url) not in acted]
+    unverified = [url for url in linked if normalise_url(url) not in acted]
     if not unverified:
         return None
     shown = ", ".join(unverified[:3]) + ("…" if len(unverified) > 3 else "")
     return VerifyFailure(
         binding, obligation,
+        # `opened` is everything that COUNTED as opened — this turn's calls
+        # and the chat's ledger together (#267), not the turn's calls alone.
+        # Sampled at 8, so it is a witness for the refusal, never the ledger.
         {"named": NAMED_UNVERIFIED_LINKS, "linked": linked[:8],
          "opened": sorted(acted)[:8], "unverified": unverified[:8]},
         UNVERIFIED_LINKS_ASK.format(
@@ -2394,7 +2427,7 @@ def _pages_read(evidence: TurnEvidence) -> dict[str, set[str]]:
         figures = set(call.get("figures") or ())
         for key in _URL_ARGS:
             if value := str(args.get(key, "") or "").strip():
-                pages.setdefault(_normalise_url(value), set()).update(figures)
+                pages.setdefault(normalise_url(value), set()).update(figures)
     return pages
 
 
@@ -2434,7 +2467,7 @@ def _verify_prices(
     unverified = [
         (url, written)
         for url, amount, written in claimed
-        if _normalise_url(url) in pages and amount not in pages[_normalise_url(url)]
+        if normalise_url(url) in pages and amount not in pages[normalise_url(url)]
     ]
     if not unverified:
         return None

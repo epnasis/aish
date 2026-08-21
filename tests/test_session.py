@@ -1241,6 +1241,84 @@ class TestLastTurn:
         assert SessionLog.last_turn(log.path) == 2
 
 
+class TestCallsThatRan:
+    """A reopened chat gets a fresh agent, so anything verify learned from the
+    calls it made has to come back off the log (#267) — the ledger of what this
+    chat has already opened is the case that pays for it."""
+
+    def _log(self, tmp_path):
+        log = SessionLog.new(tmp_path)
+        log.step({"kind": "call", "turn": 1, "call": 1, "name": "read_url",
+                  "args": {"url": "https://example.com/guide"}})
+        log.step({"kind": "tool", "turn": 1, "call": 1, "name": "read_url",
+                  "ok": True, "status": "ok"})
+        return log
+
+    def test_it_pairs_a_calls_arguments_with_its_verdict(self, tmp_path):
+        [(call, when)] = SessionLog.calls_that_ran(self._log(tmp_path).path)
+        assert call["args"]["url"] == "https://example.com/guide"
+        assert call["status"] == "ok"
+        assert when > 0
+
+    def test_a_failed_call_is_reported_as_failed_not_dropped(self, tmp_path):
+        """The reader states what the log says; deciding what a failure MEANS
+        belongs to the rule engine, which already has one definition of it."""
+        log = SessionLog.new(tmp_path)
+        log.step({"kind": "call", "turn": 1, "call": 1, "name": "read_url",
+                  "args": {"url": "https://example.com/gone"}})
+        log.step({"kind": "tool", "turn": 1, "call": 1, "name": "read_url",
+                  "ok": False, "status": "failed"})
+        [(call, _)] = SessionLog.calls_that_ran(log.path)
+        assert call["status"] == "failed"
+
+    def test_the_join_is_by_id_never_by_position(self, tmp_path):
+        """Read-only tools run in parallel, so their steps interleave. Pairing
+        by order would hand one call's verdict to another call's arguments."""
+        log = SessionLog.new(tmp_path)
+        log.step({"kind": "call", "turn": 2, "call": 1, "name": "read_url",
+                  "args": {"url": "https://a.example/"}})
+        log.step({"kind": "call", "turn": 2, "call": 2, "name": "read_url",
+                  "args": {"url": "https://b.example/"}})
+        log.step({"kind": "tool", "turn": 2, "call": 2, "name": "read_url",
+                  "ok": True, "status": "ok"})
+        log.step({"kind": "tool", "turn": 2, "call": 1, "name": "read_url",
+                  "ok": False, "status": "failed"})
+        got = {c["args"]["url"]: c["status"] for c, _ in SessionLog.calls_that_ran(log.path)}
+        assert got == {"https://b.example/": "ok", "https://a.example/": "failed"}
+
+    def test_a_call_number_is_only_unique_WITHIN_its_turn(self, tmp_path):
+        """`call` restarts at 1 every turn, so the key is the pair. Keyed on
+        the call alone, turn 2's verdict would land on turn 1's arguments."""
+        log = SessionLog.new(tmp_path)
+        log.step({"kind": "call", "turn": 1, "call": 1, "name": "read_url",
+                  "args": {"url": "https://first.example/"}})
+        log.step({"kind": "tool", "turn": 1, "call": 1, "name": "read_url",
+                  "ok": True, "status": "ok"})
+        log.step({"kind": "call", "turn": 2, "call": 1, "name": "read_url",
+                  "args": {"url": "https://second.example/"}})
+        log.step({"kind": "tool", "turn": 2, "call": 1, "name": "read_url",
+                  "ok": True, "status": "ok"})
+        assert [c["args"]["url"] for c, _ in SessionLog.calls_that_ran(log.path)] == [
+            "https://first.example/", "https://second.example/"]
+
+    def test_a_call_that_never_came_back_is_not_a_call_that_ran(self, tmp_path):
+        """The session was killed mid-step: arguments recorded, no verdict.
+        Absence is never the evidence."""
+        log = SessionLog.new(tmp_path)
+        log.step({"kind": "call", "turn": 1, "call": 1, "name": "read_url",
+                  "args": {"url": "https://example.com/guide"}})
+        assert SessionLog.calls_that_ran(log.path) == []
+
+    def test_a_pre_contract_log_reports_nothing(self, tmp_path):
+        """No ids to join on. Skipped rather than guessed at: the cost is one
+        repeat call, where a wrong pairing would attribute a success to a URL
+        that failed."""
+        log = SessionLog.new(tmp_path)
+        log.step({"kind": "call", "name": "read_url", "args": {"url": "https://x/"}})
+        log.step({"kind": "tool", "name": "read_url", "ok": True})
+        assert SessionLog.calls_that_ran(log.path) == []
+
+
 class TestWriteLock:
     """SessionLog._record is reached from more than one thread (the agent
     worker logs the conversation while the event loop writes a rename or a

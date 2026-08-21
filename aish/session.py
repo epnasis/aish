@@ -938,6 +938,63 @@ class SessionLog:
         return last
 
     @staticmethod
+    def calls_that_ran(path: Path) -> list[tuple[dict, int]]:
+        """Every tool call this log says actually RAN, oldest first, as
+        (call-record, epoch) — the record shaped the way Verify reads one
+        (`{"tool", "args", "status"}`).
+
+        One step is TWO records under the trace contract §2: `call` carries the
+        model's own arguments, `tool` carries the runtime's verdict, and they
+        are joined by (turn, call) — never by position, because read-only tools
+        run in parallel and their steps interleave. A log written before the
+        contract has neither id; those steps are skipped rather than guessed
+        at, which costs a reopened chat one repeat call and can never
+        misattribute a verdict to the wrong arguments.
+
+        It exists so a reopened chat can refill the ledger of what it has
+        already opened (`Agent.restore_opened_links`, #267). Deliberately
+        knows nothing about URLs: which argument is a link, and what counts as
+        opened, is the rule engine's fence and must have one definition.
+        """
+        args_by_call: dict[tuple[int, int], tuple[str, dict, int]] = {}
+        ran: list[tuple[dict, int]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = _record_or_none(line)
+            if record is None:
+                continue
+            step = record.get("step")
+            if not isinstance(step, dict):
+                continue
+            turn, call = step.get("turn"), step.get("call")
+            if not isinstance(turn, int) or not isinstance(call, int):
+                continue
+            when = record_epoch(record)
+            if step.get("kind") == "call" and isinstance(step.get("args"), dict):
+                args_by_call[(turn, call)] = (
+                    str(step.get("name") or ""), dict(step["args"]), when or 0
+                )
+                continue
+            if step.get("kind") != "tool":
+                continue
+            emitted = args_by_call.pop((turn, call), None)
+            if emitted is None:
+                continue
+            name, args, at = emitted
+            ran.append((
+                {
+                    "tool": step.get("name") or name,
+                    "args": args,
+                    # Mirrors rules._ran: what the runtime said, not a guess at
+                    # what the result looked like. `ok` is the pre-envelope
+                    # spelling of the same verdict, kept so old logs read alike.
+                    "status": step.get("status") or ("ok" if step.get("ok") else "failed"),
+                    "decision": step.get("decision"),
+                },
+                when or at,
+            ))
+        return ran
+
+    @staticmethod
     def pending_task(path: Path) -> dict | None:
         """The task this session was still running when its process died, or
         None when the last task finished normally (#164). A `task_start` record

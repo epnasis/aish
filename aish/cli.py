@@ -1262,6 +1262,10 @@ def handle_slash(
         restored_cwd, trusted = SessionLog.restore_state(selected.path)
         agent.restore_workspace(restored_cwd, trusted)
         agent.resume_turns(SessionLog.last_turn(selected.path))
+        # ...and what this chat has already opened, so the link rule does
+        # not send the model back to re-read pages that are in the
+        # transcript it just resumed (#267).
+        agent.restore_opened_links(SessionLog.calls_that_ran(selected.path))
         print(f"{DIM}resumed {len(messages)} messages from {selected.path.name}:{RESET}")
         chips = replay_history(messages)
         if chips_out is not None:
@@ -2112,6 +2116,7 @@ def main() -> int:
         restored_cwd, trusted = SessionLog.restore_state(log.path)
         agent.restore_workspace(restored_cwd, trusted)
         agent.resume_turns(SessionLog.last_turn(log.path))
+        agent.restore_opened_links(SessionLog.calls_that_ran(log.path))
         print(f"{DIM}resumed {len(history)} messages from {log.path.name}"
               f" · model {model_spec(agent)} · /help:{RESET}")
         resumed_chips = replay_history(history)

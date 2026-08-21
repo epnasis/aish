@@ -5511,6 +5511,11 @@ def create_app(
             # aish-web, i.e. every ship — so without this the log gets a second
             # `turn: 1` and the ledger's join collapses two turns into one.
             agent.resume_turns(SessionLog.last_turn(path))
+            # ...and the links this chat has already opened, so a reopened
+            # chat — which on the web is every restart of aish-web — does
+            # not have the link rule demand a re-read of every page in the
+            # transcript it just replayed (#267).
+            agent.restore_opened_links(SessionLog.calls_that_ran(path))
             # Resume with the model this session last used (the drawer shows
             # it); fall back to the startup model when it can't be built.
             if (
