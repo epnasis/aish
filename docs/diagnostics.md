@@ -199,8 +199,10 @@ Rows are collapsed per outcome rather than per rule — ten verify verdicts are 
 
 The reader reports each of these as *not recorded* rather than guessing:
 
-- **attachment guidance** — see below; it is the last piece of the brief that is still unstored.
-- **attachment guidance** (#241) — the sentences telling the model what it may do with each attached file are still built at hand-over and never stored.
-- **consumed vs sent** (#243) — the prompt-token count is on the `reasoning` record and `num_ctx` on the `brief`, so a context that filled up is derivable, but nothing flags it. That belongs in the suspicion list, not in another record.
-- **a web view** (#243) — `aish explain` is CLI-only. The contract's §8.7 already says a UI needs a deliberate new endpoint, because none of this is client-side and the offline mirror must not start caching reasoning onto every device.
-- **claude-max** (#242) — its SDK loop emits none of these records and drops thinking blocks entirely. A dossier for one of its turns must say so wholesale rather than assembling something half-plausible.
+- **attachment guidance** (#241) — the sentences telling the model what it may do with each attached file are still built at hand-over and never stored. The last piece of the brief that is unstored.
+- **claude-max** (#242) — its SDK loop emits no `brief`, no `reasoning` and no `call` records, and drops thinking blocks entirely. Its turns already report `grouping: none` and list their calls flat rather than inventing a round; what is still owed is a **whole-turn** statement saying this backend records none of it, instead of a dozen separate "not recorded" rows that read like a dozen separate faults.
+- **the brief diff** (#243 slice B) — *"it worked Tuesday, what changed?"*. Two turns from any two sessions compared by digest: tools added or removed, a description that changed, different knowledge injected, different rules bound. Nearly free, since the digests are already recorded, and a more common shape of the question than "explain this turn".
+- **the raw records section** — served by the endpoint (`raw=1`, capped and reporting what it elided) and not yet drawn in the panel. A rendering that cannot be checked against its own source is a narrative.
+- **re-measure** — `aish-curate --context` recorded the before picture (`docs/knowledge-layer.md`). The same numbers a few weeks after the history-policy change are what settle whether it worked; nothing in the claim is safe to assume.
+
+Closed since this doc was written: the web view and the flow view (#243 slice A), the system text (#239), recoverable trims, and consumed-vs-sent — which is now the `context_full` check, measured against the window **recorded** as in force rather than against `num_ctx`.
