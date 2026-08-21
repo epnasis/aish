@@ -11,6 +11,7 @@ from aish.backends import (
     AnthropicBackend,
     BackendError,
     OpenAICompatBackend,
+    _from_anthropic,
     anthropic_tools,
     convert_messages,
     convert_messages_anthropic,
@@ -52,7 +53,9 @@ def test_make_chat_with_injected_client():
     chat, provider, model = make_chat("gemini:gemini-3.5-flash", client=object())
     assert provider == "gemini"
     assert model == "gemini-3.5-flash"
-    assert isinstance(chat, OpenAICompatBackend)
+    # Wrapped by the governor (#261), which is what puts EVERY consumer of the
+    # key behind one pacing point rather than only the agent loop.
+    assert isinstance(chat.__wrapped__, OpenAICompatBackend)
 
 
 # ------------------------------------------------------- message conversion
@@ -538,3 +541,141 @@ def test_media_support_map():
     assert "pdf" in backends.media_support("claude")
     assert "pdf" not in backends.media_support("gemini")
     assert backends.media_support("claude-max") == frozenset()
+
+
+class TestRetryLayers:
+    """There must be exactly ONE retry policy, and aish must own it (#261).
+
+    Before this, a single visible "model call failed …; retrying once…" was up
+    to twelve HTTP requests: the streaming fallback re-sent (x2), the SDK
+    retried underneath (x3), and the agent loop retried on top (x2) — each
+    carrying the full ~120k-token history, against the quota that had just run
+    out, and none of the inner attempts visible to any code that could classify
+    or record them.
+    """
+
+    def test_the_sdk_does_not_retry_behind_us(self):
+        assert backends.SDK_RETRIES == 0
+
+    def test_stream_fallback_ignores_a_rate_limit(self):
+        """The bug in one assertion: a 429 used to take the fallback branch."""
+
+        class RateLimited(Exception):
+            status_code = 429
+            body = {"error": {"message": "quota exceeded"}}
+
+        assert not backends._rejects_stream_options(RateLimited())
+
+    def test_stream_fallback_ignores_a_server_error(self):
+        class Down(Exception):
+            status_code = 503
+
+        assert not backends._rejects_stream_options(Down())
+
+    def test_stream_fallback_still_catches_what_it_was_written_for(self):
+        """A gateway may reject an unknown field as 400, 404 or 422 — but it
+        always names the field, so the field name is the test, not the status."""
+        for status in (400, 404, 422):
+            exc = type("Rejected", (Exception,), {"status_code": status})(
+                "Unrecognized request argument supplied: stream_options"
+            )
+            assert backends._rejects_stream_options(exc), status
+
+    def test_stream_fallback_ignores_an_unrelated_bad_request(self):
+        class BadRequest(Exception):
+            status_code = 400
+
+        assert not backends._rejects_stream_options(BadRequest("context length exceeded"))
+
+    def test_a_rate_limit_propagates_out_of_the_stream_helper(self):
+        """End to end: the exception must reach the agent loop, which is the
+        only layer that classifies, paces and records it."""
+
+        class RateLimited(Exception):
+            status_code = 429
+
+        calls = {"n": 0}
+
+        class Client:
+            class chat:  # noqa: N801 — mirrors the SDK's attribute shape
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        calls["n"] += 1
+                        raise RateLimited("429 quota")
+
+        backend = backends.OpenAICompatBackend(Client(), "gemini")
+        with pytest.raises(RateLimited):
+            list(backend._stream({"model": "m", "messages": []}))
+        assert calls["n"] == 1, "the fallback re-sent a rate-limited request"
+
+
+class TestUsageDetail:
+    """The provider's usage report survives the adapter, units intact (#262).
+
+    Every backend used to flatten its report into two ints, so the cache split —
+    the biggest single determinant of what a turn cost, on a loop that resends
+    its whole history every step — was discarded where the fields still existed.
+    Worse, the surviving number meant three different things: it INCLUDES cached
+    tokens on OpenAI-shaped providers, EXCLUDES them on Anthropic (which summed
+    all three into it), and excludes KV-cache reuse on Ollama. A daily total
+    across providers was adding incompatible units.
+    """
+
+    def test_openai_shaped_input_includes_the_cached_subset(self):
+        usage = SimpleNamespace(
+            prompt_tokens=129_623,
+            completion_tokens=250,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=100_000),
+        )
+        detail = backends._openai_usage(usage)
+        assert detail["semantics"] == backends.INPUT_INCLUDES_CACHE
+        assert detail["input"] == 129_623
+        assert detail["cached"] == 100_000
+        assert detail["output"] == 250
+
+    def test_a_provider_that_reports_no_cache_omits_the_key(self):
+        """A provider that does not report cache reads and a turn that had none
+        are different facts; only the absent key tells them apart."""
+        usage = SimpleNamespace(
+            prompt_tokens=100, completion_tokens=5, prompt_tokens_details=None
+        )
+        assert "cached" not in backends._openai_usage(usage)
+
+    def test_no_usage_at_all_is_none_not_zeros(self):
+        assert backends._openai_usage(None) is None
+
+    def test_anthropic_keeps_the_three_way_split_beside_the_sum(self):
+        """A cache read bills at ~10% of base input, so the sum alone cannot
+        tell a 1M-token turn that cost 1M from one that cost 100k-equivalent."""
+        response = SimpleNamespace(
+            content=[],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(
+                input_tokens=1_000,
+                cache_read_input_tokens=120_000,
+                cache_creation_input_tokens=2_000,
+                output_tokens=300,
+            ),
+        )
+        chunk = _from_anthropic(response)
+        # The sum stays: everything downstream sizes context from it, and a
+        # cache read still occupies the window.
+        assert chunk.prompt_eval_count == 123_000
+        assert chunk.usage["semantics"] == backends.INPUT_EXCLUDES_CACHE
+        assert chunk.usage["input"] == 1_000
+        assert chunk.usage["cache_read"] == 120_000
+        assert chunk.usage["cache_write"] == 2_000
+
+    def test_the_semantics_flag_is_never_dropped(self):
+        assert backends.usage_detail(backends.INPUT_EXCLUDES_KV_REUSE) == {
+            "semantics": backends.INPUT_EXCLUDES_KV_REUSE
+        }
+
+    def test_the_three_semantics_are_distinct(self):
+        flags = {
+            backends.INPUT_INCLUDES_CACHE,
+            backends.INPUT_EXCLUDES_CACHE,
+            backends.INPUT_EXCLUDES_KV_REUSE,
+        }
+        assert len(flags) == 3

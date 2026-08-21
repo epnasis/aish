@@ -836,6 +836,9 @@ class RecordingStatus:
     def add_tokens(self, count):
         self.events.append(("tokens", count))
 
+    def note(self, text):
+        self.events.append(("note", text))
+
     def stop(self):
         self.events.append(("stop",))
 
@@ -850,6 +853,9 @@ class TestLiveStatus:
 
             def add_tokens(self, count):
                 events.append(("tokens", count))
+
+            def note(self, text):
+                events.append(("note", text))
 
             def stop(self):
                 events.append(("stop",))
@@ -919,6 +925,9 @@ class TestLiveStatus:
 
             def add_tokens(self, count):
                 events.append(("tokens", count))
+
+            def note(self, text):
+                events.append(("note", text))
 
             def stop(self):
                 events.append(("stop",))

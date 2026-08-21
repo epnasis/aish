@@ -1191,3 +1191,53 @@ class TestTheFlow:
         assert doc["given"]["trims"], "the seed trim was dropped"
         assert not [e for r in doc["flow"]["rounds"] for e in r["before"]]
         assert "eager_stub" in explain_mod.explain(path, root=tmp_path)
+
+
+class TestUsageOnTheReasoningRecord:
+    """The provider's usage report reaches the log with its units intact (#262).
+
+    Without it, "how many tokens did I spend yesterday" sums three different
+    quantities: input INCLUDING cache on OpenAI-shaped providers, EXCLUDING it
+    on Anthropic, and excluding KV-cache reuse on Ollama. And the cache split —
+    what actually decides whether a 120k-token resend was expensive or nearly
+    free — was discarded at the adapter, recoverable only from the provider's
+    documentation as it reads today. Evidence that decays.
+    """
+
+    def test_the_report_lands_on_the_record_that_already_carries_tokens(self, tmp_path):
+        from aish import backends
+
+        detail = backends.usage_detail(
+            backends.INPUT_INCLUDES_CACHE, input=129_623, cached=100_000, output=250
+        )
+        reply = model_says("done")
+        reply.usage = detail
+        reply.prompt_eval_count, reply.eval_count = 129_623, 250
+        agent, _, log = make_logged_agent([reply], tmp_path)
+        agent.run_task("hi")
+        (record,) = steps(log.path, "reasoning")
+        assert record["usage"] == detail
+        # The two-int summary stays put beside it — everything downstream sizes
+        # context from it, and a scanner needs both to show the residual.
+        assert record["tokens"] == [129_623, 250]
+
+    def test_ollama_is_labelled_rather_than_assumed(self, tmp_path):
+        """Ollama attaches no report, so the meaning of its two counts has to
+        travel with them or a reader supplies the wrong one."""
+        from aish import backends
+
+        reply = model_says("done")
+        reply.prompt_eval_count, reply.eval_count = 900, 40
+        agent, _, log = make_logged_agent([reply], tmp_path)
+        agent.run_task("hi")
+        (record,) = steps(log.path, "reasoning")
+        assert record["usage"]["semantics"] == backends.INPUT_EXCLUDES_KV_REUSE
+        assert record["usage"]["input"] == 900
+
+    def test_a_call_that_reported_nothing_records_no_usage(self, tmp_path):
+        """Absent, not zeroed: a provider that said nothing and a turn that cost
+        nothing are different facts."""
+        agent, _, log = make_logged_agent([model_says("done")], tmp_path)
+        agent.run_task("hi")
+        (record,) = steps(log.path, "reasoning")
+        assert "usage" not in record

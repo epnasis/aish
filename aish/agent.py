@@ -42,6 +42,7 @@ from . import (
     evidence,
     files,
     media,
+    ratelimit,
     recordings,
     rule_compiler,
     rules,
@@ -349,7 +350,19 @@ EMPTY_RESPONSE = (
 
 
 class ModelUnavailable(RuntimeError):
-    """The model call failed after a retry (backend down, overloaded, or OOM)."""
+    """The model call failed after every attempt it was entitled to."""
+
+
+# How many times one model call may be issued before the task gives up. Three,
+# not the old two, because the attempts are now SPACED (ratelimit.backoff_delay)
+# and CLASSIFIED — a permanent failure spends one attempt instead of two, so a
+# transient one can afford three. `docs/rate-limits.md`.
+MODEL_CALL_ATTEMPTS = 3
+
+# How much of a provider's error text a `model_error` record keeps. A quota
+# error carries a documentation URL and a details array; the sentence that says
+# what went wrong is at the front of all of them.
+MODEL_ERROR_CHARS = 700
 
 
 class TaskCancelled(Exception):
@@ -1010,7 +1023,7 @@ KNOWLEDGE_WRITE_TOOLS = frozenset({"remember", "forget_memory"})
 # an answer always needs the tool steps and the knowledge step alongside the
 # gate records. `thinking` is deliberately left out: it is the high-volume kind
 # and buys nothing #197 asks for. Renderless kinds are stamped by _emit_record.
-TURN_STAMPED_STEPS = frozenset({"tool_start", "tool", "knowledge", "trim"})
+TURN_STAMPED_STEPS = frozenset({"tool_start", "tool", "knowledge", "trim", "model_error"})
 
 # Decisions meaning THE ACTION DID NOT HAPPEN. A step carrying one is never
 # green, whichever path set it — see _emit_tool_step for why this is one rule
@@ -1068,6 +1081,24 @@ def format_secs(seconds: float) -> str:
 
 def format_tokens(count: int) -> str:
     return f"{count / 1000:.1f}k" if count >= 1000 else str(count)
+
+
+def _usage_detail(response: Any) -> dict | None:
+    """The provider's own usage report, units intact (#262).
+
+    The adapted backends attach it; ollama does not, so its two counts are
+    labelled here instead — `prompt_eval_count` skips KV-cache-reused prefix
+    tokens, which is a THIRD meaning of "input tokens" and the reason the label
+    travels with the number rather than being assumed by whoever reads it.
+    """
+    if (detail := getattr(response, "usage", None)) and isinstance(detail, dict):
+        return detail
+    prompt, completion = _usage(response)
+    if not prompt and not completion:
+        return None
+    return backends.usage_detail(
+        backends.INPUT_EXCLUDES_KV_REUSE, input=prompt, output=completion
+    )
 
 
 def _usage(response: Any) -> tuple[int, int]:
@@ -1144,7 +1175,10 @@ TRIMMED_RECOVERABLE = (
 CHARS_PER_TOKEN_BUDGET = 3
 # The most history aish will carry, whatever the backend's window allows.
 #
-# NOT a cost control — the owner's Gemini budget is not the constraint. It is
+# NOT a cost control — see SPEND_BUDGET_CALLS_PER_MINUTE below, which is. That
+# premise held right up until a Gemini free-tier key was exhausted mid-task
+# (#261): on a METERED backend, history size IS the spend control, because the
+# whole of it is resent on every step. This constant is not that control; it is
 # there so the trimming path is EXERCISED on a large-window backend instead of
 # lying dormant until the day he moves to local models and discovers it never
 # worked. A ceiling below Gemini's 1,048,576 means real sessions cross it and
@@ -1158,6 +1192,31 @@ CHARS_PER_TOKEN_BUDGET = 3
 # (128k) are already below it, and Ollama's num_ctx is far below it, so the
 # local path is unchanged by construction.
 HISTORY_TOKEN_CEILING = 300_000
+
+# How many model calls a minute the history budget is sized to allow, when a
+# provider rate limit is actually known.
+#
+# The constant above sizes history against the CONTEXT WINDOW: what one request
+# may contain. That is a different constraint from what a minute of requests may
+# contain, and only the first was ever modelled. The incident: 156 calls
+# averaging ~120k prompt tokens, peaking at 1.91M input tokens in one minute,
+# against a per-minute quota an order of magnitude below that. History sat at
+# 130k tokens, so a 300k ceiling never fired — the budget was correct about the
+# window and silent about the rate.
+#
+# Sizing history at TPM/N is what makes the two agree: it buys N calls a minute
+# rather than one enormous one, which is the difference between a task that runs
+# slowly and a task that cannot run at all. Four is deliberately modest — a step
+# that has to wait most of a minute for headroom reads as a hang.
+#
+# Engages ONLY when a limit is known (stated by the owner, or learned from a
+# 429). With no limit known nothing changes, so a key that never hits a quota
+# behaves exactly as it did. `docs/rate-limits.md`.
+SPEND_BUDGET_CALLS_PER_MINUTE = 4
+
+# Below this, trimming for spend costs more than it saves: the model loses the
+# thread and re-fetches what was cut, which is more calls and more tokens.
+MIN_SPEND_BUDGET_TOKENS = 16_000
 # Command output carried in an activity-trace step is a preview (the trace
 # collapses it); the full result still reaches the model and streams live.
 STEP_OUTPUT_CAP = 8000
@@ -1315,6 +1374,40 @@ def _safe_args(args: dict, cap: int) -> tuple[dict, int]:
         except (TypeError, ValueError):
             out[str(key)] = repr(value)[:cap]
     return out, dropped
+
+
+def _model_error_line(
+    failure: ratelimit.CallFailure, attempt: int, delay: float, final: bool
+) -> str:
+    """The terminal's one line about a failed call. Says what kind of failure it
+    was and what happens next, because "model call failed" answered neither."""
+    what = failure.kind.replace("_", " ")
+    if not final:
+        return f"✕ {what} (attempt {attempt}) — retrying in {delay:.0f}s"
+    if failure.exhausted:
+        return f"✕ {what}: the quota is spent, not merely busy — not retrying"
+    if not failure.retryable:
+        return f"✕ {what} — retrying cannot change this, not retrying"
+    return f"✕ {what} — gave up after {attempt} attempts"
+
+
+def _unavailable_text(failure: ratelimit.CallFailure | None) -> str:
+    """What the user is told when every attempt is spent.
+
+    A raw provider traceback answered the wrong question. Whether waiting helps
+    is the only thing the reader can act on, so it leads — and a spent daily
+    quota says so rather than inviting a Retry that cannot work.
+    """
+    if failure is None:  # unreachable in the loop; cheaper than an assert
+        return "the model call failed"
+    if failure.exhausted:
+        return (
+            f"{failure.kind.replace('_', ' ')}: this quota is spent rather than "
+            f"busy — retrying will not help until it resets. {failure.text}"
+        )
+    if not failure.retryable:
+        return f"{failure.kind.replace('_', ' ')} (not retryable): {failure.text}"
+    return f"{failure.kind.replace('_', ' ')} after {MODEL_CALL_ATTEMPTS} attempts: {failure.text}"
 
 
 def _capped(text: str, cap: int) -> tuple[str, int]:
@@ -1522,6 +1615,11 @@ class Agent:
         # Turn/call identity (docs/trace-contract.md §2), advanced by
         # _reset_task_state. `turn` starts at 0 so the first task is turn 1.
         self._turn = 0
+        # Reset per task below, but bound HERE too: messages are appended
+        # outside a task (adopted history, a server-side injection) and they
+        # carry this stamp, so a counter that only exists once a task has begun
+        # makes the very first append raise.
+        self._model_call = 0
         self._call_seq = itertools.count(1)
         # The call id currently being dispatched, so a `gate` verdict joins to
         # the `tool` step for the action it governed (§2). Thread-local rather
@@ -1863,6 +1961,14 @@ class Agent:
         self.messages.append(message)
         if self.on_message:
             record = _serialize(message)
+            # Which model call this message was in front of (#262). Membership
+            # in a call's context was otherwise POSITIONAL — inferred from the
+            # order lines happen to sit in the file, the fragility contract §2
+            # exists to kill and which `curate._windows` already apologises for
+            # in its own docstring. Without it, "what filled the context of the
+            # call that cost 129k tokens" cannot be answered from the log at
+            # all; with it, it is a group-by.
+            record["model_call"] = self._model_call
             if interim:
                 record["interim"] = True
             if record_content is not None:
@@ -2581,8 +2687,21 @@ class Agent:
     def _chat_turn(self) -> tuple[str, list[dict], tuple[int, int], list | None, str]:
         """One model call; returns (content, normalized tool_calls, token usage,
         provider-native raw blocks or None, thinking text or ""). Streams
-        content through on_token when set. Retries once on a transport error (a
-        busy/overloaded local Ollama commonly drops or refuses a request)."""
+        content through on_token when set.
+
+        Every failure here is CLASSIFIED, WAITED OUT, and RECORDED (#261). This
+        loop used to catch every exception identically, echo one line that
+        reached no log, and re-issue the identical request microseconds later.
+        For a 429 that is worse than doing nothing — the retry re-sends the same
+        request (~120k tokens in the incident that named this) into the quota
+        that just ran out, while the SDK underneath was retrying too, so one
+        visible "retrying once…" was six HTTP requests. For a 400 or a wrong API
+        key it spent a request to relearn a permanent answer. And because the
+        line was an `echo`, it never reached the session log at all: a cold
+        reload showed a silent gap where the failure had been, which is the
+        absence-as-evidence failure `docs/trace-contract.md` §0 exists to stop.
+        `docs/rate-limits.md`.
+        """
         self._refresh_plugin_tools()
         menu = tools.TOOL_SCHEMAS + self._plugin_defs
         self._model_call += 1
@@ -2594,23 +2713,106 @@ class Agent:
             options={"num_ctx": self.num_ctx},
             think=self.think,
         )
-        last_error: Exception | None = None
-        for attempt in range(2):
+        last: ratelimit.CallFailure | None = None
+        for attempt in range(1, MODEL_CALL_ATTEMPTS + 1):
             try:
-                turn = self._one_chat(kwargs)
+                # The governor's cancel and status wiring, for the span of one
+                # call. It cannot ride on the arguments: every backend is
+                # adapted to the exact `ollama.chat` convention so this file
+                # never learns which provider it is on, and a keyword added for
+                # the governor's benefit would break that.
+                with ratelimit.hooks(
+                    should_stop=self._cancel.is_set,
+                    on_wait=self.status.note,
+                    ceiling=self._wait_ceiling(),
+                ):
+                    turn = self._one_chat(kwargs)
             except TaskCancelled:
                 raise  # a user stop is not a transport error — never retry
+            except ratelimit.Cancelled as exc:
+                # Stopped while queued for headroom. The user is owed the cancel
+                # path, not an error naming the provider for their own decision.
+                raise TaskCancelled from exc
             except Exception as exc:  # noqa: BLE001 — surface, don't crash the REPL
-                last_error = exc
-                if attempt == 0:
-                    self.echo(f"model call failed ({exc}); retrying once…")
+                last = ratelimit.classify(exc)
+                final = attempt >= MODEL_CALL_ATTEMPTS or not last.retryable
+                delay = 0.0 if final else ratelimit.backoff_delay(last, attempt)
+                self._record_model_error(last, attempt, delay, final)
+                if final:
+                    break
+                if ratelimit.wait(delay, self._cancel, self.status.note):
+                    # A Stop during the wait is a stop, not a failed call: the
+                    # user is owed the cancel path, not a ModelUnavailable that
+                    # blames the provider for their own decision.
+                    raise TaskCancelled from exc
             else:
                 # The ONE emit point for what the model produced, so no caller
                 # can forget it: _chat_turn is reached by the tool-call path,
                 # the text-only path and the final no-tools turn alike.
                 self._record_reasoning(turn)
                 return turn
-        raise ModelUnavailable(str(last_error)) from last_error
+        raise ModelUnavailable(_unavailable_text(last))
+
+    def _wait_ceiling(self) -> float:
+        """How long this session will queue for rate-limit headroom.
+
+        An unattended session gets far less, and not out of politeness: it holds
+        a thread from the server's bounded worker pool, which exists so that a
+        session parked on an approval cannot starve short user actions. A
+        session parked on headroom would re-create that hazard inside the pool.
+        """
+        if self.origin == "user":
+            return ratelimit.DEFAULT_WAIT_CEILING_S
+        return ratelimit.UNATTENDED_WAIT_CEILING_S
+
+    def _record_model_error(
+        self, failure: ratelimit.CallFailure, attempt: int, delay: float, final: bool
+    ) -> None:
+        """A failed model call, as evidence (#261).
+
+        RENDERED, not log-only, and that is the whole point. This was
+        `self.echo(...)` — a live-transport event that reached viewers and the
+        hot transcript and NEVER the session log, so `grep -c '"echo"'` on the
+        log of the session that motivated this returns 0. The owner reading the
+        trace afterwards found a silent gap where a quota failure had been, and
+        `aish explain` could not see it at all. Contract §0 corollary 2: absence
+        must never be the evidence.
+
+        Stamped with `model_call` so a dossier can join it to the `brief` that
+        says what the model was handed and the `reasoning` that says what came
+        back — the join is the reason the record is worth writing.
+
+        `sent_chars` and not an estimated token count, deliberately: chars are a
+        measured fact, tokens here would be a model of one, and the two must not
+        wear the same unit as the provider's own number (#262).
+        """
+        step: dict = {
+            "kind": "model_error",
+            "model_call": self._model_call,
+            "provider": self.provider,
+            "model": self.model,
+            "attempt": attempt,
+            "attempts": MODEL_CALL_ATTEMPTS,
+            # Passed in, never re-derived from `delay`: a provider may
+            # legitimately answer "Retry-After: 0", and the last attempt of a
+            # retryable failure also waits zero. Both would read as the opposite
+            # of what happened — the confident-false-record class §0 is about.
+            "action": "give_up" if final else "retry",
+            "sent_chars": self._total_chars(),
+            "sent_messages": len(self.messages),
+            **failure.record(),
+        }
+        if delay:
+            step["waited_s"] = round(delay, 3)
+        text, dropped = _capped(failure.text, MODEL_ERROR_CHARS)
+        step["text"] = text
+        if dropped:
+            step["truncated"] = dropped
+            step["cap_source"] = "constant:MODEL_ERROR_CHARS"
+        self._emit_step(**step)
+        # The terminal has no trace timeline to draw the row on, so it gets the
+        # sentence instead — `_note` is silent wherever `on_step` renders.
+        self._note(_model_error_line(failure, attempt, delay, final))
 
     def _record_reasoning(self, turn: tuple) -> None:
         """Everything the model produced on one call, in full (#240).
@@ -2648,7 +2850,7 @@ class Agent:
             record["said"] = said_text
             if said_dropped:
                 record["said_truncated"] = said_dropped
-        for key in ("stop", "blocks", "malformed"):
+        for key in ("stop", "blocks", "malformed", "usage"):
             if meta.get(key):
                 record[key] = meta[key]
         if meta.get("synthesized"):
@@ -2679,6 +2881,7 @@ class Agent:
             content = message.content or ""
             raw_calls = message.tool_calls or []
             usage = _usage(response)
+            detail = _usage_detail(response)
             raw_blocks = getattr(message, "raw_blocks", None)
             thinking = getattr(message, "thinking", None) or ""
             stop = _stop_reason(message, response)
@@ -2688,6 +2891,7 @@ class Agent:
             thinking_head = ""
             raw_calls = []
             usage = (0, 0)
+            detail = None
             for chunk in self.chat(stream=True, **kwargs):
                 if self._cancel.is_set():
                     # Abandoning the iterator closes the connection, which
@@ -2726,6 +2930,7 @@ class Agent:
                     raw_blocks = message.raw_blocks
                 if _usage(chunk) != (0, 0):  # counts arrive on the final chunk
                     usage = _usage(chunk)
+                    detail = _usage_detail(chunk)
                 # Last non-empty wins: like usage, the reason arrives on the
                 # final chunk, and an earlier chunk must not blank it.
                 stop = _stop_reason(message, chunk) or stop
@@ -2735,6 +2940,7 @@ class Agent:
                 self.on_token("\n")
         self._response_meta = {
             "stop": stop,
+            "usage": detail,
             "synthesized": bool(getattr(message, "synthesized", False)),
             # Block TYPES only, never their content: this is what reveals a
             # provider-redacted thinking block without storing anything.
@@ -3785,7 +3991,30 @@ class Agent:
         capped = min(window, HISTORY_TOKEN_CEILING)
         if capped < window:
             source = f"constant:HISTORY_TOKEN_CEILING:{HISTORY_TOKEN_CEILING}"
+        spend, spend_source = self._spend_budget()
+        if spend is not None and spend < capped:
+            # The rate is tighter than the window. Which of the three bounds is
+            # binding goes into the provenance, because "why was my page cut?"
+            # has three different answers and a reader cannot tell them apart
+            # from the number alone.
+            capped, source = spend, spend_source
         return capped * CHARS_PER_TOKEN_BUDGET, source
+
+    def _spend_budget(self) -> tuple[int | None, str]:
+        """(tokens of history the rate limit affords, provenance), or (None, "")
+        when no limit is known.
+
+        None is the default and it means "unchanged": aish cannot know which
+        billing tier a key is on, and trimming a paid session's history against
+        a guessed free-tier number would be a self-inflicted loss of context.
+        The budget appears the moment the owner states a limit or a 429 teaches
+        one — which is exactly when it starts to matter.
+        """
+        limits = ratelimit.governor().limits(f"{self.provider}:{self.model}")
+        if limits.tpm is None:
+            return None, ""
+        budget = max(MIN_SPEND_BUDGET_TOKENS, limits.tpm // SPEND_BUDGET_CALLS_PER_MINUTE)
+        return budget, f"ratelimit:tpm/{SPEND_BUDGET_CALLS_PER_MINUTE}:{limits.source}"
 
     def _output_caps(self) -> tuple[tuple[int, int], str]:
         """(head, tail) and the provenance of that size. `num_ctx` is an

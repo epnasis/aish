@@ -1,0 +1,483 @@
+"""What aish spent, and what filled the context that made it cost that.
+
+A pure scan over the session logs: no model call, no live process state, no
+provider API. Same shape as `curate.scan_ledger`, and the same reason —
+`docs/trace-contract.md` §7 makes a `scan_*` pass the sanctioned way to compute
+over recorded evidence, as opposed to §0's prohibition on re-deriving behaviour
+from source. Everything below is already in the log; nothing here needed a new
+record kind. `docs/token-accounting.md`.
+
+Three numbers, kept apart on purpose:
+
+**Spend** — input + output tokens summed across calls. What you are billed and
+rate-limited on.
+
+**Context** — how big the conversation got. Summing prompt tokens across calls
+DOUBLE-COUNTS the resent history, so spend reads as a far bigger number than the
+context ever was; reporting one as the other would make every figure wrong in
+the same direction.
+
+**Residency** — chars x the number of calls they stayed in context. Because
+every call resends the whole history, a page read early and never trimmed is
+resent on every subsequent call, and that is what the rate limiter counts. It is
+NOT cost: aish keeps the prefix stable precisely because providers cache it, so
+on a caching backend a long-resident result is far cheaper than residency
+suggests. Reported beside spend, never as spend.
+
+And residency names the biggest resident, not the most wasteful one. A result
+read at call 2 and still needed at call 50 is resident by necessity. Triage
+metric, not blame metric.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from collections import defaultdict
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .explain import _records, state_dir
+
+# Roles that are not a tool, bucketed under their own name.
+_PLAIN_ROLES = ("user", "assistant", "system")
+
+# What a session whose model calls left no usage record is called. NEVER 0: a
+# day of heavy claude-max use reading "0 tokens" is a confident lie, and the
+# three-states discipline in docs/diagnostics.md exists for exactly this.
+NOT_RECORDED = "not recorded"
+
+
+@dataclass
+class Call:
+    """One model call's reported usage."""
+
+    session: str
+    ts: str
+    number: int
+    provider: str
+    model: str
+    input: int = 0
+    output: int = 0
+    cached: int = 0
+    semantics: str = ""
+
+    @property
+    def day(self) -> str:
+        return self.ts[:10]
+
+    @property
+    def total(self) -> int:
+        return self.input + self.output
+
+
+@dataclass
+class Contributor:
+    """One origin's share of a session's context.
+
+    `chars` is what it put IN — a measured fact. `char_calls` is that multiplied
+    by how long it stayed. Deliberately NOT converted to tokens: chars are
+    measured, tokens here would be a model of one, and giving an estimate the
+    provider's own unit invites a reader to sum the parts and contradict the
+    call's reported total.
+    """
+
+    origin: str
+    chars: int = 0
+    items: int = 0
+    char_calls: int = 0
+    trimmed: int = 0  # results whose residency was ended by a trim
+
+
+@dataclass
+class SessionUsage:
+    name: str
+    path: Path
+    provider: str = ""
+    model: str = ""
+    origin: str = "user"
+    title: str = ""
+    calls: list[Call] = field(default_factory=list)
+    contributors: list[Contributor] = field(default_factory=list)
+    failures: list[dict] = field(default_factory=list)
+    trims: int = 0
+    unattributed_trims: int = 0
+    rewritten: bool = False
+    saw_model_calls: bool = False
+    # Whether this log's message records carry the `model_call` stamp (#262).
+    # Without it, when a message entered the context can only be inferred from
+    # the order lines happen to sit in the file, and residency degrades to
+    # "chars x every call in the session" — a number that LOOKS like attribution
+    # and is arithmetic on an assumption. A log written before the stamp says so
+    # instead of showing it.
+    stamped: bool = False
+
+    @property
+    def recorded(self) -> bool:
+        """False when this session made model calls that reported no usage —
+        claude-max drives the Claude Agent SDK's own loop and records no input
+        tokens at all. Its spend is unknown, which is a different fact from
+        zero and must never be shown as zero."""
+        return bool(self.calls) or not self.saw_model_calls
+
+    @property
+    def spend(self) -> int:
+        return sum(call.total for call in self.calls)
+
+    @property
+    def peak_context(self) -> int:
+        return max((call.input for call in self.calls), default=0)
+
+
+def _origin_of(record: dict) -> str:
+    role = str(record.get("role") or "")
+    if role == "tool":
+        return str(record.get("tool_name") or "tool")
+    return role if role in _PLAIN_ROLES else role or "other"
+
+
+def scan_session(path: Path) -> SessionUsage:
+    """One log file → its usage. Never raises on content: a torn line is skipped
+    the way every other reader of these files skips it."""
+    session = SessionUsage(name=path.stem, path=path)
+    # Messages still in context, oldest first per origin, as
+    # origin -> [[first_call_present, chars, closed_at_or_None], ...]
+    live: dict[str, list[list]] = defaultdict(list)
+    buckets: dict[str, Contributor] = {}
+    call_number = 0
+    last_call = 0
+
+    def bucket(origin: str) -> Contributor:
+        return buckets.setdefault(origin, Contributor(origin=origin))
+
+    for record in _records(path):
+        kind = record.get("kind")
+        if kind == "model":
+            spec = str(record.get("model") or "")
+            provider, _, name = spec.partition(":")
+            session.provider, session.model = (provider, name) if name else ("ollama", spec)
+        elif kind == "task_start":
+            session.origin = str(record.get("origin") or session.origin)
+        elif kind == "title":
+            session.title = str(record.get("title") or "")
+        elif kind == "redaction" or record.get("redacted"):
+            # The log is not the billing truth: a redaction (and a web Retry's
+            # rewind) removes records for calls that were still billed.
+            session.rewritten = True
+        elif kind == "message":
+            if "model_call" in record:
+                session.stamped = True
+            stamp = int(record.get("model_call") or 0)
+            chars = len(str(record.get("content") or ""))
+            origin = _origin_of(record)
+            entry = [stamp + 1, chars, None]
+            live[origin].append(entry)
+            item = bucket(origin)
+            item.chars += chars
+            item.items += 1
+        elif kind == "trace":
+            step = record.get("step") or {}
+            skind = step.get("kind")
+            if skind == "reasoning":
+                call_number = int(step.get("model_call") or call_number + 1)
+                last_call = max(last_call, call_number)
+                session.calls.append(_call_from(session, record, step, call_number))
+                session.saw_model_calls = True
+            elif skind == "model_error":
+                session.saw_model_calls = True
+                session.failures.append(dict(step))
+            elif skind == "trim":
+                session.trims += 1
+                session.unattributed_trims += int(step.get("stubbed_truncated") or 0)
+                _close_stubbed(live, buckets, step, last_call)
+
+    if session.stamped:
+        for origin, entries in live.items():
+            item = bucket(origin)
+            for first, chars, closed in entries:
+                end = last_call if closed is None else closed
+                item.char_calls += chars * max(0, end - first + 1)
+    session.contributors = sorted(
+        buckets.values(), key=lambda c: (c.char_calls, c.chars), reverse=True
+    )
+    return session
+
+
+def _call_from(session: SessionUsage, record: dict, step: dict, number: int) -> Call:
+    tokens = step.get("tokens") or [0, 0]
+    detail = step.get("usage") or {}
+    return Call(
+        session=session.name,
+        ts=str(record.get("ts") or ""),
+        number=number,
+        provider=session.provider,
+        model=session.model,
+        # The detail is authoritative where it exists: `tokens[0]` means three
+        # different things across the three backends, and only `semantics` says
+        # which. Falling back to it is honest for logs written before the split
+        # was kept, and those are exactly the logs whose units are ambiguous.
+        input=int(detail.get("input") or (tokens[0] if tokens else 0)),
+        output=int(detail.get("output") or (tokens[1] if len(tokens) > 1 else 0)),
+        cached=int(detail.get("cached") or detail.get("cache_read") or 0),
+        semantics=str(detail.get("semantics") or ""),
+    )
+
+
+def _close_stubbed(live, buckets, step: dict, at_call: int) -> None:
+    """A trim ends a result's residency. Oldest-first, matching the policy the
+    trimmer actually uses, and per TOOL NAME rather than per instance:
+    `stubbed[].at` indexes the live message list, which does not map 1:1 to log
+    order across resume, redact or rewind. Attribution by name survives that;
+    per-instance identity does not, and claiming it would be a false precision.
+    """
+    for stub in step.get("stubbed") or []:
+        origin = str(stub.get("tool") or "tool")
+        for entry in live.get(origin, []):
+            if entry[2] is None:
+                entry[2] = at_call
+                buckets.setdefault(origin, Contributor(origin=origin)).trimmed += 1
+                break
+
+
+def scan(root: os.PathLike | str | None = None, days: int | None = None) -> list[SessionUsage]:
+    """Every session log, newest last. One unreadable file must not take the
+    whole report down with it — the containment rule a single corrupt session
+    log taught the web server."""
+    directory = Path(root) if root is not None else state_dir()
+    if not directory.is_dir():
+        return []
+    out: list[SessionUsage] = []
+    for path in sorted(directory.glob("session-*.jsonl")):
+        if days is not None and not _within(path.stem, days):
+            continue
+        try:
+            out.append(scan_session(path))
+        except OSError:
+            continue
+    return out
+
+
+def _within(stem: str, days: int) -> bool:
+    """`session-YYYYMMDD-...` — the date is in the NAME, so a whole file can be
+    skipped without opening it. That is what keeps `aish usage --days 7` from
+    parsing a year of logs to discard them."""
+    import datetime
+
+    parts = stem.split("-")
+    if len(parts) < 2 or len(parts[1]) != 8 or not parts[1].isdigit():
+        return True  # unnameable: include it rather than silently drop it
+    try:
+        when = datetime.date(int(parts[1][:4]), int(parts[1][4:6]), int(parts[1][6:]))
+    except ValueError:
+        return True
+    return (datetime.date.today() - when).days < days
+
+
+def calls_of(sessions: list[SessionUsage]) -> list[Call]:
+    return [call for session in sessions for call in session.calls]
+
+
+def by_day(calls: list[Call]) -> dict[str, list[Call]]:
+    grouped: dict[str, list[Call]] = defaultdict(list)
+    for call in calls:
+        grouped[call.day].append(call)
+    return dict(sorted(grouped.items()))
+
+
+def by_week(calls: list[Call]) -> dict[str, list[Call]]:
+    import datetime
+
+    grouped: dict[str, list[Call]] = defaultdict(list)
+    for call in calls:
+        try:
+            when = datetime.date.fromisoformat(call.day)
+        except ValueError:
+            continue
+        monday = when - datetime.timedelta(days=when.weekday())
+        grouped[f"w/c {monday.isoformat()}"].append(call)
+    return dict(sorted(grouped.items()))
+
+
+def by_model(calls: list[Call]) -> dict[str, list[Call]]:
+    grouped: dict[str, list[Call]] = defaultdict(list)
+    for call in calls:
+        grouped[f"{call.provider}:{call.model}" if call.provider else call.model].append(call)
+    return dict(sorted(grouped.items(), key=lambda kv: -sum(c.total for c in kv[1])))
+
+
+def json_report(sessions: list[SessionUsage]) -> str:
+    """The same figures, for anything that is not a terminal."""
+    return json.dumps(
+        {
+            "sessions": [
+                {
+                    "name": s.name,
+                    "model": f"{s.provider}:{s.model}" if s.provider else s.model,
+                    "origin": s.origin,
+                    "calls": len(s.calls),
+                    "input": sum(c.input for c in s.calls),
+                    "output": sum(c.output for c in s.calls),
+                    "cached": sum(c.cached for c in s.calls),
+                    "peak_context": s.peak_context,
+                    "recorded": s.recorded,
+                    "rewritten": s.rewritten,
+                    "failures": len(s.failures),
+                    "residency_recorded": s.stamped,
+                    "contributors": [
+                        {
+                            "origin": c.origin,
+                            "chars": c.chars,
+                            "items": c.items,
+                            # Absent rather than 0 when the log cannot support
+                            # it: a consumer must not read "not measurable" as
+                            # "nothing was resident".
+                            **({"char_calls": c.char_calls} if s.stamped else {}),
+                            "trimmed": c.trimmed,
+                        }
+                        for c in s.contributors
+                    ],
+                }
+                for s in sessions
+            ]
+        },
+        indent=2,
+    )
+
+
+# ------------------------------------------------------------------ rendering
+
+BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
+
+
+def human(count: int) -> str:
+    for limit, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "k")):
+        if abs(count) >= limit:
+            return f"{count / limit:.1f}{suffix}"
+    return str(count)
+
+
+def _totals(calls: list[Call]) -> tuple[int, int, int, int]:
+    return (
+        len(calls),
+        sum(c.input for c in calls),
+        sum(c.output for c in calls),
+        sum(c.cached for c in calls),
+    )
+
+
+def _rows(title: str, grouped: dict[str, list[Call]]) -> list[str]:
+    out = [f"{BOLD}{title}{RESET}", f"  {'':<26} {'calls':>7} {'in':>9} {'out':>8} {'cached':>8}"]
+    for label, calls in grouped.items():
+        n, tin, tout, cached = _totals(calls)
+        shown = human(cached) if cached else f"{DIM}—{RESET}"
+        out.append(f"  {label:<26} {n:>7} {human(tin):>9} {human(tout):>8} {shown:>8}")
+    return out
+
+
+def render(sessions: list[SessionUsage], period: str = "day") -> str:
+    """The summary. Spend and context are reported separately and never added:
+    summing prompt tokens across calls double-counts the resent history."""
+    calls = calls_of(sessions)
+    if not sessions:
+        return "no session logs found"
+    lines = [
+        f"{BOLD}token usage{RESET} · {len(sessions)} session"
+        f"{'' if len(sessions) == 1 else 's'} · {len(calls)} recorded model calls",
+        "",
+    ]
+    grouped = by_week(calls) if period == "week" else by_day(calls)
+    lines += _rows(f"by {period}", grouped) + [""]
+    lines += _rows("by model", by_model(calls)) + [""]
+    n, tin, tout, cached = _totals(calls)
+    lines.append(
+        f"  {BOLD}spend{RESET} {human(tin)} in + {human(tout)} out"
+        + (f", of which {human(cached)} served from cache" if cached else "")
+    )
+    peak = max((s.peak_context for s in sessions), default=0)
+    lines.append(
+        f"  {BOLD}context{RESET} peaked at {peak:,} tokens in one call"
+        f" {DIM}(spend counts each resend; context does not){RESET}"
+    )
+    lines += [""] + _caveats(sessions)
+    lines.append(f"{DIM}  measures RECORDED usage — not a billing statement{RESET}")
+    return "\n".join(lines)
+
+
+def _caveats(sessions: list[SessionUsage]) -> list[str]:
+    """Everything the number is NOT. A report that omits these is confidently
+    wrong in a direction the reader cannot see."""
+    out = []
+    unrecorded = [s for s in sessions if not s.recorded]
+    if unrecorded:
+        out.append(
+            f"  ⚠ {len(unrecorded)} session{'' if len(unrecorded) == 1 else 's'} made model "
+            f"calls that reported no usage — shown as {NOT_RECORDED}, never as 0"
+        )
+    rewritten = [s for s in sessions if s.rewritten]
+    if rewritten:
+        out.append(
+            f"  ⚠ {len(rewritten)} session{'' if len(rewritten) == 1 else 's'} had records "
+            "removed by Retry or redaction — those calls were billed and are not counted here"
+        )
+    failures = sum(len(s.failures) for s in sessions)
+    if failures:
+        out.append(
+            f"  ⚠ {failures} model call{'' if failures == 1 else 's'} failed "
+            "— see `aish explain`"
+        )
+    out.append(
+        f"{DIM}  calls outside a task (session retitling, curate) are not counted{RESET}"
+    )
+    return out
+
+
+def render_session(session: SessionUsage) -> str:
+    """The drill-down: what filled this chat's context."""
+    model = f"{session.provider}:{session.model}" if session.provider else session.model
+    head = f"{BOLD}{session.name}{RESET}"
+    if session.title:
+        head += f"  {DIM}{session.title}{RESET}"
+    lines = [head, f"  {model} · {session.origin} · {len(session.calls)} recorded calls"]
+    if not session.recorded:
+        lines.append(f"  spend {BOLD}{NOT_RECORDED}{RESET} — this backend reports no usage")
+    else:
+        _, tin, tout, cached = _totals(session.calls)
+        lines.append(
+            f"  spend {human(tin)} in + {human(tout)} out"
+            + (f" ({human(cached)} cached)" if cached else "")
+            + f" · context peaked at {session.peak_context:,} tokens"
+        )
+    lines += ["", f"{BOLD}what filled the context{RESET}"]
+    # The resident column is dropped rather than filled with "not recorded" on
+    # every row: an absent column reads as "this log cannot say", a column of
+    # repeated apologies reads as noise.
+    tail = f" {'resident':>10} {'trimmed':>8}" if session.stamped else ""
+    lines.append(f"  {'':<22} {'items':>6} {'chars':>9}{tail}")
+    for item in session.contributors[:15]:
+        row = f"  {item.origin:<22} {item.items:>6} {human(item.chars):>9}"
+        if session.stamped:
+            row += f" {human(item.char_calls):>10} {item.trimmed or '—':>8}"
+        lines.append(row)
+    if not session.stamped:
+        return "\n".join(
+            lines
+            + [
+                "",
+                f"{DIM}  This log predates the per-call stamp on message records, so WHEN each",
+                "  result entered the context is not recorded and residency cannot be computed.",
+                f"  `chars` is measured and stands.{RESET}",
+            ]
+        )
+    lines += [
+        "",
+        f"{DIM}  resident = chars x calls they stayed in context. Every call resends the whole",
+        "  history, so that is what the RATE LIMIT counts — it is not cost, because providers",
+        "  cache the stable prefix. It names the biggest resident, not the most wasteful one:",
+        f"  a page read early and still needed at the end is resident by necessity.{RESET}",
+    ]
+    if session.unattributed_trims:
+        lines.append(
+            f"{DIM}  {session.unattributed_trims} trimmed result(s) could not be attributed "
+            f"(the trim record caps its list), so residency above is an upper bound.{RESET}"
+        )
+    return "\n".join(lines)

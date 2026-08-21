@@ -15,6 +15,7 @@ existing invocations keep working unchanged.
 """
 
 import base64
+import functools
 import json
 import mimetypes
 import os
@@ -22,6 +23,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from . import ratelimit
 
 
 @dataclass
@@ -72,6 +75,10 @@ class ChatChunk:
     message: ChatMessage
     prompt_eval_count: int = 0
     eval_count: int = 0
+    # The provider's usage report, with its units intact (#262). See
+    # `usage_detail` for why collapsing it to the two ints above loses the
+    # only fact about cost that cannot be recovered later.
+    usage: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +119,54 @@ PROVIDERS = {
 
 class BackendError(RuntimeError):
     """Backend cannot be constructed (unknown provider, missing API key)."""
+
+
+# The provider SDKs retry 429/5xx themselves, with their own backoff, silently,
+# INSIDE one call — openai and anthropic both default to 2 extra attempts. That
+# made aish's retry policy a fiction stacked on an invisible one: one visible
+# "retrying once…" was up to six HTTP requests, none of which aish could see,
+# classify, pace or record, and most 429s never surfaced to any code that could
+# have recorded them (#261). aish owns the retry policy now — `ratelimit.py` for
+# the classification, `agent._chat_turn` for the loop — so there must be exactly
+# one of them. `docs/rate-limits.md`.
+SDK_RETRIES = 0
+
+
+# What a provider's "input tokens" number MEANS. Not decoration: the same field
+# name carries three different units across the three backends, so a daily total
+# that sums them without this flag is adding incompatible things (#262).
+#
+#   - OpenAI-shaped (incl. Gemini's compat layer): `prompt_tokens` INCLUDES
+#     cached tokens; the cached subset is reported separately.
+#   - Anthropic: `input_tokens` EXCLUDES cache reads and cache writes, which are
+#     their own fields and bill at different rates (a cache read is ~10% of base
+#     input, so collapsing them cannot distinguish a 1M-token turn that cost 1M
+#     from one that cost 100k-equivalent).
+#   - Ollama: `prompt_eval_count` EXCLUDES tokens served from KV-cache reuse.
+INPUT_INCLUDES_CACHE = "input_includes_cache"
+INPUT_EXCLUDES_CACHE = "input_excludes_cache"
+INPUT_EXCLUDES_KV_REUSE = "input_excludes_kv_reuse"
+
+
+def usage_detail(semantics: str, **counts: int) -> dict:
+    """The provider's usage report, verbatim, labelled with its own units.
+
+    This exists because the collapse was lossy in a way nothing downstream could
+    undo. Every backend flattened its report into two ints, so the cache split —
+    the single biggest determinant of what a turn actually cost, and the thing
+    an agent loop that resends its whole history every step lives or dies on —
+    was discarded at the adapter and could only ever be re-derived from the
+    provider's documentation as it reads TODAY. That is evidence that decays:
+    providers change what they report and how they bill it, and a log written
+    last month cannot be reinterpreted once they do.
+
+    Zero-valued counts are dropped. A provider that does not report cache reads
+    and a turn that had none are different facts, and only the absent key can
+    tell them apart.
+    """
+    detail: dict = {"semantics": semantics}
+    detail.update({name: int(value) for name, value in counts.items() if value})
+    return detail
 
 
 # Real input context per provider, in TOKENS (#192). This exists because every
@@ -220,12 +275,12 @@ def make_chat(model_arg: str, client=None) -> tuple[Callable, str, str]:
     if provider_name == "ollama":
         import ollama
 
-        return ollama.chat, "ollama", model_name
+        return governed(ollama.chat, "ollama"), "ollama", model_name
     provider = PROVIDERS[provider_name]
     if provider.kind == "anthropic":
         if client is None:
             client = _anthropic_client(provider)
-        return AnthropicBackend(client), provider_name, model_name
+        return governed(AnthropicBackend(client), provider_name), provider_name, model_name
     if client is None:
         api_key = os.environ.get(provider.env_key, "").strip()
         if not api_key:
@@ -240,8 +295,72 @@ def make_chat(model_arg: str, client=None) -> tuple[Callable, str, str]:
                 "the 'openai' package is missing — reinstall aish "
                 "(uv tool install --force --reinstall /path/to/aish)"
             ) from exc
-        client = OpenAI(api_key=api_key, base_url=provider.base_url)
-    return OpenAICompatBackend(client, provider_name), provider_name, model_name
+        client = OpenAI(api_key=api_key, base_url=provider.base_url, max_retries=SDK_RETRIES)
+    backend = OpenAICompatBackend(client, provider_name)
+    return governed(backend, provider_name), provider_name, model_name
+
+
+def governed(chat: Callable, provider: str) -> Callable:
+    """Wrap a chat callable so every call it makes is paced and every refusal it
+    hits is learned from.
+
+    HERE, and not in `agent._chat_turn`, because this is the only in-process
+    chokepoint that EVERY consumer of an API key traverses. The agent loop is
+    one of them; `server._model_session_title` is another — it calls
+    `agent.chat` directly, outside `run_task`, after every eligible completed
+    turn, and its `except Exception: return None` swallowed the 429 with no
+    record at all. Governing the loop alone would leave the shared quota
+    governed at one of its several consumers, which is the shape of the bug
+    rather than a fix for it.
+
+    The `ollama.chat` calling convention is preserved exactly — same keywords,
+    same return type, streaming still a generator — so nothing downstream can
+    tell it is wrapped. `ratelimit.hooks()` is how a caller supplies the
+    cancel/status wiring that does not belong in a calling convention.
+    """
+
+    @functools.wraps(chat)
+    def call(*, model: str = "", messages: list | None = None, stream: bool = False, **kw):
+        key = f"{provider}:{model}"
+        ticket = ratelimit.reserve_for_call(key, messages)
+        try:
+            result = chat(model=model, messages=messages, stream=stream, **kw)
+        except Exception as exc:  # noqa: BLE001 — observed, then re-raised as-is
+            _settle_failure(key, ticket, exc)
+            raise
+        if not stream:
+            ticket.settle(getattr(result, "prompt_eval_count", 0) or 0)
+            return result
+        return _governed_stream(result, key, ticket)
+
+    return call
+
+
+def _governed_stream(chunks, key: str, ticket):
+    """A stream settles on its LAST chunk, because that is where the counts
+    arrive. One that is abandoned part-way settles on nothing, deliberately:
+    the estimate stands, because the provider may well have generated the whole
+    response and charged for it."""
+    try:
+        last = None
+        for chunk in chunks:
+            last = chunk
+            yield chunk
+    except Exception as exc:  # noqa: BLE001 — observed, then re-raised as-is
+        _settle_failure(key, ticket, exc)
+        raise
+    ticket.settle(getattr(last, "prompt_eval_count", 0) or 0)
+
+
+def _settle_failure(key: str, ticket, exc: BaseException) -> None:
+    failure = ratelimit.classify(exc)
+    ratelimit.governor().observe(key, failure)
+    if failure.is_rate_limit:
+        # The request happened and plausibly counts against RPM, but tokens the
+        # provider never processed should not crowd out the retry.
+        ticket.rejected()
+    else:
+        ticket.settle(None)
 
 
 def list_models(provider_name: str) -> list[str]:
@@ -289,7 +408,7 @@ def _anthropic_client(provider: Provider):
             "the 'anthropic' package is missing — reinstall aish "
             "(uv tool install --force --reinstall /path/to/aish)"
         ) from exc
-    return anthropic.Anthropic()
+    return anthropic.Anthropic(max_retries=SDK_RETRIES)
 
 
 # Gemini's OpenAI-compat layer returns thought summaries only when asked, and
@@ -354,6 +473,23 @@ def split_thoughts(text: str) -> tuple[str, str]:
     return thinking + tail_t, visible + tail_v
 
 
+def _rejects_stream_options(exc: BaseException) -> bool:
+    """True only for "I do not know the field `stream_options`".
+
+    Deliberately narrow and deliberately NOT status-only: retrying anything
+    else here is a second uncoordinated attempt at the provider's expense, and
+    for a rate limit it is an attempt spent on the thing that ran out.
+    """
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    if status is not None and not (400 <= int(status) < 500):
+        return False
+    if status == 429:  # a quota failure is never a schema complaint
+        return False
+    return "stream_options" in f"{exc} {getattr(exc, 'body', '') or ''}"
+
+
 class OpenAICompatBackend:
     """Chat-completions backend for any OpenAI-compatible API (OpenAI, Gemini)."""
 
@@ -394,8 +530,22 @@ class OpenAICompatBackend:
             chunks = self.client.chat.completions.create(
                 stream=True, stream_options={"include_usage": True}, **kwargs
             )
-        except Exception:
+        except Exception as exc:
             # Some compatible servers reject stream_options — retry without.
+            #
+            # The catch used to be bare, which made this a THIRD retry layer and
+            # the least visible one (#261): a 429 raised at create() took this
+            # branch too, so the request was re-sent in full before aish's own
+            # loop or the SDK's had any say. On the streaming (web) path that
+            # multiplied out to a dozen ~120k-token requests per one visible
+            # "retrying once…" — against the quota that had just run out.
+            #
+            # So it is narrowed to the one failure it was written for, and the
+            # test is the argument name in the error rather than the status
+            # alone: a gateway may reject an unknown field as 400, 404 or 422,
+            # but it always says which field.
+            if not _rejects_stream_options(exc):
+                raise
             chunks = self.client.chat.completions.create(stream=True, **kwargs)
         # Tool-call fragments must be accumulated across chunks; only text
         # deltas are useful to the caller incrementally. OpenAI numbers
@@ -405,10 +555,12 @@ class OpenAICompatBackend:
         # turn merge into one garbage call ("read_urlread_url").
         pending: dict[tuple, dict] = {}
         usage = (0, 0)
+        detail: dict | None = None
         thoughts = _ThoughtFilter() if self.provider == "gemini" else None
         for chunk in chunks:
             if getattr(chunk, "usage", None):
                 usage = (chunk.usage.prompt_tokens or 0, chunk.usage.completion_tokens or 0)
+                detail = _openai_usage(chunk.usage)
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -452,6 +604,7 @@ class OpenAICompatBackend:
             ),
             prompt_eval_count=usage[0],
             eval_count=usage[1],
+            usage=detail,
         )
 
 
@@ -598,6 +751,22 @@ def _from_completion(response) -> ChatChunk:
         ),
         prompt_eval_count=(usage.prompt_tokens or 0) if usage else 0,
         eval_count=(usage.completion_tokens or 0) if usage else 0,
+        usage=_openai_usage(usage),
+    )
+
+
+def _openai_usage(usage: Any) -> dict | None:
+    """`prompt_tokens` is the TOTAL and `cached` is the subset of it that was
+    served from the provider's prompt cache — the number that decides whether a
+    120k-token resend was expensive or nearly free."""
+    if not usage:
+        return None
+    details = getattr(usage, "prompt_tokens_details", None)
+    return usage_detail(
+        INPUT_INCLUDES_CACHE,
+        input=usage.prompt_tokens or 0,
+        cached=(getattr(details, "cached_tokens", 0) or 0) if details else 0,
+        output=usage.completion_tokens or 0,
     )
 
 
@@ -821,11 +990,21 @@ def _from_anthropic(response) -> ChatChunk:
         synthesized = True
     usage = getattr(response, "usage", None)
     prompt_tokens = 0
+    detail = None
     if usage:
-        prompt_tokens = (
-            (usage.input_tokens or 0)
-            + (getattr(usage, "cache_read_input_tokens", 0) or 0)
-            + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        prompt_tokens = (usage.input_tokens or 0) + cache_read + cache_write
+        # The SUM stays, because everything downstream sizes context from it and
+        # a cache read still occupies the window. What is new is that the three
+        # parts survive alongside it: they bill at three different rates, and
+        # the sum alone cannot tell a cheap turn from an expensive one (#262).
+        detail = usage_detail(
+            INPUT_EXCLUDES_CACHE,
+            input=usage.input_tokens or 0,
+            cache_read=cache_read,
+            cache_write=cache_write,
+            output=usage.output_tokens or 0,
         )
     return ChatChunk(
         message=ChatMessage(
@@ -838,4 +1017,5 @@ def _from_anthropic(response) -> ChatChunk:
         ),
         prompt_eval_count=prompt_tokens,
         eval_count=(usage.output_tokens or 0) if usage else 0,
+        usage=detail,
     )
