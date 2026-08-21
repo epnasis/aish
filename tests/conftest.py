@@ -118,7 +118,7 @@ def no_real_browser(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path_factory.mktemp("state")))
     monkeypatch.setattr(browser_module, "_submit", refuse)
     # `web_search` reads a results page through the browser on EVERY call
-    # (#249), so the guard above turned every test that searches into a hard
+    # (#263), so the guard above turned every test that searches into a hard
     # failure — eight of them at once, none of them about the browser. Unlike
     # `read`, this one has an honest "there is no browser here" outcome that
     # the caller is built to handle, and most machines running this suite

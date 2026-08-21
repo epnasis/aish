@@ -1527,11 +1527,11 @@ class TestEveryActionActuallyRuns:
 
 
 class TestTheSearchProfile:
-    """The second identity, and the fence that keeps it at two (#249).
+    """The second identity, and the fence that keeps it at two (#264).
 
     Reading a results page needs a browser but must never need the owner's
-    SESSION — a signed-in read is what `_login_gate` exists to stop, and a
-    profile that has signed into nothing answers that gate's question by
+    SESSION (#263) — a signed-in read is what `_login_gate` exists to stop, and
+    a profile that has signed into nothing answers that gate's question by
     construction. Measured 2026-08-21: same IP, same minute, the signed-in
     profile got 200 and full results while this one got 429 and `/sorry`. The
     cost is real; carrying his session to dodge it is not the trade."""
@@ -1760,7 +1760,7 @@ class TestTheAddressBar:
 
 
 class TestRecentPages:
-    """Where the view has been, so reopening is a tap (#249)."""
+    """Where the view has been, so reopening is a tap (#264)."""
 
     def test_one_row_per_site_newest_first(self, tmp_path, monkeypatch):
         """The owner's own framing: search from here a few times and the ten

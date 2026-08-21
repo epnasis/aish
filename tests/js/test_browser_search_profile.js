@@ -1,5 +1,5 @@
 // Node-only, dependency-free check that `/browser anon <url>` drives the
-// SEARCH profile and plain `/browser <url>` does not (#249).
+// SEARCH profile and plain `/browser <url>` does not (#264).
 //
 // The two profiles look identical on screen and mean opposite things: one
 // carries every session the owner has, the other carries none. Routing a

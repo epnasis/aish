@@ -1196,7 +1196,7 @@ class TestStripTracking:
 
 
 class TestTheSecondIndex:
-    """Reading a search engine's OWN results page, as nobody (#249)."""
+    """Reading a search engine's OWN results page, as nobody (#263)."""
 
     def test_a_real_results_page_becomes_titles_urls_and_snippets(self):
         raw, page = serp_page()
@@ -1261,7 +1261,7 @@ class TestTheSecondIndex:
 
 
 class TestWhereTheSearchLanded:
-    """A read is judged by where it ENDED, not by what was requested (#249).
+    """A read is judged by where it ENDED, not by what was requested (#263).
 
     The alternative — an allowlist of URLs aish may ask for — judges the address
     at the one moment it is guaranteed correct, and Chrome then follows
