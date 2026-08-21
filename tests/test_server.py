@@ -433,7 +433,7 @@ class TestConnect:
         import aish.agent as agent_module
 
         monkeypatch.setattr(
-            agent_module.web, "read_url", lambda url, topic=None: f"[{url}] text"
+            agent_module.web, "read_url", lambda url, topic=None, **_kw: f"[{url}] text"
         )
         read_call = SimpleNamespace(
             function=SimpleNamespace(name="read_url", arguments={"url": "https://x.example/"})

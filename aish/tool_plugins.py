@@ -157,10 +157,25 @@ def output_caps(window_tokens: int) -> tuple[int, int]:
     return head, budget - head
 
 
-def store_continuation(text: str, store_dir) -> str:
+# A key is the content digest, optionally carrying how much of that content the
+# model was ALREADY SHOWN. The suffix rides on the key rather than in a sidecar
+# file so the bytes stay purely content-addressed — two tools that produce the
+# same output still share one file, and pruning still has exactly one thing to
+# delete per cached output.
+_KEY_RE = re.compile(r"([0-9a-f]{4,32})(?:s([0-9]{1,9}))?")
+
+
+def store_continuation(text: str, store_dir, shown: int | None = None) -> str:
     """Cache a full tool output and return its content-addressed key. Returns
     "" if the store is unwritable — a missing continuation degrades to today's
-    dead end, which must never be an exception in the middle of a tool call."""
+    dead end, which must never be an exception in the middle of a tool call.
+
+    `shown` is how many leading characters the caller already put in front of
+    the model, when that is not the cap `read_continuation` would assume. A
+    browse result is cut at `web.PAGE_MAX_CHARS` and has no idea what the
+    agent's context window makes of `output_caps`; paging against the wrong
+    anchor is the silent mid-output hole the docstring below exists to
+    prevent."""
     try:
         store = Path(store_dir)
         store.mkdir(parents=True, exist_ok=True)
@@ -171,7 +186,7 @@ def store_continuation(text: str, store_dir) -> str:
         else:
             path.write_text(text, encoding="utf-8")
         prune_continuations(store)
-        return digest
+        return digest if shown is None else f"{digest}s{max(0, int(shown))}"
     except OSError:
         return ""
 
@@ -181,26 +196,31 @@ def read_continuation(key: str, store_dir, page: int, head: int, tail: int) -> s
     unknown — evicted, or a key the model invented.
 
     Paging RESUMES WHERE THE SHOWN RESULT STOPPED, which is why page 2 starts
-    at `head` and not at `head + tail`: the truncated result showed the first
-    `head` chars and then jumped to the LAST `tail` chars, so a page 2 anchored
-    on the total kept size would skip `tail` characters the model never saw —
+    at what was shown and not at `head + tail`: the truncated result showed the
+    first `head` chars and then jumped to the LAST `tail` chars, so a page 2
+    anchored on the total kept size would skip `tail` characters never seen —
     a silent hole in the middle of an output it was told it could page through
     to the end, which is exactly the class of unannounced gap #192 exists to
     remove. Page 1 is therefore the shown head alone, and pages concatenate to
     the original text exactly (the tail is simply read a second time when
     paging reaches it)."""
-    if not re.fullmatch(r"[0-9a-f]{4,32}", key or ""):
+    parsed = _KEY_RE.fullmatch(key or "")
+    if parsed is None:
         return None
-    path = Path(store_dir) / f"{key}.txt"
+    digest, carried = parsed.group(1), parsed.group(2)
+    path = Path(store_dir) / f"{digest}.txt"
     try:
         text = path.read_text(encoding="utf-8")
         path.touch()
     except OSError:
         return None
+    # What the model was shown wins over what this backend's caps would have
+    # shown: the cut already happened, at whatever size the producing tool uses.
+    shown = int(carried) if carried is not None else head
     size = max(1, head + tail)
     if max(1, page) <= 1:
-        return text[:head]
-    start = head + (page - 2) * size
+        return text[:shown]
+    start = shown + (page - 2) * size
     if start >= len(text):
         return ""
     return text[start : start + size]

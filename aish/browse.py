@@ -43,6 +43,13 @@ from typing import Any
 # list that long is both a context bill and unreadable. The cap is reported when
 # it bites (`hidden`) — a silent truncation reads as "that is all there is",
 # which is how a model concludes a control does not exist.
+#
+# A cap this size cannot address a long list, and no way of CHOOSING the 100 is
+# going to fix that (#270). Spreading them across the page's repeating rows was
+# measured and rejected: a ratings row carries ~10 kinds of control, so a
+# round-robin over control families buys rows 1-10 where document order buys
+# rows 1-9. What changes the answer is `topic` — the caller names what they are
+# looking for and the budget is spent on that first.
 MAX_CONTROLS = 100
 
 # Text long enough to be a paragraph is not a control's NAME. A whole article
@@ -171,6 +178,12 @@ class Snapshot:
     status: int | None = None
     # Controls the cap left out. Never silent: see MAX_CONTROLS.
     hidden: int = 0
+    # The topic the control list was narrowed WITH, and how many controls
+    # matched it. Both are needed to say something true about the list: "12 of
+    # 2678 controls match 'Interstellar'" is an answer, and the same list with
+    # no topic on it is a page the model has barely seen.
+    narrowed: str = ""
+    matching: int = 0
     # Controls the PAGE is hiding — a closed menu, an off-canvas drawer, a panel
     # behind a dialog. Also never silent, and for a sharper reason than the cap:
     # a model that cannot see the control it wants concludes the page has none
@@ -261,6 +274,50 @@ def is_mutating(
         return True
     lowered = f" {name.lower()} "
     return any(word in lowered for word in _MUTATING_WORDS)
+
+
+# What a control that is supposed to produce a FILE is called, and what its
+# destination looks like. Polish first, like the mutating list, for the same
+# reason: this is the owner's web.
+_DOWNLOAD_WORDS = (
+    "pobierz", "pobieranie", "ściągnij", "sciagnij", "zapisz", "eksport",
+    "eksportuj", "wyeksportuj", "download", "export", "save as", "get csv",
+    "get pdf",
+)
+_DOWNLOAD_SUFFIXES = (
+    ".csv", ".pdf", ".xls", ".xlsx", ".zip", ".json", ".txt", ".ics", ".xml",
+)
+
+
+def wants_download(name: str, href: str = "") -> bool:
+    """Does pressing this READ AS an attempt to obtain a file?
+
+    Only ever consulted when no file arrived, and it only decides whether to
+    add a sentence — so a false positive costs an advisory nobody needed, and a
+    false negative costs the failure this exists for (#271): a site that
+    PREPARES an export asynchronously is indistinguishable, to the model, from
+    a download button that is broken. It abandoned IMDb's own Export and went
+    off to write a scraper that a WAF then refused."""
+    lowered = f" {(name or '').lower()} "
+    if any(word in lowered for word in _DOWNLOAD_WORDS):
+        return True
+    path = (href or "").lower().split("?", 1)[0].split("#", 1)[0]
+    if any(path.endswith(suffix) for suffix in _DOWNLOAD_SUFFIXES):
+        return True
+    return "/download" in path or "/export" in path
+
+
+# The sentence for the case above. It states the three things the model cannot
+# work out for itself — that nothing arrived, that this is not proof the press
+# failed, and what to do instead of assuming it did.
+NO_FILE_YET = (
+    "no file arrived from that press. That is NOT proof it failed: a site that "
+    "prepares an export or a document does it in the background and publishes "
+    "it later — on a downloads/exports page of its own, or by email. Look for "
+    "where it will appear, or press it again only if the page says nothing is "
+    "pending. Do NOT fall back to scraping the page for what the file holds "
+    "without saying that is what you are doing."
+)
 
 
 # Could the OWNER put this on screen and press it right now, using nothing but
@@ -426,6 +483,12 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
     '[contenteditable]', '[contenteditable=true]',
   ].join(', ');
   const out = [];
+  // Every control that could be listed, in document order, BEFORE the budget
+  // is spent. Collected first so `opts.match` can decide which ones the budget
+  // buys: the cap used to run inside the walk, so a control past it was never
+  // tagged and could never be acted on afterwards — and on a 250-row list that
+  // put every row after the ninth permanently out of reach (#270).
+  const found = [];
   let matched = 0;
   let unreached = 0;
   const seen = new Set();
@@ -588,12 +651,34 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
       // be described — it would arrive as `[12] button ''`, which is noise.
       if (!name && !href) continue;
       matched += 1;
-      if (opts.offset + out.length >= opts.max) continue;
-      emit(el, tagOn, kindOf(el, type), name, href);
+      found.push({el: el, tagOn: tagOn, kind: kindOf(el, type), name: name, href: href});
     }
   };
   walk(document);
-  return {controls: out, matched: matched, unreachable: unreached};
+
+  // The budget, spent on what was asked for first. Matching is a plain
+  // case-insensitive substring over the name and the href — deliberately not
+  // fuzzy, for the reason `match_option` is not: this decides which controls
+  // the model can press at all, and a clever match that quietly promotes the
+  // wrong row is worse than one that finds nothing and says so.
+  const needle = (opts.match || '').toLowerCase();
+  const hit = (c) => (c.name || '').toLowerCase().indexOf(needle) >= 0
+                     || (c.href || '').toLowerCase().indexOf(needle) >= 0;
+  const wanted = needle ? found.filter(hit) : [];
+  const rest = needle ? found.filter((c) => !hit(c)) : found;
+  // Never a hard filter: the chrome the model needs to get anywhere — the
+  // menu, the next-page link, the view switcher — is exactly what a topic
+  // drawn from the page's CONTENT will not match, and dropping it would trade
+  // one dead end for another.
+  const room = Math.max(0, opts.max - opts.offset);
+  const take = wanted.concat(rest).slice(0, room);
+  for (const c of take) emit(c.el, c.tagOn, c.kind, c.name, c.href);
+  return {
+    controls: out,
+    matched: matched,
+    unreachable: unreached,
+    matching: wanted.length,
+  };
 }"""
 
 

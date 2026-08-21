@@ -38,7 +38,7 @@ from pathlib import Path
 os.environ["AISH_STATE_DIR"] = tempfile.mkdtemp(prefix="verify-browse-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from aish import browse, browser  # noqa: E402
+from aish import browse, browser, web  # noqa: E402
 
 PORTAL = """<!doctype html>
 <html lang="pl"><head><meta charset="utf-8"><title>Mój E.ON (atrapa)</title></head>
@@ -233,6 +233,93 @@ def absent(snapshot, name):
     assert not hits, f"{name!r} should not be listed, got {[c.line() for c in hits]}"
 
 
+# A page shaped like imdb.com/user/<id>/ratings/: a long NUMBERED list whose
+# rows each carry several controls, so it blows both budgets at once — the page
+# text cap and the control cap (#268-#271). The row the checks reach for sits
+# far past anything document order can buy.
+LONG_LIST_ROWS = 250
+LONG_LIST = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Your ratings</title></head>
+<body>
+<h1>Your ratings history</h1>
+<a href="/">Home</a>
+<button type="button">Actions</button>
+ROWS
+</body></html>
+"""
+ROW = """<div>
+  <p>{n}. {title}</p>
+  <p>{filler}</p>
+  <a href="/title/tt{n}/">View title page for {title}</a>
+  <button type="button">Your rating: {rating}</button>
+  <button type="button">Watched {title}</button>
+  <button type="button">Add {title} to Watchlist</button>
+</div>"""
+
+
+def long_list_html() -> str:
+    filler = "Plot summary that exists to spend the page budget. " * 6
+    rows = "\n".join(
+        ROW.format(
+            n=n,
+            title=("Interstellar" if n == 137 else f"Film {n}"),
+            rating=(n % 10) + 1,
+            filler=filler,
+        )
+        for n in range(1, LONG_LIST_ROWS + 1)
+    )
+    return LONG_LIST.replace("ROWS", rows)
+
+
+def check_long_list(url: str) -> None:
+    """What a cut is allowed to claim, on a real page that provokes one.
+
+    Everything in tests/ inspects the SOURCE of `CONTROLS_JS`. Whether the
+    two-pass selection actually reaches a row the cap cannot is a question only
+    a real DOM answers."""
+    page = browser.browse_open(url + "ratings.html")
+    rendered = web._present_snapshot(page)
+    assert page.hidden, "expected this page to blow the control cap"
+    print(
+        f"opened the long list: {len(page.controls)} controls listed, "
+        f"{page.hidden} not listed"
+    )
+
+    assert web.CUT_MARKER in rendered, "a 250-row page was not cut"
+    assert f"of the {LONG_LIST_ROWS} numbered here" in rendered, (
+        "the cut was not reported in the page's own units:\n" + rendered[-400:]
+    )
+    assert web.CONTROLS_COMPLETE not in rendered, (
+        "the control list was capped and the notice still called it complete"
+    )
+    assert web.CONTROLS_CUT in rendered
+    line = [ln for ln in rendered.splitlines() if web.CUT_MARKER in ln][0]
+    print("  " + line.strip()[:160])
+
+    # Document order cannot reach row 137. This is the failure the whole
+    # narrowing exists for: not listed means not tagged means not actable.
+    assert not [c for c in page.controls if "Interstellar" in c.name], (
+        "row 137 should be far past the cap in document order"
+    )
+
+    narrowed = browser.browse_open(url + "ratings.html", topic="Interstellar")
+    hit = named(narrowed, "View title page for Interstellar")
+    print(
+        f"  narrowed to 'Interstellar': [{hit.n}] {hit.kind} {hit.name!r}"
+        f" — {narrowed.matching} matching control(s)"
+    )
+    assert narrowed.narrowed == "Interstellar"
+    assert len(narrowed.controls) <= browse.MAX_CONTROLS, "narrowing widened the budget"
+    # The chrome is still there: a topic drawn from page content never matches
+    # the menu, and dropping it would trade one dead end for another.
+    named(narrowed, "Home")
+
+    # And the number it gave back really does act on that row.
+    after = browser.browse_act(hit.n, "click", href="", mutating=False)
+    assert "tt137" in after.url, f"pressing the narrowed control went to {after.url}"
+    print(f"  pressed it → {after.url}")
+
+
 def check_portal(url: str) -> None:
     """The flow the whole feature exists for, end to end."""
     page = browser.browse_open(url)
@@ -407,12 +494,14 @@ def main() -> int:
     Path(root, "hard.html").write_text(HARD.replace("OPTIONS", OPTIONS), encoding="utf-8")
     Path(root, "frame.html").write_text(FRAME, encoding="utf-8")
     Path(root, "faktura.pdf").write_bytes(PDF)
+    Path(root, "ratings.html").write_text(long_list_html(), encoding="utf-8")
     port = serve(root)
     url = f"http://127.0.0.1:{port}/"
 
     print(f"profile: {browser.profile_dir()}")
     check_portal(url)
     check_hard(url)
+    check_long_list(url)
 
     browser.browse_close()
     browser.shutdown()

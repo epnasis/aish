@@ -309,7 +309,7 @@ class TestReadUrl:
         result = web.read_url("https://example.com/manual")
         assert "[https://example.com/manual]" in result
         assert "Widgets frob nicely" in result
-        assert "page truncated" in result
+        assert web.CUT_MARKER in result
         assert "'topic'" in result
         assert result.startswith(web.UNTRUSTED_NOTE)
         assert len(result) < web.PAGE_MAX_CHARS + 300 + len(web.UNTRUSTED_NOTE)
@@ -766,7 +766,7 @@ class TestPageImages:
         big = self.PAGE.replace("The phone folds.", "x " * 200_000)
         monkeypatch.setattr(web, "_fetch", lambda _u: (big, "text/html"))
         out = web.read_url("https://site.test/a")
-        assert "[page truncated" in out, "expected this fixture to exceed the cap"
+        assert web.CUT_MARKER in out, "expected this fixture to exceed the cap"
         assert "https://site.test/img/hero.jpg" in out
 
 
@@ -878,7 +878,7 @@ class TestLinksInTheText:
         offer links in the page, 14 inside the cap."""
         page = "filler line\n" * 3000 + "Widget Z → https://s.pl/oferta/z\n"
         monkey = web._present("https://s.pl/listing", page, [])
-        assert "page truncated" in monkey
+        assert web.CUT_MARKER in monkey
         assert "Widget Z → https://s.pl/oferta/z" in monkey
 
     def test_the_carried_links_are_pairs_not_bare_urls(self):
@@ -1009,14 +1009,14 @@ class TestTileStrips:
         the body genuinely did not fit."""
         page = "filler line\n" * 3000 + "Widget Z → https://s.pl/oferta/z\n"
         out = web._present("https://s.pl/listing", page, [])
-        assert "page truncated" in out
+        assert web.CUT_MARKER in out
         assert "Widget Z → https://s.pl/oferta/z" in out
 
     def test_a_page_that_fits_carries_no_note_at_all(self):
         """Nothing was dropped, so there is nothing to rescue — this is where
         the old shape paid for the same carousel twice."""
         out = web._present("https://s.pl/offer", self.OFFER, [])
-        assert "page truncated" not in out
+        assert web.CUT_MARKER not in out
         assert "more links from the omitted part" not in out
 
 
@@ -1161,7 +1161,7 @@ class TestWhatThePageDeclares:
                 + "<p>filler paragraph</p>" * 2000 + "</body></html>")
         monkeypatch.setattr(web, "_fetch", lambda _u: (html, "text/html"))
         out = web.read_url("https://shop.test/oferta/karabinek-15960083405")
-        assert "[page truncated" in out, "expected this fixture to exceed the cap"
+        assert web.CUT_MARKER in out, "expected this fixture to exceed the cap"
         assert "63.19 PLN" in out
         assert "OUT OF STOCK" in out
 

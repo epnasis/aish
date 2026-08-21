@@ -21,9 +21,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from html.parser import HTMLParser
 from typing import Any
 
+from . import browse as browse_mod
 from . import browser
 from .tools import DOCS_MAX_CHARS, _filter_topic, truncate
 
@@ -34,10 +36,106 @@ FETCH_MAX_BYTES = 2_000_000
 # Some sites reject urllib's default UA outright; a browser-ish one is enough.
 USER_AGENT = "Mozilla/5.0 (compatible; aish/0.1; +https://github.com/epnasis/aish)"
 
-PAGE_TRUNCATION_HINT = (
-    "\n[page truncated — call read_url again with a 'topic' (a word or phrase) "
-    "to search the full page text]"
+# What a page read may be narrowed with when it did not fit. Kept as advice
+# rather than as the answer: paging the cache reads the SAME bytes, and a topic
+# re-fetches a page that may have moved.
+NARROW_ADVICE = (
+    "You can also call it again with a 'topic' (a word or phrase) to search "
+    "the page text instead of paging it."
 )
+
+# How a numbered list announces its own positions in rendered text: "1. ", "40)".
+# Anchored to the line and requiring real content after the separator, so a year
+# range or a price cannot be read as a list position.
+_NUMBERED_LINE = re.compile(r"^ *([0-9]{1,5})[.)] +\S", re.M)
+# Below this, a run of numbered lines is a coincidence rather than a list.
+NUMBERED_MIN_RUN = 3
+
+# How every cut in this module announces itself. One phrase, so a caller (and a
+# test) has one thing to look for whether the cut was a page, a topic-narrowed
+# read, or a driven page's text.
+CUT_MARKER = "this text was CUT"
+
+
+# How a cut hands the rest of the text to somewhere it can be read back from:
+# (whole text, characters shown) -> continuation key, or "" when there is no
+# store. INJECTED rather than imported, because `web` has to keep working with
+# no agent behind it — a read from a test, from the server's own probe, or from
+# a session whose store is unwritable degrades to the old dead end, never to an
+# exception in the middle of a fetch.
+Stash = Callable[[str, int], str]
+
+
+def _stash_key(text: str, shown: int, stash: Stash | None) -> str:
+    """The continuation key for `text`, or "" if there is nowhere to put it."""
+    if stash is None:
+        return ""
+    try:
+        return stash(text, shown) or ""
+    except Exception:  # noqa: BLE001 — an unwritable store is not a failed read
+        return ""
+
+
+def _capped(text: str, cap: int, stash: Stash | None, *, extra: str = "") -> str:
+    """`text` cut to `cap`, carrying the note that says what went and how to get
+    it back. Unchanged when it fits — a cut nobody made needs no sentence."""
+    if len(text) <= cap:
+        return text
+    kept = text[:cap]
+    return kept + cut_note(kept, text, _stash_key(text, cap, stash), extra=extra)
+
+
+def numbered_span(text: str) -> tuple[int, int] | None:
+    """(first, last) list position this text numbers, or None when it is not a
+    numbered list.
+
+    Deliberately strict — a single number out of order and this gives up. A
+    false negative costs the notice its best sentence and falls back to a
+    character count; a false positive would put a CONFIDENT wrong claim about
+    coverage in front of the model, which is the failure the notice exists to
+    stop (#269)."""
+    seen = [int(m.group(1)) for m in _NUMBERED_LINE.finditer(text)]
+    if len(seen) < NUMBERED_MIN_RUN:
+        return None
+    if any(later < earlier for earlier, later in zip(seen, seen[1:], strict=False)):
+        return None
+    if seen[-1] - seen[0] < NUMBERED_MIN_RUN - 1:
+        return None
+    return seen[0], seen[-1]
+
+
+def cut_note(kept: str, full: str, key: str = "", *, extra: str = "") -> str:
+    """The sentence a cut owes the model.
+
+    Three things, none of which it can work out for itself: how much is missing,
+    **in the page's own units when the page has any**, whether the rest is
+    recoverable, and what not to do about the part it has not read.
+
+    Characters were the whole of this and characters are unactionable —
+    `[... 65047 characters omitted ...]` on a 250-row ratings page, which the
+    model read as a complete list and answered from twice (#269). A page that
+    numbers its own rows can be measured in rows, and *"showing items 1-40 of
+    the 250 this page numbers"* is not a sentence anything can answer "yes, all
+    of them" to. The count is aish's own — the positions it KEPT against the
+    positions it HAD — never the site's claim about its own total, which is
+    page content like any other."""
+    what = f"{len(kept)} of {len(full)} characters shown"
+    inside, whole = numbered_span(kept), numbered_span(full)
+    if inside and whole and whole[1] > inside[1]:
+        what += f", which is items {inside[0]}-{inside[1]} of the {whole[1]} numbered here"
+    note = f"\n\n[aish: {CUT_MARKER} — {what}."
+    if key:
+        note += (
+            " The full text is CACHED, not lost: call read_tool_output("
+            f'continuation="{key}", page=2) and keep paging to the end. It is '
+            "served from the cache and does NOT re-open the page."
+        )
+    if extra:
+        note += f" {extra}"
+    return note + (
+        " Do NOT answer as though you had read the part you have not read, and"
+        " do NOT substitute another source for it without saying so.]"
+    )
 
 # Sites behind bot protection refuse a plain urllib fetch (403/429/503 — and
 # 401, which is how ticketmaster.pl words it), and JS-only
@@ -1355,17 +1453,20 @@ def _present_rendered(
     *,
     topic: str | None,
     login_host: str,
+    stash: Stash | None = None,
 ) -> str:
     """A browser read, presented — with the provenance note when the site the
     owner is signed into answered with a password field anyway."""
     text, images, declared, signin = rendered
     note = STALE_SESSION_NOTE.format(host=login_host) if login_host and signin else ""
     return note + _present(
-        url, text, images, declared, topic=topic, via_browser=True
+        url, text, images, declared, topic=topic, via_browser=True, stash=stash
     )
 
 
-def read_url(url: str, topic: str | None = None) -> str:
+def read_url(
+    url: str, topic: str | None = None, *, stash: Stash | None = None
+) -> str:
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         return f"ERROR: read_url only fetches http(s) URLs (got {url!r})"
@@ -1396,7 +1497,9 @@ def read_url(url: str, topic: str | None = None) -> str:
     if browser.host_of(url) in BROWSER_HOSTS or login_host:
         rendered, why = _browser_read(url)
         if rendered is not None:
-            return _present_rendered(url, rendered, topic=topic, login_host=login_host)
+            return _present_rendered(
+                url, rendered, topic=topic, login_host=login_host, stash=stash
+            )
         if why == WALLED:
             return f"ERROR: {url} — {WALLED}"
         # Remembered, not discarded: the fetch below is about to be made with the
@@ -1423,7 +1526,9 @@ def read_url(url: str, topic: str | None = None) -> str:
         if exc.code in _BLOCKED_CODES and not anonymous_why:
             rendered, why = _browser_read(url)
             if rendered is not None:
-                return _present_rendered(url, rendered, topic=topic, login_host=login_host)
+                return _present_rendered(
+                url, rendered, topic=topic, login_host=login_host, stash=stash
+            )
             if why == WALLED:
                 return f"ERROR: {url} — {WALLED}"
         hint = _blocked_note(url) if exc.code in _BLOCKED_CODES else ""
@@ -1438,7 +1543,9 @@ def read_url(url: str, topic: str | None = None) -> str:
         if _worth_rendering(exc) and not anonymous_why:
             rendered, why = _browser_read(url)
             if rendered is not None:
-                return _present_rendered(url, rendered, topic=topic, login_host=login_host)
+                return _present_rendered(
+                url, rendered, topic=topic, login_host=login_host, stash=stash
+            )
             if why == WALLED:
                 return f"ERROR: {url} — {WALLED}"
         return f"ERROR: could not fetch {url}: {exc}"
@@ -1483,7 +1590,9 @@ def read_url(url: str, topic: str | None = None) -> str:
         if not anonymous_why:
             rendered, why = _browser_read(url)
             if rendered is not None:
-                return _present_rendered(url, rendered, topic=topic, login_host=login_host)
+                return _present_rendered(
+                url, rendered, topic=topic, login_host=login_host, stash=stash
+            )
             if why == WALLED:
                 return f"ERROR: {url} — {WALLED}"
         return f"ERROR: {url} returned no readable text{_blocked_note(url)}"
@@ -1498,8 +1607,8 @@ def read_url(url: str, topic: str | None = None) -> str:
             host=login_host,
             why=anonymous_why or "the browser was not used",
             form=ANONYMOUS_READ_FORM if login_form else "",
-        ) + _present(url, text, images, declared, topic=topic)
-    return _present(url, text, images, declared, topic=topic)
+        ) + _present(url, text, images, declared, topic=topic, stash=stash)
+    return _present(url, text, images, declared, topic=topic, stash=stash)
 
 
 def _present(
@@ -1510,6 +1619,7 @@ def _present(
     *,
     topic: str | None = None,
     via_browser: bool = False,
+    stash: Stash | None = None,
 ) -> str:
     """The read, as the model receives it. Shared by the fetch and the browser
     so a rendered page is filtered, truncated and image-noted identically."""
@@ -1521,17 +1631,16 @@ def _present(
         # one aimed at a specific fact, and dropping the page's own statement
         # of that fact from the narrowest read would be exactly backwards.
         matched = _filter_topic(text, topic)
-        if matched:
-            return UNTRUSTED_NOTE + truncate(
-                f"[{source} — lines matching {topic!r}]\n{facts}{matched}",
-                head=DOCS_MAX_CHARS, tail=0
-            ) + image_note(images)
-        return UNTRUSTED_NOTE + truncate(
-            f"[{source}] NO LINES MATCH {topic!r}; start of page instead:\n"
-            f"{facts}{text}",
-            head=DOCS_MAX_CHARS,
-            tail=0,
-        ) + image_note(images)
+        whole = (
+            f"[{source} — lines matching {topic!r}]\n{facts}{matched}"
+            if matched
+            else f"[{source}] NO LINES MATCH {topic!r}; start of page instead:\n"
+                 f"{facts}{text}"
+        )
+        # A narrowed read is cut by the same one-way door as a whole one — and
+        # the lines matching a topic on a long list are exactly the case where
+        # the cut lands mid-answer.
+        return UNTRUSTED_NOTE + _capped(whole, DOCS_MAX_CHARS, stash) + image_note(images)
 
     # The declaration goes ABOVE the body and inside the budget: it is a few
     # typed lines, and it is the one part of the read that cannot be recovered
@@ -1544,8 +1653,8 @@ def _present(
     # are the point of the read in exactly the same way, and the cap cuts them
     # in exactly the same place.
     if len(result) > PAGE_MAX_CHARS:
-        return (UNTRUSTED_NOTE + truncate(result, head=PAGE_MAX_CHARS, tail=0)
-                + PAGE_TRUNCATION_HINT + link_note(result[PAGE_MAX_CHARS:])
+        return (UNTRUSTED_NOTE + _capped(result, PAGE_MAX_CHARS, stash, extra=NARROW_ADVICE)
+                + link_note(result[PAGE_MAX_CHARS:])
                 + image_note(images))
     return UNTRUSTED_NOTE + result + image_note(images)
 
@@ -1562,18 +1671,38 @@ BROWSE_CONTROLS_NOTE = (
     "list is aish's reading of the page, not text from it.]\n"
 )
 
-BROWSE_TRUNCATION_HINT = (
-    "\n[page text truncated — the control list below is complete]"
+# What the page text's cut has to say about the OTHER half of the answer.
+#
+# This sentence used to be one string, appended unconditionally, and it read
+# "the control list below is complete" (#268). On a 250-row ratings page it was
+# printed four lines above a footer saying 2 478 controls were missing, and the
+# model — which correctly trusts aish's own narration more than the untrusted
+# page content it is wrapped around — answered as though it had seen the page.
+# A completeness claim is now made only by the code that can check it.
+CONTROLS_COMPLETE = "The control list below IS complete."
+CONTROLS_CUT = (
+    "The control list below is ALSO cut — its own footer says by how much."
+)
+# What to do about a control list that a cap has made unusable. Imperative and
+# specific: "narrow the page" is advice a small model reads as a suggestion.
+NARROW_CONTROLS = (
+    "To reach a control that is not listed, call this tool again with a 'topic' "
+    "naming it (its label, or a word from it) — matching controls are listed "
+    "FIRST, so a topic reaches ones the cap otherwise cuts."
 )
 
 
-def _present_snapshot(snapshot, *, topic: str | None = None) -> str:
+def _present_snapshot(
+    snapshot, *, topic: str | None = None, stash: Stash | None = None
+) -> str:
     """A driven page, as the model receives it.
 
     The control list is appended AFTER truncation, for the same reason a read's
     links and images are: the numbers are the entire point of the call, and a
     12k cap that fell inside the page text would cut exactly the thing the model
-    is meant to act on."""
+    is meant to act on. It is also why the control list is the one half that is
+    never PAGED away — the numbers die with the document, so a control on page 3
+    of a continuation is a control that has already expired."""
     head = f"[{snapshot.url} — you are driving this page]"
     if snapshot.title:
         head += f"\n{snapshot.title}"
@@ -1585,8 +1714,14 @@ def _present_snapshot(snapshot, *, topic: str | None = None) -> str:
             f"NO LINES MATCH {topic!r}; start of page instead:\n{body}"
         )
     if len(body) > PAGE_MAX_CHARS:
-        body = truncate(body, head=PAGE_MAX_CHARS, tail=0)
-        hint = BROWSE_TRUNCATION_HINT
+        whole, body = body, body[:PAGE_MAX_CHARS]
+        complete = not snapshot.hidden and not snapshot.unreachable
+        hint = cut_note(
+            body,
+            whole,
+            _stash_key(whole, PAGE_MAX_CHARS, stash),
+            extra=CONTROLS_COMPLETE if complete else f"{CONTROLS_CUT} {NARROW_CONTROLS}",
+        )
     lines = [c.line() for c in snapshot.controls]
     if getattr(snapshot, "unreachable", 0):
         # The sentence a small model needs in order to do the right thing: not
@@ -1599,10 +1734,22 @@ def _present_snapshot(snapshot, *, topic: str | None = None) -> str:
         )
     if snapshot.hidden:
         # Never a silent cap: a model that cannot see a control concludes the
-        # page does not have one, and starts guessing URLs again.
+        # page does not have one, and starts guessing URLs again. And never a
+        # bare count either — "narrow the page first, or say what you are
+        # looking for" was a promise nothing implemented, so the sentence named
+        # a capability that did not exist (#270).
         lines.append(
-            f"[{snapshot.hidden} more control(s) not listed — narrow the page "
-            "first, or say what you are looking for]"
+            f"[{snapshot.hidden} more control(s) not listed. {NARROW_CONTROLS}]"
+        )
+    if snapshot.narrowed:
+        # Where the numbers came from. Without it a narrowed list reads as the
+        # whole page, which is the same wrong belief the cut notice exists to
+        # prevent — one tool call further on.
+        lines.insert(
+            0,
+            f"[narrowed to {snapshot.narrowed!r}: {snapshot.matching} control(s) "
+            "on this page match it, and they are listed first. The rest of the "
+            "list is the page's own chrome, unfiltered.]",
         )
     controls = BROWSE_CONTROLS_NOTE + "\n".join(lines) if lines else (
         "\n\n[no controls found on this page]"
@@ -1622,7 +1769,7 @@ def _present_snapshot(snapshot, *, topic: str | None = None) -> str:
     return problem + got + UNTRUSTED_NOTE + head + "\n" + body + hint + controls
 
 
-def browse(url: str, topic: str | None = None) -> str:
+def browse(url: str, topic: str | None = None, *, stash: Stash | None = None) -> str:
     """Open a page in the browser the owner is signed into, and describe what
     can be pressed on it."""
     url = url.strip()
@@ -1633,12 +1780,12 @@ def browse(url: str, topic: str | None = None) -> str:
     except BlockedURLError as exc:
         return f"ERROR: {exc} — browse only reaches public internet hosts."
     try:
-        snapshot = browser.browse_open(url)
+        snapshot = browser.browse_open(url, topic=topic or "")
     except browser.BrowserUnavailable as exc:
         return f"ERROR: cannot browse {url} — {exc}"
     except Exception as exc:  # noqa: BLE001 — a nav failure reports, never crashes
         return f"ERROR: could not open {url}: {type(exc).__name__}: {exc}"
-    return _present_snapshot(snapshot, topic=topic)
+    return _present_snapshot(snapshot, topic=topic, stash=stash)
 
 
 def browse_act(
@@ -1648,17 +1795,24 @@ def browse_act(
     value: str = "",
     submit: bool = False,
     topic: str | None = None,
+    stash: Stash | None = None,
 ) -> str:
     """Do one thing to one numbered control, and hand back the page it made."""
     # Read off the SNAPSHOT, not the live DOM: `_press` may fall back to a link's
     # own destination, and the thing the gate classified has to be the thing that
     # runs. A destination the SSRF guard would refuse is simply not offered as a
     # fallback — the same fence `browse` itself applies to a model-chosen URL.
-    href, mutating = "", False
+    href, mutating, expect_download = "", False, False
     current = browser.browse_current()
     control = current.control(int(target)) if current else None
     if control is not None:
         mutating = control.mutating
+        # Read off the snapshot for the same reason as `href`: what the model
+        # pressed is what the notice must be about, and the live DOM after the
+        # press is a different page.
+        expect_download = action == "click" and browse_mod.wants_download(
+            control.name, control.detail
+        )
         if control.kind == "link" and control.detail.startswith(("http://", "https://")):
             try:
                 _require_public(control.detail)
@@ -1669,7 +1823,8 @@ def browse_act(
     try:
         snapshot = browser.browse_act(
             int(target), action, text=text, value=value, submit=submit,
-            href=href, mutating=mutating,
+            href=href, mutating=mutating, topic=topic or "",
+            expect_download=expect_download,
         )
     except browser.BrowserUnavailable as exc:
         return f"ERROR: {exc}"
@@ -1678,7 +1833,7 @@ def browse_act(
             f"ERROR: could not {action} control [{target}]: "
             f"{type(exc).__name__}: {exc}"
         )
-    return _present_snapshot(snapshot, topic=topic)
+    return _present_snapshot(snapshot, topic=topic, stash=stash)
 
 
 class BlockedURLError(Exception):

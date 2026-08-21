@@ -54,6 +54,7 @@ import time
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -2109,19 +2110,25 @@ async def _save_downloads(owner: _Owner, *, read_page: Any = None) -> list[str]:
 MAX_FRAMES = 12
 
 
-async def _enumerate(page: Any) -> tuple[list[dict], int, int]:
+async def _enumerate(page: Any, match: str = "") -> tuple[list[dict], int, int, int]:
     """Every control on the page, across its frames, in one numbering.
 
     The count continues across frames rather than restarting, so `[14]` means
     one thing on this page however many documents it is made of — and acting
-    finds it by searching the frames for the tag."""
+    finds it by searching the frames for the tag.
+
+    `match` decides which controls the cap BUYS, not which ones exist. It has
+    to be applied here and not on the way out: a control the cap dropped was
+    never tagged, and an untagged control cannot be acted on however cleverly
+    Python filters the list afterwards (#270)."""
     raw: list[dict] = []
-    matched = unreached = 0
+    matched = unreached = matching = 0
     options = {
         "max": browse_mod.MAX_CONTROLS,
         "nameMax": browse_mod.NAME_MAX_CHARS,
         "inlineChoices": browse_mod.CHOICE_INLINE_MAX,
         "offset": 0,
+        "match": match or "",
     }
     try:
         frames = list(page.frames)[:MAX_FRAMES]
@@ -2136,7 +2143,8 @@ async def _enumerate(page: Any) -> tuple[list[dict], int, int]:
         raw += list(found.get("controls") or [])
         matched += int(found.get("matched") or 0)
         unreached += int(found.get("unreachable") or 0)
-    return raw, matched, unreached
+        matching += int(found.get("matching") or 0)
+    return raw, matched, unreached, matching
 
 
 async def _find(page: Any, n: int) -> tuple[Any, bool]:
@@ -2160,12 +2168,18 @@ async def _find(page: Any, n: int) -> tuple[Any, bool]:
 
 
 async def _snapshot(
-    owner: _Owner, page: Any, *, problem: str = "", notice: str = "", asked: str = ""
+    owner: _Owner,
+    page: Any,
+    *,
+    problem: str = "",
+    notice: str = "",
+    asked: str = "",
+    match: str = "",
 ) -> browse_mod.Snapshot:
     """The page as the model receives it: what it says, and what it can press."""
     global _LAST_SNAPSHOT
     text = await _without_option_floods(page, await _settled_text(page))
-    raw, matched, unreached = await _enumerate(page)
+    raw, matched, unreached, matching = await _enumerate(page, match)
     controls = browse_mod.controls_from(raw)
     # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
     # control the model is looking for is very often in the header the narrowing
@@ -2176,6 +2190,8 @@ async def _snapshot(
         text=text,
         controls=controls,
         hidden=max(0, matched - len(controls)),
+        narrowed=match or "",
+        matching=matching,
         unreachable=unreached,
         epoch=owner.browse_epoch,
         problem=problem,
@@ -2230,8 +2246,13 @@ async def _adopt_new_tab(owner: _Owner, page: Any, before: list[Any]) -> Any:
     return fresh
 
 
-def browse_open(url: str, *, timeout: float = 120.0) -> browse_mod.Snapshot:
-    """Open `url` in the model's session and describe what is there."""
+def browse_open(
+    url: str, *, topic: str = "", timeout: float = 120.0
+) -> browse_mod.Snapshot:
+    """Open `url` in the model's session and describe what is there.
+
+    `topic` narrows BOTH halves of the answer — the page text on the way out,
+    and which controls the cap buys on the way in."""
     reason = unavailable_reason()
     if reason:
         raise BrowserUnavailable(reason)
@@ -2243,7 +2264,7 @@ def browse_open(url: str, *, timeout: float = 120.0) -> browse_mod.Snapshot:
         owner.browse_epoch += 1
         await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         await _dismiss_consent(page)
-        return await _snapshot(owner, page, asked=url)
+        return await _snapshot(owner, page, asked=url, match=topic)
 
     return _submit(job, timeout)
 
@@ -2399,6 +2420,8 @@ def browse_act(
     submit: bool = False,
     href: str = "",
     mutating: bool = False,
+    topic: str = "",
+    expect_download: bool = False,
     timeout: float = 120.0,
 ) -> browse_mod.Snapshot:
     """Do one thing to control `n`, and hand back the page it produced.
@@ -2421,11 +2444,16 @@ def browse_act(
     async def job(owner: _Owner) -> browse_mod.Snapshot:
         page = await _browse_page(owner, opening=False)
         target, top = await _find(page, n)
+        # Bound once so every ending below — refusal, stuck, stale index, or the
+        # act itself — describes the page the same way. An error path that
+        # silently un-narrows the list would hand back numbers from a different
+        # selection than the one the model asked for.
+        shot = partial(_snapshot, match=topic)
         if target is None:
             # The document changed under the numbering — an SPA re-render, a
             # redirect, a timed refresh. Re-describing beats guessing.
             owner.browse_epoch += 1
-            return await _snapshot(
+            return await shot(
                 owner,
                 page,
                 problem=(
@@ -2435,11 +2463,11 @@ def browse_act(
                 ),
             )
         if action not in ("click", "type", "choose"):
-            return await _snapshot(owner, page, problem=f"unknown action {action!r}")
+            return await shot(owner, page, problem=f"unknown action {action!r}")
         gone = await _reachable_now(target)
         if gone:
             owner.browse_epoch += 1
-            return await _snapshot(
+            return await shot(
                 owner,
                 page,
                 problem=(
@@ -2463,9 +2491,9 @@ def browse_act(
             else:
                 notice = await _choose(target, value)
         except Refused as exc:
-            return await _snapshot(owner, page, problem=str(exc))
+            return await shot(owner, page, problem=str(exc))
         except Stuck:
-            return await _snapshot(
+            return await shot(
                 owner,
                 page,
                 problem=(
@@ -2477,7 +2505,7 @@ def browse_act(
                 ),
             )
         except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
-            return await _snapshot(
+            return await shot(
                 owner,
                 page,
                 problem=f"could not {action} control [{n}]: {type(exc).__name__}",
@@ -2488,7 +2516,15 @@ def browse_act(
             pass
         await _dismiss_consent(page)
         page = await _adopt_new_tab(owner, page, before)
-        return await _snapshot(owner, page, notice=notice)
+        snapshot = await shot(owner, page, notice=notice)
+        if expect_download and not snapshot.downloads:
+            # Said HERE rather than at the gate, because it is only true here:
+            # the press that works says nothing, and the press that produced no
+            # file is the only one that needs the sentence (#271).
+            snapshot.notice = (
+                f"{snapshot.notice} {browse_mod.NO_FILE_YET}".strip()
+            )
+        return snapshot
 
     return _submit(job, timeout)
 
