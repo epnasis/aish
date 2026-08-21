@@ -1844,3 +1844,105 @@ class TestRecentPages:
         browser.remember_page("https://a.pl/", "A")
         browser.remember_page("https://b.pl/", "B")
         assert [r["host"] for r in browser.forget_page("a.pl")] == ["b.pl"]
+
+
+class TestTheThingApprovedIsTheThingPressed:
+    """#251. A name is a better handle than a number because it survives the
+    re-render a number never did — but only if it is checked against the page
+    as it is NOW. A framework that reuses a row's DOM node for a different row
+    hands the same tag to different content, and pressing it would be the right
+    element and the wrong flight."""
+
+    def _drive(self, monkeypatch, live, target="Wybierz", mutating=False,
+               action="click"):
+        from aish import browse as browse_mod
+
+        pressed = []
+        snaps = []
+
+        class FakePage:
+            url = "https://lot.com/"
+
+            def is_closed(self):
+                return False
+
+            @property
+            def context(self):
+                return type("C", (), {"pages": []})()
+
+            async def wait_for_load_state(self, *a, **k):
+                pass
+
+        page = FakePage()
+        owner = type(
+            "O", (), {"view": None, "browse_page": page, "browse_epoch": 0}
+        )()
+
+        async def snapshot(_owner, _page, *, problem="", notice="", asked=""):
+            snaps.append(problem or notice)
+            return browse_mod.Snapshot(
+                url=page.url, title="", text="", problem=problem, notice=notice
+            )
+
+        monkeypatch.setattr(browser, "_enumerate", lambda p: _done((live, len(live), 0)))
+        monkeypatch.setattr(browser, "_snapshot", snapshot)
+        monkeypatch.setattr(browser, "_find", lambda p, n: _done((f"locator-{n}", True)))
+        monkeypatch.setattr(browser, "_reachable_now", lambda t: _done(""))
+        monkeypatch.setattr(browser, "_centre", lambda t: _done(None))
+        monkeypatch.setattr(browser, "_dismiss_consent", lambda p: _done(None))
+        monkeypatch.setattr(browser, "_adopt_new_tab", lambda o, p, b: _done(p))
+
+        async def press(_page, target, *, mutating, href):
+            pressed.append((target, mutating, href))
+            return ""
+
+        monkeypatch.setattr(browser, "_press", press)
+        monkeypatch.setattr(browser, "unavailable_reason", lambda: "")
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        browser.browse_act(target, action, mutating=mutating)
+        return pressed, snaps
+
+    def test_the_name_is_pressed_where_it_is_now_not_where_it_was(self, monkeypatch):
+        """The page re-rendered and 'Wybierz' moved from [3] to [9]. The old
+        number would have pressed whatever took its place."""
+        live = [{"n": 9, "kind": "button", "name": "Wybierz"}]
+        pressed, _ = self._drive(monkeypatch, live)
+        assert pressed == [("locator-9", False, "")]
+
+    def test_a_control_that_now_needs_approval_is_not_pressed(self, monkeypatch):
+        """Whatever the owner said yes to, it was not this. The gate classified
+        a plain button; the page has since turned it into 'Zapłać'."""
+        live = [{"n": 3, "kind": "button", "name": "Zapłać"}]
+        pressed, snaps = self._drive(monkeypatch, live, target="Zapłać")
+        assert pressed == []
+        assert "not the control that was approved" in snaps[0]
+
+    def test_a_password_field_is_never_typed_however_it_is_reached(self, monkeypatch):
+        live = [{"n": 1, "kind": "password", "name": "Hasło"}]
+        pressed, snaps = self._drive(monkeypatch, live, target="Hasło")
+        assert pressed == []
+        assert "not the control that was approved" in snaps[0]
+
+    def test_a_name_that_no_longer_resolves_returns_the_page(self, monkeypatch):
+        live = [{"n": 1, "kind": "button", "name": "Anuluj"}]
+        pressed, snaps = self._drive(monkeypatch, live, target="Wybierz")
+        assert pressed == []
+        assert "no control on this page is called 'Wybierz'" in snaps[0]
+
+    def test_reading_touches_nothing(self, monkeypatch):
+        """`action="read"` is how the model gets the whole page back without
+        navigating to it — a goto to the same URL resets an SPA's state, so
+        "let me look properly" must not be a round trip through the address
+        bar."""
+        live = [{"n": 1, "kind": "button", "name": "Wybierz"}]
+        pressed, snaps = self._drive(monkeypatch, live, action="read")
+        assert pressed == []
+
+
+def _done(value):
+    """A coroutine already holding its answer — for patching an awaited helper."""
+
+    async def ready():
+        return value
+
+    return ready()

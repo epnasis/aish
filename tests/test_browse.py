@@ -83,7 +83,7 @@ class TestWhatCountsAsMutating:
 class TestTheControlList:
     def test_a_control_reads_as_one_line(self):
         line = control(n=7, name="Przełącz lokal").line()
-        assert line == "[7] button 'Przełącz lokal'"
+        assert line == "button 'Przełącz lokal'"
 
     def test_a_link_carries_its_destination(self):
         """A link the model can READ instead of clicking is a round trip saved,
@@ -112,14 +112,14 @@ class TestTheControlList:
         assert out.startswith(web_module.UNTRUSTED_NOTE)
 
     def test_the_control_list_survives_truncation(self):
-        """The numbers are the entire point of the call, so a text cap that fell
-        inside them would cut exactly what the model is meant to act on."""
+        """The controls are the entire point of the call, so a text cap that
+        fell inside them would cut exactly what the model is meant to act on."""
         long_page = snapshot(
             text="x" * (web_module.PAGE_MAX_CHARS + 5000),
             controls=[control(n=0, name="Przełącz lokal")],
         )
         out = web_module._present_snapshot(long_page)
-        assert "[0] button 'Przełącz lokal'" in out
+        assert "button 'Przełącz lokal'" in out
         assert "truncated" in out
 
     def test_a_problem_is_stated_above_the_page(self):
@@ -316,6 +316,24 @@ class TestBrowseGate:
         assert "aish never types passwords" in out
         assert "/browser eon.pl" in out
         assert asked == []          # never even offered
+
+    def test_the_card_names_the_control_the_model_asked_for(self, monkeypatch):
+        """What the owner used to read on the card was `browse_act target=15,
+        action=click`, and nobody can review "click 15". He decides to press a
+        button by reading its label; the card has to carry the same words."""
+        snap = snapshot(controls=[control(n=5, name="Zapłać")])
+        agent, asked = self._agent(monkeypatch, lambda *a: True, snap)
+        agent._approved_browsing.add("eon.pl")
+        assert agent._browse_gate("browse_act", {"target": "Zapłać"}) is None
+        assert "click button 'Zapłać' on eon.pl" in asked[0]
+
+    def test_the_echo_names_the_control_too(self, monkeypatch):
+        """The transcript line is the owner's only running account of what aish
+        is doing inside his account, once the host grant has been given."""
+        snap = snapshot(controls=[control(n=5, name="Zapłać")])
+        agent, _ = self._agent(monkeypatch, lambda *a: True, snap)
+        label, _thunk = agent._browse_call("browse_act", {"target": "Zapłać"})
+        assert label == "→ browse: click button 'Zapłać'"
 
     def test_acting_with_nothing_open_says_what_to_do(self, monkeypatch):
         agent, _ = self._agent(monkeypatch, lambda *a: True, None)
@@ -790,3 +808,218 @@ class TestScrollingIsWhatMakesAThingReachable:
         assert js.index("return 'outside-scroll-range'") < js.index(
             "box = {left: pr.left, top: pr.top"
         )
+
+
+class TestAControlIsAddressedByWhatItSays:
+    """#251. The model used to press `[13]`, which is what the trace and the
+    approval card then showed the owner — `browse_act target=15, action=click`,
+    reviewable by nobody. A person decides to press a button by reading its
+    label, so that is what aish asks for and what the card prints."""
+
+    def test_a_control_is_asked_for_by_its_name(self):
+        controls = browse.controls_from([{"n": 4, "kind": "button", "name": "Szukaj"}])
+        assert controls[0].address == "Szukaj"
+        assert browse.resolve(controls, "Szukaj").control is controls[0]
+
+    def test_the_name_is_matched_the_way_the_owners_web_is_written(self):
+        """Same fold as `match_option`: 'Przelacz lokal' has to find 'Przełącz
+        lokal', because that is how it will be typed."""
+        controls = browse.controls_from(
+            [{"n": 1, "kind": "button", "name": "Przełącz lokal"}]
+        )
+        assert browse.resolve(controls, "przelacz lokal").control is controls[0]
+
+    def test_two_nodes_of_one_control_share_one_address(self):
+        """The mobile copy and the desktop copy of one nav link say the same
+        thing and go to the same place. Numbering them apart would ask the model
+        a question with no right answer."""
+        controls = browse.controls_from([
+            {"n": 1, "kind": "link", "name": "Faktury", "detail": "https://x/f"},
+            {"n": 2, "kind": "link", "name": "Faktury", "detail": "https://x/f"},
+        ])
+        assert [c.address for c in controls] == ["Faktury", "Faktury"]
+        assert browse.resolve(controls, "Faktury").control is controls[0]
+
+    def test_two_controls_that_only_look_alike_are_told_apart(self):
+        controls = browse.controls_from([
+            {"n": 1, "kind": "link", "name": "Wybierz", "detail": "https://x/a"},
+            {"n": 2, "kind": "link", "name": "Wybierz", "detail": "https://x/b"},
+        ])
+        assert [c.address for c in controls] == ["Wybierz #1", "Wybierz #2"]
+        assert browse.resolve(controls, "Wybierz #2").control is controls[1]
+
+    def test_an_ambiguous_name_is_a_question_never_a_guess(self):
+        """The same posture as `match_option`: picking silently between two
+        buttons is how 'Iran' stands in for 'Iraq' — and this one may be a
+        button that spends money."""
+        controls = browse.controls_from([
+            {"n": 1, "kind": "link", "name": "Wybierz", "detail": "https://x/a"},
+            {"n": 2, "kind": "link", "name": "Wybierz", "detail": "https://x/b"},
+        ])
+        found = browse.resolve(controls, "Wybierz")
+        assert found.control is None
+        assert "'Wybierz #1', 'Wybierz #2'" in found.problem
+
+    def test_a_control_the_page_gave_no_words_to_is_asked_for_by_number(self):
+        controls = browse.controls_from([{"n": 12, "kind": "button", "name": ""}])
+        assert controls[0].address == "#12"
+        assert browse.resolve(controls, "#12").control is controls[0]
+        assert browse.resolve(controls, "12").control is controls[0]
+
+    def test_a_name_that_matches_nothing_hands_back_what_is_there(self):
+        controls = browse.controls_from([{"n": 1, "kind": "button", "name": "Szukaj"}])
+        found = browse.resolve(controls, "Search")
+        assert found.control is None
+        assert "'Szukaj'" in found.problem
+
+    def test_part_of_a_long_label_still_finds_it(self):
+        controls = browse.controls_from(
+            [{"n": 1, "kind": "button", "name": "Szukaj połączeń i cen"}]
+        )
+        assert browse.resolve(controls, "Szukaj").control is controls[0]
+
+
+class TestAnIconIsNotANamelessButton:
+    """The old rule dropped any control with no words and nowhere to go, which
+    took the swap-airports arrow, the hamburger and every dialog's X off the
+    list — on a booking form, half the controls that matter."""
+
+    def test_the_page_is_asked_what_it_calls_its_own_picture(self):
+        source = browse.CONTROLS_JS
+        # The ladder, in the order a name is most likely to be a real one.
+        for asked in ("svg.querySelector('title')", "img[alt]", "data-icon", "GLYPHS"):
+            assert asked in source
+
+    def test_a_stylesheet_name_is_turned_into_words(self):
+        """'icon-swap-airports' is the page saying what the picture is; it is
+        just written for a stylesheet rather than for a person."""
+        assert "replace(/[_\\-.]+/g, ' ')" in browse.CONTROLS_JS
+
+    def test_a_glyph_is_read_as_the_word_it_draws(self):
+        assert "'×': 'close'" in browse.CONTROLS_JS
+        assert "'☰': 'menu'" in browse.CONTROLS_JS
+
+
+class TestWhatChangedRatherThanThePageAgain:
+    """#251, the measured half: nine actions on lot.com cost 44 788 characters,
+    ~5 000 each, because every click re-sent the whole page and the whole
+    control list to report that a dropdown had opened."""
+
+    def setup_method(self):
+        web_module.forget_shown_page()
+
+    def _show(self, snap):
+        return web_module._present_snapshot(snap)
+
+    def test_an_action_reports_only_what_it_changed(self):
+        before = snapshot(text="From\nTo", controls=[control(n=0, name="Szukaj")])
+        self._show(before)
+        after = snapshot(
+            text="From\nTo\nParis (CDG)",
+            controls=[control(n=0, name="Szukaj"), control(n=1, name="Paris (CDG)")],
+        )
+        out = web_module._present_snapshot(after, acted=True)
+        assert "Paris (CDG)" in out
+        assert "what your action changed" in out
+        # The page it did NOT change is not sent again.
+        assert out.count("From") == 0
+        assert len(out) < len(self._show(after))
+
+    def test_a_click_that_did_nothing_says_so_in_words(self):
+        """The answer to "did that work" — on the FIRST click, as a fact the
+        page reported, not inferred by a counter three identical calls later."""
+        page = snapshot(controls=[control(n=0, name="Szukaj")])
+        self._show(page)
+        out = web_module._present_snapshot(
+            snapshot(controls=[control(n=0, name="Szukaj")]), acted=True
+        )
+        assert "nothing on the page changed" in out
+
+    def test_a_change_bigger_than_the_page_sends_the_page(self):
+        self._show(snapshot(text="a\nb\nc", controls=[control(n=0)]))
+        rebuilt = snapshot(
+            text="\n".join(f"line {i} of a completely different page" for i in range(200)),
+            controls=[control(n=0, name="Dalej")],
+        )
+        out = web_module._present_snapshot(rebuilt, acted=True)
+        assert "what your action changed" not in out
+        assert "controls on this page" in out
+
+    def test_a_different_page_is_sent_whole(self):
+        self._show(snapshot(url="https://lot.com/a", controls=[control(n=0)]))
+        out = web_module._present_snapshot(
+            snapshot(url="https://lot.com/b", controls=[control(n=0)]), acted=True
+        )
+        assert "controls on this page" in out
+
+    def test_a_problem_is_never_reported_as_a_diff(self):
+        """The model's next move depends on seeing where it actually is."""
+        self._show(snapshot(controls=[control(n=0)]))
+        out = web_module._present_snapshot(
+            snapshot(controls=[control(n=0)], problem="that control is gone"),
+            acted=True,
+        )
+        assert "controls on this page" in out
+
+    def test_the_picture_cannot_drift_for_long(self):
+        """A chain of deltas is a reconstruction, so the page comes back whole
+        every DELTA_RUN_MAX reports whether anything asked for it or not."""
+        self._show(snapshot(text="a", controls=[control(n=0)]))
+        outs = [
+            web_module._present_snapshot(
+                snapshot(text=f"a{i}", controls=[control(n=0)]), acted=True
+            )
+            for i in range(web_module.DELTA_RUN_MAX + 1)
+        ]
+        assert all("what your action changed" in o for o in outs[:-1])
+        assert "controls on this page" in outs[-1]
+
+    def test_the_diff_is_against_what_the_model_was_last_shown(self):
+        """Not against the page a moment before the click: a page that moves on
+        its own — a price that updates, a session that expires — would fall into
+        the gap between two reads and never be reported at all."""
+        self._show(snapshot(text="49,49 zl", controls=[control(n=0)]))
+        # The page changed by itself, and then an action changed something else.
+        out = web_module._present_snapshot(
+            snapshot(text="63,19 zl\nDodano do koszyka", controls=[control(n=0)]),
+            acted=True,
+        )
+        assert "63,19" in out
+        assert "49,49" in out
+
+    def test_no_change_is_ever_dropped_silently(self):
+        """The `MAX_CONTROLS` principle applied to text: a diff that quietly
+        decides which changes matter is a channel for a page to hide one."""
+        before = snapshot(text="\n".join(f"row {i}" for i in range(400)))
+        after = snapshot(text="\n".join(f"row {i} changed" for i in range(400)))
+        delta = browse.diff_snapshots(before, after)
+        assert delta.more_text > 0
+        assert f"{delta.more_text} more changed line(s) not shown" in delta.render()
+
+    def test_the_page_is_told_how_to_send_the_form(self):
+        """A change report stops re-listing what did not change, and the submit
+        button is exactly the control that never changes while a form is filled."""
+        page = snapshot(
+            controls=[
+                control(n=0, kind=browse.FIELD, name="Skąd"),
+                control(n=1, name="Szukaj", submits=True),
+            ]
+        )
+        assert "to submit this form" in self._show(page)
+        out = web_module._present_snapshot(
+            snapshot(
+                controls=[
+                    control(n=0, kind=browse.FIELD, name="Skąd", detail="currently: WAW"),
+                    control(n=1, name="Szukaj", submits=True),
+                ]
+            ),
+            acted=True,
+        )
+        assert "browse_act(target='Szukaj')" in out
+
+    def test_the_change_report_is_still_untrusted_page_content(self):
+        self._show(snapshot(controls=[control(n=0)]))
+        out = web_module._present_snapshot(
+            snapshot(text="Wyspowa zmieniona", controls=[control(n=0)]), acted=True
+        )
+        assert out.index(web_module.UNTRUSTED_NOTE) < out.index("Wyspowa zmieniona")

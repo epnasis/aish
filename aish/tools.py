@@ -1022,32 +1022,39 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "browse_act",
             "description": (
-                "Do ONE thing to ONE numbered control on the page browse opened, "
-                "and get the resulting page back in the same shape. The numbers "
-                "come from the most recent browse/browse_act result and change "
-                "every time the page does — always act on a number you have just "
-                "been given. A control marked '(needs approval)' asks the user "
-                "first; a password field is never typed by aish at all. If the "
-                "control you want is not in the list, it is closed away: press "
-                "whatever opens it (a menu, a tab, a dialog) and look again. Never "
-                "guess a URL instead."
+                "Do ONE thing to ONE control on the page browse opened, naming "
+                "it the way it is written in the list — browse_act(target=\"Log "
+                "in\"). You get back WHAT CHANGED on the page, not the whole "
+                "page again: if it says nothing changed, the control did "
+                "nothing and pressing it again will not help — find another "
+                "route. Use action=\"read\" when you need the whole page back. "
+                "A control marked '(needs approval)' asks the user first; a "
+                "password field is never typed by aish at all. If the control "
+                "you want is not in the list, it is closed away: press whatever "
+                "opens it (a menu, a tab, a dialog) and look again. Never guess "
+                "a URL instead."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "target": {
-                        "type": "integer",
+                        "type": "string",
                         "description": (
-                            "The [number] of the control, from the list you were "
-                            "just shown."
+                            "The control's NAME, exactly as the list writes it "
+                            "in quotes — 'Log in', 'Szukaj', 'Flight to:'. Where "
+                            "two controls say the same thing the list numbers "
+                            "them ('Select #2'); say which. A control the page "
+                            "gave no words to is listed as '#12' and is asked "
+                            "for that way."
                         ),
                     },
                     "action": {
                         "type": "string",
-                        "enum": ["click", "type", "choose"],
+                        "enum": ["click", "type", "choose", "read"],
                         "description": (
-                            "click a link/button/checkbox, type into a field, or "
-                            "choose an option in a dropdown. Default: click."
+                            "click a link/button/checkbox, type into a field, "
+                            "choose an option in a dropdown, or read the whole "
+                            "page again (touching nothing). Default: click."
                         ),
                     },
                     "text": {

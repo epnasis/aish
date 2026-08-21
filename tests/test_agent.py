@@ -366,8 +366,9 @@ class TestLoop:
         agent, chat = make_agent([endless] * 10, max_steps=3)
         result = agent.run_task("loop forever")
         assert "no progress" in result
-        # 5 identical calls trip the detector, then 1 no-tools wrap-up turn
-        assert len(chat.calls) == 6
+        # The FIRST call learns something (#251 counts repeats, not occurrences),
+        # then 5 dead retries trip the detector, then 1 no-tools wrap-up turn.
+        assert len(chat.calls) == 7
 
     def test_unknown_tool_reported_not_crashed(self):
         agent, _ = make_agent(
@@ -1719,7 +1720,7 @@ class TestRootScoping:
         # never typed them and the live UI shows nothing for them — a /cd is a
         # workspace marker, a nudge is internal. A cold replay classifies them
         # by their text, so the shape of every producer is pinned here (#171).
-        from aish.agent import LOOP_STOP_NOTE, LOOP_WARNING, STALL_NOTE, STEP_LIMIT_NOTE
+        from aish.agent import LOOP_STOP_NOTE, STALL_NOTE, STEP_LIMIT_NOTE
         from aish.session import synthetic_kind
 
         root = tmp_path / "a"
@@ -1731,7 +1732,7 @@ class TestRootScoping:
         assert synthetic_kind(agent.messages[-1]["content"]) == "note"  # /cd announce
         agent.add_root(str(root))
         assert synthetic_kind(agent.messages[-1]["content"]) == "note"  # /add-dir announce
-        for nudge in (LOOP_WARNING, STEP_LIMIT_NOTE, LOOP_STOP_NOTE, STALL_NOTE):
+        for nudge in (STEP_LIMIT_NOTE, LOOP_STOP_NOTE, STALL_NOTE):
             assert synthetic_kind(nudge) == "note"
         # …and a real prompt is never mistaken for one.
         assert synthetic_kind("move the session to the other repo") == ""
@@ -2035,35 +2036,71 @@ class TestStepLimitAndLoops:
         executed = []
         self._docs(monkeypatch, lambda c, topic=None: (executed.append(c), "same docs")[1])
         endless = model_says(tool_calls=[tool_call("read_docs", command="ls")])
-        agent, chat = make_agent([endless] * 6, max_steps=25)
+        agent, chat = make_agent([endless] * 7, max_steps=25)
         result = agent.run_task("task")
         assert result.startswith("(stopped")
-        assert executed == ["ls"] * 5  # the 5 in-budget calls ran; the wrap-up's did not
+        assert executed == ["ls"] * 6  # the in-budget calls ran; the wrap-up's did not
         assert tool_messages(agent.messages)[-1]["content"] == NOT_EXECUTED_LIMIT
 
-    def test_loop_warning_injected_after_three_identical_results(self, monkeypatch):
+    def test_nothing_is_injected_at_three_repeats(self, monkeypatch):
+        """#251 removed the nudge. It said "repeating this cannot make progress
+        — change your approach", which is false for a page view and false by
+        construction for a re-read the rules engine ORDERS. Told to use lot.pl,
+        the model read it as change SOURCE and silently moved to Google
+        Flights."""
         self._docs(monkeypatch, lambda c, topic=None: "same docs")
         same = model_says(tool_calls=[tool_call("read_docs", command="ls")])
         agent, _ = make_agent(
-            [same, same, same, model_says("changing approach")], max_steps=10
+            [same, same, same, model_says("still on it")], max_steps=10
         )
-        assert agent.run_task("loop") == "changing approach"
-        warnings = [
+        assert agent.run_task("loop") == "still on it"
+        assert not [
             m for m in agent.messages
-            if m.get("role") == "user" and "identical output" in (m.get("content") or "")
+            if m.get("role") == "user" and "cannot make progress" in (m.get("content") or "")
         ]
-        assert len(warnings) == 1  # warned exactly once, at the third repeat
 
-    def test_loop_stops_after_five_identical_results(self, monkeypatch):
+    def test_a_revisit_between_real_progress_never_stops_the_task(self, monkeypatch):
+        """The shape of driving a website (#251): open, act, look again, act
+        again. A hub page revisited six times across a working flow is not a
+        loop, and the old lifetime tally ended tasks that were making progress
+        the whole way."""
+        pages = iter(range(100))
+        def docs(command, topic=None):
+            return "the same hub page" if command == "hub" else f"new {next(pages)}"
+
+        self._docs(monkeypatch, docs)
+        revisit = model_says(tool_calls=[tool_call("read_docs", command="hub")])
+        onward = model_says(tool_calls=[tool_call("read_docs", command="deeper")])
+        agent, _ = make_agent(
+            [revisit, onward] * 6 + [model_says("found it")], max_steps=25
+        )
+        assert agent.run_task("navigate") == "found it"
+
+    def test_every_stop_forbids_answering_from_a_source_they_did_not_ask_for(self):
+        """The moment of temptation: the model is stuck, and the cheapest way
+        out is a different website. Being told aish cannot drive a site is a
+        useful answer; being handed another site's numbers as if they were that
+        site's is not."""
+        from aish.agent import LOOP_STOP_NOTE, STALL_NOTE, STEP_LIMIT_NOTE
+
+        for note in (LOOP_STOP_NOTE, STALL_NOTE, STEP_LIMIT_NOTE):
+            assert "MUST NOT quietly answer from a different source" in note
+        # And the standing rule, not only the moment it is being stopped.
+        from aish.agent import SYSTEM_PROMPT_TEMPLATE
+
+        assert "THE SOURCE THE USER NAMED IS THE SOURCE" in SYSTEM_PROMPT_TEMPLATE
+        assert "another site's prices as if" in SYSTEM_PROMPT_TEMPLATE
+
+    def test_loop_stops_after_five_dead_retries(self, monkeypatch):
         self._docs(monkeypatch, lambda c, topic=None: "same docs")
         same = model_says(tool_calls=[tool_call("read_docs", command="ls")])
         agent, chat = make_agent(
-            [same] * 5 + [model_says("stuck because the flag is unsupported")],
+            [same] * 6 + [model_says("stuck because the flag is unsupported")],
             max_steps=25,
         )
         result = agent.run_task("loop")
         assert "no progress" in result and "stuck because" in result
-        assert len(chat.calls) == 6  # stopped at 5 repeats, then the diagnostic turn
+        assert len(chat.calls) == 7  # first call, 5 dead retries, diagnostic turn
 
     def test_changing_output_never_trips_loop_detection(self, monkeypatch):
         ticks = iter(range(100))
@@ -2075,9 +2112,10 @@ class TestStepLimitAndLoops:
     def test_model_failure_in_wrapup_falls_back_to_headline(self, monkeypatch):
         self._docs(monkeypatch, lambda c, topic=None: "same docs")
         endless = model_says(tool_calls=[tool_call("read_docs", command="ls")])
-        # 5 identical calls trip the loop detector; the wrap-up then pops the
-        # empty list (model failure) and must fall back to the headline.
-        agent, chat = make_agent([endless] * 5, max_steps=25)
+        # A first call plus 5 dead retries trips the loop detector; the wrap-up
+        # then pops the empty list (model failure) and must fall back to the
+        # headline.
+        agent, chat = make_agent([endless] * 6, max_steps=25)
         result = agent.run_task("task")
         assert result.startswith("(stopped: repeating the same tool call")
 
@@ -2484,9 +2522,9 @@ class TestSkillGate:
         assert "freed" in results[1]["content"]  # command ran after the read
 
     def test_gate_auto_lifts_after_bounded_refusals(self, tmp_path):
-        from aish.agent import GATE_MAX_REFUSALS, LOOP_WARN_REPEATS
+        from aish.agent import GATE_MAX_REFUSALS, LOOP_STOP_REPEATS
 
-        assert GATE_MAX_REFUSALS < LOOP_WARN_REPEATS  # refusals never trip loop detection
+        assert GATE_MAX_REFUSALS < LOOP_STOP_REPEATS  # refusals never trip loop detection
         self._write_big_skill(tmp_path)
         agent, _ = make_agent(
             [
@@ -2703,7 +2741,7 @@ class TestActivityTraceSteps:
         # The wrap-up answer after a stop is a real answer turn: unreported, the
         # trace header totals every turn EXCEPT the one the user is reading.
         steps, result = run_with_steps(
-            [model_says(tool_calls=[tool_call("read_docs", command="ls")])] * 5
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")])] * 6
             + [model_says("here's where I got to", tokens=(900, 40))],
             max_steps=25,
         )

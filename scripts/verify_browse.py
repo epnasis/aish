@@ -140,6 +140,16 @@ HARD = """<!doctype html>
   </div>
   <button id="open-dialog">Otwórz okno</button>
 
+  <!-- Icon-only controls, every way a real site writes one. The old rule
+       dropped all of these: no words, nowhere to go. On a booking form they
+       are half the controls that matter. -->
+  <section id="ikony">
+    <button id="swap" class="btn icon-swap-airports"></button>
+    <button id="shut">×</button>
+    <button id="cog"><svg viewBox="0 0 16 16"><title>Ustawienia</title></svg></button>
+    <button id="bin"><svg viewBox="0 0 16 16"><use href="#icon-usun-pozycje"></use></svg></button>
+    <button id="pic"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="Drukuj"></button>
+  </section>
   <script>
     document.getElementById('unfold').onclick = () => {
       document.getElementById('folded').style.height = 'auto';
@@ -256,23 +266,57 @@ def check_portal(url: str) -> None:
     # The menu is not in the first snapshot at all — this is the round trip that
     # no URL could have replaced.
     absent(page, "Bluszczanska")
-    after = browser.browse_act(switch.n, "click")
+    after = browser.browse_act(switch.address, "click")
     chosen = named(after, "Bluszczanska")
     print(f"clicked 'Przełącz lokal' → {len(after.controls)} controls, menu is open")
 
-    final = browser.browse_act(chosen.n, "click")
+    final = browser.browse_act(chosen.address, "click")
     assert "Bluszczanska" in final.text, final.text
     assert "118,40" in final.text, f"the table never switched: {final.text!r}"
     print(f"clicked 'Bluszczanska' → {final.text.splitlines()[-1]}")
 
-    typed = browser.browse_act(named(final, "Szukaj faktury").n, "type", text="wrzesień")
+    typed = browser.browse_act("Szukaj faktury", "type", text="wrzesień")
     field = named(typed, "Szukaj faktury")
     assert "wrzesień" in field.detail, field.detail
     print(f"typed into the search box → {field.line()}")
 
-    stale = browser.browse_act(9999, "click")
-    assert "no control [9999]" in stale.problem, stale.problem
-    print("stale index refused:", stale.problem.splitlines()[0])
+    stale = browser.browse_act("Wyślij pieniądze do Nigerii", "click")
+    assert "no control on this page is called" in stale.problem, stale.problem
+    print("unknown control refused:", stale.problem.splitlines()[0][:90])
+
+    # The delta: the whole point of #251. Acting reports what changed, and the
+    # page it did not change is not re-sent.
+    before_len = len(final.text)
+    changed = browse.diff_snapshots(final, typed)
+    assert not changed.empty(), "typing into the search box changed nothing?"
+    assert len(changed.render()) < before_len, (
+        f"the change report ({len(changed.render())}) is not smaller than the "
+        f"page ({before_len})"
+    )
+    print(f"delta: {len(changed.render())} chars vs {before_len} for the page")
+
+    same = browse.diff_snapshots(typed, typed)
+    assert same.empty() and "nothing on the page changed" in same.render()
+    print("an action that changes nothing says so")
+
+
+def check_icons(page) -> None:
+    """An icon-only button is not a nameless button — it is a button whose name
+    is a picture, and a person reads it fine (#251)."""
+    wanted = ("swap airports", "close", "Ustawienia", "usun pozycje", "Drukuj")
+    how_each = (
+        "an icon class token", "a glyph", "the SVG's own <title>",
+        "the <use> reference", "the <img alt>",
+    )
+    for expected, how in zip(wanted, how_each, strict=True):
+        hits = [c for c in page.controls if c.name == expected]
+        assert hits, (
+            f"{how} should have named a control {expected!r}; got "
+            f"{[c.name for c in page.controls]}"
+        )
+    print("icon-only controls named:", ", ".join(
+        repr(c.address) for c in page.controls if c.name in wanted
+    ))
 
 
 def check_hard(url: str) -> None:
@@ -280,6 +324,7 @@ def check_hard(url: str) -> None:
     page = browser.browse_open(url + "hard.html")
     print(f"\nopened {page.url}: {len(page.controls)} controls, "
           f"{page.unreachable} closed away")
+    check_icons(page)
 
     # 1. The responsive duplicate. Both copies are named the same and only one
     #    can be pressed; the drawer copy is what burned 45 seconds on eon.pl.
@@ -300,7 +345,7 @@ def check_hard(url: str) -> None:
     # 3. A collapsed accordion is not a control list.
     absent(page, "Szczegóły rozliczenia")
     assert page.unreachable >= 2, page.unreachable
-    opened = browser.browse_act(named(page, "Pokaż szczegóły").n, "click")
+    opened = browser.browse_act("Pokaż szczegóły", "click")
     named(opened, "Szczegóły rozliczenia")
     print("collapsed accordion → hidden until opened, then listed")
 
@@ -308,7 +353,10 @@ def check_hard(url: str) -> None:
     agree = named(opened, "Akceptuję regulamin")
     assert agree.kind == browse.CHECK, agree
     assert agree.detail == "unchecked", agree
-    ticked = browser.browse_act(agree.n, "click")
+    # `mutating` is what the GATE classified, and the act-time re-read refuses
+    # anything the owner was not asked about (#251) — so a caller reaching past
+    # `web.browse_act` has to carry the same verdict the card was drawn from.
+    ticked = browser.browse_act(agree.address, "click", mutating=agree.mutating)
     after = named(ticked, "Akceptuję regulamin")
     assert after.detail == "checked", f"the label click did not toggle it: {after}"
     print("styled checkbox → pressing the label toggled the hidden input")
@@ -327,20 +375,20 @@ def check_hard(url: str) -> None:
     assert "250 options — see the control list" in page.text, page.text[:400]
     print(f"page text without the option flood → {len(page.text)} characters")
 
-    chosen = browser.browse_act(kraj.n, "choose", value="niemcy")
+    chosen = browser.browse_act(kraj.address, "choose", value="niemcy")
     assert "Niemcy (+49)" in named(chosen, "kraj").detail, named(chosen, "kraj").detail
     print(f"chose by folded name → {named(chosen, 'kraj').detail}")
 
-    lodz = browser.browse_act(kraj.n, "choose", value="Lodz")
+    lodz = browser.browse_act(kraj.address, "choose", value="Lodz")
     assert "Łódź" in named(lodz, "kraj").detail, named(lodz, "kraj").detail
     print("chose 'Lodz' → matched 'Łódź (+00)'")
 
-    ambiguous = browser.browse_act(kraj.n, "choose", value="Ira")
+    ambiguous = browser.browse_act(kraj.address, "choose", value="Ira")
     assert "matches 2 options" in ambiguous.problem, ambiguous.problem
     assert "Irak" in ambiguous.problem and "Iran" in ambiguous.problem
     print("ambiguous choice refused:", ambiguous.problem.splitlines()[0][:80])
 
-    missing = browser.browse_act(kraj.n, "choose", value="Atlantyda")
+    missing = browser.browse_act(kraj.address, "choose", value="Atlantyda")
     assert "no option matches" in missing.problem, missing.problem
     print("unmatched choice refused, with candidates")
 
@@ -353,7 +401,7 @@ def check_hard(url: str) -> None:
     covered = named(chosen, "Wyślij zgłoszenie")
     assert covered.mutating is True, covered
     started = time.monotonic()
-    pressed = browser.browse_act(covered.n, "click", mutating=True)
+    pressed = browser.browse_act(covered.address, "click", mutating=True)
     took = time.monotonic() - started
     assert "Wysłano zgłoszenie" in pressed.text, (pressed.problem, pressed.notice)
     assert took < 20, f"a covered control took {took:.0f}s — the ladder is not bounded"
@@ -361,7 +409,7 @@ def check_hard(url: str) -> None:
 
     # 7. The dialog that pins the page.
     deep = named(pressed, "Na samym dole")
-    locked = browser.browse_act(named(pressed, "Otwórz okno").n, "click")
+    locked = browser.browse_act("Otwórz okno", "click")
     absent(locked, "Na samym dole")
     named(locked, "Numer rezerwacji")
     print(f"dialog opened → [{deep.n}] 'Na samym dole' is now out of reach, "
@@ -372,12 +420,12 @@ def check_hard(url: str) -> None:
     # gate reads the same fresh snapshot, so the card names what is really there.
     assert not any(c.n == deep.n and c.name == deep.name for c in locked.controls)
 
-    unlocked = browser.browse_act(named(locked, "Zamknij okno").n, "click")
+    unlocked = browser.browse_act("Zamknij okno", "click")
     named(unlocked, "Na samym dole")
     print("dialog closed → the page is reachable again")
 
     # 8. The download that opens in a tab Chrome closes.
-    got = browser.browse_act(named(unlocked, "Pobierz e-fakturę").n, "click")
+    got = browser.browse_act("Pobierz e-fakturę", "click")
     assert got.downloads, f"nothing was downloaded: {got.problem or 'no problem reported'}"
     saved = Path(got.downloads[0])
     assert saved.exists() and saved.read_bytes().startswith(b"%PDF"), saved

@@ -24,6 +24,7 @@ import urllib.request
 from html.parser import HTMLParser
 from typing import Any
 
+from . import browse as browse_mod
 from . import browser
 from .tools import DOCS_MAX_CHARS, _filter_topic, truncate
 
@@ -1558,20 +1559,117 @@ def _present(
 # control list is aish's own description of the DOM, not the page's words about
 # itself.
 BROWSE_CONTROLS_NOTE = (
-    "\n\n[controls on this page — act with browse_act(target=<number>). This "
-    "list is aish's reading of the page, not text from it.]\n"
+    "\n\n[controls on this page — act with browse_act(target=\"<name>\"), using "
+    "the name in quotes. This list is aish's reading of the page, not text from "
+    "it.]\n"
 )
+
+# How many change reports in a row before the whole page is sent again. A chain
+# of deltas is a reconstruction, and a reconstruction drifts: the model stops
+# being able to see what it has not been reminded of. Ten is a compromise
+# between that and the bill the whole feature exists to cut — and it is a floor
+# under drift, not the only cure, since a delta bigger than the cap and any
+# change of page both send the page anyway.
+DELTA_RUN_MAX = 10
+
+# The page the MODEL was last shown, which is what a change report is a change
+# from. Not the page as it was a moment before the click: a page that moves on
+# its own — a price that updates, a session that expires — would fall into the
+# gap between the two reads and never be reported at all.
+_LAST_SHOWN: Any = None
+_DELTA_RUN = 0
+
+
+def forget_shown_page() -> None:
+    """Next page presented is presented in full. For tests and for anything
+    that ends a browsing session."""
+    global _LAST_SHOWN, _DELTA_RUN
+    _LAST_SHOWN = None
+    _DELTA_RUN = 0
 
 BROWSE_TRUNCATION_HINT = (
     "\n[page text truncated — the control list below is complete]"
 )
 
 
-def _present_snapshot(snapshot, *, topic: str | None = None) -> str:
-    """A driven page, as the model receives it.
+def _present_snapshot(snapshot, *, topic: str | None = None, acted: bool = False) -> str:
+    """A driven page, as the model receives it — the whole page, or only what
+    an action changed about it.
+
+    Sending the page back after every click is what made driving one expensive:
+    nine actions on lot.com cost 44 788 characters, most of it the same page
+    text and the same control list, re-sent to say that a dropdown had opened.
+    So an action reports its CHANGES, and the page comes back whole only when
+    it is genuinely a different page, when the change is bigger than the page,
+    when something went wrong, when the model asks, or every DELTA_RUN_MAX
+    reports so its picture cannot drift for long."""
+    global _LAST_SHOWN, _DELTA_RUN
+    if (
+        acted
+        and _LAST_SHOWN is not None
+        and not topic
+        and not snapshot.problem
+        and _LAST_SHOWN.url == snapshot.url
+        and _DELTA_RUN < DELTA_RUN_MAX
+    ):
+        delta = browse_mod.diff_snapshots(_LAST_SHOWN, snapshot)
+        if delta.worth_sending():
+            _LAST_SHOWN = snapshot
+            _DELTA_RUN += 1
+            return _present_change(snapshot, delta)
+    _LAST_SHOWN = snapshot
+    _DELTA_RUN = 0
+    return _present_page(snapshot, topic=topic)
+
+
+def _submit_hint(snapshot) -> str:
+    """How to send this form, named — because a change report stops re-listing
+    the controls that did not change, and the submit button is exactly the one
+    that never changes while a form is being filled."""
+    submits = [c for c in snapshot.controls if c.submits and not c.disabled]
+    if not submits:
+        return ""
+    return (
+        f"\n[aish: to submit this form, browse_act(target={submits[0].address!r})]"
+    )
+
+
+def _present_change(snapshot, delta) -> str:
+    """What the action did, rather than the page it did it to."""
+    said = _snapshot_notes(snapshot)
+    head = f"[{snapshot.url} — you are driving this page]"
+    return (
+        said
+        + UNTRUSTED_NOTE
+        + head
+        + "\n[what your action changed — everything else is as you last saw it]\n"
+        + delta.render()
+        + _submit_hint(snapshot)
+        + '\n[aish: use browse_act(action="read") to see the whole page again]'
+    )
+
+
+def _snapshot_notes(snapshot) -> str:
+    """aish's own statements about this result, which go ABOVE the untrusted
+    banner because they are not the site talking."""
+    problem = f"[aish: {snapshot.problem}]\n" if snapshot.problem else ""
+    if getattr(snapshot, "notice", ""):
+        problem += f"[aish: {snapshot.notice}]\n"
+    if getattr(snapshot, "asked", ""):
+        # The model asked for one page and is standing on another.
+        problem += (
+            f"[aish: you asked for {snapshot.asked} and the site sent you to "
+            f"{snapshot.url} instead. You are reading THAT page. Whatever you "
+            "wanted from the address you typed may not be here.]\n"
+        )
+    return problem + downloaded_note(snapshot.downloads, "this action downloaded")
+
+
+def _present_page(snapshot, *, topic: str | None = None) -> str:
+    """The whole page.
 
     The control list is appended AFTER truncation, for the same reason a read's
-    links and images are: the numbers are the entire point of the call, and a
+    links and images are: the controls are the entire point of the call, and a
     12k cap that fell inside the page text would cut exactly the thing the model
     is meant to act on."""
     head = f"[{snapshot.url} — you are driving this page]"
@@ -1607,19 +1705,16 @@ def _present_snapshot(snapshot, *, topic: str | None = None) -> str:
     controls = BROWSE_CONTROLS_NOTE + "\n".join(lines) if lines else (
         "\n\n[no controls found on this page]"
     )
-    problem = f"[aish: {snapshot.problem}]\n" if snapshot.problem else ""
-    if getattr(snapshot, "notice", ""):
-        problem += f"[aish: {snapshot.notice}]\n"
-    if getattr(snapshot, "asked", ""):
-        # Above the untrusted banner, because it is aish's statement and not the
-        # site's: the model asked for one page and is standing on another.
-        problem += (
-            f"[aish: you asked for {snapshot.asked} and the site sent you to "
-            f"{snapshot.url} instead. You are reading THAT page. Whatever you "
-            "wanted from the address you typed may not be here.]\n"
-        )
-    got = downloaded_note(snapshot.downloads, "this action downloaded")
-    return problem + got + UNTRUSTED_NOTE + head + "\n" + body + hint + controls
+    return (
+        _snapshot_notes(snapshot)
+        + UNTRUSTED_NOTE
+        + head
+        + "\n"
+        + body
+        + hint
+        + controls
+        + _submit_hint(snapshot)
+    )
 
 
 def browse(url: str, topic: str | None = None) -> str:
@@ -1642,21 +1737,23 @@ def browse(url: str, topic: str | None = None) -> str:
 
 
 def browse_act(
-    target: int,
+    target: str,
     action: str = "click",
     text: str = "",
     value: str = "",
     submit: bool = False,
     topic: str | None = None,
 ) -> str:
-    """Do one thing to one numbered control, and hand back the page it made."""
+    """Do one thing to the control the model named, and hand back what changed."""
     # Read off the SNAPSHOT, not the live DOM: `_press` may fall back to a link's
     # own destination, and the thing the gate classified has to be the thing that
     # runs. A destination the SSRF guard would refuse is simply not offered as a
     # fallback — the same fence `browse` itself applies to a model-chosen URL.
     href, mutating = "", False
     current = browser.browse_current()
-    control = current.control(int(target)) if current else None
+    control = (
+        browse_mod.resolve(current.controls, target).control if current else None
+    )
     if control is not None:
         mutating = control.mutating
         if control.kind == "link" and control.detail.startswith(("http://", "https://")):
@@ -1668,17 +1765,17 @@ def browse_act(
                 href = control.detail
     try:
         snapshot = browser.browse_act(
-            int(target), action, text=text, value=value, submit=submit,
+            str(target), action, text=text, value=value, submit=submit,
             href=href, mutating=mutating,
         )
     except browser.BrowserUnavailable as exc:
         return f"ERROR: {exc}"
     except Exception as exc:  # noqa: BLE001
         return (
-            f"ERROR: could not {action} control [{target}]: "
+            f"ERROR: could not {action} {target!r}: "
             f"{type(exc).__name__}: {exc}"
         )
-    return _present_snapshot(snapshot, topic=topic)
+    return _present_snapshot(snapshot, topic=topic, acted=action != "read")
 
 
 class BlockedURLError(Exception):
