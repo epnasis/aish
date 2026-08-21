@@ -3492,6 +3492,46 @@ body.console-open #backdrop { z-index: 63; }
 }
 .bv-empty svg { width: 42px; height: 42px; opacity: 0.5; }
 .bv-empty-title { font-size: 15px; }
+/* Where the view has been. A LIST and not a button, because the one-button
+   version answered "somewhere else" with nothing at all. */
+.bv-recent[hidden] { display: none; }
+.bv-recent {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  max-width: 420px;
+  margin-top: 6px;
+  max-height: 46vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.bv-recent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  align-items: flex-start;
+  text-align: left;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--bg-elev2);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.bv-recent-row:active { opacity: 0.6; }
+.bv-recent-host { font-size: 14px; font-weight: 600; }
+.bv-recent-title {
+  font-size: 12px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.bv-recent-anon { font-size: 11px; color: var(--dim); }
 #bv-resume { max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bv-edit-note { font-size: 12px; color: var(--dim); }
 .bv-edit-note:empty { display: none; }

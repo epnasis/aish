@@ -8020,8 +8020,8 @@ const SLASH_COMMANDS = [
   ["/cd", "change working directory (re-anchors approval root)"],
   ["/add-dir", "allow auto-approved work in another tree"],
   ["/jobs", "list background jobs"],
-  ["/browser", "sign in to a site in aish's own browser (window opens on the Mac)"],
-  ["/browser search", "the separate profile web searches are read with"],
+  ["/browser", "open a page — or type anything to search — in aish's own browser"],
+  ["/browser anon", "the separate profile web searches are read with"],
   ["/session", "show this chat's log path (copyable)"],
   ["/mic", "test speech recognition (mic diagnostic)"],
   ["/explain", "the full record of a turn — what it was given, thought, ran and answered"],
@@ -8441,19 +8441,22 @@ function handleSlash(text) {
         openSheet("workspace-sheet");
         return send({ type: "browser", arg });
       }
-      // `/browser search <url>` drives the SEARCH profile — the separate,
-      // signed-into-nothing browser web_search reads results pages with. Bare
-      // `/browser search` is a question about that profile, so it goes to the
-      // sheet as text like the other bookkeeping verbs.
-      if (verb === "search") {
+      // `/browser anon <url>` drives the SEARCH profile — the separate,
+      // signed-into-nothing browser web_search reads results pages with. It is
+      // not called `search` any more: the address bar now takes a search
+      // phrase, so `/browser search cats` would have been a genuine coin-flip
+      // between "look up cats" and "sign the search profile in at cats". Bare
+      // `/browser anon` is a question, so it goes to the sheet as text like the
+      // other bookkeeping verbs.
+      if (verb === "anon") {
         // Not named `rest`: the JS checks flatten const to var to run a real
         // function out of this file, and another branch already uses that name.
-        const searchAt = arg.slice(verb.length).trim();
-        if (!searchAt) {
+        const anonAt = arg.slice(verb.length).trim();
+        if (!anonAt) {
           openSheet("workspace-sheet");
           return send({ type: "browser", arg });
         }
-        openBrowserView(searchAt, "search");
+        openBrowserView(anonAt, "search");
         return true;
       }
       openBrowserView(arg);
@@ -12121,6 +12124,7 @@ function onBrowserView(event) {
     $("bv-status").textContent = `error: ${event.error}`;
     return;
   }
+  if (event.action === "recent") { bvRenderRecent(event.items || []); return; }
   if (event.action === "recorded") {
     const hosts = (event.hosts || []).join(", ");
     showToast(hosts ? `signed in: ${hosts}` : "nothing recorded");
@@ -12178,13 +12182,6 @@ function onBrowserView(event) {
   if (typeof event.nav === "number" && event.nav !== bvLastNav) {
     if (bvLastNav !== -1) bvZoom = { scale: 1, x: 0, y: 0 };
     bvLastNav = event.nav;
-    // The PROFILE is stored with the URL, not separately and not inferred:
-    // Resume reopens an address, and reopening a search-profile address in the
-    // owner's browser would silently swap which sessions are attached.
-    try {
-      localStorage.setItem("aish-bv-last", event.url || "");
-      localStorage.setItem("aish-bv-last-profile", bvProfile);
-    } catch (e) { /* private */ }
   }
   $("bv-empty").hidden = true;
   // A password went into this host and the page then moved — which is what a
@@ -12362,6 +12359,50 @@ function bvPaintFocus(focus) {
 }
 // [BROWSER-VIEW-EDIT-END]
 
+// [BROWSER-VIEW-RECENT-START]
+/** The places this browser has been, one row per site, newest first.
+ *
+ *  Built from the SERVER's list rather than from localStorage, which is what
+ *  the single Resume button used: where aish's browser has been is a fact
+ *  about that one Chrome on that one Mac, not about the phone looking at it,
+ *  so it has to read the same from every device.
+ *
+ *  Rows are per HOST because the alternative is useless in exactly the case
+ *  the owner named: search from here a few times and the ten most recent pages
+ *  are ten google.com rows, pushing off the list the address he actually
+ *  opened this to find. */
+function bvRenderRecent(items) {
+  const box = $("bv-recent");
+  box.textContent = "";
+  box.hidden = !items.length;
+  for (const item of items) {
+    const row = document.createElement("button");
+    row.className = "bv-recent-row";
+    row.type = "button";
+    const host = document.createElement("span");
+    host.className = "bv-recent-host";
+    host.textContent = item.host || item.url;
+    row.appendChild(host);
+    if (item.title) {
+      const title = document.createElement("span");
+      title.className = "bv-recent-title";
+      title.textContent = item.title;
+      row.appendChild(title);
+    }
+    if (item.profile === "search") {
+      // WHICH browser this row would reopen in. Two profiles, and reopening a
+      // page in the wrong one silently changes which sessions are attached.
+      const tag = document.createElement("span");
+      tag.className = "bv-recent-anon";
+      tag.textContent = "anonymous profile";
+      row.appendChild(tag);
+    }
+    row.addEventListener("click", () => openBrowserView(item.url, item.profile));
+    box.appendChild(row);
+  }
+}
+// [BROWSER-VIEW-RECENT-END]
+
 // Which profile the OPEN view is driving, so a frame arriving later can be
 // stored with the right one.
 let bvProfile = "";
@@ -12389,18 +12430,12 @@ function openBrowserView(url, profile) {
   $("bv-url").value = url || "";
   if (!url) {
     // An empty browser should INVITE, not present a black rectangle with a
-    // line of text under it. The last page is offered as one tap, because the
-    // commonest reason to reopen this is to carry on where you left off.
+    // line of text under it. It offered exactly ONE page — the last one — which
+    // answers "carry on where you left off" and nothing else; ten pages back is
+    // where the address you cannot remember actually lives.
     $("bv-empty").hidden = false;
     $("bv-status").textContent = "";
-    const last = localStorage.getItem("aish-bv-last") || "";
-    const resume = $("bv-resume");
-    resume.hidden = !last;
-    if (last) {
-      resume.textContent = `Resume ${last.replace(/^https?:\/\//, "").slice(0, 40)}`;
-      const lastProfile = localStorage.getItem("aish-bv-last-profile") || "";
-      resume.onclick = () => openBrowserView(last, lastProfile);
-    }
+    bvSend({ action: "recent" });   // server-side: the same list on every device
     $("bv-url").focus();
     return;
   }

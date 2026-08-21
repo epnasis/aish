@@ -185,7 +185,10 @@ Rules:
 7. WEB: for information not on this machine (current events, releases,
    unfamiliar errors, general facts), call web_search, then read_url the most
    promising result and answer from what the page actually says, citing the
-   URL. Search queries and URLs LEAVE THIS MACHINE — never include private
+   URL. web_search asks TWO indexes at once and merges them, so a thin or
+   surprising result set is the web's answer and not a tool that half-worked;
+   "No results" means it ran and matched nothing — do not re-run that query.
+   Search queries and URLs LEAVE THIS MACHINE — never include private
    local data (file contents, key values, personal details) in them.
    read_url only reaches public internet hosts; for a localhost or LAN
    service, propose a curl command instead (it goes through approval).

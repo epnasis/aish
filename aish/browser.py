@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
 import os
 import re
 import threading
@@ -395,6 +396,64 @@ def search_logins_file() -> Path:
     return state_dir() / "browser" / "search-logins.txt"
 
 
+# Where the view has BEEN, so reopening something is one tap rather than
+# retyping an address. Server-side, in the state dir, deliberately: this is a
+# fact about the BROWSER — one Chrome, on one Mac — not about the screen it is
+# being driven from, so it must read the same from his phone and his laptop.
+# The localStorage version it replaces was per-device by accident.
+RECENT_MAX = 20
+
+
+def recent_file() -> Path:
+    return state_dir() / "browser" / "recent.json"
+
+
+def recent_pages() -> list[dict]:
+    try:
+        loaded = json.loads(recent_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [row for row in loaded if isinstance(row, dict) and row.get("url")][:RECENT_MAX]
+
+
+def remember_page(url: str, title: str, *, cold: bool = False) -> None:
+    """Record a page the view landed on. Never raises — this is bookkeeping
+    alongside a screenshot, and a broken file must not cost the frame.
+
+    ONE ENTRY PER HOST, newest first, which is the owner's own framing: ten
+    Google pages in a row are ten rows of the same site and push everything
+    else off a list whose whole job is breadth. What he wants back is the
+    places he has been, not the steps he took through them."""
+    host = host_of(url)
+    if not host or not url.startswith(("http://", "https://")):
+        return
+    row = {
+        "url": url,
+        "title": " ".join((title or "").split())[:120],
+        "host": host,
+        "profile": "search" if cold else "",
+    }
+    kept = [r for r in recent_pages() if r.get("host") != host]
+    try:
+        path = recent_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps([row] + kept[: RECENT_MAX - 1], ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def forget_page(host: str) -> list[dict]:
+    kept = [r for r in recent_pages() if r.get("host") != host_of("https://" + host)]
+    try:
+        recent_file().write_text(json.dumps(kept, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    return kept
+
+
 def search_logged_in_hosts() -> set[str]:
     try:
         raw = search_logins_file().read_text(encoding="utf-8")
@@ -439,6 +498,55 @@ def unavailable_reason() -> str:
 
 
 # ------------------------------------------------------------------ logins
+
+# Where a bare phrase goes. Owned HERE rather than in `web.py` because this is
+# what an address bar does, and `web` already imports this module — the other
+# direction would be a cycle. `web.SEARCH_ENGINE_URL` is this constant.
+SEARCH_URL = "https://www.google.com/search?q={q}"
+
+# A thing that could be a host: labels, an optional port, an optional path. The
+# last label must START WITH A LETTER, which is what keeps `3.14` and `1.5` out
+# — Chrome searches for those, and so does this.
+_LOOKS_LIKE_HOST = re.compile(
+    r"^[\w-]+(\.[\w-]+)*\.[A-Za-z][\w-]*(:\d+)?([/?#].*)?$"
+)
+_IS_IPV4 = re.compile(r"^\d{1,3}(\.\d{1,3}){3}(:\d+)?([/?#].*)?$")
+_IS_LOCAL = re.compile(r"^localhost(:\d+)?([/?#].*)?$", re.I)
+
+
+def as_address(text: str) -> str:
+    """What the owner typed, as the thing to navigate to — address OR search.
+
+    The address bar in every browser he uses takes both, and this one took only
+    addresses: typing `krzyżacy 1960 obsada` became `https://krzyżacy 1960
+    obsada`, which Chrome refuses, so the view came back blank. Searching from
+    aish's browser meant knowing to type the whole google.com/search URL by
+    hand.
+
+    Deciding between them is a HEURISTIC and there is no version that is not.
+    The rules are Chrome's, in the order that matters: an explicit http(s)
+    scheme is an address and nothing else is inspected; anything with
+    whitespace in it is a search, because no address has a space; a bare
+    `localhost`, an IPv4 address, or something shaped like a dotted host with a
+    port or path is an address; everything else is a search. That last default
+    is the one that matters — a single unrecognised word is far more often
+    something he wants to look up than a hostname he wants to visit."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if text.startswith(("http://", "https://")):
+        return text
+    if not text.split() or len(text.split()) > 1:
+        return SEARCH_URL.format(q=urllib.parse.quote_plus(text))
+    if _IS_LOCAL.match(text) or _IS_IPV4.match(text):
+        # http, not https: a box on the LAN — his Home Assistant, aish's own
+        # web app — is almost never served over TLS, and https there fails
+        # rather than falling back.
+        return "http://" + text
+    if _LOOKS_LIKE_HOST.match(text):
+        return "https://" + text
+    return SEARCH_URL.format(q=urllib.parse.quote_plus(text))
+
 
 def host_of(url: str) -> str:
     """Bare hostname, `www.` stripped, lowercased. "" when unparseable."""
@@ -892,6 +1000,7 @@ class _Owner:
         # owner confirms a sign-in AFTER closing it, and that confirmation has
         # to land in the right record.
         self.view_cold = False
+        self.recorded_nav = -1
         self.view_hosts: set[str] = set()
         self.view_touched = 0.0
         self.busy = 0
@@ -1301,7 +1410,7 @@ def command(arg: str) -> str:
         shutdown()
         return "browser closed."
 
-    if verb == "search":
+    if verb in ("anon", "search"):
         signed = sorted(search_logged_in_hosts())
         if not rest:
             return "\n".join(
@@ -1315,14 +1424,11 @@ def command(arg: str) -> str:
                     "your other sessions, and nothing it is signed into can "
                     "change what a read_url of a site is allowed to do.",
                     "",
-                    "/browser search <url>   sign this profile in (opens the "
+                    "/browser anon <url>   sign this profile in (opens the "
                     "remote view on it)",
                 ]
             )
-        return (
-            "opening the search profile at "
-            + (rest if rest.startswith(("http://", "https://")) else "https://" + rest)
-        )
+        return "opening the anonymous profile at " + as_address(rest)
 
     if not arg:
         reason = unavailable_reason()
@@ -1335,14 +1441,12 @@ def command(arg: str) -> str:
             "",
             "/browser <url>       open a real window there so you can sign in",
             "/browser forget <host>  stop treating a site as signed in",
-            "/browser search      the separate profile searches are read with",
+            "/browser anon        the separate profile searches are read with",
             "/browser close       shut the browser down now",
         ]
         return "\n".join(lines)
 
-    url = arg if arg.startswith(("http://", "https://")) else "https://" + arg
-    if verb in ("login", "open"):
-        url = rest if rest.startswith(("http://", "https://")) else "https://" + rest
+    url = as_address(rest if verb in ("login", "open") else arg)
     reason = unavailable_reason()
     if reason:
         return f"cannot open a browser: {reason}"
@@ -1554,7 +1658,7 @@ async def _frame(
     else:
         await page.wait_for_timeout(FIRST_FRAME_MS)
     size = page.viewport_size or {"width": VIEW_WIDTH, "height": VIEW_HEIGHT}
-    return Frame(
+    frame = Frame(
         jpeg=await page.screenshot(type="jpeg", quality=VIEW_JPEG_QUALITY),
         url=page.url or "",
         title=(await page.title()) or "",
@@ -1563,6 +1667,13 @@ async def _frame(
         focus=await _focus_info(page, click),
         nav=owner.navigations,
     )
+    # Recorded per NAVIGATION, not per frame: a frame is sent for every tap,
+    # scroll and keystroke, and rewriting the file on each of those would spend
+    # a disk write on a screenshot that went nowhere.
+    if owner.navigations != owner.recorded_nav:
+        owner.recorded_nav = owner.navigations
+        remember_page(frame.url, frame.title, cold=owner.view_cold)
+    return frame
 
 
 def _note_visit(owner: _Owner, url: str) -> None:
@@ -1599,14 +1710,13 @@ def view_open(
     reason = unavailable_reason()
     if reason:
         raise BrowserUnavailable(reason)
-    # The scheme, which `view_act(goto)` and `browse_open` both add and this did
-    # not. `/browser eon.pl` from the web app therefore NEVER opened: the web
-    # sends the typed line straight here, Chrome refuses a schemeless address,
-    # and the view came back `about:blank` with "could not open eon.pl (Error)".
-    # Only the CLI worked, because `command()` normalises before it calls this
-    # — so the one surface the owner actually uses was the broken one.
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
+    # Address OR search, the same as the location box (`as_address`). Before
+    # this the web app sent the typed line straight here and Chrome refused
+    # anything schemeless, so `/browser eon.pl` from the PWA NEVER opened — it
+    # came back `about:blank` with "could not open eon.pl (Error)" while
+    # `/browser https://eon.pl` worked, and only because `command()` normalised
+    # first. The one surface the owner actually uses was the broken one.
+    url = as_address(url)
     w, h = view_size(width, height)
 
     async def job(owner: _Owner) -> Frame:
@@ -1884,9 +1994,7 @@ def view_act(action: str, **kwargs: Any) -> Frame:
             except Exception:  # noqa: BLE001 — nothing to go back to is not an error
                 pass
         elif action == "goto":
-            target = str(kwargs.get("url", ""))
-            if not target.startswith(("http://", "https://")):
-                target = "https://" + target
+            target = as_address(str(kwargs.get("url", "")))
             await page.goto(target, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         elif action == "refresh":
             # RELOAD, not merely re-capture. It was a no-op that just took a
