@@ -14128,18 +14128,51 @@ $("sessions-search").addEventListener(
 // or Escape.
 const RAIL_DOCK_MIN = 900; // px of viewport width at which the rail docks open
 
+// Docked is TWO facts, not one. `railDocked()` is the viewport's: there is room
+// for a sidebar. `railFiledAway()` is the OWNER's: they have put it away on this
+// screen, and want the whole window for the chat.
+//
+// Only the width used to count, and the consequence was a dead control — the
+// topbar's chats button and ⌘O both route to `closeSessionRail`, which refuses
+// while docked, so on the only screens wide enough to dock there was no way to
+// hide the list at all. The two facts are deliberately separate writers: this
+// preference is written ONLY by the toggle and by an explicit open, never by
+// `closeSessionRail` — that function is the slide-over's dismiss (the scrim,
+// Escape, picking a chat) and if it filed the sidebar away, every tap on a chat
+// row would close the sidebar on desktop.
+//
+// It lives in localStorage rather than on the server because it is a fact about
+// this SCREEN — the laptop's sidebar has nothing to say about the phone's.
+const RAIL_HIDDEN_KEY = "aish-rail-hidden";
+
 function railDocked() { return innerWidth >= RAIL_DOCK_MIN; }
 function railIsOpen() { return document.body.classList.contains("rail-open"); }
+function railFiledAway() {
+  try { return localStorage.getItem(RAIL_HIDDEN_KEY) === "1"; } catch (e) { return false; }
+}
+function setRailFiledAway(away) {
+  try {
+    if (away) localStorage.setItem(RAIL_HIDDEN_KEY, "1");
+    else localStorage.removeItem(RAIL_HIDDEN_KEY);
+  } catch (e) { /* private mode: the sidebar simply comes back next load */ }
+}
 function railWidth() {
   return $("session-rail").offsetWidth || Math.min(innerWidth * 0.86, 380);
 }
 
 function openSessionRail(query = "") {
+  // An explicit open is the owner asking for the list, so it unfiles a sidebar
+  // they had put away — /resume and ⌘O must be able to bring it back.
+  if (railDocked()) setRailFiledAway(false);
   // Whatever else owns the screen stands down first — the rail is not a sheet
-  // and does not stack with one.
-  for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
-  for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
-  $("backdrop").hidden = true;
+  // and does not stack with one. DOCKED it is not a mode and does not overlap
+  // anything (the sheets are inset beside it), so there it stands nothing down:
+  // showing the sidebar must not close the dossier you opened it to compare.
+  if (!railDocked()) {
+    for (const sheet of document.querySelectorAll(".sheet")) sheet.hidden = true;
+    for (const menu of document.querySelectorAll(".popover-menu")) menu.hidden = true;
+    $("backdrop").hidden = true;
+  }
   document.body.classList.remove("rail-dragging");
   document.body.classList.add("rail-open");
   clearRailDragStyles();
@@ -14162,8 +14195,23 @@ function openSessionRail(query = "") {
   requestSessions(query);
 }
 
+// Dismissing the SLIDE-OVER: the scrim, Escape, picking a chat, starting a new
+// one. Docked, none of those mean "put the sidebar away" — they are the ordinary
+// business of a list that is simply always there — so it still refuses, and the
+// owner's preference is untouched.
 function closeSessionRail() {
   if (railDocked()) return; // docked open is its resting state, not a mode
+  hideRail();
+}
+
+// Putting the SIDEBAR away: the one deliberate act, and the only writer of the
+// preference in this direction.
+function fileRailAway() {
+  setRailFiledAway(true);
+  hideRail();
+}
+
+function hideRail() {
   const active = document.activeElement;
   if (active && active.closest("#session-rail")) active.blur();
   document.body.classList.remove("rail-open", "rail-dragging");
@@ -14172,8 +14220,9 @@ function closeSessionRail() {
 }
 
 function toggleSessionRail() {
-  if (railIsOpen()) closeSessionRail();
-  else openSessionRail("");
+  if (!railIsOpen()) openSessionRail("");
+  else if (railDocked()) fileRailAway();
+  else closeSessionRail();
 }
 
 function clearRailDragStyles() {
@@ -14261,9 +14310,13 @@ $("rail-scrim").onclick = () => closeSessionRail();
 // was never deliberately opened sitting over the chat.
 addEventListener("resize", () => {
   if (railDocked()) {
-    if (!railIsOpen()) {
-      document.body.classList.add("rail-open");
-      requestSessions($("sessions-search").value || "");
+    // Growing past the breakpoint restores what the owner last chose here, not
+    // an unconditional open: a sidebar they filed away must stay away across a
+    // window resize, or every drag of the window edge undoes the decision.
+    const show = !railFiledAway();
+    if (show !== railIsOpen()) {
+      document.body.classList.toggle("rail-open", show);
+      if (show) requestSessions($("sessions-search").value || "");
     }
     return;
   }
@@ -14271,10 +14324,10 @@ addEventListener("resize", () => {
   clearRailDragStyles();
 });
 
-// At a docked width the rail is open from the start. Only the CLASS is set
-// here — filling it is left to the first hello, because this runs at module
-// load, before the offline layer the list paints from is ready.
-if (railDocked()) document.body.classList.add("rail-open");
+// At a docked width the rail starts open unless it was filed away. Only the
+// CLASS is set here — filling it is left to the first hello, because this runs
+// at module load, before the offline layer the list paints from is ready.
+if (railDocked() && !railFiledAway()) document.body.classList.add("rail-open");
 // [RAIL-END]
 
 // Only the states the user can act on. "idle but open in server memory" is
