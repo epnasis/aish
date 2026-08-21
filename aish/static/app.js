@@ -2950,6 +2950,28 @@ function traceStep(step) {
     updateTraceHead(t);
     return;
   }
+  if (step.kind === "trim") {
+    // The one governance record that draws a row (#243). Every other one
+    // describes a decision you can look up; this one CONTRADICTS what is in
+    // front of you — the transcript above still shows the whole page while the
+    // model was handed 200 characters of it, and the transcript is what you are
+    // reading. It marks the turn it prepared; which results, and whether they
+    // can be paged back, are in the full record one tap below.
+    t.started += 1;
+    const n = step.affected || 0;
+    const recoverable = (step.stubbed || []).filter((x) => x.continuation).length;
+    const tail = recoverable === n && n
+      ? "the model can read them back on demand"
+      : recoverable
+        ? `${recoverable} of them can be read back on demand`
+        : "the model cannot get them back";
+    traceRow(
+      t, traceSvg("thinking", "var(--dim)"),
+      `Shortened ${n} earlier result${n === 1 ? "" : "s"} for the model`,
+      tail
+    );
+    return;
+  }
   if (step.kind === "knowledge") {
     t.started += 1;
     const items = step.items || [];

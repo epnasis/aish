@@ -1006,7 +1006,7 @@ KNOWLEDGE_WRITE_TOOLS = frozenset({"remember", "forget_memory"})
 # an answer always needs the tool steps and the knowledge step alongside the
 # gate records. `thinking` is deliberately left out: it is the high-volume kind
 # and buys nothing #197 asks for. Renderless kinds are stamped by _emit_record.
-TURN_STAMPED_STEPS = frozenset({"tool_start", "tool", "knowledge"})
+TURN_STAMPED_STEPS = frozenset({"tool_start", "tool", "knowledge", "trim"})
 
 # Decisions meaning THE ACTION DID NOT HAPPEN. A step carrying one is never
 # green, whichever path set it — see _emit_tool_step for why this is one rule
@@ -2863,7 +2863,12 @@ class Agent:
         # from num_ctx — a record claiming the backend window governed a trim
         # the backend window never touched.
         _, cap_source = self._history_budget()
-        self._emit_record(
+        # RENDERED, not log-only (#243). Every other governance record describes
+        # a decision the owner can look up on demand; this one contradicts what
+        # is in front of him — the transcript still shows the full page while
+        # the model holds 200 characters of it — so the turn it prepared says
+        # so on screen.
+        self._emit_step(
             kind="trim",
             policy=policy,
             affected=len(stubbed),

@@ -228,6 +228,11 @@ Long bodies are **folded, not truncated** — the record's whole point is that i
 
 The check that let a broken deep-link ship asserted a note **had** a click handler without ever calling it, so a jump that reached nothing passed. `test_explain_panel.js` now invokes the handler and asserts where the panel ended up — which is why the fake element grew a `click()` and a small `querySelector`. `xpAbort` cancels an in-flight read when a second turn is opened, and a failed fetch **says so** (L7) rather than leaving the spinner up; offline is the ordinary case, since the transcript paints from the mirror while `/explain` cannot be served. — `test_explain_panel.js`
 
+### A trim marks the turn it prepared
+The one governance record that draws a row (#243). Every other one describes a decision you can look up; this one **contradicts what is in front of you** — the transcript above still shows the whole page while the model was handed 200 characters of it, and the transcript is what you are reading.
+
+The row says how many earlier results were shortened and whether the model can read them back on demand; it never says why, and it never names the results — which ones, and their keys, are in the full record one tap below. Singular and plural are distinguished, and it books a step like every other row, or the finished header contradicts the timeline printed under it (the turn clock). — `tests/js/test_trim_row.js`
+
 ### The door is the finished trace card
 The card is already the turn's footnote, it already replays cold, and it already means "what it did", so it gains one row — `Full record ›` — rather than the answer's tool row gaining a tenth chip for something that is not about the answer.
 

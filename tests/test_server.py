@@ -7136,6 +7136,12 @@ class TestNoGhostTraceCards:
 
         steps = [e for e in seen if e.get("type") == "step"]
         assert steps, "sanity: the turn produced trace steps"
+        # …and that renderless kinds were genuinely PRODUCED on this turn, or
+        # the assertion below passes by there being nothing to catch. `trim`
+        # used to be the producer here and is deliberately rendered now (#243),
+        # so the guarantee rests on the ones emitted every turn.
+        written = (Path(app_env["state_dir"]) / _hello["session"]).read_text()
+        assert '"kind": "brief"' in written and '"kind": "reasoning"' in written
         leaked = [s for s in steps if s.get("kind") in session_module.RENDERLESS_STEPS]
         assert not leaked, f"renderless records reached a live client: {leaked}"
 
