@@ -2713,6 +2713,68 @@ class TestSessions:
             ws.send_json({"type": "approval", "id": request["id"], "action": "deny"})
             recv_until(ws, "done")
 
+    def test_a_reopened_chat_lands_on_the_same_workspace(self, app_env):
+        """#258 end to end: the chat is rebuilt (eviction, restart, model
+        switch) and must come back to the SAME scratch dir. When it did not,
+        the model kept writing to the path its history named — the previous
+        agent's — and aish raised an approval card for its own throwaway file
+        mid-task."""
+        client, _ = make_client(app_env, [model_says("ok")])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "hello"})
+            recv_until(ws, "done")
+
+            server = client.app.state.server
+            before = server.sessions[name].agent
+            staged = before.scratch_dir / "fares.py"
+            staged.write_text("x")
+            server.sessions.pop(name).close()  # evicted
+
+            session, _history = server.open_session(server.state_dir / name)
+            assert session.agent.scratch_dir == before.scratch_dir
+            assert staged.read_text() == "x"  # what it staged is still there
+            # …and the prompt it is given names the dir the gate will scope to.
+            assert str(session.agent.scratch_dir) in session.agent.messages[0]["content"]
+
+    def test_delete_takes_the_chat_scratch_workspace_with_it(self, app_env):
+        """#258: the workspace is keyed on the chat's log and outlives every
+        agent built behind it, so deleting the chat is the only thing left
+        that collects it."""
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, hello, _):
+            name = hello["session"]
+            scratch = app_env["state_dir"] / "scratch" / name[: -len(".jsonl")]
+            assert scratch.is_dir()
+            (scratch / "probe.py").write_text("x")
+
+            ws.send_json({"type": "delete_session", "name": name})
+            recv_until(ws, "session_deleted")
+            recv_until(ws, "session_list")
+            assert not scratch.exists()
+
+    def test_startup_sweeps_workspaces_whose_chat_is_gone(self, app_env):
+        """Orphans predate the fix (every rebuilt agent leaked its
+        predecessor's dir) and outlive a kill -9. The log is the owner, so a
+        workspace with no log is collectable — read once at start, while no
+        chat is open to be mistaken for one."""
+        state_dir = app_env["state_dir"]
+        state_dir.mkdir(parents=True, exist_ok=True)
+        orphan = state_dir / "scratch" / "session-20200101-000000-000000"
+        orphan.mkdir(parents=True)
+        (orphan / "leftover.py").write_text("x")
+        kept = state_dir / "scratch" / "session-20200102-000000-000000"
+        kept.mkdir(parents=True)
+        (state_dir / "session-20200102-000000-000000.jsonl").write_text(
+            '{"kind": "message", "role": "user", "content": "still here"}\n',
+            encoding="utf-8",
+        )
+
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            assert not orphan.exists()
+            assert kept.is_dir()
+
     def test_delete_rejects_path_escape_and_unknown_names(self, app_env):
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):

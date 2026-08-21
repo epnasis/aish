@@ -2,9 +2,11 @@
 
 Why a store rather than "wherever the model put the file":
 
-- The scratch workspace is auto-approved for writing but **deleted when the
-  session ends**, and a transcript is permanent — an image left in scratch is a
-  broken picture the moment you reopen the chat. Different lifetimes.
+- The scratch workspace is auto-approved for writing but **dies with its
+  chat** (#258; before that, with the session — an image left there was a
+  broken picture the moment you reopened), and it is private to one chat,
+  while a picture is displayed by a transcript that is permanent and
+  exportable. Different lifetimes, different scope.
 - The project tree is the wrong place for a picture of a phone. Writing there
   also needs approval, which turns "show me what it looks like" into a diff
   review.

@@ -65,6 +65,8 @@ from .agent import (
     Agent,
     ModelUnavailable,
     environment_context,
+    prune_chat_scratch,
+    remove_chat_scratch,
 )
 from .approval import (
     DEFAULT_ALLOWLIST,
@@ -1697,6 +1699,13 @@ class WebServer:
     ):
         self.open_session = open_session  # (path | None) -> Session
         self.state_dir = state_dir
+        # Here and not in startup(), deliberately (#258): a chat scratch
+        # workspace is an orphan exactly when its session log is gone, and a
+        # brand-new chat has no log until it records its first line — so the
+        # only moment that reading is unambiguous is before this server can
+        # open anything, which is now. create_app opens the default session
+        # immediately after constructing us. One directory listing.
+        prune_chat_scratch(state_dir)
         self.uploads_dir = state_dir / "uploads"
         # The share inbox survives a restart, and it has to: a photo shared from
         # the phone at lunchtime is claimed when the app is next opened, and
@@ -3842,6 +3851,10 @@ class WebServer:
         # file open via --resume keeps appending to the unlinked inode until
         # it exits — harmless, the data just vanishes with the last handle.
         await asyncio.to_thread(lambda: path.unlink(missing_ok=True))
+        # The chat's scratch workspace goes with it (#258). Deleting the chat
+        # is the ONLY thing that collects it — closing the session no longer
+        # does, because the workspace has to survive eviction and restart.
+        await asyncio.to_thread(remove_chat_scratch, self.state_dir, path)
         # To EVERY client, not just the one that asked (#204): a chat deleted
         # on the laptop used to stay on the phone's list until it happened to
         # refresh, and tapping it opened a chat that no longer existed.

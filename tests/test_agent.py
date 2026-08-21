@@ -2956,6 +2956,132 @@ class TestScratchWorkspace:
         assert not scratch.exists()
 
 
+class TestScratchBelongsToTheChat:
+    """Issue #258: the scratch workspace is keyed on the SESSION LOG, not on
+    the Agent object. A chat is rebuilt behind the user's back all the time
+    (reconnect, eviction, model switch, restart) and the conversation keeps
+    naming the path it was given, so a per-object dir turned aish's own
+    throwaway file into an approval card mid-task."""
+
+    def _agent(self, tmp_path, state_dir, log):
+        return Agent(
+            model="fake",
+            approve=lambda _cmd: True,
+            client_chat=FakeChat([]),
+            cwd=str(tmp_path),
+            state_dir=state_dir,
+            current_session=lambda: log,
+        )
+
+    def test_the_same_chat_reopens_onto_the_same_workspace(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        log = state_dir / "session-20260821-191416-521841.jsonl"
+        first = self._agent(tmp_path, state_dir, log)
+        staged = first.scratch_dir / "fares.py"
+        staged.write_text("x")
+        first.close()  # eviction: the chat is still there
+
+        second = self._agent(tmp_path, state_dir, log)
+        assert second.scratch_dir == first.scratch_dir
+        assert staged.read_text() == "x"  # survived the rebuild
+
+    def test_a_reopened_chat_writes_its_own_scratch_file_unprompted(self, tmp_path):
+        """The reported session: turn 3 auto-approved, turn 4 raised a card for
+        the identical action because the agent underneath had been replaced."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        log = state_dir / "session-1.jsonl"
+        first = self._agent(tmp_path, state_dir, log)
+        target = first.scratch_dir / "probe.py"
+        first.close()
+
+        second = self._agent(tmp_path, state_dir, log)
+        second.approve_write = lambda _plan: pytest.fail("scratch write must not prompt")
+        second.chat = FakeChat(
+            [
+                model_says(
+                    tool_calls=[tool_call("write_file", path=str(target), content="print(1)")]
+                ),
+                model_says("done"),
+            ]
+        )
+        assert second.run_task("probe the fare api") == "done"
+        assert target.read_text() == "print(1)\n"
+
+    def test_two_chats_never_share_a_workspace(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        one = self._agent(tmp_path, state_dir, state_dir / "session-1.jsonl")
+        two = self._agent(tmp_path, state_dir, state_dir / "session-2.jsonl")
+        assert one.scratch_dir != two.scratch_dir
+
+    def test_the_path_the_model_is_told_is_the_path_that_auto_approves(self, tmp_path):
+        """The system prompt names the workspace; the gate scopes to it. When
+        those two came from different agents the card appeared."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        log = state_dir / "session-1.jsonl"
+        agent = self._agent(tmp_path, state_dir, log)
+        told = agent.messages[0]["content"]
+        assert str(agent_module.chat_scratch_dir(state_dir, log).resolve()) in told
+        assert agent.workspace_roots() and agent.scratch_dir in agent.workspace_roots()
+
+    def test_closing_a_chat_scoped_agent_keeps_the_workspace(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        agent = self._agent(tmp_path, state_dir, state_dir / "session-1.jsonl")
+        scratch = agent.scratch_dir
+        agent.close()
+        assert scratch.is_dir()
+
+    def test_no_session_log_still_gets_a_throwaway_workspace(self, tmp_path):
+        """Embedded/test agents have no chat identity — they keep the old
+        ephemeral dir, and it is still collected on close()."""
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=FakeChat([]), cwd=str(tmp_path)
+        )
+        assert "aish-scratch-" in agent.scratch_dir.name
+        agent.close()
+        assert not agent.scratch_dir.exists()
+
+    def test_an_unwritable_state_dir_falls_back_instead_of_failing(self, tmp_path):
+        """A scratch workspace is never a reason for a session not to start."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "scratch").write_text("not a directory")
+        agent = self._agent(tmp_path, state_dir, state_dir / "session-1.jsonl")
+        assert "aish-scratch-" in agent.scratch_dir.name
+        assert agent.scratch_dir.is_dir()
+
+
+class TestOrphanScratchIsCollected:
+    """Issue #258: the chat's log is the owner. A workspace whose log is gone
+    has nobody left to delete it — before this, every rebuilt agent leaked its
+    predecessor's dir into $TMPDIR forever."""
+
+    def test_a_workspace_whose_chat_is_gone_is_swept(self, tmp_path):
+        (tmp_path / "scratch" / "session-dead").mkdir(parents=True)
+        assert agent_module.prune_chat_scratch(tmp_path) == [tmp_path / "scratch" / "session-dead"]
+        assert not (tmp_path / "scratch" / "session-dead").exists()
+
+    def test_a_workspace_whose_chat_is_alive_is_left_alone(self, tmp_path):
+        (tmp_path / "scratch" / "session-live").mkdir(parents=True)
+        (tmp_path / "session-live.jsonl").write_text("{}\n")
+        assert agent_module.prune_chat_scratch(tmp_path) == []
+        assert (tmp_path / "scratch" / "session-live").is_dir()
+
+    def test_no_scratch_root_at_all_is_not_an_error(self, tmp_path):
+        assert agent_module.prune_chat_scratch(tmp_path) == []
+
+    def test_deleting_a_chat_deletes_its_workspace(self, tmp_path):
+        target = tmp_path / "scratch" / "session-1"
+        target.mkdir(parents=True)
+        (target / "probe.py").write_text("x")
+        agent_module.remove_chat_scratch(tmp_path, tmp_path / "session-1.jsonl")
+        assert not target.exists()
+
+
 class TestMidTaskSteering:
     """Issue #95: a /cd or a message queued while a task runs is applied /
     injected BETWEEN steps, so a long multi-step task stays responsive."""
