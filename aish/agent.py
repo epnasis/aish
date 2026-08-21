@@ -1125,6 +1125,22 @@ TRIMMED_RECOVERABLE = (
 # Rough tokens→chars margin: ~4 chars/token, keep well under num_ctx so the
 # system prompt is never silently evicted by Ollama's own truncation.
 CHARS_PER_TOKEN_BUDGET = 3
+# The most history aish will carry, whatever the backend's window allows.
+#
+# NOT a cost control — the owner's Gemini budget is not the constraint. It is
+# there so the trimming path is EXERCISED on a large-window backend instead of
+# lying dormant until the day he moves to local models and discovers it never
+# worked. A ceiling below Gemini's 1,048,576 means real sessions cross it and
+# the machinery is under load continuously; a ceiling at the window would mean
+# it never fires there at all.
+#
+# Generous on purpose. The hardware that will run those local models does not
+# exist in this house yet and the world will have moved by the time it does, so
+# this is sized to be out of the way of ordinary work while still binding
+# sometimes. It binds only on Gemini today: Claude's window (200k) and OpenAI's
+# (128k) are already below it, and Ollama's num_ctx is far below it, so the
+# local path is unchanged by construction.
+HISTORY_TOKEN_CEILING = 300_000
 # Command output carried in an activity-trace step is a preview (the trace
 # collapses it); the full result still reaches the model and streams live.
 STEP_OUTPUT_CAP = 8000
@@ -1995,7 +2011,11 @@ class Agent:
         images: list[str] | None = None,
         documents: list[str] | None = None,
         *,
-        keep_history: bool = False,
+        # Kept as a parameter for the resume caller (server.py) and now inert:
+        # one budget-gated, oldest-first policy serves both cases, since newest
+        # results are the last to go and a resume's unfinished work is the
+        # newest there is.
+        keep_history: bool = False,  # noqa: ARG002 — see above
     ) -> str:
         # Fresh scan every task: skills/memory created mid-session (or after
         # /cd) show up immediately, in every open session — no restart needed.
@@ -2031,18 +2051,13 @@ class Agent:
         # task's own preflight immediately below.
         self._reset_task_state()
 
-        # Old tasks' raw tool outputs are rarely needed verbatim again;
-        # shrinking them keeps long REPL sessions inside the context window.
+        # Old tool outputs are shrunk only when the history no longer fits the
+        # window actually in force — one policy, oldest-first, whether this is a
+        # fresh task or a resumed one (`_trim_history_to_budget` says why there
+        # used to be two).
         task_start = len(self.messages)
-        if keep_history:
-            # Resuming an interrupted task (#164): what looks like "an old task"
-            # here IS this task's own unfinished work, so trimming it to a
-            # 200-char stub would throw away exactly the results the resumed run
-            # must not recompute. Keep them whole and fall back to the same
-            # oldest-first trim only if the context genuinely doesn't fit.
-            self._trim_history_to_budget()
-        else:
-            self._trim_eagerly(task_start)
+        self._expire_delivered_images(task_start)
+        self._trim_history_to_budget()
 
         # Task text is owner-authored (a typed message or the trigger prompt),
         # so its hosts enter egress provenance (#178 P0-2).
@@ -2715,19 +2730,6 @@ class Agent:
         This matters most exactly where the trim hurts most: a small local model
         can never hold a long history, so being able to fetch a page back on
         demand is the difference between a bounded context and a lossy one."""
-        # Delivered pictures are dropped WHOLE rather than shortened, and by
-        # the same trim as an old tool result because they are the same thing:
-        # a past task's output still riding every request. Images are the
-        # costlier half — each one is re-encoded into every later call — and
-        # the note stays behind, so the model can tell it once looked and ask
-        # again (the store is content-addressed, so a second look is free).
-        # The owner's OWN attachment is deliberately untouched: it is not a
-        # tool output, they may refer back to it tasks later, and only aish's
-        # deliveries carry the `[aish: …]` marker that identifies one.
-        if message.get("images") and str(message.get("content", "")).startswith(NOTE_MARKER):
-            del message["images"]
-            message["content"] = TOOL_MEDIA_EXPIRED
-            return ""
         if message.get("role") != "tool":
             return None
         content = message["content"]
@@ -2745,29 +2747,56 @@ class Agent:
         message["content"] = content[:TRIM_KEEP_CHARS] + note
         return key
 
-    def _trim_eagerly(self, task_start: int) -> None:
-        """The eager per-task trim: every prior tool output down to a 200-char
-        stub, unconditionally — NOT budget-gated (only the resume path is), so
-        a 27 KB result is destroyed at turn 2 regardless of available room.
+    def _expire_delivered_images(self, task_start: int) -> None:
+        """Drop pictures aish delivered in EARLIER tasks, unconditionally.
 
-        This is the truncator with the largest blast radius and, until #192,
-        the one that recorded NOTHING at all — which is why Session B, asked
-        why its output was truncated, grepped aish's source, found a different
-        truncator's marker and confidently blamed the wrong thing."""
+        The one thing that stays unconditional, and for a reason the character
+        budget cannot express: images are INVISIBLE to it. `_total_chars` sums
+        text, so however many pictures accumulate the budget never notices —
+        and they are the costly half, each one re-encoded into every later
+        request. Budget-gating them would mean never dropping them at all.
+
+        The note stays behind, so the model can tell it once looked and ask
+        again; the media store is content-addressed, so a second look is free.
+        The owner's OWN attachment is deliberately untouched: it is not a tool
+        output, he may refer back to it tasks later, and only aish's deliveries
+        carry the `[aish: …]` marker that identifies one.
+        """
         before = self._total_chars()
-        stubbed = []
+        dropped: list[dict] = []
         for i in range(1, task_start):
-            key = self._trim_tool_message(self.messages[i])
-            if key is not None:
-                stubbed.append(self._stub_ref(i, key))
-        self._record_trim("eager_stub", before, budget=None, stubbed=stubbed)
+            message = self.messages[i]
+            if not message.get("images"):
+                continue
+            if not str(message.get("content", "")).startswith(NOTE_MARKER):
+                continue
+            del message["images"]
+            message["content"] = TOOL_MEDIA_EXPIRED
+            dropped.append(self._stub_ref(i))
+        self._record_trim("delivered_images", before, budget=None, stubbed=dropped)
 
     def _trim_history_to_budget(self) -> None:
-        """Shrink restored tool outputs oldest-first, but only as far as the
-        character budget actually demands (#164). The counterpart to the eager
-        per-task trim: on a resume the newest results are the ones the model
-        needs verbatim to continue, so they are the last to go."""
-        budget = self.num_ctx * CHARS_PER_TOKEN_BUDGET
+        """Shrink old tool outputs oldest-first, only as far as the budget
+        actually demands — the ONE history policy, at every task boundary.
+
+        There used to be two. This one ran on a resume (#164), where trimming
+        to a stub would gut exactly the unfinished work the resume exists to
+        preserve; every other task got `_trim_eagerly`, which cut EVERY prior
+        tool result to 200 characters unconditionally, whatever room was
+        available. That was written on 2026-07-12, six days before cloud
+        backends existed, and every assumption in it — small window, num_ctx is
+        the real limit, prefill is expensive — was an Ollama-era assumption the
+        cloud paths silently inherited.
+
+        Keeping the budget-gated policy loses nothing the eager one protected:
+        oldest-first already means a resume's newest results are the last to
+        go, so the two branches collapse into one. And rewriting old messages
+        every turn invalidated the providers' prompt caches from the earliest
+        rewritten message onward — the growing conversation prefix is cached on
+        purpose (`backends.py`, `cache_control`), so trimming rarely is a cost
+        SAVING, not a cost risk.
+        """
+        budget, _ = self._history_budget()
         before = self._total_chars()
         stubbed: list[dict] = []
         for i in range(1, len(self.messages)):
@@ -2804,7 +2833,11 @@ class Agent:
         stated before: the trim was unconditional."""
         if not stubbed:
             return
-        _, cap_source = backends.context_window(self.provider, self.num_ctx)
+        # The provenance of the number that ACTUALLY governed this trim. It
+        # used to report the backend window while the budget had been computed
+        # from num_ctx — a record claiming the backend window governed a trim
+        # the backend window never touched.
+        _, cap_source = self._history_budget()
         self._emit_record(
             kind="trim",
             policy=policy,
@@ -2832,7 +2865,7 @@ class Agent:
         by step 7 with no trace of when or why. That is worse than an unrecorded
         omission: the log still holds the full text, so it positively suggests
         the model had something it did not."""
-        budget = self.num_ctx * CHARS_PER_TOKEN_BUDGET
+        budget, _ = self._history_budget()
         if self._total_chars() <= budget:
             return
         before = self._total_chars()
@@ -3548,6 +3581,28 @@ class Agent:
             cap_source=cap_source,
             store_dir=self.tool_output_dir,
         )
+
+    def _history_budget(self) -> tuple[int, str]:
+        """(chars of history to keep, provenance).
+
+        Sized from the window ACTUALLY in force, capped by the ceiling. Every
+        history budget used to be `num_ctx * CHARS_PER_TOKEN_BUDGET`, and
+        `num_ctx` is an Ollama-only option every cloud backend accepts and
+        discards — so a Gemini session with a 1,048,576-token window was
+        trimmed to fit about 33,000, roughly thirty times too early. This is
+        the same `num_ctx`-fiction #192 removed from the output caps, in the
+        three history sites that fix never reached.
+
+        On Ollama this is num_ctx * CHARS_PER_TOKEN_BUDGET exactly as before —
+        num_ctx IS the window there, and it is far below the ceiling — so the
+        local path's behaviour is preserved by construction rather than by a
+        carve-out that could drift.
+        """
+        window, source = backends.context_window(self.provider, self.num_ctx)
+        capped = min(window, HISTORY_TOKEN_CEILING)
+        if capped < window:
+            source = f"constant:HISTORY_TOKEN_CEILING:{HISTORY_TOKEN_CEILING}"
+        return capped * CHARS_PER_TOKEN_BUDGET, source
 
     def _output_caps(self) -> tuple[tuple[int, int], str]:
         """(head, tail) and the provenance of that size. `num_ctx` is an
