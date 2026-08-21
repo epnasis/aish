@@ -1258,3 +1258,63 @@ class TestTheSecondIndex:
         )
         assert len(rows) == 1
         assert rows[0][2] == "from the browser"  # the better-ranked one wins
+
+
+class TestWhereTheSearchLanded:
+    """A read is judged by where it ENDED, not by what was requested (#249).
+
+    The alternative — an allowlist of URLs aish may ask for — judges the address
+    at the one moment it is guaranteed correct, and Chrome then follows
+    redirects. This is also the fence that would make signing the search profile
+    in safe: aish builds the only URL, and the landing is pinned, so "mail is a
+    different URL from search" is enforced at both ends rather than trusted."""
+
+    def test_a_results_page_is_where_a_search_should_land(self):
+        assert web.landed_on_results("https://www.google.com/search?q=x&sei=abc")
+        assert web.landed_on_results("https://google.com/search")
+
+    def test_every_redirect_google_actually_makes_is_off_the_results_page(self):
+        for elsewhere in (
+            "https://www.google.com/sorry/index?continue=x",
+            "https://consent.google.com/m?continue=x",
+            "https://accounts.google.com/CheckCookie?continue=x",
+            "https://mail.google.com/mail/u/0/",
+        ):
+            assert not web.landed_on_results(elsewhere), elsewhere
+
+    def test_a_read_that_landed_elsewhere_is_discarded_unread(self, monkeypatch):
+        """Not merely unranked — the page's text and links never reach the model.
+
+        A consent or account page HAS links, so "we got a page" is not the same
+        as "we got results", and presenting one as the other is how a signed-in
+        session would leak through a feature that never asked for it."""
+        elsewhere = browser.Page(
+            text="Zanim przejdziesz do wyszukiwarki Google",
+            title="", images=[], url="https://consent.google.com/m?continue=x",
+            status=200,
+            links=[("Konto Google", "https://myaccount.google.com/")],
+        )
+        monkeypatch.setattr(web, "_search_walled_at", 0.0)
+        monkeypatch.setattr(web.browser, "read_cold", lambda url, **kw: elsewhere)
+        rows, why = web.search_page("anything")
+        assert rows == []
+        assert "consent.google.com" in why
+        assert "myaccount" not in why
+
+    def test_an_unexpected_landing_stands_the_index_down_too(self, monkeypatch):
+        """A redirect is not a blip either — whatever moved us will move us
+        again on the next query."""
+        reads = []
+
+        def elsewhere(url, **kw):
+            reads.append(url)
+            return browser.Page(
+                text="hello", title="", images=[],
+                url="https://consent.google.com/m", status=200,
+            )
+
+        monkeypatch.setattr(web, "_search_walled_at", 0.0)
+        monkeypatch.setattr(web.browser, "read_cold", elsewhere)
+        web.search_page("one")
+        web.search_page("two")
+        assert len(reads) == 1
