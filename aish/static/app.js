@@ -1397,7 +1397,10 @@ function handle(event) {
       // The activity trace already shows a run_command's approval + result and
       // its own Stop/Stopping state, so drop the approver's redundant
       // confirmation and the "stop requested" line while a trace is open.
-      if (currentTrace && /^[✓✕] (auto-approved|session-allowed|always-allowed|blocked|stop requested)/.test(event.text)) break;
+      // `session-allowed` is the wording every log written before the chat
+      // rename carries, and a replay must render as the live turn did (L2), so
+      // both spellings are recognised — the server only ever emits the new one.
+      if (currentTrace && /^[✓✕] (auto-approved|session-allowed|chat-allowed|always-allowed|blocked|stop requested)/.test(event.text)) break;
       closeAnswer();
       addAnsiMsg("echo", event.text);
       break;
@@ -6235,7 +6238,7 @@ let sessionExporting = false;
 async function exportSessionPdf() {
   if (!currentSession || sessionExporting) return;
   sessionExporting = true;
-  showToast("Exporting session to PDF…", true);
+  showToast("Exporting chat to PDF…", true);
   const query = new URLSearchParams({ session: currentSession });
   if (token) query.set("token", token);
   try {
@@ -6245,8 +6248,8 @@ async function exportSessionPdf() {
       showToast(`export failed: ${body.error || response.status}`);
       return;
     }
-    saveBlob(await response.blob(), dispositionName(response, "aish-session.pdf"));
-    showToast("Session exported");
+    saveBlob(await response.blob(), dispositionName(response, "aish-chat.pdf"));
+    showToast("Chat exported");
   } catch {
     showToast("export failed — is the server reachable?");
   } finally {
@@ -6298,7 +6301,7 @@ function forkChip(ordinal, answerId) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "copy-chip";
-  btn.title = "fork the conversation from here into a new session";
+  btn.title = "fork the conversation from here into a new chat";
   btn.setAttribute("aria-label", "fork from here");
   btn.appendChild(forkIcon());
   btn.onclick = () => {
@@ -6828,11 +6831,16 @@ const FOLDER_SVG = '<svg viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h3.4
 // Each scope segment maps to the SAME wire action the old per-scope buttons
 // sent (server contract in make_web_approvers): the segment picks what an
 // Approve remembers, it does not change the message shape.
+// The WIRE actions keep saying `session` — that is the protocol, and the
+// server's contract in make_web_approvers. Only the words the owner reads
+// change: what this scope actually lasts for is this conversation's approver,
+// which is a CHAT, and calling it a session made it read as "until the server
+// restarts".
 const SCOPE_LABELS = {
-  approve: "Just once",         // plain approve — this command, this time
-  approve_session: "Session",   // allowlist the shown prefix(es) for this session
-  approve_always: "Always",     // persist the prefix(es) to the allowlist file
-  approve_trust: "Trust dir",   // trust the escaping directory for this session
+  approve: "Just once",          // plain approve — this command, this time
+  approve_session: "This chat",  // allowlist the shown prefix(es) for this chat
+  approve_always: "Always",      // persist the prefix(es) to the allowlist file
+  approve_trust: "Trust dir",    // trust the escaping directory for this chat
 };
 
 // The explanatory sentence under the segmented control. Dynamic parts
@@ -6843,13 +6851,14 @@ function scopeExplain(action, prefixText, escapeText) {
   const mono = (t) => { const s = document.createElement("span"); s.className = "mono"; s.textContent = t; return s; };
   const strong = (t) => { const b = document.createElement("b"); b.textContent = t; return b; };
   if (action === "approve_session") {
-    // "Session" is scoped to this conversation's approver (server_prefixes),
-    // not the process — so it lasts for this chat, not "until restart".
-    frag.append("Also auto-approve ", mono(prefixText), " for the rest of this session.");
+    // This scope belongs to this conversation's approver (server_prefixes),
+    // not the process — so it lasts for this chat, not "until restart", which
+    // is exactly what the old "Session" label was being read as.
+    frag.append("Also auto-approve ", mono(prefixText), " for the rest of this chat.");
   } else if (action === "approve_always") {
-    frag.append("Save ", mono(prefixText), " to the allowlist — it persists across sessions.");
+    frag.append("Save ", mono(prefixText), " to the allowlist — it persists across chats.");
   } else if (action === "approve_trust") {
-    frag.append("Trust ", mono(escapeText), " for this session — anything inside then runs without asking.");
+    frag.append("Trust ", mono(escapeText), " for this chat — anything inside then runs without asking.");
   } else {
     // Default (Just once) mirrors the design: the safe choice, then a hint at
     // what the broader segments would do.
@@ -7446,7 +7455,7 @@ function diffWrapBtn(diff, on) {
 function escapeNote(escapes) {
   const note = document.createElement("div");
   note.className = "escape-note";
-  note.textContent = `⚠ outside the session roots: ${escapes.join(", ")}`;
+  note.textContent = `⚠ outside the trusted folders: ${escapes.join(", ")}`;
   return note;
 }
 
@@ -7496,7 +7505,7 @@ function buildReadCard(card, event) {
     trustBtn.type = "button";
     trustBtn.className = "trust";
     trustBtn.textContent = "Trust dir";
-    trustBtn.title = `add ${escapes.join(", ")} to the session roots until the session closes`;
+    trustBtn.title = `add ${escapes.join(", ")} to the trusted folders until this chat closes`;
     trustBtn.onclick = () => answerCard(event.id, "approve_trust", feedbackExtra(feedback));
     actionsRow.appendChild(trustBtn);
   }
@@ -7953,17 +7962,17 @@ function recallHistory(key) {
 
 const SLASH_COMMANDS = [
   ["/model", "switch model — opens the searchable picker"],
-  ["/resume", "search & resume an earlier session"],
+  ["/resume", "search & resume an earlier chat"],
   ["/delete", "open a chat, then Delete chat in its title menu"],
-  ["/new", "fresh conversation in a new session"],
-  ["/fork", "branch this conversation into a new session (original untouched)"],
+  ["/new", "fresh conversation in a new chat"],
+  ["/fork", "branch this conversation into a new chat (original untouched)"],
   ["/learn", "save this conversation's learnings as skills/memory"],
   ["/feedback", "file a bug or idea as a GitHub issue"],
   ["/cd", "change working directory (re-anchors approval root)"],
   ["/add-dir", "allow auto-approved work in another tree"],
   ["/jobs", "list background jobs"],
   ["/browser", "sign in to a site in aish's own browser (window opens on the Mac)"],
-  ["/session", "show this session's log path (copyable)"],
+  ["/session", "show this chat's log path (copyable)"],
   ["/mic", "test speech recognition (mic diagnostic)"],
   ["/explain", "the full record of a turn — what it was given, thought, ran and answered"],
   ["/help", "about aish web"],
@@ -8393,7 +8402,7 @@ function handleSlash(text) {
     // argument is a turn id or, for a log written before ids, an ordinal.
     case "/explain": openExplain(arg || ""); return true;
     case "/help": openSheet("workspace-sheet"); return true;
-    case "/quit": case "/exit": showToast("just close the tab — sessions persist"); return true;
+    case "/quit": case "/exit": showToast("just close the tab — chats persist"); return true;
     case "/debug": reportViewport("manual"); showToast("viewport state sent to server log"); return true;
     default: showToast(`unknown command ${command}`); return false;
   }
@@ -12169,7 +12178,7 @@ function bvAskSignin(host) {
   askConfirm({
     title: `Signed in to ${host}?`,
     body:
-      `If you just signed in, aish can use that session when it reads ${host} ` +
+      `If you just signed in, aish can use that sign-in when it reads ${host} ` +
       "— and it will ask you before every one of those reads. If that was not " +
       "a sign-in, choose Not a sign-in.",
     verb: "Remember it",
@@ -13437,7 +13446,7 @@ function onSessionGone(name) {
 // and tapping it opened a chat that no longer existed.
 async function onSessionDeleted(event) {
   rosterBaseline(event.seq);
-  showToast("session deleted");
+  showToast("chat deleted");
   // Repaint only AFTER the copy is gone: the rail reads the mirror, so a
   // render racing the eviction paints the chat straight back onto the list.
   await forgetSession(event.name);
@@ -14176,6 +14185,7 @@ function openSessionRail(query = "") {
   document.body.classList.remove("rail-dragging");
   document.body.classList.add("rail-open");
   clearRailDragStyles();
+  syncRailToggle();
   $("sessions-search").value = query;
   // Auto-focus only where a hardware keyboard is likely: on touch devices
   // focusing would throw the on-screen keyboard over the list before the user
@@ -14216,6 +14226,7 @@ function hideRail() {
   if (active && active.closest("#session-rail")) active.blur();
   document.body.classList.remove("rail-open", "rail-dragging");
   clearRailDragStyles();
+  syncRailToggle();
   snapViewportSoon();
 }
 
@@ -14223,6 +14234,28 @@ function toggleSessionRail() {
   if (!railIsOpen()) openSessionRail("");
   else if (railDocked()) fileRailAway();
   else closeSessionRail();
+}
+
+// The half of the toggle's state that CSS cannot express: what the control is
+// CALLED right now, and whether a screen reader is told it is pressed. The
+// glyph, the fill and the tint all derive from `body.rail-open` in the
+// stylesheet, so this adds no second opinion about which state is painted — it
+// only names it. Docked, the name is what the tap will DO (Hide/Show), because
+// there the button is a switch whose position you can see; as a slide-over it
+// stays "Chats", because there it opens a list and nothing is toggling.
+function syncRailToggle() {
+  const chip = $("back-chip");
+  if (!chip) return;
+  const docked = railDocked();
+  const showing = railIsOpen();
+  const label = !docked ? "Chats" : showing ? "Hide chats" : "Show chats";
+  chip.title = label;
+  chip.setAttribute("aria-label", label);
+  // aria-pressed only where the control IS a switch. On a phone it opens an
+  // overlay that the scrim and a swipe also close, so announcing a pressed
+  // state would describe a toggle the user does not have.
+  if (docked) chip.setAttribute("aria-pressed", showing ? "true" : "false");
+  else chip.removeAttribute("aria-pressed");
 }
 
 function clearRailDragStyles() {
@@ -14318,16 +14351,21 @@ addEventListener("resize", () => {
       document.body.classList.toggle("rail-open", show);
       if (show) requestSessions($("sessions-search").value || "");
     }
+    // Crossing the breakpoint changes what the control IS, not just its state,
+    // so the wording is re-derived even when nothing opened or closed.
+    syncRailToggle();
     return;
   }
   document.body.classList.remove("rail-open", "rail-dragging");
   clearRailDragStyles();
+  syncRailToggle();
 });
 
 // At a docked width the rail starts open unless it was filed away. Only the
 // CLASS is set here — filling it is left to the first hello, because this runs
 // at module load, before the offline layer the list paints from is ready.
 if (railDocked() && !railFiledAway()) document.body.classList.add("rail-open");
+syncRailToggle();
 // [RAIL-END]
 
 // Only the states the user can act on. "idle but open in server memory" is
@@ -14562,7 +14600,7 @@ function renderSessions(event) {
   // Ranked search results are ordered by relevance, so date/band grouping would
   // lie about why a row is where it is. Render a flat list.
   if (searching) {
-    if (!event.sessions.length) { list.textContent = "no matching sessions"; return; }
+    if (!event.sessions.length) { list.textContent = "no matching chats"; return; }
     for (const info of event.sessions) {
       list.appendChild(sessionRow(info, current, { unread: sessionUnread(info, unreadState) }));
     }
@@ -14995,7 +15033,7 @@ function copyToClipboard(text, label = "copied") {
 
 // /session and the ⋯ menu's "Copy log path": copy the session's JSONL log path.
 function copyLogPath() {
-  if (!currentLogPath) { showToast("no session log yet"); return; }
+  if (!currentLogPath) { showToast("no chat log yet"); return; }
   copyToClipboard(currentLogPath, "log path");
 }
 

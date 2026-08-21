@@ -248,6 +248,27 @@ The card carries the turn id it was **created** with, so the row addresses a tur
 
 Docked, the rail overlaps nothing, so `openSessionRail` stands NO sheets down there — showing the list must not close the dossier you opened it beside. On a phone it covers them and still does. The toggle animates nothing: the shell's padding cannot move in step with the panel's transform (a transition on `body`'s padding fires on the class set at module load, i.e. on every cold load), and half an animation reads worse than none.
 
+**And the button shows the state it is about to change.** This is design Screen 0 (#57), built at last: the layout was taken from that mock and the control was not, which is how it ended up a dead button that also could not have said anything if it worked. One button, two glyphs, chosen by width — because the panel it drives is two different things by width:
+
+- **Slide-over** — a hamburger with the word beside it. The panel is an OVERLAY, the platform affordance for "a list is behind this", and the scrim and a swipe also close it, so the button is not the toggle and `aria-pressed` would describe a switch the owner does not have.
+- **Docked** — a sidebar glyph whose left pane is drawn FILLED while the pane is on screen and empty while it is away, tinted `--dim` when showing and the accent when hidden (an accent means "there is something here to get back"), with the word gone: a labelled button in a two-pane layout is naming the pane it is standing next to. `aria-pressed` here, and the name is what the tap will DO — *Hide chats* / *Show chats*.
+
+A transforming hamburger→X was rejected on the same distinction that picked the glyph: an X says *this is covering your work, dismiss it*, which is true of the overlay and false of a pane sitting beside the chat.
+
+**The split between CSS and JS is the invariant.** Everything visual — which glyph, the fill, the tint — derives from `body.rail-open` in the stylesheet, so it cannot hold a different opinion from the panel about which state is painted. `syncRailToggle` sets only what CSS cannot: the wording and `aria-pressed`. It is a READER of the fact, called from every path that writes `rail-open` (open, hide, resize, module load) — including a resize that opens and closes nothing, because crossing the breakpoint changes what the control IS. — `test_session_rail.js`
+
+### The UI says CHAT; the machine says session
+The button said *Sessions* and the panel it opened said *Chats*. The split ran much wider than that one control — *Session roots*, *Session exported*, *Allow this session*, *no such session*, *sessions persist* — and it has one cause: **`session` is the machine's word.** It names a log file, an entry in `WebServer.sessions`, a process lifetime. Those are real things, which is exactly why the word keeps leaking outward into text about the thing the owner is actually looking at, which is a **chat**.
+
+So the line is drawn by AUDIENCE, not by file: the wire protocol (`approve_session` is still the action `make_web_approvers` reads), the log format (`session-*.jsonl`), the CLI, the Python identifiers and every comment go on saying `session`. Everything a person reads in the web UI says chat — including `web_usage_context`, because that is the model describing this UI back to its owner and it has to use the owner's words or it is describing an app that does not exist.
+
+Two things a find-and-replace would have broken, and the reason this is pinned by `tests/test_chat_vocabulary.py` rather than done once with a sed:
+
+- **One "session" on screen is not a chat at all** — the browser sign-in note, where it means a cookie jar. It is allowlisted by exact string.
+- **The approval echo is display text AND a matcher.** `✓ session-allowed:` is what the server emitted and what the trace card matches to suppress a line it already shows. The server now emits `chat-allowed`, and the matcher accepts BOTH — every log written before the rename carries the old spelling, and a replay must render as the live turn did (L2).
+
+The approval card's middle scope is now **This chat**, which is also more true than the old *Session*: it is scoped to this conversation's approver, and "Session" was being read as "until the server restarts".
+
 ### A sheet belongs to the chat, not to the window
 Sheets are `position: fixed`, so they never saw the shell's inset and went on centring themselves over the whole viewport. On any window narrower than roughly 1300px that slid the sheet under the docked rail, which is painted above it (z-index 30 vs 20) — reported as the full record sitting *"in the middle and behind the session list"*. The docked query gives `.sheet` and `#backdrop` the same left inset the shell has, which centres them on the chat and makes the overlap impossible rather than layering out of it: the rail is this app's navigation and a picker should never bury it. The dim layer moves with them, so it stops at the sidebar's edge and reads as deliberate. Scoped to `.rail-open`, so a put-away sidebar hands the full width back. `tests/test_desktop_layout.py`.
 

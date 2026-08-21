@@ -1183,7 +1183,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         if action == "approve_session":
             session_prefixes().update(suggestions)
             bridge.emit(
-                {"type": "echo", "text": f"✓ session-allowed: {', '.join(suggestions)}"}
+                {"type": "echo", "text": f"✓ chat-allowed: {', '.join(suggestions)}"}
             )
             record(command, tagged("approved+session"))
             resolve(request["id"], "approved", comment)
@@ -1374,7 +1374,7 @@ About aish (you) — use this to answer questions about your own usage:
 {identity_context(model, provider)}
 - The user talks to you through the aish WEB UI in a browser (often a phone), \
 not a terminal. Every command you propose appears as an approval card with \
-Approve / Allow this session / Always allow / Deny buttons and a pencil \
+Approve / This chat / Always / Deny buttons and a pencil \
 icon beside the command to edit it before running; file writes show a \
 unified diff before approval. Cards also carry an optional \
 comment field whose text arrives with WHICHEVER button the user presses, and \
@@ -1383,12 +1383,12 @@ ADJUST: the original command is NOT run — adjust it to what the user asked and
 propose the adjusted command (it is approved again before it runs). DENY + \
 comment = STOP: reply in plain text addressing the concern, then wait — run \
 nothing else first. Read-only commands auto-approve within the \
-session roots (allowlist: {allow_path}). "Allow this session" auto-approves \
-that command's prefixes until the session closes — in memory only. "Always \
-allow" saves those same prefixes to the persistent allowlist file. When a \
-command or file read reaches outside the session roots, its card warns about \
-the escape and offers "Trust directory": one tap adds that directory to the \
-session roots, so allowlisted work there auto-approves afterwards — also in \
+chat's trusted folders (allowlist: {allow_path}). "This chat" auto-approves \
+that command's prefixes until the chat closes — in memory only. "Always" \
+saves those same prefixes to the persistent allowlist file. When a \
+command or file read reaches outside the trusted folders, its card warns about \
+the escape and offers "Trust dir": one tap adds that directory to this chat's \
+trusted folders, so allowlisted work there auto-approves afterwards — also in \
 memory only.
 - A message the user prefixes with ! runs directly as a shell command — their \
 own action, without you and without an approval card (just as in the terminal); \
@@ -1411,15 +1411,16 @@ follows, e.g. "/learn the gh flow"; "/learn lessons" migrates the legacy \
 lessons file); the composer also accepts /model /resume /delete /new /fork \
 /cd /add-dir /jobs /help. To branch the conversation and explore a tangent \
 without touching the current thread, the user types /fork (or /branch): it \
-copies the whole conversation so far into a NEW session and switches there, \
+copies the whole conversation so far into a NEW chat and switches there, \
 leaving this one untouched — tell them to use it when they want to try an \
 alternative approach or a side question and keep the main chat clean. Header \
-controls: a "‹ Sessions" back button (top left, \
-with a badge when a background session needs attention) opens the sessions \
-drawer. The chat's name is written for it automatically — after the first \
+controls: a "Chats" button (top left, with a badge when a background chat \
+needs attention) opens the chat list — on a narrow screen it slides over the \
+conversation, and on a wide one it is a sidebar that this same button shows \
+and hides. The chat's name is written for it automatically — after the first \
 answer, when a fork first differs from its parent, and occasionally if the \
 subject really changes; if the user renames it by hand that name is final and \
-is never rewritten. The centered session title opens a menu (new chat, rename this chat, \
+is never rewritten. The centered chat title opens a menu (new chat, rename this chat, \
 switch model, change directory, line wrap, export the chat to PDF, keep this \
 chat, delete \
 this chat, workspace & jobs); the compose pencil (top right) starts a new \
@@ -1429,7 +1430,7 @@ to PDF, and (where available) read-aloud. Each of the user's OWN prompts has a \
 row too — the time it was sent, a trash chip, a pencil that puts the prompt \
 back in the composer, and copy. The trash chip DELETES that whole exchange \
 (their prompt, your work on it and your answer): it asks first, in a dialog \
-naming what is lost, and on confirm the text is deleted from the session log, \
+naming what is lost, and on confirm the text is deleted from the chat log, \
 dropped from your context so you can no longer quote it, and gone from every \
 device's offline copy at the next sync; a "Message deleted" marker stays where \
 it was. Tell them to use it for a message sent to the wrong chat, one \
@@ -1441,7 +1442,7 @@ answers, not thinking or intermediate steps. A single-answer PDF is titled and \
 named after the ANSWER (you write that title yourself when asked), not after \
 the prompt that produced it; a whole-chat PDF uses the chat's title. \
 Exported PDFs embed pictures: \
-local image paths inside the session's directories, web images, Google Maps \
+local image paths inside the chat's trusted folders, web images, Google Maps \
 snapshots (needs GOOGLE_MAPS_API_KEY set), and YouTube thumbnails are inlined; \
 anything unavailable becomes a captioned link card. A \
 context bar under the title shows the working directory \
@@ -1452,8 +1453,8 @@ interactive shell (a real TTY for programs that prompt for input). \
 Your tool activity (thinking, recalled knowledge, commands and their \
 output) is grouped into one collapsible activity trace per turn. Swiping the \
 transcript sideways pages through recent chats.
-- Several sessions can be open at once; a task keeps running when the user \
-switches to another session and its result is there when they switch back. \
+- Several chats can be open at once; a task keeps running when the user \
+switches to another chat and its result is there when they switch back. \
 While you work, messages the user sends are QUEUED and run one after \
 another; the user can also press Stop to cancel your current task — a \
 "(task stopped by user)" note means exactly that, so do not treat it as an \
@@ -1515,7 +1516,7 @@ inline in the chat, and the user EXPECTS to see pictures this way. Whenever \
 your answer involves an image the user would want to look at — a chart or \
 diagram you just generated, a plot, a downloaded picture — you MUST embed \
 it: ![caption](/absolute/path.png) for a local file (png/jpg/gif/webp \
-inside the session roots). Remote images are blocked by the browser's \
+inside the chat's trusted folders). Remote images are blocked by the browser's \
 security policy except YouTube thumbnails and Google static maps — for any \
 other web image, download it to a local file first and embed the local \
 path. Mentioning the file path in prose does NOT show the picture; always \
@@ -1530,12 +1531,12 @@ the same video, or the answer opens with the same picture twice.
 - Safety denylist: unrecoverable command classes are blocked outright and \
 cannot be approved here at all (extendable in {deny_path}); suggest a safer \
 alternative when blocked.
-- Sessions: conversation + command audit trail logged to {state_dir} — the \
-same format as terminal aish, so sessions are interchangeable between both. \
-Each drawer row has a trash icon: tap it, then its "Delete?" confirm, to \
-permanently delete that session (conversation and audit log; refused while \
-the session is running; deleting the current chat lands on a fresh one). \
-The session-title menu also has a "Delete chat" item (same two-tap \
+- Chats: conversation + command audit trail logged to {state_dir} — the \
+same format as terminal aish, so chats are interchangeable between both. \
+Each row in the chat list has a trash icon: tap it, then its "Delete?" \
+confirm, to permanently delete that chat (conversation and audit log; \
+refused while the chat is running; deleting the current chat lands on a \
+fresh one). The chat-title menu also has a "Delete chat" item (same two-tap \
 "Confirm delete") that deletes the chat you are currently in, and a \
 "Rename chat…" item that gives the current chat a custom title (an inline \
 field; the terminal equivalent is the /rename <title> command). A custom \
@@ -1551,7 +1552,7 @@ redirects to edit files.
 commit message, an intermediate patch or artifact) in the private scratch \
 directory named in your system-prompt rules — writing, editing, and deleting \
 there is AUTO-APPROVED (no card) and the whole directory is wiped when the \
-session ends. Everything OUTSIDE it still needs approval as usual.
+chat ends. Everything OUTSIDE it still needs approval as usual.
 - Attachments: the web UI can upload files — the ＋ button, a PASTE into the \
 composer (Cmd/Ctrl+V on a desktop, the paste button on a phone), or a DRAG \
 onto the window. From an iPhone, the share sheet can hand aish a file or a \
@@ -2543,8 +2544,8 @@ class WebServer:
         if session.busy:
             await self._refuse(
                 client,
-                "this session is busy — wait, or start a new "
-                "session (＋) and work there in parallel",
+                "this chat is busy — wait, or start a new "
+                "chat (＋) and work there in parallel",
             )
             return True
         return False
@@ -2966,11 +2967,11 @@ class WebServer:
         if session.origin == "user" or session.viewers or not notify.configured():
             return
         link = f"{self.public_url}/?session={session.name}" if self.public_url else None
-        title = session.custom_title or "automated session"
+        title = session.custom_title or "automated chat"
         body = (result or "done").strip()[:300] or "done"
         await asyncio.to_thread(
             notify.pushover, f"aish finished — {title}", body,
-            url=link, url_title="Open session", priority=0,
+            url=link, url_title="Open chat", priority=0,
         )
 
     async def _run_task(
@@ -3606,7 +3607,7 @@ class WebServer:
             "type": "error",
             "code": "no_such_session",
             "name": name,
-            "text": f"no such session: {name}",
+            "text": f"no such chat: {name}",
         }
 
     async def _resume(self, client: Client, name: str) -> None:
@@ -3738,7 +3739,7 @@ class WebServer:
             return
         if source.busy:
             await self._refuse(
-                client, "can't fork while this session is working — wait for "
+                client, "can't fork while this chat is working — wait for "
                     "the current task to finish, then fork",
                 )
             return
@@ -3749,7 +3750,7 @@ class WebServer:
         if not has_history or not src_path.is_file():
             await self._refuse(
                 client, "nothing to fork yet — send a message first, then fork "
-                    "to branch the conversation into a new session",
+                    "to branch the conversation into a new chat",
                 )
             return
 
@@ -3800,7 +3801,7 @@ class WebServer:
         session.bridge.record(
             {
                 "type": "echo",
-                "text": "✓ forked into a new session — the original chat is "
+                "text": "✓ forked into a new chat — the original chat is "
                 "untouched; continue the tangent here",
             }
         )
@@ -3820,7 +3821,7 @@ class WebServer:
             # Never kill work as a side effect of a delete.
             await self._refuse(
                 client,
-                "task still running in that session — "
+                "task still running in that chat — "
                 "stop it (or let it finish) before deleting",
                 name=name,
             )
@@ -4563,7 +4564,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return JSONResponse({"error": "unsupported file type"}, status_code=415)
         path = path.resolve()
         if not any(path.is_relative_to(r) for r in self._workspace_roots()):
-            return JSONResponse({"error": "outside session roots"}, status_code=403)
+            return JSONResponse({"error": "outside the trusted folders"}, status_code=403)
         if not path.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
         headers = {"X-Content-Type-Options": "nosniff"}
@@ -4617,7 +4618,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return None, JSONResponse({"error": "not a PDF"}, status_code=415)
         path = path.resolve()
         if not any(path.is_relative_to(r) for r in self._workspace_roots()):
-            return None, JSONResponse({"error": "outside session roots"}, status_code=403)
+            return None, JSONResponse({"error": "outside the trusted folders"}, status_code=403)
         if not path.is_file():
             return None, JSONResponse({"error": "not found"}, status_code=404)
         try:
@@ -4719,7 +4720,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return JSONResponse({"error": "path must be absolute"}, status_code=400)
         path = path.resolve()
         if not any(path.is_relative_to(r) for r in self._workspace_roots()):
-            return JSONResponse({"error": "outside session roots"}, status_code=403)
+            return JSONResponse({"error": "outside the trusted folders"}, status_code=403)
         suffix = path.suffix.lower()
         shown = suffix in IMAGE_TYPES or suffix == ".pdf"
         # And what aish FETCHED for him, through his own session, because he
@@ -4966,19 +4967,19 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         safe = name.startswith("session-") and name.endswith(".jsonl") and "/" not in name
         path = self.state_dir / name
         if not safe or ".." in name or not path.is_file():
-            return JSONResponse({"error": f"no such session: {name}"}, status_code=404)
+            return JSONResponse({"error": f"no such chat: {name}"}, status_code=404)
         image_roots = self._workspace_roots()
 
         def build() -> tuple[bytes, str]:
             messages, _, custom_title, *_ = SessionLog._parse(path)
-            title = custom_title or SessionLog._derive_title(messages) or "aish session"
+            title = custom_title or SessionLog._derive_title(messages) or "aish chat"
             return export.render_session_pdf(messages, title, image_roots), title
 
         try:
             data, title = await asyncio.to_thread(build)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"error": f"export failed: {exc}"}, status_code=500)
-        return self._pdf_response(data, export.safe_pdf_filename(title, "aish-session"))
+        return self._pdf_response(data, export.safe_pdf_filename(title, "aish-chat"))
 
     # ---- offline mirror (#165) ------------------------------------------
     # Two read-only endpoints, deliberately outside the WebSocket: the PWA's
@@ -5028,7 +5029,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         path = self._offline_path(request)
         if path is None:
             name = request.query_params.get("session", "").strip()
-            return JSONResponse({"error": f"no such session: {name}"}, status_code=404)
+            return JSONResponse({"error": f"no such chat: {name}"}, status_code=404)
         ref = request.query_params.get("turn") or ""
         want_raw = request.query_params.get("raw") == "1"
 
@@ -5107,7 +5108,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         path = self._offline_path(request)
         if path is None:
             name = request.query_params.get("session", "").strip()
-            return JSONResponse({"error": f"no such session: {name}"}, status_code=404)
+            return JSONResponse({"error": f"no such chat: {name}"}, status_code=404)
 
         stat = path.stat()
         # Weak validator: mtime+size identifies a version of an append-only log

@@ -113,7 +113,7 @@ function errorWorld() {
 // ---- 4. The by-name navigation failure keeps its own handling ---------------
 {
   const w = errorWorld();
-  w.sandbox.handle({ type: "error", code: "no_such_session", name: "gone.jsonl", text: "no such session" });
+  w.sandbox.handle({ type: "error", code: "no_such_session", name: "gone.jsonl", text: "no such chat" });
   ok("a missing session prunes the phantom rather than toasting or failing",
     w.did("gone:gone.jsonl") && !w.did("toast:") && !w.did("finishTrace"));
 }

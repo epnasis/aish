@@ -197,6 +197,16 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .back-ico { position: relative; display: inline-flex; flex: none; }
 .back-ico > svg { width: 22px; height: 22px; display: block; }
 .back-label { margin-left: 1px; }
+/* Slide-over width: the hamburger, and only the hamburger. The sidebar glyph
+   would be describing a pane that does not exist here.
+
+   `.back-ico > .ico-sidebar`, not a bare `.ico-sidebar`: the sizing rule above
+   is `.back-ico > svg` (0,1,1), which OUTRANKS a lone class (0,1,0) and carries
+   `display: block`. A bare class here looks like it hides the glyph and does
+   nothing — measured, both glyphs painted side by side at every width, and no
+   node check can see it. Every display rule for these two matches the same
+   shape so the specificities stay comparable. */
+.back-ico > .ico-sidebar { display: none; }
 #back-badge {
   position: absolute;
   top: -3px;
@@ -2856,6 +2866,24 @@ body.kb-open .rail-searchbar { padding-bottom: 7px; }
      full width back to the sheets too. */
   body.rail-open #backdrop,
   body.rail-open .sheet { left: calc(env(safe-area-inset-left) + var(--rail-w)); }
+
+  /* The control becomes a sidebar toggle, and it SHOWS ITS STATE (design
+     Screen 0). Three things move together: the glyph's left pane is filled
+     while the pane is on screen and empty while it is away, the tint drops to
+     `--dim` when showing and rises to the accent when hidden (an accent means
+     "there is something here to get back"), and the word goes — a labelled
+     button in a two-pane layout is naming the pane it is already next to.
+     A transforming hamburger→X was rejected: an X says "this is covering your
+     work, dismiss it", which is true of the phone's overlay and false of a
+     pane sitting beside the chat. The wording and aria-pressed are JS
+     (`syncRailToggle`); everything visual derives from `body.rail-open`, so
+     the two can never disagree about which state is painted. */
+  .back-label { display: none; }
+  .back-ico > .ico-menu { display: none; }
+  .back-ico > .ico-sidebar { display: block; }
+  .ico-sidebar-fill { display: none; }
+  body.rail-open .ico-sidebar-fill { display: block; }
+  body.rail-open #back-chip { color: var(--dim); }
 }
 
 /* per-session working directory line */

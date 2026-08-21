@@ -42,16 +42,26 @@
 <link rel="stylesheet" href="style.css">
 
 <header id="topbar">
-  <!-- nav row: back to sessions · session title (menu) · console · new chat -->
+  <!-- nav row: the chats control · chat title (menu) · console · new chat -->
+  <!-- TWO glyphs, one button, because the panel it drives is two different
+       things by width (design Screen 0, #57). Below the dock breakpoint the
+       rail is an OVERLAY, so the control is a hamburger with a word next to
+       it — the platform affordance for "a list is behind this". Docked it is
+       a PANE, so the control is a sidebar glyph whose left half is drawn
+       filled while the pane is there and empty while it is away: the button
+       shows the state it is about to change, and a hamburger→X would be
+       claiming something is in your way when nothing is. Which one shows is
+       CSS; only the wording and aria-pressed are set in JS. -->
   <div id="nav-row">
-    <button id="back-chip" class="nav-back" title="sessions" aria-label="sessions">
+    <button id="back-chip" class="nav-back" title="Chats" aria-label="Chats">
       <span class="back-ico">
-        <svg viewBox="0 0 24 24"><path d="M4 8.5h16M4 15.5h16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/></svg>
+        <svg class="ico-menu" viewBox="0 0 24 24"><path d="M4 8.5h16M4 15.5h16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/></svg>
+        <svg class="ico-sidebar" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><line x1="9.5" y1="5" x2="9.5" y2="19" stroke="currentColor" stroke-width="1.6"/><rect class="ico-sidebar-fill" x="5" y="7" width="3" height="2" rx=".6" fill="currentColor"/></svg>
         <span id="back-badge" hidden></span>
       </span>
-      <span class="back-label">Sessions</span>
+      <span class="back-label">Chats</span>
     </button>
-    <button id="session-chip" class="nav-title" title="session menu">
+    <button id="session-chip" class="nav-title" title="chat menu">
       <span id="session-title">aish</span>
       <svg class="caret" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
@@ -87,7 +97,7 @@
   </div>
 </header>
 
-<!-- session title menu (settings for the current session) -->
+<!-- chat title menu (settings for the current chat) -->
 <div id="session-menu" class="popover-menu" hidden>
   <button class="menu-item" data-act="new">
     <svg viewBox="0 0 24 24"><path d="M12 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17.8 3.7a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
@@ -419,13 +429,13 @@
   </button>
 </div>
 
-<!-- sessions drawer -->
+<!-- chats drawer -->
 <!-- Session rail (the left slide-over). Not a ".screen": a full-page list
      would be a second navigation model, and this same panel docks open as a
      permanent sidebar at a wide viewport. The scrim is the dismiss target and
      the thing that says "you are still in that chat". -->
 <div id="rail-scrim"></div>
-<aside id="session-rail" aria-label="sessions">
+<aside id="session-rail" aria-label="Chats">
   <div class="rail-head">
     <div class="rail-title-row">
       <div class="rail-title">Chats</div>
@@ -475,7 +485,7 @@
     <div class="ws-row"><button id="ws-cd-change">Change…</button></div>
   </div>
   <div class="ws-section">
-    <div class="ws-label">Session roots <span class="ws-note">(auto-approval allowed in these trees)</span></div>
+    <div class="ws-label">Trusted folders <span class="ws-note">(auto-approval allowed in these trees)</span></div>
     <div id="ws-roots" class="mono"></div>
     <div class="ws-row"><input id="root-input" placeholder="/another/tree"><button id="root-add">Add</button></div>
   </div>
@@ -487,7 +497,7 @@
   <div class="ws-section ws-about">
     aish web · commands need your approval before running · type / for
     commands, @ to mention project files · the persistent "always allow"
-    list can only be grown from terminal aish · sessions are shared with
+    list can only be grown from terminal aish · chats are shared with
     the terminal and keep running when you switch away
   </div>
 </div>
@@ -648,7 +658,7 @@
     <strong class="grow">Working directory</strong>
     <button class="close" aria-label="close" data-close="dir-sheet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".16"/><path d="M8.9 8.9l6.2 6.2m0-6.2l-6.2 6.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".65"/></svg></button>
   </div>
-  <div class="dir-note">The folder aish reads &amp; runs commands in for <b>this session</b>.</div>
+  <div class="dir-note">The folder aish reads &amp; runs commands in for <b>this chat</b>.</div>
   <div id="dir-crumb" class="dir-crumb mono"></div>
   <div id="dir-list" class="sheet-list"></div>
   <div class="dir-action">

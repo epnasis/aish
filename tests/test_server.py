@@ -2610,7 +2610,7 @@ class TestSessions:
             ws.send_json({"type": "resume", "path": "../../../etc/passwd"})
             error = recv_until(ws, "error")
             assert error["type"] == "error"
-            assert "no such session" in error["text"]
+            assert "no such chat" in error["text"]
 
     def test_delete_background_session_removes_file_and_list_entry(self, app_env):
         client, _ = make_client(app_env, [model_says("noted")])
@@ -2720,7 +2720,7 @@ class TestSessions:
                 ws.send_json({"type": "delete_session", "name": name})
                 error = recv_until(ws, "error")
                 assert error["type"] == "error"
-                assert "no such session" in error["text"]
+                assert "no such chat" in error["text"]
 
 
 class TestSeenLedger:
@@ -2954,7 +2954,7 @@ class TestRename:
                 ws.send_json({"type": "rename_session", "name": name, "title": "x"})
                 # rename stamps control first (a `role` event) before rejecting.
                 error = recv_until(ws, "error")
-                assert "no such session" in error["text"]
+                assert "no such chat" in error["text"]
 
 
 class TestAutoTitle:
@@ -3424,7 +3424,7 @@ class TestHistoryMore:
             request = recv_until(ws, "approval_request")  # now busy, blocked
             ws.send_json({"type": "fork"})
             error = recv_until(ws, "error")
-            assert "can't fork while this session is working" in error["text"]
+            assert "can't fork while this chat is working" in error["text"]
             ws.send_json({"type": "approval", "id": request["id"], "action": "approve"})
             recv_until(ws, "done")
 
