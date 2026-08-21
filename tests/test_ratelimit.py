@@ -470,11 +470,11 @@ class TestGovernorLimits:
         assert limits.rpm == 9  # 10 requests * 0.9
         assert limits.tpm == 9_000
 
-    def test_a_second_429_never_raises_a_ceiling(self):
-        """The only evidence a refusal carries is an UPPER bound, so a later
-        observation may tighten a ceiling and must never relax one."""
+    def test_a_refusal_only_ever_tightens_what_is_currently_enforced(self):
+        """The evidence a refusal carries is an UPPER bound on the rate that
+        just failed."""
         now = [0.0]
-        governor = ratelimit.Governor(clock=lambda: now[0])
+        governor = ratelimit.Governor(clock=lambda: now[0], wall=lambda: 1000.0)
         for _ in range(10):
             governor.reserve("g:m", 1_000).settle(1_000)
         governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
@@ -505,8 +505,11 @@ class TestGovernorLimits:
 
 class TestGovernorAdmission:
     def _governed(self, rpm=None, tpm=None):
+        # One list drives both clocks: the rolling window is monotonic and the
+        # latch is wall, and a test that moved only one would pass for the
+        # wrong reason.
         now = [0.0]
-        governor = ratelimit.Governor(clock=lambda: now[0])
+        governor = ratelimit.Governor(clock=lambda: now[0], wall=lambda: now[0])
         governor._limits["g:m"] = ratelimit.Limits(rpm=rpm, tpm=tpm, source="env")
         return governor, now
 
@@ -709,3 +712,143 @@ class TestSpendBudget:
         budget, source = agent._history_budget()
         assert "ratelimit" not in source
         assert budget == agent.num_ctx * 3
+
+
+class TestLimitsAreABeliefNotALaw:
+    """A real key's ceiling MOVES.
+
+    A pay-as-you-go key on a shared organisation quota has neighbours, so the
+    limit at 23:00 is not the limit at 09:00. Holding a once-observed number
+    forever converts a temporary squeeze into a permanent self-imposed one —
+    believing your own model over the server. So the belief decays toward
+    optimism while the server keeps saying yes, and snaps back when it says no.
+    """
+
+    def learned(self, wall):
+        governor = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: wall[0])
+        for _ in range(10):
+            governor.reserve("g:m", 1_000).settle(1_000)
+        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        return governor
+
+    def test_the_belief_holds_while_the_refusal_is_fresh(self):
+        wall = [1000.0]
+        governor = self.learned(wall)
+        wall[0] += ratelimit.RELAX_AFTER_S - 1
+        assert governor.limits("g:m").rpm == governor.believed("g:m").rpm
+
+    def test_a_quiet_stretch_loosens_it(self):
+        """There is no synthetic probe: what tests the loosened ceiling is the
+        next call the owner was making anyway."""
+        wall = [1000.0]
+        governor = self.learned(wall)
+        strict = governor.believed("g:m").tpm
+        wall[0] += ratelimit.RELAX_AFTER_S
+        assert governor.limits("g:m").tpm > strict
+        wall[0] += ratelimit.RELAX_AFTER_S * 5
+        assert governor.limits("g:m").tpm > strict * 2
+
+    def test_loosening_is_visible_in_the_record(self):
+        wall = [1000.0]
+        governor = self.learned(wall)
+        wall[0] += ratelimit.RELAX_AFTER_S * 2
+        assert governor.limits("g:m").record()["relaxed"] > 1.0
+
+    def test_the_stored_belief_never_moves_with_the_clock(self):
+        """A file that recorded the relaxed view would disagree with itself the
+        moment it was read back."""
+        wall = [1000.0]
+        governor = self.learned(wall)
+        before = governor.believed("g:m").rpm
+        wall[0] += ratelimit.RELAX_AFTER_S * 10
+        assert governor.believed("g:m").rpm == before
+
+    def test_a_new_refusal_snaps_it_back(self):
+        wall = [1000.0]
+        governor = self.learned(wall)
+        wall[0] += ratelimit.RELAX_AFTER_S * 4
+        loose = governor.limits("g:m").rpm
+        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        assert governor.limits("g:m").rpm < loose
+
+    def test_a_stated_tier_never_drifts(self, monkeypatch):
+        """Relaxation is aish correcting its own guess. An owner who stated
+        their tier said something aish has no business loosening."""
+        monkeypatch.setenv("AISH_RATE_LIMIT_G", "rpm=10,tpm=1000")
+        wall = [1000.0]
+        governor = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: wall[0])
+        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        wall[0] += ratelimit.RELAX_AFTER_S * 10
+        assert governor.limits("g:m").rpm == 10
+        assert governor.limits("g:m").source == "env"
+
+
+class TestLearnedLimitsSurviveRestart:
+    """A ceiling costs a 429 to learn, so learning it once per RESTART instead
+    of once is paying repeatedly for the same information — and `make ship`
+    restarts the server often."""
+
+    def test_what_was_learned_is_reloaded(self, tmp_path):
+        store = tmp_path / "rate-limits.json"
+        first = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1000.0, store=store)
+        for _ in range(10):
+            first.reserve("g:m", 1_000).settle(1_000)
+        first.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        learned = first.believed("g:m")
+
+        second = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1000.0, store=store)
+        assert second.believed("g:m").rpm == learned.rpm
+        assert second.believed("g:m").tpm == learned.tpm
+        assert second.believed("g:m").source == "observed"
+
+    def test_the_age_of_the_evidence_survives_too(self, tmp_path):
+        """Otherwise a restart would look like a fresh refusal and re-freeze a
+        ceiling that had spent an hour earning its way back up."""
+        store = tmp_path / "rate-limits.json"
+        first = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1000.0, store=store)
+        first.reserve("g:m", 1_000).settle(1_000)
+        first.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+
+        later = ratelimit.Governor(
+            clock=lambda: 0.0, wall=lambda: 1000.0 + ratelimit.RELAX_AFTER_S * 3, store=store
+        )
+        assert later.limits("g:m").relaxed > 1.0
+
+    def test_a_spent_quota_is_still_spent_after_a_restart(self, tmp_path):
+        """Restart recovery re-runs interrupted triggered sessions, so an
+        in-memory latch meant a spent daily quota was re-slammed on every
+        restart by the very sessions it had already refused."""
+        store = tmp_path / "rate-limits.json"
+        body = {"error": {"details": [{"violations": [{"quotaId": "RequestsPerDay"}]}]}}
+        first = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1000.0, store=store)
+        first.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429, body=body)))
+
+        second = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1100.0, store=store)
+        with pytest.raises(ratelimit.RateLimited, match="spent rather than busy"):
+            second.reserve("g:m", 1)
+
+    def test_the_latch_still_lifts_on_schedule_across_a_restart(self, tmp_path):
+        store = tmp_path / "rate-limits.json"
+        exc = FakeAPIError("q", status=429, headers={"Retry-After": "1800"})
+        first = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1000.0, store=store)
+        first.observe("g:m", ratelimit.classify(exc))
+
+        second = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 3000.0, store=store)
+        assert second.exhausted_for("g:m") is None
+        second.reserve("g:m", 1)
+
+    def test_an_unreadable_store_reads_as_nothing_learned(self, tmp_path):
+        """Which is exactly the state a first run is in — nothing here is worth
+        failing a model call over."""
+        store = tmp_path / "rate-limits.json"
+        store.write_text("{ not json")
+        governor = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1.0, store=store)
+        assert governor.believed("g:m").source == "none"
+        governor.reserve("g:m", 10_000_000).settle(1)
+
+    def test_nothing_is_written_when_there_is_no_state_dir(self, monkeypatch):
+        monkeypatch.delenv("AISH_STATE_DIR", raising=False)
+        governor = ratelimit.Governor(clock=lambda: 0.0, wall=lambda: 1.0)
+        governor.reserve("g:m", 1).settle(1)
+        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        assert governor.believed("g:m").source == "observed"  # in memory only

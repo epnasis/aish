@@ -267,8 +267,17 @@ a `429` that has nothing to do with the task being hard.
 
 aish paces itself against that ceiling, process-wide, across every chat and
 every backend. It cannot know which billing tier your key is on, so out of the
-box it enforces nothing and **learns the limit from the first `429`**. If you
-know your tier, tell it and it never has to learn the hard way:
+box it enforces nothing and **learns the limit from the first `429`** — once,
+not once per restart: what it learned is remembered on disk.
+
+And it treats that limit as a belief rather than a law, because a real one
+moves. A pay-as-you-go key on a shared quota has neighbours, so the ceiling at
+23:00 is not the ceiling at 09:00. After a quiet stretch aish loosens what it
+believes, and snaps back the moment the server says no — the server's answer is
+the only thing that counts as evidence. There is no probe traffic; what tests
+the loosened ceiling is the next call you were making anyway.
+
+If you know your tier you can just say so, and aish will not second-guess it:
 
 ```sh
 export AISH_RATE_LIMIT_GEMINI="rpm=10,tpm=250000"     # per provider
