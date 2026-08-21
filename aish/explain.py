@@ -876,9 +876,22 @@ def notes(doc: dict) -> dict:
 
     # The fullest call, not every call: the window is a property of the turn and
     # repeating it per call buries everything else.
+    #
+    # The window must be the one that was RECORDED as in force. `num_ctx` is an
+    # Ollama option carried on every turn whatever the backend, so comparing
+    # against it called a Gemini turn sitting at 5% of its million-token window
+    # "nearly full" — a confident wrong claim at the top of the evidence, which
+    # is the one thing this pass must never produce. For a log written before
+    # the window was recorded, `num_ctx` is trustworthy ONLY on Ollama, where it
+    # genuinely is the window; anywhere else the reader cannot know, and
+    # abstains rather than guessing.
     window = 0
     for brief in briefs:
-        window = int((brief["options"] or {}).get("num_ctx") or 0) or window
+        options = brief["options"] or {}
+        if recorded := int(options.get("window") or 0):
+            window = recorded
+        elif options.get("provider") == "ollama":
+            window = int(options.get("num_ctx") or 0) or window
     fullest = max(
         (c for c in doc["thought"]["calls"] if c["tokens"]),
         key=lambda c: int(c["tokens"][0] or 0),
