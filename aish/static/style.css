@@ -2106,6 +2106,12 @@ body.dropping::after {
    cap and center it so it presents as a bottom-docked dialog. */
 @media (min-width: 700px) {
   .sheet { max-width: 560px; margin-inline: auto; }
+  /* …except the full record, which is a DOCUMENT and not a picker. Every other
+     sheet is a short list of rows, where 560px is generous. This one carries a
+     turn's reasoning, its tool arguments and whatever a command printed, and at
+     picker width on a desktop it reads through a letterbox while most of the
+     screen sits empty. Given room, it takes it. */
+  #explain-sheet { max-width: min(1040px, 100%); max-height: 92%; }
 }
 .grabber {
   /* Generous invisible hit area around the visible 36×5 bar. */
@@ -2806,8 +2812,8 @@ body.kb-open .rail-searchbar { padding-bottom: 7px; }
   touch-action: pan-y;
 }
 
-/* Docked: the panel stops being a mode — it is simply always there, and the app
-   shell is inset to make room.
+/* Docked: the panel stops being a slide-over mode — it is a sidebar, and the
+   app shell is inset to make room.
 
    The inset goes on body's padding, the same lever the landscape safe-area
    inset uses, and the rail needs NO counter-offset: body carries
@@ -2816,16 +2822,40 @@ body.kb-open .rail-searchbar { padding-bottom: 7px; }
    block's PADDING BOX — whose left edge is body's border edge, i.e. 0. Padding
    moves the flex children (topbar, transcript, composer) and leaves `left: 0`
    exactly where it was. Measured, not assumed: pulling the rail back by
-   --rail-w "to compensate" put it entirely off-screen. */
+   --rail-w "to compensate" put it entirely off-screen.
+
+   Everything here hangs off `body.rail-open`, which is what lets the sidebar be
+   PUT AWAY. It used to be unconditional — the width alone decided — so the one
+   control that could hide the list was a dead button on the only screens wide
+   enough to want it hidden. Docked is now two facts (the viewport has room, the
+   owner has not filed it away) and the class carries the second; the base rules
+   below the query already lay the panel off-screen, so "not open" needs no
+   rules of its own. `transition: none` stays OUTSIDE the class, because the
+   shell's padding cannot animate in step with it (a transition on body padding
+   fires on the class this app sets at module load, i.e. on every cold load) and
+   half an animation reads worse than none. */
 @media (min-width: 900px) {
-  body { padding-left: calc(env(safe-area-inset-left) + var(--rail-w)); }
-  #session-rail {
+  body.rail-open { padding-left: calc(env(safe-area-inset-left) + var(--rail-w)); }
+  #session-rail { transition: none; }
+  body.rail-open #session-rail {
     transform: none;
     visibility: visible;
     pointer-events: auto;
-    transition: none;
   }
   #rail-scrim { display: none; }
+
+  /* A sheet belongs to the CHAT, not to the window. Sheets are `position:
+     fixed`, so they never saw the shell's inset and went on centring themselves
+     over the whole viewport: on any window narrower than about 1300px that slid
+     the sheet under the docked rail, where the rail's higher stacking order
+     (30 vs 20) painted straight over it. Giving them the same inset centres
+     them on the chat and makes the overlap impossible rather than layering out
+     of it — the rail is this app's navigation and a picker should never bury
+     it. The dim layer moves with them, so it stops at the sidebar's edge and
+     reads as deliberate. Scoped to `.rail-open` so a put-away sidebar hands the
+     full width back to the sheets too. */
+  body.rail-open #backdrop,
+  body.rail-open .sheet { left: calc(env(safe-area-inset-left) + var(--rail-w)); }
 }
 
 /* per-session working directory line */

@@ -77,7 +77,7 @@ ok("the commit distance scales with the screen, not a fixed pixel count",
 // ---- 2. the choreography --------------------------------------------------
 // A minimal DOM: what matters is which classes are set and whether an inline
 // transform survives the gesture.
-function railWorld({ width = 420 } = {}) { // phone by default
+function railWorld({ width = 420, stored = {} } = {}) { // phone by default
   const classes = new Set();
   const listeners = {};
   const rail = {
@@ -87,6 +87,7 @@ function railWorld({ width = 420 } = {}) { // phone by default
   const scrim = { style: {} };
   const search = { value: "", focus() {}, closest: () => null };
   const calls = [];
+  const resizeHandlers = [];
   const sandbox = {
     innerWidth: width,
     document: {
@@ -98,7 +99,7 @@ function railWorld({ width = 420 } = {}) { // phone by default
         },
       },
       activeElement: null,
-      querySelectorAll: () => [],
+      querySelectorAll: (sel) => { if (sel === ".sheet") calls.push("hid-sheets"); return []; },
     },
     $: (id) => ({
       "session-rail": rail,
@@ -107,16 +108,22 @@ function railWorld({ width = 420 } = {}) { // phone by default
       backdrop: { hidden: true },
     }[id]),
     FINE_POINTER: false,
+    localStorage: {
+      getItem: (k) => (k in stored ? stored[k] : null),
+      setItem: (k, v) => { stored[k] = String(v); },
+      removeItem: (k) => { delete stored[k]; },
+    },
     requestAnimationFrame() {},
     setTimeout() {},
     requestSessions: (q) => calls.push(`requestSessions:${q}`),
     snapViewportSoon: () => calls.push("snapViewportSoon"),
     reportViewport() {},
-    addEventListener() {},
+    addEventListener: (type, fn) => { if (type === "resize") resizeHandlers.push(fn); },
+    dispatchResize: () => resizeHandlers.forEach((fn) => fn()),
   };
   vm.createContext(sandbox);
   vm.runInContext(extract("// [RAIL-START]", "// [RAIL-END]"), sandbox);
-  return { s: sandbox, classes, rail, scrim, calls, listeners };
+  return { s: sandbox, classes, rail, scrim, calls, listeners, stored };
 }
 
 // A drag that is released past the threshold leaves the rail OPEN and, crucially,
@@ -160,20 +167,90 @@ function railWorld({ width = 420 } = {}) { // phone by default
 }
 
 // ---- 3. docked ------------------------------------------------------------
-// At a docked width the rail is not a mode, so nothing may close it — a close
-// that "worked" there would leave the app inset for a panel that isn't shown.
+// Docked, the rail is not a slide-over, so the slide-over's DISMISSES must not
+// touch it: the scrim, Escape, picking a chat and starting a new one all route
+// to closeSessionRail, and a sidebar that vanished every time you opened a chat
+// would be unusable. A close that "worked" there would also leave the app inset
+// for a panel that isn't shown.
 {
   const w = railWorld({ width: 1400 });
   ok("a wide viewport docks the rail", w.s.railDocked() === true);
   w.s.openSessionRail("");
   w.s.closeSessionRail();
-  ok("closing a docked rail does nothing", w.classes.has("rail-open"));
+  ok("dismissing a docked rail does nothing", w.classes.has("rail-open"));
 
   const narrow = railWorld({ width: 420 });
   ok("a phone does not dock", narrow.s.railDocked() === false);
   narrow.s.openSessionRail("");
   narrow.s.closeSessionRail();
   ok("…and there it really closes", !narrow.classes.has("rail-open"));
+}
+
+// ---- 3a. …but the owner can still put the sidebar away --------------------
+// The bug this replaces: docked was a pure VIEWPORT fact, and every control that
+// could hide the list went through closeSessionRail, which refuses when docked.
+// So on the only screens wide enough to dock, the chats button and ⌘O were dead
+// — there was no way to give the chat the whole window.
+{
+  const w = railWorld({ width: 1400 });
+  ok("a docked rail starts open", w.classes.has("rail-open"));
+
+  w.s.toggleSessionRail();
+  ok("the toggle puts a docked sidebar away", !w.classes.has("rail-open"));
+  ok("…and remembers it, because it is a fact about this screen",
+    w.stored["aish-rail-hidden"] === "1");
+  ok("…while an ordinary dismiss still cannot: only the toggle writes it",
+    (w.s.closeSessionRail(), w.stored["aish-rail-hidden"] === "1"));
+
+  w.s.toggleSessionRail();
+  ok("the toggle brings it back", w.classes.has("rail-open"));
+  ok("…and forgets the preference, so it is not re-hidden next load",
+    !("aish-rail-hidden" in w.stored));
+  ok("…filled, never brought back empty",
+    w.calls.some((c) => c.startsWith("requestSessions")));
+}
+
+// A sidebar filed away stays away across a reload and across a window resize.
+// Both are how the decision gets silently undone: the class is set at module
+// load, and the resize handler used to force it open on any width change.
+{
+  const cold = railWorld({ width: 1400, stored: { "aish-rail-hidden": "1" } });
+  ok("a filed-away sidebar does not come back on load",
+    !cold.classes.has("rail-open"));
+
+  const resized = railWorld({ width: 1400, stored: { "aish-rail-hidden": "1" } });
+  resized.s.dispatchResize();
+  ok("…nor when the window is resized", !resized.classes.has("rail-open"));
+
+  const shown = railWorld({ width: 1400 });
+  shown.s.toggleSessionRail();      // put away
+  shown.s.dispatchResize();
+  ok("…nor when it was put away in THIS session", !shown.classes.has("rail-open"));
+}
+
+// An explicit open — /resume, or the ⌘O that means "show me the chats" — is the
+// owner asking for the list, so it unfiles it. Otherwise the slash command would
+// silently do nothing on a screen where the sidebar happened to be away.
+{
+  const w = railWorld({ width: 1400, stored: { "aish-rail-hidden": "1" } });
+  w.s.openSessionRail("invoice");
+  ok("an explicit open brings a filed-away sidebar back",
+    w.classes.has("rail-open") && !("aish-rail-hidden" in w.stored));
+}
+
+// Docked, the rail overlaps nothing — the sheets are inset beside it — so
+// showing it must not tear down whatever else is on screen. On a phone it
+// covers them, and there it still stands them down.
+{
+  const wide = railWorld({ width: 1400 });
+  wide.s.openSessionRail("");
+  ok("a docked rail closes no sheets: it sits beside them",
+    !wide.calls.includes("hid-sheets"));
+
+  const phone = railWorld({ width: 420 });
+  phone.s.openSessionRail("");
+  ok("…a slide-over still does, because it covers them",
+    phone.calls.includes("hid-sheets"));
 }
 
 // ---- 3b. leftward on the panel closes it ---------------------------------
