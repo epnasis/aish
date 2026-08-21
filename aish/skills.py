@@ -88,6 +88,26 @@ SEMANTIC_MIN_SIM = 0.24
 # scored median 0.458, irrelevant 0.290; replaying the verdicts, 0.35
 # yields ~76% precision vs ~45% at 0.24.
 PREFLIGHT_MIN_SIM = 0.35
+# And the READ GATE needs a higher bar than injection (#238). Injection at 0.35
+# buys ~76% precision, which is the right trade for a teaser: a near-miss costs
+# some characters. The gate is not comparable — it REFUSES unrelated tool calls
+# until the model submits to reading the skill — so it must not run on the same
+# confidence.
+#
+# Measured, on the session that produced this: the owner asked for his energy
+# invoices "for each apartment"; `trippy_search`, a playbook for finding hotels,
+# scored 0.282 — below the injection floor, and almost exactly the audit's
+# median for an IRRELEVANT entry (0.290). It was injected anyway because its
+# author had listed `apartment` as a keyword, which drops the bar to
+# SEMANTIC_MIN_SIM; and its body is 3 036 characters, 36 over the oversized
+# line, so the teaser came with a gate. Two browse calls refused, one call spent
+# reading a hotel playbook, and a sentence in the owner's chat explaining it —
+# which the refusal text explicitly forbids.
+#
+# 0.45 is the audit's median for a RELEVANT entry (#183). Same calibration, a
+# bar the gate can carry. A keyword hit is a PRIOR and never arms the gate on
+# its own; only a match this strong, or the entry being NAMED, may block work.
+GATE_MIN_SIM = 0.45
 # A short follow-up ("show on map") is a hopeless retrieval query on its
 # own — mid-conversation injections were the most random in the #183 audit.
 # Below this task length the EMBEDDING query gains recent conversation
@@ -779,7 +799,13 @@ def preflight(
             if score >= PREFLIGHT_MIN_SCORE:
                 picked.append((score, entry))
         picked.sort(key=lambda pair: -pair[0])  # stable: corpus order within a tier
-        chosen = [(entry, {"score": score}) for score, entry in picked]
+        # The rail rides along even though lexical selection does not use it:
+        # with no similarity to clear, being NAMED is the only thing that may
+        # arm the read gate, and `_gate_arms` has to be able to see it.
+        chosen = [
+            (entry, {"score": score, "rail": _exact_rail(entry, task_padded)})
+            for score, entry in picked
+        ]
     blocks: list[str] = []
     names: list[str] = []
     unread: list[str] = []
@@ -794,25 +820,55 @@ def preflight(
             body = entry.body[:room]
             cut = "…" if len(body) < len(entry.body) else ""
             block = f"{header}{body}{cut}".rstrip()
-        else:  # oversized skill: teaser now, full body via the gated read_skill
+        else:  # oversized skill: teaser now, full body via read_skill
             head = entry.body[:PREFLIGHT_HEAD_CHARS]
+            # Whether this may BLOCK is a separate question from whether it may
+            # be injected, and a stricter one — see GATE_MIN_SIM. A skill that
+            # does not clear it still gets its teaser and can still be read; it
+            # simply cannot refuse the model's next tool call.
+            gated = _gate_arms(diag)
+            ask = (
+                f'(REQUIRED: call read_skill("{entry.name}") for the full '
+                "playbook before other tools. If it plainly does not fit this "
+                "task, retry your call instead — silently."
+                if gated else
+                f'(Call read_skill("{entry.name}") for the full playbook IF it '
+                "fits this task. If it does not, ignore it and carry on."
+            )
             block = (
                 f"[skill: {entry.name} — TRUNCATED: first {len(head)} chars of a "
                 "longer playbook]\n"
                 f"{head}…\n"
-                f'(REQUIRED: call read_skill("{entry.name}") for the full playbook '
-                "before other tools. If it plainly does not fit this task, retry "
-                "your call instead — silently. Never tell the user which skills "
-                "you did or did not use.)"
+                f"{ask} Never tell the user which skills you did or did not "
+                "use.)"
             )
             if len(block) > remaining:
                 continue  # not even the teaser fits — leave it to recall
-            unread.append(entry.name)
+            if gated:
+                unread.append(entry.name)
         blocks.append(block)
         names.append(entry.name)
         items.append({"name": entry.name, "kind": entry.kind, **diag})
         remaining -= len(block) + 2  # +2 covers the join's blank line
     return Preload("\n\n".join(blocks), names, unread, items, mode)
+
+
+def _gate_arms(diag: dict) -> bool:
+    """May this entry REFUSE the model's next tool call, or only ask to be read?
+
+    Named in the task (rail 4) is unambiguous — the owner or the model said the
+    word, and a gate is what they asked for. Otherwise the similarity has to
+    clear GATE_MIN_SIM on its own: a keyword hit lowers the INJECTION bar and
+    must not be readable as confidence, because the whole failure it caused was
+    a curated keyword ("apartment") standing in for relevance it did not have.
+
+    In lexical mode there is no similarity to clear, so nothing but a name arms
+    it. That is the conservative direction on purpose: an unarmed gate costs a
+    playbook the model may skip, and an armed one costs the owner's task."""
+    if diag.get("rail", 0) >= 4:
+        return True
+    sim = diag.get("sim")
+    return sim is not None and sim >= GATE_MIN_SIM
 
 
 def _snippet(text: str, words: list[str], width: int = RECALL_SNIPPET_CHARS) -> str | None:

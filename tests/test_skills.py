@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 from aish import skills as skills_module
 from aish.skills import (
     INDEX_MEMORY_MAX,
@@ -737,7 +739,12 @@ class TestPreflightPrecision:
         self._memory(tmp_path, "web-release", "steps to release", keywords="deploy")
         preload = preflight(str(tmp_path), None, "please deploy the new version")
         assert preload.mode == "lexical"
-        assert preload.items == [{"name": "web-release", "kind": "memory", "score": 3}]
+        # `rail` rides along even here, where selection does not use it: with no
+        # similarity to clear, being NAMED is the only thing that may arm the
+        # read gate, and `_gate_arms` has to be able to see which rail hit.
+        assert preload.items == [
+            {"name": "web-release", "kind": "memory", "score": 3, "rail": 3}
+        ]
 
     def test_save_memory_disabled_retires_and_revives(self, tmp_path, monkeypatch):
         # #185: disable is the reversible retirement path — the entry drops
@@ -1175,3 +1182,108 @@ class TestIndexSelectionRecord:
         """Every existing caller passes no callback and must be unaffected."""
         self._memory("a-fact", "some fact")
         assert "some fact" in knowledge_index(str(tmp_path))
+
+
+class TestOnlyAStrongMatchMayBlockWork:
+    """Injecting a teaser and REFUSING a tool call are not comparable acts, and
+    they must not share a confidence bar (#238).
+
+    Measured on the session that produced this. The owner asked for his energy
+    invoices "for each apartment"; `trippy_search`, a playbook for finding
+    hotels, scored 0.282 — below the injection floor, and almost exactly the
+    audit's median for an irrelevant entry. Its author had listed `apartment` as
+    a keyword, which drops the bar to SEMANTIC_MIN_SIM; its body is 36
+    characters over the oversized line, so the teaser came with a gate. Two
+    browse calls refused, one call spent reading a hotel playbook, and a
+    sentence in the owner's chat explaining it — which the refusal text forbids.
+    """
+
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", tmp_path / "gs")
+        monkeypatch.setattr(skills_module, "GLOBAL_MEMORY_DIR", tmp_path / "gm")
+
+    def _big_skill(self, tmp_path, name, keywords=""):
+        kw = f"keywords: {keywords}\n" if keywords else ""
+        write_skill(
+            tmp_path / "gs",  # a SKILL: a memory is never gated, whatever its size
+            f"{name}.md",
+            f"---\nname: {name}\ndescription: {name} playbook\n{kw}---\n"
+            + "step\n" * 1000,
+        )
+
+    def _preload(self, tmp_path, task, sim):
+        return preflight(
+            str(tmp_path), None, task,
+            semantic=lambda q, entries: {id(e): sim for e in entries},
+        )
+
+    def test_a_weak_match_injects_a_teaser_and_blocks_nothing(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._big_skill(tmp_path, "trippy_search", keywords="apartment")
+        preload = self._preload(tmp_path, "get invoices for each apartment", 0.282)
+        assert preload.names == ["trippy_search"], "the teaser is still worth having"
+        assert preload.unread == [], "a 0.282 match must not refuse a tool call"
+
+    def test_a_strong_match_still_blocks(self, tmp_path, monkeypatch):
+        """The gate is not being removed — a skill that IS about the task keeps
+        its enforcement."""
+        self._isolate(tmp_path, monkeypatch)
+        self._big_skill(tmp_path, "trippy_search", keywords="apartment")
+        preload = self._preload(
+            tmp_path, "find a quiet apartment in Lisbon with a balcony", 0.454
+        )
+        assert preload.unread == ["trippy_search"]
+
+    def test_naming_the_skill_always_blocks(self, tmp_path, monkeypatch):
+        """Cosine may not veto an explicit mention: saying the name IS asking
+        for the playbook."""
+        self._isolate(tmp_path, monkeypatch)
+        self._big_skill(tmp_path, "bigplay")
+        preload = self._preload(tmp_path, "run bigplay now", 0.05)
+        assert preload.unread == ["bigplay"]
+
+    def test_an_unarmed_teaser_does_not_claim_to_be_required(self, tmp_path, monkeypatch):
+        """A model told a read is REQUIRED when nothing enforces it learns that
+        aish's requirements are optional."""
+        self._isolate(tmp_path, monkeypatch)
+        self._big_skill(tmp_path, "trippy_search", keywords="apartment")
+        text = self._preload(tmp_path, "get invoices for each apartment", 0.282).text
+        assert "REQUIRED" not in text
+        assert 'read_skill("trippy_search")' in text
+        assert "IF it fits this task" in text
+        assert "Never tell the user which skills" in text
+
+    def test_an_armed_teaser_still_says_required(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._big_skill(tmp_path, "trippy_search", keywords="apartment")
+        text = self._preload(
+            tmp_path, "find a quiet apartment in Lisbon", 0.454
+        ).text
+        assert "REQUIRED" in text
+        assert "retry your call instead — silently" in text
+
+    def test_lexical_mode_blocks_only_on_a_name(self, tmp_path, monkeypatch):
+        """No embeddings means no confidence signal, and a gate that stops the
+        owner's task needs one. The conservative direction on purpose: an
+        unarmed gate costs a playbook the model may skip."""
+        self._isolate(tmp_path, monkeypatch)
+        self._big_skill(tmp_path, "trippy_search", keywords="apartment")
+        keyword_only = preflight(str(tmp_path), None, "invoices for each apartment")
+        assert keyword_only.names == ["trippy_search"]
+        assert keyword_only.unread == []
+        named = preflight(str(tmp_path), None, "use trippy_search for this")
+        assert named.unread == ["trippy_search"]
+
+    @pytest.mark.parametrize(
+        "diag, arms",
+        [
+            ({"rail": 4, "sim": 0.01}, True),      # named
+            ({"rail": 3, "sim": 0.44}, False),     # keyword prior, weak match
+            ({"rail": 3, "sim": 0.45}, True),      # keyword prior, strong match
+            ({"rail": 0, "sim": 0.50}, True),      # no rail, strong match
+            ({"rail": 3, "score": 3}, False),      # lexical, keyword only
+            ({"rail": 4, "score": 3}, True),       # lexical, named
+        ],
+    )
+    def test_the_rule_in_one_table(self, diag, arms):
+        assert skills_module._gate_arms(diag) is arms
