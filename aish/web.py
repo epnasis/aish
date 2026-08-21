@@ -725,6 +725,44 @@ PAGE_TITLES: dict[str, str] = {}
 PAGE_TITLES_MAX = 500
 
 
+# The exact sentence ddgs raises when every engine came back empty and none of
+# them errored. Matching a library's message is not something to be casual
+# about, so the direction of the failure is the point: if the wording ever
+# changes, an empty search is reported as the ERROR it used to be, which is
+# merely the old behaviour back. Nothing here can turn a real error into a
+# false "nothing found".
+SEARCH_FOUND_NOTHING = "no results found."
+
+
+def found_nothing(exc: Exception) -> bool:
+    """Is this ddgs failure an empty result set wearing an exception?
+
+    It raises for BOTH outcomes, out of the same class: an engine that blew up
+    is re-raised carrying that engine's own exception, and "everything answered,
+    nothing matched" carries this sentence. The message is the only thing that
+    tells them apart."""
+    return str(exc).strip().lower() == SEARCH_FOUND_NOTHING
+
+
+# What the model is told when the search matched nothing. It has to say the
+# search WORKED, because the previous wording said the opposite and was obeyed:
+# ddgs signals an empty result set by RAISING, so `if not results` below was
+# unreachable and every empty search reached the model as `ERROR: web search
+# failed (No results found.) — retry once, or answer without the web`. On
+# 2026-08-21 one question spent ten searches doing exactly that, re-wording the
+# same query and being told ten times that the tool had failed, while the user
+# watched a working tool report itself broken.
+#
+# So: no ERROR prefix (which the envelope's prefix sniff scores as a failed
+# call), no invitation to retry, and one alternative that is a different ACTION
+# rather than a different phrasing of the same one.
+NO_RESULTS = (
+    "No results for {query!r}. The search ran and matched nothing — that is an "
+    "answer, not a failure. Do not run this query again. Either search once "
+    "more with different keywords, or say that the web has nothing on it."
+)
+
+
 def web_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> str:
     query = query.strip()
     if not query:
@@ -734,9 +772,11 @@ def web_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> str:
     try:
         results = DDGS().text(query, max_results=max_results)
     except Exception as exc:  # noqa: BLE001 — network/rate-limit errors are routine
-        return f"ERROR: web search failed ({exc}) — retry once, or answer without the web"
+        if not found_nothing(exc):
+            return f"ERROR: web search failed ({exc}) — retry once, or answer without the web"
+        results = []
     if not results:
-        return f"NO RESULTS for {query!r} — try fewer or different keywords."
+        return NO_RESULTS.format(query=query)
 
     lines = []
     for i, hit in enumerate(results, 1):
