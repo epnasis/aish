@@ -7888,7 +7888,7 @@ class TestBrowserView:
             assert calls == [("open", "https://x.pl", 430, 900, False)]
 
     def test_the_client_says_which_profile_the_view_drives(self, app_env, monkeypatch):
-        """Sent by the client, never inferred from the URL (#249).
+        """Sent by the client, never inferred from the URL (#264).
 
         Signing the search profile in happens at accounts.google.com — the same
         address the owner would use for his own — so the address cannot say

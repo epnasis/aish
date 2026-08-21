@@ -1,5 +1,5 @@
 {
- "_comment": "A real google.com results page, captured through aish's own browser on 2026-08-21 with scripts/probe_search.py. The query is the one from the session that filed #249, and every trap serp_results has to survive is in here as it really appeared: ten language/time filter links on the engine's own /search path, a support.google.com accessibility link, and every result listed TWICE — once as its title and once as Google's 'Tłumaczenie strony' link on the same href.",
+ "_comment": "A real google.com results page, captured through aish's own browser on 2026-08-21 with scripts/probe_search.py. The query is the one from the session that filed #263, and every trap serp_results has to survive is in here as it really appeared: ten language/time filter links on the engine's own /search path, a support.google.com accessibility link, and every result listed TWICE — once as its title and once as Google's 'Tłumaczenie strony' link on the same href.",
  "query": "site:careers.google.com \"product management\" Poland",
  "url": "https://www.google.com/search?q=site%3Acareers.google.com+%22product+management%22+Poland",
  "status": 200,
