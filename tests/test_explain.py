@@ -487,7 +487,8 @@ class TestCoverageHoles:
                 {"role": "tool", "tool_name": "read_url", "content": "x" * 4000},
             ]
         )
-        agent._trim_eagerly(len(agent.messages))
+        agent.num_ctx = 1024   # a 3072-char budget, so the history overflows
+        agent._trim_history_to_budget()
         (record,) = steps(log.path, "trim")
         (stub,) = record["stubbed"]
         assert stub["at"] == 2 and stub["tool"] == "read_url"

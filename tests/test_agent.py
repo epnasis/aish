@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from aish import agent as agent_module
+from aish import backends as backends_module
 from aish import rules as rules_module
 from aish import secrets as secrets_module
 from aish import session as session_module
@@ -392,7 +393,11 @@ class TestContextCompaction:
         monkeypatch.setattr(agent_module.tools, "run_command", lambda cmd, **_kw: "X" * 5000)
         return make_agent(responses, **kwargs)
 
-    def test_previous_task_tool_output_trimmed_on_new_task(self, monkeypatch):
+    def test_a_previous_task_output_SURVIVES_when_the_window_has_room(self, monkeypatch):
+        """The behaviour that changed. Every prior tool result used to be cut to
+        200 characters at the start of the next task, whatever room was
+        available — written six days before cloud backends existed, and then
+        inherited by models with windows thirty times larger."""
         agent, _ = self.big_output_agent(
             [
                 model_says(tool_calls=[tool_call("run_command", command="big")]),
@@ -400,6 +405,21 @@ class TestContextCompaction:
                 model_says("task 2 done"),
             ],
             monkeypatch,
+        )
+        agent.run_task("first")
+        assert len(tool_messages(agent.messages)[0]["content"]) == 5000
+        agent.run_task("second")
+        assert len(tool_messages(agent.messages)[0]["content"]) == 5000
+
+    def test_previous_task_tool_output_trimmed_when_it_no_longer_fits(self, monkeypatch):
+        agent, _ = self.big_output_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="big")]),
+                model_says("task 1 done"),
+                model_says("task 2 done"),
+            ],
+            monkeypatch,
+            num_ctx=1024,   # a 3072-char budget; 5000 chars does not fit
         )
         agent.run_task("first")
         assert len(tool_messages(agent.messages)[0]["content"]) == 5000
@@ -5514,14 +5534,17 @@ class TestNearDuplicateAdmission:
 
 
 class TestTrimIsRecorded:
-    """docs/trace-contract.md §3.5. The truncator with the LARGEST blast radius
-    — every prior tool output down to a 200-char stub at the start of every
-    task, unconditionally — and it recorded nothing at all. That silence is why
-    Session B, asked why its output was truncated, grepped aish's own source,
-    found a DIFFERENT truncator's marker and confidently blamed the wrong
-    thing."""
+    """docs/trace-contract.md §3.5. This used to be the truncator with the
+    LARGEST blast radius — every prior tool output down to a 200-char stub at
+    the start of every task, unconditionally — and it recorded nothing at all.
+    That silence is why Session B, asked why its output was truncated, grepped
+    aish's own source, found a DIFFERENT truncator's marker and confidently
+    blamed the wrong thing. It is now budget-gated like the other two."""
 
-    def test_the_eager_trim_records_that_it_was_unconditional(self, tmp_path):
+    def test_a_task_that_fits_its_window_is_not_trimmed_at_all(self, tmp_path):
+        """The behaviour change. A 500-char result on a 32k-token window is
+        nowhere near any limit, and used to be cut to 200 characters anyway at
+        the start of the very next task."""
         steps: list[dict] = []
         agent, _ = make_agent(
             [
@@ -5534,18 +5557,41 @@ class TestTrimIsRecorded:
         )
         agent.run_task("make a big result")
         steps.clear()
-        agent.run_task("a second task, which trims the first task's output")
+        agent.run_task("a second task")
+
+        assert [s for s in steps if s.get("kind") == "trim"] == []
+        kept = [m for m in agent.messages if m.get("role") == "tool"][0]["content"]
+        assert "[trimmed" not in kept, "an old result was cut with room to spare"
+
+    def test_a_history_over_budget_is_trimmed_and_says_what_governed_it(self, tmp_path):
+        steps: list[dict] = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("run_command", command="echo big")]),
+                model_says("first done"),
+                model_says("second done"),
+            ],
+            cwd=str(tmp_path),
+            step_log=steps.append,
+            num_ctx=1024,   # a 3072-char budget: a small local model
+        )
+        agent.run_task("make a big result")
+        agent.messages.append(
+            {"role": "tool", "tool_name": "run_command", "content": "y" * 9000}
+        )
+        steps.clear()
+        agent.run_task("a second task")
 
         trims = [s for s in steps if s.get("kind") == "trim"]
         assert len(trims) == 1
-        assert trims[0]["policy"] == "eager_stub"
+        assert trims[0]["policy"] == "budget_oldest_first"
         assert trims[0]["affected"] >= 1
         assert trims[0]["bytes_before"] > trims[0]["bytes_after"]
         assert trims[0]["keep_chars"] == agent_module.TRIM_KEEP_CHARS
-        # `budget: null` states the fact #192 says is wrong and which no record
-        # stated before: this trim consulted no budget at all.
-        assert trims[0]["budget"] is None
-        assert trims[0]["cap_source"] == "constant:TRIM_KEEP_CHARS"
+        # The budget is stated, and its provenance is the number that actually
+        # governed the trim rather than one the trim never consulted.
+        assert trims[0]["budget"] == 1024 * agent_module.CHARS_PER_TOKEN_BUDGET
+        assert trims[0]["cap_source"] == "num_ctx:1024"
 
     def test_a_trim_that_changed_nothing_stays_silent(self, tmp_path):
         """Records are evidence of decisions, not heartbeat noise."""
@@ -5557,11 +5603,11 @@ class TestTrimIsRecorded:
         assert [s for s in steps if s.get("kind") == "trim"] == []
 
     def test_the_trim_is_stamped_with_the_turn_it_prepares(self, tmp_path):
-        """The eager trim runs as preparation for the NEW task, so its record
-        must carry that task's turn. Stamped with the previous one it would
-        tell #197 that the turn which lost its evidence was the one that had
-        just finished, not the one about to run — the reader would look in the
-        wrong place. Found by driving the real UI, not by a unit test."""
+        """The trim runs as preparation for the NEW task, so its record must
+        carry that task's turn. Stamped with the previous one it would tell
+        #197 that the turn which lost its evidence was the one that had just
+        finished, not the one about to run — the reader would look in the wrong
+        place. Found by driving the real UI, not by a unit test."""
         steps: list[dict] = []
         agent, _ = make_agent(
             [
@@ -5571,8 +5617,12 @@ class TestTrimIsRecorded:
             ],
             cwd=str(tmp_path),
             step_log=steps.append,
+            num_ctx=1024,   # small enough that the history genuinely overflows
         )
         agent.run_task("make a big result")
+        agent.messages.append(
+            {"role": "tool", "tool_name": "run_command", "content": "z" * 9000}
+        )
         agent.run_task("the task the trim is preparing for")
 
         trim = [s for s in steps if s.get("kind") == "trim"][0]
@@ -8582,9 +8632,12 @@ class TestTrimmingIsRecoverable:
                 ]
             ),
             state_dir=tmp_path,
+            # A small local model: the history genuinely does not fit, which is
+            # the case recoverability exists for.
+            num_ctx=1024,
         )
         agent.run_task("first")
-        agent.run_task("second")   # the eager trim fires here
+        agent.run_task("second")   # the history no longer fits; the trim fires
         return agent
 
     def test_the_stub_carries_a_key_that_reads_the_output_back(self, tmp_path, monkeypatch):
@@ -8639,3 +8692,84 @@ class TestTrimmingIsRecoverable:
         assert key == ""
         assert "[trimmed" in agent.messages[-1]["content"]
         assert "read_tool_output" not in agent.messages[-1]["content"]
+
+
+class TestHistoryBudget:
+    """How much history aish carries, and where that number comes from.
+
+    Every history budget used to be `num_ctx * CHARS_PER_TOKEN_BUDGET`, and
+    `num_ctx` is an Ollama-only option every cloud backend accepts and
+    discards — so a Gemini session with a 1,048,576-token window was trimmed to
+    fit about 33,000. This is the same num_ctx fiction #192 removed from the
+    output caps, in the three history sites that fix never reached.
+    """
+
+    def _agent(self, provider, num_ctx=32768):
+        agent, _ = make_agent([model_says("x")], num_ctx=num_ctx)
+        agent.provider = provider
+        return agent
+
+    def test_ollama_is_unchanged_by_construction(self):
+        """num_ctx IS the window on Ollama and is far below the ceiling, so the
+        local path keeps exactly today's budget — preserved by the formula
+        rather than by a carve-out that could drift away from it."""
+        agent = self._agent("ollama", num_ctx=32768)
+        budget, source = agent._history_budget()
+        assert budget == 32768 * agent_module.CHARS_PER_TOKEN_BUDGET
+        assert source == "num_ctx:32768"
+
+    def test_a_big_window_is_not_trimmed_to_a_local_default(self):
+        agent = self._agent("gemini")
+        budget, _ = agent._history_budget()
+        assert budget > 32768 * agent_module.CHARS_PER_TOKEN_BUDGET * 8
+
+    def test_the_ceiling_binds_below_the_biggest_window_and_says_so(self):
+        """Deliberate: a ceiling AT the window would mean the trimming path
+        never runs on the backend used every day, and only breaks on the day
+        the owner moves to local models."""
+        agent = self._agent("gemini")
+        budget, source = agent._history_budget()
+        assert budget == agent_module.HISTORY_TOKEN_CEILING * agent_module.CHARS_PER_TOKEN_BUDGET
+        assert "HISTORY_TOKEN_CEILING" in source
+        window, _ = backends_module.context_window("gemini", 0)
+        assert agent_module.HISTORY_TOKEN_CEILING < window, "the ceiling must actually bind"
+
+    def test_a_window_below_the_ceiling_governs_instead(self):
+        """Claude's 200k window is already under the ceiling, so the window is
+        the constraint and the record must name the window."""
+        agent = self._agent("claude")
+        budget, source = agent._history_budget()
+        window, _ = backends_module.context_window("claude", 0)
+        assert budget == window * agent_module.CHARS_PER_TOKEN_BUDGET
+        assert source.startswith("backend:claude")
+
+    def test_every_trim_site_reads_the_same_budget(self):
+        """Three sites computed their own and drifted; the fix is that there is
+        one. A site that grows its own arithmetic back re-opens the bug
+        silently, so this is checked at the source.
+
+        Scoped to the TRIM functions on purpose: `skills.preflight`'s budget
+        also mentions num_ctx, and there it is a real small-window guard behind
+        a 12,000-char hard cap that binds first at any realistic window."""
+        import ast
+
+        path = Path(__file__).resolve().parents[1] / "aish/agent.py"
+        source = path.read_text()
+        tree = ast.parse(source)
+        wanted = {"_trim_history_to_budget", "_enforce_budget", "_record_trim"}
+        seen = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name not in wanted:
+                continue
+            seen.add(node.name)
+            # The docstrings TALK about num_ctx — that is the history being
+            # recorded. Parse the code, so a test cannot be satisfied by
+            # rewording prose, which is how the last source-level check failed.
+            body = [n for n in node.body if not (
+                isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+                and isinstance(n.value.value, str)
+            )]
+            code = "\n".join(ast.unparse(n) for n in body)
+            assert "num_ctx" not in code, f"{node.name} sizes itself from num_ctx again"
+            assert "_history_budget()" in code, f"{node.name} does not read the one budget"
+        assert seen == wanted, f"a trim site vanished or was renamed: {wanted - seen}"

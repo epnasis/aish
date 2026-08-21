@@ -7086,8 +7086,10 @@ class TestNoGhostTraceCards:
         return sorted(session_module.RENDERLESS_STEPS)
 
     def test_no_renderless_step_reaches_a_live_client(self, app_env):
-        """The eager trim emits a real `trim` record on the second task — a
-        genuine producer, not a synthetic probe."""
+        """The history trim emits a real `trim` record on the second task — a
+        genuine producer, not a synthetic probe. `num_ctx` is small so the
+        history genuinely overflows: the trim is budget-gated now, and a 400
+        character result on a 32k window is nowhere near any limit."""
         client, _ = make_client(
             app_env,
             [
@@ -7095,6 +7097,7 @@ class TestNoGhostTraceCards:
                 model_says("first"),
                 model_says("second"),
             ],
+            num_ctx=128,
         )
         seen: list[dict] = []
         with connected(client) as (ws, _hello, _replay):
@@ -7151,6 +7154,7 @@ class TestNoGhostTraceCards:
                 model_says("first"),
                 model_says("second"),
             ],
+            num_ctx=128,
         )
         with connected(client) as (ws, hello, _replay):
             name = hello["session"]
