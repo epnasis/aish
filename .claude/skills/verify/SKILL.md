@@ -29,10 +29,11 @@ Port is not a defence: `scripts/aish-preview.sh` points preview at PROD's
 ## The harness is NOT fully isolated — know what it still shares (#254)
 
 The temp `state_dir` isolates sessions. It does **not** isolate the knowledge
-layer: `rules.GLOBAL_RULES_DIR`, `skills.GLOBAL_SKILLS_DIR` and
-`skills.GLOBAL_MEMORY_DIR` all resolve from `Path.home()` with no override, so
-a verification run reads — and could write — the owner's live rules, skills and
-memory. `AISH_CONFIG` does not help; it names `config.toml` only.
+layer: `rules.GLOBAL_RULES_DIR`, `skills.GLOBAL_SKILLS_DIR`,
+`skills.GLOBAL_MEMORY_DIR` and `tool_plugins.GLOBAL_TOOLS_DIR` all resolve from
+`Path.home()`, so a verification run reads — and could write — the owner's live
+rules, skills, memory and plugin tools. No `create_app` parameter reaches them,
+and `AISH_CONFIG` does not help; it names `config.toml` only.
 
 Two consequences, and the second is the one that bites:
 
@@ -44,6 +45,35 @@ Two consequences, and the second is the one that bites:
 - **`remember` / `create_skill` / `import_skill` write for real.** Approving
   one of those on a harness card lands in `~/.config/aish/`, permanently. Only
   your choice of scripted tool calls prevents it. Do not script them.
+
+**Cut them off if the run is not about them.** They are module-level constants,
+so rebinding them BEFORE importing `aish.server` gives a genuinely empty
+knowledge layer — the same thing `tests/conftest.py`'s autouse
+`isolated_global_dirs` does for the pytest suite, and for the same reason its
+comment gives: otherwise the developer's own corpus starts governing the run.
+
+```python
+from aish import rules as rules_module
+from aish import skills as skills_module
+from aish import tool_plugins as tool_plugins_module
+
+for mod, attr in ((skills_module, "GLOBAL_SKILLS_DIR"),
+                  (skills_module, "GLOBAL_MEMORY_DIR"),
+                  (tool_plugins_module, "GLOBAL_TOOLS_DIR"),
+                  (rules_module, "GLOBAL_RULES_DIR")):
+    d = workdir / "global" / attr.lower()
+    d.mkdir(parents=True, exist_ok=True)
+    setattr(mod, attr, d)
+
+from aish.server import create_app  # AFTER the rebinding
+```
+
+Measured: without it, a scripted `mkdir` never reached an approval card — a
+live rule refused the call first — and the run looked like the approval gate
+was broken. With it, the card appeared immediately. Keep the owner's corpus
+only when the rules or the retrieval ARE what you are verifying; then expect
+them in front of everything and read the trace before believing the feature is
+at fault.
 
 ## Recipe
 
