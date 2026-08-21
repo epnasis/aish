@@ -506,6 +506,86 @@ class TestNarrationOrdering:
         assert "It folds." not in delivered
 
 
+class TestApprovalIntentOnTheSdkPath:
+    """#252 on the backend that owns its own loop. The chat's one-narration cap
+    is the same here, so the gate must get its copy on the same terms: taken
+    from the message that ACTED, before the cap can drop it, and cleared by a
+    message that acts without saying anything."""
+
+    def _drive(self, monkeypatch, tmp_path, messages):
+        """`messages` is a list of (text, acted) — `acted` meaning the message
+        carried a tool_use block, which is what makes its words narration."""
+        noted, delivered = [], []
+        agent, fake = make_max_agent(
+            monkeypatch, tmp_path, on_delivered=delivered.append
+        )
+        real = agent.inner.note_intent
+
+        def spy(said):
+            noted.append((said or "").strip())
+            real(said)
+
+        agent.inner.note_intent = spy
+        stream = []
+        for text, acted in messages:
+            blocks = [FakeSDK.TextBlock(text)] if text else []
+            if acted:
+                blocks.append(FakeSDK.ToolUseBlock("web_search"))
+            stream.append(FakeSDK.AssistantMessage(blocks))
+        fake.streams.append(stream)
+
+        async def script(_sdk):
+            return messages[-1][0]
+
+        fake.scripts.append(script)
+        agent.run_task("what does it look like?")
+        return agent, noted, delivered
+
+    def test_the_step_the_chat_dropped_still_reaches_the_gate(
+        self, monkeypatch, tmp_path
+    ):
+        agent, noted, delivered = self._drive(
+            monkeypatch, tmp_path,
+            [
+                ("Let me search.", True),
+                ("There are leaks — digging in.", True),
+                ("It folds.", False),
+            ],
+        )
+        # The cap is untouched: the owner is told once, as before.
+        assert delivered == ["Let me search."]
+        # But the gate is handed BOTH — including the second, which is the one
+        # the owner would otherwise have had to reverse-engineer.
+        assert noted == ["Let me search.", "There are leaks — digging in."]
+        assert agent.inner.turn_intent() == "There are leaks — digging in."
+
+    def test_the_approvers_can_actually_read_it_off_this_wrapper(
+        self, monkeypatch, tmp_path
+    ):
+        """The gate reads `turn_intent()` off whichever agent the session holds,
+        and this class delegates to the inner Agent BY HAND — no __getattr__.
+        A missing delegate is not a card with no reason on it; it is an
+        AttributeError raised inside the approver on every approval this
+        backend shows."""
+        agent, _fake = make_max_agent(monkeypatch, tmp_path)
+        assert agent.turn_intent() == ""
+        agent.inner.note_intent("  checking the account balance  ")
+        assert agent.turn_intent() == "checking the account balance"
+
+    def test_a_wordless_action_clears_the_previous_reason(
+        self, monkeypatch, tmp_path
+    ):
+        """The SDK gives no per-response boundary to assign on, so the clear
+        rides the emptied buffer: an acting message that said nothing notes an
+        empty intent, matching the native loop's self-clearing assignment."""
+        agent, noted, _delivered = self._drive(
+            monkeypatch, tmp_path,
+            [("Let me search.", True), ("", True), ("It folds.", False)],
+        )
+        assert noted == ["Let me search.", ""]
+        assert agent.inner.turn_intent() == ""
+
+
 def _text_delta(text):
     return FakeSDK.StreamEvent({
         "type": "content_block_delta",

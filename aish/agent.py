@@ -1458,6 +1458,10 @@ class Agent:
         # emitted alongside each step's tool calls, as delivered. Verify grades
         # the whole of it — see _deliverable.
         self._delivered: list[str] = []
+        # What the model said alongside THIS step's tool calls, whether or not
+        # the owner was told it (#252). Read by the approval gate; see
+        # note_intent for why it is not the same thing as `_delivered`.
+        self._intent = ""
         # Tokens withheld from the client while a bound turn's answer is still
         # unverified. `None` means stream normally.
         self._held_answer: list[str] | None = None
@@ -1982,6 +1986,7 @@ class Agent:
         self._turn_calls = []
         self._said_something = False
         self._delivered = []
+        self._intent = ""
         self._held_answer = None
         self._held_entry = None
         self._not_followed = []
@@ -2193,6 +2198,11 @@ class Agent:
             turn_secs = time.perf_counter() - turn_start
             tokens_in += usage[0]
             tokens_out += usage[1]
+            # The gate's copy of this step's prose (#252), taken before any of
+            # its tool calls are dispatched and independent of whether the
+            # owner is told it. Assigned on every response, so a silent step
+            # clears its predecessor's plan instead of inheriting it.
+            self.note_intent(content)
             # The only fact `must_first: answer` needs: has the model said
             # anything to the user yet. Set BEFORE this turn's tool calls are
             # dispatched, so text emitted alongside them counts — a model that
@@ -4911,6 +4921,46 @@ class Agent:
             return answer
         notes, self._not_followed = self._not_followed, []
         return (answer + "\n\n" + "\n".join(notes)).strip()
+
+    def note_intent(self, said: str) -> None:
+        """Stash what the model said alongside THIS step's tool calls, for the
+        approval gate to show beside the action it is gating (#252).
+
+        A card said WHAT and never WHY, so the owner reverse-engineered intent
+        from a tool name and its arguments — and when that guess was wrong the
+        decision was wrong. The words that would have answered it already
+        existed: on the step that a browse card was refused for, the model had
+        written *"…to see if there is any credit, overpayment or adjusting
+        transaction on the account balance that explains why the portal asks
+        for X while the PDF shows Y"*. It went to the log and nowhere else.
+
+        Called on EVERY model response, which is what clears it: a step that
+        said nothing leaves the intent empty, and the card says so rather than
+        showing the previous step's plan. Staleness is the dangerous failure
+        here — a wrong-but-plausible reason is worse than no reason — so the
+        set and the clear are deliberately the same line.
+
+        **Deliberately not routed through `_deliver_interim`.** That path is
+        capped at one delivery per TASK (#212, and the cap is right: nineteen
+        "I will search… I will read…" bubbles buried the answer). The card is a
+        different consumer of the same words — not a bubble to scroll past but
+        text inside a thing the owner has already stopped at and must act on,
+        so what justifies the cap does not reach it. Staying off `_delivered`
+        also keeps this out of `_deliverable`, where Verify would otherwise
+        grade words the owner was never shown.
+
+        Nothing tells the model where this lands, and that is load-bearing: a
+        field the model knows is read by the gate gets written FOR the gate.
+        Narration is written as chat to the owner, and inheriting honest text
+        is the whole reason to reuse it instead of asking for a `why` argument.
+        """
+        self._intent = (said or "").strip()
+
+    def turn_intent(self) -> str:
+        """What the model said before proposing this step's actions — the
+        approvers' late-bound reader, mirroring get_scope/get_origin. Empty
+        when it said nothing, which the card renders as an absence."""
+        return self._intent
 
     def _deliver_interim(self, content: str) -> None:
         """Close out the turn's ONE interim delivery — the prose it said

@@ -6865,6 +6865,45 @@ function scopeExplain(action, prefixText, escapeText) {
   return frag;
 }
 
+// The model's stated reason, on the card that gates the action (#252).
+//
+// A card said WHAT and never WHY, so the owner reverse-engineered the purpose
+// from a tool name and its arguments. One wrong guess held a legitimate
+// verification step, and the answer that followed was invented in its place.
+// The words that would have prevented it already existed — the model wrote
+// them beside the tool call — but the chat delivers one narration per task
+// (#212) and everything after it, including this, was dropped.
+//
+// Rendered as a CLAIM, in its own box, and never folded into the preview or
+// the args: those are computed by code, this is the model's word for it, and
+// one box for both would lend the second the authority of the first.
+//
+// Absence is rendered too. "It gave no reason" is information — it tells the
+// owner he is back to guessing — and it is what makes the silence visible if
+// narration ever stops (it exists because of a rule, not a prompt, and a
+// measured 0/0/0 turns narrated with that rule off).
+//
+// Never truncated: the 120-character snippet the trace already keeps cuts the
+// incident's sentence at an abbreviation and loses the entire reason.
+function intentBlock(event) {
+  const wrap = document.createElement("div");
+  wrap.className = "card-intent";
+  const label = document.createElement("div");
+  label.className = "card-intent-label";
+  label.textContent = "aish says";
+  const body = document.createElement("div");
+  body.className = "card-intent-text";
+  const said = String(event.intent || "").trim();
+  if (said) {
+    body.textContent = said;
+  } else {
+    wrap.classList.add("empty");
+    body.textContent = "It gave no reason for this step.";
+  }
+  wrap.append(label, body);
+  return wrap;
+}
+
 function buildCommandCard(card, event) {
   // #107: reserve the orange (danger) accent for DESTRUCTIVE commands so the
   // warning color keeps its punch; a standard command uses the calmer blue
@@ -6907,6 +6946,7 @@ function buildCommandCard(card, event) {
   cmdTools.append(editBtn, copyChip(() => code.textContent, "copy command"));
   box.append(dollar, code, cmdTools);
   card.appendChild(box);
+  card.appendChild(intentBlock(event));
 
   function toggleEdit() {
     if (code.isContentEditable) {
@@ -7142,6 +7182,7 @@ function buildToolCard(card, event) {
     for (const [k, v] of entries) argsWrap.appendChild(toolArgRow(k, v));
   }
   card.appendChild(argsWrap);
+  card.appendChild(intentBlock(event));
 
   const feedback = feedbackField();
   card.appendChild(feedback);

@@ -1040,7 +1040,13 @@ def _all_recipients_owner(args: dict) -> bool:
 
 def _describe_hold(event: dict) -> str:
     """A short human phrase for a held approval_request, for the notification
-    body (#163) — so the push says WHAT needs approving, not just 'something'."""
+    body (#163) — so the push says WHAT needs approving, not just 'something'.
+
+    Never `intent` (#252), tempting as it reads: the model's prose carries far
+    more incidental detail than the arguments do — the step this feature exists
+    for names a home address — and this string leaves the machine for a
+    third-party push service. The reason stays on the card, where it is read on
+    the owner's own screen."""
     kind = event.get("kind")
     if kind == "tool":
         tool = event.get("tool", "a tool")
@@ -1074,7 +1080,7 @@ def _triggered_safe(name: str, args: dict) -> bool:
 
 
 def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir,
-                       get_origin=None, get_session_prefixes=None):
+                       get_origin=None, get_session_prefixes=None, get_intent=None):
     """The three approval callbacks, backed by browser round trips. Mirrors
     cli.make_approver semantics exactly: denylist first (also on edited
     commands), then auto-approval scoped to the live session roots, then a
@@ -1085,7 +1091,12 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     card's shown prefixes to the persistent allowlist, same file as the CLI's
     'a' answer.
     trust_dir(path) -> note widens the live roots when the card's "Trust
-    directory" button answers a command or read escaping them."""
+    directory" button answers a command or read escaping them.
+    get_intent() -> what the model said it was doing on the step that proposed
+    this action (#252), late-bound off the agent like the rest. It rides the
+    card so the owner decides on a stated reason instead of a guessed one, and
+    it is recorded with EVERY decision — including auto ones — so the audit
+    trail can be asked what was claimed, not just what was allowed."""
     own_prefixes: set[str] = set()
 
     def session_prefixes() -> set[str]:
@@ -1094,8 +1105,20 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     def known_prefixes() -> frozenset:
         return frozenset(load_prefixes(allow_path)) | session_prefixes()
 
+    def intent() -> str:
+        return (get_intent() if get_intent else "") or ""
+
+    def carry_intent(request: dict) -> None:
+        """Put the model's stated reason on the card — as a CLAIM, in its own
+        key, never folded into `preview`. `preview` is ground truth the tool
+        computed (#157); this is the model's word for it, and one slot for both
+        would launder the second into the trust level of the first. Omitted
+        when empty so the contract's byte-identical replay holds."""
+        if said := intent():
+            request["intent"] = said
+
     def record(command: str, decision: str) -> None:
-        logref.command(command, decision)
+        logref.command(command, decision, intent())
 
     def resolve(uid: str, decision: str, comment: str = "") -> None:
         event = {"type": "approval_resolved", "id": uid, "decision": decision}
@@ -1134,6 +1157,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             "prefixes": suggestions,
             "escapes": escapes,
         }
+        carry_intent(request)
         answer = bridge.ask(request)
         action = answer.get("action")
         # Feedback is button-agnostic: on deny it explains the refusal, on any
@@ -1265,6 +1289,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         }
         if preview:
             request["preview"] = preview
+        carry_intent(request)
         answer = bridge.ask(request)
         approved = answer.get("action") == "approve"
         comment = str(answer.get("comment") or "").strip()
@@ -5357,6 +5382,7 @@ def create_app(
             get_session_prefixes=(
                 lambda: agent_holder[0].session_prefixes if agent_holder else set()
             ),
+            get_intent=lambda: agent_holder[0].turn_intent() if agent_holder else "",
         )
         # Coalesce a command's per-line output into fewer, larger `stream`
         # events (issue #109) — huge output otherwise emits one WS event + one

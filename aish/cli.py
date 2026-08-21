@@ -257,8 +257,8 @@ class LogRef:
         if message.get("role") == "assistant" and (message.get("content") or "").strip():
             self.last_answer_id = written
 
-    def command(self, command: str, decision: str) -> None:
-        self.log.command(command, decision)
+    def command(self, command: str, decision: str, intent: str = "") -> None:
+        self.log.command(command, decision, intent)
 
     def set_title(self, title: str) -> None:
         self.log.set_title(title)
@@ -336,6 +336,23 @@ def allow_segments_flow(command: str, allow_path: Path) -> None:
         print(f"{DIM}  saved: {answer or suggestion} → {allow_path}{RESET}")
 
 
+def print_intent(said: str) -> None:
+    """The model's stated reason, above a gate prompt (#252).
+
+    Attributed and dimmed so it reads as a CLAIM standing beside the command,
+    never as part of it — the terminal's version of the web card's separate
+    section. Printed whole: the 120-character snippet the trace already keeps
+    cuts this exact sentence at an abbreviation and loses the entire reason,
+    which is the failure the feature exists for.
+    """
+    if not said:
+        return
+    lines = said.strip().splitlines()
+    print(f"\n{DIM}  \u25b8 aish says: {lines[0]}{RESET}")
+    for line in lines[1:]:
+        print(f"{DIM}    {line}{RESET}")
+
+
 def make_approver(
     ask_all: bool,
     allow_path: Path,
@@ -344,6 +361,7 @@ def make_approver(
     get_scope=None,
     get_session_prefixes=None,
     trust_dir=None,
+    get_intent=None,
 ):
     """get_scope() -> (cwd, roots): the agent's live directory scope, bound
     late because the agent is constructed after its approver. When present,
@@ -355,7 +373,10 @@ def make_approver(
     construction. Unwired (no agent), the approver owns a set of its own and the
     allowance lasts exactly as long as the approver. trust_dir(path) -> note
     widens the live roots when the user answers 't' on a command that escapes
-    them (also late-bound, in-memory only)."""
+    them (also late-bound, in-memory only). get_intent() -> what the model said
+    it was doing on the step that proposed this command (#252), printed above
+    the prompt and recorded with the decision — the terminal gate shows the same
+    reason the web card does, because the two gate identically."""
     own_prefixes: set[str] = set()
 
     def session_prefixes() -> set[str]:
@@ -364,9 +385,12 @@ def make_approver(
     def known_prefixes() -> frozenset:
         return frozenset(load_prefixes(allow_path)) | session_prefixes()
 
+    def intent() -> str:
+        return (get_intent() if get_intent else "") or ""
+
     def record(command: str, decision: str) -> None:
         if log:
-            log.command(command, decision)
+            log.command(command, decision, intent())
 
     def ask_approval(command: str) -> str | Blocked | None:
         # Denylist first: unrecoverable commands never reach the prompt and
@@ -386,6 +410,7 @@ def make_approver(
             record(command, "auto")
             return command
 
+        print_intent(intent())
         warning = f" {RED}⚠ destructive{RESET}" if looks_destructive(command) else ""
         print(f"\n{YELLOW}{BOLD}▶ run command?{RESET}{warning}\n  {BOLD}{command}{RESET}")
         escapes = escaping_dirs(command, cwd, roots) if trust_dir and cwd and roots else []
@@ -544,7 +569,7 @@ def make_import_approver(log):
     return approve_import
 
 
-def make_tool_approver(log):
+def make_tool_approver(log, get_intent=None):
     """Gate a mutating plugin tool call (issue #141). Reuses the command
     prompt's shape — the tool name + its structured args stand in for a shell
     string — but there is no denylist or auto-approval: a mutating tool always
@@ -552,6 +577,8 @@ def make_tool_approver(log):
 
     def approve_tool(name: str, args: dict, preview: "str | None" = None) -> bool:
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        said = (get_intent() if get_intent else "") or ""
+        print_intent(said)
         print(f"\n{YELLOW}{BOLD}▶ run tool?{RESET} {BOLD}{name}{RESET}({shown})")
         if preview:
             print(f"{DIM}  {preview}{RESET}")
@@ -561,7 +588,9 @@ def make_tool_approver(log):
             answer = ""
         approved = answer in ("y", "yes")
         if log:
-            log.command(f"tool {name}({shown})", "approved" if approved else "denied")
+            log.command(
+                f"tool {name}({shown})", "approved" if approved else "denied", said
+            )
         return approved
 
     return approve_tool
@@ -1884,6 +1913,11 @@ def main() -> int:
             return agent_holder[0].trust_root(path)
         return "ERROR: agent not ready"
 
+    def get_intent() -> str:
+        # What the model said on the step that proposed the action being gated
+        # (#252) — late-bound off the agent like the scope and the allowances.
+        return agent_holder[0].turn_intent() if agent_holder else ""
+
     agent: Agent | ClaudeMaxAgent
     if provider == "claude-max":
         # aliased so the annotation above binds the TYPE_CHECKING import,
@@ -1898,11 +1932,11 @@ def main() -> int:
             model=model_name,
             approve=make_approver(
                 args.ask_all, allow_path, logref, deny_path, get_scope,
-                get_session_prefixes, trust_dir=trust_dir,
+                get_session_prefixes, trust_dir=trust_dir, get_intent=get_intent,
             ),
             approve_write=make_write_approver(logref),
             approve_read=make_read_approver(logref, trust_dir=trust_dir),
-            approve_tool=make_tool_approver(logref),
+            approve_tool=make_tool_approver(logref, get_intent),
             approve_import=make_import_approver(logref),
             echo=echo,
             stream=stream_line,
@@ -1932,11 +1966,11 @@ def main() -> int:
             client_chat=chat,
             approve=make_approver(
                 args.ask_all, allow_path, logref, deny_path, get_scope,
-                get_session_prefixes, trust_dir=trust_dir,
+                get_session_prefixes, trust_dir=trust_dir, get_intent=get_intent,
             ),
             approve_write=make_write_approver(logref),
             approve_read=make_read_approver(logref, trust_dir=trust_dir),
-            approve_tool=make_tool_approver(logref),
+            approve_tool=make_tool_approver(logref, get_intent),
             approve_import=make_import_approver(logref),
             echo=echo,
             stream=stream_line,

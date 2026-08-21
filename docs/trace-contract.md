@@ -552,6 +552,8 @@ Refuses other tools while a preloaded truncated skill is unread; bounded to `GAT
 
 *Must log:* `gate{gate:"approval", at:"approval", verdict:"allowed", tier:0, evidence:{prefix:"git status", source:"always"|"session"|"safe_command", roots_ok:true, escapes:[], sensitive:false}}` — and on the prompting path, `verdict:"held"` with the same evidence plus the escapes that forced the prompt.
 
+**The `kind:"command"` record also carries `intent` (#252)** — what the model SAID it was doing on the step that proposed the action, the same text the card showed. Omitted when the step said nothing, so a session that predates it replays byte-identically. It is not evidence in §8's sense (it is model prose, not a measurement) and it does not replace the structured `gate` record above; it answers a question nothing else can — *what was claimed at the moment this was allowed?* — which is what makes a stated reason that does not match the action it rode on a queryable artifact rather than a hand reconstruction from raw JSONL. Recorded on EVERY decision including `auto`, because a reason is worth as much on the actions nobody was asked about.
+
 The other approval outcomes are recorded but as **prose decision strings** on a `kind:"command"` record: `"approved+always:git status,ls"`, `"auto (email)"`, `"approved (feedback: …)"`, `"blocked: reason"`. That is greppable, not readable — and `reconstruct_events` never reads `kind:"command"` at all, so it is invisible to every trace consumer. Structured `gate` records should be emitted **alongside**, not instead: the `kind:"command"` audit trail is a separate, older contract and nothing here changes it.
 
 ### 6.6 · Loop detector / stall budget / step ceiling · ✕

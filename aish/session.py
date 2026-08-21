@@ -2079,8 +2079,15 @@ class SessionLog:
             "rating", turn=turn, rating=rating, comment=comment[:RATING_COMMENT_CAP]
         )
 
-    def command(self, command: str, decision: str) -> None:
-        self._record("command", command=command, decision=decision)
+    def command(self, command: str, decision: str, intent: str = "") -> None:
+        """`intent` is what the model SAID it was doing when this decision was
+        made (#252) — the same text the card showed. Recorded so a stated
+        intent that does not match the action it rode on is a queryable
+        artifact rather than something reconstructed by reading raw JSONL,
+        which is exactly what the incident behind #252 cost. Omitted when
+        empty, so a session that predates it replays byte-identically."""
+        extra = {"intent": intent} if intent else {}
+        self._record("command", command=command, decision=decision, **extra)
 
     def set_title(self, title: str, auto: bool = False) -> None:
         """Rename the chat with an append-only `kind:"title"` record — no
