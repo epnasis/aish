@@ -264,6 +264,18 @@ Rules:
    them: browse_act(target="Country", action="choose", value="Poland") matches
    on what you say, and if it matches more than one or none you get the
    candidates back.
+   FILLING IN A FORM IS ONE CALL, NOT ONE CALL PER FIELD. Use browse_fill with
+   a list of steps whenever you are about to touch two or more controls on the
+   same form. Example: browse_fill(steps=[{{"target":"Skąd","value":"Warszawa"}},
+   {{"target":"Dokąd","value":"Paryż"}},
+   {{"target":"Data wylotu","value":"7.09"}},
+   {{"target":"Szukaj","do":"click"}}]). do="fill" types AND presses the
+   matching suggestion when the page opens a list — a destination or a
+   station box needs — typing alone leaves it empty. The step that SENDS the
+   form must be the last one, and only that step asks the user. If a step
+   cannot be carried out the batch stops there and tells you exactly where it
+   got to and what each control now holds; carry on from that, and do NOT
+   assume the form was sent.
    WHEN A CLICK DOWNLOADS A FILE, PUT THE LINE aish GIVES YOU IN YOUR ANSWER,
    EXACTLY AS WRITTEN. It looks like [invoice.pdf](/Users/…/downloads/x.pdf) and
    it is what turns the file into something the user can tap and open. A path
@@ -1035,6 +1047,11 @@ BROWSE_ACTION_DENIED = (
     "Do not retry it or look for another control that does the same thing. Tell "
     "the user what you were about to do and let them decide."
 )
+
+# Every fence in the dispatch path keys on the tool NAME, and there are four of
+# them. A new browsing tool that misses one is a tool outside the gate, so they
+# all read this.
+BROWSE_TOOLS = ("browse", "browse_act", "browse_fill")
 
 BROWSE_NO_PAGE = (
     "NOT EXECUTED: nothing is open to act on. Call browse(url) first, then act "
@@ -3914,6 +3931,15 @@ class Agent:
             topic = str(args.get("topic", "") or "")
             label = f"→ browse: {url}" + (f" (topic: {topic})" if topic else "")
             return label, lambda: web.browse(url, topic or None)
+        if name == "browse_fill":
+            steps = list(args.get("steps") or [])
+            said = ", ".join(
+                str(step.get("target", "?")) for step in steps if isinstance(step, dict)
+            )
+            label = f"→ browse: fill in {len(steps)} step(s) — {said}"
+            return label, lambda: web.browse_fill(
+                steps, topic=str(args.get("topic", "") or "") or None
+            )
         target = str(args.get("target", "") or "")
         action = str(args.get("action", "click") or "click")
         control = self._browse_target(args)
@@ -4982,9 +5008,11 @@ class Agent:
         money, end a contract or throw something away, and named, so the card
         says `click "Zapłać"` rather than `click element 7`. A password field is
         refused outright and never draws a card at all."""
-        if name not in ("browse", "browse_act"):
+        if name not in BROWSE_TOOLS:
             return None
         host = self._browse_host(name, args)
+        if name == "browse_fill":
+            return self._browse_batch_gate(args, host)
         if name == "browse_act":
             current = browser.browse_current()
             if current is None:
@@ -5024,6 +5052,46 @@ class Agent:
         what = f"{args.get('action', 'click')} {control.kind} {control.address!r} on {host}"
         return self._browse_approval(
             name, args, what, BROWSE_ACTION_DENIED.format(what=what)
+        )
+
+    def _browse_batch_gate(self, args: dict, host: str) -> str | None:
+        """One card for a whole form (#251).
+
+        The batch is validated BEFORE it is offered, so a card is never drawn
+        for something that cannot run — and a batch carrying a password is
+        refused outright, exactly as a single action is. Filling needs no card
+        at all: typing has never been mutating, so a batch with no committing
+        step rides the host grant like any other read."""
+        current = browser.browse_current()
+        if current is None:
+            return _gate_outcome(BROWSE_NO_PAGE, decision="blocked")
+        plan = browse.plan_batch(current.controls, list(args.get("steps") or []))
+        if plan.problem:
+            return _gate_outcome(
+                f"NOT EXECUTED: {plan.problem}", decision="blocked"
+            )
+        if not host:
+            return None
+        if self.approve_tool is None:
+            return _gate_outcome(
+                BROWSE_NO_APPROVER.format(host=host), decision="blocked"
+            )
+        if host not in self._approved_browsing:
+            preview = (
+                f"drive {host} in your signed-in browser — aish will open pages "
+                "and click on them AS YOU, and can see private account data"
+            )
+            refusal = self._browse_approval(
+                "browse_fill", args, preview, BROWSE_DENIED.format(host=host)
+            )
+            if refusal is not None:
+                return refusal
+            self._approved_browsing.add(host)
+        if not browse.batch_is_mutating(plan):
+            return None
+        what = plan.card(host)
+        return self._browse_approval(
+            "browse_fill", args, what, BROWSE_ACTION_DENIED.format(what=what)
         )
 
     @staticmethod
@@ -6085,7 +6153,7 @@ class Agent:
                 return _gate_outcome(READ_DENIED, decision="denied")
             return thunk()
 
-        if name in ("browse", "browse_act"):
+        if name in BROWSE_TOOLS:
             # Not a read-only tool and deliberately not on the parallel path:
             # one page, one session, one action at a time. Two browse calls in
             # flight would be two clicks on the same document in an order

@@ -1023,3 +1023,167 @@ class TestWhatChangedRatherThanThePageAgain:
             snapshot(text="Wyspowa zmieniona", controls=[control(n=0)]), acted=True
         )
         assert out.index(web_module.UNTRUSTED_NOTE) < out.index("Wyspowa zmieniona")
+
+
+class TestFillingAFormIsOneAct:
+    """#251. A person searching for a flight sets origin, destination, both
+    dates, passengers and cabin, then presses search — one act. Doing it one
+    call at a time cost six round trips, six echo lines, and on a form where
+    every field is a combobox it did not finish at all."""
+
+    def _form(self):
+        return browse.controls_from([
+            {"n": 0, "kind": "field", "name": "Skąd"},
+            {"n": 1, "kind": "field", "name": "Dokąd"},
+            {"n": 2, "kind": "check", "name": "Tylko bezpośrednie"},
+            {"n": 3, "kind": "button", "name": "Szukaj", "submits": True},
+        ])
+
+    def test_a_whole_form_plans_as_one_batch(self):
+        plan = browse.plan_batch(self._form(), [
+            {"target": "Skąd", "value": "WAW"},
+            {"target": "Dokąd", "value": "Paris"},
+            {"target": "Tylko bezpośrednie", "do": "check"},
+            {"target": "Szukaj", "do": "click"},
+        ])
+        assert not plan.problem
+        assert browse.batch_is_mutating(plan)
+
+    def test_the_card_shows_every_value_going_in(self):
+        """The argument for the whole feature: typing has NEVER been mutating,
+        so today a twenty-field form is twenty unseen auto-approved keystrokes
+        and one card that does not say what it is about to send."""
+        plan = browse.plan_batch(self._form(), [
+            {"target": "Skąd", "value": "WAW"},
+            {"target": "Dokąd", "value": "Paris"},
+            {"target": "Szukaj", "do": "click"},
+        ])
+        card = plan.card("lot.com")
+        assert "'Skąd' ← 'WAW'" in card
+        assert "'Dokąd' ← 'Paris'" in card
+        assert "press 'Szukaj'" in card
+
+    def test_a_long_value_is_shortened_visibly_never_silently(self):
+        plan = browse.plan_batch(
+            browse.controls_from([{"n": 0, "kind": "field", "name": "Uwagi"}]),
+            [{"target": "Uwagi", "value": "x" * 200}],
+        )
+        assert "+ 140 more chars" in plan.card("x.pl")
+
+    def test_only_one_step_may_need_approval(self):
+        controls = browse.controls_from([
+            {"n": 0, "kind": "button", "name": "Zapłać"},
+            {"n": 1, "kind": "button", "name": "Wyślij"},
+        ])
+        plan = browse.plan_batch(controls, [
+            {"target": "Zapłać", "do": "click"}, {"target": "Wyślij", "do": "click"},
+        ])
+        assert "only ONE step that needs approval" in plan.problem
+
+    def test_the_committing_step_must_be_last(self):
+        """Not card hygiene — abort semantics. With the only committing step at
+        the end, a batch that dies at step 7 of 20 has changed nothing the
+        owner would mind; a mutating step in the middle makes every partial
+        failure a half-sent form."""
+        plan = browse.plan_batch(self._form(), [
+            {"target": "Szukaj", "do": "click"},
+            {"target": "Skąd", "value": "WAW"},
+        ])
+        assert "must be the LAST step" in plan.problem
+
+    def test_a_password_refuses_the_whole_batch(self):
+        controls = browse.controls_from([
+            {"n": 0, "kind": "field", "name": "Login"},
+            {"n": 1, "kind": "password", "name": "Hasło"},
+        ])
+        plan = browse.plan_batch(controls, [
+            {"target": "Login", "value": "pawel"},
+            {"target": "Hasło", "value": "hunter2"},
+        ])
+        assert "never types passwords" in plan.problem
+        assert not plan.steps
+
+    def test_a_step_naming_nothing_stops_the_batch_before_it_starts(self):
+        plan = browse.plan_batch(self._form(), [{"target": "Departure", "value": "x"}])
+        assert "no control on this page is called 'Departure'" in plan.problem
+
+    def test_a_batch_too_long_to_review_is_refused_with_the_way_round_it(self):
+        controls = browse.controls_from(
+            [{"n": i, "kind": "field", "name": f"Pole {i}"} for i in range(20)]
+        )
+        plan = browse.plan_batch(
+            controls, [{"target": f"Pole {i}", "value": "x"} for i in range(20)]
+        )
+        assert "more than one card can honestly show" in plan.problem
+        assert "filling needs no approval" in plan.problem
+
+    def test_filling_without_sending_needs_no_card(self, monkeypatch):
+        """Nothing is committed until something is pressed, so a batch with no
+        committing step rides the host grant like any other read."""
+        snap = snapshot(controls=self._form())
+        asked = []
+
+        def approve_tool(name, args, preview):
+            asked.append(preview)
+            return True
+
+        agent = Agent(
+            model="fake", approve=lambda _c: True,
+            client_chat=lambda **kw: {}, approve_tool=approve_tool,
+        )
+        monkeypatch.setattr(browser, "browse_current", lambda: snap)
+        agent._approved_browsing.add("eon.pl")
+        args = {"steps": [{"target": "Skąd", "value": "WAW"}]}
+        assert agent._browse_gate("browse_fill", args) is None
+        assert asked == []
+
+    def test_sending_the_form_draws_one_card_naming_every_value(self, monkeypatch):
+        snap = snapshot(controls=self._form())
+        asked = []
+
+        def approve_tool(name, args, preview):
+            asked.append(preview)
+            return True
+
+        agent = Agent(
+            model="fake", approve=lambda _c: True,
+            client_chat=lambda **kw: {}, approve_tool=approve_tool,
+        )
+        monkeypatch.setattr(browser, "browse_current", lambda: snap)
+        agent._approved_browsing.add("eon.pl")
+        assert agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Skąd", "value": "WAW"},
+            {"target": "Szukaj", "do": "click"},
+        ]}) is None
+        assert len(asked) == 1
+        assert "'Skąd' ← 'WAW'" in asked[0] and "press 'Szukaj'" in asked[0]
+
+    def test_an_unrunnable_batch_never_reaches_a_card(self, monkeypatch):
+        snap = snapshot(controls=self._form())
+        asked = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+        )
+        monkeypatch.setattr(browser, "browse_current", lambda: snap)
+        agent._approved_browsing.add("eon.pl")
+        out = agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Szukaj", "do": "click"}, {"target": "Skąd", "value": "x"},
+        ]})
+        assert out.startswith("NOT EXECUTED")
+        assert asked == []
+
+    def test_the_batch_tool_rides_the_same_gate_as_every_other_browse_call(self):
+        """Four fences in the dispatch path key on the tool NAME. A browsing
+        tool that misses one is a tool outside the gate."""
+        assert "browse_fill" in agent_module.BROWSE_TOOLS
+
+    def test_the_ledger_is_aishs_own_words_above_the_untrusted_banner(self):
+        """A suggestion list opens and closes between two snapshots and nets to
+        zero in the page diff, so without this the model cannot know which
+        suggestion was pressed on its behalf."""
+        snap = snapshot(controls=[control(n=0)])
+        snap.ledger = ["1. 'Dokąd' ← 'Paryż (CDG)' (picked from 4 suggestions)"]
+        out = web_module._present_snapshot(snap)
+        assert out.index("Paryż (CDG)") < out.index(web_module.UNTRUSTED_NOTE)
+        assert "what this filled in, step by step" in out

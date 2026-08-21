@@ -2541,6 +2541,202 @@ def browse_act(
     return _submit(job, timeout)
 
 
+def browse_fill(
+    steps: list[dict],
+    *,
+    mutating: bool = False,
+    timeout: float = 240.0,
+) -> browse_mod.Snapshot:
+    """Fill in a form — several controls, then at most one press — as ONE act.
+
+    A person searching for a flight sets origin, destination, both dates,
+    passengers and cabin, then presses search. Doing that one call at a time
+    cost the model six round trips and the owner six echo lines, and on a form
+    where every field is a combobox it did not finish at all.
+
+    **`fill` is the compound verb, and it is the reason this exists.** On these
+    forms a destination box is not a text field: typing opens a list that did
+    not exist when the batch was composed, so the model CANNOT name the option
+    it will need. `fill` types, waits for the page to answer, and presses the
+    option that matches — using the same ladder as `choose`, and only ever
+    pressing something the page opened IN RESPONSE (`option`), never a control
+    that merely happened to appear.
+
+    **It stops at the first step it cannot carry out, and never skips one.**
+    Order on these pages is a dependency statement, so "did 7, skipped 3, did
+    the rest" is unreviewable against the card the owner approved — and the
+    approved press is made only if every step before it verified. A batch that
+    could not establish its values ends UNSENT, saying so."""
+    reason = unavailable_reason()
+    if reason:
+        raise BrowserUnavailable(reason)
+
+    async def job(owner: _Owner) -> browse_mod.Snapshot:
+        page = await _browse_page(owner, opening=False)
+        ledger: list[str] = []
+        last = len(steps) - 1
+        started_at = str(page.url or "")
+        for index, step in enumerate(steps):
+            asked = str(step.get("target", "") or "")
+            verb = str(step.get("do") or step.get("action") or browse_mod.FILL).lower()
+            value = str(step.get("value", "") or step.get("text", "") or "")
+            raw, _, _ = await _enumerate(page)
+            live = browse_mod.controls_from(raw)
+            found = browse_mod.resolve(live, asked)
+            control = found.control
+            if control is None:
+                return await _stop(
+                    owner, page, ledger, index, len(steps),
+                    f"{found.problem}",
+                )
+            if control.kind == browse_mod.PASSWORD:
+                return await _stop(
+                    owner, page, ledger, index, len(steps),
+                    "it is a password field, and aish never types passwords",
+                )
+            if control.mutating and not (index == last and mutating):
+                return await _stop(
+                    owner, page, ledger, index, len(steps),
+                    f"{control.address!r} needs approval of its own and this "
+                    "batch was not approved for it — the page changed under it",
+                )
+            owner.browse_epoch += 1
+            try:
+                said = await _run_step(page, control, verb, value, live)
+            except _StepFailed as exc:
+                return await _stop(owner, page, ledger, index, len(steps), str(exc))
+            except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
+                return await _stop(
+                    owner, page, ledger, index, len(steps),
+                    f"could not {verb} it ({type(exc).__name__})",
+                )
+            ledger.append(f"{index + 1}. {said}")
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            except Exception:  # noqa: BLE001 — nothing navigated, which is common
+                pass
+            if str(page.url or "") != started_at and index != last:
+                # The remaining steps were composed against a document that no
+                # longer exists. The delta machinery sends the whole page on a
+                # URL change, which is the right reply to standing somewhere new.
+                return await _stop(
+                    owner, page, ledger, index + 1, len(steps),
+                    "the page navigated, so the rest of the batch was composed "
+                    "against a page you are no longer on",
+                    after=True,
+                )
+        snapshot = await _snapshot(owner, page)
+        snapshot.ledger = ledger
+        return snapshot
+
+    return _submit(job, timeout)
+
+
+class _StepFailed(Exception):
+    """A batch step the page would not take. Carries what to tell the model."""
+
+
+async def _run_step(
+    page: Any, control: Any, verb: str, value: str, before: list
+) -> str:
+    """Carry out one step and say what the control HOLDS afterwards."""
+    target, _top = await _find(page, control.n)
+    if target is None:
+        raise _StepFailed(f"{control.address!r} left the page mid-batch")
+    gone = await _reachable_now(target)
+    if gone:
+        raise _StepFailed(f"{control.address!r} cannot be pressed now ({gone})")
+    await _centre(target)
+    if verb == "choose":
+        await _choose(target, value)
+        return f"{control.address!r} ← {value!r} (from its list)"
+    if verb in ("click", "check"):
+        await _press(page, target, mutating=control.mutating, href="")
+        return f"pressed {control.address!r}"
+    await _type(page, target, text=value, submit=False)
+    return await _commit_suggestion(page, control, value, before)
+
+
+async def _commit_suggestion(
+    page: Any, control: Any, value: str, before: list
+) -> str:
+    """Typing is not choosing. If the page answered with a list, press the
+    entry that matches; if it did not, the text stands on its own."""
+    raw, _, _ = await _enumerate(page)
+    after = browse_mod.controls_from(raw)
+    was = {c.address for c in before}
+    offered = [c for c in after if c.option and c.address not in was]
+    if not offered:
+        return f"{control.address!r} ← {_held(after, control.address) or value!r}"
+    picked = browse_mod.match_option([(c.name, c.address) for c in offered], value)
+    if picked.problem:
+        raise _StepFailed(
+            f"{control.address!r} offered {len(offered)} suggestions and "
+            f"{picked.problem} Nothing was chosen"
+        )
+    chosen = next(c for c in after if c.address == picked.value)
+    if chosen.mutating:
+        raise _StepFailed(
+            f"the suggestion {chosen.address!r} needs approval of its own, so "
+            "it was not pressed"
+        )
+    element, _top = await _find(page, chosen.n)
+    if element is None:
+        raise _StepFailed(f"the suggestion {chosen.address!r} vanished before it could be pressed")
+    await _centre(element)
+    await _press(page, element, mutating=False, href="")
+    raw, _, _ = await _enumerate(page)
+    held = _held(browse_mod.controls_from(raw), control.address)
+    return (
+        f"{control.address!r} ← {held or picked.label!r} "
+        f"(picked from {len(offered)} suggestions)"
+    )
+
+
+def _held(controls: list, address: str) -> str:
+    """What the control actually holds now — read back, never assumed."""
+    for control in controls:
+        if control.address == address and control.detail.startswith("currently: "):
+            return control.detail[len("currently: "):]
+    return ""
+
+
+async def _stop(
+    owner: _Owner,
+    page: Any,
+    ledger: list[str],
+    done: int,
+    total: int,
+    why: str,
+    *,
+    after: bool = False,
+) -> browse_mod.Snapshot:
+    """End a batch part-way and say exactly where it got to.
+
+    The unspent approval is stated out loud: a card said "send this form", and
+    if that press was never made the model must not report the form as sent —
+    nor may the next batch inherit the yes."""
+    step = done + (0 if after else 1)
+    ledger = list(ledger)
+    ledger.append(f"{step}. STOPPED: {why}")
+    if step < total:
+        ledger.append(
+            f"steps {step + 1}–{total} were not attempted, and any approved "
+            "press in them was NOT made"
+        )
+    owner.browse_epoch += 1
+    snapshot = await _snapshot(
+        owner,
+        page,
+        problem=(
+            f"the batch stopped at step {step} of {total} — {why}. Here is the "
+            "page as it is now; carry on from what the steps below report."
+        ),
+    )
+    snapshot.ledger = ledger
+    return snapshot
+
+
 def browse_close() -> None:
     """End the model's session. The context and the profile stay."""
 

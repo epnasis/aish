@@ -1091,6 +1091,76 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "browse_fill",
+            "description": (
+                "Fill in a FORM on the page browse opened — several controls, "
+                "then at most one press — as ONE call. Use it whenever you are "
+                "about to do two or more things to one form: a flight search is "
+                "origin, destination, both dates, passengers, cabin and then "
+                "Search, which is one act for a person and should be one here. "
+                "A step's do=\"fill\" types AND picks the matching suggestion "
+                "if the page opens a list, so it works on a destination box "
+                "that is not a plain text field. Filling needs no approval; the "
+                "one step that sends the form does, so it must be the LAST "
+                "step. You get back what each control HOLDS afterwards, step by "
+                "step, plus what changed on the page."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "description": (
+                            "The steps, in the order a person would do them. "
+                            "Stops at the first one it cannot carry out and "
+                            "tells you where it got to — nothing is skipped."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "target": {
+                                    "type": "string",
+                                    "description": (
+                                        "The control's NAME, exactly as the "
+                                        "list writes it in quotes."
+                                    ),
+                                },
+                                "do": {
+                                    "type": "string",
+                                    "enum": ["fill", "choose", "check", "click"],
+                                    "description": (
+                                        "fill = type, and press the matching "
+                                        "suggestion if one appears (use this "
+                                        "for search boxes and destination "
+                                        "fields); choose = pick from a "
+                                        "dropdown; check = tick; click = "
+                                        "press. Default: fill."
+                                    ),
+                                },
+                                "value": {
+                                    "type": "string",
+                                    "description": (
+                                        "What to type or pick. Say what you "
+                                        "want in words; aish matches it "
+                                        "against what the page offers."
+                                    ),
+                                },
+                            },
+                            "required": ["target"],
+                        },
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "Optional filter on the resulting page text.",
+                    },
+                },
+                "required": ["steps"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "show_video",
             "description": (
                 "Show the user a video they can play. Call this whenever a video "

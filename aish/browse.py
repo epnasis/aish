@@ -102,6 +102,9 @@ class Control:
     detail: str = ""
     mutating: bool = False
     disabled: bool = False
+    # An entry in a list the page opened (`role=option`), which is the only
+    # thing a batch step may press sight-unseen. See `plan_batch`.
+    option: bool = False
     # Does pressing this post the form it is in? Carried rather than re-derived
     # because it is what the page is told to say about HOW TO SUBMIT: once a
     # form-fill reports only what changed, the submit button stops being
@@ -214,6 +217,12 @@ class Snapshot:
     # /en-pl/help.html, and spent the rest of the turn reasoning about a form
     # that was never on the page in front of it (#247).
     asked: str = ""
+    # What a BATCH did, step by step, in aish's own words — the value each
+    # control HOLDS on readback, not the value that was asked for. A mask, an
+    # autocomplete rewrite or a maxlength truncation lands silently otherwise,
+    # and the page delta cannot report any of it: a suggestion list opens and
+    # closes between two snapshots and nets to zero in the diff.
+    ledger: list[str] = field(default_factory=list)
 
     def control(self, n: int) -> Control | None:
         for control in self.controls:
@@ -434,6 +443,13 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
     '[role=button]', '[role=link]', '[role=menuitem]', '[role=tab]',
     '[role=checkbox]', '[role=switch]', '[role=combobox]', '[onclick]',
     '[contenteditable]', '[contenteditable=true]',
+    // The suggestion a search box drops down. Without this the list a site
+    // opens under "Paris" is TEXT and nothing pressable, so the field can be
+    // typed into and never committed — which is the lot.pl destination box in
+    // the session that filed #251, unfinishable by any sequence of calls. A
+    // CLOSED list is `unreachable` and drops out on its own, so this adds the
+    // open one only.
+    '[role=option]', '[role=treeitem]',
   ].join(', ');
   const out = [];
   let matched = 0;
@@ -578,7 +594,16 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
   const kindOf = (el, type) => {
     const tag = el.tagName;
     const role = (el.getAttribute('role') || '').toLowerCase();
-    if (tag === 'SELECT' || role === 'combobox') return 'choice';
+    if (tag === 'SELECT') return 'choice';
+    // A `role=combobox` on an INPUT is a search box wearing a dropdown's
+    // clothes: you type into it, and calling it a choice hid the one thing a
+    // form-fill has to report — `detailOf` gives a choice its option list, so
+    // the field's own VALUE was never read back and a destination that had
+    // been committed still read "type to search".
+    if (role === 'combobox') {
+      return (tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable)
+        ? 'field' : 'choice';
+    }
     if (tag === 'TEXTAREA') return 'field';
     if (tag === 'INPUT') {
       if (type === 'password') return 'password';
@@ -586,6 +611,7 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
       if (type === 'submit' || type === 'button' || type === 'reset') return 'button';
       return 'field';
     }
+    if (role === 'option' || role === 'treeitem') return 'button';
     if (role === 'checkbox' || role === 'switch') return 'check';
     if (el.isContentEditable) return 'field';
     if (tag === 'A' || role === 'link') return 'link';
@@ -625,6 +651,11 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
       // description: a real http href means this control navigates.
       href: href,
       disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+      // Is this an entry in a list the page opened, rather than furniture that
+      // happened to appear at the same moment? A batch's `fill` may press only
+      // these — a cookie banner rendering mid-step is also "new".
+      option: ['option', 'treeitem'].indexOf(
+        (el.getAttribute('role') || '').toLowerCase()) >= 0,
       // A form submit is gated whatever it is called: the nondescript "Dalej"
       // that posts the form is the dangerous one, not the obvious "Zapłać".
       submits: !!(el.form && (type_(el) === 'submit' || el.tagName === 'BUTTON'
@@ -763,6 +794,7 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                 ),
                 disabled=bool(raw.get("disabled")),
                 submits=bool(raw.get("submits")),
+                option=bool(raw.get("option")),
             )
         )
     return address_controls(controls)
@@ -893,6 +925,149 @@ def _addresses(controls: list[Control]) -> str:
     shown = ", ".join(repr(c.address) for c in controls[:CANDIDATES_SHOWN])
     left = len(controls) - CANDIDATES_SHOWN
     return shown if left <= 0 else f"{shown}, and {left} more"
+
+
+# How many steps one batch may carry. A flight search is eight; past this the
+# card stops being a thing anyone reads on a phone, and the answer is better
+# anyway — fill in one batch (no approval needed, nothing is committed), then
+# submit in another.
+BATCH_MAX_STEPS = 15
+
+# What one step of a batch does. `fill` is the compound verb and the reason the
+# batch is worth building: type, wait for the page to answer, and press the
+# option that matches — because on the form this was built for, a destination
+# box is not a text field. It opens a list that does not exist until the typing
+# has happened, so the model CANNOT name that option up front, and a batch of
+# flat primitives dies on the second step forever.
+FILL = "fill"
+BATCH_VERBS = (FILL, "choose", "check", "click")
+
+
+@dataclass
+class Step:
+    """One thing a batch does, as the model composed it."""
+
+    target: str
+    do: str = FILL
+    value: str = ""
+    control: Control | None = None
+
+
+@dataclass
+class Batch:
+    """A validated batch, or the reason it is not one."""
+
+    steps: list[Step] = field(default_factory=list)
+    problem: str = ""
+
+    def card(self, host: str) -> str:
+        """What the owner is asked to approve — every value, in order, in the
+        page's own words.
+
+        This is MORE oversight than the single calls it replaces, not less, and
+        that is the argument for the whole feature: typing has never been
+        mutating (`is_mutating` — nothing is committed until something is
+        pressed), so today a twenty-field form is twenty unseen auto-approved
+        keystrokes and one card that does not say what it is about to send."""
+        lines = []
+        for step in self.steps:
+            control = step.control
+            said = control.address if control is not None else step.target
+            if step.do == "click":
+                lines.append(f"press {said!r}")
+            elif step.do == "check":
+                lines.append(f"tick {said!r}")
+            else:
+                lines.append(f"{said!r} ← {_shown(step.value)}")
+        return f"fill in this form on {host} and send it:\n  " + "\n  ".join(lines)
+
+
+# A value long enough to be a paragraph is not reviewable on a card, and
+# truncating it silently would make the card a worse record than no card.
+CARD_VALUE_CHARS = 60
+
+
+def _shown(value: str) -> str:
+    if len(value) <= CARD_VALUE_CHARS:
+        return repr(value)
+    return f"{value[:CARD_VALUE_CHARS]!r} + {len(value) - CARD_VALUE_CHARS} more chars"
+
+
+def plan_batch(controls: list[Control], asked: list[Any]) -> Batch:
+    """Read a batch and decide whether it may be offered at all.
+
+    **At most ONE step may need approval, and it must be LAST.** The rule is
+    not card hygiene, it is abort semantics: with the only committing step at
+    the end, a batch that dies at step 7 of 20 has changed nothing the owner
+    would mind — typed text is not sent, and `_type` overwrites, so re-running
+    is idempotent. A mutating step in the middle turns every partial failure
+    into a half-committed form, which is a state neither the owner nor the
+    model can reason about.
+
+    A password field refuses the WHOLE batch and never draws a card, exactly as
+    a single action does. There is no yes that makes it a good idea."""
+    if not asked:
+        return Batch(problem="say what to fill in — a batch needs at least one step")
+    if len(asked) > BATCH_MAX_STEPS:
+        return Batch(
+            problem=(
+                f"{len(asked)} steps is more than one card can honestly show "
+                f"(limit {BATCH_MAX_STEPS}). Fill the form in smaller batches — "
+                "filling needs no approval — then send it in its own call."
+            )
+        )
+    steps: list[Step] = []
+    for index, raw in enumerate(asked, start=1):
+        if not isinstance(raw, dict):
+            return Batch(problem=f"step {index} is not an object with a target")
+        step = Step(
+            target=str(raw.get("target", "") or ""),
+            do=str(raw.get("do") or raw.get("action") or FILL).lower(),
+            value=str(raw.get("value", "") or raw.get("text", "") or ""),
+        )
+        if step.do not in BATCH_VERBS:
+            return Batch(
+                problem=f"step {index}: {step.do!r} is not one of {', '.join(BATCH_VERBS)}"
+            )
+        found = resolve(controls, step.target)
+        if found.control is None:
+            return Batch(problem=f"step {index}: {found.problem}")
+        step.control = found.control
+        if found.control.kind == PASSWORD:
+            return Batch(
+                problem=(
+                    f"step {index} is a password field, and aish never types "
+                    "passwords — nothing in this batch was done. Tell the user "
+                    "to sign in themselves with /browser."
+                )
+            )
+        steps.append(step)
+    committing = [
+        i for i, step in enumerate(steps)
+        if step.control is not None and step.control.mutating
+    ]
+    if len(committing) > 1:
+        return Batch(
+            problem=(
+                "a batch may carry only ONE step that needs approval; this one "
+                f"has {len(committing)}. Do them in separate calls, so the user "
+                "sees the page each one acts on."
+            )
+        )
+    if committing and committing[0] != len(steps) - 1:
+        early = steps[committing[0]].control
+        return Batch(
+            problem=(
+                f"{(early.address if early else '?')!r} needs approval, so it "
+                "must be the LAST step — otherwise a batch that fails halfway "
+                "leaves the form half-sent. Put it at the end, or in its own call."
+            )
+        )
+    return Batch(steps=steps)
+
+
+def batch_is_mutating(batch: Batch) -> bool:
+    return any(step.control is not None and step.control.mutating for step in batch.steps)
 
 
 # How much of a change report is worth sending AS a change report. Past this the
