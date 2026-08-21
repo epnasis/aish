@@ -40,6 +40,7 @@ handled as a stop-worthy limit even when nothing named a day.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -47,6 +48,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 # What went wrong, in the only vocabulary the retry policy needs. Closed set:
 # a value outside it is a bug, not a new case to handle downstream.
@@ -409,20 +411,45 @@ def estimate_tokens(messages: list | None) -> int:
     return chars // 3 + images * IMAGE_TOKENS
 
 
+# How long a key must go without a refusal before aish starts loosening what it
+# believes, and by how much per quiet stretch.
+#
+# A published per-tier number would justify learning once and holding it. A real
+# key does not behave like that: a pay-as-you-go key on a shared organisation
+# quota has neighbours, so the ceiling genuinely MOVES between one hour and the
+# next, and a limit learned at 23:00 is not a fact about 09:00. Holding a
+# once-observed number forever converts a temporary squeeze into a permanent
+# self-imposed one, which is the failure mode of believing your own model over
+# the server.
+#
+# So the belief decays toward optimism while the server keeps saying yes, and
+# snaps back the moment it says no. There is no synthetic probe and there is no
+# cost to this: the thing that tests the loosened ceiling is the next call the
+# owner was making anyway. Occasionally that costs a 429 — which is now paced,
+# recorded and legible, rather than the invisible slam it used to be.
+RELAX_AFTER_S = 600.0
+RELAX_FACTOR = 1.25
+
+
 @dataclass
 class Limits:
-    """A key's ceilings, and where they came from.
+    """A key's ceilings, where they came from, and how old the evidence is.
 
     `source` is not decoration. aish cannot know which billing tier a key is on,
     so the honest default is NO ceiling — throttling a paid key on a guess would
     be a self-inflicted outage. A 429 is the moment the world tells us, and a
     reader has to be able to tell a limit we were given from one we inferred
     from a failure. Mirrors `context_window`'s provenance discipline.
+
+    `refused_at` is wall-clock on purpose: it has to survive a restart, because
+    the whole point of learning a ceiling is not paying to learn it twice.
     """
 
     rpm: int | None = None
     tpm: int | None = None
     source: str = "none"  # none | env | observed
+    refused_at: float = 0.0
+    relaxed: float = 1.0  # how far the belief has loosened since that refusal
 
     def record(self) -> dict:
         out: dict = {"limit_source": self.source}
@@ -430,7 +457,35 @@ class Limits:
             out["rpm"] = self.rpm
         if self.tpm is not None:
             out["tpm"] = self.tpm
+        if self.relaxed > 1.0:
+            out["relaxed"] = round(self.relaxed, 2)
         return out
+
+    def as_json(self) -> dict:
+        return {"rpm": self.rpm, "tpm": self.tpm, "source": self.source,
+                "refused_at": self.refused_at}
+
+    def relax(self, now: float) -> Limits:
+        """This belief, loosened for however long the server has not refused.
+
+        Stepwise rather than continuous so the value is stable between steps: a
+        ceiling that crept up every second would make two calls a second apart
+        answerable differently for no reason a reader could reconstruct.
+        """
+        if self.source != "observed" or not self.refused_at:
+            return self  # stated by the owner, or nothing learned yet
+        quiet = max(0.0, now - self.refused_at)
+        steps = int(quiet // RELAX_AFTER_S)
+        if steps <= 0:
+            return self
+        factor = RELAX_FACTOR**steps
+        return Limits(
+            rpm=None if self.rpm is None else max(1, int(self.rpm * factor)),
+            tpm=None if self.tpm is None else max(1, int(self.tpm * factor)),
+            source=self.source,
+            refused_at=self.refused_at,
+            relaxed=factor,
+        )
 
 
 class _Window:
@@ -522,8 +577,21 @@ class Governor:
     failure.
     """
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        wall: Callable[[], float] = time.time,
+        store: Path | None = None,
+    ):
+        # Two clocks, deliberately. The rolling window needs a monotonic one (a
+        # clock jump must not appear to spend or refund a minute of quota); the
+        # learned ceilings need a wall one, because they outlive the process and
+        # "how long since the server last refused" is a question about the world
+        # rather than about this run.
         self._clock = clock
+        self._wall = wall
+        self._store = store
+        self._loaded = False
         self._lock = threading.RLock()
         self._cond = threading.Condition(self._lock)
         self._windows: dict[str, _Window] = {}
@@ -537,7 +605,16 @@ class Governor:
     # -- what we believe the ceilings are ---------------------------------
 
     def limits(self, key: str) -> Limits:
+        """What to enforce right now: the belief, loosened for however long the
+        server has not refused."""
+        return self.believed(key).relax(self._wall())
+
+    def believed(self, key: str) -> Limits:
+        """The stored belief, unrelaxed. Separate from `limits` so a reader (and
+        the persisted file) sees what was actually learned rather than a number
+        that moves with the clock."""
         with self._lock:
+            self._load()
             if key not in self._limits:
                 self._limits[key] = _limits_from_env(key)
             return self._limits[key]
@@ -560,32 +637,40 @@ class Governor:
                 # Not a pause. Nothing sent between now and the reset can
                 # succeed, so later callers are refused immediately rather than
                 # queueing behind a wait nobody would sit through.
+                #
+                # Wall time, and persisted: `make ship` restarts the server and
+                # restart recovery re-runs interrupted triggered sessions, so an
+                # in-memory latch meant a spent daily quota was re-slammed on
+                # every restart by the very sessions it had already refused.
                 wait = failure.retry_after_s or LONG_WAIT_S
-                self._exhausted_until[key] = now + wait
+                self._exhausted_until[key] = self._wall() + wait
+                self._save()
                 self._cond.notify_all()
                 return
             requests, tokens = self._window(key).totals(now)
-            current = self.limits(key)
+            current = self.believed(key)
+            if current.source == "env":
+                # The owner stating their tier outranks aish inferring one.
+                return
             self._limits[key] = Limits(
-                rpm=_tightest(current.rpm, max(1, int(requests * OBSERVED_MARGIN))),
-                tpm=_tightest(current.tpm, max(1, int(tokens * OBSERVED_MARGIN))),
-                # Env stays authoritative if it was set: the owner stating their
-                # tier outranks aish inferring one from a single failure.
-                source=current.source if current.source == "env" else "observed",
+                # Against the EFFECTIVE ceiling, not the stored one: if the
+                # belief had loosened to 1.5x and that is what just got refused,
+                # the new evidence is about the loosened number. Tightening
+                # against the stale stored value would ratchet down forever and
+                # never converge on what the server is actually allowing.
+                rpm=_tightest(self.limits(key).rpm, max(1, int(requests * OBSERVED_MARGIN))),
+                tpm=_tightest(self.limits(key).tpm, max(1, int(tokens * OBSERVED_MARGIN))),
+                source="observed",
+                refused_at=self._wall(),
             )
+            self._save()
             self._cond.notify_all()
 
     def exhausted_for(self, key: str) -> float | None:
         """Seconds until this key's spent quota resets, or None."""
         with self._lock:
-            until = self._exhausted_until.get(key)
-            if until is None:
-                return None
-            left = until - self._clock()
-            if left <= 0:
-                del self._exhausted_until[key]
-                return None
-            return left
+            self._load()
+            return self._exhausted_left(self._wall(), key)
 
     # -- admission --------------------------------------------------------
 
@@ -610,6 +695,7 @@ class Governor:
         ceiling = DEFAULT_WAIT_CEILING_S if ceiling is None else ceiling
         deadline = self._clock() + ceiling
         with self._cond:
+            self._load()  # a spent quota learned by the LAST run still counts
             ticket = self._next_ticket
             self._next_ticket += 1
             self._waiting.add(ticket)
@@ -646,14 +732,17 @@ class Governor:
     def _window(self, key: str) -> _Window:
         return self._windows.setdefault(key, _Window())
 
-    def _exhausted_left(self, now: float, key: str) -> float | None:
+    def _exhausted_left(self, _now: float, key: str) -> float | None:
+        """Wall time, not the window's monotonic clock: this deadline is
+        persisted and outlives the process that set it."""
         until = self._exhausted_until.get(key)
         if until is None:
             return None
-        if until - now <= 0:
+        left = until - self._wall()
+        if left <= 0:
             del self._exhausted_until[key]
             return None
-        return until - now
+        return left
 
     def _headroom_wait(self, now: float, key: str, estimate: int) -> float | None:
         """None if the call fits right now; otherwise roughly how long until it
@@ -685,6 +774,62 @@ class Governor:
     def _grant(self, now: float, key: str, estimate: int) -> Reservation:
         entry = self._window(key).add(now, estimate)
         return Reservation(self, key, entry, estimate)
+
+    # -- what survives a restart ------------------------------------------
+
+    def _path(self) -> Path | None:
+        if self._store is not None:
+            return self._store
+        root = os.environ.get("AISH_STATE_DIR")
+        return Path(root) / "rate-limits.json" if root else None
+
+    def _load(self) -> None:
+        """Learned ceilings and the spent-quota latch, from the last run.
+
+        A ceiling costs a 429 to learn, so learning it once per RESTART rather
+        than once is paying repeatedly for the same information — and `make
+        ship` restarts the server often. Best-effort by design: a missing or
+        unreadable file means "nothing learned yet", which is exactly the state
+        a first run is in, so there is nothing here worth failing a model call
+        over.
+        """
+        if self._loaded:
+            return
+        self._loaded = True
+        path = self._path()
+        if path is None or not path.is_file():
+            return
+        try:
+            stored = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return
+        for key, value in (stored.get("limits") or {}).items():
+            if not isinstance(value, dict) or key in self._limits:
+                continue
+            self._limits[key] = Limits(
+                rpm=value.get("rpm"), tpm=value.get("tpm"),
+                source=str(value.get("source") or "observed"),
+                refused_at=float(value.get("refused_at") or 0.0),
+            )
+        for key, until in (stored.get("exhausted_until") or {}).items():
+            self._exhausted_until[key] = float(until)
+
+    def _save(self) -> None:
+        path = self._path()
+        if path is None:
+            return
+        payload = {
+            # The BELIEF, never the relaxed view: writing a number that moves
+            # with the clock would make the file disagree with itself the moment
+            # it was read back.
+            "limits": {k: v.as_json() for k, v in self._limits.items() if v.source == "observed"},
+            "exhausted_until": dict(self._exhausted_until),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2))
+        except OSError:
+            pass  # a report aish cannot write is never worth failing a call for
 
 
 def _tightest(current: int | None, observed: int) -> int:

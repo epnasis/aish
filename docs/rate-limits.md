@@ -185,12 +185,57 @@ theirs (`AISH_RATE_LIMIT_GEMINI=rpm=10,tpm=250000`, per provider or per `provide
 and a 429 corrects it either way. `Limits.source` (`none` | `env` | `observed`) travels
 with the numbers, mirroring `context_window`'s provenance discipline. `TestGovernorLimits`.
 
-A 429 means the model of the world is wrong, so it is corrected **once**, to just under
-the rate that produced the failure — never nudged, never re-probed upward. AIMD is right
-when a limit is unknown, dynamic and contended by strangers; here it is published, static,
-per-model and contended only by yourself, and every additive-increase re-probe costs a
-full request against the quota it is probing. A later observation may **tighten** a ceiling
-and can never relax one: the only evidence a refusal carries is an upper bound.
+A 429 means the model of the world is wrong, so the ceiling snaps to just under the rate
+that produced the failure. It snaps against the **effective** ceiling, not the stored one:
+if the belief had already loosened to 1.5x and *that* is what got refused, the new evidence
+is about the loosened number, and tightening against a stale stored value would ratchet
+down forever without ever converging on what the server actually allows.
+
+**The ceiling is a belief, not a law, and it decays toward optimism.** The first design
+learned once and held forever, on the reasoning that a published per-tier limit is static.
+A real key does not behave like that: a pay-as-you-go key on a shared organisation quota
+has neighbours, so the ceiling genuinely moves between one hour and the next, and a limit
+learned at 23:00 is not a fact about 09:00. Holding a once-observed number forever converts
+a temporary squeeze into a permanent self-imposed one — believing your own model over the
+server, which is the failure this whole file is about.
+
+So after `RELAX_AFTER_S` without a refusal the belief loosens by `RELAX_FACTOR` per quiet
+stretch, and snaps back the moment the server says no. **There is no synthetic probe**, and
+that is what answers the usual objection to additive increase: the thing that tests the
+loosened ceiling is the next call the owner was making anyway. Occasionally that costs a
+429 — now paced, recorded and legible, rather than the invisible slam it replaced.
+
+Relaxation is aish correcting its own guess, so it applies only to an `observed` ceiling.
+An owner who **stated** their tier said something aish has no business loosening.
+`TestLimitsAreABeliefNotALaw`.
+
+The loosening is stepwise rather than continuous so the value is stable between steps — a
+ceiling creeping up every second would answer two calls a second apart differently for no
+reason a reader could reconstruct — and `believed()` is kept separate from `limits()` so
+the persisted file and any reader see what was actually learned rather than a number that
+moves with the clock.
+
+### What survives a restart
+
+A ceiling costs a 429 to learn, so learning it once per **restart** rather than once is
+paying repeatedly for the same information — and `make ship` restarts the server often. The
+learned ceilings, the **age of the evidence** behind them, and the spent-quota latch are
+persisted to `rate-limits.json` in the state dir. The age matters as much as the number:
+without it a restart would look like a fresh refusal and re-freeze a ceiling that had spent
+an hour earning its way back up.
+
+The latch persisting closes the gap this doc previously listed as open. Restart recovery
+re-runs interrupted triggered sessions, so an in-memory latch meant a spent daily quota was
+re-slammed on every restart **by the very sessions it had already refused**.
+
+Best-effort by design: a missing or unreadable file reads as "nothing learned yet", which is
+exactly the state a first run is in, so there is nothing here worth failing a model call
+over. `TestLearnedLimitsSurviveRestart`.
+
+Two clocks, deliberately. The rolling window is **monotonic** (a clock jump must not appear
+to spend or refund a minute of quota); the learned ceilings and the latch are **wall**,
+because they outlive the process and "how long since the server last refused" is a question
+about the world rather than about this run.
 
 ### Admission
 
@@ -269,16 +314,14 @@ Still open, tracked on #261:
 - **A context-window-exceeded 400 should trim and retry**, not fail. It is classified
   `BAD_REQUEST` and correctly not retried, but the useful action is to shorten and try
   again — the same path an unsatisfiable reservation should take.
-- **The exhausted latch is in-memory.** `make ship` restarts the server, and restart
-  recovery re-runs interrupted triggered sessions, so a spent daily quota is forgotten
-  across a restart and re-slammed. Either persist it under `state_dir` or accept the
-  re-slam explicitly and record it — silence is the one wrong option.
 - **Whether Gemini's implicit cached tokens count against TPM quota**, as opposed to
-  merely costing less. The incident is weak evidence they do count: the prefix was
-  append-only and no trim fired, so implicit caching should have been hitting, and
-  1.2–1.9M tokens/min still tripped RESOURCE_EXHAUSTED. One read of
-  `prompt_tokens_details.cached_tokens` off a real session settles it, and it decides
-  whether cache preservation or aggressive trimming is right on the free tier.
+  merely costing less. `cached_tokens` IS reported through the compat layer and now
+  reaches the log (`aish usage` shows it), so the first half of the question is answered:
+  caching is happening. Whether the cached half is excluded from the quota still is not,
+  and it decides whether cache preservation or aggressive trimming is right here. The
+  incident is weak evidence they DO count: the prefix was append-only and no trim fired,
+  so caching should have been hitting, and 1.2–1.9M tokens/min still tripped
+  RESOURCE_EXHAUSTED.
 - **`curate` runs in a separate process** on the same key, so no in-process governor
   reaches it.
 
