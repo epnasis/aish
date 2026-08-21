@@ -7531,8 +7531,8 @@ class TestBrowserView:
     def _fake_view(self, monkeypatch, calls):
         from aish import browser as browser_module
 
-        def view_open(url, width=None, height=None):
-            calls.append(("open", url, width, height))
+        def view_open(url, width=None, height=None, cold=False):
+            calls.append(("open", url, width, height, cold))
             return browser_module.Frame(jpeg=b"\xff\xd8jpeg", url=url, title="Sign in")
 
         def view_act(action, **kwargs):
@@ -7641,7 +7641,25 @@ class TestBrowserView:
             assert event["action"] == "frame"
             assert base64.b64decode(event["jpeg"]) == b"\xff\xd8jpeg"
             assert event["title"] == "Sign in"
-            assert calls == [("open", "https://x.pl", 430, 900)]
+            assert calls == [("open", "https://x.pl", 430, 900, False)]
+
+    def test_the_client_says_which_profile_the_view_drives(self, app_env, monkeypatch):
+        """Sent by the client, never inferred from the URL (#249).
+
+        Signing the search profile in happens at accounts.google.com — the same
+        address the owner would use for his own — so the address cannot say
+        which browser is meant. Getting this wrong types a password into the
+        wrong profile, which nothing else would reveal."""
+        calls = []
+        self._fake_view(monkeypatch, calls)
+        client, _ = make_client(app_env, [])
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({
+                "type": "browser_view", "action": "open",
+                "url": "https://accounts.google.com", "profile": "search",
+            })
+            recv_until(ws, "browser_view")
+            assert calls[0][-1] is True
 
     def test_a_click_carries_its_coordinates(self, app_env, monkeypatch):
         calls = []
@@ -7721,7 +7739,7 @@ class TestBrowserView:
         monkeypatch.setattr(
             browser_module,
             "view_open",
-            lambda url, width=None, height=None: browser_module.Frame(
+            lambda url, width=None, height=None, cold=False: browser_module.Frame(
                 jpeg=b"\xff\xd8", url="about:blank", title="",
                 error="could not open https://x.pl (TimeoutError)",
             ),
@@ -7736,7 +7754,7 @@ class TestBrowserView:
     def test_a_failure_comes_back_as_an_error_not_a_dead_sheet(self, app_env, monkeypatch):
         from aish import browser as browser_module
 
-        def boom(url, width=None, height=None):
+        def boom(url, width=None, height=None, cold=False):
             raise browser_module.BrowserUnavailable("Playwright is not installed")
 
         monkeypatch.setattr(browser_module, "view_open", boom)
