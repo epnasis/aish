@@ -1490,6 +1490,17 @@ with [Yes, deploy](aish-reply://yes, deploy now) and \
 [No, hold off](aish-reply://no, hold off). Only offer chips that are a \
 useful next step (a continuation, an alternative, a concrete next action) — \
 never a chip whose only purpose is to end the conversation.
+- Rate limits: a cloud API has a per-minute ceiling, and your whole \
+conversation is resent on every step, so a long task can spend millions of \
+input tokens a minute. aish paces itself against that ceiling across every \
+chat, learns it from the first 429, and once it knows it, caps how much \
+history you carry so several steps fit in a minute. If you are told you are \
+waiting on a rate limit, that is aish pacing deliberately — not a hang. A \
+quota that is SPENT rather than busy cannot be waited out; say so instead of \
+suggesting a retry. The user sets their own tier with \
+AISH_RATE_LIMIT_<PROVIDER>="rpm=..,tpm=..", and sees where the tokens went \
+with `aish usage` (add --session <name> to see which tool filled a chat's \
+context). Long pages and images are what fill it fastest.
 - REPL escapes: `!<command>` runs directly without you (no approval); \
 `!cd <dir>` is an alias for /cd — it moves the project directory and \
 re-anchors the session root. Ctrl-C cancels only the \
@@ -1746,6 +1757,58 @@ def _explain_cli(args: list[str]) -> int:
     return 0
 
 
+def _usage_cli(args: list[str]) -> int:
+    """`aish usage [--days N] [--week] [--session X] [--json]` — what was spent
+    and what filled the context (#262).
+
+    Pure read, like `aish explain`: no model call, no live process state. It
+    measures RECORDED usage, which is not the same as a billing statement, and
+    it says so rather than letting the first reconciliation against a provider
+    console discredit it.
+    """
+    from . import explain as explain_mod
+    from . import usage as usage_mod
+
+    usage_line = "usage: aish usage [--days N] [--week] [--session NAME] [--json]"
+    days: int | None = 7
+    target = ""
+    as_json = "--json" in args
+    period = "week" if "--week" in args else "day"
+    rest = [a for a in args if a not in ("--json", "--week")]
+    while rest:
+        flag = rest.pop(0)
+        if flag == "--days" and rest:
+            value = rest.pop(0)
+            if not value.isdigit():
+                print(usage_line)
+                return 2
+            days = int(value)
+        elif flag == "--all":
+            days = None
+        elif flag == "--session" and rest:
+            target = rest.pop(0)
+        else:
+            print(usage_line)
+            return 2
+    if target:
+        matches = explain_mod.resolve(target)
+        if not matches:
+            print(f"no session log matching {target!r} in {explain_mod.state_dir()}")
+            return 1
+        if len(matches) > 1:
+            # Never guess: a cost report about the wrong chat is worse than none.
+            print(f"{len(matches)} sessions match {target!r} — be more specific:")
+            for path in matches[-20:]:
+                print(f"  {path.name}")
+            return 2
+        one = usage_mod.scan_session(matches[0])
+        print(usage_mod.json_report([one]) if as_json else usage_mod.render_session(one))
+        return 0
+    sessions = usage_mod.scan(days=days)
+    print(usage_mod.json_report(sessions) if as_json else usage_mod.render(sessions, period))
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "secret":
         return _secret_cli(sys.argv[2:])
@@ -1753,6 +1816,8 @@ def main() -> int:
         return _skill_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "explain":
         return _explain_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "usage":
+        return _usage_cli(sys.argv[2:])
 
     config_path = Path(
         os.environ.get("AISH_CONFIG", str(Path.home() / ".config" / "aish" / "config.toml"))

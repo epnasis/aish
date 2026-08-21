@@ -259,6 +259,39 @@ Bare provider names pick a sensible default model. `claude-max` strips Claude
 Code down to bare inference and hands it aish's own tools, so every command
 still goes through aish's approval gate and denylist.
 
+### Rate limits and quotas
+
+A cloud API has a ceiling, and an agent loop resends its whole conversation on
+every step — so a long task can spend millions of input tokens a minute and hit
+a `429` that has nothing to do with the task being hard.
+
+aish paces itself against that ceiling, process-wide, across every chat and
+every backend. It cannot know which billing tier your key is on, so out of the
+box it enforces nothing and **learns the limit from the first `429`**. If you
+know your tier, tell it and it never has to learn the hard way:
+
+```sh
+export AISH_RATE_LIMIT_GEMINI="rpm=10,tpm=250000"     # per provider
+export AISH_RATE_LIMIT_GEMINI:GEMINI-3.5-FLASH="rpm=10,tpm=250000"   # or per model
+```
+
+Once a limit is known, aish also **sizes the conversation to it** — history is
+capped so a handful of steps fit in a minute, rather than one enormous step
+filling the whole budget. Waiting is shown while it happens, Stop works during
+it, and a quota that is *spent* rather than merely busy says so instead of
+retrying into a wall it cannot get past.
+
+To see where the tokens went:
+
+```sh
+aish usage                      # last 7 days: spend by day and by model
+aish usage --week --all         # everything, by week
+aish usage --session <name>     # what filled THAT chat's context, by tool
+```
+
+It reports what was *recorded* — not a billing statement — and says plainly
+what it cannot know rather than showing a zero.
+
 ---
 
 ## How it learns

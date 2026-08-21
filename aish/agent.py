@@ -1550,6 +1550,11 @@ class Agent:
         # Turn/call identity (docs/trace-contract.md §2), advanced by
         # _reset_task_state. `turn` starts at 0 so the first task is turn 1.
         self._turn = 0
+        # Reset per task below, but bound HERE too: messages are appended
+        # outside a task (adopted history, a server-side injection) and they
+        # carry this stamp, so a counter that only exists once a task has begun
+        # makes the very first append raise.
+        self._model_call = 0
         self._call_seq = itertools.count(1)
         # The call id currently being dispatched, so a `gate` verdict joins to
         # the `tool` step for the action it governed (§2). Thread-local rather
@@ -1872,6 +1877,14 @@ class Agent:
         self.messages.append(message)
         if self.on_message:
             record = _serialize(message)
+            # Which model call this message was in front of (#262). Membership
+            # in a call's context was otherwise POSITIONAL — inferred from the
+            # order lines happen to sit in the file, the fragility contract §2
+            # exists to kill and which `curate._windows` already apologises for
+            # in its own docstring. Without it, "what filled the context of the
+            # call that cost 129k tokens" cannot be answered from the log at
+            # all; with it, it is a group-by.
+            record["model_call"] = self._model_call
             if interim:
                 record["interim"] = True
             if record_content is not None:

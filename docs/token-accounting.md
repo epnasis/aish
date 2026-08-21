@@ -2,9 +2,9 @@
 
 What a turn actually cost, and what filled the context that made it cost that. Issue #262.
 
-**Built so far: the recording half.** The reporting surface (`aish usage`, the per-turn
-contributor section in `aish explain`) is not built yet; the decisions that constrain it
-are below so it is not designed twice.
+**Built:** the recording half, and `aish usage`. The per-turn contributor section inside
+`aish explain` is not built yet; the decisions that constrain it are below so it is not
+designed twice.
 
 ## The unit problem — why this was urgent
 
@@ -42,6 +42,38 @@ one level up: a call that reported no usage at all records none rather than zero
 The two-int summary **stays** beside the detail. Everything downstream sizes context from
 it, a cache read still occupies the window, and a report needs both numbers to show the
 residual between what was estimated and what was reported.
+
+## The report — `aish usage`
+
+`aish/usage.py` is that scanner: pure, per-file contained (one corrupt log must not take the
+report down — the containment rule a single corrupt session log taught the web server), and
+under the same reader law as `aish explain`. `--days N` reads the date out of the FILE NAME,
+so a week's report skips a year of logs without opening them.
+
+```
+aish usage [--days N | --all] [--week] [--session NAME] [--json]
+```
+
+The summary reports spend and context separately and never adds them.
+`TestSpendTotals` (`tests/test_usage.py`).
+
+The drill-down answers the question the incident could not: **what filled this context**,
+bucketed by the tool that produced it, with chars measured and residency computed from the
+`model_call` stamp. A trim **ends** a result's residency, because naive
+injection-to-end-of-session overstates precisely the results the system already handled
+well. Stubs are matched by tool NAME, not by `stubbed[].at` — that indexes the live message
+list, which does not map 1:1 to log order across resume, redact or rewind, and claiming
+per-instance identity would be false precision. `TestContextAttribution`.
+
+### What it refuses to pretend
+
+A log written before the `model_call` stamp existed cannot say **when** a result entered the
+context, so residency degrades to "chars × every call in the session" — a number that looks
+like attribution and is arithmetic on an assumption. Those reports drop the column and say
+so; the JSON omits the key rather than reporting `0`, because a consumer must not read *not
+measurable* as *nothing was resident*. Same rule for a backend that reports no usage at all,
+for a log a Retry or redaction rewrote, and for calls made outside a task.
+`TestHonestAboutWhatItCannotSay`, `TestScanIsContained`.
 
 ## Decisions the reporting surface must not re-litigate
 
