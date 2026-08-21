@@ -100,8 +100,20 @@ HARD = """<!doctype html>
   #agree { opacity: 0; position: absolute; width: 1px; height: 1px; }
   #wrap { position: relative; display: inline-block; }
   #sheet { position: absolute; inset: 0; background: transparent; }
+  /* The account switcher, shaped like E.ON's: a scrollable list inside a FIXED
+     header, showing four of its five entries. */
+  #header { position: fixed; top: 0; right: 0; background: #ddd; }
+  #lokale { max-height: 80px; overflow-y: auto; }
+  #lokale a { display: block; height: 20px; }
 </style></head>
 <body>
+  <div id="header"><div id="lokale">
+    <a href="/hard.html?ku=1">Wyspowa</a>
+    <a href="/hard.html?ku=2">Bluszczanska</a>
+    <a href="/hard.html?ku=3">Ananasowa</a>
+    <a href="/hard.html?ku=4">Garaż Bluszczańska</a>
+    <a href="/hard.html?ku=5">Marii Cetysówny 2 m. 13</a>
+  </div></div>
   <nav id="bar"><a href="/hard.html?from=bar" id="nav-desktop">Faktury i płatności</a></nav>
   <nav id="drawer"><a href="/hard.html?from=drawer" id="nav-mobile">Faktury i płatności</a></nav>
 
@@ -276,7 +288,16 @@ def check_hard(url: str) -> None:
     assert navs[0].detail.endswith("from=bar"), navs[0].detail
     print("responsive duplicate → only the on-screen copy is listed")
 
-    # 2. A collapsed accordion is not a control list.
+    # 2. The entry below a dropdown's scroll fold is REACHABLE — you scroll the
+    #    dropdown. Four of five properties were listed on the real portal and
+    #    the fifth was reported as closed away, so the model went back to
+    #    guessing a URL for it (#251).
+    for lokal in ("Wyspowa", "Bluszczanska", "Ananasowa",
+                  "Garaż Bluszczańska", "Marii Cetysówny 2 m. 13"):
+        named(page, lokal)
+    print("scrolled-away dropdown entry → all 5 properties listed")
+
+    # 3. A collapsed accordion is not a control list.
     absent(page, "Szczegóły rozliczenia")
     assert page.unreachable >= 2, page.unreachable
     opened = browser.browse_act(named(page, "Pokaż szczegóły").n, "click")
