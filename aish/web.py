@@ -10,6 +10,7 @@ and on every redirect (SSRF guard, see _require_public).
 """
 
 import base64
+import concurrent.futures
 import http.client
 import ipaddress
 import json
@@ -906,16 +907,19 @@ _SITE_OPERATOR = re.compile(r"\bsite:([^\s\"']+)", re.I)
 _FILETYPE_OPERATOR = re.compile(r"\bfiletype:([A-Za-z0-9]+)")
 
 
-def unmet_constraint(query: str, hits: list[dict]) -> str:
+def unmet_constraint(query: str, rows: list[tuple[str, str, str]]) -> str:
     """The thing this query ASKED FOR that these results do not satisfy, or "".
 
-    Count is not quality, and an index that quietly ignores an operator returns
-    a full five results that answer a different question — which no
-    "did it come back empty?" test can see. `site:` and `filetype:` are the two
-    constraints a query states in a form code can CHECK against the URLs that
-    came back, so they are the two checked. Nothing here guesses at relevance:
-    an unmet constraint is a fact about the results, not an opinion of them."""
-    urls = [str(h.get("href") or h.get("url") or "") for h in hits]
+    It was the escalation trigger and is now only an EXPLANATION, which is the
+    honest size of it: `site:` and `filetype:` are the two constraints a query
+    states in a form code can check against the URLs that came back, and they
+    are a small slice of the ways a result set can be wrong. It earns its keep
+    on the degraded path — when the browser index is walled or absent, a result
+    set that ignores the query's own terms is worth much more to the model with
+    that fact attached than left to be noticed. Nothing here guesses at
+    relevance: an unmet constraint is a fact about the results, never an opinion
+    of them."""
+    urls = [url for _, url, _ in rows]
     for site in _site_filters(query):
         hosts = [(urllib.parse.urlsplit(u).hostname or "").lower() for u in urls]
         if not any(h == site or h.endswith("." + site) for h in hosts):
@@ -936,46 +940,112 @@ def _numbered(rows: list[tuple[str, str, str]]) -> str:
     return truncate("\n".join(lines))
 
 
-def web_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> str:
-    query = query.strip()
-    if not query:
-        return "ERROR: empty search query"
+def _url_key(url: str) -> str:
+    """Two indexes citing the same page must not be two results."""
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or "").lower().removeprefix("www.")
+    return f"{host}{parts.path.rstrip('/')}?{parts.query}"
+
+
+def _merge(*ranked: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
+    """One list, best ranking first, each page once."""
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for rows in ranked:
+        for title, url, snippet in rows:
+            key = _url_key(url)
+            if not url or key in seen:
+                continue
+            seen.add(key)
+            out.append((title, url, snippet))
+    return out
+
+
+# aish's own words above the results: which indexes answered, and — when the
+# browser one did — the identity it read with. Provenance and identity are the
+# pair `read_url` states whenever either changes, and "signed into nothing" is
+# the fact that makes this read gate-free.
+BOTH_INDEXES = (
+    "[aish: {engine} (read in aish's own browser, signed into nothing) "
+    "answered with {second}, the default index with {first}.]\n"
+)
+ONE_INDEX = "[aish: {engine} could not be used for this search ({why}).{extra}]\n"
+
+
+def _first_index(query: str, max_results: int) -> tuple[list[tuple[str, str, str]], str]:
     from ddgs import DDGS  # deferred: keeps aish startup fast when unused
 
-    failure = ""
     try:
-        results = DDGS().text(query, max_results=max_results)
+        hits = DDGS().text(query, max_results=max_results)
     except Exception as exc:  # noqa: BLE001 — network/rate-limit errors are routine
-        results = []
-        failure = "" if found_nothing(exc) else f"the first index failed ({exc})"
-
-    rows = [
+        return [], "" if found_nothing(exc) else f"{exc}"
+    return [
         (
             " ".join((hit.get("title") or "").split()),
             hit.get("href") or hit.get("url") or "",
             " ".join((hit.get("body") or "").split())[:SNIPPET_MAX_CHARS],
         )
-        for hit in results
-    ]
-    # Three reasons to ask the second index, and only the first is about count:
-    # nothing came back, the index errored, or what came back does not satisfy
-    # what the query asked for (#249).
-    why = failure or ("" if results else "the first index found nothing")
-    why = why or unmet_constraint(query, results)
-    if why:
-        better, blocked = search_page(query)
-        if better:
-            return SECOND_INDEX_NOTE.format(why=why, engine=SEARCH_ENGINE) + _numbered(
-                better[:max_results]
-            )
-        if not rows:
-            if failure:
-                return (
-                    f"ERROR: web search failed ({failure}; {blocked}) — retry "
-                    "once, or answer without the web"
-                )
-            return NO_RESULTS.format(query=query)
-    return _numbered(rows)
+        for hit in hits
+    ], ""
+
+
+def web_search(query: str, max_results: int = SEARCH_MAX_RESULTS) -> str:
+    """Both indexes, at the same time, merged.
+
+    It was one index with the second held back as a fallback, triggered when the
+    first came back empty or ignored the query's own `site:`/`filetype:`. The
+    owner's objection retired that design and it was the right objection: a
+    trigger can only fire on a failure it can SEE, and the failure that matters
+    here is invisible — five plausible results that rank a Medium post above the
+    official documentation look exactly like success. Quality is not a property
+    any is-it-empty test can check, so the second index is not something to
+    reach for after noticing; it either runs or it does not help.
+
+    What made "always" affordable is that the cost was measured wrong. The
+    browser looked serial, and it is not: `_Owner` is an event loop with tabs, so
+    FOUR concurrent searches through Chrome finished in 3.16s — the same as one,
+    against 15.01s run one after another. Against an LLM turn that then has to
+    read the results, a second of wall-clock spent on better context is not a
+    trade worth making the other way.
+
+    A wall therefore costs nothing: `SEARCH_WALL_COOLDOWN` stands the browser
+    index down and the answer degrades to exactly what it was before this
+    existed, with the reason said out loud rather than silently."""
+    query = query.strip()
+    if not query:
+        return "ERROR: empty search query"
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="aish-serp"
+    ) as pool:
+        engine = pool.submit(search_page, query)
+        rows, failure = _first_index(query, max_results)
+        better, blocked = engine.result()
+
+    if better:
+        merged = _merge(better[:max_results], rows)[: max_results + 3]
+        return BOTH_INDEXES.format(
+            engine=SEARCH_ENGINE,
+            second=f"{len(better)} results",
+            first=f"{len(rows)} results" if rows else "nothing",
+        ) + _numbered(merged)
+
+    # Only the first index answered. Say so — a thin or off-target result set is
+    # worth much more to the model with the reason attached than without it.
+    ignored = unmet_constraint(query, rows)
+    note = ONE_INDEX.format(
+        engine=SEARCH_ENGINE,
+        why=blocked or "no reason given",
+        extra=f" {ignored}, and there was no second index to ask." if ignored else "",
+    )
+    if rows:
+        return note + _numbered(rows)
+    if failure:
+        return (
+            f"ERROR: web search failed ({failure}) — retry once, or answer "
+            "without the web"
+        )
+    return note + NO_RESULTS.format(query=query)
 
 
 # Hosts that have needed the browser in THIS process. A site that blocks a

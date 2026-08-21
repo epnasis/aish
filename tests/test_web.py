@@ -116,16 +116,6 @@ class TestWebSearch:
         # Module state: a wall recorded by one test must not stand the next
         # test's browser down.
         monkeypatch.setattr(web, "_search_walled_at", 0.0)
-        # No second index unless a test asks for one. conftest forbids reaching
-        # the real browser, and this is also the honest default: most machines
-        # running this have no Chrome to escalate to.
-        monkeypatch.setattr(
-            web.browser,
-            "read_cold",
-            lambda url, **kw: (_ for _ in ()).throw(
-                browser.BrowserUnavailable("no browser in tests")
-            ),
-        )
 
     @pytest.fixture
     def second_index(self, monkeypatch):
@@ -180,44 +170,50 @@ class TestWebSearch:
         assert result.startswith("ERROR")
         assert "rate limited" in result
 
-    def test_escalates_when_the_first_index_found_nothing(self, second_index):
-        self.install([])
-        result = web.web_search("zzz")
-        assert "Product Manager, Wear" in result
-        assert "careers.google.com/jobs/results/" in result
+    def test_both_indexes_answer_and_the_results_are_merged(self, second_index):
+        """Not a fallback: both run, every time, and the browser index leads.
 
-    def test_escalates_when_the_first_index_was_stonewalled(self, second_index):
-        """The case that filed this: not "nothing matches" but "we were
-        refused". One index has bad days; that is what a second one is for."""
+        A trigger can only fire on a failure it can SEE, and the failure that
+        matters is invisible — a plausible five results that rank a blog post
+        above the official documentation look exactly like success."""
+        self.install(
+            [{"title": "A blog about it", "href": "https://blog.example/post"}]
+        )
+        result = web.web_search("product management poland")
+        assert "1. Product Manager, Wear" in result  # the browser index ranks first
+        assert "A blog about it" in result  # and the other index still contributes
+
+    def test_the_same_page_from_both_indexes_is_one_result(self, second_index):
+        raw, _ = serp_page()
+        shared = raw["links"][11][1]  # the first real result on that page
+        self.install([{"title": "same page, other index", "href": shared + "?"}])
+        result = web.web_search("q")
+        assert result.count(shared.rstrip("/")) == 1
+
+    def test_the_browser_index_runs_even_when_the_first_one_succeeded(
+        self, second_index
+    ):
+        """The whole point of the owner's objection: quality is not conditional
+        on the other index having failed."""
+        self.install([{"title": "fine", "href": "https://example.com/fine"}])
+        assert "Product Manager, Wear" in web.web_search("anything")
+
+    def test_a_stonewalled_first_index_still_gets_an_answer(self, second_index):
         self.install(DDGSException(RuntimeError("connection reset by peer")))
         assert "Product Manager, Wear" in web.web_search("anything")
 
-    def test_escalates_when_the_results_ignore_the_query_s_own_operator(
-        self, second_index
-    ):
-        """Count is not quality (#249).
+    def test_an_unmet_operator_is_explained_when_there_is_no_second_index(self):
+        """On the degraded path the reason is worth more than the results.
 
-        Five results that quietly answer a different question look exactly like
-        success to an is-it-empty test. `site:` is a constraint the query STATES
-        and the URLs can be checked against, so it is checked."""
+        `site:` was the escalation trigger and is now an explanation — the
+        honest size of it, since it catches only the constraints a query states
+        out loud."""
         self.install(
             [{"title": "What is Product?", "href": "https://economictimes.example/x"}]
         )
         result = web.web_search('site:careers.google.com "product management"')
         assert "ignored `site:careers.google.com`" in result
-        assert "Product Manager, Wear" in result
-
-    def test_does_not_escalate_when_the_constraint_is_actually_met(
-        self, second_index, monkeypatch
-    ):
-        calls = []
-        monkeypatch.setattr(web.browser, "read_cold", lambda url, **kw: calls.append(url))
-        self.install(
-            [{"title": "PM, Wear", "href": "https://careers.google.com/jobs/results/1"}]
-        )
-        result = web.web_search("site:careers.google.com product")
-        assert "PM, Wear" in result
-        assert calls == []  # the browser must stay shut on the common path
+        assert "no second index to ask" in result
 
     def test_results_from_the_second_index_say_where_they_came_from(
         self, second_index
@@ -1247,10 +1243,18 @@ class TestTheSecondIndex:
         )
 
     def test_an_unmet_constraint_is_a_fact_about_the_results(self):
-        hits = [{"href": "https://example.com/a"}]
-        assert "site:python.org" in web.unmet_constraint("site:python.org x", hits)
+        rows = [("A", "https://example.com/a", "")]
+        assert "site:python.org" in web.unmet_constraint("site:python.org x", rows)
         assert web.unmet_constraint(
-            "site:python.org x", [{"href": "https://docs.python.org/3/"}]
+            "site:python.org x", [("B", "https://docs.python.org/3/", "")]
         ) == ""
-        assert "filetype:pdf" in web.unmet_constraint("filetype:pdf x", hits)
-        assert web.unmet_constraint("plain query", hits) == ""
+        assert "filetype:pdf" in web.unmet_constraint("filetype:pdf x", rows)
+        assert web.unmet_constraint("plain query", rows) == ""
+
+    def test_one_page_cited_by_both_indexes_is_one_result(self):
+        rows = web._merge(
+            [("Docs", "https://Example.com/a/", "from the browser")],
+            [("Docs", "https://www.example.com/a", "from the other index")],
+        )
+        assert len(rows) == 1
+        assert rows[0][2] == "from the browser"  # the better-ranked one wins

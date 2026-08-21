@@ -1579,5 +1579,5 @@ class TestTheSearchProfile:
         monkeypatch.setattr(
             browser, "read", lambda url, **kw: seen.update(kw) or "page"
         )
-        browser.read_cold("https://example.com")
+        browser._real_read_cold("https://example.com")  # conftest stubs the name
         assert seen["cold"] is True
