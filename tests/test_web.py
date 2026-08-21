@@ -4,6 +4,7 @@ no network. One opt-in live test (AISH_LIVE_WEB=1) exercises the real backend.
 
 import base64
 import email.message
+import inspect
 import json
 import os
 import pathlib
@@ -14,6 +15,7 @@ import urllib.error
 import urllib.request
 
 import pytest
+from ddgs.exceptions import DDGSException
 
 from aish import browser, web
 
@@ -116,13 +118,48 @@ class TestWebSearch:
 
     def test_no_results(self):
         self.install([])
-        assert "NO RESULTS" in web.web_search("zzz")
+        assert "No results" in web.web_search("zzz")
+
+    def test_an_empty_search_is_an_answer_not_an_error(self):
+        """ddgs signals "nothing matched" by RAISING, not by returning [].
+
+        The whole bug: `if not results` was unreachable, so an empty search
+        reached the model as `ERROR: web search failed (No results found.) —
+        retry once`, and the model retried — ten searches on one question. The
+        ERROR prefix also scored the call as failed in the trace, so a working
+        tool reported itself broken to the user watching."""
+        self.install(DDGSException("No results found."))
+        result = web.web_search("zzz")
+        assert not result.startswith("ERROR")
+        assert "No results" in result
+        assert "retry" not in result.lower()
+
+    def test_a_real_backend_failure_is_still_an_error(self):
+        """The same class carries both outcomes, so the message is the only
+        thing separating them — and a dead engine must not be laundered into
+        "the web has nothing on it"."""
+        self.install(DDGSException(RuntimeError("connection reset by peer")))
+        result = web.web_search("python")
+        assert result.startswith("ERROR")
+        assert "connection reset" in result
 
     def test_backend_error_reported_not_raised(self):
         self.install(RuntimeError("rate limited"))
         result = web.web_search("python")
         assert result.startswith("ERROR")
         assert "rate limited" in result
+
+    def test_ddgs_still_says_it_the_way_we_match_it(self):
+        """The canary on the string match above.
+
+        Classifying on a library's prose is safe only while someone finds out
+        that the prose changed. A bump that rewords it turns empty searches back
+        into ERRORs — the old behaviour, not a new hazard — but it should fail
+        here first rather than in a session."""
+        import ddgs.ddgs
+
+        source = inspect.getsource(ddgs.ddgs)
+        assert web.SEARCH_FOUND_NOTHING in source.lower()
 
     def test_empty_query(self):
         assert web.web_search("   ").startswith("ERROR")
