@@ -7,6 +7,7 @@ import pytest
 
 from aish import browser as browser_module
 from aish import notify as notify_module
+from aish import ratelimit as ratelimit_module
 from aish import rule_compiler as rule_compiler_module
 from aish import rules as rules_module
 from aish import secrets as secrets_module
@@ -177,3 +178,23 @@ def no_real_rule_compiler(monkeypatch):
         )
 
     monkeypatch.setattr(rule_compiler_module, "make_compiler", refuse)
+
+
+@pytest.fixture(autouse=True)
+def no_real_backoff_sleep(monkeypatch):
+    """Never spend real seconds proving that the retry policy waits.
+
+    Same reasoning as the notifier and secrets guards: `ratelimit.wait` is a
+    module that really sleeps, sitting on a path any test exercising a failing
+    model call reaches — and after #261 those waits are seconds, not the
+    instant retry they replaced. Two tests of a dead backend used to cost 3
+    seconds of wall clock apiece for nothing.
+
+    The DELAY is still computed and still recorded, so `waited_s` and the
+    retry-vs-give-up decision stay under test; only the sleeping is skipped.
+    `tests/test_ratelimit.py` captures the real function at import time and
+    restores it, which is what keeps the waiting itself covered.
+    """
+    monkeypatch.setattr(
+        ratelimit_module, "wait", lambda delay, stop, note=None: stop.is_set()
+    )

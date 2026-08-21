@@ -42,6 +42,7 @@ from . import (
     evidence,
     files,
     media,
+    ratelimit,
     recordings,
     rule_compiler,
     rules,
@@ -345,7 +346,19 @@ EMPTY_RESPONSE = (
 
 
 class ModelUnavailable(RuntimeError):
-    """The model call failed after a retry (backend down, overloaded, or OOM)."""
+    """The model call failed after every attempt it was entitled to."""
+
+
+# How many times one model call may be issued before the task gives up. Three,
+# not the old two, because the attempts are now SPACED (ratelimit.backoff_delay)
+# and CLASSIFIED — a permanent failure spends one attempt instead of two, so a
+# transient one can afford three. `docs/rate-limits.md`.
+MODEL_CALL_ATTEMPTS = 3
+
+# How much of a provider's error text a `model_error` record keeps. A quota
+# error carries a documentation URL and a details array; the sentence that says
+# what went wrong is at the front of all of them.
+MODEL_ERROR_CHARS = 700
 
 
 class TaskCancelled(Exception):
@@ -1006,7 +1019,7 @@ KNOWLEDGE_WRITE_TOOLS = frozenset({"remember", "forget_memory"})
 # an answer always needs the tool steps and the knowledge step alongside the
 # gate records. `thinking` is deliberately left out: it is the high-volume kind
 # and buys nothing #197 asks for. Renderless kinds are stamped by _emit_record.
-TURN_STAMPED_STEPS = frozenset({"tool_start", "tool", "knowledge", "trim"})
+TURN_STAMPED_STEPS = frozenset({"tool_start", "tool", "knowledge", "trim", "model_error"})
 
 # Decisions meaning THE ACTION DID NOT HAPPEN. A step carrying one is never
 # green, whichever path set it — see _emit_tool_step for why this is one rule
@@ -1064,6 +1077,24 @@ def format_secs(seconds: float) -> str:
 
 def format_tokens(count: int) -> str:
     return f"{count / 1000:.1f}k" if count >= 1000 else str(count)
+
+
+def _usage_detail(response: Any) -> dict | None:
+    """The provider's own usage report, units intact (#262).
+
+    The adapted backends attach it; ollama does not, so its two counts are
+    labelled here instead — `prompt_eval_count` skips KV-cache-reused prefix
+    tokens, which is a THIRD meaning of "input tokens" and the reason the label
+    travels with the number rather than being assumed by whoever reads it.
+    """
+    if (detail := getattr(response, "usage", None)) and isinstance(detail, dict):
+        return detail
+    prompt, completion = _usage(response)
+    if not prompt and not completion:
+        return None
+    return backends.usage_detail(
+        backends.INPUT_EXCLUDES_KV_REUSE, input=prompt, output=completion
+    )
 
 
 def _usage(response: Any) -> tuple[int, int]:
@@ -1250,6 +1281,40 @@ def _safe_args(args: dict, cap: int) -> tuple[dict, int]:
         except (TypeError, ValueError):
             out[str(key)] = repr(value)[:cap]
     return out, dropped
+
+
+def _model_error_line(
+    failure: ratelimit.CallFailure, attempt: int, delay: float, final: bool
+) -> str:
+    """The terminal's one line about a failed call. Says what kind of failure it
+    was and what happens next, because "model call failed" answered neither."""
+    what = failure.kind.replace("_", " ")
+    if not final:
+        return f"✕ {what} (attempt {attempt}) — retrying in {delay:.0f}s"
+    if failure.exhausted:
+        return f"✕ {what}: the quota is spent, not merely busy — not retrying"
+    if not failure.retryable:
+        return f"✕ {what} — retrying cannot change this, not retrying"
+    return f"✕ {what} — gave up after {attempt} attempts"
+
+
+def _unavailable_text(failure: ratelimit.CallFailure | None) -> str:
+    """What the user is told when every attempt is spent.
+
+    A raw provider traceback answered the wrong question. Whether waiting helps
+    is the only thing the reader can act on, so it leads — and a spent daily
+    quota says so rather than inviting a Retry that cannot work.
+    """
+    if failure is None:  # unreachable in the loop; cheaper than an assert
+        return "the model call failed"
+    if failure.exhausted:
+        return (
+            f"{failure.kind.replace('_', ' ')}: this quota is spent rather than "
+            f"busy — retrying will not help until it resets. {failure.text}"
+        )
+    if not failure.retryable:
+        return f"{failure.kind.replace('_', ' ')} (not retryable): {failure.text}"
+    return f"{failure.kind.replace('_', ' ')} after {MODEL_CALL_ATTEMPTS} attempts: {failure.text}"
 
 
 def _capped(text: str, cap: int) -> tuple[str, int]:
@@ -2497,8 +2562,21 @@ class Agent:
     def _chat_turn(self) -> tuple[str, list[dict], tuple[int, int], list | None, str]:
         """One model call; returns (content, normalized tool_calls, token usage,
         provider-native raw blocks or None, thinking text or ""). Streams
-        content through on_token when set. Retries once on a transport error (a
-        busy/overloaded local Ollama commonly drops or refuses a request)."""
+        content through on_token when set.
+
+        Every failure here is CLASSIFIED, WAITED OUT, and RECORDED (#261). This
+        loop used to catch every exception identically, echo one line that
+        reached no log, and re-issue the identical request microseconds later.
+        For a 429 that is worse than doing nothing — the retry re-sends the same
+        request (~120k tokens in the incident that named this) into the quota
+        that just ran out, while the SDK underneath was retrying too, so one
+        visible "retrying once…" was six HTTP requests. For a 400 or a wrong API
+        key it spent a request to relearn a permanent answer. And because the
+        line was an `echo`, it never reached the session log at all: a cold
+        reload showed a silent gap where the failure had been, which is the
+        absence-as-evidence failure `docs/trace-contract.md` §0 exists to stop.
+        `docs/rate-limits.md`.
+        """
         self._refresh_plugin_tools()
         menu = tools.TOOL_SCHEMAS + self._plugin_defs
         self._model_call += 1
@@ -2510,23 +2588,80 @@ class Agent:
             options={"num_ctx": self.num_ctx},
             think=self.think,
         )
-        last_error: Exception | None = None
-        for attempt in range(2):
+        last: ratelimit.CallFailure | None = None
+        for attempt in range(1, MODEL_CALL_ATTEMPTS + 1):
             try:
                 turn = self._one_chat(kwargs)
             except TaskCancelled:
                 raise  # a user stop is not a transport error — never retry
             except Exception as exc:  # noqa: BLE001 — surface, don't crash the REPL
-                last_error = exc
-                if attempt == 0:
-                    self.echo(f"model call failed ({exc}); retrying once…")
+                last = ratelimit.classify(exc)
+                final = attempt >= MODEL_CALL_ATTEMPTS or not last.retryable
+                delay = 0.0 if final else ratelimit.backoff_delay(last, attempt)
+                self._record_model_error(last, attempt, delay, final)
+                if final:
+                    break
+                if ratelimit.wait(delay, self._cancel, self.status.note):
+                    # A Stop during the wait is a stop, not a failed call: the
+                    # user is owed the cancel path, not a ModelUnavailable that
+                    # blames the provider for their own decision.
+                    raise TaskCancelled from exc
             else:
                 # The ONE emit point for what the model produced, so no caller
                 # can forget it: _chat_turn is reached by the tool-call path,
                 # the text-only path and the final no-tools turn alike.
                 self._record_reasoning(turn)
                 return turn
-        raise ModelUnavailable(str(last_error)) from last_error
+        raise ModelUnavailable(_unavailable_text(last))
+
+    def _record_model_error(
+        self, failure: ratelimit.CallFailure, attempt: int, delay: float, final: bool
+    ) -> None:
+        """A failed model call, as evidence (#261).
+
+        RENDERED, not log-only, and that is the whole point. This was
+        `self.echo(...)` — a live-transport event that reached viewers and the
+        hot transcript and NEVER the session log, so `grep -c '"echo"'` on the
+        log of the session that motivated this returns 0. The owner reading the
+        trace afterwards found a silent gap where a quota failure had been, and
+        `aish explain` could not see it at all. Contract §0 corollary 2: absence
+        must never be the evidence.
+
+        Stamped with `model_call` so a dossier can join it to the `brief` that
+        says what the model was handed and the `reasoning` that says what came
+        back — the join is the reason the record is worth writing.
+
+        `sent_chars` and not an estimated token count, deliberately: chars are a
+        measured fact, tokens here would be a model of one, and the two must not
+        wear the same unit as the provider's own number (#262).
+        """
+        step: dict = {
+            "kind": "model_error",
+            "model_call": self._model_call,
+            "provider": self.provider,
+            "model": self.model,
+            "attempt": attempt,
+            "attempts": MODEL_CALL_ATTEMPTS,
+            # Passed in, never re-derived from `delay`: a provider may
+            # legitimately answer "Retry-After: 0", and the last attempt of a
+            # retryable failure also waits zero. Both would read as the opposite
+            # of what happened — the confident-false-record class §0 is about.
+            "action": "give_up" if final else "retry",
+            "sent_chars": self._total_chars(),
+            "sent_messages": len(self.messages),
+            **failure.record(),
+        }
+        if delay:
+            step["waited_s"] = round(delay, 3)
+        text, dropped = _capped(failure.text, MODEL_ERROR_CHARS)
+        step["text"] = text
+        if dropped:
+            step["truncated"] = dropped
+            step["cap_source"] = "constant:MODEL_ERROR_CHARS"
+        self._emit_step(**step)
+        # The terminal has no trace timeline to draw the row on, so it gets the
+        # sentence instead — `_note` is silent wherever `on_step` renders.
+        self._note(_model_error_line(failure, attempt, delay, final))
 
     def _record_reasoning(self, turn: tuple) -> None:
         """Everything the model produced on one call, in full (#240).
@@ -2564,7 +2699,7 @@ class Agent:
             record["said"] = said_text
             if said_dropped:
                 record["said_truncated"] = said_dropped
-        for key in ("stop", "blocks", "malformed"):
+        for key in ("stop", "blocks", "malformed", "usage"):
             if meta.get(key):
                 record[key] = meta[key]
         if meta.get("synthesized"):
@@ -2595,6 +2730,7 @@ class Agent:
             content = message.content or ""
             raw_calls = message.tool_calls or []
             usage = _usage(response)
+            detail = _usage_detail(response)
             raw_blocks = getattr(message, "raw_blocks", None)
             thinking = getattr(message, "thinking", None) or ""
             stop = _stop_reason(message, response)
@@ -2604,6 +2740,7 @@ class Agent:
             thinking_head = ""
             raw_calls = []
             usage = (0, 0)
+            detail = None
             for chunk in self.chat(stream=True, **kwargs):
                 if self._cancel.is_set():
                     # Abandoning the iterator closes the connection, which
@@ -2642,6 +2779,7 @@ class Agent:
                     raw_blocks = message.raw_blocks
                 if _usage(chunk) != (0, 0):  # counts arrive on the final chunk
                     usage = _usage(chunk)
+                    detail = _usage_detail(chunk)
                 # Last non-empty wins: like usage, the reason arrives on the
                 # final chunk, and an earlier chunk must not blank it.
                 stop = _stop_reason(message, chunk) or stop
@@ -2651,6 +2789,7 @@ class Agent:
                 self.on_token("\n")
         self._response_meta = {
             "stop": stop,
+            "usage": detail,
             "synthesized": bool(getattr(message, "synthesized", False)),
             # Block TYPES only, never their content: this is what reveals a
             # provider-redacted thinking block without storing anything.

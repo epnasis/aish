@@ -3013,6 +3013,34 @@ function traceStep(step) {
     updateTraceHead(t);
     return;
   }
+  if (step.kind === "model_error") {
+    // A failed model call draws a row for the same reason `trim` does: it
+    // CONTRADICTS what is in front of you. Before #261 this was a grey echo
+    // bubble — live transport only, never written to the session log — so a
+    // retried-then-recovered call left the trace showing an unexplained gap,
+    // and a cold reload erased even the bubble. Absence as evidence, which is
+    // the one thing docs/trace-contract.md §0 exists to prevent.
+    t.started += 1;
+    const what = String(step.class || "error").replace(/_/g, " ");
+    const status = step.status ? ` (${step.status})` : "";
+    let tail;
+    if (step.action === "retry") {
+      const secs = Math.round(step.waited_s || 0);
+      tail = secs ? `attempt ${step.attempt} — retrying in ${secs}s`
+                  : `attempt ${step.attempt} — retrying`;
+    } else if (step.scope === "long") {
+      // The distinction the whole record exists for: a spent quota is not a
+      // busy one, and telling the two apart is what stops a pointless Retry.
+      tail = "this quota is spent, not busy — retrying will not help";
+    } else if (step.retryable === false) {
+      tail = "retrying cannot change this";
+    } else {
+      tail = `gave up after ${step.attempt} of ${step.attempts} attempts`;
+    }
+    traceRow(t, traceSvg("denied", "var(--red)"), `Model call failed — ${what}${status}`, tail);
+    updateTraceHead(t);
+    return;
+  }
   if (step.kind === "tool_start") { toolStart(t, step); return; }
   if (step.kind === "tool") { toolFinish(t, step); return; }
 }

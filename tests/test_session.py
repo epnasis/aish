@@ -2185,3 +2185,53 @@ class TestTrimReplaysLikeItRendered:
         from aish.session import RENDERLESS_STEPS
 
         assert "trim" not in RENDERLESS_STEPS
+
+
+class TestModelErrorReplaysLikeItRendered:
+    """A failed model call is transcript content, not governance evidence (#261).
+
+    It was `echo` — a Bridge event that reached live viewers and the hot
+    transcript and was never written here at all. So the same turn showed a
+    grey bubble while you watched it and NOTHING when you opened the chat
+    again, which for a call that failed and then recovered means the trace
+    silently omits the whole event.
+    """
+
+    def _log(self, tmp_path, step):
+        path = tmp_path / "session-20260821-000000-000000.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in [
+            {"ts": "2026-08-21T00:00:00", "kind": "message", "role": "user", "content": "go"},
+            {"ts": "2026-08-21T00:00:01", "kind": "trace", "step": step},
+            {"ts": "2026-08-21T00:00:02", "kind": "trace",
+             "step": {"kind": "thinking", "secs": 1}},
+            {"ts": "2026-08-21T00:00:03", "kind": "message", "role": "assistant",
+             "content": "done"},
+        ]) + "\n")
+        return SessionLog.reconstruct_events(path)
+
+    def test_a_model_error_survives_replay(self, tmp_path):
+        events = self._log(tmp_path, {
+            "kind": "model_error", "class": "rate_limit", "status": 429,
+            "attempt": 1, "attempts": 3, "action": "retry", "waited_s": 27.0,
+            "scope": "short", "retry_after_source": "body", "model_call": 4,
+        })
+        errors = [e for e in events
+                  if e.get("type") == "step" and e.get("kind") == "model_error"]
+        assert len(errors) == 1, events
+        # …carrying what the row needs to say whether a Retry could ever work.
+        assert errors[0]["scope"] == "short"
+        assert errors[0]["waited_s"] == 27.0
+        assert errors[0]["action"] == "retry"
+
+    def test_the_turn_still_replays_its_answer_around_the_failure(self, tmp_path):
+        """A recovered call is not a failed turn: the answer is still the answer."""
+        events = self._log(tmp_path, {
+            "kind": "model_error", "class": "transport", "attempt": 1,
+            "attempts": 3, "action": "retry",
+        })
+        assert any(e.get("type") == "done" and e.get("result") == "done" for e in events)
+
+    def test_it_is_not_registered_renderless(self):
+        from aish.session import RENDERLESS_STEPS
+
+        assert "model_error" not in RENDERLESS_STEPS

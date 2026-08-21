@@ -66,6 +66,8 @@ Merge back to main after tests pass, then remove the worktree. `make ship` alway
 | `rules.py`, `rule_compiler.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
 | `tool_plugins.py`, `secrets.py` | `docs/tools-layer.md` |
 | `explain.py`, `evidence.py`, the `brief` record | `docs/diagnostics.md` |
+| `ratelimit.py`, `_chat_turn`'s retry loop, anything that retries a model call | `docs/rate-limits.md` |
+| anything that reports or attributes token spend, `usage_detail` | `docs/token-accounting.md` |
 | `export.py` | `docs/export-pdf.md` |
 
 **New rationale goes in the area's doc, never here.** This file spent a year as a decision log — a paragraph per issue — and grew past the 150k-char limit Claude Code warns at, which is the point where the whole thing stops being reliable context. `tests/test_claude_md_size.py` fails if it passes 40k. Add a line here only for a rule that applies to *every* task; everything else belongs in `docs/`.
@@ -113,6 +115,9 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`explain.py` + `evidence.py`** — reading back why a turn went the way it did: `aish explain` assembles a
   dossier from recorded evidence only, and the content-addressed evidence store holds the bytes it points at,
   purgeably. No model call, and it must never be able to re-derive behaviour from source. → `docs/diagnostics.md`
+- **`ratelimit.py`** — what a failed model call WAS (quota vs blip vs permanent), how long to
+  wait, and the record that says it happened. There must be exactly one retry policy and aish
+  owns it; a 429 that recovered still leaves evidence. → `docs/rate-limits.md`
 - **`export.py`** — local Markdown → PDF for the web UI; the text never leaves the machine. → `docs/export-pdf.md`
 - **`dir_ignore.py`** — the configurable gitignore-style ignore list shared by the web folder browser and @-file completion. Name-level `fnmatch` on basenames only — it must never add a per-subfolder stat. → `docs/cli.md`
 
