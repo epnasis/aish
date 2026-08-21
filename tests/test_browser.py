@@ -1704,11 +1704,109 @@ class TestSigningInTheSearchProfile:
 
     def test_browser_search_says_what_that_profile_is_for(self, tmp_path, monkeypatch):
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
-        text = browser.command("search")
+        text = browser.command("anon")
         assert "search-profile" in text
         assert "nothing" in text  # signed into nothing, and it says so
-        assert "/browser search <url>" in text
+        assert "/browser anon <url>" in text
 
     def test_the_bare_listing_points_at_it(self, tmp_path, monkeypatch):
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
-        assert "/browser search" in browser.command("")
+        assert "/browser anon" in browser.command("")
+
+
+class TestTheAddressBar:
+    """`as_address` — the location box takes an address OR a search.
+
+    It took only addresses, so typing `krzyżacy 1960 obsada` became
+    `https://krzyżacy 1960 obsada`, Chrome refused it, and the view came back
+    blank. Searching from aish's own browser meant typing a google.com/search
+    URL by hand. Deciding between the two is a heuristic and there is no version
+    that is not; these are Chrome's rules, and the DEFAULT is what matters — an
+    unrecognised single word is far more often something to look up than a host
+    to visit."""
+
+    def test_an_explicit_scheme_is_taken_at_its_word(self):
+        assert browser.as_address("https://x.pl/a?b=1") == "https://x.pl/a?b=1"
+        assert browser.as_address("http://x.pl") == "http://x.pl"
+
+    def test_anything_with_a_space_in_it_is_a_search(self):
+        """No address has a space, so this needs no cleverness at all."""
+        for typed in ("krzyżacy 1960 obsada", "site:python.org tutorial", "2 + 2"):
+            assert "google.com/search" in browser.as_address(typed), typed
+
+    def test_a_dotted_host_is_an_address(self):
+        assert browser.as_address("python.org") == "https://python.org"
+        assert browser.as_address("eon.pl/mojeon") == "https://eon.pl/mojeon"
+
+    def test_a_bare_word_is_a_search_not_a_hostname(self):
+        """The default, and the reason the whole thing is usable: `nbp` is a
+        thing to look up, not a machine to visit."""
+        assert "google.com/search" in browser.as_address("nbp")
+        assert "google.com/search" in browser.as_address("anon")
+
+    def test_a_number_with_a_dot_is_not_a_host(self):
+        """`3.14` is shaped like a host and is never one — the last label has
+        to start with a letter."""
+        assert "google.com/search" in browser.as_address("3.14")
+
+    def test_the_lan_gets_http_because_nothing_there_serves_tls(self):
+        """His Home Assistant and aish's own web app are both plain http, and
+        https there fails rather than falling back."""
+        assert browser.as_address("localhost:8899") == "http://localhost:8899"
+        assert browser.as_address("192.168.10.20:8787") == "http://192.168.10.20:8787"
+
+    def test_nothing_typed_is_nothing_to_open(self):
+        assert browser.as_address("   ") == ""
+
+
+class TestRecentPages:
+    """Where the view has been, so reopening is a tap (#249)."""
+
+    def test_one_row_per_site_newest_first(self, tmp_path, monkeypatch):
+        """The owner's own framing: search from here a few times and the ten
+        most recent PAGES are ten google.com rows, pushing off the list the
+        address he opened it to find."""
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        browser.remember_page("https://eon.pl/a", "E.ON")
+        browser.remember_page("https://google.com/search?q=1", "one")
+        browser.remember_page("https://google.com/search?q=2", "two")
+        rows = browser.recent_pages()
+        assert [r["host"] for r in rows] == ["google.com", "eon.pl"]
+        assert rows[0]["url"].endswith("q=2")  # the newest visit to that site
+
+    def test_it_remembers_which_profile_the_page_was_open_in(
+        self, tmp_path, monkeypatch
+    ):
+        """Reopening a page in the wrong browser silently swaps which sessions
+        are attached to it."""
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        browser.remember_page("https://x.pl/", "X", cold=True)
+        assert browser.recent_pages()[0]["profile"] == "search"
+
+    def test_it_is_bounded(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        for i in range(browser.RECENT_MAX + 10):
+            browser.remember_page(f"https://site{i}.example/", f"n{i}")
+        assert len(browser.recent_pages()) == browser.RECENT_MAX
+
+    def test_a_page_that_is_not_a_page_is_not_remembered(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        for junk in ("about:blank", "", "chrome://newtab", "data:text/html,x"):
+            browser.remember_page(junk, "junk")
+        assert browser.recent_pages() == []
+
+    def test_a_corrupt_file_costs_the_frame_nothing(self, tmp_path, monkeypatch):
+        """This runs alongside a screenshot; it may never raise into it."""
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        path = browser.recent_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        assert browser.recent_pages() == []
+        browser.remember_page("https://x.pl/", "X")
+        assert browser.recent_pages()[0]["host"] == "x.pl"
+
+    def test_forgetting_a_site_drops_only_that_one(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        browser.remember_page("https://a.pl/", "A")
+        browser.remember_page("https://b.pl/", "B")
+        assert [r["host"] for r in browser.forget_page("a.pl")] == ["b.pl"]

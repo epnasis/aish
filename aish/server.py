@@ -3994,6 +3994,10 @@ class WebServer:
             self._view_client = None
 
         def run():
+            if action == "recent":
+                return browser.recent_pages()
+            if action == "forget_recent":
+                return browser.forget_page(str(message.get("host", "")))
             if action == "open":
                 return browser.view_open(
                     str(message.get("url", "")).strip(),
@@ -4060,6 +4064,12 @@ class WebServer:
                     # after the page moved on.
                     "token": message.get("token"),
                 }
+            )
+            return
+
+        if action in ("recent", "forget_recent"):
+            await client.ws.send_json(
+                {"type": "browser_view", "action": "recent", "items": result}
             )
             return
 

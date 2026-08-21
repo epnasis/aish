@@ -147,7 +147,7 @@ unless you explicitly *Share* a selection.
 | `read_media` | look at a video or audio recording — a YouTube link, any media URL, or a file on disk. Returns a map (length, chapters, captions) and frames from any moment, each labelled with the time it actually came from | auto |
 | `read_pdf` | read a PDF — attached, on disk, or linked — keeping columns, tables and page numbers; `pages=` and `search=` for a long one | auto |
 | `browse` / `browse_act` | Open a page in your signed-in browser and get a **numbered list of its controls**, then press one — for what lives behind a button rather than a URL. Only controls that could actually be pressed are listed; anything shut in a menu, an off-screen panel or behind a dialog is counted so aish looks for the opener instead of guessing a URL. A file a click downloads is saved and can be read | asks once per site per task, then again by name for anything that pays, deletes or cancels; **passwords are never typed** |
-| `web_search` / `read_url` | DuckDuckGo + fetch a page as readable text; a bot-blocked or JavaScript-only page is re-read in a **real browser** on your machine, and a site you're signed into is read **through your signed-in session** from the start | auto; every query/URL echoed; public hosts only (SSRF-guarded); **reading a site you're signed into asks first** |
+| `web_search` / `read_url` | **Two search indexes at once** — DuckDuckGo, and Google's own results page read in a browser signed into nothing — merged, one result per page; then fetch a page as readable text; a bot-blocked or JavaScript-only page is re-read in a **real browser** on your machine, and a site you're signed into is read **through your signed-in session** from the start | auto; every query/URL echoed; public hosts only (SSRF-guarded); **reading a site you're signed into asks first** |
 | `read_docs` | man page → `--help` fallback, full-text topic search | auto |
 | `remember` / `forget_memory` | save or prune one fact in structured memory | auto (echoed) |
 | `read_skill` / `recall` | load a playbook; ranked search across skills, memory & past sessions | auto (echoed) |
@@ -230,8 +230,18 @@ own browser is. `/browser <url>` opens a real window on the Mac for you to sign
 in at; the session is kept, and every later read of that site is made as you.
 Because those reads carry your session, each one **asks you first** — a page
 you didn't ask for must never quietly pull your account data into a chat.
-`/browser` alone shows the profile and which sites you're signed into,
-`/browser forget <host>` drops one, `/browser close` shuts it down.
+`/browser` alone opens the browser on a list of the sites it has been to
+recently — one row per site, so a run of searches doesn't bury everything else
+— and each row reopens in the profile it was opened in. The address bar takes
+**a search as readily as an address**: anything that isn't shaped like a URL is
+looked up, the way your own browser's does. `/browser forget <host>` stops
+treating a site as signed in and `/browser close` shuts it down.
+
+Searching has a **second, separate profile** that is signed into nothing — it
+is what `web_search` reads results pages with, so a search never carries your
+sessions and never needs your approval. `/browser anon` shows it;
+`/browser anon <url>` signs it in, if you ever want it to have an identity of
+its own.
 
 Chrome's automation flags are suppressed by default so sites that block
 automation stay readable; that is anti-detection and may be contrary to a

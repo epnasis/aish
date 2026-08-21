@@ -783,7 +783,10 @@ NO_RESULTS = (
 # and a wall takes all search down. Put it behind and a wall costs nothing,
 # because the first index has already answered.
 SEARCH_ENGINE = "google.com"
-SEARCH_ENGINE_URL = "https://www.google.com/search?q={q}"
+# The same constant the address bar sends a typed phrase to (`browser.SEARCH_URL`).
+# One engine, named once: two copies of a URL template drift, and the landing
+# check below is derived from this one.
+SEARCH_ENGINE_URL = browser.SEARCH_URL
 # Where a search is allowed to have ended up. Derived from the one URL aish
 # builds, so changing the engine cannot leave this pointing at the old one.
 SEARCH_RESULT_HOSTS = frozenset(
