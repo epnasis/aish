@@ -406,3 +406,306 @@ class TestModelErrorRecord:
 
 
 RAISE_TIMES = {"n": 0}
+
+
+class TestEstimate:
+    def test_chars_over_three_matches_the_history_budget_convention(self):
+        messages = [{"role": "user", "content": "x" * 300}]
+        assert ratelimit.estimate_tokens(messages) == 100
+
+    def test_images_are_counted_because_chars_cannot_see_them(self):
+        """A vision-heavy history estimated on text alone under-reserves by
+        thousands of tokens per image, and every delivered image is re-encoded
+        into every later request."""
+        text_only = [{"role": "user", "content": "hi"}]
+        with_image = [{"role": "user", "content": "hi", "images": ["<blob>"]}]
+        assert (
+            ratelimit.estimate_tokens(with_image)
+            - ratelimit.estimate_tokens(text_only)
+            == ratelimit.IMAGE_TOKENS
+        )
+
+    def test_tool_calls_are_not_free(self):
+        calls = [{"role": "assistant", "content": "", "tool_calls": [{"f": "x" * 300}]}]
+        assert ratelimit.estimate_tokens(calls) > 0
+
+    def test_nothing_to_send_estimates_nothing(self):
+        assert ratelimit.estimate_tokens(None) == 0
+        assert ratelimit.estimate_tokens([]) == 0
+
+
+class TestGovernorLimits:
+    """aish cannot know which billing tier a key is on, so the shipped model of
+    the world is "no ceiling known" — throttling a paid key on a guessed
+    free-tier number would be a self-inflicted outage. A 429 is the moment the
+    world states the ceiling."""
+
+    def test_nothing_is_enforced_until_something_is_known(self):
+        governor = ratelimit.Governor()
+        assert governor.limits("gemini:flash").source == "none"
+        for _ in range(50):
+            governor.reserve("gemini:flash", 100_000, ceiling=0).settle(100_000)
+
+    def test_the_owner_can_state_their_tier(self, monkeypatch):
+        monkeypatch.setenv("AISH_RATE_LIMIT_GEMINI", "rpm=10,tpm=250000")
+        limits = ratelimit.Governor().limits("gemini:gemini-3.5-flash")
+        assert (limits.rpm, limits.tpm, limits.source) == (10, 250_000, "env")
+
+    def test_a_model_specific_override_beats_the_provider_one(self, monkeypatch):
+        monkeypatch.setenv("AISH_RATE_LIMIT_GEMINI", "rpm=10")
+        monkeypatch.setenv("AISH_RATE_LIMIT_GEMINI:FLASH", "rpm=99")
+        assert ratelimit.Governor().limits("gemini:flash").rpm == 99
+
+    def test_a_429_teaches_the_ceiling(self):
+        """The limit is published, static and contended only by yourself, so it
+        is corrected ONCE to just under the rate that produced the failure —
+        never nudged, never re-probed upward at a full request's cost."""
+        now = [0.0]
+        governor = ratelimit.Governor(clock=lambda: now[0])
+        for _ in range(10):
+            governor.reserve("gemini:flash", 1_000).settle(1_000)
+        governor.observe("gemini:flash", ratelimit.classify(FakeAPIError("q", status=429)))
+        limits = governor.limits("gemini:flash")
+        assert limits.source == "observed"
+        assert limits.rpm == 9  # 10 requests * 0.9
+        assert limits.tpm == 9_000
+
+    def test_a_second_429_never_raises_a_ceiling(self):
+        """The only evidence a refusal carries is an UPPER bound, so a later
+        observation may tighten a ceiling and must never relax one."""
+        now = [0.0]
+        governor = ratelimit.Governor(clock=lambda: now[0])
+        for _ in range(10):
+            governor.reserve("g:m", 1_000).settle(1_000)
+        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        tight = governor.limits("g:m").rpm
+        now[0] = ratelimit.WINDOW_S + 1  # a fresh window, well under the ceiling
+        for _ in range(3):
+            governor.reserve("g:m", 10).settle(10)
+        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        assert governor.limits("g:m").rpm <= tight
+
+    def test_tightening_is_a_minimum_not_a_replacement(self):
+        assert ratelimit._tightest(9, 30) == 9
+        assert ratelimit._tightest(30, 9) == 9
+        assert ratelimit._tightest(None, 9) == 9
+
+    def test_a_stated_tier_outranks_an_inferred_one(self, monkeypatch):
+        monkeypatch.setenv("AISH_RATE_LIMIT_G", "rpm=5")
+        governor = ratelimit.Governor()
+        governor.reserve("g:m", 10).settle(10)
+        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429)))
+        assert governor.limits("g:m").source == "env"
+
+    def test_a_non_rate_failure_teaches_nothing(self):
+        governor = ratelimit.Governor()
+        governor.observe("g:m", ratelimit.classify(FakeAPIError("x", status=500)))
+        assert governor.limits("g:m").source == "none"
+
+
+class TestGovernorAdmission:
+    def _governed(self, rpm=None, tpm=None):
+        now = [0.0]
+        governor = ratelimit.Governor(clock=lambda: now[0])
+        governor._limits["g:m"] = ratelimit.Limits(rpm=rpm, tpm=tpm, source="env")
+        return governor, now
+
+    def test_requests_per_minute_binds(self):
+        governor, _ = self._governed(rpm=2)
+        governor.reserve("g:m", 1).settle(1)
+        governor.reserve("g:m", 1).settle(1)
+        with pytest.raises(ratelimit.RateLimited, match="waited"):
+            governor.reserve("g:m", 1, ceiling=0)
+
+    def test_tokens_per_minute_binds_independently(self):
+        governor, _ = self._governed(tpm=1_000)
+        governor.reserve("g:m", 900).settle(900)
+        with pytest.raises(ratelimit.RateLimited, match="waited"):
+            governor.reserve("g:m", 900, ceiling=0)
+
+    def test_headroom_returns_when_the_window_rolls(self):
+        governor, now = self._governed(rpm=1)
+        governor.reserve("g:m", 1).settle(1)
+        now[0] = ratelimit.WINDOW_S + 1
+        governor.reserve("g:m", 1, ceiling=0)  # no longer blocked
+
+    def test_debited_pessimistically_before_the_call(self):
+        """Optimistic accounting lets concurrent calls overshoot together — and
+        that overshoot IS the 429 this exists to prevent."""
+        governor, now = self._governed(tpm=1_000)
+        governor.reserve("g:m", 900)  # never settled
+        assert governor._window("g:m").totals(now[0]) == (1, 900)
+
+    def test_the_estimate_is_corrected_to_the_truth(self):
+        governor, now = self._governed(tpm=10_000)
+        governor.reserve("g:m", 900).settle(4_000)
+        assert governor._window("g:m").totals(now[0]) == (1, 4_000)
+
+    def test_a_refusal_keeps_the_request_but_drops_its_tokens(self):
+        """The request happened and plausibly counts against RPM; tokens the
+        provider never processed must not crowd out the retry."""
+        governor, now = self._governed(tpm=10_000)
+        governor.reserve("g:m", 900).rejected()
+        assert governor._window("g:m").totals(now[0]) == (1, 0)
+
+    def test_an_abandoned_stream_keeps_its_estimate(self):
+        """Usage arrives on the final chunk, so a stream nobody finished reports
+        nothing — and the server may well have generated the whole response.
+        Eating the estimate is the only direction that errs safe."""
+        governor, now = self._governed(tpm=10_000)
+        governor.reserve("g:m", 900)  # dropped on the floor, never settled
+        assert governor._window("g:m").totals(now[0]) == (1, 900)
+
+    def test_a_call_bigger_than_the_whole_budget_is_refused_not_queued(self):
+        """A naive "wait until it fits" blocks forever. The caller is told the
+        one thing that can work: make the request smaller."""
+        governor, _ = self._governed(tpm=1_000)
+        with pytest.raises(ratelimit.RateLimited, match="cannot be sent at any rate"):
+            governor.reserve("g:m", 50_000)
+
+    def test_a_spent_quota_refuses_immediately_rather_than_queueing(self):
+        governor, _ = self._governed(rpm=100)
+        body = {"error": {"details": [{"violations": [{"quotaId": "RequestsPerDay"}]}]}}
+        governor.observe("g:m", ratelimit.classify(FakeAPIError("q", status=429, body=body)))
+        with pytest.raises(ratelimit.RateLimited, match="spent rather than busy"):
+            governor.reserve("g:m", 1)
+
+    def test_the_latch_lifts_when_the_quota_resets(self):
+        governor, now = self._governed(rpm=100)
+        exc = FakeAPIError("q", status=429, headers={"Retry-After": "1800"})
+        governor.observe("g:m", ratelimit.classify(exc))
+        assert governor.exhausted_for("g:m") == 1800
+        now[0] = 1801
+        assert governor.exhausted_for("g:m") is None
+        governor.reserve("g:m", 1)
+
+    def test_a_stop_while_queued_is_a_cancel_not_a_provider_failure(self):
+        governor, _ = self._governed(rpm=1)
+        governor.reserve("g:m", 1).settle(1)
+        with pytest.raises(ratelimit.Cancelled):
+            governor.reserve("g:m", 1, should_stop=lambda: True)
+
+    def test_a_governor_refusal_is_marked_as_never_sent(self):
+        """"the provider refused" and "aish declined to ask" look identical in a
+        bare error string and mean opposite things about whose budget moved."""
+        failure = ratelimit.classify(ratelimit.RateLimited("nope", retry_after_s=60))
+        assert failure.is_rate_limit
+        assert failure.sent is False
+        assert not failure.retryable
+        assert failure.record()["sent"] is False
+
+
+class TestGovernorIsShared:
+    """Process-global, not per chat: aish-web runs many sessions as worker
+    threads against ONE API key, so a governor per session would be N programs
+    each convinced it had the whole budget."""
+
+    def test_one_governor_serves_the_whole_process(self):
+        assert ratelimit.governor() is ratelimit.governor()
+
+    def test_two_callers_share_one_budget(self):
+        governor = ratelimit.reset_governor()
+        governor._limits["g:m"] = ratelimit.Limits(rpm=2, source="env")
+        # Two unrelated consumers of the same key — an agent turn and, say, the
+        # session retitler — draw from the same window.
+        ratelimit.reserve_for_call("g:m", [{"content": "a"}]).settle(1)
+        ratelimit.reserve_for_call("g:m", [{"content": "b"}]).settle(1)
+        with pytest.raises(ratelimit.RateLimited):
+            with ratelimit.hooks(ceiling=0):
+                ratelimit.reserve_for_call("g:m", [{"content": "c"}])
+
+    def test_keys_are_per_model_not_per_provider(self):
+        """Quotas are per model on the tiers this matters for, and one process
+        genuinely mixes models on one key."""
+        governor = ratelimit.reset_governor()
+        governor._limits["g:flash"] = ratelimit.Limits(rpm=1, source="env")
+        governor.reserve("g:flash", 1).settle(1)
+        governor.reserve("g:pro", 1, ceiling=0).settle(1)  # a different budget
+
+    def test_an_unattended_session_queues_far_less_than_a_user(self):
+        """It holds a thread from the bounded worker pool, which exists so a
+        parked session cannot starve short user actions."""
+        assert ratelimit.UNATTENDED_WAIT_CEILING_S < ratelimit.DEFAULT_WAIT_CEILING_S
+
+    def test_hooks_do_not_leak_past_their_block(self):
+        with ratelimit.hooks(ceiling=3):
+            assert ratelimit.current_hooks().ceiling == 3
+        assert ratelimit.current_hooks().ceiling is None
+
+
+class TestSpendBudget:
+    """History size is the spend control on a metered backend, and nothing
+    modelled it (#261).
+
+    `HISTORY_TOKEN_CEILING` sizes history against the CONTEXT WINDOW — what one
+    request may contain. What a MINUTE of requests may contain is a different
+    constraint, and in the incident it was the binding one: history sat at 130k
+    tokens so a 300k ceiling never fired, while 16 calls of that size spent
+    1.91M input tokens in one minute against a far smaller quota.
+    """
+
+    def agent(self, provider="gemini", model="gemini-3.5-flash"):
+        from tests.test_agent import Agent, model_says
+
+        agent = Agent(model=model, approve=lambda _c: True,
+                      client_chat=lambda **kw: model_says("ok"))
+        agent.provider = provider
+        return agent
+
+    def test_nothing_changes_while_no_limit_is_known(self):
+        """A key that never hits a quota must behave exactly as it did — aish
+        cannot know its billing tier, and trimming on a guess loses context for
+        nothing."""
+        agent = self.agent()
+        budget, source = agent._history_budget()
+        assert "ratelimit" not in source
+        assert budget == 300_000 * 3  # the context ceiling, untouched
+
+    def test_a_known_rate_limit_tightens_the_history_budget(self, monkeypatch):
+        monkeypatch.setenv("AISH_RATE_LIMIT_GEMINI", "tpm=250000")
+        ratelimit.reset_governor()
+        agent = self.agent()
+        budget, source = agent._history_budget()
+        from aish.agent import CHARS_PER_TOKEN_BUDGET, SPEND_BUDGET_CALLS_PER_MINUTE
+
+        assert budget == (250_000 // SPEND_BUDGET_CALLS_PER_MINUTE) * CHARS_PER_TOKEN_BUDGET
+        assert source.startswith("ratelimit:tpm/")
+
+    def test_the_provenance_says_which_of_three_bounds_bound(self, monkeypatch):
+        """"Why was my page cut?" has three different answers — the window, the
+        ceiling, the rate — and the number alone tells them apart from none."""
+        monkeypatch.setenv("AISH_RATE_LIMIT_GEMINI", "tpm=250000")
+        ratelimit.reset_governor()
+        _, source = self.agent()._history_budget()
+        assert source.endswith(":env")
+
+    def test_a_limit_learned_from_a_429_says_so(self):
+        governor = ratelimit.reset_governor()
+        agent = self.agent()
+        key = f"{agent.provider}:{agent.model}"
+        for _ in range(4):
+            governor.reserve(key, 100_000).settle(100_000)
+        governor.observe(key, ratelimit.classify(FakeAPIError("q", status=429)))
+        _, source = agent._history_budget()
+        assert source.endswith(":observed")
+
+    def test_a_tiny_quota_does_not_trim_into_uselessness(self, monkeypatch):
+        """Below the floor, trimming costs more than it saves: the model loses
+        the thread and re-fetches what was cut, which is more calls and more
+        tokens than it saved."""
+        monkeypatch.setenv("AISH_RATE_LIMIT_GEMINI", "tpm=1000")
+        ratelimit.reset_governor()
+        from aish.agent import CHARS_PER_TOKEN_BUDGET, MIN_SPEND_BUDGET_TOKENS
+
+        budget, _ = self.agent()._history_budget()
+        assert budget == MIN_SPEND_BUDGET_TOKENS * CHARS_PER_TOKEN_BUDGET
+
+    def test_the_window_still_wins_when_it_is_tighter(self, monkeypatch):
+        """The spend budget only ever tightens. A generous quota must not be
+        read as permission to exceed the model's actual context window."""
+        monkeypatch.setenv("AISH_RATE_LIMIT_OLLAMA", "tpm=100000000")
+        ratelimit.reset_governor()
+        agent = self.agent(provider="ollama", model="qwen3:8b")
+        budget, source = agent._history_budget()
+        assert "ratelimit" not in source
+        assert budget == agent.num_ctx * 3

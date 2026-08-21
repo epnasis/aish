@@ -40,6 +40,7 @@ handled as a stop-worthy limit even when nothing named a day.
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -98,6 +99,11 @@ class CallFailure:
     scope: str = ""
     matched: str = ""
     text: str = ""
+    # False when aish declined to make the call. Nothing was sent, so nothing
+    # was charged, and a reader must not count it as the provider refusing —
+    # the two look identical in a bare error string and mean opposite things
+    # about whose budget just moved.
+    sent: bool = True
 
     @property
     def is_rate_limit(self) -> bool:
@@ -127,6 +133,8 @@ class CallFailure:
             out["scope"] = self.scope
         if self.matched:
             out["matched"] = self.matched
+        if not self.sent:
+            out["sent"] = False
         return out
 
 
@@ -221,6 +229,19 @@ def classify(exc: BaseException, now: float | None = None) -> CallFailure:
     Status first, prose second, and the prose match is recorded so the two are
     never confused for each other by a later reader.
     """
+    if isinstance(exc, Cancelled):
+        return CallFailure(kind=CANCELLED, retryable=False, matched="stopped",
+                           sent=False, text=str(exc))
+    if isinstance(exc, RateLimited):
+        # aish's own refusal, not the provider's. Never retryable here: the
+        # governor already decided this cannot be sent, and re-asking it in a
+        # tight loop is the behaviour it exists to replace.
+        return CallFailure(
+            kind=RATE_LIMIT, retryable=False, scope=LONG, matched="governor",
+            retry_after_s=exc.retry_after_s,
+            retry_after_source="governor" if exc.retry_after_s else "none",
+            sent=False, text=str(exc),
+        )
     text = str(exc)
     status = _status_of(exc)
     body_text = repr(getattr(exc, "body", "")) if getattr(exc, "body", None) else ""
@@ -320,3 +341,467 @@ def wait(delay: float, stop: threading.Event, note: Callable[[str], None] | None
         if stop.wait(min(WAIT_TICK_S, left)):
             return True
     return stop.is_set()
+
+
+# ---------------------------------------------------------------- the governor
+
+# A rate window is a minute everywhere aish looks; providers express RPM and TPM
+# over exactly this span.
+WINDOW_S = 60.0
+
+# What a request is worth before anyone has counted its tokens. Requests-per-minute
+# and tokens-per-minute are separate ceilings and either can bind first.
+IMAGE_TOKENS = 1_400  # a flat stand-in: images are char-invisible and token-huge
+
+# How much of the rate that produced a 429 the governor will allow afterwards.
+# Below 1.0 because the observation is "this failed AT this rate" — the true
+# ceiling is at or under it, never above.
+OBSERVED_MARGIN = 0.9
+
+# Longest a caller will queue for headroom before being told to give up instead.
+# An unattended session gets a much shorter one (see `hooks`): it occupies a
+# bounded worker thread, and a chat nobody is watching must not park one for
+# minutes while a user's own action queues behind it.
+DEFAULT_WAIT_CEILING_S = 120.0
+
+
+class Cancelled(RuntimeError):
+    """The user stopped while the call was queued for headroom. Never a provider
+    failure and never retryable — the caller translates it to its own cancel
+    path so a Stop is not reported as the backend being unavailable."""
+
+
+class RateLimited(RuntimeError):
+    """The call was not made: the quota is spent, or waiting for it would take
+    longer than anyone is prepared to wait.
+
+    Distinct from a provider 429 on purpose — nothing was sent, so nothing was
+    charged, and the caller must not report this as the provider refusing.
+    """
+
+    def __init__(self, message: str, *, retry_after_s: float | None = None):
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
+
+
+def estimate_tokens(messages: list | None) -> int:
+    """What a request is about to cost, before the provider counts it.
+
+    chars/3 is the same convention `agent._history_budget` uses. Images are
+    added separately because they are CHAR-INVISIBLE and token-huge — a
+    vision-heavy history estimated on text alone under-reserves by thousands of
+    tokens per image, and every delivered image is re-encoded into every later
+    request.
+
+    Deliberately an over-estimate where it is unsure. Reserving too much costs
+    some throughput; reserving too little is the 429 this exists to prevent.
+    """
+    chars = 0
+    images = 0
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        chars += len(content) if isinstance(content, str) else 0
+        images += len(message.get("images") or [])
+        for call in message.get("tool_calls") or []:
+            chars += len(str(call))
+    return chars // 3 + images * IMAGE_TOKENS
+
+
+@dataclass
+class Limits:
+    """A key's ceilings, and where they came from.
+
+    `source` is not decoration. aish cannot know which billing tier a key is on,
+    so the honest default is NO ceiling — throttling a paid key on a guess would
+    be a self-inflicted outage. A 429 is the moment the world tells us, and a
+    reader has to be able to tell a limit we were given from one we inferred
+    from a failure. Mirrors `context_window`'s provenance discipline.
+    """
+
+    rpm: int | None = None
+    tpm: int | None = None
+    source: str = "none"  # none | env | observed
+
+    def record(self) -> dict:
+        out: dict = {"limit_source": self.source}
+        if self.rpm is not None:
+            out["rpm"] = self.rpm
+        if self.tpm is not None:
+            out["tpm"] = self.tpm
+        return out
+
+
+class _Window:
+    """Requests and tokens spent in the last `WINDOW_S`, and nothing older.
+
+    Entries are mutable after the fact: a reservation is admitted on an ESTIMATE
+    and corrected to the provider's actual when the call returns. Keeping the
+    entry (rather than debiting and refunding) is what makes an abandoned stream
+    err safe — usage arrives on the final chunk, so a stream nobody finished
+    never reports, and its estimate must stand rather than silently vanish.
+    """
+
+    def __init__(self) -> None:
+        self.entries: list[list[float]] = []  # [when, tokens]
+
+    def prune(self, now: float) -> None:
+        cutoff = now - WINDOW_S
+        self.entries = [e for e in self.entries if e[0] > cutoff]
+
+    def totals(self, now: float) -> tuple[int, int]:
+        self.prune(now)
+        return len(self.entries), int(sum(e[1] for e in self.entries))
+
+    def add(self, now: float, tokens: int) -> list[float]:
+        entry = [now, float(tokens)]
+        self.entries.append(entry)
+        return entry
+
+
+class Reservation:
+    """Headroom granted for one call, and the correction owed afterwards.
+
+    Admitted on an estimate, corrected on the way out. The three outcomes are
+    NOT symmetric, and the asymmetry is the point:
+
+    - `settle(actual)` — the call returned and the provider counted it. Replace
+      the estimate with the truth.
+    - `rejected()` — the provider refused (429). Keep the REQUEST debit, drop
+      the tokens: the request happened and plausibly counts against RPM/RPD, but
+      tokens it never processed should not crowd out the retry.
+    - neither — a stream nobody finished, or a call that timed out. The estimate
+      STANDS. Usage arrives on the final chunk, so an abandoned stream reports
+      nothing, and the server may well have generated the whole response; eating
+      the estimate is the only direction that errs safe.
+    """
+
+    def __init__(self, governor: Governor, key: str, entry: list[float], estimate: int):
+        self.key = key
+        self.estimate = estimate
+        self._governor = governor
+        self._entry = entry
+        self._closed = False
+
+    def settle(self, actual: int | None) -> None:
+        with self._governor._lock:
+            if not self._closed and actual:
+                self._entry[1] = float(actual)
+            self._closed = True
+            self._governor._cond.notify_all()
+
+    def rejected(self) -> None:
+        with self._governor._lock:
+            if not self._closed:
+                self._entry[1] = 0.0
+            self._closed = True
+            self._governor._cond.notify_all()
+
+
+class Governor:
+    """One process's model-call pacing, shared by every consumer of a key.
+
+    PROCESS-GLOBAL, not per chat, and that is the whole design. aish-web runs
+    many sessions as worker threads in one process against ONE API key, so the
+    quota is shared whether or not the code modelling it is; a governor per
+    session would be N independent programs each convinced it had the whole
+    budget. The same argument reaches further than the agent loop —
+    `server._model_session_title` calls `agent.chat` directly, outside
+    `run_task`, and swallowed its 429s — which is why enforcement lives at the
+    backend adapter seam rather than in `_chat_turn`.
+
+    Keyed by `provider:model`, not provider: quotas are per model on the tiers
+    this matters for, and one process genuinely mixes models on one key.
+
+    **FIFO.** Waiters are served in arrival order. This is a choice with a cost:
+    one greedy 120k-token reservation delays everyone behind it. The alternative
+    starves it forever — a stream of small calls (retitles, a second short
+    session) can drain a bucket indefinitely while a large request never finds
+    headroom — and on one owner's machine, head-of-line blocking is the better
+    failure.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self._clock = clock
+        self._lock = threading.RLock()
+        self._cond = threading.Condition(self._lock)
+        self._windows: dict[str, _Window] = {}
+        self._limits: dict[str, Limits] = {}
+        # Per key: when a quota that CANNOT be waited out inside a task frees up.
+        # In monotonic seconds; None once it has passed.
+        self._exhausted_until: dict[str, float] = {}
+        self._next_ticket = 0
+        self._waiting: set[int] = set()
+
+    # -- what we believe the ceilings are ---------------------------------
+
+    def limits(self, key: str) -> Limits:
+        with self._lock:
+            if key not in self._limits:
+                self._limits[key] = _limits_from_env(key)
+            return self._limits[key]
+
+    def observe(self, key: str, failure: CallFailure) -> None:
+        """Learn from a refusal. The only moment the world states the ceiling.
+
+        A 429 means the model of the world is wrong, so it is corrected ONCE, to
+        just under the rate that produced the failure — not nudged, and never
+        re-probed upward. TCP's additive increase is right when the limit is
+        unknown, dynamic and contended by strangers; here it is published,
+        static, per-model, and contended only by yourself, and every re-probe
+        costs a full request against the quota it is probing.
+        """
+        if not failure.is_rate_limit:
+            return
+        with self._lock:
+            now = self._clock()
+            if failure.exhausted:
+                # Not a pause. Nothing sent between now and the reset can
+                # succeed, so later callers are refused immediately rather than
+                # queueing behind a wait nobody would sit through.
+                wait = failure.retry_after_s or LONG_WAIT_S
+                self._exhausted_until[key] = now + wait
+                self._cond.notify_all()
+                return
+            requests, tokens = self._window(key).totals(now)
+            current = self.limits(key)
+            self._limits[key] = Limits(
+                rpm=_tightest(current.rpm, max(1, int(requests * OBSERVED_MARGIN))),
+                tpm=_tightest(current.tpm, max(1, int(tokens * OBSERVED_MARGIN))),
+                # Env stays authoritative if it was set: the owner stating their
+                # tier outranks aish inferring one from a single failure.
+                source=current.source if current.source == "env" else "observed",
+            )
+            self._cond.notify_all()
+
+    def exhausted_for(self, key: str) -> float | None:
+        """Seconds until this key's spent quota resets, or None."""
+        with self._lock:
+            until = self._exhausted_until.get(key)
+            if until is None:
+                return None
+            left = until - self._clock()
+            if left <= 0:
+                del self._exhausted_until[key]
+                return None
+            return left
+
+    # -- admission --------------------------------------------------------
+
+    def reserve(
+        self,
+        key: str,
+        estimate: int,
+        should_stop: Callable[[], bool] | None = None,
+        on_wait: Callable[[str], None] | None = None,
+        ceiling: float | None = None,
+    ) -> Reservation:
+        """Block until this call fits, then debit it.
+
+        Raises `RateLimited` when it never will — a spent quota, a request
+        larger than the whole ceiling, or a wait longer than the caller's
+        patience — and `Cancelled` when the user stopped.
+
+        Debited PESSIMISTICALLY, at the estimate, before the call. Optimistic
+        accounting lets a burst of concurrent calls overshoot together — and
+        that overshoot IS the 429 this exists to prevent.
+        """
+        ceiling = DEFAULT_WAIT_CEILING_S if ceiling is None else ceiling
+        deadline = self._clock() + ceiling
+        with self._cond:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            self._waiting.add(ticket)
+            try:
+                while True:
+                    if should_stop is not None and should_stop():
+                        raise Cancelled(f"{key}: stopped while waiting for headroom")
+                    now = self._clock()
+                    if (left := self._exhausted_left(now, key)) is not None:
+                        raise RateLimited(
+                            f"{key}: this quota is spent rather than busy — it does not "
+                            f"reset for about {left / 60:.0f} min, so nothing was sent",
+                            retry_after_s=left,
+                        )
+                    wait_for = None
+                    if ticket == min(self._waiting):
+                        wait_for = self._headroom_wait(now, key, estimate)
+                        if wait_for is None:
+                            return self._grant(now, key, estimate)
+                    if now >= deadline:
+                        raise RateLimited(
+                            f"{key}: waited {ceiling:.0f}s for rate-limit headroom and "
+                            "gave up rather than queue any longer — nothing was sent"
+                        )
+                    if on_wait is not None and wait_for:
+                        on_wait(f"waiting on the {key} rate limit — about {wait_for:.0f}s")
+                    self._cond.wait(min(WAIT_TICK_S, max(0.01, deadline - now)))
+            finally:
+                self._waiting.discard(ticket)
+                self._cond.notify_all()
+
+    # -- internals --------------------------------------------------------
+
+    def _window(self, key: str) -> _Window:
+        return self._windows.setdefault(key, _Window())
+
+    def _exhausted_left(self, now: float, key: str) -> float | None:
+        until = self._exhausted_until.get(key)
+        if until is None:
+            return None
+        if until - now <= 0:
+            del self._exhausted_until[key]
+            return None
+        return until - now
+
+    def _headroom_wait(self, now: float, key: str, estimate: int) -> float | None:
+        """None if the call fits right now; otherwise roughly how long until it
+        might. Raises if it can never fit.
+        """
+        limits = self.limits(key)
+        if limits.rpm is None and limits.tpm is None:
+            return None  # no ceiling is known, so nothing is being enforced
+        if limits.tpm is not None and estimate > limits.tpm:
+            # A naive "wait until it fits" would block forever here. The caller
+            # is told to make the request SMALLER, which is the one thing that
+            # can work — and is the seam where pacing meets the real fix.
+            raise RateLimited(
+                f"{key}: this call is {estimate:,} tokens and the whole per-minute "
+                f"budget is {limits.tpm:,} — it cannot be sent at any rate. "
+                "Shorten the conversation."
+            )
+        window = self._window(key)
+        requests, tokens = window.totals(now)
+        over_rpm = limits.rpm is not None and requests + 1 > limits.rpm
+        over_tpm = limits.tpm is not None and tokens + estimate > limits.tpm
+        if not over_rpm and not over_tpm:
+            return None
+        # The window is rolling, so headroom returns when the OLDEST entry ages
+        # out. That is the earliest moment worth re-checking.
+        oldest = window.entries[0][0] if window.entries else now
+        return max(0.0, oldest + WINDOW_S - now)
+
+    def _grant(self, now: float, key: str, estimate: int) -> Reservation:
+        entry = self._window(key).add(now, estimate)
+        return Reservation(self, key, entry, estimate)
+
+
+def _tightest(current: int | None, observed: int) -> int:
+    """The lower of what we believed and what we just saw. A second 429 must
+    never RAISE a ceiling — the only evidence a refusal carries is an upper
+    bound."""
+    return observed if current is None else min(current, observed)
+
+
+def _limits_from_env(key: str) -> Limits:
+    """`AISH_RATE_LIMIT_GEMINI=rpm=10,tpm=250000` — per provider or per
+    `provider:model`, the more specific winning.
+
+    Empty by default ON PURPOSE. aish cannot know which billing tier a key is
+    on, and throttling a paid key on a guessed free-tier number would be a
+    self-inflicted outage. So the shipped model of the world is "no ceiling
+    known", the owner can state theirs, and a 429 corrects it either way.
+    """
+    provider = key.split(":", 1)[0]
+    for name in (f"AISH_RATE_LIMIT_{key}", f"AISH_RATE_LIMIT_{provider}"):
+        raw = os.environ.get(name.upper().replace("-", "_").replace(".", "_"), "").strip()
+        if not raw:
+            continue
+        values: dict[str, int] = {}
+        for part in raw.split(","):
+            field, _, number = part.partition("=")
+            if field.strip().lower() in ("rpm", "tpm") and number.strip().isdigit():
+                values[field.strip().lower()] = int(number)
+        if values:
+            return Limits(rpm=values.get("rpm"), tpm=values.get("tpm"), source="env")
+    return Limits()
+
+
+_GOVERNOR: Governor | None = None
+_GOVERNOR_LOCK = threading.Lock()
+
+
+def governor() -> Governor:
+    """The process's one governor. Lazily built so importing this module costs
+    nothing and tests can replace it."""
+    global _GOVERNOR
+    with _GOVERNOR_LOCK:
+        if _GOVERNOR is None:
+            _GOVERNOR = Governor()
+        return _GOVERNOR
+
+
+def reset_governor(instance: Governor | None = None) -> Governor:
+    """Replace the process governor. Tests only — a shared rolling window that
+    outlived one test would make the next one's behaviour depend on its
+    neighbours."""
+    global _GOVERNOR
+    with _GOVERNOR_LOCK:
+        _GOVERNOR = instance if instance is not None else Governor()
+        return _GOVERNOR
+
+
+# ------------------------------------------------------- per-call UX wiring
+
+# What an UNATTENDED session will queue for. Far shorter than a user's own, and
+# not for politeness: a background or triggered session occupies a thread from
+# the server's bounded worker pool, and that pool exists precisely so a session
+# parked on an approval cannot starve short user actions. A session parked on
+# rate-limit headroom would re-create the same hazard inside the pool.
+UNATTENDED_WAIT_CEILING_S = 20.0
+
+_HOOKS = threading.local()
+
+
+@dataclass(frozen=True)
+class Hooks:
+    """Cancel and status wiring for whatever call this thread is about to make."""
+
+    should_stop: Callable[[], bool] | None = None
+    on_wait: Callable[[str], None] | None = None
+    ceiling: float | None = None
+
+
+class hooks:  # noqa: N801 — used as a context manager, reads as one
+    """Attach cancel/status wiring to this thread's model calls.
+
+    Thread-local rather than a parameter because the parameter would have to
+    travel through the chat callable, and every backend is adapted to the EXACT
+    `ollama.chat` calling convention so `agent.py` never learns which provider
+    it is on. Adding a keyword for the governor's benefit would break the one
+    invariant that keeps the backends interchangeable.
+
+    A thread is the right scope by construction: the agent's worker thread is
+    exactly the span of one session's calls. A caller that sets nothing — the
+    retitler, `curate`, a test — gets bounded default behaviour rather than
+    blocking forever, which is the correct answer for work nobody is watching.
+    """
+
+    def __init__(self, should_stop=None, on_wait=None, ceiling=None):
+        self._hooks = Hooks(should_stop, on_wait, ceiling)
+        self._previous: Hooks | None = None
+
+    def __enter__(self) -> Hooks:
+        self._previous = getattr(_HOOKS, "current", None)
+        _HOOKS.current = self._hooks
+        return self._hooks
+
+    def __exit__(self, *_exc) -> None:
+        _HOOKS.current = self._previous
+
+
+def current_hooks() -> Hooks:
+    return getattr(_HOOKS, "current", None) or Hooks()
+
+
+def reserve_for_call(key: str, messages: list | None) -> Reservation:
+    """Estimate, then reserve, using whatever wiring this thread supplied."""
+    wiring = current_hooks()
+    return governor().reserve(
+        key,
+        estimate_tokens(messages),
+        should_stop=wiring.should_stop,
+        on_wait=wiring.on_wait,
+        ceiling=wiring.ceiling,
+    )

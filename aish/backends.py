@@ -15,6 +15,7 @@ existing invocations keep working unchanged.
 """
 
 import base64
+import functools
 import json
 import mimetypes
 import os
@@ -22,6 +23,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from . import ratelimit
 
 
 @dataclass
@@ -272,12 +275,12 @@ def make_chat(model_arg: str, client=None) -> tuple[Callable, str, str]:
     if provider_name == "ollama":
         import ollama
 
-        return ollama.chat, "ollama", model_name
+        return governed(ollama.chat, "ollama"), "ollama", model_name
     provider = PROVIDERS[provider_name]
     if provider.kind == "anthropic":
         if client is None:
             client = _anthropic_client(provider)
-        return AnthropicBackend(client), provider_name, model_name
+        return governed(AnthropicBackend(client), provider_name), provider_name, model_name
     if client is None:
         api_key = os.environ.get(provider.env_key, "").strip()
         if not api_key:
@@ -293,7 +296,71 @@ def make_chat(model_arg: str, client=None) -> tuple[Callable, str, str]:
                 "(uv tool install --force --reinstall /path/to/aish)"
             ) from exc
         client = OpenAI(api_key=api_key, base_url=provider.base_url, max_retries=SDK_RETRIES)
-    return OpenAICompatBackend(client, provider_name), provider_name, model_name
+    backend = OpenAICompatBackend(client, provider_name)
+    return governed(backend, provider_name), provider_name, model_name
+
+
+def governed(chat: Callable, provider: str) -> Callable:
+    """Wrap a chat callable so every call it makes is paced and every refusal it
+    hits is learned from.
+
+    HERE, and not in `agent._chat_turn`, because this is the only in-process
+    chokepoint that EVERY consumer of an API key traverses. The agent loop is
+    one of them; `server._model_session_title` is another — it calls
+    `agent.chat` directly, outside `run_task`, after every eligible completed
+    turn, and its `except Exception: return None` swallowed the 429 with no
+    record at all. Governing the loop alone would leave the shared quota
+    governed at one of its several consumers, which is the shape of the bug
+    rather than a fix for it.
+
+    The `ollama.chat` calling convention is preserved exactly — same keywords,
+    same return type, streaming still a generator — so nothing downstream can
+    tell it is wrapped. `ratelimit.hooks()` is how a caller supplies the
+    cancel/status wiring that does not belong in a calling convention.
+    """
+
+    @functools.wraps(chat)
+    def call(*, model: str = "", messages: list | None = None, stream: bool = False, **kw):
+        key = f"{provider}:{model}"
+        ticket = ratelimit.reserve_for_call(key, messages)
+        try:
+            result = chat(model=model, messages=messages, stream=stream, **kw)
+        except Exception as exc:  # noqa: BLE001 — observed, then re-raised as-is
+            _settle_failure(key, ticket, exc)
+            raise
+        if not stream:
+            ticket.settle(getattr(result, "prompt_eval_count", 0) or 0)
+            return result
+        return _governed_stream(result, key, ticket)
+
+    return call
+
+
+def _governed_stream(chunks, key: str, ticket):
+    """A stream settles on its LAST chunk, because that is where the counts
+    arrive. One that is abandoned part-way settles on nothing, deliberately:
+    the estimate stands, because the provider may well have generated the whole
+    response and charged for it."""
+    try:
+        last = None
+        for chunk in chunks:
+            last = chunk
+            yield chunk
+    except Exception as exc:  # noqa: BLE001 — observed, then re-raised as-is
+        _settle_failure(key, ticket, exc)
+        raise
+    ticket.settle(getattr(last, "prompt_eval_count", 0) or 0)
+
+
+def _settle_failure(key: str, ticket, exc: BaseException) -> None:
+    failure = ratelimit.classify(exc)
+    ratelimit.governor().observe(key, failure)
+    if failure.is_rate_limit:
+        # The request happened and plausibly counts against RPM, but tokens the
+        # provider never processed should not crowd out the retry.
+        ticket.rejected()
+    else:
+        ticket.settle(None)
 
 
 def list_models(provider_name: str) -> list[str]:

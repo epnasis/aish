@@ -53,7 +53,9 @@ def test_make_chat_with_injected_client():
     chat, provider, model = make_chat("gemini:gemini-3.5-flash", client=object())
     assert provider == "gemini"
     assert model == "gemini-3.5-flash"
-    assert isinstance(chat, OpenAICompatBackend)
+    # Wrapped by the governor (#261), which is what puts EVERY consumer of the
+    # key behind one pacing point rather than only the agent loop.
+    assert isinstance(chat.__wrapped__, OpenAICompatBackend)
 
 
 # ------------------------------------------------------- message conversion

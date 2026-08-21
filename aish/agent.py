@@ -1171,7 +1171,10 @@ TRIMMED_RECOVERABLE = (
 CHARS_PER_TOKEN_BUDGET = 3
 # The most history aish will carry, whatever the backend's window allows.
 #
-# NOT a cost control — the owner's Gemini budget is not the constraint. It is
+# NOT a cost control — see SPEND_BUDGET_CALLS_PER_MINUTE below, which is. That
+# premise held right up until a Gemini free-tier key was exhausted mid-task
+# (#261): on a METERED backend, history size IS the spend control, because the
+# whole of it is resent on every step. This constant is not that control; it is
 # there so the trimming path is EXERCISED on a large-window backend instead of
 # lying dormant until the day he moves to local models and discovers it never
 # worked. A ceiling below Gemini's 1,048,576 means real sessions cross it and
@@ -1185,6 +1188,31 @@ CHARS_PER_TOKEN_BUDGET = 3
 # (128k) are already below it, and Ollama's num_ctx is far below it, so the
 # local path is unchanged by construction.
 HISTORY_TOKEN_CEILING = 300_000
+
+# How many model calls a minute the history budget is sized to allow, when a
+# provider rate limit is actually known.
+#
+# The constant above sizes history against the CONTEXT WINDOW: what one request
+# may contain. That is a different constraint from what a minute of requests may
+# contain, and only the first was ever modelled. The incident: 156 calls
+# averaging ~120k prompt tokens, peaking at 1.91M input tokens in one minute,
+# against a per-minute quota an order of magnitude below that. History sat at
+# 130k tokens, so a 300k ceiling never fired — the budget was correct about the
+# window and silent about the rate.
+#
+# Sizing history at TPM/N is what makes the two agree: it buys N calls a minute
+# rather than one enormous one, which is the difference between a task that runs
+# slowly and a task that cannot run at all. Four is deliberately modest — a step
+# that has to wait most of a minute for headroom reads as a hang.
+#
+# Engages ONLY when a limit is known (stated by the owner, or learned from a
+# 429). With no limit known nothing changes, so a key that never hits a quota
+# behaves exactly as it did. `docs/rate-limits.md`.
+SPEND_BUDGET_CALLS_PER_MINUTE = 4
+
+# Below this, trimming for spend costs more than it saves: the model loses the
+# thread and re-fetches what was cut, which is more calls and more tokens.
+MIN_SPEND_BUDGET_TOKENS = 16_000
 # Command output carried in an activity-trace step is a preview (the trace
 # collapses it); the full result still reaches the model and streams live.
 STEP_OUTPUT_CAP = 8000
@@ -2591,9 +2619,23 @@ class Agent:
         last: ratelimit.CallFailure | None = None
         for attempt in range(1, MODEL_CALL_ATTEMPTS + 1):
             try:
-                turn = self._one_chat(kwargs)
+                # The governor's cancel and status wiring, for the span of one
+                # call. It cannot ride on the arguments: every backend is
+                # adapted to the exact `ollama.chat` convention so this file
+                # never learns which provider it is on, and a keyword added for
+                # the governor's benefit would break that.
+                with ratelimit.hooks(
+                    should_stop=self._cancel.is_set,
+                    on_wait=self.status.note,
+                    ceiling=self._wait_ceiling(),
+                ):
+                    turn = self._one_chat(kwargs)
             except TaskCancelled:
                 raise  # a user stop is not a transport error — never retry
+            except ratelimit.Cancelled as exc:
+                # Stopped while queued for headroom. The user is owed the cancel
+                # path, not an error naming the provider for their own decision.
+                raise TaskCancelled from exc
             except Exception as exc:  # noqa: BLE001 — surface, don't crash the REPL
                 last = ratelimit.classify(exc)
                 final = attempt >= MODEL_CALL_ATTEMPTS or not last.retryable
@@ -2613,6 +2655,18 @@ class Agent:
                 self._record_reasoning(turn)
                 return turn
         raise ModelUnavailable(_unavailable_text(last))
+
+    def _wait_ceiling(self) -> float:
+        """How long this session will queue for rate-limit headroom.
+
+        An unattended session gets far less, and not out of politeness: it holds
+        a thread from the server's bounded worker pool, which exists so that a
+        session parked on an approval cannot starve short user actions. A
+        session parked on headroom would re-create that hazard inside the pool.
+        """
+        if self.origin == "user":
+            return ratelimit.DEFAULT_WAIT_CEILING_S
+        return ratelimit.UNATTENDED_WAIT_CEILING_S
 
     def _record_model_error(
         self, failure: ratelimit.CallFailure, attempt: int, delay: float, final: bool
@@ -3840,7 +3894,30 @@ class Agent:
         capped = min(window, HISTORY_TOKEN_CEILING)
         if capped < window:
             source = f"constant:HISTORY_TOKEN_CEILING:{HISTORY_TOKEN_CEILING}"
+        spend, spend_source = self._spend_budget()
+        if spend is not None and spend < capped:
+            # The rate is tighter than the window. Which of the three bounds is
+            # binding goes into the provenance, because "why was my page cut?"
+            # has three different answers and a reader cannot tell them apart
+            # from the number alone.
+            capped, source = spend, spend_source
         return capped * CHARS_PER_TOKEN_BUDGET, source
+
+    def _spend_budget(self) -> tuple[int | None, str]:
+        """(tokens of history the rate limit affords, provenance), or (None, "")
+        when no limit is known.
+
+        None is the default and it means "unchanged": aish cannot know which
+        billing tier a key is on, and trimming a paid session's history against
+        a guessed free-tier number would be a self-inflicted loss of context.
+        The budget appears the moment the owner states a limit or a 429 teaches
+        one — which is exactly when it starts to matter.
+        """
+        limits = ratelimit.governor().limits(f"{self.provider}:{self.model}")
+        if limits.tpm is None:
+            return None, ""
+        budget = max(MIN_SPEND_BUDGET_TOKENS, limits.tpm // SPEND_BUDGET_CALLS_PER_MINUTE)
+        return budget, f"ratelimit:tpm/{SPEND_BUDGET_CALLS_PER_MINUTE}:{limits.source}"
 
     def _output_caps(self) -> tuple[tuple[int, int], str]:
         """(head, tail) and the provenance of that size. `num_ctx` is an

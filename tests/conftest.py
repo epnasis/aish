@@ -3,6 +3,8 @@ tools dirs (knowledge_index + the plugin-tool rescan run at every run_task),
 so tests must never see the developer's real ~/.config/aish — nor reach the
 developer's real phone."""
 
+import os
+
 import pytest
 
 from aish import browser as browser_module
@@ -198,3 +200,25 @@ def no_real_backoff_sleep(monkeypatch):
     monkeypatch.setattr(
         ratelimit_module, "wait", lambda delay, stop, note=None: stop.is_set()
     )
+
+
+@pytest.fixture(autouse=True)
+def isolated_rate_governor(monkeypatch):
+    """A fresh governor per test.
+
+    It is process-global by design (one API key, many session threads), so
+    without this its rolling window and — worse — the ceiling it INFERS from a
+    429 outlive the test that caused them. One test exercising a rate limit
+    would silently throttle every test after it, and the failure would land
+    somewhere unrelated.
+
+    The env overrides are cleared for the same reason in reverse: a developer
+    who has stated their real tier must not have the suite's behaviour depend
+    on it.
+    """
+    for name in list(os.environ):
+        if name.startswith("AISH_RATE_LIMIT"):
+            monkeypatch.delenv(name, raising=False)
+    ratelimit_module.reset_governor()
+    yield
+    ratelimit_module.reset_governor()
