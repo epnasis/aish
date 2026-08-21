@@ -64,7 +64,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import skills
+from . import explain, skills
 from .embeddings import entry_text
 from .session import RATING_NONE
 
@@ -1172,9 +1172,174 @@ def _push(notify_fn, now: datetime, summary: str, proposals: list[tuple[str, str
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Context health (#243) — did the history policy change actually help?
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ContextStats:
+    """What trimming did to recent sessions, from recorded evidence only.
+
+    The claim behind the policy change is testable: aish used to discard every
+    prior tool result at the start of every task, so a chat's history was gone
+    by turn two and the model re-ran lookups it had already done. If that was
+    right, trims per task should fall, characters destroyed should fall, and
+    repeated identical calls should fall with them. If it was wrong, this says
+    so — which is the point of measuring rather than asserting.
+    """
+
+    sessions: int = 0
+    tasks: int = 0
+    trims: int = 0
+    tasks_with_trim: int = 0
+    chars_destroyed: int = 0
+    stubbed_messages: int = 0
+    recoverable: int = 0            # stubs carrying a key back to the full text
+    by_policy: dict = field(default_factory=dict)
+    repeat_calls: int = 0           # identical (tool, args) issued more than once
+    repeats_after_trim: int = 0     # …in a task that had already lost history
+    prompt_tokens: list = field(default_factory=list)
+
+    @property
+    def trims_per_task(self) -> float:
+        return self.trims / self.tasks if self.tasks else 0.0
+
+    @property
+    def recoverable_share(self) -> float:
+        return self.recoverable / self.stubbed_messages if self.stubbed_messages else 0.0
+
+    @property
+    def median_prompt_tokens(self) -> int:
+        if not self.prompt_tokens:
+            return 0
+        ordered = sorted(self.prompt_tokens)
+        return ordered[len(ordered) // 2]
+
+
+def scan_context(state_dir, days: int = LEDGER_DAYS, now: datetime | None = None) -> ContextStats:
+    """Aggregate trimming and repeated-call evidence across recent sessions.
+
+    Pure: reads the logs and nothing else, makes no model call, and asks no
+    live object how aish behaves today. Session files are date-named, so the
+    age cut is a filename comparison and no file outside the window is opened.
+    """
+    now = now or datetime.now()
+    floor = f"session-{(now - timedelta(days=days)):%Y%m%d}"
+    stats = ContextStats()
+    for path in sorted(Path(state_dir).glob("session-*.jsonl")):
+        if path.name < floor:
+            continue
+        try:
+            records = _context_records(path)
+        except OSError:
+            continue
+        if records is None:
+            continue
+        stats.sessions += 1
+        _fold_session(records, stats)
+    return stats
+
+
+def _context_records(path: Path) -> list[dict] | None:
+    """Every trace step in one log, in file order, or None when unreadable."""
+    steps: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue  # a line that parses to a bare value is not a record
+        if record.get("kind") == "task_start":
+            steps.append({"kind": "task_start"})
+        step = record.get("step")
+        if isinstance(step, dict):
+            steps.append(step)
+    return steps
+
+
+def _fold_session(steps: list[dict], stats: ContextStats) -> None:
+    """One session's steps into the totals, task by task."""
+    seen_calls: set[tuple] = set()
+    trimmed_here = False
+    task_open = False
+    for step in steps:
+        kind = step.get("kind")
+        if kind == "task_start":
+            stats.tasks += 1
+            seen_calls = set()
+            trimmed_here = False
+            task_open = True
+            continue
+        if kind == "trim":
+            stats.trims += 1
+            if task_open and not trimmed_here:
+                stats.tasks_with_trim += 1
+            trimmed_here = True
+            policy = str(step.get("policy") or "?")
+            stats.by_policy[policy] = stats.by_policy.get(policy, 0) + 1
+            before = int(step.get("bytes_before") or 0)
+            after = int(step.get("bytes_after") or 0)
+            stats.chars_destroyed += max(0, before - after)
+            for stub in step.get("stubbed") or []:
+                stats.stubbed_messages += 1
+                if stub.get("continuation"):
+                    stats.recoverable += 1
+        elif kind == "call":
+            # The "searched again" signature: the same tool with the same
+            # arguments, issued twice in one task. It is the shape of a model
+            # that lost what it already found — not proof of it, which is why
+            # the count is reported beside the trim count and not as a verdict.
+            key = (str(step.get("name") or ""), json.dumps(step.get("args") or {}, sort_keys=True))
+            if key in seen_calls:
+                stats.repeat_calls += 1
+                if trimmed_here:
+                    stats.repeats_after_trim += 1
+            seen_calls.add(key)
+        elif kind == "reasoning":
+            tokens = step.get("tokens") or []
+            if tokens and isinstance(tokens[0], int):
+                stats.prompt_tokens.append(tokens[0])
+
+
+def context_report(stats: ContextStats) -> str:
+    """The numbers, plainly, with no conclusion attached to them."""
+    if not stats.sessions:
+        return "no sessions in the window"
+    out = [
+        f"sessions            {stats.sessions}",
+        f"tasks               {stats.tasks}",
+        f"trims               {stats.trims} ({stats.trims_per_task:.2f} per task)",
+        f"tasks that trimmed  {stats.tasks_with_trim}"
+        + (f" ({stats.tasks_with_trim / stats.tasks:.0%})" if stats.tasks else ""),
+        f"characters dropped  {stats.chars_destroyed:,}",
+        f"messages stubbed    {stats.stubbed_messages}",
+        f"  recoverable       {stats.recoverable} ({stats.recoverable_share:.0%})",
+        f"repeated calls      {stats.repeat_calls}"
+        f" ({stats.repeats_after_trim} in a task that had already lost history)",
+        f"median prompt       {stats.median_prompt_tokens:,} tokens",
+    ]
+    for policy, count in sorted(stats.by_policy.items(), key=lambda kv: -kv[1]):
+        out.append(f"  policy {policy:<20} {count}")
+    return "\n".join(out)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="aish retrieval self-curation: scripted judge loop (#185/#186)"
+    )
+    parser.add_argument(
+        "--context",
+        action="store_true",
+        help="report what trimming did to recent sessions; no model calls, no writes",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=LEDGER_DAYS,
+        help="how far back to look (default: %(default)s)",
     )
     parser.add_argument(
         "--dry-run",
@@ -1191,6 +1356,11 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    if args.context:
+        # One source of truth for "where the logs are" — the reader already
+        # resolves it, honouring AISH_STATE_DIR.
+        print(context_report(scan_context(explain.state_dir(), days=args.days)))
+        return 0
     return run_curate(dry_run=args.dry_run, model=args.model)
 
 
