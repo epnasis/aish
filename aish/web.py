@@ -784,6 +784,15 @@ NO_RESULTS = (
 # because the first index has already answered.
 SEARCH_ENGINE = "google.com"
 SEARCH_ENGINE_URL = "https://www.google.com/search?q={q}"
+# Where a search is allowed to have ended up. Derived from the one URL aish
+# builds, so changing the engine cannot leave this pointing at the old one.
+SEARCH_RESULT_HOSTS = frozenset(
+    {
+        (urllib.parse.urlsplit(SEARCH_ENGINE_URL).hostname or "").lower(),
+        (urllib.parse.urlsplit(SEARCH_ENGINE_URL).hostname or "").lower().removeprefix("www."),
+    }
+)
+SEARCH_RESULT_PATH = urllib.parse.urlsplit(SEARCH_ENGINE_URL).path.rstrip("/")
 
 # Google's own furniture, which appears in the link list exactly like a result.
 # Hosts, then the engine's own paths — SEPARATELY, because the naive filter
@@ -886,7 +895,36 @@ def search_page(query: str) -> tuple[list[tuple[str, str, str]], str]:
         # challenge detector exists to prevent — one host over.
         _search_walled_at = time.monotonic()
         return [], f"{SEARCH_ENGINE} served a verification wall instead of results"
+    if not landed_on_results(page.url):
+        _search_walled_at = time.monotonic()
+        return [], f"the search redirected to {_where(page.url)} instead of results"
     return serp_results(page, url), ""
+
+
+def _where(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    return f"{(parts.hostname or '?').lower()}{parts.path}"
+
+
+def landed_on_results(url: str) -> str | bool:
+    """Did the navigation END on a results page, or somewhere else entirely?
+
+    Checked AFTER the fact, which is the whole point and the reason no URL
+    allowlist was built instead. An allowlist judges the address aish is about
+    to request, at the one moment it is guaranteed to be the right one; Chrome
+    then follows redirects, and `/search` really does 302 — to
+    `consent.google.com`, to `/sorry/`, and to `accounts.google.com/CheckCookie`
+    with the session attached. Where a read LANDED is the only form of the
+    question that survives a redirect, including the redirects nobody predicted.
+
+    It is also what keeps this safe if the search profile is ever signed in:
+    the model never proposes a URL here — aish builds exactly one shape and
+    percent-encodes the query into it — so with the landing pinned as well,
+    "mail is a different URL from search" stops being a thing to trust and
+    becomes a thing the code enforces at both ends."""
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or "").lower()
+    return host in SEARCH_RESULT_HOSTS and parts.path.rstrip("/") == SEARCH_RESULT_PATH
 
 
 # What a result set that came from the second index is labelled with. aish's own
