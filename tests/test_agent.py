@@ -6968,8 +6968,8 @@ class TestTheChatsOpenedLinks:
     turns earlier and sent the model to re-read pages already sitting in the
     transcript — 53 of 130 firings across the owner's logs, 42 of them entirely
     made of already-opened links, one chat doing it twelve times, each costing
-    a refused answer, an ask round and a repeat fetch. Opening a page is a fact about the fetch; it does not un-happen when
-    the model stops talking.
+    a refused answer, an ask round and a repeat fetch. Opening a page is a fact
+    about the fetch; it does not un-happen when the model stops talking.
     """
 
     GUIDE = "https://example.com/guide"
