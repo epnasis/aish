@@ -1652,7 +1652,16 @@ def _present_change(snapshot, delta) -> str:
 def _snapshot_notes(snapshot) -> str:
     """aish's own statements about this result, which go ABOVE the untrusted
     banner because they are not the site talking."""
-    problem = f"[aish: {snapshot.problem}]\n" if snapshot.problem else ""
+    problem = ""
+    if getattr(snapshot, "ledger", None):
+        # What a batch DID, above the banner, because it is aish's account of
+        # its own acts. The page delta cannot carry it: a suggestion list opens
+        # and closes between two snapshots and nets to zero in the diff, so
+        # without this the model cannot know which suggestion was pressed on
+        # its behalf.
+        done = "\n".join(f"  {line}" for line in snapshot.ledger)
+        problem += f"[aish: what this filled in, step by step:\n{done}]\n"
+    problem += f"[aish: {snapshot.problem}]\n" if snapshot.problem else ""
     if getattr(snapshot, "notice", ""):
         problem += f"[aish: {snapshot.notice}]\n"
     if getattr(snapshot, "asked", ""):
@@ -1776,6 +1785,28 @@ def browse_act(
             f"{type(exc).__name__}: {exc}"
         )
     return _present_snapshot(snapshot, topic=topic, acted=action != "read")
+
+
+def browse_fill(steps: list[dict], topic: str | None = None) -> str:
+    """Fill in a form on the page browse opened — several controls, then at
+    most one press — as one act."""
+    current = browser.browse_current()
+    if current is None:
+        return "ERROR: nothing is open to fill in. Call browse(url) first."
+    plan = browse_mod.plan_batch(current.controls, steps or [])
+    if plan.problem:
+        # Refused before anything was touched: no card was drawn and no key was
+        # pressed, so the page is exactly as the model last saw it.
+        return f"NOT EXECUTED: {plan.problem}"
+    try:
+        snapshot = browser.browse_fill(
+            list(steps or []), mutating=browse_mod.batch_is_mutating(plan)
+        )
+    except browser.BrowserUnavailable as exc:
+        return f"ERROR: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR: could not fill this form: {type(exc).__name__}: {exc}"
+    return _present_snapshot(snapshot, topic=topic, acted=True)
 
 
 class BlockedURLError(Exception):

@@ -182,6 +182,26 @@ Two defects, one session, and they are the same defect: driving a page was addre
 
 `TestAControlIsAddressedByWhatItSays`, `TestAnIconIsNotANamelessButton` and `TestWhatChangedRatherThanThePageAgain` pin the addressing, the icon ladder and the delta rules with no browser; `TestTheThingApprovedIsTheThingPressed` pins the act-time fence.
 
+### Filling a form is ONE act (`browse_fill`)
+
+A person searching for a flight sets origin, destination, both dates, passengers and cabin, then presses search. Doing that one call at a time cost six model round trips and six echo lines — and on lot.pl it did not finish at all, which is the session that filed this.
+
+**`fill` is the compound verb, and it is the reason the batch is worth building.** On these forms a destination box is not a text field: typing fires an async request and opens a list that did not exist when the batch was composed, so the model CANNOT name the option it will need. A batch of flat primitives therefore dies on the second step forever. `fill` types, waits for the page to answer, and presses the entry that matches — via `match_option`, the same ladder `choose` uses, aimed at what appeared instead of at a `<select>`. Deliberately not fuzzy, for the reason `match_option` is not: the thing being auto-picked feeds a submit the owner approved. An ambiguous or unmatched value STOPS the batch and hands back the candidates, which is one round trip and strictly better than pressing the wrong airport.
+
+**A prerequisite that was a bug in its own right:** `CONTROLS_JS` had no `[role=option]`, so the list a site opens under "Paris" arrived as page TEXT with nothing pressable — the destination field was unfinishable by any sequence of calls. A CLOSED list is `unreachable` and drops out on its own, so enumerating options adds the open one only.
+
+**Only ONE step may need approval, and it must be LAST.** Not card hygiene — abort semantics. With the committing step at the end, a batch that dies at step 7 of 20 has changed nothing the owner would mind: typed text is not sent, and `_type` overwrites, so re-running is idempotent. A mutating step in the middle turns every partial failure into a half-sent form. A password refuses the whole batch and never draws a card, exactly as a single action does; over `BATCH_MAX_STEPS` (15) is refused with the way round it, since filling needs no approval and can be split.
+
+**It stops at the first step it cannot carry out and never skips one.** Order on these pages is a dependency statement, so "did 7, skipped 3, did the rest" is unreviewable against the card. The approved press runs only if every prior step verified — a batch that could not establish its values ends UNSENT and says so, including that the approved press was not made, so the model cannot report a form as sent and the next batch cannot inherit the yes.
+
+**The card is more oversight than the calls it replaces, which is the argument for the whole thing.** Typing has never been mutating (`is_mutating`: nothing is committed until something is pressed), so today a twenty-field form is twenty unseen auto-approved keystrokes plus one card that does not say what it is about to send. The batch card enumerates every value in order, in the control's own words, with long values shortened VISIBLY. `Approved(comment)` is the edit path: the batch is one call, so the comment holds the whole thing and the model re-composes.
+
+**The LEDGER is why the delta is not enough.** A suggestion list opens and closes between two snapshots and nets to zero in the diff, so the page delta structurally cannot report which suggestion aish pressed on the model's behalf. The ledger sits with `_snapshot_notes`, above the untrusted banner, because it is aish's account of its own acts — and it reports what each control HOLDS on readback, not what was asked for, so a mask, an autocomplete rewrite or a `maxlength` truncation cannot land silently.
+
+**One new gate surface, closed two ways:** `fill` presses a control that existed on no snapshot and no card, so the candidate set is only what appeared IN RESPONSE to that step and is marked `option` — a cookie banner rendering mid-step is also "new" — and a match that classifies as mutating is refused rather than pressed. Every step otherwise inherits the single-action live fences unchanged. `browse_fill` is a sibling tool rather than a mode of `browse_act` because a polymorphic tool is what small models get wrong, and every malformed hybrid would be a new parse-and-refuse path in front of the gate; `BROWSE_TOOLS` is the one name set all four dispatch fences read, so a new browsing tool cannot miss one.
+
+`TestFillingAFormIsOneAct` pins the planning, the card and the refusals; `TestFillingAFormAsOneAct` pins the executor — the suggestion press, the ambiguous stop, the live fence and the mid-batch navigation.
+
 ## The browse gate — two questions, not one
 
 Reading a signed-in site carries the owner's session. Driving one carries it AND presses things with it, which is the largest blast radius aish has: a button can pay a bill, cancel a contract, or delete something. So the gate is part of the feature and not a follow-up.

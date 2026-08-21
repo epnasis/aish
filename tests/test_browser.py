@@ -1946,3 +1946,146 @@ def _done(value):
         return value
 
     return ready()
+
+
+class TestFillingAFormAsOneAct:
+    """#251. `fill` is the compound verb the batch exists for: on the form this
+    was built for, a destination box is not a text field — typing opens a list
+    that did not exist when the batch was composed, so the model cannot name
+    the option it will need."""
+
+    def _drive(self, monkeypatch, passes, steps, mutating=False, urls=None):
+        from aish import browse as browse_mod
+
+        did = []
+        snaps = {}
+        rounds = iter(passes)
+        places = iter(urls or [])
+
+        class FakePage:
+            @property
+            def url(self):
+                return next(places, "https://lot.com/")
+
+            def is_closed(self):
+                return False
+
+            @property
+            def context(self):
+                return type("C", (), {"pages": []})()
+
+            async def wait_for_load_state(self, *a, **k):
+                pass
+
+        page = FakePage()
+        owner = type("O", (), {"view": None, "browse_page": page, "browse_epoch": 0})()
+
+        async def snapshot(_owner, _page, *, problem="", notice="", asked=""):
+            snaps["problem"] = problem
+            return browse_mod.Snapshot(url="https://lot.com/", title="", text="",
+                                       problem=problem)
+
+        async def enumerate_(_page):
+            return (next(rounds), 0, 0)
+
+        monkeypatch.setattr(browser, "_enumerate", enumerate_)
+        monkeypatch.setattr(browser, "_snapshot", snapshot)
+        monkeypatch.setattr(browser, "_find", lambda p, n: _done((f"el-{n}", True)))
+        monkeypatch.setattr(browser, "_reachable_now", lambda t: _done(""))
+        monkeypatch.setattr(browser, "_centre", lambda t: _done(None))
+        monkeypatch.setattr(browser, "unavailable_reason", lambda: "")
+
+        async def typed(_page, target, *, text, submit):
+            did.append(("type", target, text))
+            return ""
+
+        async def pressed(_page, target, *, mutating, href):
+            did.append(("press", target))
+            return ""
+
+        monkeypatch.setattr(browser, "_type", typed)
+        monkeypatch.setattr(browser, "_press", pressed)
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        out = browser.browse_fill(steps, mutating=mutating)
+        return out, did, snaps
+
+    FIELD = {"n": 1, "kind": "field", "name": "Dokąd"}
+    SUGGESTIONS = [
+        {"n": 5, "kind": "button", "name": "Paryż (CDG)", "option": True},
+        {"n": 6, "kind": "button", "name": "Paryż Orly (ORY)", "option": True},
+    ]
+
+    def test_typing_a_destination_presses_the_suggestion_it_opened(self, monkeypatch):
+        held = dict(self.FIELD, detail="currently: Paryż (CDG)")
+        out, did, _ = self._drive(
+            monkeypatch,
+            passes=[
+                [self.FIELD],                       # the batch resolves its target
+                [self.FIELD] + self.SUGGESTIONS,    # the list the page opened
+                [held],                             # read back after the press
+            ],
+            steps=[{"target": "Dokąd", "do": "fill", "value": "CDG"}],
+        )
+        assert ("type", "el-1", "CDG") in did
+        assert ("press", "el-5") in did          # the matching suggestion, not the other
+        # What it HOLDS, read back — not the value that was asked for.
+        assert out.ledger[0] == (
+            "1. 'Dokąd' ← 'Paryż (CDG)' (picked from 2 suggestions)"
+        )
+
+    def test_a_suggestion_it_cannot_tell_apart_stops_the_batch(self, monkeypatch):
+        """Deliberately not fuzzy, for the reason `match_option` is not: the
+        thing being auto-picked here feeds a submit the owner approved."""
+        out, did, _ = self._drive(
+            monkeypatch,
+            passes=[
+                [self.FIELD, {"n": 9, "kind": "button", "name": "Szukaj", "submits": True}],
+                [self.FIELD] + self.SUGGESTIONS,
+            ],
+            steps=[
+                {"target": "Dokąd", "do": "fill", "value": "Paryż"},
+                {"target": "Szukaj", "do": "click"},
+            ],
+            mutating=True,
+        )
+        assert not [d for d in did if d[0] == "press"]
+        assert "matches 2 options" in out.ledger[-2]
+        assert "approved press in them was NOT made" in out.ledger[-1]
+
+    def test_a_plain_field_needs_no_suggestion(self, monkeypatch):
+        held = dict(self.FIELD, detail="currently: Warszawa")
+        out, did, _ = self._drive(
+            monkeypatch,
+            passes=[[self.FIELD], [held]],
+            steps=[{"target": "Dokąd", "do": "fill", "value": "Warszawa"}],
+        )
+        assert out.ledger == ["1. 'Dokąd' ← 'Warszawa'"]
+
+    def test_a_control_that_now_needs_approval_stops_the_batch(self, monkeypatch):
+        """The live fence, per step: the page changed under a batch the owner
+        approved for something else."""
+        out, did, _ = self._drive(
+            monkeypatch,
+            passes=[[{"n": 2, "kind": "button", "name": "Zapłać"}]],
+            steps=[{"target": "Zapłać", "do": "click"}],
+        )
+        assert not did
+        assert "needs approval of its own" in out.ledger[0]
+
+    def test_navigating_mid_batch_stops_it(self, monkeypatch):
+        """The remaining steps were composed against a document that no longer
+        exists."""
+        out, did, _ = self._drive(
+            monkeypatch,
+            passes=[
+                [self.FIELD, {"n": 9, "kind": "button", "name": "Dalej"}],
+                [self.FIELD],
+            ],
+            steps=[
+                {"target": "Dokąd", "do": "fill", "value": "x"},
+                {"target": "Dalej", "do": "click"},
+            ],
+            urls=["https://lot.com/", "https://lot.com/wyniki"],
+        )
+        assert "the page navigated" in out.ledger[-2]
+        assert "2–2 were not attempted" in out.ledger[-1]

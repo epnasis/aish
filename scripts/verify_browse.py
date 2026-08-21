@@ -150,7 +150,32 @@ HARD = """<!doctype html>
     <button id="bin"><svg viewBox="0 0 16 16"><use href="#icon-usun-pozycje"></use></svg></button>
     <button id="pic"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="Drukuj"></button>
   </section>
+  <!-- The combobox that made a batch necessary: typing opens a list that did
+       not exist when the batch was composed. -->
+  <section id="szukaj-lotu">
+    <label for="dokad">Dokąd</label>
+    <input id="dokad" role="combobox" autocomplete="off">
+    <ul id="podpowiedzi"></ul>
+    <label for="pasazerowie">Pasażerowie</label>
+    <input id="pasazerowie">
+    <button id="szukaj-lot">Szukaj lotu</button>
+  </section>
   <script>
+    document.getElementById('dokad').addEventListener('input', (e) => {
+      const list = document.getElementById('podpowiedzi');
+      list.innerHTML = '';
+      if (!e.target.value) return;
+      for (const place of ['Paryż (CDG)', 'Paryż Orly (ORY)', 'Praga (PRG)']) {
+        const item = document.createElement('li');
+        item.setAttribute('role', 'option');
+        item.textContent = place;
+        item.onclick = () => {
+          e.target.value = place;
+          list.innerHTML = '';
+        };
+        list.appendChild(item);
+      }
+    });
     document.getElementById('unfold').onclick = () => {
       document.getElementById('folded').style.height = 'auto';
     };
@@ -319,6 +344,31 @@ def check_icons(page) -> None:
     ))
 
 
+def check_batch(url: str) -> None:
+    """A whole form in one act, on a real combobox (#251)."""
+    browser.browse_open(url + "hard.html")
+    filled = browser.browse_fill([
+        {"target": "Dokąd", "do": "fill", "value": "CDG"},
+        {"target": "Pasażerowie", "do": "fill", "value": "2"},
+    ])
+    assert not filled.problem, filled.problem
+    assert len(filled.ledger) == 2, filled.ledger
+    assert "Paryż (CDG)" in filled.ledger[0], filled.ledger[0]
+    dokad = named(filled, "Dokąd")
+    assert "Paryż (CDG)" in dokad.detail, dokad.detail
+    print("batch →", " | ".join(filled.ledger))
+
+    # Ambiguity is a question, never a guess — and it stops the batch.
+    browser.browse_open(url + "hard.html")
+    stopped = browser.browse_fill([
+        {"target": "Dokąd", "do": "fill", "value": "Paryż"},
+        {"target": "Pasażerowie", "do": "fill", "value": "2"},
+    ])
+    assert "matches 2 options" in stopped.ledger[-2], stopped.ledger
+    assert "not attempted" in stopped.ledger[-1], stopped.ledger
+    print("ambiguous suggestion →", stopped.ledger[-2][:80])
+
+
 def check_hard(url: str) -> None:
     """Every way a control can be listed and unpressable."""
     page = browser.browse_open(url + "hard.html")
@@ -461,6 +511,7 @@ def main() -> int:
     print(f"profile: {browser.profile_dir()}")
     check_portal(url)
     check_hard(url)
+    check_batch(url)
 
     browser.browse_close()
     browser.shutdown()
