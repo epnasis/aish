@@ -3352,6 +3352,15 @@ class Agent:
                 # in force would be describing something the model never saw.
                 "system_role": backends.system_role_policy(self.provider),
                 "provider": self.provider,
+                # The context window ACTUALLY in force, resolved here and not by
+                # the reader. `num_ctx` is an Ollama concept — it is the option
+                # that server is launched with — and it is carried on every turn
+                # regardless of backend, so a reader comparing against it calls
+                # a Gemini turn at 5% of its window "nearly full". The reader is
+                # forbidden from looking today's number up (that would be
+                # re-derivation of a value that changes), so it is recorded.
+                **dict(zip(("window", "window_source"),
+                           backends.context_window(self.provider, self.num_ctx), strict=True)),
             },
         )
 

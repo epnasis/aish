@@ -986,6 +986,39 @@ class TestWorthALook:
         assert "before the model was called at all" in stub[0]["text"]
         assert "web_search" in stub[0]["text"]
 
+    def test_a_full_context_is_measured_against_the_RECORDED_window(self, tmp_path):
+        """`num_ctx` is an Ollama option carried on every turn whatever the
+        backend. Comparing against it called a Gemini turn at 5% of its
+        million-token window "nearly full" — a confident wrong claim sitting at
+        the top of the evidence, which is the one thing this pass must not do."""
+        base = {
+            "prompt": "p", "given": {"briefs": [], "rules": {}, "state": "recorded"},
+            "thought": {"state": explain_mod.RECORDED, "calls": []},
+            "did": {"calls": [], "orphan_gates": [], "verify": []},
+            "produced": {"answer": "", "status": "ok", "error": "",
+                         "verify": {"stopped": [], "advised": [], "passed": 0}},
+            "steering": [], "trim": [],
+            "flow": {"grouping": "none", "rounds": [], "unplaced": [], "loose": []},
+        }
+
+        def rows_for(options, tokens):
+            doc = json.loads(json.dumps(base))
+            doc["given"]["briefs"] = [{"options": options, "written_here": True,
+                                       "in_force_since": None, "model_call": 1}]
+            doc["thought"]["calls"] = [{"model_call": 1, "text": "", "truncated": 0,
+                                        "cap_source": None, "said": "", "said_truncated": 0,
+                                        "stop": "stop", "tokens": tokens, "blocks": [],
+                                        "malformed": [], "synthesized": False}]
+            return [r for r in explain_mod.notes(doc)["rows"] if r["check"] == "context_full"]
+
+        gemini = {"provider": "gemini", "num_ctx": 32768, "window": 1048576}
+        assert not rows_for(gemini, [50631, 100]), "a Gemini turn at 5% was called full"
+        assert rows_for(gemini, [1_000_000, 100]), "a genuinely full window was not flagged"
+        # Ollama: num_ctx IS the window, so an old log is still readable.
+        assert rows_for({"provider": "ollama", "num_ctx": 32768}, [31000, 10])
+        # Any other backend, with no window recorded: the reader cannot know.
+        assert not rows_for({"provider": "gemini", "num_ctx": 32768}, [50631, 100])
+
     def test_notes_are_a_pure_function_of_the_dossier(self, tmp_path):
         """So the terminal and the panel surface the same list, and neither
         re-reads the log to build it."""
