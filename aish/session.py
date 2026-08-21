@@ -16,6 +16,12 @@ TITLE_MAX = 60
 SNIPPET_MAX = 90  # preview line under the title in the web sessions drawer
 FUZZY_THRESHOLD = 0.55  # whole query vs whole title
 FUZZY_WORD_CUTOFF = 0.75  # single query word vs single session word
+# A typo keeps a word roughly its own length, so a candidate that is much
+# shorter is a DIFFERENT word, not a misspelling of this one. Without this,
+# 0.75 is a length artifact: "tel" scores 0.75 against "tefal" (2*3/8) and so
+# does "tea", which is how one five-letter query reached most of the archive.
+FUZZY_LEN_SLACK = 1
+CLOSEST_MAX = 10  # rows the "nothing matched — here are the closest" fallback shows
 _PUNCT = ".,;:!?()[]{}<>'\"`"
 # DOTALL: a user-direct command can be multi-line (e.g. `gh issue create` with a
 # multi-line --body). Without it the capture stops at the first newline, the
@@ -259,6 +265,42 @@ def attachment_names(content: str) -> list[str]:
     its own — a photo sent with nothing typed is still about something, and
     "IMG_4021.jpg" beats an unnamed chat."""
     return [item.name for item in attachment_refs(content)]
+
+
+def visible_messages(messages: list[dict]) -> list[tuple[str, str]]:
+    """The (role, text) pairs a person can SEE in the chat: their own words and
+    aish's answers, an attachment read as its file name.
+
+    Everything else in the log is machinery — tool results (a command's output, a
+    fetched page, a file read, a recall excerpt) and aish's own `[aish: …]` notes.
+    Reasoning is not here either, because it is a trace record and never enters
+    `messages` at all. The log carries all of it since the record has to be honest
+    about what ran; the CHAT does not show it, so a search over the chat must not
+    match on it (#266): filtering for "tefal" returned chats whose only mention of
+    it was inside a results blob the model read and never repeated.
+
+    ONE derivation, read by the preview line and by the search index. Two
+    functions answering "what does this chat say" is precisely how a row that
+    shows nothing about the query comes back for the query."""
+    visible: list[tuple[str, str]] = []
+    for message in messages:
+        if message.get("role") not in ("user", "assistant"):
+            continue
+        raw = message.get("content") or ""
+        # Notes out BEFORE the whitespace flatten, or the line boundary they are
+        # identified by is gone.
+        content = " ".join(strip_attachment_notes(raw).split())
+        if not content:
+            # A wordless turn still said something: a photo sent with nothing
+            # typed is about its file, and that name is a thing people search for.
+            names = attachment_names(raw)
+            if not names:
+                continue
+            content = ", ".join(names)
+        elif synthetic_kind(content) == "note":
+            continue  # aish talking to itself; it never reached the transcript
+        visible.append((message.get("role") or "", content))
+    return visible
 
 
 def to_record_form(content: str, uploads_dir: Path | None) -> str:
@@ -1576,27 +1618,15 @@ class SessionLog:
 
     @staticmethod
     def _derive_snippet(messages: list[dict]) -> str:
-        """Preview line: the last user or assistant message with visible text.
-        Tool records and empty tool-calling turns say nothing about where the
-        conversation left off, so they are skipped."""
-        for message in reversed(messages):
-            if message.get("role") not in ("user", "assistant"):
-                continue
-            raw = message.get("content") or ""
-            content = " ".join(strip_attachment_notes(raw).split())
-            if not content:
-                # Same as the title: a wordless turn is previewed by what it
-                # carried, not skipped as if nothing had been said.
-                names = attachment_names(raw)
-                if names:
-                    return f"You: {', '.join(names)}"[:SNIPPET_MAX]
-                continue
-            if synthetic_kind(content) == "note":
-                continue  # "You: [I moved the session to …]" is aish talking, not you
+        """Preview line: the last thing SAID in the chat, prefixed with who said
+        it. What counts as said is `visible_messages` — the same rule the search
+        index reads, so the preview can never advertise something the search
+        cannot find, or the other way round."""
+        for role, content in reversed(visible_messages(messages)):
             bang = _BANG_RE.match(content)
             if bang:
                 content = f"! {bang.group(1)}"
-            elif message.get("role") == "user":
+            elif role == "user":
                 content = f"You: {content}"
             if len(content) > SNIPPET_MAX:
                 content = content[: SNIPPET_MAX - 1] + "…"
@@ -1787,8 +1817,11 @@ class SessionLog:
         entry: SessionEntry | None = None
         if parsed.messages:
             messages, model = parsed.messages, parsed.model
+            # WHAT THE CHAT SHOWS, not what the log holds (#266) — see
+            # `visible_messages`. Tool output is most of the bytes in a busy
+            # session and none of what a person searches for.
             content_cf = " ".join(
-                " ".join((m.get("content") or "").split()) for m in messages
+                text for _, text in visible_messages(messages)
             ).casefold()
             model_cf = model.casefold()
             # Model tokens ("gemini", "2.5", "pro") join the fuzzy vocabulary
@@ -1865,12 +1898,19 @@ class SessionLog:
 
     @staticmethod
     def rank(entries: list["SessionEntry"], query: str) -> list[SessionInfo]:
-        """Deterministic ranking over titles, model names, and full message
-        contents — no LLM. Tiers: exact title, phrase in title or model,
-        phrase in contents, all words in contents/model, then fuzzy
-        (difflib): every query word close to some session word, or the whole
-        query close to the title. Ties keep newest-first order; an empty
-        query keeps everything, newest first."""
+        """Deterministic ranking over titles, model names and the visible
+        conversation — no LLM. Tiers: exact title, phrase in title or model,
+        phrase in contents, all words in contents/model. Ties keep newest-first
+        order; an empty query keeps everything, newest first.
+
+        A LITERAL SEARCH IS NEVER DILUTED (#266). Approximate matching is a
+        separate answer to a different question — "nothing you typed is in any
+        chat; here are the closest" — so it runs only when the tiers above found
+        nothing at all (`_closest`). Mixed in, it buried three real hits for
+        "tefal" under fifty chats whose vocabulary merely contained "tel".
+
+        It is also the fast path: a query that matches anything costs no difflib
+        at all, and this runs over every session on every keystroke."""
         query_cf = " ".join(query.split()).casefold()
         words = query_cf.split()
         if not words:
@@ -1885,19 +1925,58 @@ class SessionLog:
                 score = 3
             elif all(word in entry.content_cf or word in entry.model_cf for word in words):
                 score = 2
-            elif all(
-                difflib.get_close_matches(word, entry.words, n=1, cutoff=FUZZY_WORD_CUTOFF)
-                for word in words
-            ) or (
-                difflib.SequenceMatcher(None, query_cf, entry.title_cf).ratio()
-                >= FUZZY_THRESHOLD
-            ):
-                score = 1
             else:
                 continue
             ranked.append((score, entry.info))
+        if not ranked:
+            return SessionLog._closest(entries, query_cf, words)
         ranked.sort(key=lambda pair: -pair[0])  # stable: newest first within a tier
         return [info for _, info in ranked]
+
+    @staticmethod
+    def _closest(
+        entries: list["SessionEntry"], query_cf: str, words: list[str]
+    ) -> list[SessionInfo]:
+        """The typo fallback: the chats nearest to a query nothing matched.
+
+        Ordered by how close the match actually is (the weakest word decides,
+        since every word has to land) and capped at `CLOSEST_MAX`, because
+        "close enough" over an archive-sized vocabulary has no natural end — with
+        the tail left in, the one chat the owner meant sat somewhere inside sixty
+        rows of coincidence."""
+        scored = []
+        for entry in entries:
+            ratio = SessionLog._closeness(entry, query_cf, words)
+            if ratio is not None:
+                scored.append((ratio, entry.info))
+        scored.sort(key=lambda pair: -pair[0])  # stable: newest first at equal closeness
+        return [info for _, info in scored[:CLOSEST_MAX]]
+
+    @staticmethod
+    def _closeness(
+        entry: "SessionEntry", query_cf: str, words: list[str]
+    ) -> float | None:
+        """How near this session is to a query it does not contain, or None for
+        "not near at all". Every query word must have a length-compatible near
+        word in the session (`FUZZY_LEN_SLACK`), or the whole query must read
+        like the title."""
+        ratios = []
+        for word in words:
+            candidates = [
+                candidate
+                for candidate in entry.words
+                if abs(len(candidate) - len(word)) <= FUZZY_LEN_SLACK
+            ]
+            close = difflib.get_close_matches(
+                word, candidates, n=1, cutoff=FUZZY_WORD_CUTOFF
+            )
+            if not close:
+                break
+            ratios.append(difflib.SequenceMatcher(None, word, close[0]).ratio())
+        else:
+            return min(ratios) if ratios else None
+        title = difflib.SequenceMatcher(None, query_cf, entry.title_cf).ratio()
+        return title if title >= FUZZY_THRESHOLD else None
 
     @staticmethod
     def search_sessions(

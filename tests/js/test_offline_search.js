@@ -28,14 +28,18 @@ function extract(startMarker, endMarker) {
 
 // vm only surfaces `var` (not const) as sandbox properties; top-level function
 // declarations land on it as-is.
-const snippet = extract("// [OFFLINE-SEARCH-START]", "// [OFFLINE-SEARCH-END]")
-  .replace(/\bconst\b/g, "var");
+const snippet = [
+  extract("// [OFFLINE-SEARCH-START]", "// [OFFLINE-SEARCH-END]"),
+  "var OFFLINE_SEARCH_CHARS = 200000;",
+  extract("// [OFFLINE-INDEX-START]", "// [OFFLINE-INDEX-END]"),
+].join("\n").replace(/\bconst\b/g, "var");
 const sandbox = {};
 vm.createContext(sandbox);
 vm.runInContext(snippet, sandbox);
-const { offlineRank, lcsRatio } = sandbox;
+const { offlineRank, lcsRatio, offlineSearchText } = sandbox;
 assert(typeof offlineRank === "function", "offlineRank not extracted");
 assert(typeof lcsRatio === "function", "lcsRatio not extracted");
+assert(typeof offlineSearchText === "function", "offlineSearchText not extracted");
 
 const meta = (name, title, text, ts) => ({ name, title, text, ts, snippet: "", origin: "user" });
 
@@ -117,6 +121,53 @@ check("lcsRatio is 1 for identical strings and 0 against empty", () => {
   assert.strictEqual(lcsRatio("deploy", ""), 0);
   assert.ok(lcsRatio("deploy", "deplyo") > 0.75, "a transposition should stay close");
   assert.ok(lcsRatio("deploy", "kitchen") < 0.5, "unrelated words should not be close");
+});
+
+check("a literal match is never diluted by a close one (#266)", () => {
+  // "certificates" IS in session-a; session-b's "tiles" is one letter from
+  // "tiles"/"tls"-shaped noise. Once anything matches literally, the closest
+  // tier has nothing to add.
+  eq(names(offlineRank(corpus, "certificates")), ["session-a.jsonl"]);
+});
+
+check("a short query does not match much shorter words (#266)", () => {
+  // The bug in one line: difflib-style ratios score "tel" 0.75 against "tefal"
+  // on length alone, and every archive holds a three-letter word.
+  const rows = [meta("x.jsonl", "phone notes", "call me on the tel or over tea", 1)];
+  eq(offlineRank(rows, "tefal"), []);
+});
+
+check("the closest fallback is capped", () => {
+  const many = [];
+  for (let i = 0; i < 15; i += 1) {
+    many.push(meta(`s${i}.jsonl`, "restart the server", "restart the server", i));
+  }
+  assert.strictEqual(offlineRank(many, "restrat").length, 10);
+});
+
+check("the offline index holds the chat, not the tool output (#266)", () => {
+  const text = offlineSearchText([
+    { type: "user", text: "find me a sandwich toaster" },
+    { type: "step", tool: "read_url", output: "Tefal SW852D" },
+    { type: "done", result: "Here are three options." },
+  ]);
+  assert.ok(text.includes("sandwich toaster"), "the question is searchable");
+  assert.ok(text.includes("three options"), "the answer is searchable");
+  assert.ok(!text.includes("tefal"), "a page the model read is not the chat");
+});
+
+check("the legacy history blob is filtered by role too (#266)", () => {
+  const text = offlineSearchText([
+    {
+      type: "history",
+      messages: [
+        { role: "user", content: "find me a sandwich toaster" },
+        { role: "tool", content: "Tefal SW852D" },
+      ],
+    },
+  ]);
+  assert.ok(text.includes("sandwich toaster"));
+  assert.ok(!text.includes("tefal"), "tool records must not enter the index");
 });
 
 check("a missing search index degrades to title-only, never throws", () => {
