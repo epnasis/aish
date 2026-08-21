@@ -1615,3 +1615,134 @@ class TestTheSearchProfile:
         )
         browser._real_read_cold("https://example.com")  # conftest stubs the name
         assert seen["cold"] is True
+
+
+class TestSigningInTheSearchProfile:
+    """`/browser search <url>` — the only way that profile can get a session.
+
+    Copying Google's cookies across from the owner's profile would be the
+    obvious shortcut and it is the thing rule 3 of this design forbids: a
+    session must be created in the browser that will later use it. So the
+    remote view — the same one the owner signs in with — is pointed at the
+    other profile instead."""
+
+    def test_a_search_sign_in_never_changes_what_a_read_url_may_do(
+        self, tmp_path, monkeypatch
+    ):
+        """The load-bearing separation.
+
+        `logins.txt` is not a note; it is what `is_logged_in` answers from and
+        therefore what makes `_login_gate` fire. If a sign-in in the search
+        browser landed there, signing THAT profile into Google would start
+        gating the owner's own reads of Google — a profile nobody read with
+        changing what another profile is allowed to do."""
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        browser._remember_logins({"google.com"}, cold=True)
+        assert browser.search_logged_in_hosts() == {"google.com"}
+        assert browser.logged_in_hosts() == set()
+        assert browser.is_logged_in("https://www.google.com/search?q=x") == ""
+
+    def test_the_owners_sign_ins_do_not_make_the_search_browser_look_signed_in(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        browser._remember_logins({"allegro.pl"})
+        assert browser.search_logged_in_hosts() == set()
+
+    def test_a_cold_view_is_recorded_against_the_cold_profile(
+        self, tmp_path, monkeypatch
+    ):
+        """The owner confirms a sign-in AFTER closing the view, so which record
+        it lands in cannot be re-derived from the hosts — it is what the owner
+        thread kept."""
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        monkeypatch.setattr(browser, "_view_was_cold", lambda: True)
+        browser.record_logins(["accounts.google.com"])
+        assert browser.search_logged_in_hosts() == {"accounts.google.com"}
+        assert browser.logged_in_hosts() == set()
+
+    def test_a_warm_view_is_recorded_against_the_owners_profile(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        monkeypatch.setattr(browser, "_view_was_cold", lambda: False)
+        browser.record_logins(["eon.pl"])
+        assert browser.logged_in_hosts() == {"eon.pl"}
+        assert browser.search_logged_in_hosts() == set()
+
+    def test_the_view_opens_the_profile_it_was_asked_for(self, monkeypatch):
+        asked = {}
+
+        def fake_submit(job, timeout):
+            class FakeOwner:
+                view_cold = False
+
+                async def close_now(self):
+                    pass
+
+                async def context(self, **kw):
+                    asked["profile"] = "owner"
+                    raise browser.BrowserUnavailable("stop here")
+
+                async def cold_context(self, **kw):
+                    asked["profile"] = "search"
+                    raise browser.BrowserUnavailable("stop here")
+
+            import asyncio
+
+            try:
+                asyncio.run(job(FakeOwner()))
+            except browser.BrowserUnavailable:
+                pass
+
+        monkeypatch.setattr(browser, "_submit", fake_submit)
+        monkeypatch.setattr(browser, "unavailable_reason", lambda: "")
+        browser.view_open("https://accounts.google.com", cold=True)
+        assert asked["profile"] == "search"
+        browser.view_open("https://accounts.google.com")
+        assert asked["profile"] == "owner"
+
+    def test_a_bare_host_from_the_web_actually_opens(self, monkeypatch):
+        """Measured broken, not imagined: `view_open("example.com")` came back
+        `about:blank` with "could not open example.com (Error)".
+
+        The web app sends the typed line straight to `view_open`, and only the
+        CLI normalised the scheme first — so the surface the owner actually uses
+        was the one that never worked."""
+        seen = {}
+
+        def fake_submit(job, timeout):
+            import asyncio
+
+            class FakeOwner:
+                view_cold = False
+
+                async def close_now(self):
+                    pass
+
+                async def context(self, **kw):
+                    raise browser.BrowserUnavailable("stop here")
+
+            async def note(owner, url, w, h, cold=False):
+                seen["url"] = url
+
+            monkeypatch.setattr(browser, "_open_view", note)
+            asyncio.run(job(FakeOwner()))
+
+        monkeypatch.setattr(browser, "_submit", fake_submit)
+        monkeypatch.setattr(browser, "unavailable_reason", lambda: "")
+        browser.view_open("example.com")
+        assert seen["url"] == "https://example.com"
+        browser.view_open("http://example.com")
+        assert seen["url"] == "http://example.com"
+
+    def test_browser_search_says_what_that_profile_is_for(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        text = browser.command("search")
+        assert "search-profile" in text
+        assert "nothing" in text  # signed into nothing, and it says so
+        assert "/browser search <url>" in text
+
+    def test_the_bare_listing_points_at_it(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        assert "/browser search" in browser.command("")

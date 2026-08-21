@@ -8021,6 +8021,7 @@ const SLASH_COMMANDS = [
   ["/add-dir", "allow auto-approved work in another tree"],
   ["/jobs", "list background jobs"],
   ["/browser", "sign in to a site in aish's own browser (window opens on the Mac)"],
+  ["/browser search", "the separate profile web searches are read with"],
   ["/session", "show this chat's log path (copyable)"],
   ["/mic", "test speech recognition (mic diagnostic)"],
   ["/explain", "the full record of a turn — what it was given, thought, ran and answered"],
@@ -8439,6 +8440,21 @@ function handleSlash(text) {
       if (verb === "forget" || verb === "logout" || verb === "close") {
         openSheet("workspace-sheet");
         return send({ type: "browser", arg });
+      }
+      // `/browser search <url>` drives the SEARCH profile — the separate,
+      // signed-into-nothing browser web_search reads results pages with. Bare
+      // `/browser search` is a question about that profile, so it goes to the
+      // sheet as text like the other bookkeeping verbs.
+      if (verb === "search") {
+        // Not named `rest`: the JS checks flatten const to var to run a real
+        // function out of this file, and another branch already uses that name.
+        const searchAt = arg.slice(verb.length).trim();
+        if (!searchAt) {
+          openSheet("workspace-sheet");
+          return send({ type: "browser", arg });
+        }
+        openBrowserView(searchAt, "search");
+        return true;
       }
       openBrowserView(arg);
       return true;
@@ -12149,10 +12165,10 @@ function onBrowserView(event) {
   // Showing it with an empty address bar and no word of explanation is what
   // made the view look broken; keep the typed URL and say what happened.
   if (event.error) {
-    $("bv-status").textContent = event.error;
+    $("bv-status").textContent = bvLabel(event.error);
   } else {
     $("bv-url").value = event.url || "";
-    $("bv-status").textContent = event.title || event.url || "";
+    $("bv-status").textContent = bvLabel(event.title || event.url || "");
   }
   // --- a NEW DOCUMENT resets the zoom ------------------------------------
   // Counted server-side from real navigations, NOT inferred from the URL
@@ -12162,7 +12178,13 @@ function onBrowserView(event) {
   if (typeof event.nav === "number" && event.nav !== bvLastNav) {
     if (bvLastNav !== -1) bvZoom = { scale: 1, x: 0, y: 0 };
     bvLastNav = event.nav;
-    try { localStorage.setItem("aish-bv-last", event.url || ""); } catch (e) { /* private */ }
+    // The PROFILE is stored with the URL, not separately and not inferred:
+    // Resume reopens an address, and reopening a search-profile address in the
+    // owner's browser would silently swap which sessions are attached.
+    try {
+      localStorage.setItem("aish-bv-last", event.url || "");
+      localStorage.setItem("aish-bv-last-profile", bvProfile);
+    } catch (e) { /* private */ }
   }
   $("bv-empty").hidden = true;
   // A password went into this host and the page then moved — which is what a
@@ -12340,7 +12362,27 @@ function bvPaintFocus(focus) {
 }
 // [BROWSER-VIEW-EDIT-END]
 
-function openBrowserView(url) {
+// Which profile the OPEN view is driving, so a frame arriving later can be
+// stored with the right one.
+let bvProfile = "";
+
+/** Every status line, tagged with the profile when it is not the owner's.
+ *
+ *  It has to survive the FIRST FRAME, which is where the first version of this
+ *  failed: the label was written once at open and the frame handler then
+ *  replaced the whole line with the page title, so by the time there was
+ *  anything to sign into, nothing on screen said which browser you were in.
+ *  The two profiles are pixel-identical and mean opposite things — one carries
+ *  every session the owner has, the other carries none — and a password typed
+ *  into the wrong one is a mistake nothing else on the page would reveal. */
+function bvLabel(text) {
+  return bvProfile === "search"
+    ? `${text} · search profile (signed into nothing)`
+    : text;
+}
+
+function openBrowserView(url, profile) {
+  bvProfile = profile === "search" ? "search" : "";
   openSheet("browser-sheet");
   $("bv-frame").removeAttribute("src");
   bvResetZoom();
@@ -12356,14 +12398,20 @@ function openBrowserView(url) {
     resume.hidden = !last;
     if (last) {
       resume.textContent = `Resume ${last.replace(/^https?:\/\//, "").slice(0, 40)}`;
-      resume.onclick = () => openBrowserView(last);
+      const lastProfile = localStorage.getItem("aish-bv-last-profile") || "";
+      resume.onclick = () => openBrowserView(last, lastProfile);
     }
     $("bv-url").focus();
     return;
   }
   $("bv-empty").hidden = true;
-  $("bv-status").textContent = `opening ${url}…`;
-  bvSend(Object.assign({ action: "open", url }, bvViewportSize()));
+  // WHICH browser this is has to be visible. The two profiles look identical
+  // on screen and mean opposite things — one carries every session the owner
+  // has, the other carries none — so a sign-in typed into the wrong one is a
+  // mistake nothing else would reveal.
+  $("bv-status").textContent = bvLabel(`opening ${url}…`);
+  bvSend(Object.assign({ action: "open", url, profile: bvProfile },
+                       bvViewportSize()));
 }
 
 /** The SHAPE the remote page should be laid out at: the stage we will show it

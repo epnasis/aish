@@ -383,6 +383,26 @@ def logins_file() -> Path:
     return state_dir() / "browser" / "logins.txt"
 
 
+def search_logins_file() -> Path:
+    """What the SEARCH profile is signed into — a separate file, deliberately.
+
+    `logins.txt` is not a note, it is what `is_logged_in` answers from and
+    therefore what makes `_login_gate` fire on a `read_url`. The search profile
+    is never used by `read_url`, so a sign-in there must not be able to change
+    what the owner's reads do — and equally, his sign-ins must not make the
+    search browser look signed in when it is not. Two profiles, two records,
+    and this one is READ FOR DISPLAY ONLY: nothing gates on it."""
+    return state_dir() / "browser" / "search-logins.txt"
+
+
+def search_logged_in_hosts() -> set[str]:
+    try:
+        raw = search_logins_file().read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    return {line.strip() for line in raw.splitlines() if line.strip()}
+
+
 def enabled() -> bool:
     return os.environ.get("AISH_BROWSER", "1") not in ("0", "false", "no")
 
@@ -458,12 +478,13 @@ def is_logged_in(url: str) -> str:
     return ""
 
 
-def _remember_logins(hosts: set[str]) -> None:
+def _remember_logins(hosts: set[str], *, cold: bool = False) -> None:
     if not hosts:
         return
-    path = logins_file()
+    path = search_logins_file() if cold else logins_file()
+    known = search_logged_in_hosts() if cold else logged_in_hosts()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(sorted(logged_in_hosts() | hosts)) + "\n", encoding="utf-8")
+    path.write_text("\n".join(sorted(known | hosts)) + "\n", encoding="utf-8")
 
 
 def forget_login(host: str) -> bool:
@@ -867,6 +888,10 @@ class _Owner:
         # because it must outlive a single job: the whole point of the view is
         # that tap, type and tap again land on the SAME page.
         self.view: Any = None
+        # Which profile the view is driving. Outlives the view itself: the
+        # owner confirms a sign-in AFTER closing it, and that confirmation has
+        # to land in the right record.
+        self.view_cold = False
         self.view_hosts: set[str] = set()
         self.view_touched = 0.0
         self.busy = 0
@@ -1026,12 +1051,24 @@ class _Owner:
                 )
             return self._context
 
-    async def cold_context(self) -> Any:
-        """The search browser. Never the owner's profile, and no argument that
-        could make it one."""
+    async def cold_context(
+        self,
+        *,
+        args: list[str] | None = None,
+        viewport: dict | None = None,
+        device_scale_factor: float | None = None,
+    ) -> Any:
+        """The search browser. The PROFILE is not a parameter and never will be
+        — that is the whole fence. Window size is, because signing this profile
+        in uses the same remote view the owner's does."""
         async with self._lock:
             if self._cold is None:
-                self._cold = await self._open(search_profile_dir())
+                self._cold = await self._open(
+                    search_profile_dir(),
+                    args=args,
+                    viewport=viewport,
+                    device_scale_factor=device_scale_factor,
+                )
             return self._cold
 
     async def _close(self) -> None:
@@ -1264,6 +1301,29 @@ def command(arg: str) -> str:
         shutdown()
         return "browser closed."
 
+    if verb == "search":
+        signed = sorted(search_logged_in_hosts())
+        if not rest:
+            return "\n".join(
+                [
+                    f"search profile: {search_profile_dir()}",
+                    "signed in: " + (", ".join(signed) if signed else "nothing — "
+                    "searches are read as an anonymous browser"),
+                    "",
+                    "This is the browser web_search reads results pages with. It "
+                    "is separate from the one above on purpose: it never carries "
+                    "your other sessions, and nothing it is signed into can "
+                    "change what a read_url of a site is allowed to do.",
+                    "",
+                    "/browser search <url>   sign this profile in (opens the "
+                    "remote view on it)",
+                ]
+            )
+        return (
+            "opening the search profile at "
+            + (rest if rest.startswith(("http://", "https://")) else "https://" + rest)
+        )
+
     if not arg:
         reason = unavailable_reason()
         hosts = sorted(logged_in_hosts())
@@ -1275,6 +1335,7 @@ def command(arg: str) -> str:
             "",
             "/browser <url>       open a real window there so you can sign in",
             "/browser forget <host>  stop treating a site as signed in",
+            "/browser search      the separate profile searches are read with",
             "/browser close       shut the browser down now",
         ]
         return "\n".join(lines)
@@ -1521,16 +1582,35 @@ def _note_visit(owner: _Owner, url: str) -> None:
 
 
 def view_open(
-    url: str, *, width: object = None, height: object = None, timeout: float = 120.0
+    url: str,
+    *,
+    width: object = None,
+    height: object = None,
+    cold: bool = False,
+    timeout: float = 120.0,
 ) -> Frame:
-    """Start a remote view at `url`, sized to the client, and return a frame."""
+    """Start a remote view at `url`, sized to the client, and return a frame.
+
+    `cold` drives the SEARCH profile instead of the owner's, which is the only
+    way to sign that profile in: rule 3 of this design is that a session must be
+    created in the browser that will later use it, so copying cookies across
+    from the owner's profile is not an alternative — it is the thing the rule
+    forbids."""
     reason = unavailable_reason()
     if reason:
         raise BrowserUnavailable(reason)
+    # The scheme, which `view_act(goto)` and `browse_open` both add and this did
+    # not. `/browser eon.pl` from the web app therefore NEVER opened: the web
+    # sends the typed line straight here, Chrome refuses a schemeless address,
+    # and the view came back `about:blank` with "could not open eon.pl (Error)".
+    # Only the CLI worked, because `command()` normalises before it calls this
+    # — so the one surface the owner actually uses was the broken one.
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
     w, h = view_size(width, height)
 
     async def job(owner: _Owner) -> Frame:
-        return await _open_view(owner, url, w, h)
+        return await _open_view(owner, url, w, h, cold=cold)
 
     return _submit(job, timeout)
 
@@ -1563,17 +1643,21 @@ async def _refuse_upload(owner: _Owner, chooser: Any) -> None:
         pass
 
 
-async def _open_view(owner: _Owner, url: str, w: int, h: int) -> Frame:
+async def _open_view(
+    owner: _Owner, url: str, w: int, h: int, *, cold: bool = False
+) -> Frame:
     # A KNOWN viewport, so a tap at (x, y) in the PWA means that point
     # here. The read context uses the real window size and cannot give
     # that, so the view gets its own — and Chrome locks the profile, so
     # the read context has to let go first.
     await owner.close_now()
-    context = await owner.context(
-        args=[f"--window-size={w},{h}", "--window-position=-4000,-4000"],
-        viewport={"width": w, "height": h},
-        device_scale_factor=VIEW_SCALE,
+    args = [f"--window-size={w},{h}", "--window-position=-4000,-4000"]
+    viewport = {"width": w, "height": h}
+    open_context = owner.cold_context if cold else owner.context
+    context = await open_context(
+        args=args, viewport=viewport, device_scale_factor=VIEW_SCALE
     )
+    owner.view_cold = cold
     page = await context.new_page()
     owner.navigations = 0
     page.on("framenavigated", lambda f: _count_navigation(owner, page, f))
@@ -2356,8 +2440,18 @@ def record_logins(hosts: list[str]) -> list[str]:
         host = host_of(text if "//" in text else "https://" + text)
         if host:
             clean.add(host)
-    _remember_logins(clean)
+    # WHICH record depends on which profile was being driven, and the view is
+    # already closed by the time the owner confirms — so the answer is the one
+    # the owner thread kept, never one re-derived from the hosts.
+    _remember_logins(clean, cold=_view_was_cold())
     return sorted(clean)
+
+
+def _view_was_cold() -> bool:
+    global _OWNER
+    if _OWNER is None or not _OWNER.is_alive():
+        return False
+    return bool(getattr(_OWNER.owner, "view_cold", False))  # type: ignore[attr-defined]
 
 
 def view_is_open() -> bool:

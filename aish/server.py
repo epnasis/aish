@@ -4028,6 +4028,11 @@ class WebServer:
                     str(message.get("url", "")).strip(),
                     width=message.get("width"),
                     height=message.get("height"),
+                    # Which PROFILE this view drives. Sent by the client rather
+                    # than inferred from the URL: signing the search profile in
+                    # happens at accounts.google.com, the same address the owner
+                    # would use for his own, so the address cannot say which.
+                    cold=str(message.get("profile", "")) == "search",
                 )
             if action == "close":
                 return browser.view_close()
