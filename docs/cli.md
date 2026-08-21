@@ -32,7 +32,7 @@
 
 ## The gate says why (#252)
 
-`print_intent` puts the model's stated reason above the command and tool prompts, dimmed and attributed, before the y/N line. The terminal and the web card gate identically, so they show the same reason — and it is printed whole for the same reason the card renders it whole: the one-line snippet the trace keeps cuts the sentence that motivated the feature at an abbreviation and loses all of it. The rationale, the incident, and why nothing tells the model where this lands are in `docs/agent-core.md`.
+`print_intent` puts the model's stated reason above every gate prompt — command, tool, write, read, import — dimmed and attributed, before the y/N line. The terminal and the web card gate identically, so they show the same reason — and it is printed whole for the same reason the card renders it whole: the one-line snippet the trace keeps cuts the sentence that motivated the feature at an abbreviation and loses all of it. The rationale, the incident, and why nothing tells the model where this lands are in `docs/agent-core.md`.
 
 ## Models
 

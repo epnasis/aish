@@ -1247,6 +1247,11 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 .card-intent-label { margin-bottom: 3px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--dim); }
 .card-intent-text { font-size: 13.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .card-intent.empty .card-intent-text { color: var(--dim); font-style: italic; }
+/* A long reason folds instead of being cut: the clamp is presentation, the
+   whole text is always in the DOM. */
+.card-intent.folded .card-intent-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 8; line-clamp: 8; overflow: hidden; }
+.card-intent.folded.open .card-intent-text { display: block; overflow: visible; }
+.card-intent-more { margin-top: 6px; padding: 0; border: 0; background: none; color: var(--blue, #0a84ff); font-size: 12.5px; font-weight: 600; cursor: pointer; }
 .tool-preview { margin: 10px 0 0; padding: 9px 11px; background: rgba(127,127,127,0.10); border-left: 3px solid var(--blue, #0a84ff); border-radius: 6px; font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
 .tool-args { margin: 10px 0 0; display: flex; flex-direction: column; gap: 6px; }
 .tool-args.secondary { margin-top: 8px; opacity: 0.72; }

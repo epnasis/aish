@@ -6894,6 +6894,14 @@ function scopeExplain(action, prefixText, escapeText) {
 //
 // Never truncated: the 120-character snippet the trace already keeps cuts the
 // incident's sentence at an abbreviation and loses the entire reason.
+//
+// A long reason FOLDS rather than being cut. The whole text is always in the
+// DOM and the clamp is CSS, so nothing is ever destroyed — "never truncated"
+// has to survive the fix for "sometimes it is a wall of text". The threshold
+// sits well above the incident's own 299 characters, which must never need a
+// tap: the case the feature exists for is the case it must not hide.
+const INTENT_FOLD_CHARS = 600;
+
 function intentBlock(event) {
   const wrap = document.createElement("div");
   wrap.className = "card-intent";
@@ -6903,13 +6911,26 @@ function intentBlock(event) {
   const body = document.createElement("div");
   body.className = "card-intent-text";
   const said = String(event.intent || "").trim();
-  if (said) {
-    body.textContent = said;
-  } else {
+  if (!said) {
     wrap.classList.add("empty");
     body.textContent = "It gave no reason for this step.";
+    wrap.append(label, body);
+    return wrap;
   }
+  body.textContent = said;
   wrap.append(label, body);
+  if (said.length > INTENT_FOLD_CHARS) {
+    wrap.classList.add("folded");
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "card-intent-more";
+    more.textContent = "Show more";
+    more.onclick = () => {
+      wrap.classList.toggle("open");
+      more.textContent = wrap.classList.contains("open") ? "Show less" : "Show more";
+    };
+    wrap.appendChild(more);
+  }
   return wrap;
 }
 
@@ -6955,7 +6976,6 @@ function buildCommandCard(card, event) {
   cmdTools.append(editBtn, copyChip(() => code.textContent, "copy command"));
   box.append(dollar, code, cmdTools);
   card.appendChild(box);
-  card.appendChild(intentBlock(event));
 
   function toggleEdit() {
     if (code.isContentEditable) {
@@ -6994,6 +7014,7 @@ function buildCommandCard(card, event) {
 
   const escapes = event.escapes || [];
   if (escapes.length) card.appendChild(escapeNote(escapes));
+  card.appendChild(intentBlock(event));
 
   const feedback = feedbackField();
   card.appendChild(feedback);
@@ -7126,6 +7147,7 @@ function buildWriteCard(card, event) {
   } else {
     card.appendChild(diff);
   }
+  card.appendChild(intentBlock(event));
 
   const feedback = feedbackField();
   card.appendChild(feedback);
@@ -7293,6 +7315,10 @@ function buildImportCard(card, event) {
     sk.textContent = `Binary assets skipped (not installed): ${event.skipped.join(", ")}`;
     card.appendChild(sk);
   }
+  // Above the file listing, not below it: the whole point of the consolidated
+  // review (#139) is that the files are LONG, so a reason placed after them is
+  // a reason nobody scrolls back up from.
+  card.appendChild(intentBlock(event));
 
   for (const f of files) {
     const fileHead = document.createElement("div");
@@ -7488,6 +7514,7 @@ function buildReadCard(card, event) {
 
   const escapes = event.escapes || [];
   if (escapes.length) card.appendChild(escapeNote(escapes));
+  card.appendChild(intentBlock(event));
 
   const feedback = feedbackField();
   card.appendChild(feedback);

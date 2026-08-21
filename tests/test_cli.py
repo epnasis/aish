@@ -1,9 +1,16 @@
 """Approver flow tests: monkeypatch input() to script the interactive prompt."""
 
 import builtins
+from types import SimpleNamespace
 
 from aish.approval import load_prefixes
-from aish.cli import make_approver, make_read_approver, make_tool_approver
+from aish.cli import (
+    make_approver,
+    make_import_approver,
+    make_read_approver,
+    make_tool_approver,
+    make_write_approver,
+)
 
 
 def scripted_input(monkeypatch, answers):
@@ -1609,3 +1616,33 @@ def test_an_unwired_approver_still_works(tmp_path, monkeypatch):
     approve = make_approver(False, tmp_path / "allow.txt", None)
     scripted_input(monkeypatch, ["y"])
     assert approve("touch note.txt") == "touch note.txt"
+
+
+def test_every_prompt_kind_prints_the_reason(tmp_path, monkeypatch, capsys):
+    """The terminal gates identically to the web, so it explains identically —
+    on every kind of prompt, not just the two slice 1 covered."""
+    plan = SimpleNamespace(
+        is_new=False, target=tmp_path / "a.py", diff="+1", note="", rule="",
+        rule_verb="", added=1, removed=0,
+    )
+    prompts = {
+        "command": lambda: make_approver(
+            False, tmp_path / "allow.txt", None, get_intent=lambda: INCIDENT_INTENT
+        )("touch note.txt"),
+        "tool": lambda: make_tool_approver(None, get_intent=lambda: INCIDENT_INTENT)(
+            "browse", {"url": "https://example.invalid/"}
+        ),
+        "write": lambda: make_write_approver(None, lambda: INCIDENT_INTENT)(plan),
+        "read": lambda: make_read_approver(None, get_intent=lambda: INCIDENT_INTENT)(
+            "/etc/hosts"
+        ),
+        "import": lambda: make_import_approver(None, lambda: INCIDENT_INTENT)(
+            "skill", "desc", [], [], [], "/dest"
+        ),
+    }
+    for kind, ask in prompts.items():
+        scripted_input(monkeypatch, ["y"])
+        ask()
+        printed = capsys.readouterr().out
+        assert "aish says" in printed.lower(), f"the {kind} prompt gave no reason"
+        assert "credit, overpayment" in printed, f"the {kind} prompt cut the reason"
