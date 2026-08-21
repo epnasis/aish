@@ -2282,6 +2282,14 @@ body.dropping::after {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The word you searched for, inside the row that answers the search. Colour and
+   weight rather than a highlighter block: the row is already a dim one-line
+   quote, and a filled background at this size reads as a defect. */
+.session-row mark {
+  background: none;
+  color: var(--blue);
+  font-weight: 600;
+}
 .sheet-list .badge {
   flex: none;
   font-size: 11.5px;

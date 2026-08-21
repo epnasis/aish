@@ -207,19 +207,35 @@ const offlineSafe = (promise, fallback = null) => promise.catch(() => fallback);
 // events: { name, events: [...] }   ← replayed verbatim through onReplay()
 
 // [OFFLINE-INDEX-START]
+// One message as WORDS — session.py's `plain_text`. Markdown is formatting: a
+// link becomes its label (the href is machinery), `**` and backticks go, single
+// `*`/`_` stay because they live inside identifiers far more often than they
+// mean italics.
+function offlinePlainText(content) {
+  return (content || "")
+    .split("\n")
+    .map((line) => line.replace(/^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+|>\s?)+/, ""))
+    .join("\n")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/\*\*|`/g, "");
+}
+
 function offlineSearchText(events) {
   // Only what a person would search FOR: their own words and aish's answers.
   // Command output is noise in a search index (and the bulk of the bytes).
   // Server half in `visible_messages` (session.py) — same rule, one meaning.
   const parts = [];
   for (const event of events || []) {
-    if (event.type === "user" && event.text) parts.push(event.text);
-    else if (event.type === "done" && event.result) parts.push(event.result);
+    if (event.type === "user" && event.text) parts.push(offlinePlainText(event.text));
+    else if (event.type === "done" && event.result) parts.push(offlinePlainText(event.result));
     else if (event.type === "history") {
       // The flat blob a log too old to reconstruct falls back to: raw records,
       // tool results included, so the roles have to be filtered HERE (#266).
       for (const m of event.messages || []) {
-        if (m.content && (m.role === "user" || m.role === "assistant")) parts.push(m.content);
+        if (m.content && (m.role === "user" || m.role === "assistant")) {
+          parts.push(offlinePlainText(m.content));
+        }
       }
     }
   }
@@ -347,6 +363,7 @@ function lcsRatio(a, b) {
 // LAST message says nothing about why the chat is in the list, which on screen
 // is indistinguishable from the search being wrong (#266).
 const OFFLINE_SNIPPET_CHARS = 90;
+const OFFLINE_SNIPPET_LEAD = 15; // a rail row is one truncated line (#266)
 
 function offlineMatchSnippet(text, words) {
   const flat = (text || "").split(/\s+/).filter(Boolean).join(" ");
@@ -357,7 +374,11 @@ function offlineMatchSnippet(text, words) {
     if (at >= 0 && (pos < 0 || at < pos)) pos = at;
   }
   if (pos < 0) return "";
-  const start = Math.max(0, pos - Math.floor(OFFLINE_SNIPPET_CHARS / 3));
+  let start = Math.max(0, pos - OFFLINE_SNIPPET_LEAD);
+  if (start) {
+    const space = flat.indexOf(" ", start);
+    if (space >= 0 && space < pos) start = space + 1;
+  }
   const end = Math.min(flat.length, start + OFFLINE_SNIPPET_CHARS);
   return (start > 0 ? "…" : "") + flat.slice(start, end) + (end < flat.length ? "…" : "");
 }
@@ -14717,6 +14738,37 @@ function sessionIcon(info) {
   return wrap;
 }
 
+// [SEARCH-HIGHLIGHT-START]
+// Paint the searched words inside a row's own text. A quote you have to re-read
+// to find the word you typed is barely better than no quote (#266) — and on a
+// phone the row is one truncated line, so the match has to be findable at a
+// glance or it is not there at all. Text nodes and one element per hit: the
+// text is a chat's contents and never becomes markup.
+function paintMatch(el, text, words) {
+  el.textContent = "";
+  const lower = (text || "").toLowerCase();
+  let at = 0;
+  while (at < text.length) {
+    let hit = -1;
+    let len = 0;
+    for (const word of words) {
+      const found = word ? lower.indexOf(word, at) : -1;
+      if (found >= 0 && (hit < 0 || found < hit || (found === hit && word.length > len))) {
+        hit = found;
+        len = word.length;
+      }
+    }
+    if (hit < 0) break;
+    if (hit > at) el.appendChild(document.createTextNode(text.slice(at, hit)));
+    const mark = document.createElement("mark");
+    mark.textContent = text.slice(hit, hit + len);
+    el.appendChild(mark);
+    at = hit + len;
+  }
+  if (at < text.length) el.appendChild(document.createTextNode(text.slice(at)));
+}
+// [SEARCH-HIGHLIGHT-END]
+
 function sessionRow(info, current, opts = {}) {
   const isCurrent = info.name === current;
   const row = document.createElement("button");
@@ -14728,7 +14780,8 @@ function sessionRow(info, current, opts = {}) {
   head.className = "line";
   const title = document.createElement("span");
   title.className = "title";
-  title.textContent = info.title;
+  if (opts.match && opts.match.length) paintMatch(title, info.title, opts.match);
+  else title.textContent = info.title;
   head.appendChild(title);
   const badgeSpec = STATE_BADGES[info.state];
   if (badgeSpec) {
@@ -14748,7 +14801,8 @@ function sessionRow(info, current, opts = {}) {
   if (info.snippet) {
     const snippet = document.createElement("span");
     snippet.className = "snippet";
-    snippet.textContent = info.snippet;
+    if (opts.match && opts.match.length) paintMatch(snippet, info.snippet, opts.match);
+    else snippet.textContent = info.snippet;
     body.appendChild(snippet);
   }
   const right = document.createElement("span");
@@ -14851,7 +14905,9 @@ function renderSessions(event) {
   // arrives — and a list arrives right after every switch.
   const current = currentSession || event.current;
   const unreadState = { seen: seenAt, since: seenSince, current };
-  const searching = Boolean($("sessions-search").value.trim());
+  const query = $("sessions-search").value.trim();
+  const searching = Boolean(query);
+  const match = query.toLowerCase().split(/\s+/).filter(Boolean);
   // The badge's ground truth, claimed only by an UNFILTERED SERVER list: a
   // cached list cannot see liveness at all and a ranked search result is a
   // subset of the chats there are, so either would silently under-count
@@ -14870,7 +14926,9 @@ function renderSessions(event) {
     // this whole change came from.
     if (event.approx) list.appendChild(sectionLabel("No exact match — closest chats"));
     for (const info of event.sessions) {
-      list.appendChild(sessionRow(info, current, { unread: sessionUnread(info, unreadState) }));
+      list.appendChild(
+        sessionRow(info, current, { unread: sessionUnread(info, unreadState), match })
+      );
     }
     return;
   }
