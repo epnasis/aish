@@ -1114,6 +1114,14 @@ def _status_snippet(text: str, limit: int = STATUS_SNIPPET_CHARS) -> str:
 
 TRIM_KEEP_CHARS = 200
 TRIMMED_NOTE = "\n[trimmed: full output dropped to save context]"
+# The same trim, when the full text could be cached. Imperative and complete:
+# a hint the model has to interpret is a hint it ignores, and the whole value
+# here is that it CAN get the rest back without re-running anything.
+TRIMMED_RECOVERABLE = (
+    "\n[trimmed to save context. The rest is CACHED, not lost: call"
+    ' read_tool_output(continuation="{key}", page=1) and keep paging to the end.'
+    " Do NOT re-run the tool.]"
+)
 # Rough tokens→chars margin: ~4 chars/token, keep well under num_ctx so the
 # system prompt is never silently evicted by Ollama's own truncation.
 CHARS_PER_TOKEN_BUDGET = 3
@@ -2685,7 +2693,28 @@ class Agent:
             note += TOOL_MEDIA_CAPPED.format(dropped=dropped, cap=TOOL_IMAGES_PER_TURN)
         self._append({"role": "user", "content": note, "images": shown})
 
-    def _trim_tool_message(self, message: dict) -> bool:
+    def _trim_tool_message(self, message: dict) -> str | None:
+        """Shorten one message; returns the continuation key, "" when the text
+        could not be cached, or None when nothing was trimmed.
+
+        Trimming used to be a ONE-WAY DOOR. `read_tool_output` can page a large
+        result back out of a content-addressed store without re-running the
+        tool, but its key rides a footer at the END of the output — and a stub
+        keeps the first 200 characters, so the key was the first thing severed.
+        The model was told its context had been shortened and given no way to
+        recover any of it.
+
+        Worse, only PLUGIN tools ever minted a key at all: `run_command` and
+        `read_url` — the two biggest things in any history — had none, so their
+        results were gone outright and the only recourse was running the command
+        again, which for anything that mutates is a second side effect.
+
+        Caching at TRIM time fixes both, because what is cached here is the
+        message as the model had it rather than the tool's raw output, so every
+        tool gets recoverability whether or not it knows what a continuation is.
+        This matters most exactly where the trim hurts most: a small local model
+        can never hold a long history, so being able to fetch a page back on
+        demand is the difference between a bounded context and a lossy one."""
         # Delivered pictures are dropped WHOLE rather than shortened, and by
         # the same trim as an old tool result because they are the same thing:
         # a past task's output still riding every request. Images are the
@@ -2698,14 +2727,23 @@ class Agent:
         if message.get("images") and str(message.get("content", "")).startswith(NOTE_MARKER):
             del message["images"]
             message["content"] = TOOL_MEDIA_EXPIRED
-            return True
+            return ""
         if message.get("role") != "tool":
-            return False
+            return None
         content = message["content"]
         if len(content) <= TRIM_KEEP_CHARS + len(TRIMMED_NOTE):
-            return False
-        message["content"] = content[:TRIM_KEEP_CHARS] + TRIMMED_NOTE
-        return True
+            return None
+        # Cache BEFORE overwriting. An unwritable store returns "" and the stub
+        # degrades to the old dead end, which must never be an exception in the
+        # middle of preparing a turn.
+        key = (
+            tool_plugins.store_continuation(content, self.tool_output_dir)
+            if self.tool_output_dir
+            else ""
+        )
+        note = TRIMMED_RECOVERABLE.format(key=key) if key else TRIMMED_NOTE
+        message["content"] = content[:TRIM_KEEP_CHARS] + note
+        return key
 
     def _trim_eagerly(self, task_start: int) -> None:
         """The eager per-task trim: every prior tool output down to a 200-char
@@ -2717,11 +2755,11 @@ class Agent:
         why its output was truncated, grepped aish's source, found a different
         truncator's marker and confidently blamed the wrong thing."""
         before = self._total_chars()
-        stubbed = [
-            self._stub_ref(i)
-            for i in range(1, task_start)
-            if self._trim_tool_message(self.messages[i])
-        ]
+        stubbed = []
+        for i in range(1, task_start):
+            key = self._trim_tool_message(self.messages[i])
+            if key is not None:
+                stubbed.append(self._stub_ref(i, key))
         self._record_trim("eager_stub", before, budget=None, stubbed=stubbed)
 
     def _trim_history_to_budget(self) -> None:
@@ -2735,11 +2773,12 @@ class Agent:
         for i in range(1, len(self.messages)):
             if self._total_chars() <= budget:
                 break
-            if self._trim_tool_message(self.messages[i]):
-                stubbed.append(self._stub_ref(i))
+            key = self._trim_tool_message(self.messages[i])
+            if key is not None:
+                stubbed.append(self._stub_ref(i, key))
         self._record_trim("budget_oldest_first", before, budget=budget, stubbed=stubbed)
 
-    def _stub_ref(self, index: int) -> dict:
+    def _stub_ref(self, index: int, key: str = "") -> dict:
         """Which message was stubbed, in terms a reader can act on: its position
         in the conversation and which tool produced it. `affected: 3` said
         something had been cut but never WHAT, so the log could show a complete
@@ -2747,7 +2786,14 @@ class Agent:
         concluding the model ignored what it read would be looking at evidence
         the model never saw (#241)."""
         message = self.messages[index]
-        return {"at": index, "tool": str(message.get("tool_name") or message.get("role") or "")}
+        ref = {"at": index, "tool": str(message.get("tool_name") or message.get("role") or "")}
+        # Whether the text can be fetched back. "Trimmed" and "trimmed but the
+        # model can page it back on demand" are different facts about the same
+        # turn, and only the second one means the history is bounded rather than
+        # lossy — so a reader must not have to infer which happened.
+        if key:
+            ref["continuation"] = key
+        return ref
 
     def _record_trim(
         self, policy: str, before: int, budget: int | None, stubbed: list[dict]
@@ -2797,8 +2843,9 @@ class Agent:
         ]
         stubbed: list[dict] = []
         for i in tool_indices[:-2]:
-            if self._trim_tool_message(self.messages[i]):
-                stubbed.append(self._stub_ref(i))
+            key = self._trim_tool_message(self.messages[i])
+            if key is not None:
+                stubbed.append(self._stub_ref(i, key))
                 if self._total_chars() <= budget:
                     break
         self._record_trim("mid_task_budget", before, budget=budget, stubbed=stubbed)

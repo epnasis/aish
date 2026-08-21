@@ -489,7 +489,14 @@ class TestCoverageHoles:
         )
         agent._trim_eagerly(len(agent.messages))
         (record,) = steps(log.path, "trim")
-        assert record["stubbed"] == [{"at": 2, "tool": "read_url"}]
+        (stub,) = record["stubbed"]
+        assert stub["at"] == 2 and stub["tool"] == "read_url"
+        # …and whether the model can fetch it back, which is a different fact
+        # about the same turn: with a key the history is bounded, without one
+        # it is lossy.
+        assert stub["continuation"], stub
+        assert agent.messages[2]["content"].endswith("]")
+        assert stub["continuation"] in agent.messages[2]["content"]
 
     def test_the_dossier_names_the_stubbed_results(self, tmp_path):
         path = tmp_path / "session-stub.jsonl"

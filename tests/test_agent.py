@@ -404,7 +404,17 @@ class TestContextCompaction:
         agent.run_task("second")
         old = tool_messages(agent.messages)[0]["content"]
         assert "[trimmed" in old
-        assert len(old) < 300
+        # Sized from the constants rather than a magic number: the note grew
+        # when it started carrying the ticket back, and a literal here would
+        # have read as the stub itself growing.
+        assert len(old) <= agent_module.TRIM_KEEP_CHARS + len(
+            agent_module.TRIMMED_RECOVERABLE.format(key="x" * 16)
+        )
+        # The ticket back is IN the stub, which is the whole point: the key used
+        # to ride a footer at the end of the output, so trimming severed it and
+        # the model was told its context had been cut with no way to recover any
+        # of it.
+        assert "read_tool_output(continuation=" in old
 
     def test_keep_history_preserves_interrupted_task_output(self, monkeypatch):
         # Resume (#164): the restored work IS this task's own unfinished work,
@@ -8192,3 +8202,90 @@ class TestReadPdf:
         assert agent._egress_novel_hosts("read_pdf", {"source": "https://x.test/a.pdf"}) == [
             "x.test"
         ]
+
+
+class TestTrimmingIsRecoverable:
+    """Trimming used to be a one-way door.
+
+    `read_tool_output` can page a large result back out of a content-addressed
+    store without re-running the tool — but its key rode a footer at the END of
+    the output, and a stub keeps the FIRST 200 characters, so the key was the
+    first thing severed. And only plugin tools ever minted one: `run_command`
+    and `read_url`, the two biggest things in any history, had none at all.
+    """
+
+    def _agent(self, tmp_path, monkeypatch):
+        import aish.agent as agent_module
+
+        monkeypatch.setattr(
+            agent_module.tools, "run_command",
+            lambda cmd, **_kw: "LINE-A " + ("X" * 8000) + " LINE-Z",
+        )
+        agent = Agent(
+            model="fake",
+            approve=lambda _cmd: True,
+            client_chat=FakeChat(
+                [
+                    model_says(tool_calls=[tool_call("run_command", command="ls")]),
+                    model_says("first"),
+                    model_says("second"),
+                ]
+            ),
+            state_dir=tmp_path,
+        )
+        agent.run_task("first")
+        agent.run_task("second")   # the eager trim fires here
+        return agent
+
+    def test_the_stub_carries_a_key_that_reads_the_output_back(self, tmp_path, monkeypatch):
+        agent = self._agent(tmp_path, monkeypatch)
+        stub = [m for m in agent.messages if m.get("role") == "tool"][0]["content"]
+        key = re.search(r'continuation="([0-9a-f]+)"', stub).group(1)
+        back = agent._read_tool_output({"continuation": key, "page": 1})
+        assert "LINE-A" in str(back)
+
+    def test_paging_reaches_the_end_of_what_was_trimmed(self, tmp_path, monkeypatch):
+        """The tail matters most: a stub keeps the head, so the part the model
+        cannot see is everything after it."""
+        agent = self._agent(tmp_path, monkeypatch)
+        stub = [m for m in agent.messages if m.get("role") == "tool"][0]["content"]
+        key = re.search(r'continuation="([0-9a-f]+)"', stub).group(1)
+        seen = ""
+        for page in range(1, 12):
+            text = str(agent._read_tool_output({"continuation": key, "page": page}))
+            if "you have read all of it" in text:
+                break
+            seen += text
+        assert "LINE-Z" in seen, "the end of the output could not be reached"
+
+    def test_reading_it_back_does_NOT_re_run_the_tool(self, tmp_path, monkeypatch):
+        """For anything that mutates, re-running is a second side effect — which
+        is why the recovery is served from the cache and never by calling again."""
+        import aish.agent as agent_module
+
+        agent = self._agent(tmp_path, monkeypatch)
+        stub = [m for m in agent.messages if m.get("role") == "tool"][0]["content"]
+        key = re.search(r'continuation="([0-9a-f]+)"', stub).group(1)
+        runs = []
+        monkeypatch.setattr(
+            agent_module.tools, "run_command",
+            lambda cmd, **_kw: runs.append(cmd) or "SHOULD NOT HAPPEN",
+        )
+        agent._read_tool_output({"continuation": key, "page": 1})
+        assert runs == []
+
+    def test_an_unwritable_store_degrades_and_never_raises(self, tmp_path, monkeypatch):
+        """Preparing a turn must not throw because a cache directory is gone."""
+        import aish.agent as agent_module
+
+        agent = self._agent(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            agent_module.tool_plugins, "store_continuation", lambda *a, **k: ""
+        )
+        agent.messages.append(
+            {"role": "tool", "tool_name": "read_url", "content": "y" * 4000}
+        )
+        key = agent._trim_tool_message(agent.messages[-1])
+        assert key == ""
+        assert "[trimmed" in agent.messages[-1]["content"]
+        assert "read_tool_output" not in agent.messages[-1]["content"]
