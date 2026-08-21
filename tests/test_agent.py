@@ -10,6 +10,7 @@ import importlib
 import json
 import re
 import stat
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -713,7 +714,13 @@ class TestElapsedTimeReporting:
         import aish.agent as agent_module
 
         clock = FakeClock()
-        monkeypatch.setattr(agent_module, "time", SimpleNamespace(perf_counter=clock))
+        # `time` is swapped wholesale, so every clock the module reads has to
+        # be on the fake — the chat's opened ledger stamps entries with
+        # time.time(), and a fake carrying only perf_counter took every tool
+        # call in these tests down with an AttributeError.
+        monkeypatch.setattr(
+            agent_module, "time", SimpleNamespace(perf_counter=clock, time=clock)
+        )
         return clock
 
     def test_slow_tool_gets_timing_line(self, monkeypatch):
@@ -6941,6 +6948,144 @@ then:
     pattern: "EUR"
 ---
 """
+
+RULE_LINKS = """---
+name: links-you-actually-opened
+description: Never give me a link you have not opened.
+when: always
+then:
+  answer_must_not_include: unverified_links
+---
+
+Open a link before you hand it over.
+"""
+
+
+class TestTheChatsOpenedLinks:
+    """What aish has opened is a fact about the CHAT, not about the turn (#267).
+
+    Scoped to the turn, `unverified_links` refused links aish had opened four
+    turns earlier and sent the model to re-read pages already sitting in the
+    transcript — 53 of 130 firings across the owner's logs, 42 of them entirely
+    made of already-opened links, one chat doing it twelve times, each costing
+    a refused answer, an ask round and a repeat fetch. Opening a page is a fact about the fetch; it does not un-happen when
+    the model stops talking.
+    """
+
+    GUIDE = "https://example.com/guide"
+
+    def _agent(self, tmp_path):
+        agent, _ = rules_agent(tmp_path, [], rule_texts=(RULE_LINKS,))
+        return agent
+
+    def _answer(self, agent, text="Still [the guide](https://example.com/guide)."):
+        agent.seed_rules("and the rest?")
+        return agent._verify_answer(text)
+
+    def test_a_link_opened_in_an_EARLIER_task_is_not_asked_about_again(self, tmp_path):
+        agent = self._agent(tmp_path)
+        agent.seed_rules("what does the guide say?")
+        agent._note_turn_call("read_url", {"url": self.GUIDE}, "the page says hello")
+        assert agent._verify_answer(f"See [the guide]({self.GUIDE}).") is None
+        agent._reset_task_state()
+        assert agent._turn_calls == [], "the turn's record is per-task, as it was"
+        assert self._answer(agent) is None
+
+    def test_a_link_this_chat_never_opened_is_still_refused(self, tmp_path):
+        """The widening must not turn the rule off. Only what was fetched
+        counts, whenever it was fetched."""
+        agent = self._agent(tmp_path)
+        agent._note_turn_call("read_url", {"url": self.GUIDE}, "the page says hello")
+        agent._reset_task_state()
+        ask = self._answer(agent, "Try [this one](https://elsewhere.example/x).")
+        assert ask and "elsewhere.example" in ask
+
+    def test_a_FAILED_fetch_never_enters_the_ledger(self, tmp_path):
+        """"I tried" is not "it works" — and a ledger that outlives the turn
+        would make a 404 vouch for a dead link for the rest of the chat."""
+        agent = self._agent(tmp_path)
+        agent._note_turn_call("read_url", {"url": self.GUIDE}, "ERROR: 404 Not Found")
+        agent._reset_task_state()
+        ask = self._answer(agent)
+        assert ask and "example.com/guide" in ask
+
+    def test_a_link_opened_LAST_WEEK_is_verified_again(self, tmp_path):
+        """That aish opened a page is permanent; that the page is still there
+        is not. A chat reopened days later re-reads once and knows."""
+        agent = self._agent(tmp_path)
+        agent._note_turn_call("read_url", {"url": self.GUIDE}, "the page says hello")
+        agent._opened_links[self.GUIDE] = time.time() - agent_module.OPENED_LINK_TTL - 1
+        agent._reset_task_state()
+        ask = self._answer(agent)
+        assert ask and "example.com/guide" in ask
+
+    def test_the_ledger_is_bounded_and_drops_the_oldest(self, tmp_path):
+        agent = self._agent(tmp_path)
+        for i in range(agent_module.OPENED_LINKS_MAX + 5):
+            agent._note_turn_call("read_url", {"url": f"https://example.com/{i}"}, "ok")
+        assert len(agent._opened_links) == agent_module.OPENED_LINKS_MAX
+        assert "https://example.com/0" not in agent._opened_links
+        assert "https://example.com/504" in agent._opened_links
+
+    def test_re_opening_a_page_makes_it_the_newest_again(self, tmp_path):
+        """Trimming is by age and insertion order is what carries it, so a page
+        read again must move to the back of the queue, not stay at the front."""
+        agent = self._agent(tmp_path)
+        agent._note_turn_call("read_url", {"url": self.GUIDE}, "ok")
+        agent._note_turn_call("read_url", {"url": "https://later.example/"}, "ok")
+        agent._note_turn_call("read_url", {"url": self.GUIDE}, "ok")
+        assert list(agent._opened_links) == ["https://later.example", self.GUIDE]
+
+    def test_the_SECOND_task_can_cite_what_the_first_one_read(self, tmp_path):
+        """The session that filed this, in two turns: read a page, cite it,
+        then cite it again in the next task without touching the network.
+
+        Driven through run_task rather than the verify helper, because the
+        cost being removed is a whole extra round trip — if the rule fires,
+        the model is goaded, and the second task needs a reply this script
+        does not have."""
+        steps = []
+        agent, chat = rules_agent(
+            tmp_path,
+            [
+                model_says(tool_calls=[tool_call("read_url", url=self.GUIDE)]),
+                model_says(f"See [the guide]({self.GUIDE})."),
+                model_says(f"Still [the guide]({self.GUIDE}), as I said."),
+            ],
+            rule_texts=(RULE_LINKS,),
+            step_log=steps.append,
+        )
+        agent_module.web.read_url = fake_read_url()
+        try:
+            assert agent.run_task("what does the guide say?").startswith("See ")
+            second = agent.run_task("and the rest?")
+        finally:
+            importlib.reload(agent_module.web)
+        assert second == f"Still [the guide]({self.GUIDE}), as I said."
+        assert "[aish]" not in second, "the answer shipped carrying a not-followed note"
+        assert chat.responses == [], "a scripted reply went unused"
+        reads = [s for s in records(steps, "tool") if s["name"] == "read_url"]
+        assert len(reads) == 1, "the page was read again for a link already opened"
+
+    def test_a_reopened_chat_refills_its_ledger_from_its_own_log(self, tmp_path):
+        """A chat gets a fresh agent every time it is reopened — on the web,
+        every restart of aish-web. Without this the fix would not survive a
+        ship, for exactly the chats with the most history to reuse."""
+        log = SessionLog.new(tmp_path / "state")
+        log.step({"kind": "call", "turn": 1, "call": 1, "name": "read_url",
+                  "args": {"url": self.GUIDE}})
+        log.step({"kind": "tool", "turn": 1, "call": 1, "name": "read_url",
+                  "ok": True, "status": "ok"})
+        log.step({"kind": "call", "turn": 1, "call": 2, "name": "read_url",
+                  "args": {"url": "https://example.com/gone"}})
+        log.step({"kind": "tool", "turn": 1, "call": 2, "name": "read_url",
+                  "ok": False, "status": "failed"})
+        agent = self._agent(tmp_path)
+        agent.restore_opened_links(SessionLog.calls_that_ran(log.path))
+        assert self._answer(agent) is None
+        ask = self._answer(agent, "and [the other](https://example.com/gone)")
+        assert ask and "example.com/gone" in ask
+
 
 RULE_VERIFY = """---
 name: live-price

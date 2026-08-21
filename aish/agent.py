@@ -1232,6 +1232,20 @@ REASONING_CHARS = 262144
 # body does not put a second copy of the file in the log — the diff already
 # records that. Applied per value, so a long one never displaces its siblings.
 CALL_ARG_CHARS = 8000
+# The chat's opened-links ledger (#267): how long a successful fetch keeps
+# vouching for its URL, and how many URLs are remembered at once.
+#
+# A day, because the two properties this rule is caught between separate at
+# about that scale. That aish OPENED a page is permanent — it is why the link
+# is not a guess. That the page is STILL THERE is not, and a chat reopened next
+# week vouching for a link nobody has touched since would be the rule quietly
+# not doing its job. Inside a day it is one fetch either way; past it, aish
+# re-reads once and knows.
+OPENED_LINK_TTL = 24 * 3600
+# Oldest first out. A shopping chat opens dozens of pages and a research one
+# hundreds, so this is a memory bound rather than a policy — a trimmed URL is
+# re-read once, which is exactly what happened before the ledger existed.
+OPENED_LINKS_MAX = 500
 # How many stubbed-message references a `trim` record lists before it says how
 # many more there were. A trim that hits fifty results is real and the reader
 # needs to know its shape, not fifty rows of it.
@@ -1638,6 +1652,13 @@ class Agent:
         # The model does not author this, which is the whole reason a verify
         # check can be trusted at all.
         self._turn_calls: list[dict] = []
+        # The CHAT's opened-links ledger (#267): normalised URL -> when a
+        # successful call last acted on it. Deliberately NOT in
+        # _reset_task_state — it is the one piece of verify's evidence that
+        # outlives the turn, because opening a page is a fact about the fetch
+        # and the fetch does not un-happen when the model stops talking. A
+        # reopened chat refills it from its own log; see restore_opened_links.
+        self._opened_links: dict[str, float] = {}
         # Has the model said anything to the user yet this task? The only input
         # `must_first: answer` needs.
         self._said_something = False
@@ -5255,6 +5276,9 @@ class Agent:
             # TurnEvidence.looked_at.
             answer=self._deliverable(answer), final=answer.strip(),
             calls=tuple(self._turn_calls), meaning=self._meaning_scorer(),
+            # What this CHAT has opened, not just this turn (#267). A link aish
+            # fetched four turns ago is still a link aish fetched.
+            opened_before=self._opened_in_chat(),
         )
         failures = rules.verify(self._bindings, evidence)
         asks, unmet = [], []
@@ -5579,7 +5603,7 @@ class Agent:
         never tried", and a verify check that conflated them would ask the
         model to do something the harness had just forbidden."""
         status, decision = _call_facts(result, self._run_meta)
-        self._turn_calls.append({
+        record = {
             "tool": name,
             "args": dict(args or {}),
             "status": status,
@@ -5594,7 +5618,60 @@ class Agent:
             # price sat 6 000 in. A price check that read the stored result
             # would refuse every correct answer it was shown.
             "figures": rules.money_figures(str(result)),
-        })
+        }
+        self._turn_calls.append(record)
+        self._remember_opened(record)
+
+    def _remember_opened(self, call: dict) -> None:
+        """Add whatever this call successfully opened to the chat's ledger.
+
+        Fed from the same record Verify reads and through the same
+        `rules.urls_acted_on`, so "opened" has one definition: the ledger can
+        never vouch for something the turn-local check would have refused."""
+        now = time.time()
+        for url in rules.urls_acted_on([call]):
+            self._opened_links.pop(url, None)  # re-insert, so trimming is by age
+            self._opened_links[url] = now
+        self._trim_opened_links()
+
+    def _trim_opened_links(self) -> None:
+        """Oldest out first. Insertion order IS age order here — both writers
+        re-insert on a repeat open — so this needs no sort."""
+        while len(self._opened_links) > OPENED_LINKS_MAX:
+            self._opened_links.pop(next(iter(self._opened_links)))
+
+    def _opened_in_chat(self) -> frozenset[str]:
+        """The ledger as Verify sees it: everything still inside the horizon.
+
+        Filtered at READ time rather than pruned on write — a chat can sit idle
+        for a week between turns, and a ledger that only ages when something
+        happens would hand the next turn a set that expired days ago."""
+        cutoff = time.time() - OPENED_LINK_TTL
+        return frozenset(url for url, when in self._opened_links.items() if when >= cutoff)
+
+    def restore_opened_links(self, calls: list[tuple[dict, int]]) -> None:
+        """Refill the ledger from a reopened chat's own log (#267).
+
+        A chat gets a fresh agent every time it is reopened — on the web, every
+        restart of aish-web, which is every ship — so an in-memory ledger alone
+        would go turn-scoped again for exactly the chats with the most history
+        to reuse. Same shape as resume_turns: the log is the only place this
+        fact survives the agent that recorded it.
+
+        Takes the log's calls rather than URLs (`SessionLog.calls_that_ran`)
+        and runs them through the same extraction a live call takes, so a
+        restored ledger and a live one cannot mean different things. A call
+        with no readable timestamp is dropped, not dated now: a URL of unknown
+        age arriving fresher than today's reads is the one way this could
+        vouch for something it should have re-checked.
+        """
+        for call, when in calls:
+            if not when:
+                continue
+            for url in rules.urls_acted_on([call]):
+                self._opened_links.pop(url, None)
+                self._opened_links[url] = float(when)
+        self._trim_opened_links()
 
     def _command_has_a_secret(self, command: str) -> bool:
         """Does this command carry one of HIS stored secrets, verbatim?

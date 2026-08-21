@@ -2449,6 +2449,47 @@ class TestLinksYouDidNotOpen:
         with pytest.raises(rules.RuleError):
             rules._answer_check("answer_must_include", "unverified_links")
 
+    def test_a_link_this_CHAT_opened_earlier_is_not_re_asked(self):
+        """#267 — the ledger was too narrow in TIME. Opening a page is a fact
+        about the fetch, and it does not expire when the model stops talking;
+        scoped to the turn, this rule refused links aish had opened four turns
+        back and sent it to re-read the same page. 53 of 130 firings in the
+        logs on the machine that filed it were exactly that."""
+        assert rules.verify([self._binding()], rules.TurnEvidence(
+            answer="Still [the guide](https://example.com/guide), as I said.",
+            calls=(),
+            opened_before=frozenset({"https://example.com/guide"}),
+        )) == []
+
+    def test_the_chat_ledger_is_a_URL_ledger_not_a_pass(self):
+        """It vouches for what was opened and nothing else — a second link in
+        the same answer is judged on its own evidence."""
+        [failure] = rules.verify([self._binding()], rules.TurnEvidence(
+            answer="[old](https://example.com/guide) and [new](https://other.example/x)",
+            calls=(),
+            opened_before=frozenset({"https://example.com/guide"}),
+        ))
+        assert failure.evidence["unverified"] == ["https://other.example/x"]
+
+    def test_the_ledger_holds_normalised_urls(self):
+        """The chat's ledger and the turn's calls are compared in one identity
+        — the agent normalises on the way in (rules.urls_acted_on), so the
+        share-sheet form of a video the chat opened last turn still matches the
+        canonical form the answer shows."""
+        assert rules.urls_acted_on([
+            {"tool": "youtube_analyze",
+             "args": {"url": "https://youtube.com/watch?v=lqltp2QaT30&si=cuY"},
+             "status": "ok"},
+        ]) == {"video:lqltp2QaT30"}
+
+    def test_a_FAILED_call_never_reaches_the_ledger(self):
+        """The widening must not smuggle in the thing the rule stops: what
+        counts as opened has ONE definition, and a 404 is not it."""
+        assert rules.urls_acted_on([
+            {"tool": "read_url", "args": {"url": "https://example.com/gone"},
+             "status": "failed"},
+        ]) == set()
+
 
 class TestPricesYouDidNotRead:
     """`must_first: read_url` was the owner's price rule for a year and it is an
