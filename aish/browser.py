@@ -2283,7 +2283,7 @@ async def _choose(target: Any, value: str) -> str:
 
 
 def browse_act(
-    n: int,
+    address: str,
     action: str,
     *,
     text: str = "",
@@ -2293,14 +2293,20 @@ def browse_act(
     mutating: bool = False,
     timeout: float = 120.0,
 ) -> browse_mod.Snapshot:
-    """Do one thing to control `n`, and hand back the page it produced.
+    """Do one thing to the control the model NAMED, and hand back the page.
 
-    Every action re-enumerates afterwards, so the numbers the model reads are
-    always the ones on the document in front of it.
+    **The name is re-resolved against the live page immediately before it is
+    pressed.** The tag survives a re-render, which is what makes it a good
+    handle — but a framework that reuses a row's DOM node for a different row
+    hands the same tag to different content, and pressing it would be the right
+    element and the wrong flight. Re-reading the controls costs one enumeration
+    and turns that into a refusal with a fresh page.
 
-    `href` and `mutating` come from the SNAPSHOT's control, never from the live
-    DOM: the thing the gate classified has to be the thing that runs, or the
-    fallback in `_press` becomes a way around the card.
+    That re-read is also what enforces the card. `href` and `mutating` are what
+    the GATE classified, from the snapshot the owner was shown; if the live
+    control disagrees — it needs approval now and did not then, it has become a
+    password field, its destination has changed — the action does not run. The
+    thing the owner approved has to be the thing that happens.
 
     Nothing in here raises for a page reason. Every ending is a snapshot with a
     line saying what happened — a bare error string used to leave the model
@@ -2312,6 +2318,47 @@ def browse_act(
 
     async def job(owner: _Owner) -> browse_mod.Snapshot:
         page = await _browse_page(owner, opening=False)
+        if action == "read":
+            # Looking is not acting. The model needs a way to see the whole page
+            # again without navigating to it — a `goto` to the same URL resets
+            # an SPA's state, so "let me look properly" must not be a round trip
+            # through the address bar.
+            owner.browse_epoch += 1
+            return await _snapshot(owner, page)
+        if action not in ("click", "type", "choose"):
+            return await _snapshot(owner, page, problem=f"unknown action {action!r}")
+        raw, _, _ = await _enumerate(page)
+        live = browse_mod.controls_from(raw)
+        found = browse_mod.resolve(live, address)
+        if found.control is None:
+            owner.browse_epoch += 1
+            return await _snapshot(
+                owner,
+                page,
+                problem=f"{found.problem} Here is the page as it is now.",
+            )
+        control = found.control
+        n = control.n
+        if control.kind == browse_mod.PASSWORD or (control.mutating and not mutating):
+            # The page moved between the card and the press. Whatever the owner
+            # said yes to, it was not this.
+            owner.browse_epoch += 1
+            return await _snapshot(
+                owner,
+                page,
+                problem=(
+                    f"{control.address!r} is not the control that was approved "
+                    "— the page changed under it and it now needs approval of "
+                    "its own. Here is the page as it is now; ask again for what "
+                    "you want."
+                ),
+            )
+        # The destination the gate checked has to still be this control's
+        # destination, or the link fallback in `_press` has nothing safe to aim
+        # at. Pressing the element itself is still fine.
+        approved_href = (
+            href if control.kind == browse_mod.LINK and control.detail == href else ""
+        )
         target, top = await _find(page, n)
         if target is None:
             # The document changed under the numbering — an SPA re-render, a
@@ -2321,13 +2368,11 @@ def browse_act(
                 owner,
                 page,
                 problem=(
-                    f"there is no control [{n}] on this page any more — it "
+                    f"{control.address!r} is not on this page any more — it "
                     "changed since you last saw it. Here it is as it is now; "
-                    "pick a number from THIS list."
+                    "act on something from THIS list."
                 ),
             )
-        if action not in ("click", "type", "choose"):
-            return await _snapshot(owner, page, problem=f"unknown action {action!r}")
         gone = await _reachable_now(target)
         if gone:
             owner.browse_epoch += 1
@@ -2335,10 +2380,10 @@ def browse_act(
                 owner,
                 page,
                 problem=(
-                    f"control [{n}] is still on the page but cannot be pressed "
-                    f"now ({gone}) — the menu or panel holding it has closed "
-                    "since you last saw it. Here is the page as it is now; pick "
-                    "a number from THIS list."
+                    f"{control.address!r} is still on the page but cannot be "
+                    f"pressed now ({gone}) — the menu or panel holding it has "
+                    "closed since you last saw it. Here is the page as it is "
+                    "now; act on something from THIS list."
                 ),
             )
         await _centre(target)
@@ -2348,7 +2393,7 @@ def browse_act(
         try:
             if action == "click":
                 notice = await _press(
-                    page, target, mutating=mutating, href=href if top else ""
+                    page, target, mutating=mutating, href=approved_href if top else ""
                 )
             elif action == "type":
                 notice = await _type(page, target, text=text, submit=submit)
@@ -2361,18 +2406,21 @@ def browse_act(
                 owner,
                 page,
                 problem=(
-                    f"aish could not {action} control [{n}] — it is on the page "
-                    "and would not take the action, by click, by keyboard, or "
-                    "otherwise. Something may be covering it. Try the control "
-                    "that closes whatever is over the page, or another route to "
-                    "the same thing."
+                    f"aish could not {action} {control.address!r} — it is on "
+                    "the page and would not take the action, by click, by "
+                    "keyboard, or otherwise. Something may be covering it. Try "
+                    "the control that closes whatever is over the page, or "
+                    "another route to the same thing."
                 ),
             )
         except Exception as exc:  # noqa: BLE001 — a page reason, not a crash
             return await _snapshot(
                 owner,
                 page,
-                problem=f"could not {action} control [{n}]: {type(exc).__name__}",
+                problem=(
+                    f"could not {action} {control.address!r}: "
+                    f"{type(exc).__name__}"
+                ),
             )
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)

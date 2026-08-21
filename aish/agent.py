@@ -234,17 +234,22 @@ Rules:
    their account.
    WHEN THE THING YOU NEED IS A BUTTON, USE browse — NEVER GUESS ITS URL.
    read_url reads a page; browse opens it in the user's own signed-in browser
-   and hands you a NUMBERED list of what can be pressed, and browse_act presses
+   and hands you a list of what can be pressed, BY NAME, and browse_act presses
    one. A tab, a filter, a "show more", a control that switches which account
    or property you are looking at — none of those are addresses, and a URL you
    invent for one 404s. Example: the user says "switch apartments using the
    'Przełącz lokal' button" — call browse("https://eon.pl/mojeon"), find
-   `[7] button 'Przełącz lokal'` in the list, then browse_act(target=7). You
-   MUST NOT answer that a portal cannot be navigated, or ask the user to click
-   through it and paste the result, until you have tried browse.
-   The numbers are only valid for the page you were JUST shown — the list comes
-   back after every action, so act on a number from the newest list. A control
-   marked "(needs approval)" will ask the user; that is expected, not an error.
+   `button 'Przełącz lokal'` in the list, then
+   browse_act(target="Przełącz lokal"). You MUST NOT answer that a portal
+   cannot be navigated, or ask the user to click through it and paste the
+   result, until you have tried browse.
+   AN ACTION GIVES YOU BACK WHAT CHANGED, NOT THE WHOLE PAGE. Everything you
+   are not shown is still exactly as you last saw it, so keep using it. When
+   the reply says nothing changed, that control DID NOTHING — pressing it again
+   will do nothing again. Try what would open it first, or another route to the
+   same thing. Call browse_act(action="read") when you need the whole page back.
+   A control marked "(needs approval)" will ask the user; that is expected, not
+   an error.
    IF THE CONTROL YOU WANT IS NOT IN THE LIST, IT IS CLOSED AWAY — NOT ABSENT.
    The list ends with a line saying how many controls are shut in a collapsed
    menu, an off-screen panel or behind a dialog. Press the thing that opens
@@ -252,8 +257,9 @@ Rules:
    button — and look again. You MUST NOT go back to guessing URLs because a
    control was not listed.
    A long dropdown shows only how many options it has. You do NOT need to see
-   them: browse_act(target=N, action="choose", value="Poland") matches on what
-   you say, and if it matches more than one or none you get the candidates back.
+   them: browse_act(target="Country", action="choose", value="Poland") matches
+   on what you say, and if it matches more than one or none you get the
+   candidates back.
    WHEN A CLICK DOWNLOADS A FILE, PUT THE LINE aish GIVES YOU IN YOUR ANSWER,
    EXACTLY AS WRITTEN. It looks like [invoice.pdf](/Users/…/downloads/x.pdf) and
    it is what turns the file into something the user can tap and open. A path
@@ -309,7 +315,16 @@ Rules:
    key: call read_tool_output(continuation="<key>", page=2) to read the rest.
    That is served from a cache and does NOT re-run the tool. Page through what
    you need, or say plainly what you could not read — never guess at the
-   omitted part.{scratch_note}
+   omitted part.
+7d. THE SOURCE THE USER NAMED IS THE SOURCE. When they name a site, a shop, a
+   document or an account, you MUST get the answer FROM IT. If you cannot —
+   the page will not drive, the control does nothing, you are signed out — you
+   MUST say so plainly, name what blocked you, and STOP. You MUST NOT quietly
+   answer from somewhere else. Example: asked for flights on lot.pl, the search
+   box would not open; say "I cannot drive the search on lot.pl — the
+   destination field does not respond. I can check Google Flights instead if
+   you want" — and wait. You MUST NOT hand them another site's prices as if
+   they were lot.pl's.{scratch_note}
 """
 
 # The chat's scratch workspace (issues #70, #258). Injected only when a path is
@@ -363,12 +378,29 @@ CALL_RESULT_CHARS = 600
 # Both directions of the secret join use one threshold, owned by the store.
 SECRET_MIN_MATCH = secrets.MIN_MATCH
 
-# Loop detection: the exact same tool call returning the exact same output is
-# not progress. At WARN repeats the model gets one nudge to change approach;
-# at STOP repeats the task ends with a diagnostic wrap-up instead of burning
-# the remaining step budget. Legitimate polling (tail on a growing log,
-# job-status checks) has changing output, so it never trips this.
-LOOP_WARN_REPEATS = 3
+# Loop detection: the exact same tool call returning the exact same output, with
+# NO PROGRESS ANYWHERE IN BETWEEN, is not progress. Any step that produces a
+# result never seen before clears these counts, so this measures a RUN of dead
+# retries and not a lifetime tally.
+#
+# It counted lifetime occurrences per task until #251, and that shape was wrong
+# in the direction that costs the most. Driving a website is repetitive BY
+# CONSTRUCTION — open the page, act, look again, act again — and a date picker
+# legitimately opened five times across a forty-step booking flow renders
+# identically every time. The tally could therefore end a task that was making
+# progress the whole way, which is the one thing no guard here is allowed to do;
+# the step ceiling and the stall counter are what bound a task that is not.
+#
+# The 3-repeat NUDGE this used to inject is gone (#251). It told the model
+# "repeating this cannot make progress — change your approach", which is false
+# for a page view and false by construction for a re-read the rules engine
+# ORDERS (`links-you-actually-opened` requires opening a URL before citing it).
+# Worse, it read as an instruction to change SOURCE: told to use lot.pl, the
+# model was nudged at the third click and silently moved to Google Flights,
+# which is not what the owner asked for and not something he was told about. A
+# browse action now reports whether the page changed, in words, on the FIRST
+# click — the one service that nudge ever performed, delivered earlier and by
+# the layer that actually knows.
 LOOP_STOP_REPEATS = 5
 
 # Progress-gated step budget (issue #108). A flat step cap has the wrong shape:
@@ -386,7 +418,7 @@ MAX_STALL_STEPS = 8
 HARD_STEP_CEILING = 60  # effective cap = max(self.max_steps, HARD_STEP_CEILING)
 
 # Skill-read gate (issue #40): while a preloaded-but-truncated skill is
-# unread, other tool calls are refused. Must stay < LOOP_WARN_REPEATS — an
+# unread, other tool calls are refused. Must stay < LOOP_STOP_REPEATS — an
 # identical refused call repeats at most GATE_MAX_REFUSALS times before the
 # gate lifts and its result changes, so the loop detector never fires on the
 # gate itself.
@@ -424,11 +456,18 @@ STOP_GATE_REFUSAL = (
 # never typed. The live UI shows nothing for them, so their shared `[aish: `
 # opening is what keeps a cold replay from rendering them as blue user bubbles
 # (session.synthetic_kind, #171) — a test pins it. Don't drop the prefix.
-LOOP_WARNING = (
-    "[aish: you have issued this exact tool call {count} times and received "
-    "identical output every time — repeating it cannot make progress. Change "
-    "your approach; if you have no other approach, stop and explain what is "
-    "blocking you.]"
+# Every note that ENDS or REDIRECTS a task carries the same clause, because
+# this is the moment of temptation: the model is stuck, and the cheapest way out
+# is to answer from somewhere the user did not ask about. That is what happened
+# on lot.pl (#251) — the harness said "change your approach" and the model
+# changed WEBSITE, silently. Being told aish cannot drive a site is a useful
+# answer; being handed a different site's numbers as if they were that site's
+# is not.
+NAMED_SOURCE_CLAUSE = (
+    " If the user named a site, a document or a source and you could not get "
+    "what they asked for FROM IT, say so plainly and name what blocked you. "
+    "You MUST NOT quietly answer from a different source instead — offer it "
+    "and let them choose."
 )
 
 STEP_LIMIT_NOTE = (
@@ -436,21 +475,23 @@ STEP_LIMIT_NOTE = (
     "calls are possible. Assess your work and reply with TEXT ONLY: if the "
     "task is complete, give the final answer now. Otherwise state clearly "
     "(1) what was accomplished, (2) what remains, and (3) the next concrete "
-    "step — the user can ask you to continue.]"
+    "step — the user can ask you to continue." + NAMED_SOURCE_CLAUSE + "]"
 )
 
 LOOP_STOP_NOTE = (
     "[aish: stopping this task — the same tool call kept returning identical "
-    "output even after a warning, so you are running in circles. Reply with "
-    "TEXT ONLY: summarize what you tried, what failed and why you appear "
-    "stuck, and what would be needed to make progress.]"
+    "output with nothing new in between, so you are running in circles. Reply "
+    "with TEXT ONLY: summarize what you tried, what failed and why you appear "
+    "stuck, and what would be needed to make progress." + NAMED_SOURCE_CLAUSE
+    + "]"
 )
 
 STALL_NOTE = (
     "[aish: stopping this task — your recent tool calls stopped producing any "
     "new results (no progress for several steps), so you appear stuck. Reply "
     "with TEXT ONLY: summarize what you accomplished, what remains, and what is "
-    "blocking further progress — the user can redirect you or say 'continue'.]"
+    "blocking further progress — the user can redirect you or say 'continue'."
+    + NAMED_SOURCE_CLAUSE + "]"
 )
 
 STOPPED_LIMIT = (
@@ -981,16 +1022,16 @@ BROWSE_ACTION_DENIED = (
 
 BROWSE_NO_PAGE = (
     "NOT EXECUTED: nothing is open to act on. Call browse(url) first, then act "
-    "on a number from the list it gives you."
+    "on a control by the name in the list it gives you."
 )
 
 # aish types the owner's credentials nowhere, and this is the last door that
 # could have let it start. Structural, not a card: there is no yes that makes
 # this a good idea, and a card offering one would teach him there is.
 BROWSE_NO_PASSWORDS = (
-    "NOT EXECUTED: aish never types passwords. Control [{n}] is a password "
-    "field. Tell the user to run /browser {host} and sign in themselves — the "
-    "session persists, and this page will work afterwards."
+    "NOT EXECUTED: aish never types passwords. {n} is a password field. Tell "
+    "the user to run /browser {host} and sign in themselves — the session "
+    "persists, and this page will work afterwards."
 )
 
 # Origin-gated knowledge writes (#196). remember/forget_memory auto-approve, and
@@ -2262,7 +2303,14 @@ class Agent:
 
         task_started = time.perf_counter()
         tokens_in = tokens_out = 0
-        repeats: dict[tuple, int] = {}  # (tool, args, result) -> occurrences
+        # Two different questions, and conflating them is what #251 fixed.
+        # `seen` is every (tool, args, result) this task has produced and is
+        # never cleared — it answers "is this step PROGRESS". `run` counts a
+        # streak of dead retries and is cleared by any progress at all, so a
+        # legitimate revisit spread across a working flow can never accumulate
+        # into a stop.
+        seen: set[tuple] = set()
+        run: dict[tuple, int] = {}
         # Progress-gated budget (#108): `max_steps` is the base, the ceiling is
         # the hard cost cap nothing exceeds, and `stall` counts consecutive
         # no-new-progress steps. A progressing task extends past max_steps; a
@@ -2444,37 +2492,36 @@ class Agent:
             # shape, not a join, and the contract's whole posture is that a join
             # must not rest on emit-order luck (§0, §2).
             results = self._execute_tool_calls(tool_calls, self._model_call)
-            warn = stuck = progressed = False
+            stuck = progressed = False
             for call, result in zip(tool_calls, results, strict=True):
                 self._append(
                     {"role": "tool", "tool_name": call["function"]["name"], "content": result}
                 )
                 self._collect_source(call, result)
                 key = self._call_key(call, result)
-                repeats[key] = count = repeats.get(key, 0) + 1
-                if count == 1:
+                if key not in seen:
+                    seen.add(key)
                     progressed = True  # a never-seen (tool,args,result) is progress (#108)
+                run[key] = count = run.get(key, 0) + 1
                 if count >= LOOP_STOP_REPEATS:
                     stuck = True
-                elif count == LOOP_WARN_REPEATS:
-                    warn = True  # injected below: never between a turn's results
             # After every result is appended, never between two of them: the
             # pictures belong to the turn, not to one call in it.
             self._deliver_tool_media(tool_calls, results)
+            # Progress forgives everything: it resets the stall clock AND the
+            # dead-retry streaks, so only a run of steps that learned nothing
+            # can reach either cap.
+            if progressed:
+                stall = 0
+                run.clear()
+                continue
             if stuck:
                 self.echo("✕ loop detected: identical call, identical output — stopping")
                 return self._finish_stopped(LOOP_STOP_NOTE, STOPPED_LOOP)
-            # Progress resets the stall clock; a step that produced only repeats
-            # (or, defensively, no results at all) advances toward the stall cap.
-            stall = 0 if progressed else stall + 1
+            stall += 1
             if stall >= MAX_STALL_STEPS:
                 self.echo("⚠ no new progress for several steps — asking the model to wrap up")
                 return self._finish_stopped(STALL_NOTE, STOPPED_STALL)
-            if warn:
-                self.echo("⚠ repeated identical tool call — nudging the model to change approach")
-                self._append(
-                    {"role": "user", "content": LOOP_WARNING.format(count=LOOP_WARN_REPEATS)}
-                )
 
         self.echo("⚠ step ceiling reached — asking the model to wrap up")
         return self._finish_stopped(STEP_LIMIT_NOTE, STOPPED_LIMIT)
@@ -3637,11 +3684,12 @@ class Agent:
             topic = str(args.get("topic", "") or "")
             label = f"→ browse: {url}" + (f" (topic: {topic})" if topic else "")
             return label, lambda: web.browse(url, topic or None)
-        target = int(args.get("target", -1))
+        target = str(args.get("target", "") or "")
         action = str(args.get("action", "click") or "click")
-        current = browser.browse_current()
-        control = current.control(target) if current is not None else None
-        what = f"[{target}]" if control is None else f"{control.kind} {control.name!r}"
+        control = self._browse_target(args)
+        what = (
+            repr(target) if control is None else f"{control.kind} {control.address!r}"
+        )
         label = f"→ browse: {action} {what}"
         return label, lambda: web.browse_act(
             target,
@@ -4688,11 +4736,12 @@ class Agent:
             current = browser.browse_current()
             if current is None:
                 return _gate_outcome(BROWSE_NO_PAGE, decision="blocked")
-            target = int(args.get("target", -1))
-            control = current.control(target)
+            control = self._browse_target(args)
             if control is not None and control.kind == browse.PASSWORD:
                 return _gate_outcome(
-                    BROWSE_NO_PASSWORDS.format(n=target, host=host or "the site"),
+                    BROWSE_NO_PASSWORDS.format(
+                        n=repr(control.address), host=host or "the site"
+                    ),
                     decision="blocked",
                 )
         if not host:
@@ -4714,16 +4763,26 @@ class Agent:
             self._approved_browsing.add(host)
         if name != "browse_act":
             return None
-        current = browser.browse_current()
-        control = current.control(int(args.get("target", -1))) if current else None
+        control = self._browse_target(args)
         if control is None or not control.mutating:
             return None
         # Named, every time, and never folded into the driving grant: this is
         # the click the owner would want to have been asked about.
-        what = f"{args.get('action', 'click')} {control.kind} {control.name!r} on {host}"
+        what = f"{args.get('action', 'click')} {control.kind} {control.address!r} on {host}"
         return self._browse_approval(
             name, args, what, BROWSE_ACTION_DENIED.format(what=what)
         )
+
+    @staticmethod
+    def _browse_target(args: dict):
+        """The control a browse_act names, off the snapshot the model was shown.
+
+        One resolver for the gate, the echo and the call, so the card can never
+        name one control while another is pressed."""
+        current = browser.browse_current()
+        if current is None:
+            return None
+        return browse.resolve(current.controls, args.get("target")).control
 
     def _browse_approval(
         self, name: str, args: dict, preview: str, denial: str

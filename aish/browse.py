@@ -33,6 +33,7 @@ module knows what the page says, the agent knows who is watching.
 
 from __future__ import annotations
 
+import difflib
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -101,10 +102,19 @@ class Control:
     detail: str = ""
     mutating: bool = False
     disabled: bool = False
+    # Does pressing this post the form it is in? Carried rather than re-derived
+    # because it is what the page is told to say about HOW TO SUBMIT: once a
+    # form-fill reports only what changed, the submit button stops being
+    # re-listed on every step, and a model that cannot see it starts hunting.
+    submits: bool = False
+    # What the model asks for this control BY — its words, not its position.
+    # `n` stays the tag that finds the element; this is the address, and
+    # `address_controls` is where it is worked out. Empty only until then.
+    address: str = ""
 
     def line(self) -> str:
         """One line, as the model reads it."""
-        bits = f"[{self.n}] {self.kind} {self.name!r}"
+        bits = f"{self.kind} {(self.address or self.name)!r}"
         if self.detail:
             bits += f" → {self.detail}"
         if self.disabled:
@@ -473,6 +483,73 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
     return '';
   };
 
+  // An icon-only button is not a nameless button — it is a button whose name is
+  // a picture, and a person reads it fine. Dropping it (the old rule: no words
+  // and nowhere to go, so skip) took the swap-airports arrow, the hamburger and
+  // every dialog's X off the list entirely, which on a booking form is half the
+  // controls that matter. So: ask the page what it calls its own picture,
+  // several ways, and describe it in words the model can ask for it by.
+  const GLYPHS = {
+    '×': 'close', '✕': 'close', '✖': 'close', '╳': 'close',
+    '☰': 'menu', '⋮': 'more', '⋯': 'more',
+    '⇄': 'swap', '⇆': 'swap', '↔': 'swap', '⟷': 'swap',
+    '←': 'back', '→': 'forward', '↑': 'up', '↓': 'down',
+    '▾': 'expand', '⌄': 'expand', '▴': 'collapse', '⌃': 'collapse',
+    '⚙': 'settings', '🔍': 'search', '＋': 'add', '+': 'add',
+    '−': 'remove', '–': 'remove', '☆': 'favourite', '★': 'favourite',
+  };
+  // 'icon-swap-airports' and 'swap_horiz' are both the page telling you what the
+  // picture is; they are just written for a stylesheet rather than for a person.
+  const words = (s) => clean((s || '')
+    .split(/[#\/]/).pop()
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_\-.]+/g, ' ')
+    .replace(/\b(icon|ico|fa|fas|far|glyph|svg|symbol|btn|button)\b/gi, ' ')
+    .toLowerCase());
+
+  const iconWords = (el) => {
+    const svg = el.querySelector && el.querySelector('svg');
+    if (svg) {
+      const t = svg.querySelector('title');
+      const said = clean((t && (t.textContent || '')) || svg.getAttribute('aria-label') || '');
+      if (said) return said;
+      const use = svg.querySelector('use');
+      const ref = use && (use.getAttribute('href') || use.getAttribute('xlink:href') || '');
+      if (ref) { const w = words(ref); if (w) return w; }
+    }
+    const img = el.querySelector && el.querySelector('img[alt]');
+    if (img) { const alt = clean(img.getAttribute('alt')); if (alt) return alt; }
+    for (const attr of ['data-icon', 'data-testid', 'data-test', 'name']) {
+      const w = words(el.getAttribute && el.getAttribute(attr));
+      if (w) return w;
+    }
+    const marked = (el.matches && el.matches('[class*=icon], [class*=ico-]')) ? el
+      : (el.querySelector && el.querySelector('[class*=icon], [class*=ico-]'));
+    if (marked) {
+      for (const token of (marked.getAttribute('class') || '').split(/\s+/)) {
+        if (!/icon|ico-/i.test(token)) continue;
+        const w = words(token);
+        if (w && w.length > 2) return w;
+      }
+    }
+    return '';
+  };
+
+  // Only for things that are unmistakably controls. A nameless <div onclick>
+  // described by its neighbour would fill the list with furniture.
+  const NEAR = 'a[href], button, input, [role=button], [role=link], summary';
+  const nearbyWords = (el) => {
+    if (!el.matches || !el.matches(NEAR)) return '';
+    let at = el;
+    for (let up = 0; up < 3 && at; up += 1) {
+      at = at.parentElement;
+      if (!at) break;
+      const text = clean(at.innerText || at.textContent || '');
+      if (text) return 'near ' + JSON.stringify(text.slice(0, 40));
+    }
+    return '';
+  };
+
   const nameOf = (el) => {
     const aria = clean(el.getAttribute && el.getAttribute('aria-label'));
     if (aria) return aria;
@@ -489,8 +566,13 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
                    || el.getAttribute('title') || el.id || '');
     }
     const text = clean(el.innerText || el.textContent || '');
-    if (text) return text;
-    return clean(el.getAttribute('title') || el.value || '');
+    // Letters or digits, or it is a picture drawn with a character — '×' is
+    // the name of that button only if you can see it.
+    if (text && /[\p{L}\p{N}]/u.test(text)) return text;
+    if (text && GLYPHS[text]) return GLYPHS[text];
+    const said = clean(el.getAttribute('title') || el.value || '');
+    if (said) return said;
+    return iconWords(el) || nearbyWords(el);
   };
 
   const kindOf = (el, type) => {
@@ -680,9 +762,263 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                     navigates=bool(raw.get("href")),
                 ),
                 disabled=bool(raw.get("disabled")),
+                submits=bool(raw.get("submits")),
             )
         )
+    return address_controls(controls)
+
+
+# A control the page gave no words to is addressed by its number, and the hash
+# is what keeps that out of the namespace of real labels — plenty of pages have
+# a button that says "12".
+def _numbered(n: int) -> str:
+    return f"#{n}"
+
+
+def address_controls(controls: list[Control]) -> list[Control]:
+    """Give every control the name the model will ask for it by, in place.
+
+    **A control is addressed by what it SAYS, not by where it sits.** The
+    numbering was positional and re-derived on every pass, so the same button
+    was [13] and then [15]; worse, `browse_act(target=15)` is what the owner
+    reads on the approval card and in the trace, and no human can review "click
+    15". He reviews `click "Szukaj"` the same way he decides to press it
+    himself — by reading the label — so the address IS the label. A name also
+    survives the SPA re-render that renumbering never did.
+
+    Duplicates are the whole difficulty, and they come in two kinds. Two nodes
+    saying the same thing AND pointing at the same place are one control wearing
+    two DOM elements — the mobile copy and the desktop copy of one nav link,
+    which is most of them — so they share the address and either will do. Two
+    that say the same thing and go somewhere DIFFERENT are genuinely two
+    controls, and get an ordinal (`'Szukaj #1'`, `'Szukaj #2'`) on top of the
+    `detail` already on their line. The ordinal is deliberately part of the
+    address rather than a separate argument: it is one string the model copies
+    back, and one string the card can print."""
+    groups: dict[str, list[Control]] = {}
+    for control in controls:
+        base = (control.name or "").strip() or _numbered(control.n)
+        control.address = base
+        groups.setdefault(fold(base), []).append(control)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        if len({(c.kind, c.detail) for c in members}) == 1:
+            continue  # one control, several nodes: any of them does the job
+        for ordinal, control in enumerate(members, start=1):
+            control.address = f"{control.address} #{ordinal}"
     return controls
+
+
+@dataclass
+class Resolution:
+    """Which control the model meant, or why that could not be settled."""
+
+    control: Control | None = None
+    problem: str = ""
+
+
+def resolve(controls: list[Control], target: Any) -> Resolution:
+    """Find the control the model asked for by name.
+
+    A ladder, tightest first, stopping at the first rung that yields exactly
+    one — the same shape as `match_option`, and deliberately NOT fuzzy for the
+    same reason: an edit-distance match silently picks, and the thing being
+    picked here is a button that may spend money.
+
+    Numbers still resolve. They are what a nameless icon is addressed by, they
+    are what older sessions and the tests speak, and refusing them would turn a
+    working call into a round trip for nothing."""
+    asked = str(target if target is not None else "").strip()
+    if not asked:
+        return Resolution(problem="say which control, by the name in the list")
+    if not controls:
+        return Resolution(problem="this page has no controls listed")
+
+    wanted = fold(asked)
+    ladder = (
+        [c for c in controls if c.address == asked],
+        [c for c in controls if fold(c.address) == wanted],
+        [c for c in controls if c.name == asked],
+        [c for c in controls if fold(c.name) == wanted],
+    )
+    for hits in ladder:
+        settled = _one_of(hits)
+        if settled is not None:
+            return Resolution(control=settled)
+        if hits:
+            return Resolution(problem=_ambiguous(asked, hits))
+
+    digits = asked.lstrip("#")
+    if digits.isdigit():
+        for control in controls:
+            if control.n == int(digits):
+                return Resolution(control=control)
+        return Resolution(
+            problem=f"there is no control {asked!r} on this page any more"
+        )
+
+    loose = [c for c in controls if wanted and wanted in fold(c.address)]
+    settled = _one_of(loose)
+    if settled is not None:
+        return Resolution(control=settled)
+    if loose:
+        return Resolution(problem=_ambiguous(asked, loose))
+    return Resolution(
+        problem=f"no control on this page is called {asked!r}. This page has: "
+        f"{_addresses(controls)}."
+    )
+
+
+def _one_of(hits: list[Control]) -> Control | None:
+    """The single control these hits are, or None if they are several.
+
+    Controls sharing an ADDRESS are one control the page drew twice — the
+    mobile copy and the desktop copy of one nav link — and `address_controls`
+    has already decided that. Asking the model to choose between two spellings
+    of the same word is a question with no right answer."""
+    if not hits:
+        return None
+    return hits[0] if len({c.address for c in hits}) == 1 else None
+
+
+def _ambiguous(asked: str, hits: list[Control]) -> str:
+    return (
+        f"{asked!r} matches {len(hits)} controls — {_addresses(hits)}. "
+        "Say which one, exactly as it is written."
+    )
+
+
+def _addresses(controls: list[Control]) -> str:
+    shown = ", ".join(repr(c.address) for c in controls[:CANDIDATES_SHOWN])
+    left = len(controls) - CANDIDATES_SHOWN
+    return shown if left <= 0 else f"{shown}, and {left} more"
+
+
+# How much of a change report is worth sending AS a change report. Past this the
+# delta has stopped being cheaper than the thing it describes, and the caller
+# sends the page instead — see `worth_sending`.
+DELTA_MAX_CHARS = 1500
+
+# Lines of unchanged text kept around each change. Zero would be cheapest and
+# useless: "+ 63,19 zł" means nothing without the line above it saying what is
+# priced. One line either side is what makes a diff readable as prose.
+DELTA_CONTEXT_LINES = 1
+
+
+@dataclass
+class Delta:
+    """What one action did to the page — the whole result of an action, and
+    not a summary of one.
+
+    **The page is re-sent in full only when it is a different page.** Measured
+    on the session that filed this: nine clicks and types on lot.com cost 44 788
+    characters, ~5 000 per action, because every one of them re-sent the entire
+    page and its entire control list to report that a dropdown had opened. What
+    the model needed each time was the handful of lines that were not there
+    before.
+
+    Two properties make that safe to do. It is diffed against WHAT THE MODEL WAS
+    LAST SHOWN, never against the page as it was a moment before the click — so
+    a change the page made on its own, while nobody was acting, still arrives
+    rather than falling into the gap between two reads. And nothing is ever
+    dropped silently: past the cap the count of unsent changed lines is stated,
+    the same way `MAX_CONTROLS` states what it left out. A diff that quietly
+    decides which changes matter would be a channel for a page to hide one."""
+
+    added: list[Control] = field(default_factory=list)
+    removed: list[Control] = field(default_factory=list)
+    changed: list[tuple[Control, Control]] = field(default_factory=list)
+    text: list[str] = field(default_factory=list)
+    # Changed lines the cap left out. Never silent: see the class docstring.
+    more_text: int = 0
+
+    def empty(self) -> bool:
+        """Did nothing at all change?
+
+        This is the answer to "did that click work" — delivered on the FIRST
+        click, as a fact the page reported, rather than inferred by a counter
+        three identical calls later."""
+        return not (self.added or self.removed or self.changed or self.text)
+
+    def render(self) -> str:
+        if self.empty():
+            return "nothing on the page changed"
+        parts = []
+        if self.text:
+            body = "\n".join(self.text)
+            if self.more_text:
+                body += (
+                    f"\n[{self.more_text} more changed line(s) not shown — "
+                    'use action="read" to see the whole page]'
+                )
+            parts.append("page text:\n" + body)
+        control_lines = (
+            [f"+ {c.line()}" for c in self.added]
+            + [f"- {c.line()}" for c in self.removed]
+            + [f"~ {new.line()}" for _, new in self.changed]
+        )
+        if control_lines:
+            parts.append("controls:\n" + "\n".join(control_lines))
+        return "\n".join(parts)
+
+    def worth_sending(self) -> bool:
+        """Is the change still smaller than the page?
+
+        A click that rebuilds the whole page produces a diff the size of two
+        pages. At that point the honest and the cheap answer are the same one:
+        send the page."""
+        return len(self.render()) <= DELTA_MAX_CHARS
+
+
+def diff_snapshots(before: Snapshot, after: Snapshot) -> Delta:
+    """What changed between the page the model was last shown and this one."""
+    delta = Delta()
+    was = {c.address: c for c in before.controls}
+    now = {c.address: c for c in after.controls}
+    delta.added = [c for a, c in now.items() if a not in was]
+    delta.removed = [c for a, c in was.items() if a not in now]
+    delta.changed = [
+        (was[a], c)
+        for a, c in now.items()
+        if a in was and _control_state(was[a]) != _control_state(c)
+    ]
+    delta.text, delta.more_text = _text_delta(before.text, after.text)
+    return delta
+
+
+def _control_state(control: Control) -> tuple:
+    """Everything about a control that the model would act differently on. Its
+    address is its identity and so is not part of its state."""
+    return (control.kind, control.detail, control.disabled, control.mutating)
+
+
+def _text_delta(before: str, after: str) -> tuple[list[str], int]:
+    """Changed lines of page text, with context, and how many were left out."""
+    lines: list[str] = []
+    spent = 0
+    dropped = 0
+    for line in difflib.unified_diff(
+        (before or "").splitlines(),
+        (after or "").splitlines(),
+        n=DELTA_CONTEXT_LINES,
+        lineterm="",
+    ):
+        if line.startswith(("---", "+++")):
+            continue
+        if line.startswith("@@"):
+            # The hunk header is line arithmetic for a patch program. The model
+            # needs to know only that the next lines are from somewhere else.
+            line = "…"
+        changed = line.startswith(("+", "-"))
+        if spent + len(line) > DELTA_MAX_CHARS:
+            dropped += int(changed)
+            continue
+        spent += len(line) + 1
+        lines.append(line)
+    while lines and lines[-1] == "…":
+        lines.pop()
+    return lines, dropped
 
 
 # How many candidates a failed choice hands back. The failure message IS the
