@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from aish.session import (
+    CLOSEST_MAX,
     SessionLog,
     attachment_embed,
     attachment_guidance,
@@ -679,21 +680,76 @@ def test_search_ranks_exact_title_over_phrase_over_content(tmp_path):
     assert [r.path for r in results] == [exact_title, phrase_in_title, content_hit]
 
 
-def test_search_all_words_and_fuzzy_tiers(tmp_path):
+def test_a_literal_match_is_never_diluted_by_a_close_one(tmp_path):
+    """#266: approximate matching answers "nothing you typed is here". Once
+    something IS here, it has nothing to say — mixing it in is what buried three
+    real hits under fifty chats that merely rhymed with the query."""
     scattered_words = make_session(
         tmp_path,
         "session-20260101-000000-000000.jsonl",
         ("user", "check alpha service"),
         ("assistant", "gamma looks fine"),
     )
-    typo_title = make_session(
+    make_session(
         tmp_path,
         "session-20260102-000000-000000.jsonl",
-        ("user", "alpha gama"),  # fuzzy-close to the query, no exact words
+        ("user", "alpha gama"),  # close to the query, contains neither word
     )
     results = SessionLog.search_sessions(tmp_path, "alpha gamma")
-    assert results[0].path == scattered_words  # all words present beats fuzzy
-    assert results[1].path == typo_title
+    assert [r.path for r in results] == [scattered_words]
+
+
+def test_search_reads_the_chat_not_the_tool_output(tmp_path):
+    """#266: "tefal" came back with chats whose only mention of it was inside a
+    web page the model read and never repeated."""
+    log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+    log.message({"role": "user", "content": "find me a sandwich toaster"})
+    log.message({"role": "tool", "tool_name": "read_url", "content": "Tefal SW852D"})
+    log.message({"role": "assistant", "content": "Here are three options."})
+    said_it = make_session(
+        tmp_path,
+        "session-20260102-000000-000000.jsonl",
+        ("user", "what about the tefal one"),
+    )
+    assert [r.path for r in SessionLog.search_sessions(tmp_path, "tefal")] == [said_it]
+
+
+def test_search_ignores_aishs_own_notes(tmp_path):
+    """A `[aish: …]` note is logged as a user turn but never reaches the
+    transcript, so it is not searchable either."""
+    log = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+    log.message({"role": "user", "content": "[aish: moved the session to /tmp/scratch]"})
+    log.message({"role": "user", "content": "carry on"})
+    assert SessionLog.search_sessions(tmp_path, "scratch") == []
+
+
+def test_a_short_query_does_not_match_much_shorter_words(tmp_path):
+    """difflib scores "tel" 0.75 against "tefal" purely on length, and an archive
+    always holds some three-letter word — which is how one query reached most of
+    the sessions in it (#266)."""
+    make_session(
+        tmp_path,
+        "session-20260101-000000-000000.jsonl",
+        ("user", "call me on the tel or over tea"),
+    )
+    assert SessionLog.search_sessions(tmp_path, "tefal") == []
+
+
+def test_a_typo_still_finds_the_chat_when_nothing_matched(tmp_path):
+    hit = make_session(
+        tmp_path, "session-20260101-000000-000000.jsonl", ("user", "alpha gamma")
+    )
+    assert [r.path for r in SessionLog.search_sessions(tmp_path, "alpah gama")] == [hit]
+
+
+def test_the_closest_fallback_is_capped(tmp_path):
+    for i in range(15):
+        make_session(
+            tmp_path, f"session-2026010{i // 9}-00000{i % 9}-000000.jsonl",
+            ("user", "restart the server"),
+        )
+    results = SessionLog.search_sessions(tmp_path, "restrat")
+    assert len(results) == CLOSEST_MAX
 
 
 def test_search_fuzzy_matches_typoed_words_in_contents(tmp_path):

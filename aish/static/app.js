@@ -206,19 +206,26 @@ const offlineSafe = (promise, fallback = null) => promise.catch(() => fallback);
 //           total, sig, bytes, text }
 // events: { name, events: [...] }   ← replayed verbatim through onReplay()
 
+// [OFFLINE-INDEX-START]
 function offlineSearchText(events) {
   // Only what a person would search FOR: their own words and aish's answers.
   // Command output is noise in a search index (and the bulk of the bytes).
+  // Server half in `visible_messages` (session.py) — same rule, one meaning.
   const parts = [];
   for (const event of events || []) {
     if (event.type === "user" && event.text) parts.push(event.text);
     else if (event.type === "done" && event.result) parts.push(event.result);
     else if (event.type === "history") {
-      for (const m of event.messages || []) if (m.content) parts.push(m.content);
+      // The flat blob a log too old to reconstruct falls back to: raw records,
+      // tool results included, so the roles have to be filtered HERE (#266).
+      for (const m of event.messages || []) {
+        if (m.content && (m.role === "user" || m.role === "assistant")) parts.push(m.content);
+      }
     }
   }
   return parts.join("\n").slice(0, OFFLINE_SEARCH_CHARS).toLowerCase();
 }
+// [OFFLINE-INDEX-END]
 
 async function offlineSave(name, payload, events) {
   const text = offlineSearchText(events);
@@ -308,6 +315,8 @@ async function offlineEnforceBudget(current) {
 // LCS ratio, which agrees with it for the typo-shaped cases it exists to catch.
 const OFFLINE_FUZZY_THRESHOLD = 0.55;  // whole query vs whole title
 const OFFLINE_FUZZY_WORD_CUTOFF = 0.75; // single query word vs single session word
+const OFFLINE_FUZZY_LEN_SLACK = 1;      // a typo keeps a word's length (#266)
+const OFFLINE_CLOSEST_MAX = 10;         // rows the "closest chats" fallback shows
 const OFFLINE_PUNCT_RE = /^[.,;:!?()[\]{}<>'"`]+|[.,;:!?()[\]{}<>'"`]+$/g;
 
 function lcsRatio(a, b) {
@@ -338,25 +347,54 @@ function offlineRank(metas, query) {
     else if (titleCf.includes(queryCf)) score = 4;
     else if (contentCf.includes(queryCf)) score = 3;
     else if (words.every((w) => contentCf.includes(w))) score = 2;
-    else {
-      const vocab = new Set(
-        contentCf.split(/\s+/).map((w) => w.replace(OFFLINE_PUNCT_RE, "")).filter(Boolean)
-      );
-      const everyWordClose = words.every((w) => {
-        for (const candidate of vocab) {
-          if (lcsRatio(w, candidate) >= OFFLINE_FUZZY_WORD_CUTOFF) return true;
-        }
-        return false;
-      });
-      if (everyWordClose || lcsRatio(queryCf, titleCf) >= OFFLINE_FUZZY_THRESHOLD) score = 1;
-      else continue;
-    }
+    else continue;
     scored.push({ score, meta });
   }
+  // Nothing you typed is in any chat — a different question, answered
+  // separately, and only then (#266). Mixed into a search that worked, the
+  // approximate tier was most of what came back.
+  if (!scored.length) return offlineClosest(metas, queryCf, words);
   // Newest-first within a tier, matching the server (whose input is already
   // recency-ordered and whose sort is stable).
   scored.sort((a, b) => b.score - a.score || (b.meta.ts || 0) - (a.meta.ts || 0));
   return scored.map((s) => s.meta);
+}
+
+// The chats nearest a query nothing matched, closest first and capped —
+// SessionLog._closest.
+function offlineClosest(metas, queryCf, words) {
+  const scored = [];
+  for (const meta of metas) {
+    const ratio = offlineCloseness(meta, queryCf, words);
+    if (ratio !== null) scored.push({ ratio, meta });
+  }
+  scored.sort((a, b) => b.ratio - a.ratio || (b.meta.ts || 0) - (a.meta.ts || 0));
+  return scored.slice(0, OFFLINE_CLOSEST_MAX).map((s) => s.meta);
+}
+
+// How near one chat is, or null for "not near at all". Every query word needs a
+// near word of ITS OWN LENGTH: without that guard 0.75 is a length artifact —
+// "tel" scores it against "tefal" — and every chat holds some short word.
+function offlineCloseness(meta, queryCf, words) {
+  const titleCf = (meta.title || "").toLowerCase();
+  const vocab = new Set(
+    (meta.text || "").split(/\s+/).map((w) => w.replace(OFFLINE_PUNCT_RE, "")).filter(Boolean)
+  );
+  let weakest = 1;
+  for (const word of words) {
+    let best = 0;
+    for (const candidate of vocab) {
+      if (Math.abs(candidate.length - word.length) > OFFLINE_FUZZY_LEN_SLACK) continue;
+      const ratio = lcsRatio(word, candidate);
+      if (ratio > best) best = ratio;
+    }
+    if (best < OFFLINE_FUZZY_WORD_CUTOFF) {
+      const title = lcsRatio(queryCf, titleCf);
+      return title >= OFFLINE_FUZZY_THRESHOLD ? title : null;
+    }
+    if (best < weakest) weakest = best;
+  }
+  return weakest;
 }
 // [OFFLINE-SEARCH-END]
 
