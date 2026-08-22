@@ -1094,10 +1094,12 @@ UNTRUSTED_SOURCE_TOOLS = frozenset(EGRESS_TOOLS | set(BROWSE_TOOLS))
 # ride it — see `_grant_host`.
 BROWSE_GRANT = (
     "drive {host} in your signed-in browser — aish will open pages and click "
-    "on them AS YOU, and can see private account data. It may fill in and "
-    "submit forms there without asking again — searches, filters, dates. It "
-    "will still ask before anything that says it pays, buys, books, deletes, "
-    "sends or signs, and before any form on a page that looks like a checkout. "
+    "on them AS YOU, and can see private account data.\n"
+    "It may fill in and submit forms there without asking again — searches, "
+    "filters, dates.\n"
+    "It will still ask before anything that says it pays, buys, books, "
+    "deletes, sends or signs, and before any form on a page that looks like a "
+    "checkout.\n"
     "It never types passwords."
 )
 

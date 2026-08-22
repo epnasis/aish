@@ -124,3 +124,27 @@ def test_only_the_toggle_files_the_sidebar_away() -> None:
         "closeSessionRail now writes the owner's preference, so every tap on a "
         "chat row files the desktop sidebar away"
     )
+
+
+class TestACardThatListsValuesRendersAsAList:
+    """#251. A batch approval card is a LIST — one line per value going into
+    the form — and its whole claim to be more oversight than the keystrokes it
+    replaces is that the owner can read those values before he taps.
+
+    With the default `white-space` the newlines collapsed and it rendered as
+    one run-on line. Measured in real Chrome at 390px before the fix:
+    `fill in this form on lot.com and send it: 'Skąd' ← 'WAW' 'Dokąd' ← …`.
+    A JS test would not have caught it: the string was always correct, and it
+    was the stylesheet that threw the shape away."""
+
+    def _rule(self) -> str:
+        start = CSS.index(".tool-preview {")
+        return CSS[start:CSS.index("}", start)]
+
+    def test_the_preview_keeps_the_line_breaks_it_was_given(self):
+        assert "white-space: pre-wrap" in self._rule()
+
+    def test_it_still_wraps_a_long_unbroken_value(self):
+        """pre-wrap must not become pre: a URL or a long value has to fold
+        inside the card rather than push it sideways off a phone."""
+        assert "overflow-wrap: anywhere" in self._rule()
