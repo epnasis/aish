@@ -9397,3 +9397,161 @@ class TestTheFenceGoesUpWhenSomethingIsRead:
         assert agent._egress_novel_hosts(
             "read_url", {"url": f"https://{long_label}.x.example/p"}
         ) == [f"{long_label}.x.example"]
+
+
+class TestALinkThatArrivedByMail:
+    """#279. Mail is the delivery mechanism for every account-recovery flow
+    there is, so aish following a link by itself hands an injected turn the
+    password-reset button for anything he owns. He opens it; aish does not."""
+
+    def _mail_tool(self, tmp_path, payload):
+        """A read-only plugin tool that declares its output is e-mail."""
+        import json as _json
+
+        from aish import tool_plugins
+
+        # conftest points GLOBAL_TOOLS_DIR at a temp dir suite-wide, so real
+        # discovery finds this — a hand-set _plugin_tools is wiped by the
+        # agent's first rescan.
+        tool_dir = tool_plugins.GLOBAL_TOOLS_DIR / "mail_search"
+        tool_dir.mkdir(parents=True, exist_ok=True)
+        (tool_dir / "TOOL.md").write_text(
+            "---\nname: mail_search\ndescription: search mail\n"
+            "exec: ./wrapper\nmutating: no\nreturns: text\n"
+            "content_from: email\n"
+            'schema: {"q": {"type": "string"}}\n---\nbody\n',
+            encoding="utf-8",
+        )
+        wrapper = tool_dir / "wrapper"
+        wrapper.write_text(
+            "#!/bin/sh\ncat <<'EOF'\n" + _json.dumps(payload, ensure_ascii=False) + "\nEOF\n",
+            encoding="utf-8",
+        )
+        import stat as _stat
+
+        wrapper.chmod(wrapper.stat().st_mode | _stat.S_IEXEC)
+        tool, errors = tool_plugins._parse_tool(tool_dir / "TOOL.md")
+        assert errors == [], errors
+        return tool_dir
+
+    def _agent(self, tmp_path, monkeypatch, payload, then, approve_tool=None):
+        import aish.agent as agent_module
+
+        fetched: list[str] = []
+        monkeypatch.setattr(
+            agent_module.web, "read_url",
+            lambda url, topic=None, **_kw: (fetched.append(url), "a page")[1],
+        )
+        asked: list = []
+
+        def approver(name, args, preview=None):
+            asked.append(preview)
+            return True if approve_tool is None else approve_tool(name, args, preview)
+
+        self._mail_tool(tmp_path, payload)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("mail_search", q="invoices")]),
+                model_says(tool_calls=then),
+                model_says("done"),
+            ],
+            approve_tool=approver,
+        )
+        agent.run_task("check my mail")
+        return agent, fetched, asked
+
+    ORDINARY = [{"from": "sklep@x.pl", "subject": "Zamówienie",
+                 "body": "Śledź przesyłkę: https://inpost.test/track/999"}]
+    RESET = [{"from": "noreply@eon.pl", "subject": "Resetowanie hasła",
+              "body": "Kliknij, aby zresetować hasło: https://eon.test/r?t=abc123"}]
+
+    def test_a_sign_in_link_is_refused_outright_and_never_carded(
+        self, tmp_path, monkeypatch
+    ):
+        """The judged half, and it may only RESTRICT: 'open the sign-in link'
+        is exactly the card a tired owner taps."""
+        agent, fetched, asked = self._agent(
+            tmp_path, monkeypatch, self.RESET,
+            [tool_call("read_url", url="https://eon.test/r?t=abc123")],
+        )
+        assert fetched == []
+        assert asked == []  # no card offered at all
+        out = tool_messages(agent.messages)[1]["content"]
+        assert "NOT EXECUTED" in out and "sign-in" in out
+
+    def test_an_ordinary_mailed_link_is_offered_once_and_opens(
+        self, tmp_path, monkeypatch
+    ):
+        """A card is spent exactly where the standing rule says it still earns
+        its place: rare, and checkable at a glance."""
+        agent, fetched, asked = self._agent(
+            tmp_path, monkeypatch, self.ORDINARY,
+            [tool_call("read_url", url="https://inpost.test/track/999")],
+        )
+        assert fetched == ["https://inpost.test/track/999"]
+        assert any("arrived in an e-mail" in (a or "") for a in asked)
+
+    def test_denying_it_never_fetches(self, tmp_path, monkeypatch):
+        agent, fetched, _ = self._agent(
+            tmp_path, monkeypatch, self.ORDINARY,
+            [tool_call("read_url", url="https://inpost.test/track/999")],
+            approve_tool=lambda *_a: False,
+        )
+        assert fetched == []
+        assert "NOT EXECUTED" in tool_messages(agent.messages)[1]["content"]
+
+    def test_a_url_the_mail_never_carried_is_untouched(self, tmp_path, monkeypatch):
+        agent, fetched, asked = self._agent(
+            tmp_path, monkeypatch, self.ORDINARY,
+            [tool_call("read_url", url="https://inpost.test/track/999/details")],
+        )
+        assert fetched == ["https://inpost.test/track/999/details"]
+        assert asked == []
+
+    def test_one_reset_mail_does_not_condemn_the_other_hits(self):
+        """A search returns many messages in one blob; classifying the blob
+        would let one reset mail refuse everybody's links."""
+        import json as _json
+
+        from aish import provenance
+
+        found = provenance.links_in_mail(
+            _json.dumps(self.RESET + self.ORDINARY, ensure_ascii=False)
+        )
+        assert found["https://eon.test/r?t=abc123"] == provenance.SIGN_IN
+        assert found["https://inpost.test/track/999"] == provenance.LINK
+
+    def test_a_tool_that_does_not_declare_mail_records_nothing(self, tmp_path):
+        agent, _ = make_agent([])
+        agent._note_provenance([("web_search", {})], ["https://x.test/reset?t=1"])
+        assert agent._mail_links == {}
+
+    def test_the_grant_is_per_link_never_per_host(self, tmp_path):
+        agent, _ = make_agent([], approve_tool=lambda *_a: True)
+        from aish import provenance
+
+        agent._mail_links = {
+            "https://x.test/a": provenance.LINK,
+            "https://x.test/b": provenance.LINK,
+        }
+        assert agent._mail_link_gate("read_url", {"url": "https://x.test/a"}) is None
+        assert agent._approved_mail_links == {"https://x.test/a"}
+        assert "https://x.test/b" not in agent._approved_mail_links
+
+    def test_unattended_it_fails_closed(self):
+        from aish import provenance
+
+        agent, _ = make_agent([], approve_tool=None)
+        agent._mail_links = {"https://x.test/a": provenance.LINK}
+        out = agent._mail_link_gate("read_url", {"url": "https://x.test/a"})
+        assert "nobody to ask" in out
+
+    def test_browsing_to_a_mailed_link_is_gated_too(self):
+        """Wider than the egress gate on purpose: a link is dangerous because
+        following it ACTS, not because it carries data outward."""
+        from aish import provenance
+
+        agent, _ = make_agent([], approve_tool=None)
+        agent._mail_links = {"https://x.test/a": provenance.SIGN_IN}
+        assert agent._mail_link_gate("browse", {"url": "https://x.test/a"}) is not None
+        assert agent._mail_link_gate("read_pdf", {"source": "https://x.test/a"}) is not None

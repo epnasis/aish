@@ -12335,6 +12335,9 @@ function onBrowserView(event) {
   // successful sign-in looks like from out here. Ask NOW, naming the site,
   // rather than at the end of the session where two logins are one question.
   if (event.signin) bvAskSignin(event.signin);
+  // Saved, not asked: the checkbox was the question and he already answered
+  // it. This is the receipt, with the one-tap way back out.
+  if (event.saved) bvSavedSignin(event.saved);
   bvFocusRect = event.focus || null;
   bvPaint(false);   // re-clamp AND redraw the outline for the new geometry
   if (event.focus && event.focus.tapped && event.focus.editable) bvOpenEditor(event.focus);
@@ -12378,6 +12381,11 @@ function bvOpenEditor(focus) {
   input.value = secret ? "" : (focus.value || "");
   $("bv-edit-eye").hidden = !secret;
   $("bv-edit-eye").classList.remove("revealed");
+  // The remember checkbox belongs to a password field and nothing else. It is
+  // reset every time it opens: consent is given for THIS sign-in, and a box
+  // left ticked from an hour ago is not consent.
+  $("bv-edit-remember").hidden = !secret;
+  $("bv-edit-remember-box").checked = false;
   $("bv-edit-note").textContent = secret ? "hidden — typing replaces it" : "";
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
@@ -12405,6 +12413,20 @@ function bvAskSignin(host) {
   });
 }
 
+/** Receipt for a stored sign-in. NOT a question — the checkbox was the
+ * question and he already answered it.
+ *
+ * A plain toast rather than an Undo button, deliberately: the way back already
+ * exists as `/browser forget <host>`, shared by the CLI and here, and an
+ * action slot on the toast would be a new widget standing in for a door that
+ * is already open — which is the mistake this file's rules name first. The
+ * wording also does not offer to undo the SESSION he just established: that
+ * one is the site's, and ending it is his to do there. */
+function bvSavedSignin(origin) {
+  const host = origin.replace(/^https?:\/\//, "");
+  showToast(`saved your ${host} sign-in — /browser forget ${host} deletes it`);
+}
+
 function bvCloseEditor() {
   // Cleared on the way out: this input holds passwords, and a value left in a
   // DOM node outlives the dialog.
@@ -12430,8 +12452,9 @@ function bvCommit(submit) {
   // Send BEFORE clearing: bvSend refuses while an interaction is in flight,
   // and clearing first silently destroyed the text — a password, typically —
   // with nothing on screen to say so.
-  if (!bvSend({ action: "fill", text, submit,
-                secret: !!(bvEditing && bvEditing.kind === "password") })) {
+  const secret = !!(bvEditing && bvEditing.kind === "password");
+  if (!bvSend({ action: "fill", text, submit, secret,
+                remember: secret && $("bv-edit-remember-box").checked })) {
     $("bv-edit-note").textContent = "still working — try again in a moment";
     return;
   }

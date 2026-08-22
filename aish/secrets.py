@@ -25,12 +25,20 @@ live attacker already running as the user. That is out of scope by design.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import time
 from pathlib import Path
 
 SERVICE = "aish"
+# Site sign-ins live in their OWN Keychain service, and the separation is a
+# fence rather than tidiness (#280). Two things resolve a name against SERVICE:
+# a plugin manifest's `secrets:` field, and `aish secret get`. A site credential
+# must be reachable by neither — a wrapper that could declare `secrets: eon_pl`
+# would put the owner's password in a subprocess environment aish does not
+# control, and `aish secret list` is a different lifecycle with a different UI.
+SIGNIN_SERVICE = "aish-signin"
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # env-var-shaped
 NAMES_INDEX = Path.home() / ".local" / "state" / "aish" / "secret-names.txt"
 _SECURITY = "/usr/bin/security"
@@ -88,6 +96,50 @@ def delete(name: str) -> bool:
         return False
     proc = _security(["delete-generic-password", "-a", name, "-s", SERVICE])
     _index_remove(name)
+    _invalidate()
+    return proc.returncode == 0
+
+
+# --- site sign-ins (#280) ---------------------------------------------------
+#
+# Keyed by ORIGIN (scheme://host[:port]) rather than by a name the caller picks,
+# because the whole safety property is that a credential belongs to exactly one
+# origin and can never be typed at another. There is no `put_signin(name, ...)`
+# for the same reason there is no name: nothing may choose one.
+
+
+def put_signin(origin: str, identifier: str, password: str) -> None:
+    """Store the sign-in for one origin. Raises SecretError on failure."""
+    if not origin.startswith(("http://", "https://")):
+        raise SecretError(f"a sign-in is bound to an origin, not to {origin!r}")
+    blob = json.dumps({"identifier": identifier, "password": password})
+    proc = _security(
+        ["add-generic-password", "-a", origin, "-s", SIGNIN_SERVICE, "-U", "-w", blob]
+    )
+    if proc.returncode != 0:
+        raise SecretError(proc.stderr.strip() or "failed to store sign-in")
+    _invalidate()
+
+
+def get_signin(origin: str) -> tuple[str, str] | None:
+    """(identifier, password) for this origin, or None.
+
+    NEVER returned to a model: the only caller is the browser's own sign-in
+    replay, which types it into a page and reports nothing back."""
+    proc = _security(["find-generic-password", "-a", origin, "-s", SIGNIN_SERVICE, "-w"])
+    if proc.returncode != 0:
+        return None
+    try:
+        loaded = json.loads(proc.stdout.rstrip("\n"))
+    except ValueError:
+        return None
+    identifier = str(loaded.get("identifier", ""))
+    password = str(loaded.get("password", ""))
+    return (identifier, password) if password else None
+
+
+def delete_signin(origin: str) -> bool:
+    proc = _security(["delete-generic-password", "-a", origin, "-s", SIGNIN_SERVICE])
     _invalidate()
     return proc.returncode == 0
 
@@ -160,12 +212,37 @@ def _matchable() -> list[tuple[str, str]]:
             value = get(name)
             if value and len(value) >= MIN_MATCH:
                 pairs.append((name, value))
+        # Site sign-ins are scrubbed on the same terms and for a sharper
+        # reason: a login page that echoes a failed password back into its own
+        # error text would otherwise carry it into the model's context, which
+        # is the one place this design promises it never goes.
+        for origin, secret in _signin_values():
+            if len(secret) >= MIN_MATCH:
+                pairs.append((f"sign-in for {origin}", secret))
         # Longest first: one secret can be a substring of another, and
         # replacing the short one first would leave a fragment of the long one
         # in the text with its placeholder wrapped around the middle.
         pairs.sort(key=lambda pair: len(pair[1]), reverse=True)
         _cache.update(names=current, at=now, pairs=pairs)
     return _cache["pairs"]
+
+
+def _signin_values() -> list[tuple[str, str]]:
+    """(origin, password) for every stored sign-in.
+
+    Imported lazily: `signin` owns the origin list and depends on this module
+    for the Keychain, so a module-level import would be a cycle."""
+    try:
+        from . import signin
+
+        found = []
+        for origin in signin.origins():
+            pair = get_signin(origin)
+            if pair:
+                found.append((origin, pair[1]))
+        return found
+    except Exception:  # noqa: BLE001 — scrubbing must never raise into a tool
+        return []
 
 
 def contains(text: str) -> bool:

@@ -4143,6 +4143,10 @@ class WebServer:
                 text=message.get("text", ""),
                 value=message.get("value", ""),
                 secret=bool(message.get("secret")),
+                # His checkbox: may aish keep this sign-in and re-establish it
+                # when the session lapses (#280). Nothing is written until the
+                # sign-in is seen to work.
+                remember=bool(message.get("remember")),
                 submit=bool(message.get("submit")),
                 dy=message.get("dy", 600),
                 key=message.get("key", "Enter"),
@@ -4225,6 +4229,7 @@ class WebServer:
                 "focus": result.focus,
                 "nav": result.nav,
                 "signin": result.signin,
+                "saved": result.saved,
             }
         )
 

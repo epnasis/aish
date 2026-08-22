@@ -565,6 +565,10 @@ def unvetted_segments(command: str, prefixes: Collection[str]) -> list[str]:
 # Wrappers that don't change what the underlying command does.
 _WRAPPERS = ("sudo", "nohup", "time", "command")
 
+# The two Keychain services aish keeps. Matched as whole argv tokens, so a file
+# that merely mentions one is untouched.
+_KEYCHAIN_SERVICES = frozenset({"aish", "aish-signin"})
+
 _DISKUTIL_DESTRUCTIVE = {
     "erasedisk",
     "erasevolume",
@@ -614,6 +618,18 @@ def _segment_deny_reason(segment: str) -> str | None:
             return "rm -rf: recursive force delete is unrecoverable"
     if name in ("shred", "srm"):
         return f"{name}: secure deletion is unrecoverable"
+    if name == "security" and any(t.strip() in _KEYCHAIN_SERVICES for t in tokens[1:]):
+        # aish's own Keychain namespaces (#142, #280). Everything else in this
+        # denylist is here for being UNRECOVERABLE; this one is here for the
+        # other reason a command may have no yes — reading it hands the model
+        # the owner's stored passwords, which every other fence in the browser
+        # exists to keep out of its context. A card would not help: the owner
+        # has said he will not read one, and this is precisely the request that
+        # looks reasonable in passing.
+        return (
+            "aish's own Keychain: reading it would put the owner's stored "
+            "passwords into the model's context"
+        )
     if name.startswith("mkfs"):
         return "mkfs: formatting a filesystem is unrecoverable"
     if name == "dd" and any(t.startswith("of=/dev/") for t in tokens[1:]):

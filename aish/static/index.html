@@ -637,6 +637,14 @@
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor" opacity=".28"/><path d="M9 9l6 6m0-6l-6 6" fill="none" stroke="var(--bg)" stroke-width="2.1" stroke-linecap="round"/></svg>
       </button>
     </div>
+    <!-- Shown only on a PASSWORD field. This checkbox is the whole consent
+         for storing a sign-in (#280): flipping it is what lets aish hold the
+         value at all, and nothing is written until the sign-in is seen to
+         work. Default off, every time. -->
+    <label id="bv-edit-remember" class="bv-edit-remember" hidden>
+      <input id="bv-edit-remember-box" type="checkbox">
+      <span>Remember this — aish can sign in again when the site signs you out</span>
+    </label>
     <div id="bv-edit-note" class="bv-edit-note"></div>
   </div>
 </div>

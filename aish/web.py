@@ -1402,12 +1402,19 @@ def _file_link(path: str) -> str:
 
 def _browser_read(
     url: str,
-) -> tuple[tuple[str, list[str], list[str], bool] | None, str]:
-    """(text, images, declared, signin) as a REAL browser renders the page, or
-    None if it could
-    not be used. The escalation for the two pages a fetch cannot read at all:
-    JavaScript-only (the fetch gets an empty shell) and login-walled (the fetch
-    is a logged-out client).
+    *,
+    renew: bool = True,
+) -> tuple[tuple[str, list[str], list[str], bool, str] | None, str]:
+    """(text, images, declared, signin, renewal) as a REAL browser renders the
+    page, or None if it could not be used.
+
+    `renew=False` is how the ONE automatic sign-in attempt is bounded: the
+    re-read after a renewal cannot itself renew, so a site that keeps asking
+    for a password cannot loop. Structural rather than a counter.
+
+    The escalation for the two pages a fetch cannot read at all: JavaScript-only
+    (the fetch gets an empty shell) and login-walled (the fetch is a logged-out
+    client).
 
     The browser hands back RENDERED text, already extracted — running its HTML
     back through `_extract` would re-lose everything a site renders into shadow
@@ -1426,6 +1433,7 @@ def _browser_read(
         # Rendering a rendering service proves nothing, and its own stub page
         # would then be judged as if it were the site.
         return None, "a third-party reader URL is not rendered again"
+    renewal = ""
     try:
         page = browser.read(url)
     except browser.BrowserUnavailable as exc:
@@ -1442,11 +1450,30 @@ def _browser_read(
             BROWSER_HOSTS.add(host)
         return (
             downloaded_note(page.downloads, "this link is a file, and aish saved it"),
-            [], [], False,
+            [], [], False, "",
         ), ""
     text = "\n".join(
         line for line in (ln.strip() for ln in page.text.splitlines()) if line
     )
+    if page.signin and renew:
+        # The page asked for a password and the owner saved a sign-in for this
+        # origin. ONE attempt, then read again — never a loop: `renew=False`
+        # on the way back is what makes that structural rather than a counter.
+        outcome = _renew_session(url)
+        if outcome is not None:
+            if outcome.ok:
+                again, why = _browser_read(url, renew=False)
+                if again is not None:
+                    return (*again[:4], RENEWED_SESSION_NOTE.format(host=host)), ""
+                return None, why
+            renewal = RENEWAL_STOPPED_NOTE.format(
+                host=host,
+                why=(
+                    RENEWAL_SECOND_FACTOR.format(host=host)
+                    if outcome.second_factor
+                    else outcome.why
+                ),
+            )
     if is_blank(text):
         return None, "the browser rendered an empty page"
     # A wall HAS text, so "non-empty" is not the same as "the page". Handing a
@@ -1461,7 +1488,7 @@ def _browser_read(
     _remember_title(url, page.title)
     if host:
         BROWSER_HOSTS.add(host)
-    return (text, page.images, page.declared, page.signin), ""
+    return (text, page.images, page.declared, page.signin, renewal), ""
 
 
 def _worth_rendering(exc: Exception) -> bool:
@@ -1513,14 +1540,47 @@ ANONYMOUS_READ_NOTE = (
     "report a signed-out page as their data.]\n"
 )
 
+# aish's own account of a thing it did with his credential, and it sits above
+# the untrusted-content banner because it is a statement about PROVENANCE. It
+# is never silent: he asked for an assistant that acts on his behalf, and the
+# price of that is that every act is written down where he can find it.
+RENEWED_SESSION_NOTE = (
+    "[aish: the session at {host} had lapsed, so aish signed in again as the "
+    "user with the sign-in they saved. What follows IS their account.]\n"
+)
+
+# The renewal was tried and did not finish. Both endings are worth saying out
+# loud, and they call for opposite things: a second factor needs thirty seconds
+# of his attention, a stale credential needs a fresh sign-in.
+RENEWAL_STOPPED_NOTE = (
+    "[aish: {host} asked for a password, and the sign-in the user saved did not "
+    "get all the way in — {why}. What follows is the SIGNED-OUT page, not their "
+    "account: nothing in it is their data.]\n"
+)
+RENEWAL_SECOND_FACTOR = (
+    "the site then asked for a one-time code, which only they can supply — tell "
+    "them to open /browser {host}, finish the sign-in, and ask again"
+)
+
 ANONYMOUS_READ_FORM = (
     " This page is a sign-in form, so it carries no account content at all."
 )
 
 
+def _renew_session(url: str) -> "browser.SignInResult | None":
+    """Sign in again at this URL's origin, or None when nothing is stored.
+
+    A seam rather than a direct call so a browser that cannot even be imported
+    degrades to the old lapsed-session note instead of raising into a read."""
+    try:
+        return browser.sign_in(url)
+    except Exception:  # noqa: BLE001 — a renewal failing is a read without one
+        return None
+
+
 def _present_rendered(
     url: str,
-    rendered: tuple[str, list[str], list[str], bool],
+    rendered: tuple[str, list[str], list[str], bool, str],
     *,
     topic: str | None,
     login_host: str,
@@ -1528,8 +1588,13 @@ def _present_rendered(
 ) -> str:
     """A browser read, presented — with the provenance note when the site the
     owner is signed into answered with a password field anyway."""
-    text, images, declared, signin = rendered
-    note = STALE_SESSION_NOTE.format(host=login_host) if login_host and signin else ""
+    text, images, declared, signin, renewal = rendered
+    # A renewal note REPLACES the lapsed-session note: both describe the same
+    # page, and the renewal one is the more specific true statement.
+    if renewal:
+        note = renewal
+    else:
+        note = STALE_SESSION_NOTE.format(host=login_host) if login_host and signin else ""
     return note + _present(
         url, text, images, declared, topic=topic, via_browser=True, cut=cut
     )
