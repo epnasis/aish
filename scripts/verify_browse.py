@@ -140,6 +140,24 @@ HARD = """<!doctype html>
   </div>
   <button id="open-dialog">Otwórz okno</button>
 
+  <!-- A results list: three rows whose buttons all say the same thing, and
+       whose boilerplate is identical. The only thing telling them apart is
+       what each row says. -->
+  <section id="wyniki">
+    <article class="oferta">
+      <p>07:45 – 09:10</p><p>LO123</p><p>1 przesiadka</p><p>640 PLN</p>
+      <p>Bagaż podręczny wliczony</p><button>Wybierz</button>
+    </article>
+    <article class="oferta">
+      <p>11:20 – 12:45</p><p>LO125</p><p>bezpośredni</p><p>720 PLN</p>
+      <p>Bagaż podręczny wliczony</p><button>Wybierz</button>
+    </article>
+    <article class="oferta">
+      <p>18:05 – 19:30</p><p>LO129</p><p>bezpośredni</p><p>590 PLN</p>
+      <p>Bagaż podręczny wliczony</p><button>Wybierz</button>
+    </article>
+  </section>
+
   <!-- Icon-only controls, every way a real site writes one. The old rule
        dropped all of these: no words, nowhere to go. On a booking form they
        are half the controls that matter. -->
@@ -588,6 +606,30 @@ def check_calendar(url: str) -> None:
     print("submit-shaped month arrow refused →", refused.ledger[0][-96:])
 
 
+def check_rows(url: str) -> None:
+    """Three identical buttons, told apart by their rows (#251)."""
+    page = browser.browse_open(url + "hard.html")
+    picks = [c for c in page.controls if c.name == "Wybierz"]
+    assert len(picks) == 3, [c.line() for c in picks]
+
+    # The label stays the prefix; what follows tells the row from its
+    # neighbours; the boilerplate every row carries is gone.
+    for control in picks:
+        assert control.address.startswith("Wybierz — "), control.address
+        assert "Bagaż podręczny wliczony" not in control.row, control.row
+    assert len({c.address for c in picks}) == 3
+    for control in picks:
+        print("row →", control.line())
+
+    # And a row is asked for by anything that identifies it — a price, a flight
+    # number, a time — rather than by its position.
+    cheapest = browse.resolve(page.controls, "590 PLN")
+    assert cheapest.control is not None, cheapest.problem
+    assert "18:05" in cheapest.control.address, cheapest.control.address
+    assert browse.resolve(page.controls, "LO125").control.n == picks[1].n
+    print("asked for by price →", cheapest.control.address)
+
+
 def check_hard(url: str) -> None:
     """Every way a control can be listed and unpressable."""
     page = browser.browse_open(url + "hard.html")
@@ -734,6 +776,7 @@ def main() -> int:
     check_batch(url)
     check_long_list(url)
     check_calendar(url)
+    check_rows(url)
 
     browser.browse_close()
     browser.shutdown()

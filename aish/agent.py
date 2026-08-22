@@ -264,6 +264,13 @@ Rules:
    them: browse_act(target="Country", action="choose", value="Poland") matches
    on what you say, and if it matches more than one or none you get the
    candidates back.
+   ON A LIST OF RESULTS, EVERY ROW'S BUTTON IS NAMED BY ITS ROW. Twenty
+   flights are twenty buttons that all say "Wybierz", so the list gives you
+   `button 'Wybierz — 07:45 – 09:10' — in: 07:45 – 09:10 | LO123 | 640 PLN`.
+   Pick by what the row says, and ask for it that way — target="Wybierz —
+   07:45 – 09:10", or just target="640 PLN" if that is what identifies it.
+   You MUST NOT quote a price, a time or a flight number that is not in the
+   row you actually acted on.
    FILLING IN A FORM IS ONE CALL, NOT ONE CALL PER FIELD. Use browse_fill with
    a list of steps whenever you are about to touch two or more controls on the
    same form. Example: browse_fill(steps=[{{"target":"Skąd","value":"Warszawa"}},
@@ -5077,7 +5084,14 @@ class Agent:
             return None
         # Named, every time, and never folded into the driving grant: this is
         # the click the owner would want to have been asked about.
-        what = f"{args.get('action', 'click')} {control.kind} {control.address!r} on {host}"
+        # The ROW rides the card, not just the address: on a results page the
+        # difference between the flight the owner wanted and the one beside it
+        # is the price and the time, and a card he cannot check against what he
+        # asked for is a card he taps through.
+        what = f"{args.get('action', 'click')} {control.kind} {control.address!r}"
+        if said := control.row_note():
+            what += f" ({said})"
+        what += f" on {host}"
         return self._browse_approval(
             name, args, what, BROWSE_ACTION_DENIED.format(what=what)
         )
