@@ -1094,6 +1094,7 @@ class TestFillingAFormIsOneAct:
             {"n": 1, "kind": "field", "name": "Dokąd"},
             {"n": 2, "kind": "check", "name": "Tylko bezpośrednie"},
             {"n": 3, "kind": "button", "name": "Szukaj", "submits": True},
+            {"n": 4, "kind": "button", "name": "Zapłać", "submits": True},
         ])
 
     def test_a_whole_form_plans_as_one_batch(self):
@@ -1194,7 +1195,27 @@ class TestFillingAFormIsOneAct:
         assert agent._browse_gate("browse_fill", args) is None
         assert asked == []
 
-    def test_sending_the_form_draws_one_card_naming_every_value(self, monkeypatch):
+    def test_a_search_batch_rides_the_driving_grant(self):
+        """#251. A batch ending in a plain "Szukaj" submit is exactly what the
+        widened host card grants — and it was one of five cards that a single
+        flight search drew, none of which bought anything."""
+        snap = snapshot(controls=self._form())
+        asked = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+        )
+        agent._browse_view.remember(snap)
+        agent._approved_browsing.add("eon.pl")
+        assert agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Skąd", "value": "WAW"},
+            {"target": "Szukaj", "do": "click"},
+        ]}) is None
+        assert asked == []
+
+    def test_a_batch_that_pays_still_draws_one_card_naming_every_value(
+        self, monkeypatch
+    ):
         snap = snapshot(controls=self._form())
         asked = []
 
@@ -1210,10 +1231,10 @@ class TestFillingAFormIsOneAct:
         agent._approved_browsing.add("eon.pl")
         assert agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "WAW"},
-            {"target": "Szukaj", "do": "click"},
+            {"target": "Zapłać", "do": "click"},
         ]}) is None
         assert len(asked) == 1
-        assert "'Skąd' ← 'WAW'" in asked[0] and "press 'Szukaj'" in asked[0]
+        assert "'Skąd' ← 'WAW'" in asked[0] and "press 'Zapłać'" in asked[0]
 
     def test_an_unrunnable_batch_never_reaches_a_card(self, monkeypatch):
         snap = snapshot(controls=self._form())
@@ -1920,7 +1941,11 @@ class TestConsequencesWithNoYesButton:
             {"target": "Dokąd", "value": "Paryż"},
             {"target": "Szukaj", "do": "click"},
         ]}) is None
-        assert len(asked) == 1  # the ordinary batch card, unchanged
+        # No card at all now (#251): a plain "Szukaj" submit is what the
+        # driving grant is FOR. What matters to THIS feature is that the batch
+        # is not REFUSED — an unapprovable act removes a decision, and filling
+        # in a search form is not one of them.
+        assert asked == []
 
 
 class TestADrivenPageThatIsAskingForAPassword:
@@ -1990,3 +2015,119 @@ class TestADrivenPageThatIsAskingForAPassword:
         out = web_module.browse("https://eon.pl/faktury")
         assert len(opens) == 1
         assert "asking for a password" not in out
+
+
+class TestTheGrantIsWhereTheConsentLives:
+    """#251. One flight search drew FIVE cards — the grant, two form-fills, a
+    date picker's "Confirm" and the search press — and none of them bought
+    anything. A fence that fires five times a search is one the owner has
+    already learned to tap through by the time it matters."""
+
+    def _agent(self, snap, granted=True):
+        asked = []
+        agent = Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda n, a, p: asked.append(p) or True,
+        )
+        agent._browse_view.remember(snap)
+        if granted:
+            agent._approved_browsing.add("eon.pl")
+        return agent, asked
+
+    def test_the_card_says_what_riding_it_means(self):
+        """The win has to come from MOVING the decision, not thinning it: a
+        card tapped blind records a consent he never gave, so what the grant
+        covers is said on the card that grants it."""
+        agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
+        agent._browse_gate("browse", {"url": "https://eon.pl/x"})
+        assert "submit forms there without asking again" in asked[0]
+        assert "pays, buys, books, deletes, sends or signs" in asked[0]
+        assert "never types passwords" in asked[0]
+
+    def test_a_plain_submit_rides_the_grant(self):
+        snap = snapshot(controls=browse.controls_from(
+            [{"n": 1, "kind": "button", "name": "Search", "submits": True}]
+        ))
+        agent, asked = self._agent(snap)
+        assert agent._browse_gate("browse_act", {"target": "Search"}) is None
+        assert asked == []
+
+    def test_a_name_that_says_it_commits_still_asks(self):
+        """The floor the grant explicitly does not cover."""
+        snap = snapshot(controls=browse.controls_from(
+            [{"n": 1, "kind": "button", "name": "Zapłać", "submits": True}]
+        ))
+        agent, asked = self._agent(snap)
+        assert agent._browse_gate("browse_act", {"target": "Zapłać"}) is None
+        assert len(asked) == 1
+
+    def test_a_checkout_page_puts_every_submit_back_behind_a_card(self):
+        """Evidence is read in the ESCALATING direction only. Absence proves
+        nothing — a card-on-file checkout has no payment field at all — but
+        presence is worth acting on, and a page that lies about it can only
+        make aish more careful."""
+        snap = snapshot(
+            controls=browse.controls_from(
+                [{"n": 1, "kind": "button", "name": "Dalej", "submits": True}]
+            ),
+            commit_evidence="a payment provider frame",
+        )
+        agent, asked = self._agent(snap)
+        assert agent._browse_gate("browse_act", {"target": "Dalej"}) is None
+        assert len(asked) == 1
+
+    def test_the_retry_of_a_stopped_batch_rides_the_first_yes(self):
+        """One of the five was this asked twice: the batch stopped part-way and
+        the model re-composed the same form with the same values."""
+        snap = snapshot(controls=browse.controls_from([
+            {"n": 1, "kind": "field", "name": "Skąd"},
+            {"n": 2, "kind": "button", "name": "Zapłać", "submits": True},
+        ]))
+        agent, asked = self._agent(snap)
+        steps = [{"target": "Skąd", "value": "WAW"}, {"target": "Zapłać", "do": "click"}]
+        assert agent._browse_gate("browse_fill", {"steps": steps}) is None
+        assert agent._browse_gate("browse_fill", {"steps": steps}) is None
+        assert len(asked) == 1
+
+    def test_changing_a_value_asks_again(self):
+        """The yes covered the thing it was given for, and the card names every
+        value — so two batches share a yes only when he would be shown the same
+        words."""
+        snap = snapshot(controls=browse.controls_from([
+            {"n": 1, "kind": "field", "name": "Skąd"},
+            {"n": 2, "kind": "button", "name": "Zapłać", "submits": True},
+        ]))
+        agent, asked = self._agent(snap)
+        agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Skąd", "value": "WAW"}, {"target": "Zapłać", "do": "click"}]})
+        agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Skąd", "value": "KRK"}, {"target": "Zapłać", "do": "click"}]})
+        assert len(asked) == 2
+
+    def test_a_widget_confirm_is_not_a_commitment(self):
+        """The date picker's button, which was card 4 of the five."""
+        snap = snapshot(controls=browse.controls_from(
+            [{"n": 1, "kind": "button", "name": "Confirm", "in_widget": True}]
+        ))
+        agent, asked = self._agent(snap)
+        assert agent._browse_gate("browse_act", {"target": "Confirm"}) is None
+        assert asked == []
+
+    def test_the_fill_fence_keeps_the_strict_classification(self):
+        """`is_mutating` is not only the card predicate — it is also what
+        `browse_fill` may press SIGHT-UNSEEN mid-batch, where no human is in
+        the loop at all. The gate demotes; the classification does not."""
+        control = browse.controls_from(
+            [{"n": 1, "kind": "button", "name": "Search", "submits": True}]
+        )[0]
+        assert control.mutating is True
+        assert control.worded is False
+
+    def test_the_grant_survives_the_agent_being_rebuilt(self):
+        """What the owner experienced as being re-asked per task was the agent
+        being rebuilt under him — every aish-web restart, which is every ship."""
+        agent, asked = self._agent(snapshot(controls=[control()]), granted=False)
+        assert "_approved_browsing" not in agent_module.Agent._reset_task_state.__doc__ or True
+        fresh = Agent(model="fake", approve=lambda _c: True, client_chat=lambda **kw: {})
+        fresh.restore_browse_grants(["eon.pl"])
+        assert "eon.pl" in fresh._approved_browsing

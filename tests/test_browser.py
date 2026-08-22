@@ -2076,7 +2076,7 @@ class TestTheThingApprovedIsTheThingPressed:
             )
 
         monkeypatch.setattr(
-            browser, "_enumerate", lambda p, m="": _done((live, len(live), 0, 0))
+            browser, "_enumerate", lambda p, m="": _done((live, len(live), 0, 0, ""))
         )
         monkeypatch.setattr(browser, "_snapshot", snapshot)
         monkeypatch.setattr(browser, "_find", lambda p, n: _done((f"locator-{n}", True)))
@@ -2182,7 +2182,7 @@ class TestFillingAFormAsOneAct:
                                        problem=problem)
 
         async def enumerate_(_page, _match=""):
-            return (next(rounds), 0, 0, 0)
+            return (next(rounds), 0, 0, 0, "")
 
         monkeypatch.setattr(browser, "_enumerate", enumerate_)
         monkeypatch.setattr(browser, "_snapshot", snapshot)
@@ -2401,7 +2401,7 @@ class TestAPageAnotherChatTookIsNotActedOn:
             )
 
         async def nothing(page, match=""):
-            return [], 0, 0, 0
+            return [], 0, 0, 0, ""
 
         monkeypatch.setattr(browser, "_enumerate", nothing)
         monkeypatch.setattr(browser, "_snapshot", snapshot)
@@ -2447,7 +2447,7 @@ class TestAPageAnotherChatTookIsNotActedOn:
 
         async def watched(page, match=""):
             looked.append(page)
-            return [], 0, 0, 0
+            return [], 0, 0, 0, ""
 
         monkeypatch.setattr(browser, "_enumerate", watched)
         with pytest.raises(browser.BrowserUnavailable):

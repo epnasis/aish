@@ -150,8 +150,13 @@ HARD = """<!doctype html>
     <input name="q" aria-label="Skąd i dokąd">
     <button type="submit">Szukaj połączeń</button>
   </form>
+  <!-- The date picker's own Confirm: chrome, inside a widget, submits nothing. -->
+  <div id="okienko" role="dialog">
+    <button id="kal-ok" type="button">Confirm</button>
+  </div>
   <form id="wyslij-nieznany" action="hard.html">
-    <button type="submit">Dalej do płatności</button>
+    <button type="submit">Dalej</button>
+    <button type="submit">Zapłać teraz</button>
   </form>
 
   <section id="szukaj-wolno">
@@ -316,6 +321,21 @@ HARD = """<!doctype html>
       document.body.classList.remove('locked');
     };
   </script>
+</body></html>
+"""
+
+# A page that plainly commits something, with none of it in the button's words:
+# the amount is inside the form, and the button says "Dalej". Evidence read in
+# the escalating direction is what puts the card back.
+KASA = """<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"><title>Kasa (atrapa)</title></head>
+<body>
+  <h1>Podsumowanie zamówienia</h1>
+  <form action="podsumowanie.html">
+    <p>Do zapłaty: 1 249,00 zł</p>
+    <label for="ulica">Ulica</label><input id="ulica">
+    <button type="submit">Dalej</button>
+  </form>
 </body></html>
 """
 
@@ -681,10 +701,38 @@ def check_submit_gating(url: str) -> None:
         "a GET search drew a card — aish follows the same query as a link "
         "without asking"
     )
-    unknown = named(page, "Dalej do płatności")
+    unknown = named(page, "Dalej")
     assert unknown.mutating, "a form that states no method must stay gated"
     print(f"GET search → {search.line()}")
     print(f"no method  → {unknown.line()}")
+
+
+def check_grant_scope(url: str) -> None:
+    """What the driving grant covers, and what it never will (#251)."""
+    page = browser.browse_open(url + "hard.html")
+    by_name = {c.name: c for c in page.controls}
+
+    plain = by_name["Dalej"]
+    assert plain.mutating and not plain.worded, plain
+    picker = by_name["Confirm"]
+    assert not picker.worded, "a picker's Confirm is chrome, not a commitment"
+    assert not picker.mutating, picker
+    pays = by_name["Zapłać teraz"]
+    assert pays.worded, "a name that says it pays is never covered by a grant"
+    assert not page.commit_evidence, (
+        f"an ordinary page claimed commit evidence: {page.commit_evidence!r}"
+    )
+    print("grant covers →", plain.line())
+    print("grant never covers →", pays.line())
+
+    # …and on a page that says it commits, every submit is carded again.
+    checkout = browser.browse_open(url + "podsumowanie.html")
+    # Deliberately NOT a checkout-shaped address: the amount inside the form
+    # is what has to be doing the work here.
+    assert checkout.commit_evidence == "a price inside the form being submitted", (
+        checkout.commit_evidence
+    )
+    print("escalates on →", checkout.commit_evidence)
 
 
 def check_hard(url: str) -> None:
@@ -824,6 +872,7 @@ def main() -> int:
     Path(root, "frame.html").write_text(FRAME, encoding="utf-8")
     Path(root, "faktura.pdf").write_bytes(PDF)
     Path(root, "ratings.html").write_text(long_list_html(), encoding="utf-8")
+    Path(root, "podsumowanie.html").write_text(KASA, encoding="utf-8")
     port = serve(root)
     url = f"http://127.0.0.1:{port}/"
 
@@ -836,6 +885,7 @@ def main() -> int:
     check_rows(url)
     check_spinner(url)
     check_submit_gating(url)
+    check_grant_scope(url)
 
     browser.browse_close()  # the keyless session this script drove
     browser.shutdown()
