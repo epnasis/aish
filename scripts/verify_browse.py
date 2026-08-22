@@ -143,6 +143,17 @@ HARD = """<!doctype html>
   <!-- The spinner: pressing Szukaj shows a CSS donut and fetches. The DOM sits
        perfectly still for two seconds while the page is plainly unfinished,
        which is exactly where quiescence stops standing in for "finished". -->
+  <!-- Two submits, same shape, different consequence. The search is an
+       explicit GET — a link with the query typed into it — and must not draw a
+       card; the other says nothing about its method and must. -->
+  <form id="szukaj-get" method="get" action="hard.html">
+    <input name="q" aria-label="Skąd i dokąd">
+    <button type="submit">Szukaj połączeń</button>
+  </form>
+  <form id="wyslij-nieznany" action="hard.html">
+    <button type="submit">Dalej do płatności</button>
+  </form>
+
   <section id="szukaj-wolno">
     <button id="szukaj-btn" type="button">Szukaj wolno</button>
     <div id="wyniki-wolne"></div>
@@ -659,6 +670,23 @@ def check_spinner(url: str) -> None:
           [ln for ln in after.text.splitlines() if "Znaleziono" in ln])
 
 
+def check_submit_gating(url: str) -> None:
+    """A search is not a commit (#251)."""
+    page = browser.browse_open(url + "hard.html")
+    search = next(
+        c for c in page.controls
+        if c.kind == browse.BUTTON and c.name == "Szukaj połączeń"
+    )
+    assert not search.mutating, (
+        "a GET search drew a card — aish follows the same query as a link "
+        "without asking"
+    )
+    unknown = named(page, "Dalej do płatności")
+    assert unknown.mutating, "a form that states no method must stay gated"
+    print(f"GET search → {search.line()}")
+    print(f"no method  → {unknown.line()}")
+
+
 def check_hard(url: str) -> None:
     """Every way a control can be listed and unpressable."""
     page = browser.browse_open(url + "hard.html")
@@ -807,6 +835,7 @@ def main() -> int:
     check_calendar(url)
     check_rows(url)
     check_spinner(url)
+    check_submit_gating(url)
 
     browser.browse_close()  # the keyless session this script drove
     browser.shutdown()
