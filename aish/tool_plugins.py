@@ -137,6 +137,13 @@ class Tool:
     # code) is not the trust boundary — `_parse_tool` is, and it refuses a
     # manifest that declares nothing.
     returns: tuple[str, ...] | None = None
+    # WHERE this tool's output came from, when that changes what may be done
+    # with it (#279). Only "email" means anything so far: it marks the result
+    # as mail, so the links in it are recorded and aish will not navigate one
+    # by itself. Declared rather than inferred, exactly as `mutating` is — the
+    # harness cannot tell a mail reader from a weather reader by its name, and
+    # guessing in either direction is worse than being told.
+    content_from: str = ""
 
 
 def _truncate(text: str, head: int = _OUT_HEAD, tail: int = _OUT_TAIL) -> str:
@@ -386,6 +393,7 @@ def _parse_tool(manifest: Path) -> tuple[Tool | None, list[str]]:
             secrets=secrets,
             preview=preview,
             returns=returns,
+            content_from=fields.get("content_from", "").strip().lower(),
         ),
         [],
     )

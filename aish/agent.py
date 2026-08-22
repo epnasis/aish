@@ -42,6 +42,7 @@ from . import (
     evidence,
     files,
     media,
+    provenance,
     ratelimit,
     recordings,
     rule_compiler,
@@ -1115,6 +1116,32 @@ BROWSE_IRREVERSIBLE = (
     "Tell the user to run /browser {host} and do it themselves."
 )
 
+# A link that arrived by e-mail (#279). Structural, and it needs no classifier:
+# mail is the delivery mechanism for every account-recovery flow there is, so
+# aish following one by itself hands an injected turn the password-reset button
+# for anything the owner owns. He opens it; aish does not.
+MAIL_LINK_HELD = (
+    "this link arrived in an e-mail, and aish does not open those by itself"
+)
+MAIL_LINK_DENIED = (
+    "NOT EXECUTED: the user did not want that e-mailed link opened. Give them "
+    "the address and let them decide."
+)
+MAIL_LINK_NO_APPROVER = (
+    "NOT EXECUTED: {url} arrived in an e-mail and there is nobody to ask. aish "
+    "never opens an e-mailed link unattended — that is the whole shape of an "
+    "account-recovery attack. Report the address instead."
+)
+# The judged half, and it may only ever RESTRICT (#198): a message that reads
+# like a sign-in or a reset has its links refused OUTRIGHT rather than offered,
+# because "open the sign-in link" is precisely the card a tired owner taps.
+MAIL_SIGN_IN_LINK = (
+    "NOT EXECUTED: {url} came from a message that reads like a sign-in, "
+    "password-reset or account-activation e-mail, and aish never opens one — "
+    "there is no yes that makes it safe, because following it is how an "
+    "account is taken over. Give the user the address; they open it themselves."
+)
+
 BROWSE_NO_BANK_DETAILS = (
     "NOT EXECUTED: aish never types a bank account number into a form. Step "
     "{n} does. Nothing in this batch was done. A payment is made by the user, "
@@ -1641,6 +1668,12 @@ class Agent:
         # the owner having pressed start says nothing about whether the model
         # is currently echoing an instruction it read on a page.
         self._tainted = False
+        # URLs that arrived by e-mail this task, mapped to what they are
+        # (provenance.LINK / provenance.SIGN_IN). Read by _mail_link_gate.
+        self._mail_links: dict[str, str] = {}
+        # Mail links vouched for on a card this task. Per LINK, never per host:
+        # approving one tracking link must not approve the next one.
+        self._approved_mail_links: set[str] = set()
         # Signed-in hosts vouched for on a login card this session (#221).
         # Session-scoped like every other grant (L4): a yes given in the chat
         # you leave must not follow you into the one you land in.
@@ -2361,6 +2394,8 @@ class Agent:
         # Taint belongs to the task that acquired it. A page read while
         # answering one question must not put a card in front of the next.
         self._tainted = False
+        self._mail_links = {}
+        self._approved_mail_links = set()
         # Which model call within this turn (#239). Distinct from `call`,
         # which numbers TOOL calls: one turn makes many model calls and the
         # brief can change between them.
@@ -3548,18 +3583,20 @@ class Agent:
             or self._pending_comment_response
             or gated_by_rule
         ):
+            done: list[str] = []
             try:
-                return [
-                    self._call_result(
-                        name,
-                        partial(self._timed, partial(self._dispatch, name, args)),
-                        args=args,
-                        model_call=model_call,
+                for name, args in calls:
+                    done.append(
+                        self._call_result(
+                            name,
+                            partial(self._timed, partial(self._dispatch, name, args)),
+                            args=args,
+                            model_call=model_call,
+                        )
                     )
-                    for name, args in calls
-                ]
+                return done
             finally:
-                self._note_taint(calls)
+                self._note_provenance(calls, done)
 
         results: list[str] = [""] * len(calls)
         with ThreadPoolExecutor(max_workers=min(len(concurrent), 8)) as pool:
@@ -3589,7 +3626,7 @@ class Agent:
                     )
             finally:
                 self.status.stop()
-                self._note_taint(calls)
+                self._note_provenance(calls, results)
             self._note(
                 f"✓ {len(futures)} parallel lookups "
                 f"{format_secs(time.perf_counter() - batch_start)}"
@@ -3602,7 +3639,28 @@ class Agent:
                         args=args,
                         model_call=model_call,
                     )
+            self._note_provenance(calls, results)
         return results
+
+    def _note_provenance(self, calls: list[tuple[str, dict]], results: list) -> None:
+        """What this batch brought in, and what that permits afterwards.
+
+        Two records, both keyed on the batch that produced them: the task is
+        TAINTED once anything from outside arrived (#277), and any link that
+        arrived by MAIL is remembered as such (#279), because a link is not
+        merely untrusted content — it is the delivery mechanism for every
+        account-recovery flow there is."""
+        self._note_taint(calls)
+        # strict=False: the sequential path reports what it has if a call raised.
+        for (name, _args), result in zip(calls, results, strict=False):
+            tool = self._plugin_tools.get(name)
+            if tool is None or tool.content_from != provenance.MAIL:
+                continue
+            for url, kind in provenance.links_in_mail(str(result)).items():
+                # SIGN_IN is sticky: the same URL seen once in a reset mail
+                # stays refused however innocently it appears later.
+                if self._mail_links.get(url) != provenance.SIGN_IN:
+                    self._mail_links[url] = kind
 
     def _note_taint(self, calls: list[tuple[str, dict]]) -> None:
         """Did this batch bring in content from outside? Then the task is
@@ -5024,6 +5082,12 @@ class Agent:
         login_host = self._login_host(name, args)
         if login_host and login_host not in self._approved_logins:
             return True
+        # An e-mailed link is gated too, and the parallel thunks have no gate
+        # at all (#279).
+        if (url := self._mail_link_url(name, args)) and (
+            url not in self._approved_mail_links
+        ):
+            return True
         return self._egress_novel_hosts(name, args) is not None
 
     def _egress_novel_hosts(self, name: str, args: dict) -> list[str] | None:
@@ -5156,6 +5220,63 @@ class Agent:
         # Plain approve: the owner vouched for these hosts for the rest of
         # this session, so the same host does not re-prompt every step.
         self._approved_hosts.update(novel)
+        return None
+
+    def _mail_link_url(self, name: str, args: dict) -> str:
+        """The e-mailed URL this call would open, or "".
+
+        Every tool that can FETCH one, which is a wider set than the egress
+        gate's: a link is dangerous here because following it acts, not because
+        it carries data outward, so `browse` counts and so does a PDF."""
+        if name not in EGRESS_TOOLS and name not in BROWSE_TOOLS:
+            return ""
+        url = str(args.get("url") or args.get("source") or "").strip()
+        return url if url in self._mail_links else ""
+
+    def _mail_link_gate(self, name: str, args: dict) -> str | None:
+        """A link that arrived by e-mail is opened by HIM, not by aish (#279).
+
+        The structural half needs no classifier and cannot be evaded by
+        wording: mail is the delivery mechanism for every account-recovery flow
+        there is, so aish following a link by itself hands an injected turn the
+        password-reset button for anything he owns.
+
+        A card is right here and nowhere near a general answer — it is spent
+        exactly where the standing rule says a card still earns its place: rare
+        (a handful of links in a task, not one per action) and checkable at a
+        glance (one address, from one message). The grant is per LINK and never
+        per host, because approving a tracking link must not approve the next
+        one from the same sender.
+
+        The judged half only ever RESTRICTS. A message that reads like a
+        sign-in or reset has its links refused outright rather than carded —
+        "open the sign-in link" is the card a tired owner taps, and there is no
+        yes that makes following one safe."""
+        url = self._mail_link_url(name, args)
+        if not url or url in self._approved_mail_links:
+            return None
+        if self._mail_links.get(url) == provenance.SIGN_IN:
+            return _gate_outcome(
+                MAIL_SIGN_IN_LINK.format(url=url), decision="blocked"
+            )
+        if self.approve_tool is None:
+            return _gate_outcome(
+                MAIL_LINK_NO_APPROVER.format(url=url), decision="blocked"
+            )
+        decision = self.approve_tool(name, args, f"{MAIL_LINK_HELD}: {url}")
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            return _gate_outcome(
+                _with_feedback(MAIL_LINK_DENIED, decision.comment), decision="denied"
+            )
+        if isinstance(decision, Approved):
+            return _gate_outcome(
+                TOOL_HELD_FOR_ADJUSTMENT.format(name=name, comment=decision.comment),
+                decision="held",
+            )
+        if decision is None or decision is False:
+            return _gate_outcome(MAIL_LINK_DENIED, decision="denied")
+        self._approved_mail_links.add(url)
         return None
 
     def _login_host(self, name: str, args: dict) -> str:
@@ -6454,6 +6575,9 @@ class Agent:
             # one page, one session, one action at a time. Two browse calls in
             # flight would be two clicks on the same document in an order
             # nobody chose.
+            refusal = self._mail_link_gate(name, args)
+            if refusal is not None:
+                return refusal
             refusal = self._browse_gate(name, args)
             if refusal is not None:
                 return refusal
@@ -6468,6 +6592,9 @@ class Agent:
         if name in READ_ONLY_TOOLS:
             # Outbound reads in a triggered session hold for approval when
             # they reach beyond the owner's own hosts (#178 P0-2).
+            refusal = self._mail_link_gate(name, args)
+            if refusal is not None:
+                return refusal
             refusal = self._egress_gate(name, args)
             if refusal is not None:
                 return refusal
