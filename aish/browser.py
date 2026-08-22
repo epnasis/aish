@@ -1230,6 +1230,10 @@ class _Owner:
         # the remote-view input path retains nothing by default and this is the
         # one bounded exception, opened only by his own checkbox.
         self.pending_credential: dict = {}
+        # Hosts whose page ASKED FOR A PASSWORD while he was looking at it.
+        # This — not the browsing history — is what `view_close` may ask him
+        # about. See `_note_visit`.
+        self.password_hosts: set[str] = set()
         self.pending_nav = -1      # the navigation count when that happened
         self.last_url = ""         # where the view was, so it can be reopened
         # The pages the MODEL is driving (#237, #272), ONE PER CHAT. Each is a
@@ -2358,6 +2362,7 @@ class Frame:
     nav: int = 0     # documents loaded so far; a change means "reset the zoom"
     signin: str = ""  # a host a password was just submitted to
     saved: str = ""   # an origin whose sign-in was just stored (#280)
+    asks_password: bool = False  # is this page putting a password box in front of him?
     # The page's activity generation AT CAPTURE, so the watcher can ask "has
     # anything happened since this picture?" rather than "since I last looked".
     # Paired with `nav` because a navigation resets the counter to zero, which
@@ -2390,6 +2395,12 @@ async def _frame(
     # the byte-compare throws away; reading it after would count that mutation as
     # already shown and lose the frame. Err toward the wasted compare.
     gen = await _activity(page)
+    # Asked once per frame and reused: `view_act` needs it to tell a successful
+    # sign-in from a failed one, and `view_close` needs it to know which sites
+    # are even candidates for the question.
+    asks_for_a_password = await _has_password_field(page)
+    if asks_for_a_password and (host := host_of(page.url or "")):
+        owner.password_hosts.add(host)
     frame = Frame(
         jpeg=await page.screenshot(type="jpeg", quality=VIEW_JPEG_QUALITY),
         url=page.url or "",
@@ -2399,6 +2410,7 @@ async def _frame(
         focus=await _focus_info(page, click),
         nav=owner.navigations,
         gen=-1 if gen is None else int(gen.get("gen", -1)),
+        asks_password=asks_for_a_password,
     )
     # Recorded per NAVIGATION, not per frame: a frame is sent for every tap,
     # scroll and keystroke, and rewriting the file on each of those would spend
@@ -2418,8 +2430,20 @@ def _note_visit(owner: _Owner, url: str) -> None:
     whole feature exists for asked for approval — friction on the main path,
     and a claim about the owner's account that was simply untrue.
 
-    A login is a thing only the owner can confirm, so `view_close` hands these
-    back and the UI ASKS. Nothing here writes the record."""
+    A login is a thing only the owner can confirm, so `view_close` hands back
+    the ones that plausibly WERE one and the UI asks. Nothing here writes the
+    record.
+
+    What it hands back used to be this set — everything visited — and that was
+    the same over-recording mistake in a third costume. Closing a session in
+    which he had read eight sites asked him about eight sites in one batch with
+    a single yes, and the yes wrote all of them: measured, it put netflix.com,
+    airbnb.com, imdb.com and a typo'd imbd.com into `logins.txt`, each of which
+    then costs a Chrome launch and an approval card on every later read of it.
+    Friction on the main path, bought with a false claim about his accounts.
+
+    So this set stays what it is — where the view HAS BEEN, which the recents
+    list wants — and the question is asked from `password_hosts` instead."""
     host = host_of(url)
     if host:
         owner.view_hosts.add(host)
@@ -2794,9 +2818,14 @@ def view_act(action: str, **kwargs: Any) -> Frame:
         if (
             owner.pending_signin
             and owner.navigations > owner.pending_nav
-            and not await _has_password_field(page)
+            and not frame.asks_password
         ):
             frame.signin = owner.pending_signin
+            # Asked NOW, about this one site, at the moment it happened. So it
+            # is no longer a leftover for the close-time sweep to ask about
+            # again — the same question twice is the complaint that started
+            # this.
+            owner.password_hosts.discard(owner.pending_signin)
             owner.pending_signin = ""
             frame.saved = _save_held_credential(owner)
         if owner.notice:
@@ -3882,15 +3911,26 @@ def browse_close(key: str = "") -> None:
 
 
 def view_close() -> list[str]:
-    """End the view and hand back the hosts visited — WITHOUT recording them.
+    """End the view and hand back the hosts that ASKED HIM FOR A PASSWORD —
+    without recording them.
 
     Whether a login happened is the owner's fact to state, not one aish may
-    infer from a URL having been open."""
+    infer. But the question has to be about the sites where signing in was even
+    possible: a page that never showed a password box is not a candidate, and
+    asking about the whole browsing history is how `logins.txt` filled up with
+    sites he had merely read.
+
+    A host is dropped once it is already recorded, and once aish has SEEN the
+    sign-in happen (`frame.signin` asked at the time, naming that one site), so
+    the close-time question is only ever the leftovers — most often nothing at
+    all, which is the right number of questions for a session spent reading."""
 
     async def job(owner: _Owner) -> list[str]:
-        visited = sorted(owner.view_hosts)
+        known = logged_in_hosts()
+        visited = sorted(owner.password_hosts - known)
         owner.view = None
         owner.view_hosts = set()
+        owner.password_hosts = set()
         await owner.close_now()  # next read relaunches off-screen at full size
         return visited
 
