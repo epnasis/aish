@@ -2032,7 +2032,7 @@ class TestFillingAFormAsOneAct:
         assert ("press", "el-5") in did          # the matching suggestion, not the other
         # What it HOLDS, read back — not the value that was asked for.
         assert out.ledger[0] == (
-            "1. 'Dokąd' ← 'Paryż (CDG)' (picked from 2 suggestions)"
+            "1. 'Dokąd' ← 'Paryż (CDG)' (picked 'Paryż (CDG)' from 2 suggestions)"
         )
 
     def test_a_suggestion_it_cannot_tell_apart_stops_the_batch(self, monkeypatch):
@@ -2091,3 +2091,42 @@ class TestFillingAFormAsOneAct:
         )
         assert "the page navigated" in out.ledger[-2]
         assert "2–2 were not attempted" in out.ledger[-1]
+
+
+class TestALedgerNeverStatesWhatItDidNotRead:
+    """`_held` returning nothing meant two different things, and the ledger
+    reported both as success: "the field holds X" and "aish typed X and the
+    control says nothing back" are different claims, and only the first is
+    evidence. A date "field" on a booking site is very often a button showing
+    text — `detailOf` gives it no `currently:`, so the asked value was being
+    echoed back as if verified, in aish's own voice, above the banner."""
+
+    def test_a_readable_field_is_quoted_as_what_it_holds(self):
+        from aish import browse as browse_mod
+
+        controls = browse_mod.controls_from(
+            [{"n": 1, "kind": "field", "name": "Dokąd", "detail": "currently: Paryż"}]
+        )
+        assert browser._readback(controls, controls[0], "CDG") == "'Dokąd' ← 'Paryż'"
+
+    def test_an_unreadable_control_says_so_instead_of_echoing_the_ask(self):
+        from aish import browse as browse_mod
+
+        controls = browse_mod.controls_from(
+            [{"n": 1, "kind": "button", "name": "Wylot"}]
+        )
+        said = browser._readback(controls, controls[0], "2026-09-07")
+        assert "'2026-09-07'" in said
+        assert "shows nothing readable back" in said
+
+    def test_unreadable_and_empty_are_not_the_same_answer(self):
+        from aish import browse as browse_mod
+
+        readable = browse_mod.controls_from(
+            [{"n": 1, "kind": "field", "name": "Dokąd"}]
+        )
+        unreadable = browse_mod.controls_from(
+            [{"n": 1, "kind": "button", "name": "Dokąd"}]
+        )
+        assert browser._held(readable, "Dokąd") is None or browser._held(readable, "Dokąd") == ""
+        assert browser._held(unreadable, "Dokąd") is None

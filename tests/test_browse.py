@@ -1442,3 +1442,87 @@ class TestAnAsyncDownloadIsNotAFailedOne:
         assert "no file arrived" in out
         assert "NOT proof it failed" in out
         assert "scraping" in out
+
+class TestPickingADateFromACalendar:
+    """A date field is not a text field: it opens a grid, and the grid is where
+    the answer is. Booking is the owner's main use for this, and every search
+    stands behind two of them."""
+
+    def test_a_month_stem_must_start_a_word(self):
+        """'wrzesień' folds to 'wrzesien', which CONTAINS 'sie' — so a
+        substring test reads September as August, which on a date step is two
+        months of somebody's trip."""
+        assert browse.month_of("wrzesień 2026") == 9
+        assert browse.month_of("sierpień 2026") == 8
+        assert browse.month_of("September 2026") == 9
+
+    def test_dates_are_read_the_way_pages_and_people_write_them(self):
+        for said, expected in (
+            ("2026-09-07", browse.Day(7, 9, 2026)),
+            ("7 września 2026", browse.Day(7, 9, 2026)),
+            ("7 September 2026", browse.Day(7, 9, 2026)),
+            ("07.09.2026", browse.Day(7, 9, 2026)),
+            ("7.09", browse.Day(7, 9, None)),
+        ):
+            assert browse.read_date(said) == expected, said
+
+    def test_the_machine_written_date_beats_the_one_written_for_a_person(self):
+        cell = browse.Cell(tag=1, text="7", label="poniedziałek", stamp="2026-09-07")
+        assert cell.day() == browse.Day(7, 9, 2026)
+
+    def test_a_bare_number_takes_its_month_from_the_grids_own_heading(self):
+        cell = browse.Cell(tag=1, text="7")
+        assert cell.day("wrzesień 2026") == browse.Day(7, 9, 2026)
+
+    def test_a_day_with_no_month_anywhere_is_a_question_not_a_press(self):
+        """A range picker shows two months side by side and both have a 7.
+        Pressing one and reading the field afterwards is a coin flip whose
+        result gets submitted."""
+        cells = [browse.Cell(tag=1, text="7"), browse.Cell(tag=2, text="7")]
+        pick = browse.pick_day(cells, browse.Day(7, 9, 2026))
+        assert pick.tag is None
+        assert "would be a guess" in pick.problem
+
+    def test_the_same_date_shown_twice_is_refused(self):
+        cells = [
+            browse.Cell(tag=1, text="7", label="7 września 2026"),
+            browse.Cell(tag=2, text="7", label="7 września 2026"),
+        ]
+        assert "showing it twice" in browse.pick_day(cells, browse.Day(7, 9, 2026)).problem
+
+    def test_a_date_that_cannot_be_chosen_is_not_pressed(self):
+        cells = [browse.Cell(tag=1, text="7", label="7 września 2026", disabled=True)]
+        pick = browse.pick_day(cells, browse.Day(7, 9, 2026))
+        assert pick.tag is None
+        assert "cannot be chosen" in pick.problem
+
+    def test_the_right_cell_out_of_two_months_is_found(self):
+        cells = [
+            browse.Cell(tag=1, text="7", label="7 września 2026"),
+            browse.Cell(tag=2, text="7", label="7 października 2026"),
+        ]
+        assert browse.pick_day(cells, browse.Day(7, 10, 2026)).tag == 2
+
+    def test_a_month_arrow_is_matched_by_a_short_closed_list(self):
+        """This is a control aish presses with nobody looking, so a loose match
+        on 'next' anywhere is how a carousel's arrow gets pressed."""
+        assert browse.month_step("Next month", forward=True)
+        assert browse.month_step("Następny miesiąc", forward=True)
+        assert browse.month_step("›", forward=True)
+        assert browse.month_step("Poprzedni miesiąc", forward=False)
+        assert not browse.month_step("Next month", forward=False)
+        assert not browse.month_step("Next offer in this carousel", forward=True)
+
+    def test_the_cells_are_never_in_the_pages_control_list(self):
+        """~84 cells would blow MAX_CONTROLS on exactly the pages this exists
+        for — and the cap drops a control BEFORE its tag is written, so the
+        date step could not reach the cells it needs. They get their own
+        attribute, and the page's numbering never moves under the model."""
+        assert "role=gridcell" not in browse.CONTROLS_JS
+        assert "data-aish-cell" in browse.CALENDAR_JS
+        assert "data-aish-cell" not in browse.CONTROLS_JS
+        assert "data-aish-n" not in browse.CALENDAR_JS.split("const cells")[1]
+
+    def test_the_month_arrow_is_looked_for_inside_the_picker_only(self):
+        assert "box.querySelectorAll" in browse.CALENDAR_JS
+        assert "submits" in browse.CALENDAR_JS

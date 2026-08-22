@@ -2677,6 +2677,144 @@ def browse_fill(
     return _submit(job, timeout)
 
 
+async def _read_calendar(page: Any, n: int) -> dict:
+    """The open picker, as the page describes it — or {"found": False}."""
+    try:
+        return await page.evaluate(browse_mod.CALENDAR_JS, {"n": int(n)}) or {}
+    except Exception:  # noqa: BLE001 — a page that will not answer has no picker
+        return {}
+
+
+def _cells_of(grid: dict) -> list:
+    return [
+        browse_mod.Cell(
+            tag=int(raw.get("tag", 0)),
+            text=str(raw.get("text") or ""),
+            label=str(raw.get("label") or ""),
+            stamp=str(raw.get("stamp") or ""),
+            disabled=bool(raw.get("disabled")),
+        )
+        for raw in (grid.get("cells") or [])
+    ]
+
+
+def _grid_signature(grid: dict) -> tuple:
+    """Enough of a picker to tell whether pressing an arrow changed it."""
+    return (
+        str(grid.get("heading") or ""),
+        tuple(sorted((c.get("label") or c.get("text") or "") for c in grid.get("cells") or [])),
+    )
+
+
+async def _press_in_picker(page: Any, tag: int) -> None:
+    target = page.locator(f'[data-aish-cell="{int(tag)}"]').first
+    await _centre(target)
+    await _press(page, target, mutating=False, href="")
+
+
+async def _pick_date(page: Any, control: Any, value: str, before: list) -> str:
+    """Set a date by pressing the day in the picker the field opens.
+
+    **The cells are pressed sight-unseen, so the fence has to be narrow.** A
+    date step may press only what is INSIDE the grid its own field opened, only
+    a cell matching the date the owner's step named, plus that picker's own
+    month arrows — and never anything that submits. A calendar sits inside the
+    search form on most booking sites, and a `<button>` with no type attribute
+    IS a submit button, so a next-month arrow can be a form submit nobody
+    approved.
+
+    Everything about the walk is a heuristic; nothing about the RESULT is. The
+    field is read back afterwards, and a value that cannot be confirmed says so
+    rather than being reported as done."""
+    wanted = browse_mod.read_date(value)
+    if wanted is None or not wanted.month:
+        raise _StepFailed(
+            f"{value!r} is not a date aish can read — give it as 2026-09-07"
+        )
+    grid = await _read_calendar(page, control.n)
+    if not grid.get("found"):
+        # Not open yet: pressing the field is what opens it. A range picker
+        # that is ALREADY open must not be pressed again — that closes it, and
+        # on most range widgets it resets the half-made selection.
+        target, _top = await _find(page, control.n)
+        if target is None:
+            raise _StepFailed(f"{control.address!r} left the page mid-batch")
+        await _centre(target)
+        await _press(page, target, mutating=False, href="")
+        await _settle(page)
+        grid = await _read_calendar(page, control.n)
+    if not grid.get("found"):
+        raise _StepFailed(
+            f"pressing {control.address!r} opened no date picker aish can read"
+        )
+
+    hops = 0
+    seen: set = set()
+    while True:
+        cells = _cells_of(grid)
+        heading = str(grid.get("heading") or "")
+        pick = browse_mod.pick_day(cells, wanted, heading)
+        if pick.tag is not None:
+            await _press_in_picker(page, pick.tag)
+            await _settle(page)
+            raw, _, _, _ = await _enumerate(page)
+            said = _readback(
+                browse_mod.controls_from(raw), control, value, kind="picked"
+            )
+            walked = f", after walking {hops} month(s)" if hops else ""
+            return f"{said} (pressed {pick.label or wanted.day!r}{walked})"
+        if "not in the month" not in pick.problem:
+            raise _StepFailed(f"{control.address!r}: {pick.problem}")
+        shown_month, shown_year = browse_mod.read_month(heading)
+        if not shown_month:
+            raise _StepFailed(
+                f"{control.address!r}: that date is not on the picker's open "
+                "month, and the picker does not say which month it is showing, "
+                "so aish will not walk it blind"
+            )
+        forward = (shown_year or 0, shown_month) < (wanted.year or shown_year or 0, wanted.month)
+        arrow = next(
+            (
+                one for one in (grid.get("nav") or [])
+                if browse_mod.month_step(str(one.get("name") or ""), forward=forward)
+            ),
+            None,
+        )
+        if arrow is None:
+            raise _StepFailed(
+                f"{control.address!r}: the picker is showing "
+                f"{heading or 'another month'} and aish cannot find its "
+                f"{'next' if forward else 'previous'}-month arrow"
+            )
+        if arrow.get("submits"):
+            raise _StepFailed(
+                f"{control.address!r}: this picker's "
+                f"{'next' if forward else 'previous'}-month control "
+                f"({str(arrow.get('name'))!r}) is a form submit button, so "
+                "pressing it could send the form. Move the month yourself"
+            )
+        hops += 1
+        if hops > browse_mod.MONTH_HOPS:
+            raise _StepFailed(
+                f"{control.address!r}: walked {browse_mod.MONTH_HOPS} months "
+                "without reaching that date"
+            )
+        signature = _grid_signature(grid)
+        if signature in seen:
+            raise _StepFailed(
+                f"{control.address!r}: the picker stopped changing at "
+                f"{heading or 'this month'} — it does not go that far"
+            )
+        seen.add(signature)
+        await _press_in_picker(page, int(arrow["tag"]))
+        await _settle(page)
+        grid = await _read_calendar(page, control.n)
+        if not grid.get("found"):
+            raise _StepFailed(
+                f"{control.address!r}: the picker closed while moving months"
+            )
+
+
 class _StepFailed(Exception):
     """A batch step the page would not take. Carries what to tell the model."""
 
@@ -2685,6 +2823,10 @@ async def _run_step(
     page: Any, control: Any, verb: str, value: str, before: list
 ) -> str:
     """Carry out one step and say what the control HOLDS afterwards."""
+    if verb == "date":
+        # It finds and opens its own widget, and must NOT re-press a field
+        # whose picker is already standing open.
+        return await _pick_date(page, control, value, before)
     target, _top = await _find(page, control.n)
     if target is None:
         raise _StepFailed(f"{control.address!r} left the page mid-batch")
@@ -2707,12 +2849,18 @@ async def _commit_suggestion(
 ) -> str:
     """Typing is not choosing. If the page answered with a list, press the
     entry that matches; if it did not, the text stands on its own."""
+    # The list is fetched, not rendered locally, so reading straight after the
+    # keystrokes reads the page BEFORE it answered — and "no suggestions
+    # appeared" would then be a race reported as a fact. Snapshots have always
+    # settled; a batch's intermediate reads did not, which is precisely where
+    # the readback this design rests on would have been raced.
+    await _settle(page)
     raw, _, _, _ = await _enumerate(page)
     after = browse_mod.controls_from(raw)
     was = {c.address for c in before}
     offered = [c for c in after if c.option and c.address not in was]
     if not offered:
-        return f"{control.address!r} ← {_held(after, control.address) or value!r}"
+        return _readback(after, control, value)
     picked = browse_mod.match_option([(c.name, c.address) for c in offered], value)
     if picked.problem:
         raise _StepFailed(
@@ -2730,20 +2878,43 @@ async def _commit_suggestion(
         raise _StepFailed(f"the suggestion {chosen.address!r} vanished before it could be pressed")
     await _centre(element)
     await _press(page, element, mutating=False, href="")
+    await _settle(page)
     raw, _, _, _ = await _enumerate(page)
-    held = _held(browse_mod.controls_from(raw), control.address)
-    return (
-        f"{control.address!r} ← {held or picked.label!r} "
-        f"(picked from {len(offered)} suggestions)"
+    said = _readback(
+        browse_mod.controls_from(raw), control, picked.label, kind="picked"
     )
+    return f"{said} (picked {picked.label!r} from {len(offered)} suggestions)"
 
 
-def _held(controls: list, address: str) -> str:
-    """What the control actually holds now — read back, never assumed."""
+def _held(controls: list, address: str) -> str | None:
+    """What the control actually holds now — read back, never assumed.
+
+    None means UNREADABLE, which is a third outcome and not a synonym for
+    empty: only a `field` carries `currently:`, and a great many date and
+    passenger "fields" on booking sites are a button or a div showing text. A
+    caller that folds None into the asked value states a value nobody verified,
+    in aish's own voice, above the untrusted banner."""
     for control in controls:
-        if control.address == address and control.detail.startswith("currently: "):
-            return control.detail[len("currently: "):]
-    return ""
+        if control.address == address:
+            if control.detail.startswith("currently: "):
+                return control.detail[len("currently: "):]
+            return None
+    return None
+
+
+def _readback(controls: list, control: Any, value: str, *, kind: str = "typed") -> str:
+    """One ledger line, saying whether the value was VERIFIED or merely done.
+
+    The distinction is the point: "the field holds X" and "aish did X and the
+    control says nothing back" are different claims, and only the first is
+    evidence. Collapsing them is how a ledger states a value nobody checked."""
+    held = _held(controls, control.address)
+    if held:
+        return f"{control.address!r} ← {held!r}"
+    return (
+        f"{control.address!r} ← {value!r} ({kind}; the control shows nothing "
+        "readable back)"
+    )
 
 
 async def _stop(
