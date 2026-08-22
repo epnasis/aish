@@ -1499,8 +1499,7 @@ SIGNIN_FORM_JS = """
   // The origin is checked HERE, against the origin the credential was saved
   // for, and in the SAME step that tags the fields. Doing it in Python before
   // this call left a gap: the page could navigate in between, and the tags
-  // would land on whatever arrived — while the same-origin form check would
-  // compare the attacker's page to the attacker's form and pass.
+  // would land on whatever arrived.
   if (location.origin !== expected) {
     return {ok: false, why: 'the page moved to ' + location.origin};
   }
@@ -1515,37 +1514,58 @@ SIGNIN_FORM_JS = """
   if (pw.length === 0) return {ok: false, why: 'no password field on the page'};
   if (pw.length > 1) return {ok: false, why: 'more than one password field'};
   const secret = pw[0];
+  // A <form> is OPTIONAL, and requiring one is what broke this on the first
+  // real site it met: linkedin.com renders its login as a React app with no
+  // form element at all, which is the ordinary shape of a modern login page
+  // rather than an edge case. Where a form DOES exist its declared
+  // destination is still checked — it is a cheap early out — but the fence
+  // that actually holds is at the network layer, because a form can be
+  // submitted by JavaScript to anywhere regardless of its action.
   const form = secret.form;
-  if (!form) return {ok: false, why: 'the password field is not in a form'};
-  const method = (form.getAttribute('method') || 'get').toLowerCase();
-  if (method !== 'post') return {ok: false, why: 'the form is not a POST'};
-  // form.action resolves to the document URL when the attribute is absent,
-  // which is the ordinary same-origin case and correct.
-  let target;
-  try { target = new URL(form.action, document.baseURI).origin; }
-  catch (e) { return {ok: false, why: 'the form has no readable destination'}; }
-  // Against EXPECTED, not against location.origin: comparing the live page to
-  // its own form answers "did this page send it to itself", which is the wrong
-  // question once the page may not be the one the credential belongs to.
-  if (target !== expected) {
-    return {ok: false, why: 'the form sends to ' + target};
+  let target = '';
+  if (form) {
+    if ((form.getAttribute('method') || 'get').toLowerCase() !== 'post') {
+      return {ok: false, why: 'the form is a GET, which would put the password in the URL'};
+    }
+    try { target = new URL(form.action, document.baseURI).origin; }
+    catch (e) { return {ok: false, why: 'the form has no readable destination'}; }
+    if (target !== expected) return {ok: false, why: 'the form sends to ' + target};
+  }
+  // Scope for the identifier: the form when there is one, otherwise the
+  // nearest ancestor that holds the password field and a button. Never the
+  // whole document — a page-wide search finds the newsletter box.
+  let scope = form;
+  if (!scope) {
+    scope = secret.parentElement;
+    while (scope && scope !== document.body &&
+           !scope.querySelector('button, input[type=submit]')) {
+      scope = scope.parentElement;
+    }
+    scope = scope || document.body;
   }
   const TEXTY = ['text', 'email', 'tel', 'number', ''];
-  const ident = [...form.querySelectorAll('input')].filter(
+  const ident = [...scope.querySelectorAll('input')].filter(
     (el) => TEXTY.includes((el.getAttribute('type') || '').toLowerCase()) && vis(el)
   )[0];
   secret.setAttribute('data-aish-signin', 'password');
+  // The identifier is OPTIONAL. A "welcome back, <name>, enter your password"
+  // page has no e-mail field at all — which is exactly the page linkedin.com
+  // served — and refusing it would refuse the easiest sign-in there is.
   if (ident) ident.setAttribute('data-aish-signin', 'identifier');
-  const submit = [...form.querySelectorAll(
-    'button, input[type=submit]'
-  )].filter((el) => {
-    const t = (el.getAttribute('type') || '').toLowerCase();
-    return vis(el) && t !== 'button' && t !== 'reset';
-  })[0];
+  // Only a form's own submit button is ever pressed. With no form the submit
+  // is the ENTER key, deliberately: choosing a button by its words on a login
+  // page is how the model ended up pressing "Continue with Google".
+  let submit = null;
+  if (form) {
+    submit = [...form.querySelectorAll('button, input[type=submit]')].filter((el) => {
+      const t = (el.getAttribute('type') || '').toLowerCase();
+      return vis(el) && t !== 'button' && t !== 'reset';
+    })[0] || null;
+  }
   if (submit) submit.setAttribute('data-aish-signin', 'submit');
   return {
     ok: true, posts_to: target, page_origin: location.origin,
-    identifier: !!ident, submit: !!submit,
+    identifier: !!ident, submit: !!submit, form: !!form,
   };
 }
 """
@@ -1561,14 +1581,15 @@ SIGNIN_STILL_OURS_JS = """
   const secret = document.querySelector('[data-aish-signin="password"]');
   if (!secret) return 'the password field is gone';
   const form = secret.form;
-  if (!form) return 'the password field left its form';
-  if ((form.getAttribute('method') || 'get').toLowerCase() !== 'post') {
-    return 'the form stopped being a POST';
+  if (form) {
+    if ((form.getAttribute('method') || 'get').toLowerCase() !== 'post') {
+      return 'the form stopped being a POST';
+    }
+    let target;
+    try { target = new URL(form.action, document.baseURI).origin; }
+    catch (e) { return 'the form has no readable destination'; }
+    if (target !== expected) return 'the form now sends to ' + target;
   }
-  let target;
-  try { target = new URL(form.action, document.baseURI).origin; }
-  catch (e) { return 'the form has no readable destination'; }
-  if (target !== expected) return 'the form now sends to ' + target;
   return '';
 }
 """
@@ -1583,6 +1604,50 @@ SECOND_FACTOR_JS = """
   return auto === 'one-time-code' || (mode === 'numeric' && len > 0 && len <= 8);
 })
 """
+
+
+# Methods that can carry a credential in a body. A GET cannot, and blocking
+# cross-origin GETs during a sign-in would break the fonts and images the login
+# page needs to render.
+_BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+
+class _OffOriginBlocked(Exception):
+    """The page tried to send a body somewhere else while signing in."""
+
+
+async def _fence_the_origin(page: Any, expected: str, blocked: list[str]) -> None:
+    """Refuse, at the network, to let this page POST anywhere but `expected`.
+
+    **This is the fence, and the DOM checks are only an early out.** A form's
+    `action` is a declaration, and a login page can submit by JavaScript to
+    whatever address it likes regardless of it — so checking the attribute
+    answers a question the page is not obliged to answer honestly. Most modern
+    login pages have no form at all (linkedin.com is a React app), which made
+    the static check simultaneously too weak and, when it was mandatory, strong
+    enough to refuse the ordinary case.
+
+    Blocking the REQUEST needs no guess about encoding: it does not go looking
+    for the password in a body that may be JSON, form-encoded or percent-
+    escaped. Anything with a body going to another origin is denied for the few
+    seconds the sign-in takes. A cross-origin analytics beacon losing one POST
+    in that window costs nothing."""
+
+    async def decide(route: Any) -> None:
+        request = route.request
+        try:
+            if request.method.upper() in _BODY_METHODS:
+                origin = signin_mod.origin_of(request.url)
+                if origin and origin != expected:
+                    blocked.append(request.url)
+                    await route.abort()
+                    return
+            await route.continue_()
+        except Exception:  # noqa: BLE001 — a dead route must not hang the page
+            with contextlib.suppress(Exception):
+                await route.continue_()
+
+    await page.route("**/*", decide)
 
 
 @dataclass
@@ -1625,18 +1690,21 @@ async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) ->
             why=f"{found.get('why', 'no usable sign-in form')} — {refused}",
             url=page.url,
         )
-    if not found.get("identifier"):
-        return SignInResult(why="the form has no identifier field", url=page.url)
-
     # REAL keystrokes, for the reason `view_act` uses them: a site that listens
     # for key events (and a great many login forms do) sees nothing from fill().
-    for selector, value in (
-        ("[data-aish-signin='identifier']", identifier),
-        ("[data-aish-signin='password']", password),
-    ):
+    # The identifier is skipped when the page has no field for it — a "welcome
+    # back, enter your password" page is a sign-in, not a broken one.
+    steps = []
+    if found.get("identifier") and identifier:
+        steps.append(("[data-aish-signin='identifier']", identifier))
+    steps.append(("[data-aish-signin='password']", password))
+    for selector, value in steps:
         element = await page.query_selector(selector)
         if element is None:
-            return SignInResult(why="the sign-in form changed while filling it", url=page.url)
+            return SignInResult(
+                why=f"the sign-in page changed while it was being filled — {refused}",
+                url=page.url,
+            )
         await element.click(timeout=ACT_TIMEOUT_MS)
         await page.keyboard.press("ControlOrMeta+a")
         await page.keyboard.type(value, delay=12)
@@ -1656,6 +1724,9 @@ async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) ->
             url=page.url,
         )
 
+    # Only a form's OWN submit button is ever pressed. With no form the submit
+    # is Enter — the universal gesture, and the one that cannot land on
+    # "Continue with Google", which is what choosing a button by its words did.
     submit = await page.query_selector("[data-aish-signin='submit']")
     if submit is not None:
         await submit.click(timeout=ACT_TIMEOUT_MS)
@@ -1799,11 +1870,28 @@ def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
         context = await owner.context()
         page = await context.new_page()
         owner.read_pages.add(page)
+        blocked: list[str] = []
         try:
             await page.goto(record.url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             await page.wait_for_timeout(SETTLE_MS)
             await _dismiss_consent(page)
-            return await _sign_in_on(page, record, identifier, password)
+            # Armed BEFORE anything is typed and left up through the submit and
+            # the settle, so a delayed exfiltration is caught too.
+            await _fence_the_origin(page, record.origin, blocked)
+            outcome = await _sign_in_on(page, record, identifier, password)
+            if blocked:
+                # Not a hypothetical: say it, and never report the sign-in as
+                # having worked when the page was caught doing this.
+                where = signin_mod.origin_of(blocked[0]) or blocked[0]
+                return SignInResult(
+                    why=(
+                        f"that page tried to send something to {where} while it "
+                        f"was being signed in — aish blocked it and stopped. "
+                        f"Sign in yourself at /browser {host_of(record.origin)}"
+                    ),
+                    url=outcome.url or page.url,
+                )
+            return outcome
         finally:
             owner.read_pages.discard(page)
             with contextlib.suppress(Exception):
