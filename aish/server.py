@@ -755,6 +755,18 @@ class Bridge:
         # indefinitely while every other tab's attention count said nothing.
         # None = no wiring (CLI, tests).
         self.on_hold: Callable[[], Any] | None = None
+        # The other edge, and it needs its own hook for a reason worth stating
+        # (#204 follow-up). "The hold is over" looks like news the ANSWER
+        # carries — that is where it used to be published from — but the answer
+        # only drops a value in a queue: the worker parked on that queue is what
+        # ends the hold, and until it wakes the session still reads `waiting`.
+        # The publish therefore built an unchanged row, the diff swallowed it,
+        # and nothing else republishes mid-turn, so a chat sat in `Needs you`
+        # behind a card the owner had already answered until the turn ended.
+        # Fired on the LOOP thread from the resuming worker, by which time
+        # state() states the truth whatever it is (running, or idle if the turn
+        # has already finished — a late row is never a wrong one).
+        self.on_release: Callable[[], Any] | None = None
 
     def emit(self, event: dict, record: bool = True) -> None:
         loop = self._get_loop()
@@ -822,6 +834,15 @@ class Bridge:
             return slot.get()
         finally:
             self.pending.pop(uid, None)
+            # AFTER the pop, so the row this schedules can no longer see the
+            # hold. Suppressed on a closed loop: a shutdown denies every
+            # pending approval to unpark its workers, and there is nobody left
+            # to tell.
+            if self.on_release is not None:
+                loop = self._get_loop()
+                if loop is not None:
+                    with contextlib.suppress(RuntimeError):
+                        loop.call_soon_threadsafe(self.on_release)
 
     def answer(self, uid: str, value: dict) -> bool:
         slot = self.pending.get(uid)
@@ -1903,8 +1924,9 @@ class WebServer:
         # open, /trigger, the server's first session), which is why the hold
         # announcer is wired here rather than four times over (#203) — and why
         # a session appearing is published from here too (#204). Both run on
-        # the loop thread; `on_hold` is hopped there by the Bridge.
+        # the loop thread; both hold hooks are hopped there by the Bridge.
         session.bridge.on_hold = lambda: self._announce_hold(session)
+        session.bridge.on_release = lambda: self._touch(session)
         if publish:
             self._touch(session)
         if default:
@@ -2337,11 +2359,12 @@ class WebServer:
         elif kind == "approval":
             uid = str(message.get("id", ""))
             for session in self.sessions.values():
+                # The row that says the hold is over is published by the worker
+                # this unparks (`on_release`), not from here: at this instant
+                # the session still reads `waiting`, and a row built now is the
+                # old row — which is exactly how every other device went on
+                # showing "Needs approval" for a card cleared here.
                 if session.bridge.answer(uid, message):
-                    # The hold is released: the row goes back to running, and
-                    # the OTHER devices need to hear it or they go on showing
-                    # "Needs approval" for a card cleared here (#204).
-                    self._touch(session)
                     break
             # Answering the gate is an action — claim control (the card lives in
             # the client's own view). The event loop serializes all incoming

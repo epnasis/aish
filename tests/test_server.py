@@ -2567,6 +2567,66 @@ class TestSessions:
             # not carry is the interruption, since the laptop was looking at it.
             assert notices == ["finished"]
 
+    def test_answering_a_card_publishes_the_chat_as_running_again(self, app_env, tmp_path):
+        # The RELEASE edge, which the row could not state (#204 follow-up). The
+        # publish was made by the message handler the instant the answer
+        # arrived — on the loop thread, while the worker that owns the hold had
+        # not yet woken to drop it — so the row it built still said `waiting`,
+        # the diff dropped it as unchanged, and nothing else republishes
+        # mid-turn. The chat you had just approved therefore sat in `Needs you`
+        # behind a card that no longer existed, for the whole rest of the turn.
+        release = threading.Event()
+
+        class HoldsThenWorks:
+            """One approval, then a turn that keeps running until released."""
+
+            def __init__(self):
+                self.turns = 0
+
+            def __call__(self, **kwargs):
+                if _is_title_call(kwargs):
+                    return model_says("")
+                self.turns += 1
+                if self.turns == 1:
+                    response = model_says(
+                        tool_calls=[
+                            tool_call("run_command", command=f"touch {tmp_path}/x")
+                        ]
+                    )
+                else:
+                    release.wait(timeout=10)
+                    response = model_says("done")
+                return iter([response]) if kwargs.get("stream") else response
+
+        app = create_app("fake", client_chat=HoldsThenWorks(), **app_env, token=TEST_TOKEN)
+        client = TokenClient(app, auto_token=TEST_TOKEN)
+        try:
+            with client, connected(client) as (ws, hello, _):
+                name = hello["session"]
+                server = client.app.state.server
+                ws.send_json({"type": "task", "text": "run it"})
+                request = recv_until(ws, "approval_request")
+                recv_until_row(ws, name, "waiting")
+                ws.send_json(
+                    {"type": "approval", "id": request["id"], "action": "approve"}
+                )
+                # WHILE THE TURN IS STILL GOING, not when it ends: the model
+                # call below is parked on `release`, so a row that only catches
+                # up at `finished` has left the list wrong for as long as the
+                # work takes.
+                for _ in range(300):
+                    if server._roster.get(name, {}).get("state") == "running":
+                        break
+                    time.sleep(0.01)
+                assert server._roster.get(name, {}).get("state") == "running"
+                release.set()
+                # …and it TRAVELLED: this row alone is what clears "Needs
+                # approval" from a list on some other device.
+                recv_until_row(ws, name, "running")
+                recv_until(ws, "done")
+        finally:
+            release.set()
+
     def test_a_failed_turn_is_recorded_and_flags_the_chat(self, app_env, tmp_path):
         # A turn that dies used to leave nothing durable: the failure text went
         # out as a live event and was never written, so "why did last night's
