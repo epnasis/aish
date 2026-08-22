@@ -2043,6 +2043,24 @@ DRIVEN_BY_HAND = (
 
 NOTHING_OPEN = "nothing is open to act on — call browse(url) first"
 
+# There is ONE page for the whole process, so another chat's `browse(url)`
+# navigates it out from under this one (#272). The epoch counts documents this
+# session has driven; a chat carries the epoch of the snapshot it was handed,
+# and a mismatch means the page it is looking at is not the page that is
+# loaded.
+#
+# **The refusal deliberately carries no page.** Every other ending here is a
+# snapshot, because a bare string leaves the model holding nothing — but the
+# page on the other side of this fence belongs to a DIFFERENT CHAT and may be
+# any account the owner is signed into. Handing it over to say "this is not
+# yours" would be the disclosure the fence exists to prevent.
+PAGE_TAKEN = (
+    "another chat navigated this browser to a different page while you were "
+    "on it, so what you were looking at is gone and its controls no longer "
+    "mean anything. Nothing was pressed. Call browse(url) to open the page "
+    "you need again"
+)
+
 
 async def _settled_text(page: Any, *, tries: int = 3) -> str:
     """The page's text, once it stops saying it is still fetching it.
@@ -2422,6 +2440,7 @@ def browse_act(
     mutating: bool = False,
     topic: str = "",
     expect_download: bool = False,
+    expect_epoch: int | None = None,
     timeout: float = 120.0,
 ) -> browse_mod.Snapshot:
     """Do one thing to the control the model NAMED, and hand back the page.
@@ -2449,6 +2468,11 @@ def browse_act(
 
     async def job(owner: _Owner) -> browse_mod.Snapshot:
         page = await _browse_page(owner, opening=False)
+        # Before anything is read or pressed, and INSIDE the owner loop: the
+        # gate ran in the caller's thread, and another chat can navigate this
+        # page in the gap between the card and here.
+        if expect_epoch is not None and owner.browse_epoch != expect_epoch:
+            raise BrowserUnavailable(PAGE_TAKEN)
         # Bound once so every ending below — refusal, stuck, stale name, or the
         # act itself — describes the page the same way. An error path that
         # silently un-narrowed the list would hand back a DIFFERENT selection
@@ -2588,6 +2612,7 @@ def browse_fill(
     *,
     mutating: bool = False,
     topic: str = "",
+    expect_epoch: int | None = None,
     timeout: float = 240.0,
 ) -> browse_mod.Snapshot:
     """Fill in a form — several controls, then at most one press — as ONE act.
@@ -2616,6 +2641,11 @@ def browse_fill(
 
     async def job(owner: _Owner) -> browse_mod.Snapshot:
         page = await _browse_page(owner, opening=False)
+        # Before anything is read or pressed, and INSIDE the owner loop: the
+        # gate ran in the caller's thread, and another chat can navigate this
+        # page in the gap between the card and here.
+        if expect_epoch is not None and owner.browse_epoch != expect_epoch:
+            raise BrowserUnavailable(PAGE_TAKEN)
         ledger: list[str] = []
         last = len(steps) - 1
         started_at = str(page.url or "")
