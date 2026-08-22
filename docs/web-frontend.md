@@ -8,6 +8,12 @@ Full narrative history is in git; this file keeps only what a future edit needs.
 
 ---
 
+## A card that lists values has to render as a list (#251)
+
+`.tool-preview` carries `white-space: pre-wrap`, and that is load-bearing rather than typography. A batch approval card is a LIST — one line per value going into the form — and its entire claim to be *more* oversight than the twenty unseen keystrokes it replaces is that the owner can read those values before he taps. With the default `white-space` the newlines collapsed, and measured in real Chrome at 390px it rendered as one run-on line: `fill in this form on lot.com and send it: 'Skąd' ← 'WAW' 'Dokąd' ← 'Paryż' press 'Szukaj'`.
+
+No JS test would have caught it. The preview string was always correct; the stylesheet threw its shape away — which is the standing reason this project drives a real browser rather than trusting the unit tests it already has. `overflow-wrap: anywhere` stays alongside it: `pre-wrap` must not become `pre`, or a long value pushes the card sideways off a phone. `TestACardThatListsValuesRendersAsAList` pins both.
+
 ## The laws
 
 Seven rules explain most of the fences. Every entry below cites one instead of re-arguing it.
