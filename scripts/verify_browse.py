@@ -160,7 +160,85 @@ HARD = """<!doctype html>
     <input id="pasazerowie">
     <button id="szukaj-lot">Szukaj lotu</button>
   </section>
+  <!-- Two picker shapes, both real. WYLOT labels every cell with its full
+       date (the ARIA-conformant shape). POWROT gives bare day numbers and
+       states the month only in the grid's heading — and its next-month arrow
+       is a typeless <button> inside a <form>, which the browser and aish both
+       read as a SUBMIT. -->
+  <section id="daty">
+    <label for="wylot">Wylot</label>
+    <input id="wylot" readonly>
+    <div id="kal-wylot" role="grid" aria-label="wrzesień 2026" hidden></div>
+    <form id="termin-form">
+      <label for="termin">Termin</label>
+      <input id="termin" readonly>
+      <div id="kal-termin" class="datepicker" hidden>
+        <div class="header">wrzesień 2026</div>
+        <!-- No type attribute, inside a form: the browser and aish both read
+             this as a SUBMIT button. -->
+        <button id="kal-termin-next">Następny miesiąc</button>
+        <table><tbody><tr><td role="gridcell">1</td></tr></tbody></table>
+      </div>
+    </form>
+    <form id="powrot-form">
+      <label for="powrot">Powrót</label>
+      <input id="powrot" readonly>
+      <div id="kal-powrot" class="datepicker" hidden>
+        <div class="header">wrzesień 2026</div>
+        <button id="kal-next" type="button">Następny miesiąc</button>
+        <table><tbody><tr id="kal-dni"></tr></tbody></table>
+      </div>
+    </form>
+  </section>
   <script>
+    const MIESIACE = ['stycznia','lutego','marca','kwietnia','maja','czerwca',
+      'lipca','sierpnia','września','października','listopada','grudnia'];
+    const wylotGrid = document.getElementById('kal-wylot');
+    for (let d = 1; d <= 30; d += 1) {
+      const cell = document.createElement('div');
+      cell.setAttribute('role', 'gridcell');
+      cell.textContent = String(d);
+      cell.setAttribute('aria-label', d + ' września 2026');
+      if (d === 3) cell.setAttribute('aria-disabled', 'true');
+      cell.onclick = () => {
+        document.getElementById('wylot').value = d + ' września 2026';
+        wylotGrid.hidden = true;
+      };
+      wylotGrid.appendChild(cell);
+    }
+    document.getElementById('wylot').onclick = () => { wylotGrid.hidden = false; };
+
+    let powrotMiesiac = 8;  // 0-based: wrzesień
+    const powrotBox = document.getElementById('kal-powrot');
+    const rysuj = () => {
+      document.querySelector('#kal-powrot .header').textContent =
+        ['styczeń','luty','marzec','kwiecień','maj','czerwiec','lipiec','sierpień',
+         'wrzesień','październik','listopad','grudzień'][powrotMiesiac] + ' 2026';
+      const row = document.getElementById('kal-dni');
+      row.innerHTML = '';
+      for (let d = 1; d <= 28; d += 1) {
+        const cell = document.createElement('td');
+        cell.setAttribute('role', 'gridcell');
+        cell.textContent = String(d);
+        cell.onclick = () => {
+          document.getElementById('powrot').value =
+            d + ' ' + MIESIACE[powrotMiesiac] + ' 2026';
+          powrotBox.hidden = true;
+        };
+        row.appendChild(cell);
+      }
+    };
+    rysuj();
+    document.getElementById('powrot').onclick = () => { powrotBox.hidden = false; };
+    document.getElementById('termin').onclick = () => {
+      document.getElementById('kal-termin').hidden = false;
+    };
+    document.getElementById('kal-next').onclick = (e) => {
+      e.preventDefault();
+      powrotMiesiac += 1;
+      rysuj();
+    };
+
     document.getElementById('dokad').addEventListener('input', (e) => {
       const list = document.getElementById('podpowiedzi');
       list.innerHTML = '';
@@ -328,7 +406,10 @@ def check_portal(url: str) -> None:
 def check_icons(page) -> None:
     """An icon-only button is not a nameless button — it is a button whose name
     is a picture, and a person reads it fine (#251)."""
-    wanted = ("swap airports", "close", "Ustawienia", "usun pozycje", "Drukuj")
+    # The glyph is KEPT and the meaning added beside it: it renders in a
+    # terminal, it stores in the log, and '×' names that button only to someone
+    # looking at it (#251).
+    wanted = ("swap airports", "× (close)", "Ustawienia", "usun pozycje", "Drukuj")
     how_each = (
         "an icon class token", "a glyph", "the SVG's own <title>",
         "the <use> reference", "the <img alt>",
@@ -367,6 +448,53 @@ def check_batch(url: str) -> None:
     assert "matches 2 options" in stopped.ledger[-2], stopped.ledger
     assert "not attempted" in stopped.ledger[-1], stopped.ledger
     print("ambiguous suggestion →", stopped.ledger[-2][:80])
+
+
+def check_calendar(url: str) -> None:
+    """Both picker shapes, in real Chrome (#251)."""
+    browser.browse_open(url + "hard.html")
+
+    # Shape A: every cell carries its own full date.
+    out = browser.browse_fill([{"target": "Wylot", "do": "date", "value": "2026-09-07"}])
+    assert not out.problem, out.problem
+    assert "7 września 2026" in out.ledger[0], out.ledger
+    print("calendar (labelled cells) →", out.ledger[0])
+
+    # A date the page will not take is refused, not pressed.
+    browser.browse_open(url + "hard.html")
+    blocked = browser.browse_fill(
+        [{"target": "Wylot", "do": "date", "value": "2026-09-03"}]
+    )
+    assert "cannot be chosen" in "\n".join(blocked.ledger), blocked.ledger
+    print("unavailable date refused →", blocked.ledger[0][:80])
+
+    # Shape B: bare day numbers, month only in the heading — and the arrow that
+    # would move it is a typeless <button> in a <form>, i.e. a submit.
+    browser.browse_open(url + "hard.html")
+    same = browser.browse_fill(
+        [{"target": "Powrót", "do": "date", "value": "2026-09-14"}]
+    )
+    assert not same.problem, same.problem
+    assert "14 września 2026" in same.ledger[0], same.ledger
+    print("calendar (bare cells + heading) →", same.ledger[0])
+
+    # A date in a later month: aish presses the picker's own arrow to get there.
+    browser.browse_open(url + "hard.html")
+    walked = browser.browse_fill(
+        [{"target": "Powrót", "do": "date", "value": "2026-11-14"}]
+    )
+    assert not walked.problem, walked.problem
+    assert "14 listopada 2026" in walked.ledger[0], walked.ledger
+    assert "walking 2 month(s)" in walked.ledger[0], walked.ledger
+    print("calendar (walked months) →", walked.ledger[0])
+
+    # …but never an arrow that is a form submit in disguise.
+    browser.browse_open(url + "hard.html")
+    refused = browser.browse_fill(
+        [{"target": "Termin", "do": "date", "value": "2026-10-14"}]
+    )
+    assert "form submit button" in "\n".join(refused.ledger), refused.ledger
+    print("submit-shaped month arrow refused →", refused.ledger[0][-96:])
 
 
 def check_hard(url: str) -> None:
@@ -512,6 +640,7 @@ def main() -> int:
     check_portal(url)
     check_hard(url)
     check_batch(url)
+    check_calendar(url)
 
     browser.browse_close()
     browser.shutdown()

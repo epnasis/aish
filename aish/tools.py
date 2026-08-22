@@ -1127,14 +1127,16 @@ TOOL_SCHEMAS = [
                                 },
                                 "do": {
                                     "type": "string",
-                                    "enum": ["fill", "choose", "check", "click"],
+                                    "enum": ["fill", "date", "choose", "check", "click"],
                                     "description": (
                                         "fill = type, and press the matching "
                                         "suggestion if one appears (use this "
                                         "for search boxes and destination "
-                                        "fields); choose = pick from a "
-                                        "dropdown; check = tick; click = "
-                                        "press. Default: fill."
+                                        "fields); date = open the field's "
+                                        "calendar and press the day, with "
+                                        "value as 2026-09-07; choose = pick "
+                                        "from a dropdown; check = tick; "
+                                        "click = press. Default: fill."
                                     ),
                                 },
                                 "value": {

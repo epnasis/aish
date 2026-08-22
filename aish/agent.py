@@ -271,7 +271,9 @@ Rules:
    {{"target":"Data wylotu","value":"7.09"}},
    {{"target":"Szukaj","do":"click"}}]). do="fill" types AND presses the
    matching suggestion when the page opens a list — a destination or a
-   station box needs — typing alone leaves it empty. The step that SENDS the
+   station box needs — typing alone leaves it empty. do="date" with
+   value="2026-09-07" opens a date field's calendar and presses the day,
+   walking months if it has to. The step that SENDS the
    form must be the last one, and only that step asks the user. If a step
    cannot be carried out the batch stops there and tells you exactly where it
    got to and what each control now holds; carry on from that, and do NOT

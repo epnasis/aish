@@ -582,13 +582,16 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
                    || el.getAttribute('title') || el.id || '');
     }
     const text = clean(el.innerText || el.textContent || '');
-    // Letters or digits, or it is a picture drawn with a character — '×' is
-    // the name of that button only if you can see it.
     if (text && /[\p{L}\p{N}]/u.test(text)) return text;
-    if (text && GLYPHS[text]) return GLYPHS[text];
+    // What is left is a picture drawn with a character. KEEP IT — it renders in
+    // a terminal, it stores in the log, and it is what the owner would point at
+    // — and say what it does beside it, because '×' names the button only to
+    // someone looking at it. Neither half alone is the control's name.
     const said = clean(el.getAttribute('title') || el.value || '');
-    if (said) return said;
-    return iconWords(el) || nearbyWords(el);
+    const meaning = GLYPHS[text] || said || iconWords(el) || nearbyWords(el);
+    if (text && meaning) return text + ' (' + meaning + ')';
+    if (text) return text;
+    return meaning;
   };
 
   const kindOf = (el, type) => {
@@ -707,6 +710,130 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
   };
   walk(document);
   return {controls: out, matched: matched, unreachable: unreached};
+}"""
+
+
+# The open picker, read on its own terms — and deliberately NOT part of
+# `CONTROLS_JS`.
+#
+# A two-month range picker is ~84 day cells. Putting them in the page's control
+# list would blow `MAX_CONTROLS` on exactly the pages this exists for, so the
+# cells the date step needs would be the ones the cap dropped — and the cap
+# drops them BEFORE the tag is written, which is what makes an unlisted control
+# unpressable. It would also flood the delta on every open, and turn every ARIA
+# spreadsheet and seat map on the web into a page of listed controls.
+#
+# So: the model never sees the cells. It says "this field ← this date"; the
+# executor opens the picker, reads it here, and presses one cell. The cells are
+# stamped with their OWN attribute so nothing about the page's numbering moves
+# under the model while this happens.
+CALENDAR_JS = "(opts) => {" + REACH_JS + r"""
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const field = document.querySelector('[data-aish-n="' + opts.n + '"]');
+
+  // Which container is this field's picker? Its own statement first — a page
+  // that says aria-controls is telling you exactly, and guessing over the top
+  // of that is how you read the wrong widget on a page with two.
+  const GRID = '[role=grid], [role=application][class*=alendar], [class*=datepicker],'
+             + ' [class*=date-picker], [class*=alendar], [class*=aterange]';
+  const named = (el, attr) => {
+    const id = el && el.getAttribute && el.getAttribute(attr);
+    if (!id) return null;
+    for (const one of id.split(/\s+/)) {
+      const found = document.getElementById(one);
+      if (found && !unreachable(found)) return found;
+    }
+    return null;
+  };
+  let grid = field ? (named(field, 'aria-controls') || named(field, 'aria-owns')) : null;
+  if (grid && !grid.querySelector('[role=gridcell], td, [class*=day]')) {
+    const inner = grid.querySelector(GRID);
+    if (inner) grid = inner;
+  }
+  if (!grid && field) {
+    let at = field;
+    for (let up = 0; up < 5 && at && !grid; up += 1) {
+      at = at.parentElement;
+      if (!at) break;
+      for (const one of at.querySelectorAll(GRID)) {
+        if (!unreachable(one)) { grid = one; break; }
+      }
+    }
+  }
+  if (!grid) {
+    for (const one of document.querySelectorAll(GRID)) {
+      if (!unreachable(one)) { grid = one; break; }
+    }
+  }
+  if (!grid) return {found: false};
+
+  // The heading is what a bare "7" needs in order to mean a date at all. Read
+  // it from the grid's own accessible name before anything visual.
+  const labelled = named(grid, 'aria-labelledby');
+  let heading = clean(grid.getAttribute('aria-label') || '');
+  if (!heading && labelled) heading = clean(labelled.innerText || labelled.textContent);
+  if (!heading) {
+    const cap = grid.querySelector('caption, [class*=eader], h1, h2, h3, h4');
+    if (cap) heading = clean(cap.innerText || cap.textContent);
+  }
+  if (!heading) {
+    const box = grid.closest('[class*=datepicker], [class*=alendar], [role=dialog]') || grid;
+    const cap = box.querySelector('caption, [class*=eader], h1, h2, h3, h4');
+    if (cap) heading = clean(cap.innerText || cap.textContent);
+  }
+
+  const cells = [];
+  let stamp = 0;
+  for (const cell of grid.querySelectorAll('[role=gridcell], td, [class*=day]')) {
+    const text = clean(cell.innerText || cell.textContent || '');
+    const stamped = cell.getAttribute('data-date') || cell.getAttribute('data-day')
+                 || cell.getAttribute('data-value') || cell.getAttribute('data-iso') || '';
+    if (!text && !stamped) continue;
+    // A picker very often wraps a <button> in a <td role=gridcell>; pressing
+    // the td presses nothing at all.
+    const press = cell.matches('button, a[href], [role=button]')
+      ? cell
+      : (cell.querySelector('button, a[href], [role=button]') || cell);
+    if (unreachable(press)) continue;
+    const label = clean(press.getAttribute('aria-label') || cell.getAttribute('aria-label')
+                        || press.getAttribute('title') || cell.getAttribute('title') || '');
+    stamp += 1;
+    press.setAttribute('data-aish-cell', String(stamp));
+    cells.push({
+      tag: stamp,
+      text: text,
+      label: label,
+      stamp: clean(stamped),
+      disabled: !!press.disabled
+               || press.getAttribute('aria-disabled') === 'true'
+               || cell.getAttribute('aria-disabled') === 'true'
+               || /disabled|unavailable|niedostep/i.test(press.className || '')
+               || /disabled|unavailable|niedostep/i.test(cell.className || ''),
+    });
+  }
+
+  // Month arrows, scoped to the picker. A page-level carousel's "next" must be
+  // out of reach of a step that presses things with nobody looking.
+  const box = grid.closest('[class*=datepicker], [class*=alendar], [role=dialog]') || grid;
+  const nav = [];
+  for (const one of box.querySelectorAll('button, a[href], [role=button]')) {
+    if (unreachable(one)) continue;
+    const name = clean(one.getAttribute('aria-label') || one.getAttribute('title')
+                       || one.innerText || one.textContent || '');
+    if (!name) continue;
+    stamp += 1;
+    one.setAttribute('data-aish-cell', String(stamp));
+    nav.push({
+      tag: stamp,
+      name: name,
+      // A <button> with no type attribute defaults to SUBMIT, and a picker
+      // inside the search form is the normal case — so this arrow may be a
+      // form submit nobody approved. Reported, never pressed on a guess.
+      submits: !!(one.form && (one.tagName === 'BUTTON'
+                 && (one.getAttribute('type') || 'submit') === 'submit')),
+    });
+  }
+  return {found: true, heading: heading, cells: cells, nav: nav};
 }"""
 
 
@@ -940,7 +1067,7 @@ BATCH_MAX_STEPS = 15
 # has happened, so the model CANNOT name that option up front, and a batch of
 # flat primitives dies on the second step forever.
 FILL = "fill"
-BATCH_VERBS = (FILL, "choose", "check", "click")
+BATCH_VERBS = (FILL, "date", "choose", "check", "click")
 
 
 @dataclass
@@ -1068,6 +1195,222 @@ def plan_batch(controls: list[Control], asked: list[Any]) -> Batch:
 
 def batch_is_mutating(batch: Batch) -> bool:
     return any(step.control is not None and step.control.mutating for step in batch.steps)
+
+
+# Month names as STEMS, Polish and English in one table, because a picker
+# writes "7 września 2026" or "7 September 2026" and the stem is what both
+# spellings and every inflection share (września/wrzesień both start wrz).
+# `mar` and `maj`/`may` collide across the two languages onto the same month,
+# which is exactly why stems are safe here.
+_MONTH_STEMS = (
+    ("sty", "jan"), ("lut", "feb"), ("mar",), ("kwi", "apr"), ("maj", "may"),
+    ("cze", "jun"), ("lip", "jul"), ("sie", "aug"), ("wrz", "sep"),
+    ("paz", "oct"), ("lis", "nov"), ("gru", "dec"),
+)
+
+
+def month_of(text: str) -> int | None:
+    """Which month does this text name, if any.
+
+    A stem must START a word, never merely occur in one: "wrzesień" folds to
+    "wrzesien", which CONTAINS "sie", so a substring test reads September as
+    August. On a date step that is the difference between two months of the
+    owner's trip."""
+    words = fold(text).replace(",", " ").split()
+    for number, stems in enumerate(_MONTH_STEMS, start=1):
+        if any(word.startswith(stem) for word in words for stem in stems):
+            return number
+    return None
+
+
+# A date, as much of one as could be read. A missing year is not a failure: a
+# picker cell often says "7 września" with the year only in the grid's heading,
+# and a match with an unknown year on one side is still a match.
+@dataclass(frozen=True)
+class Day:
+    day: int
+    month: int | None = None
+    year: int | None = None
+
+    def matches(self, other: Day) -> bool:
+        """Same day, and same everything BOTH of us know."""
+        if self.day != other.day:
+            return False
+        if self.month and other.month and self.month != other.month:
+            return False
+        return not (self.year and other.year and self.year != other.year)
+
+    def complete(self) -> bool:
+        return bool(self.month and self.year)
+
+
+_ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+_DMY = re.compile(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b")
+_YEAR = re.compile(r"\b(20\d{2})\b")
+_DAY = re.compile(r"\b(\d{1,2})\b")
+
+
+def read_date(text: str) -> Day | None:
+    """Read a date out of anything a page or a model writes.
+
+    Tolerant on purpose and in one direction only: it will return a PARTIAL
+    date rather than guess a whole one, because the caller can still match a
+    partial safely — and the thing being matched is a day cell that feeds a
+    submit."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    iso = _ISO.search(text)
+    if iso:
+        return Day(int(iso.group(3)), int(iso.group(2)), int(iso.group(1)))
+    named = month_of(text)
+    if named:
+        day = _DAY.search(text)
+        year = _YEAR.search(text)
+        if day:
+            return Day(int(day.group(1)), named, int(year.group(1)) if year else None)
+        return None
+    dmy = _DMY.search(text)
+    if dmy:
+        said_year = dmy.group(3) or ""
+        if len(said_year) == 2:
+            said_year = f"20{said_year}"
+        return Day(
+            int(dmy.group(1)), int(dmy.group(2)), int(said_year) if said_year else None
+        )
+    bare = _DAY.fullmatch(text)
+    if bare:
+        # A cell that says only "7". Which month it belongs to has to come from
+        # somewhere else, and `pick_day` will not press it until it does.
+        return Day(int(bare.group(1)))
+    return None
+
+
+def read_month(text: str) -> tuple[int | None, int | None]:
+    """The month and year a picker's heading names — "wrzesień 2026", "September
+    2026", "2026-09". A heading has no day, so `read_date` cannot read one."""
+    text = (text or "").strip()
+    if not text:
+        return (None, None)
+    year = _YEAR.search(text)
+    month = month_of(text)
+    if month is None:
+        numeric = re.search(r"\b(20\d{2})[-/.](\d{1,2})\b", text)
+        if numeric:
+            return (int(numeric.group(2)), int(numeric.group(1)))
+    return (month, int(year.group(1)) if year else None)
+
+
+@dataclass
+class Cell:
+    """One day in an open picker, as the page describes it."""
+
+    tag: int
+    text: str = ""
+    label: str = ""
+    stamp: str = ""  # data-date and friends: machine-written, so trusted first
+    disabled: bool = False
+
+    def day(self, heading: str = "") -> Day | None:
+        """The date this cell IS, read from the most trustworthy thing it has.
+
+        The stamp beats the label beats the visible text — `data-date` is
+        written for a program and the label for a person, and only the text is
+        ever just "7". A heading contributes only what the cell does not say
+        itself."""
+        for said in (self.stamp, self.label, self.text):
+            found = read_date(said)
+            if found is None:
+                continue
+            if found.complete() or not heading:
+                return found
+            month, year = read_month(heading)
+            return Day(found.day, found.month or month, found.year or year)
+        return None
+
+
+@dataclass
+class Pick:
+    """Which cell to press, or why none may be."""
+
+    tag: int | None = None
+    label: str = ""
+    problem: str = ""
+
+
+def pick_day(cells: list[Cell], wanted: Day, heading: str = "") -> Pick:
+    """Which cell in this grid is the date asked for?
+
+    **A cell is never pressed on a day number alone.** A range picker shows two
+    months side by side and both of them have a "7"; a grid that says nothing
+    about which month it is showing makes the two indistinguishable, and
+    pressing one of them and reading the field afterwards is a coin flip whose
+    result gets submitted. Unknown month is a QUESTION, exactly as an ambiguous
+    suggestion is."""
+    if not cells:
+        return Pick(problem="no day cells were found in the picker that opened")
+    hits = []
+    vague = 0
+    for cell in cells:
+        found = cell.day(heading)
+        if found is None:
+            continue
+        if not found.month:
+            vague += 1
+            continue
+        if found.matches(wanted):
+            hits.append(cell)
+    if not hits and vague:
+        return Pick(
+            problem=(
+                f"this picker's days say only their number ({vague} of them) and "
+                "nothing says which month is shown, so pressing one would be a "
+                "guess. Open the month you want and press the day yourself"
+            )
+        )
+    if not hits:
+        return Pick(problem="that date is not in the month this picker is showing")
+    if len(hits) > 1:
+        return Pick(
+            problem=(
+                f"{len(hits)} cells claim to be that date — the picker is "
+                "showing it twice, so pressing either would be a guess"
+            )
+        )
+    chosen = hits[0]
+    if chosen.disabled:
+        return Pick(
+            problem=f"{chosen.label or chosen.text!r} cannot be chosen on this page"
+        )
+    return Pick(tag=chosen.tag, label=chosen.label or chosen.text)
+
+
+# How far a date step may walk. Airline booking horizons run to about eleven
+# months; past this the model asked for something the picker does not offer.
+MONTH_HOPS = 14
+
+# What the control that moves a picker forward is called. Deliberately a SHORT
+# closed list: this is a control aish presses with nobody looking, so a loose
+# match ("next" anywhere on the page) is how a carousel's arrow gets pressed.
+_FORWARD = ("next month", "nastepny miesiac", "nastepny", "next", "→", "›", "»", "▶")
+_BACKWARD = ("previous month", "poprzedni miesiac", "poprzedni", "previous", "prev",
+             "←", "‹", "«", "◀")
+
+
+def month_step(name: str, *, forward: bool) -> bool:
+    """Is this the picker's own month arrow?
+
+    Whole name only, or one of the two phrases that can mean nothing else. "is
+    the word 'next' in there somewhere" matches "Next offer in this carousel",
+    and this is a control aish presses with nobody looking."""
+    folded = fold(name)
+    words = _FORWARD if forward else _BACKWARD
+    if any(fold(word) == folded for word in words):
+        return True
+    phrases = ("next month", "nastepny miesiac") if forward else (
+        "previous month", "poprzedni miesiac"
+    )
+    return any(folded.startswith(fold(phrase)) for phrase in phrases)
 
 
 # How much of a change report is worth sending AS a change report. Past this the
