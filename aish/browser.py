@@ -1056,8 +1056,34 @@ async def _declared_data_async(page: Any) -> list[str]:
 # masked on the phone does not undo transmitting it. Refusal keys on
 # autocomplete too, because sites flip type=password to type=text for their own
 # reveal button and tapping that first would otherwise launder the value.
-_FOCUS_JS = """() => {
-  const a = document.activeElement;
+# What REALLY has focus, across shadow boundaries.
+#
+# `document.activeElement` stops at the shadow HOST: focus a field inside an
+# open shadow root and the document reports the custom element wrapping it, at
+# every level above it. Measured on qatarairways.com, whose booking widget is
+# an Angular app inside `<app-nbx-explore>` — focusing the destination box
+# leaves `document.activeElement` as APP-NBX-EXPLORE while the shadow root's
+# own `activeElement` is the input, focused, ready to type.
+#
+# Both halves of aish that ask "what has focus" got the wrapper. `_focus`
+# concluded focus had not landed and threw away the KEYBOARD rung of the press
+# ladder — the rung that exists for exactly the control a real click cannot
+# reach — so a field aish had successfully focused was reported as "would not
+# take the action, by click, by keyboard, or otherwise" (#273). The owner's
+# view asked the same question to decide whether to offer a keyboard, and a
+# custom element is not editable, so it offered none.
+_DEEP_ACTIVE_JS = """
+  const deepActive = () => {
+    let node = document.activeElement;
+    while (node && node.shadowRoot && node.shadowRoot.activeElement) {
+      node = node.shadowRoot.activeElement;
+    }
+    return node;
+  };
+"""
+
+_FOCUS_JS = """() => {""" + _DEEP_ACTIVE_JS + """
+  const a = deepActive();
   if (!a || a === document.body || a === document.documentElement) return null;
   const tag = a.tagName.toLowerCase();
   const type = (a.getAttribute('type') || 'text').toLowerCase();
@@ -3168,6 +3194,15 @@ async def _centre(target: Any) -> None:
         await target.evaluate(browse_mod.CENTRE_JS)
 
 
+# Focus, then ask whether it landed ON this element — piercing shadow roots,
+# because that is where it lands and not where the document says (#273).
+_FOCUS_LANDED_JS = "(el) => {" + _DEEP_ACTIVE_JS + """
+  el.focus();
+  const active = deepActive();
+  return active === el || (!!active && !!el.contains && el.contains(active));
+}"""
+
+
 async def _focus(target: Any) -> bool:
     """Focus it, and say whether focus actually landed.
 
@@ -3175,13 +3210,59 @@ async def _focus(target: Any) -> bool:
     take goes to the document, and on a page with a form that is a submit
     nobody asked for."""
     try:
-        return bool(
-            await target.evaluate(
-                "(el) => { el.focus(); return document.activeElement === el"
-                " || el.contains(document.activeElement); }"
-            )
-        )
+        return bool(await target.evaluate(_FOCUS_LANDED_JS))
     except Exception:  # noqa: BLE001 — an element that will not focus has not
+        return False
+
+
+# What is sitting ON TOP of this control, or "" if nothing is.
+#
+# Shadow-aware in both directions: `elementFromPoint` returns the shadow HOST
+# for anything inside an open shadow root, and `Node.contains` does not cross a
+# shadow boundary either — so the naive "is the top element my ancestor" test
+# calls a control covered by its own host. The ancestor chain is walked through
+# hosts instead.
+_COVERED_JS = """(el) => {
+  const b = el.getBoundingClientRect();
+  if (!b.width || !b.height) return "";
+  const top = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+  if (!top) return "";
+  const chain = new Set();
+  let node = el;
+  while (node) {
+    chain.add(node);
+    const root = node.getRootNode && node.getRootNode();
+    node = node.parentElement || (root && root.host) || null;
+  }
+  if (chain.has(top) || el.contains(top)) return "";
+  return String(top.id || top.className || top.tagName || "").slice(0, 60);
+}"""
+
+
+async def _uncover(page: Any, target: Any) -> bool:
+    """Something is over this control. If it is a consent wall, take it down.
+
+    **The wall does not have to be there when the page opens.** OneTrust,
+    Cookiebot and their kind load asynchronously, so on qatarairways.com the
+    banner arrives AFTER `browse_open` has already looked for one and found
+    nothing — and from then on it eats every click on the page for the rest of
+    the session. Every press fell through to the keyboard, and pressing Enter
+    on a date field that never opened its picker is a press that reports
+    success and does nothing (#273).
+
+    Only ever consulted when a real click has already failed, because that is
+    the only evidence worth spending four seconds of selector probing on. A
+    page with nothing over it pays one `evaluate`."""
+    try:
+        covered = str(await target.evaluate(_COVERED_JS) or "")
+    except Exception:  # noqa: BLE001 — an element that will not answer is not coverable
+        return False
+    if not covered:
+        return False
+    await _dismiss_consent(page)
+    try:
+        return not await target.evaluate(_COVERED_JS)
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -3212,6 +3293,12 @@ async def _press(page: Any, target: Any, *, mutating: bool, href: str) -> str:
     with contextlib.suppress(Exception):
         await target.click(timeout=ACT_TIMEOUT_MS)
         return ""
+    # A real click is worth trying TWICE if the reason it failed was something
+    # lying over the page that aish is allowed to remove.
+    if await _uncover(page, target):
+        with contextlib.suppress(Exception):
+            await target.click(timeout=ACT_TIMEOUT_MS)
+            return "something was covering it, so aish dismissed that and pressed it"
     if await _focus(target):
         with contextlib.suppress(Exception):
             await page.keyboard.press("Enter")
@@ -3247,9 +3334,16 @@ async def _type(page: Any, target: Any, *, text: str, submit: bool) -> str:
     try:
         await target.click(timeout=ACT_TIMEOUT_MS)
     except Exception:  # noqa: BLE001 — a field that will not click may still focus
-        if not await _focus(target):
-            raise Stuck() from None
-        note = "the field would not click, so aish focused it with the keyboard"
+        clicked = False
+        if await _uncover(page, target):
+            with contextlib.suppress(Exception):
+                await target.click(timeout=ACT_TIMEOUT_MS)
+                clicked = True
+                note = "something was covering it, so aish dismissed that first"
+        if not clicked:
+            if not await _focus(target):
+                raise Stuck() from None
+            note = "the field would not click, so aish focused it with the keyboard"
     await page.keyboard.press("ControlOrMeta+a")
     if text:
         await page.keyboard.type(text, delay=12)
@@ -3672,14 +3766,25 @@ async def _pick_date(page: Any, control: Any, value: str, before: list) -> str:
             return f"{said} (pressed {pick.label or wanted.day!r}{walked})"
         if "not in the month" not in pick.problem:
             raise _StepFailed(f"{control.address!r}: {pick.problem}")
-        shown_month, shown_year = browse_mod.read_month(heading)
-        if not shown_month:
+        # The heading first; failing that, the span the CELLS themselves state.
+        on_show = browse_mod.months_on_show(cells, heading)
+        if not on_show:
             raise _StepFailed(
                 f"{control.address!r}: that date is not on the picker's open "
                 "month, and the picker does not say which month it is showing, "
                 "so aish will not walk it blind"
             )
-        forward = (shown_year or 0, shown_month) < (wanted.year or shown_year or 0, wanted.month)
+        want = (wanted.year or on_show[-1][0], wanted.month)
+        forward = on_show[-1] < want
+        if not forward and want > on_show[0]:
+            # Inside the span already and still not found: the day is simply
+            # not offered (a sold-out date, a past date), and walking would
+            # leave the month that DOES contain it.
+            raise _StepFailed(
+                f"{control.address!r}: {value!r} is on a month the picker is "
+                "already showing, but that day cannot be chosen on this page"
+            )
+        shown_year, shown_month = on_show[0] if not forward else on_show[-1]
         arrow = next(
             (
                 one for one in (grid.get("nav") or [])
