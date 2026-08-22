@@ -1918,6 +1918,15 @@ class BrowseView:
         self.shown = snapshot
         self.epoch = getattr(snapshot, "epoch", None)
 
+    def commit_evidence(self) -> str:
+        """What the page this chat was last shown says it COMMITS, if anything.
+
+        Off the picture the GATE reads, for the same reason everything else
+        here is: another chat's checkout must not tighten this chat's search,
+        and this chat's checkout must not be missed because another chat has
+        since navigated the shared browser somewhere harmless."""
+        return str(getattr(self.shown, "commit_evidence", "") or "")
+
     def forget(self) -> None:
         """Next page presented is presented in full."""
         self.shown = None

@@ -964,6 +964,27 @@ class SessionLog:
         return cwd, trusted
 
     @staticmethod
+    def browse_grants(path: Path) -> list[str]:
+        """Hosts this chat has already agreed aish may drive, oldest first.
+
+        A chat gets a fresh agent every time it is reopened — on the web, every
+        restart of aish-web, which is every ship — and the grant lived only in
+        that agent. So the owner was re-asked for the same site not because the
+        grant is task-scoped (it never was) but because the thing holding it
+        had been rebuilt underneath him. Same shape as `restore_state`: the log
+        is the only place this fact survives the agent that recorded it, and it
+        is restored to the SAME chat only, never across chats."""
+        hosts: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = _record_or_none(line)
+            if record is None or record.get("kind") != "browse_grant":
+                continue
+            host = record.get("host")
+            if host and host not in hosts:
+                hosts.append(host)
+        return hosts
+
+    @staticmethod
     def last_turn(path: Path) -> int:
         """The highest turn counter this log has already used (0 for a log
         written before the trace contract, or by a session that never reached

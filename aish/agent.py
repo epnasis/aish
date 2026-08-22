@@ -1089,6 +1089,18 @@ BROWSE_TOOLS = ("browse", "browse_act", "browse_fill")
 # the owner never named; under-tainting costs the fence. The asymmetry decides.
 UNTRUSTED_SOURCE_TOOLS = frozenset(EGRESS_TOOLS | set(BROWSE_TOOLS))
 
+# What the driving grant actually buys, said on the card that buys it. The
+# clauses are the floor it does NOT cover, and they are the reason the rest can
+# ride it — see `_grant_host`.
+BROWSE_GRANT = (
+    "drive {host} in your signed-in browser — aish will open pages and click "
+    "on them AS YOU, and can see private account data. It may fill in and "
+    "submit forms there without asking again — searches, filters, dates. It "
+    "will still ask before anything that says it pays, buys, books, deletes, "
+    "sends or signs, and before any form on a page that looks like a checkout. "
+    "It never types passwords."
+)
+
 BROWSE_NO_PAGE = (
     "NOT EXECUTED: nothing is open to act on. Call browse(url) first, then act "
     "on a control by the name in the list it gives you."
@@ -1679,6 +1691,12 @@ class Agent:
         # you leave must not follow you into the one you land in.
         self._approved_logins: set[str] = set()
         self._approved_browsing: set[str] = set()
+        # Form-fills the owner has already said yes to, by their CARD TEXT —
+        # which names the host, every value and the committing press, so two
+        # batches share an entry only when he would be shown the same words. A
+        # batch that stopped part-way retries against the same yes; changing
+        # any value asks again.
+        self._approved_batches: set[str] = set()
         # THIS CHAT's view of the browsed page. Per-Agent for the same reason
         # `_approved_browsing` is: the browser holds one page for the whole
         # process, and while the view was a module global the gate could draw
@@ -5414,21 +5432,13 @@ class Agent:
             return _gate_outcome(
                 BROWSE_NO_APPROVER.format(host=host), decision="blocked"
             )
-        if host not in self._approved_browsing:
-            preview = (
-                f"drive {host} in your signed-in browser — aish will open pages "
-                "and click on them AS YOU, and can see private account data"
-            )
-            refusal = self._browse_approval(
-                name, args, preview, BROWSE_DENIED.format(host=host)
-            )
-            if refusal is not None:
-                return refusal
-            self._approved_browsing.add(host)
+        refusal = self._grant_host(name, args, host)
+        if refusal is not None:
+            return refusal
         if name != "browse_act":
             return None
         control = self._browse_target(args)
-        if control is None or not control.mutating:
+        if control is None or not self._needs_its_own_card(control):
             return None
         # Named, every time, and never folded into the driving grant: this is
         # the click the owner would want to have been asked about.
@@ -5443,6 +5453,50 @@ class Agent:
         return self._browse_approval(
             name, args, what, BROWSE_ACTION_DENIED.format(what=what)
         )
+
+    def _grant_host(self, name: str, args: dict, host: str) -> str | None:
+        """The one card the owner demonstrably reads, and what it now grants.
+
+        **The consent moved onto this card rather than being thinned quietly.**
+        One flight search drew FIVE cards — the grant, two form-fills, a date
+        picker's "Confirm" and the search press — none of which bought
+        anything, and a fence that fires five times a search is one he has
+        already learned to tap through by the time it matters. The fix is not
+        to reclassify submits behind his back: a card tapped blind records a
+        consent he never gave, so the win has to come from moving the decision,
+        not from thinning it. So this card says what riding it means."""
+        if host in self._approved_browsing:
+            return None
+        refusal = self._browse_approval(
+            name, args, BROWSE_GRANT.format(host=host), BROWSE_DENIED.format(host=host)
+        )
+        if refusal is not None:
+            return refusal
+        self._approved_browsing.add(host)
+        if self.state_log is not None:
+            self.state_log({"kind": "browse_grant", "host": host})
+        return None
+
+    def _needs_its_own_card(self, control) -> bool:
+        """Does this control draw a card of its own, on top of the grant?
+
+        Two reasons, and only one of them is grantable. A NAME that says it
+        pays, deletes, sends or signs draws a card whatever the owner granted —
+        that is the floor the grant explicitly does not cover. A nondescript
+        form submit is what the grant is FOR… unless the page itself shows it
+        commits something, and then every submit is carded again.
+
+        Evidence is read in the escalating direction ONLY. Absence proves
+        nothing: a card-on-file checkout has no payment field at all, a
+        provider's card form sits in a cross-origin frame aish cannot see into,
+        and a BLIK confirmation is one six-digit box and a button. Because it
+        can only ever tighten, a page that lies about it makes aish more
+        careful and never less."""
+        if control.worded:
+            return True
+        if not control.mutating:
+            return False
+        return bool(self._browse_view.commit_evidence())
 
     def _browse_batch_gate(self, args: dict, host: str) -> str | None:
         """One card for a whole form (#251).
@@ -5471,23 +5525,28 @@ class Agent:
             return _gate_outcome(
                 BROWSE_NO_APPROVER.format(host=host), decision="blocked"
             )
-        if host not in self._approved_browsing:
-            preview = (
-                f"drive {host} in your signed-in browser — aish will open pages "
-                "and click on them AS YOU, and can see private account data"
-            )
-            refusal = self._browse_approval(
-                "browse_fill", args, preview, BROWSE_DENIED.format(host=host)
-            )
-            if refusal is not None:
-                return refusal
-            self._approved_browsing.add(host)
-        if not browse.batch_is_mutating(plan):
+        refusal = self._grant_host("browse_fill", args, host)
+        if refusal is not None:
+            return refusal
+        if not any(
+            step.control is not None and self._needs_its_own_card(step.control)
+            for step in plan.steps
+        ):
             return None
         what = plan.card(host)
-        return self._browse_approval(
+        if what in self._approved_batches:
+            # The SAME form, the same values, the same committing press — this
+            # is the retry of a batch that stopped part-way, and one of the
+            # five cards that search drew was exactly this asked twice. A yes
+            # covers the thing it was given for; asking again for it teaches
+            # him the card means nothing.
+            return None
+        refusal = self._browse_approval(
             "browse_fill", args, what, BROWSE_ACTION_DENIED.format(what=what)
         )
+        if refusal is None:
+            self._approved_batches.add(what)
+        return refusal
 
     def _browse_target(self, args: dict):
         """The control a browse_act names, off the snapshot THIS CHAT was shown.
@@ -6192,6 +6251,16 @@ class Agent:
         happens would hand the next turn a set that expired days ago."""
         cutoff = time.time() - OPENED_LINK_TTL
         return frozenset(url for url, when in self._opened_links.items() if when >= cutoff)
+
+    def restore_browse_grants(self, hosts: list[str]) -> None:
+        """Re-arm the driving grants this chat already gave (#251).
+
+        The grant was never task-scoped — `_approved_browsing` is per Agent and
+        is deliberately NOT in `_reset_task_state` — so what the owner
+        experienced as being re-asked was the agent being rebuilt under him.
+        Restored per chat, from that chat's own log, which is what keeps it a
+        SESSION grant (L4) rather than a machine-wide one."""
+        self._approved_browsing.update(hosts)
 
     def restore_opened_links(self, calls: list[tuple[dict, int]]) -> None:
         """Refill the ledger from a reopened chat's own log (#267).

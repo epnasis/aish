@@ -2922,7 +2922,9 @@ async def _save_downloads(
 MAX_FRAMES = 12
 
 
-async def _enumerate(page: Any, match: str = "") -> tuple[list[dict], int, int, int]:
+async def _enumerate(
+    page: Any, match: str = ""
+) -> tuple[list[dict], int, int, int, str]:
     """Every control on the page, across its frames, in one numbering.
 
     The count continues across frames rather than restarting, so `[14]` means
@@ -2935,6 +2937,7 @@ async def _enumerate(page: Any, match: str = "") -> tuple[list[dict], int, int, 
     Python filters the list afterwards (#270)."""
     raw: list[dict] = []
     matched = unreached = matching = 0
+    commit = ""
     options = {
         "max": browse_mod.MAX_CONTROLS,
         "nameMax": browse_mod.NAME_MAX_CHARS,
@@ -2956,7 +2959,8 @@ async def _enumerate(page: Any, match: str = "") -> tuple[list[dict], int, int, 
         matched += int(found.get("matched") or 0)
         unreached += int(found.get("unreachable") or 0)
         matching += int(found.get("matching") or 0)
-    return raw, matched, unreached, matching
+        commit = commit or str(found.get("commit") or "")
+    return raw, matched, unreached, matching, commit
 
 
 async def _find(page: Any, n: int) -> tuple[Any, bool]:
@@ -3004,7 +3008,7 @@ async def _snapshot(
             timeout_ms=WATCH_MAX_MS if started_work else SETTLE_MAX_MS,
         ),
     )
-    raw, matched, unreached, matching = await _enumerate(page, match)
+    raw, matched, unreached, matching, commit = await _enumerate(page, match)
     controls = browse_mod.controls_from(raw)
     # Deliberately NOT narrowed to <main>: reads narrow for budget, but the
     # control the model is looking for is very often in the header the narrowing
@@ -3024,6 +3028,7 @@ async def _snapshot(
         notice=notice,
         downloads=await _save_downloads(owner, browse_page=page),
         asked=asked if browse_mod.landed_elsewhere(asked, str(page.url or "")) else "",
+        commit_evidence=commit,
     )
     session.touched = time.monotonic()
     return snapshot
@@ -3352,7 +3357,7 @@ def browse_act(
         # the very one the narrowing existed to reach (#270). Falling back to
         # the address costs nothing: a name the matcher cannot see simply
         # leaves the selection in document order, which is what it was before.
-        raw, _, _, _ = await _enumerate(page, topic or address)
+        raw, _, _, _, _ = await _enumerate(page, topic or address)
         live = browse_mod.controls_from(raw)
         found = browse_mod.resolve(live, address)
         if found.control is None:
@@ -3520,7 +3525,7 @@ def browse_fill(
             value = str(step.get("value", "") or step.get("text", "") or "")
             # Narrowed the same way the listing the model read was — see
             # browse_act, same reasoning, and each step names its own control.
-            raw, _, _, _ = await _enumerate(page, topic or asked)
+            raw, _, _, _, _ = await _enumerate(page, topic or asked)
             live = browse_mod.controls_from(raw)
             found = browse_mod.resolve(live, asked)
             control = found.control
@@ -3659,7 +3664,7 @@ async def _pick_date(page: Any, control: Any, value: str, before: list) -> str:
         if pick.tag is not None:
             await _press_in_picker(page, pick.tag)
             await _settle(page)
-            raw, _, _, _ = await _enumerate(page)
+            raw, _, _, _, _ = await _enumerate(page)
             said = _readback(
                 browse_mod.controls_from(raw), control, value, kind="picked"
             )
@@ -3757,7 +3762,7 @@ async def _commit_suggestion(
     # settled; a batch's intermediate reads did not, which is precisely where
     # the readback this design rests on would have been raced.
     await _settle(page)
-    raw, _, _, _ = await _enumerate(page)
+    raw, _, _, _, _ = await _enumerate(page)
     after = browse_mod.controls_from(raw)
     was = {c.address for c in before}
     offered = [c for c in after if c.option and c.address not in was]
@@ -3781,7 +3786,7 @@ async def _commit_suggestion(
     await _centre(element)
     await _press(page, element, mutating=False, href="")
     await _settle(page)
-    raw, _, _, _ = await _enumerate(page)
+    raw, _, _, _, _ = await _enumerate(page)
     said = _readback(
         browse_mod.controls_from(raw), control, picked.label, kind="picked"
     )

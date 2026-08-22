@@ -98,6 +98,8 @@ _MUTATING_WORDS = (
     "usuń", "usun", "skasuj", "kasuj", "wyczyść", "wyczysc", "delete", "remove",
     "erase", "clear",
     # commitment and change
+    "rezerwuj", "zarezerwuj", "book", "reserve", "złóż", "zloz", "transfer",
+    "autoryzuj", "zezwól", "zezwol",
     "wypowiedz", "rozwiąż", "rozwiaz", "zerwij", "anuluj", "odwołaj", "odwolaj",
     "zmień", "zmien", "edytuj", "zapisz", "wyślij", "wyslij", "potwierdź",
     "potwierdz", "akceptuj", "zaakceptuj", "podpisz", "aktywuj", "dezaktywuj",
@@ -263,6 +265,15 @@ def types_a_bank_account(value: str) -> bool:
     return bool(_IBAN_RE.fullmatch(stripped))
 
 
+# Words that are chrome as often as they are commitments. A date picker's
+# "Confirm" and a wizard's "Accept" are these; so is the button that ends a
+# purchase, which is why they are demoted only INSIDE a widget the page has
+# just opened and never on a control that submits a form.
+CHROME_WORDS = (
+    "confirm", "potwierdź", "potwierdz", "accept", "akceptuj", "zaakceptuj",
+)
+
+
 @dataclass
 class Control:
     """One thing on the page the model can touch."""
@@ -281,6 +292,10 @@ class Control:
     # difference. Empty unless the control is one of several saying the same
     # thing inside a repeated structure — see `digestRows` in CONTROLS_JS.
     row: list[str] = field(default_factory=list)
+    # Did the NAME say this commits something? `mutating` is the union of that
+    # and "submits a form"; the gate needs them apart, because only one of the
+    # two is something the owner can sensibly grant a whole site at once.
+    worded: bool = False
     # An entry in a list the page opened (`role=option`), which is the only
     # thing a batch step may press sight-unseen. See `plan_batch`.
     option: bool = False
@@ -425,6 +440,11 @@ class Snapshot:
     # signed-in portal is often the document at the end of it, and the anonymous
     # opener behind read_pdf could never have fetched one.
     downloads: list[str] = field(default_factory=list)
+    # What on THIS page says it commits something — a card field, a payment
+    # provider's frame, a checkout address, a price inside the form being
+    # submitted. Read only in the escalating direction: while it is set, every
+    # form submit draws its own card again.
+    commit_evidence: str = ""
     # Where the model AIMED, when that is not where it landed. A site that
     # redirects is not an error and needs no refusal — but the model asked for
     # qatarairways.com/en-pl/help/feedback.retrieve.html, was silently handed
@@ -472,6 +492,39 @@ def landed_elsewhere(asked: str, got: str) -> bool:
 QUERY_METHOD = "get"
 
 
+def is_worded(name: str) -> bool:
+    """Does this control's NAME say, in the owner's web's own vocabulary, that
+    pressing it commits something?
+
+    Split out from `is_mutating` because the GATE needs the two reasons apart:
+    a name that says "Zapłać" draws a card whatever else is true, while a
+    nondescript form submit is something the owner can grant a site once."""
+    lowered = f" {name.lower()} "
+    return any(word in lowered for word in _MUTATING_WORDS)
+
+
+def _only_chrome(name: str) -> bool:
+    """Everything this name matched is a word that is chrome as often as it is
+    a commitment — so the name says nothing on its own."""
+    lowered = f" {name.lower()} "
+    hits = [word for word in _MUTATING_WORDS if word in lowered]
+    return bool(hits) and all(word in CHROME_WORDS for word in hits)
+
+
+def says_it_commits(name: str, *, submits: bool = False, in_widget: bool = False) -> bool:
+    """Does this control's NAME commit something, given where it sits?
+
+    ONE place decides this, because two things read it and they must not
+    disagree: `is_mutating` (which is also the fence on what a batch may press
+    sight-unseen) and the GATE (which uses it to decide what the driving grant
+    cannot cover). The date picker's "Confirm" is demoted here — scoped to a
+    widget the page opened, and never to something that submits a form, so the
+    demotion cannot reach the button that ends a purchase."""
+    if in_widget and not submits and _only_chrome(name):
+        return False
+    return is_worded(name)
+
+
 def is_mutating(
     name: str,
     kind: str,
@@ -479,6 +532,7 @@ def is_mutating(
     submits: bool = False,
     navigates: bool = False,
     method: str = "",
+    in_widget: bool = False,
 ) -> bool:
     """Would pressing this change something the owner would mind?
 
@@ -518,8 +572,9 @@ def is_mutating(
         return False
     if submits and method.strip().lower() != QUERY_METHOD:
         return True
-    lowered = f" {name.lower()} "
-    return any(word in lowered for word in _MUTATING_WORDS)
+    # Measured: of the five cards one flight search drew, the only word from
+    # the list that fired at all was the date picker's "Confirm".
+    return says_it_commits(name, submits=submits, in_widget=in_widget)
 
 
 # What a control that is supposed to produce a FILE is called, and what its
@@ -949,6 +1004,10 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
       // these — a cookie banner rendering mid-step is also "new".
       // What tells this control's row apart from its neighbours. See digestRows.
       row: row || [],
+      // Is it inside something the page OPENED — a dialog, a listbox, a
+      // calendar — rather than on the page proper? Only chrome words are
+      // demoted by this, and never on something that submits.
+      in_widget: !!(el.closest && el.closest(WIDGET)),
       option: ['option', 'treeitem'].indexOf(
         (el.getAttribute('role') || '').toLowerCase()) >= 0,
       // A form submit is gated whatever it is called: the nondescript "Dalej"
@@ -962,6 +1021,10 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
       method: methodOf(el),
     });
   };
+
+  const WIDGET = '[role=dialog], [role=alertdialog], [role=listbox], [role=menu],'
+               + ' [class*=datepicker], [class*=date-picker], [class*=alendar],'
+               + ' [class*=picker], [class*=dropdown], [class*=modal]';
 
   const type_ = (el) => ((el.getAttribute && el.getAttribute('type')) || '').toLowerCase();
 
@@ -1103,8 +1166,45 @@ CONTROLS_JS = "(opts) => {" + REACH_JS + r"""
   const room = Math.max(0, opts.max - opts.offset);
   const take = wanted.concat(rest).slice(0, room);
   for (const c of take) emit(c.el, c.tagOn, c.kind, c.name, c.href, c.row || []);
+  // EVIDENCE THAT THIS PAGE COMMITS SOMETHING, read only in the direction that
+  // ADDS a card. Absence proves nothing and must never un-gate: a card-on-file
+  // checkout has no payment field at all, a PSP's card form is in a
+  // cross-origin frame this cannot even see into, and a BLIK confirmation is
+  // one six-digit box and a button. Present, though, it is worth acting on —
+  // and because it only ever tightens, a page that lies about it can make aish
+  // more careful and never less.
+  const PSP = new RegExp('(^|\\.)(stripe|adyen|payu|przelewy24|p24|paypal'
+                       + '|klarna|checkout|braintree-api|blik)\\.', 'i');
+  const CHECKOUT = new RegExp('checkout|platnosc|płatnoś|payment|zamowienie'
+                            + '|zamówienie|kasa|order|koszyk|basket|cart', 'i');
+  const MONEY = /\d[\d\s.,]*(zł|pln|eur|€|usd|\$|gbp|£)/i;
+  const commitEvidence = () => {
+    try {
+      if (document.querySelector('input[autocomplete*="cc-"],'
+                                 + ' input[autocomplete="one-time-code"]')) {
+        return 'a card or one-time-code field';
+      }
+      for (const frame of document.querySelectorAll('iframe[src]')) {
+        try {
+          if (PSP.test(new URL(frame.src, location.href).hostname)) {
+            return 'a payment provider frame';
+          }
+        } catch (e) { /* an unparseable src is not evidence */ }
+      }
+      if (CHECKOUT.test(location.pathname)) return 'a checkout address';
+      for (const form of document.querySelectorAll('form')) {
+        if (!form.querySelector('button, input[type=submit]')) continue;
+        if (MONEY.test((form.innerText || '').slice(0, 4000))) {
+          return 'a price inside the form being submitted';
+        }
+      }
+    } catch (e) { /* a page that will not answer is not evidence either */ }
+    return '';
+  };
+
   return {
     controls: out,
+    commit: commitEvidence(),
     matched: matched,
     unreachable: unreached,
     matching: wanted.length,
@@ -1318,6 +1418,12 @@ def controls_from(found: list[dict[str, Any]]) -> list[Control]:
                     submits=bool(raw.get("submits")),
                     navigates=bool(raw.get("href")),
                     method=str(raw.get("method") or ""),
+                    in_widget=bool(raw.get("in_widget")),
+                ),
+                worded=says_it_commits(
+                    name,
+                    submits=bool(raw.get("submits")),
+                    in_widget=bool(raw.get("in_widget")),
                 ),
                 disabled=bool(raw.get("disabled")),
                 submits=bool(raw.get("submits")),
