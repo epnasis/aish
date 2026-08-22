@@ -194,8 +194,15 @@ class TestTheReplayItself:
                 where = self._form.get("page_origin")
                 if self._form.get("ok") and where != expected:
                     return {"ok": False, "why": f"the page moved to {where}"}
-                if self._form.get("ok") and self._form.get("posts_to") != expected:
-                    return {"ok": False, "why": f"the form sends to {self._form.get('posts_to')}"}
+                # The real JS checks the destination only when a <form>
+                # exists; a formless login has none to declare.
+                target = self._form.get("posts_to")
+                if (
+                    self._form.get("ok")
+                    and self._form.get("form", True)
+                    and target != expected
+                ):
+                    return {"ok": False, "why": f"the form sends to {target}"}
                 return self._form
             if script is browser.SIGNIN_STILL_OURS_JS:
                 return self._changed
@@ -204,6 +211,13 @@ class TestTheReplayItself:
             return None
 
         async def query_selector(self, selector):
+            # Only tags the enumeration actually SET can be found — a submit
+            # button on a formless page is never tagged, so Playwright would
+            # return None here and the code must fall through to Enter.
+            if "submit" in selector and not self._form.get("submit", True):
+                return None
+            if "identifier" in selector and not self._form.get("identifier", True):
+                return None
             return _FakeElement(self, selector)
 
         async def wait_for_load_state(self, *a, **kw):
@@ -453,3 +467,131 @@ class TestACredentialIsOnlyEverTypedAtItsOwnOrigin:
 
         signin.save("https://eon.pl/login", "him", "pw", today="d")
         assert browser.sign_in("https://linkedin.com/feed") is None
+
+
+class TestALoginPageWithNoFormAtAll:
+    """The shape the first real site turned out to have. linkedin.com renders
+    its login as a React app with no <form> element, and requiring one refused
+    the ordinary case — while the message told him his saved sign-in had been
+    rejected by a site that never saw it."""
+
+    def _page(self, **kw):
+        return TestTheReplayItself.FakePage(**kw)
+
+    def _run(self, page):
+        import asyncio
+
+        from aish import browser
+        from aish import signin as signin_mod
+
+        record = signin_mod.Record(
+            origin="https://www.linkedin.com",
+            url="https://www.linkedin.com/login", saved="d",
+        )
+        original = browser._has_password_field
+        browser._has_password_field = _fake_has_password(page)
+        try:
+            return asyncio.run(
+                browser._sign_in_on(page, record, "him@x.pl", "hunter2hunter2")
+            )
+        finally:
+            browser._has_password_field = original
+
+    FORMLESS = {
+        "ok": True, "posts_to": "", "page_origin": "https://www.linkedin.com",
+        "identifier": False, "submit": False, "form": False,
+    }
+
+    def test_a_formless_login_signs_in(self):
+        page = self._page(url="https://www.linkedin.com/login", form=self.FORMLESS)
+        result = self._run(page)
+        assert result.ok
+        # No identifier field on a "welcome back" page: only the password.
+        assert page.typed == ["hunter2hunter2"]
+
+    def test_with_no_form_the_submit_is_enter_never_a_button(self):
+        """Choosing a button by its words on a login page is how the model
+        pressed 'Continue with Google'."""
+        page = self._page(url="https://www.linkedin.com/login", form=self.FORMLESS)
+        self._run(page)
+        assert page.submitted is False  # nothing was clicked
+
+    def test_the_origin_is_still_checked_without_a_form(self):
+        page = self._page(
+            url="https://www.linkedin.com/login",
+            form={**self.FORMLESS, "page_origin": "https://evil.test"},
+        )
+        result = self._run(page)
+        assert not result.ok and page.typed == []
+
+    def test_holding_it_back_is_not_the_site_rejecting_it(self):
+        """`stale` is what stops a credential being spent again. A harness
+        refusal must never set it — the value is fine and the site never saw
+        it."""
+        page = self._page(
+            url="https://www.linkedin.com/login",
+            form={"ok": False, "why": "more than one password field"},
+        )
+        result = self._run(page)
+        assert not result.ok
+        assert result.stale is False
+
+
+class TestTheOriginFenceIsAtTheNetwork:
+    """A form's `action` is a declaration, and a login page can submit by
+    JavaScript to whatever address it likes regardless of it — so the DOM check
+    answers a question the page is not obliged to answer honestly. The fence
+    that holds refuses the REQUEST."""
+
+    class FakeRoute:
+        def __init__(self, url, method):
+            self.request = type("R", (), {"url": url, "method": method})()
+            self.aborted = False
+            self.continued = False
+
+        async def abort(self):
+            self.aborted = True
+
+        async def continue_(self):
+            self.continued = True
+
+    class FakePage:
+        def __init__(self):
+            self.handler = None
+
+        async def route(self, _pattern, handler):
+            self.handler = handler
+
+    def _decide(self, url, method="POST"):
+        import asyncio
+
+        from aish import browser
+
+        page, blocked = self.FakePage(), []
+        asyncio.run(browser._fence_the_origin(page, "https://eon.pl", blocked))
+        route = self.FakeRoute(url, method)
+        asyncio.run(page.handler(route))
+        return route, blocked
+
+    def test_a_post_to_another_origin_is_aborted(self):
+        route, blocked = self._decide("https://evil.test/collect")
+        assert route.aborted and not route.continued
+        assert blocked == ["https://evil.test/collect"]
+
+    def test_a_post_to_the_recorded_origin_goes_through(self):
+        route, blocked = self._decide("https://eon.pl/api/login")
+        assert route.continued and not route.aborted and blocked == []
+
+    def test_a_cross_origin_GET_is_not_blocked(self):
+        """Fonts, images and scripts are how the login page renders at all."""
+        route, blocked = self._decide("https://cdn.test/font.woff2", method="GET")
+        assert route.continued and blocked == []
+
+    def test_a_subdomain_is_another_origin(self):
+        route, _ = self._decide("https://api.eon.pl/login")
+        assert route.aborted
+
+    def test_every_body_method_counts(self):
+        for method in ("POST", "PUT", "PATCH", "put"):
+            route, _ = self._decide("https://evil.test/x", method=method)
+            assert route.aborted, method
