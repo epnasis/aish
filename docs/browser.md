@@ -650,6 +650,12 @@ A login is a fact only the owner can state, and they are right there when the sh
 
 The general shape is worth keeping: *the safe direction* is not always the restrictive one. Over-recording a login is not a cautious version of under-recording it; it is a different false statement, and this one taxed the main path to make it.
 
+**And then it happened a third time, in the question itself (2026-08-23).** Asking was right; asking about *everywhere he had been* was not. One session of ordinary browsing offered eight hosts in a single batch under one yes, and the yes wrote all of them — measured on his own `logins.txt`: `netflix.com`, `airbnb.com`, `imdb.com` and a typo'd `imbd.com` recorded as accounts, each now costing a ~2s Chrome launch and an approval card on every later read of it. Friction on the main path, bought with a false claim about his accounts, for the third time.
+
+**A site is a candidate only if it put a PASSWORD BOX in front of him.** `_has_password_field` is asked once per frame now (`view_act` already needed it to tell a successful sign-in from a failed one, so it is one call reused rather than a new cost), and the hosts that answered yes are what `view_close` hands back. `view_hosts` stays what it always was — everywhere the view has been, which the recents list wants — and simply stops feeding the question.
+
+Two more subtractions fall out. A host already in the record is dropped, and so is one whose sign-in aish **watched happen**: `frame.signin` asked about it at the moment, naming that one site, and asking again at close is the same question twice — the complaint that started this. So the close-time question is only ever the leftovers, and for a session spent reading it is nothing at all. `TestOnlyASiteThatAskedForAPasswordIsACandidate`.
+
 ## Input: a tap opens an editor, and a password is never read back
 
 The first input design was a text bar living permanently in the sheet. Every part of it failed in use — the owner's report is in `docs/web-frontend.md` under `[BROWSER-VIEW-EDIT]`. The server side of the replacement:

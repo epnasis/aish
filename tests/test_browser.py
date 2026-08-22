@@ -2734,3 +2734,50 @@ class TestLookingOnceIsWhatASpinnerDefeats:
             browser._settle(page, timeout_ms=60_000)
         )
         assert Silent.waited <= browser.WATCH_POLL_MS * browser.SETTLE_UNKNOWN_TRIES
+
+
+class TestOnlyASiteThatAskedForAPasswordIsACandidate:
+    """Closing the view used to offer the whole browsing history in one batch
+    under a single yes. Measured on the owner's own `logins.txt` after one
+    session: netflix.com, airbnb.com, imdb.com and a typo'd imbd.com recorded
+    as accounts, each then costing a Chrome launch and an approval card on
+    every later read. The over-recording mistake in a third costume."""
+
+    class FakeOwner:
+        def __init__(self):
+            self.view_hosts = set()
+            self.password_hosts = set()
+            self.pending_signin = ""
+
+    def test_browsing_history_is_not_a_candidate(self, monkeypatch):
+        owner = self.FakeOwner()
+        for url in ("https://netflix.com/browse", "https://imdb.com/title/x",
+                    "https://airbnb.com/rooms/1"):
+            browser._note_visit(owner, url)
+        # Everywhere it has BEEN, which the recents list wants…
+        assert owner.view_hosts == {"netflix.com", "imdb.com", "airbnb.com"}
+        # …and nowhere it was asked to sign in, which is what gets offered.
+        assert owner.password_hosts == set()
+
+    def test_a_host_already_recorded_is_not_asked_about_again(self, monkeypatch):
+        monkeypatch.setattr(browser, "logged_in_hosts", lambda: {"eon.pl"})
+        owner = self.FakeOwner()
+        owner.password_hosts = {"eon.pl", "linkedin.com"}
+        assert sorted(owner.password_hosts - browser.logged_in_hosts()) == [
+            "linkedin.com"
+        ]
+
+    def test_a_sign_in_aish_watched_happen_is_not_a_leftover(self):
+        """It was asked about at the moment it happened, naming that one site.
+        Asking again at close is the same question twice."""
+        owner = self.FakeOwner()
+        owner.password_hosts = {"eon.pl", "linkedin.com"}
+        owner.pending_signin = "eon.pl"
+        owner.password_hosts.discard(owner.pending_signin)
+        assert owner.password_hosts == {"linkedin.com"}
+
+    def test_a_session_spent_reading_asks_nothing(self):
+        owner = self.FakeOwner()
+        for url in ("https://allegro.pl/x", "https://google.com/search?q=y"):
+            browser._note_visit(owner, url)
+        assert sorted(owner.password_hosts) == []
