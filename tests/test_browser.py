@@ -1878,13 +1878,15 @@ class TestTheThingApprovedIsTheThingPressed:
             "O", (), {"view": None, "browse_page": page, "browse_epoch": 0}
         )()
 
-        async def snapshot(_owner, _page, *, problem="", notice="", asked=""):
+        async def snapshot(_owner, _page, *, problem="", notice="", asked="", match=""):
             snaps.append(problem or notice)
             return browse_mod.Snapshot(
                 url=page.url, title="", text="", problem=problem, notice=notice
             )
 
-        monkeypatch.setattr(browser, "_enumerate", lambda p: _done((live, len(live), 0)))
+        monkeypatch.setattr(
+            browser, "_enumerate", lambda p, m="": _done((live, len(live), 0, 0))
+        )
         monkeypatch.setattr(browser, "_snapshot", snapshot)
         monkeypatch.setattr(browser, "_find", lambda p, n: _done((f"locator-{n}", True)))
         monkeypatch.setattr(browser, "_reachable_now", lambda t: _done(""))
@@ -1980,13 +1982,13 @@ class TestFillingAFormAsOneAct:
         page = FakePage()
         owner = type("O", (), {"view": None, "browse_page": page, "browse_epoch": 0})()
 
-        async def snapshot(_owner, _page, *, problem="", notice="", asked=""):
+        async def snapshot(_owner, _page, *, problem="", notice="", asked="", match=""):
             snaps["problem"] = problem
             return browse_mod.Snapshot(url="https://lot.com/", title="", text="",
                                        problem=problem)
 
-        async def enumerate_(_page):
-            return (next(rounds), 0, 0)
+        async def enumerate_(_page, _match=""):
+            return (next(rounds), 0, 0, 0)
 
         monkeypatch.setattr(browser, "_enumerate", enumerate_)
         monkeypatch.setattr(browser, "_snapshot", snapshot)

@@ -1428,7 +1428,7 @@ class TestWebTools:
 
         seen = {}
 
-        def fake_read(url, topic=None):
+        def fake_read(url, topic=None, **_kw):
             seen.update(url=url, topic=topic)
             return "[page] matching lines"
 
@@ -1449,7 +1449,7 @@ class TestWebTools:
         import aish.agent as agent_module
 
         monkeypatch.setattr(
-            agent_module.web, "read_url", lambda url, topic=None: f"[{url}] page text"
+            agent_module.web, "read_url", lambda url, topic=None, **_kw: f"[{url}] page text"
         )
         monkeypatch.setitem(
             agent_module.web.PAGE_TITLES, "https://a.example/doc", "A Documentation"
@@ -1475,7 +1475,7 @@ class TestWebTools:
 
         results = {"https://ok.example/": "[page] text", "https://bad.example/": "ERROR: 404"}
         monkeypatch.setattr(
-            agent_module.web, "read_url", lambda url, topic=None: results[url]
+            agent_module.web, "read_url", lambda url, topic=None, **_kw: results[url]
         )
         agent, _ = make_agent(
             [
@@ -4062,7 +4062,7 @@ class TestLoginGate:
         fetched: list[str] = []
         monkeypatch.setattr(
             agent_module.web, "read_url",
-            lambda url, topic=None: (fetched.append(url), f"page at {url}")[1],
+            lambda url, topic=None, **_kw: (fetched.append(url), f"page at {url}")[1],
         )
         return fetched
 
@@ -4211,7 +4211,7 @@ class TestEgressGate:
         fetched: list[str] = []
         monkeypatch.setattr(
             agent_module.web, "read_url",
-            lambda url, topic=None: (fetched.append(url), f"page at {url}")[1],
+            lambda url, topic=None, **_kw: (fetched.append(url), f"page at {url}")[1],
         )
         monkeypatch.setattr(
             agent_module.web, "web_search",
@@ -9091,3 +9091,84 @@ class TestHistoryBudget:
             assert "num_ctx" not in code, f"{node.name} sizes itself from num_ctx again"
             assert "_history_budget()" in code, f"{node.name} does not read the one budget"
         assert seen == wanted, f"a trim site vanished or was renamed: {wanted - seen}"
+
+
+class TestALongPageCanBePagedInsteadOfRefetched:
+    """#269, end to end. A browse/read_url cut used to be the only one-way door
+    left in aish: `web` truncated inside itself and handed the agent a string
+    that was already short, so the rest reached no cache and no key — while
+    every plugin tool had had a continuation since #192.
+
+    The session that filed it read 40 of 250 IMDb ratings, said it had them all,
+    and then — asked whether it could read past the cut — correctly described
+    `read_tool_output` and was wrong that it applied to the tool it had just
+    used. It wrote a scraper instead, and an AWS WAF refused it."""
+
+    @staticmethod
+    def _page(rows=250, filler=400):
+        return "\n".join(f"{n}. Title {n}\n" + ("x" * filler) for n in range(1, rows + 1))
+
+    def _driven(self, monkeypatch, tmp_path, page):
+        from aish import browse as browse_mod
+
+        # The SSRF guard resolves the host, and this one is deliberately not
+        # real. Nothing here is testing that fence — TestSsrfGuard is.
+        monkeypatch.setattr(agent_module.web, "_require_public", lambda _url: None)
+        monkeypatch.setattr(
+            agent_module.browser,
+            "browse_open",
+            lambda url, *, topic="", **_kw: browse_mod.Snapshot(
+                url=url, title="Your ratings", text=page, controls=[]
+            ),
+        )
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call("browse", url="https://imdb.test/r/")]),
+                model_says("done"),
+            ],
+            approve_tool=lambda *_a: True,
+            state_dir=str(tmp_path),
+        )
+        agent.run_task("read all my ratings")
+        return agent, tool_messages(agent.messages)[0]["content"]
+
+    def test_the_cut_carries_a_key_and_paging_reaches_the_end(
+        self, monkeypatch, tmp_path
+    ):
+        page = self._page()
+        agent, shown = self._driven(monkeypatch, tmp_path, page)
+
+        key = re.search(r'read_tool_output\(continuation="([^"]+)", page=2\)', shown)
+        assert key, f"a cut page offered no continuation:\n{shown[-800:]}"
+
+        # What the model was actually shown stops well short of the end.
+        assert "1. Title 1" in shown
+        assert "250. Title 250" not in shown
+
+        # Paging from page 1 reconstructs the page EXACTLY — no hole in the
+        # middle, which is the whole reason the cut size travels on the key.
+        seen, page_n = "", 1
+        while page_n < 100:
+            text = str(
+                agent._read_tool_output({"continuation": key.group(1), "page": page_n})
+            )
+            if "past the end of this output" in text:
+                break
+            seen += text.split("\n\n[aish: continue with")[0]
+            page_n += 1
+        assert seen == page, "paging did not reconstruct the page it was cut from"
+        assert "250. Title 250" in seen
+
+    def test_the_model_is_told_which_items_it_actually_got(
+        self, monkeypatch, tmp_path
+    ):
+        """The sentence that stops the wrong answer. A character count is not
+        something a model can act on; a row count is not something it can answer
+        "yes, all of them" to."""
+        _agent, shown = self._driven(monkeypatch, tmp_path, self._page())
+        assert re.search(r"items 1-\d+ of the 250 numbered here", shown), shown[-600:]
+
+    def test_a_page_that_fits_offers_nothing_to_page(self, monkeypatch, tmp_path):
+        _agent, shown = self._driven(monkeypatch, tmp_path, self._page(rows=4))
+        assert agent_module.web.CUT_MARKER not in shown
+        assert "read_tool_output" not in shown

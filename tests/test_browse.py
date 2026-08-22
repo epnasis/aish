@@ -120,7 +120,7 @@ class TestTheControlList:
         )
         out = web_module._present_snapshot(long_page)
         assert "button 'Przełącz lokal'" in out
-        assert "truncated" in out
+        assert web_module.CUT_MARKER in out
 
     def test_a_problem_is_stated_above_the_page(self):
         out = web_module._present_snapshot(
@@ -681,15 +681,44 @@ class TestHidingAControlNeverRoutesAroundItsCard:
     never approved."""
 
     def test_not_listed_means_not_tagged_means_not_actable(self):
-        """The chain, in the enumeration itself: the over-cap `continue` and the
-        unreachable `continue` both sit BEFORE the setAttribute, and acting
-        resolves the tag and nothing else."""
-        walk = browse.CONTROLS_JS[browse.CONTROLS_JS.index("const walk ="):]
-        emits = walk.index("emit(el, tagOn,")
-        assert walk.index("if (unreachable(el))") < emits
-        assert walk.index("if (opts.offset + out.length >= opts.max) continue;") < emits
-        # And `emit` is the only thing that writes a tag.
+        """The chain, in the enumeration itself.
+
+        #270 moved the cap OUT of the walk so a topic could decide which
+        controls the budget buys, which means the over-cap `continue` that used
+        to guard the tag is gone. The invariant it protected must not be: the
+        walk only ever COLLECTS, `emit` is still the sole writer of the tag, and
+        `emit` is reached only through the capped selection."""
+        walk = browse.CONTROLS_JS[
+            browse.CONTROLS_JS.index("const walk ="):browse.CONTROLS_JS.index("walk(document);")
+        ]
+        # The unreachable `continue` still precedes the only thing the walk does
+        # with a control, so a control the page has closed away never reaches
+        # the candidate list — let alone the tag.
+        assert walk.index("if (unreachable(el))") < walk.index("found.push(")
+        assert "setAttribute" not in walk, "the walk must not tag anything"
+
+        # `emit` is the only thing that writes a tag, and it is called exactly
+        # once — over `take`, which is the candidate list capped at `room`.
         assert browse.CONTROLS_JS.count("setAttribute('data-aish-n'") == 1
+        select = browse.CONTROLS_JS[browse.CONTROLS_JS.index("walk(document);"):]
+        assert select.count("emit(") == 1
+        assert "for (const c of take) emit(" in select
+        assert "const take = wanted.concat(rest).slice(0, room);" in select
+        assert "const room = Math.max(0, opts.max - opts.offset);" in select
+
+    def test_a_topic_reorders_the_budget_but_never_widens_it(self):
+        """`topic` decides WHICH controls the cap buys, never how many. A
+        narrowing that could raise the ceiling would be a way to spend an
+        unbounded amount of context on a page that names the right word."""
+        select = browse.CONTROLS_JS[browse.CONTROLS_JS.index("walk(document);"):]
+        # One slice, one bound, and the bound is the same MAX_CONTROLS budget
+        # the un-narrowed path uses.
+        assert select.count(".slice(0, room)") == 1
+        assert select.count("const room =") == 1
+        # And the unmatched controls are kept rather than filtered away: the
+        # menu and the next-page link are what a content topic never matches.
+        assert "const rest = needle ? found.filter((c) => !hit(c)) : found;" in select
+        assert "wanted.concat(rest)" in select
 
     def test_a_mutating_control_that_is_hidden_cannot_be_reached_by_number(self):
         """A control the page has closed away is not in the snapshot, so the
@@ -1187,3 +1216,229 @@ class TestFillingAFormIsOneAct:
         out = web_module._present_snapshot(snap)
         assert out.index("Paryż (CDG)") < out.index(web_module.UNTRUSTED_NOTE)
         assert "what this filled in, step by step" in out
+
+def numbered_page(first, last, filler=400):
+    """A page shaped like a ratings list: one numbered row, then bulk."""
+    return "\n".join(
+        f"{n}. Title {n}\n" + ("x" * filler) for n in range(first, last + 1)
+    )
+
+
+class TestACutNeverClaimsMoreThanItKnows:
+    """#268. `BROWSE_TRUNCATION_HINT` said "the control list below is complete"
+    unconditionally, and on a 250-row IMDb ratings page it said so four lines
+    above a footer reporting 2 478 controls missing. The model — which correctly
+    trusts aish's own narration more than the untrusted page content it wraps —
+    answered as if it had read the page, twice."""
+
+    def _cut_snapshot(self, **kw):
+        return snapshot(
+            text=numbered_page(1, 250),
+            controls=[control(n=0, name="Menu")],
+            **kw,
+        )
+
+    def test_a_capped_control_list_is_never_called_complete(self):
+        out = web_module._present_snapshot(self._cut_snapshot(hidden=2478))
+        assert web_module.CONTROLS_COMPLETE not in out
+        assert web_module.CONTROLS_CUT in out
+
+    def test_controls_the_page_is_hiding_also_deny_the_claim(self):
+        """`unreachable` is a different kind of missing from `hidden` and the
+        claim is just as false either way."""
+        out = web_module._present_snapshot(self._cut_snapshot(unreachable=101))
+        assert web_module.CONTROLS_COMPLETE not in out
+        assert web_module.CONTROLS_CUT in out
+
+    def test_the_claim_survives_when_it_is_actually_true(self):
+        """The fix is a conditional, not a deletion: a page whose controls all
+        fit still says so, because that is the case where the model can stop
+        looking for the button it wants."""
+        out = web_module._present_snapshot(self._cut_snapshot())
+        assert web_module.CONTROLS_COMPLETE in out
+        assert web_module.CONTROLS_CUT not in out
+
+    def test_the_cut_is_reported_in_items_not_only_characters(self):
+        """#269. "[... 65047 characters omitted ...]" is not something a model
+        can act on; "items 1-N of the 250 numbered here" is not something it can
+        answer "yes, all of them" to."""
+        out = web_module._present_snapshot(self._cut_snapshot(hidden=2478))
+        assert "of the 250 numbered here" in out
+        assert "characters shown" in out
+
+
+class TestTheRestOfThePageIsRecoverable:
+    """#269. The cut was a ONE-WAY DOOR: `web` truncated inside itself and
+    handed back a short string, so the 65k it dropped reached no cache and no
+    key. The session that filed this wrote an httpx scraper, hit an AWS WAF and
+    guessed at sort parameters — all to re-fetch bytes aish had just held."""
+
+    def test_the_whole_page_is_offered_to_the_stash_with_what_was_shown(self):
+        seen = {}
+
+        def stash(text, shown):
+            seen.update(text=text, shown=shown)
+            return "deadbeef"
+
+        page = numbered_page(1, 250)
+        out = web_module._present_snapshot(snapshot(text=page), stash=stash)
+        assert seen["text"] == page, "the stash must get the WHOLE page, not the cut one"
+        assert seen["shown"] == web_module.PAGE_MAX_CHARS
+        assert 'read_tool_output(continuation="deadbeef", page=2)' in out
+
+    def test_a_page_that_fits_is_never_stashed(self):
+        called = []
+        out = web_module._present_snapshot(
+            snapshot(text="short page"), stash=lambda t, s: called.append(t) or "k"
+        )
+        assert called == []
+        assert web_module.CUT_MARKER not in out
+
+    def test_an_unwritable_store_degrades_to_the_old_dead_end(self):
+        """A cut is still a cut when the cache fails. It must not become an
+        exception in the middle of a read."""
+        def broken(_text, _shown):
+            raise OSError("read-only filesystem")
+
+        out = web_module._present_snapshot(
+            snapshot(text=numbered_page(1, 250)), stash=broken
+        )
+        assert web_module.CUT_MARKER in out
+        assert "read_tool_output" not in out
+
+    def test_the_control_list_is_never_paged_away(self):
+        """An address resolves against the page in front of the model, so a
+        control on page 3 of a continuation is one it cannot act on and would
+        only be tempted to name. Controls stay on page 1 whatever happens to
+        the text."""
+        out = web_module._present_snapshot(
+            snapshot(text=numbered_page(1, 250), controls=[control(n=0, name="Menu")]),
+            stash=lambda _t, _s: "deadbeef",
+        )
+        assert "button 'Menu'" in out
+
+
+class TestNumberedSpan:
+    """The reading that lets a cut be measured in the page's own units. Strict
+    on purpose: a false negative costs the notice its best sentence, a false
+    positive puts a confident wrong claim about coverage in front of the
+    model."""
+
+    def test_a_list_reports_its_first_and_last_position(self):
+        assert web_module.numbered_span("1. A\n2. B\n3. C\n4. D") == (1, 4)
+
+    def test_a_later_page_of_the_same_list_keeps_its_own_numbers(self):
+        assert web_module.numbered_span("251. A\n252. B\n253. C") == (251, 253)
+
+    def test_a_year_range_is_not_a_list_position(self):
+        assert web_module.numbered_span("2016-2022\n7.5\n(92K)\n8\nWatched") is None
+
+    def test_numbers_out_of_order_are_not_a_list(self):
+        assert web_module.numbered_span("1. A\n9. B\n3. C\n4. D") is None
+
+    def test_two_numbered_lines_are_a_coincidence(self):
+        assert web_module.numbered_span("1. A\n2. B") is None
+
+
+class TestATopicNarrowsTheControlList:
+    """#270. 100 numbers cannot address 250 rows, and no way of CHOOSING the
+    100 fixes that — only narrowing does. The footer promised "say what you are
+    looking for" and nothing implemented it."""
+
+    def test_the_topic_reaches_the_enumeration(self, monkeypatch):
+        seen = {}
+
+        def fake_open(url, *, topic="", **_kw):
+            seen.update(url=url, topic=topic)
+            return snapshot()
+
+        monkeypatch.setattr(browser, "browse_open", fake_open)
+        web_module.browse("https://imdb.com/user/x/ratings/", "Interstellar")
+        assert seen["topic"] == "Interstellar", (
+            "filtering after the cap cannot recover a control the cap dropped —"
+            " an untagged control has no number to act on"
+        )
+
+    def test_an_action_keeps_the_narrowing(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(browser, "browse_current", lambda: snapshot())
+        monkeypatch.setattr(
+            browser, "browse_act",
+            lambda n, action, **kw: seen.update(kw) or snapshot(),
+        )
+        web_module.browse_act(0, "click", topic="Interstellar")
+        assert seen["topic"] == "Interstellar"
+
+    def test_a_narrowed_list_says_so(self):
+        """Without it a narrowed list reads as the whole page — the same wrong
+        belief the cut notice exists to prevent, one call further on."""
+        out = web_module._present_snapshot(
+            snapshot(controls=[control(n=0, name="Interstellar")],
+                     narrowed="Interstellar", matching=3)
+        )
+        assert "narrowed to 'Interstellar'" in out
+        assert "3 control(s) on this page match it" in out
+
+    def test_the_hidden_footer_names_the_way_out(self):
+        out = web_module._present_snapshot(snapshot(hidden=2478))
+        assert "2478 more control(s) not listed" in out
+        assert "'topic'" in out
+
+
+class TestAnAsyncDownloadIsNotAFailedOne:
+    """#271. The model found IMDb's own Export button and pressed it. IMDb
+    queues the export and publishes it later, so no file arrived, the snapshot
+    said nothing, and the model read it as failure — abandoned the page's own
+    bulk-export path and went off to write a scraper a WAF then refused."""
+
+    @pytest.mark.parametrize(
+        "name,href",
+        [("Export", ""), ("Pobierz fakturę", ""), ("Eksportuj", ""),
+         ("Download CSV", ""), ("Zapisz", ""),
+         ("Get it", "https://x.test/files/ratings.csv"),
+         ("Continue", "https://x.test/account/export?id=7")],
+    )
+    def test_what_reads_as_an_attempt_to_get_a_file(self, name, href):
+        assert browse.wants_download(name, href) is True
+
+    @pytest.mark.parametrize(
+        "name,href",
+        [("Przełącz lokal", ""), ("Next page", "https://x.test/ratings?page=2"),
+         ("Sort by", ""), ("Menu", "")],
+    )
+    def test_what_does_not(self, name, href):
+        assert browse.wants_download(name, href) is False
+
+    def test_a_press_that_should_have_produced_a_file_says_when_none_did(
+        self, monkeypatch
+    ):
+        seen = {}
+        monkeypatch.setattr(
+            browser, "browse_current",
+            lambda: snapshot(controls=[control(n=1, name="Export")]),
+        )
+        monkeypatch.setattr(
+            browser, "browse_act",
+            lambda n, action, **kw: seen.update(kw) or snapshot(),
+        )
+        web_module.browse_act(1, "click")
+        assert seen["expect_download"] is True
+
+    def test_an_ordinary_press_expects_nothing(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            browser, "browse_current",
+            lambda: snapshot(controls=[control(n=1, name="Przełącz lokal")]),
+        )
+        monkeypatch.setattr(
+            browser, "browse_act",
+            lambda n, action, **kw: seen.update(kw) or snapshot(),
+        )
+        web_module.browse_act(1, "click")
+        assert seen["expect_download"] is False
+
+    def test_the_sentence_says_what_to_do_instead_of_assuming_failure(self):
+        out = web_module._present_snapshot(snapshot(notice=browse.NO_FILE_YET))
+        assert "no file arrived" in out
+        assert "NOT proof it failed" in out
+        assert "scraping" in out

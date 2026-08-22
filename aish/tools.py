@@ -1007,9 +1007,13 @@ TOOL_SCHEMAS = [
                     "topic": {
                         "type": "string",
                         "description": (
-                            "Optional word or phrase: returns only matching lines "
-                            "of the page text. The control list always comes back "
-                            "in full."
+                            "Optional word or phrase. It narrows BOTH halves of "
+                            "the answer: the page text is filtered to matching "
+                            "lines, and controls whose label or link matches are "
+                            "listed FIRST. Use it to reach a control the list "
+                            "says it had to leave out — on a long list that is "
+                            "the only way to reach one, since the numbering is "
+                            "capped."
                         ),
                     },
                 },

@@ -822,6 +822,54 @@ class TestContinuation:
             page += 1
         assert seen == text, "paging to the end did not reconstruct the output"
 
+    def test_a_key_carries_the_cut_its_producer_actually_made(self, tmp_path):
+        """#269. A page is cut at `web.PAGE_MAX_CHARS` and knows nothing about
+        this backend's `output_caps`. Paging against the caps instead of against
+        what was SHOWN reopens the silent mid-output hole the test above closes
+        — from the other end."""
+        text = "".join(chr(97 + (i // 50) % 26) for i in range(30_000))
+        store = tmp_path / "store"
+        shown = 12_000  # what web.py put in front of the model
+        head, tail = 600, 200  # what this backend would have chosen
+        key = tp.store_continuation(text, store, shown=shown)
+        assert key.endswith(f"s{shown}")
+
+        assert tp.read_continuation(key, store, 1, head, tail) == text[:shown]
+        assert tp.read_continuation(key, store, 2, head, tail) == (
+            text[shown : shown + head + tail]
+        ), "page 2 resumed at the caps rather than at the cut that was made"
+
+        seen = text[:shown]
+        page = 2
+        while True:
+            chunk = tp.read_continuation(key, store, page, head, tail)
+            if not chunk:
+                break
+            seen += chunk
+            page += 1
+        assert seen == text, "paging to the end did not reconstruct the page"
+
+    def test_the_bytes_stay_content_addressed(self, tmp_path):
+        """The shown-length rides on the KEY, never in the file, so two callers
+        that produced the same text still share one cached copy — and pruning
+        still has exactly one thing to delete per output."""
+        store = tmp_path / "store"
+        text = "x" * 5000
+        a = tp.store_continuation(text, store, shown=100)
+        b = tp.store_continuation(text, store, shown=900)
+        assert a != b
+        assert a.split("s")[0] == b.split("s")[0]
+        assert len(list(store.glob("*.txt"))) == 1
+
+    def test_a_key_with_no_shown_length_pages_as_it_always_did(self, tmp_path):
+        """Plugin outputs carry no suffix and must be unaffected."""
+        store = tmp_path / "store"
+        text = "".join(chr(97 + (i // 50) % 26) for i in range(5000))
+        key = tp.store_continuation(text, store)
+        assert "s" not in key
+        assert tp.read_continuation(key, store, 2, 600, 200) == text[600:1400]
+
     def test_an_unknown_key_is_not_a_crash(self, tmp_path):
         assert tp.read_continuation("deadbeef", tmp_path / "nope", 2, 600, 200) is None
         assert tp.read_continuation("../etc/passwd", tmp_path, 2, 600, 200) is None
+        assert tp.read_continuation("deadbeefs12s3", tmp_path, 2, 600, 200) is None

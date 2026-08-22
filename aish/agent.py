@@ -331,7 +331,12 @@ Rules:
    key: call read_tool_output(continuation="<key>", page=2) to read the rest.
    That is served from a cache and does NOT re-run the tool. Page through what
    you need, or say plainly what you could not read — never guess at the
-   omitted part.
+   omitted part. THIS INCLUDES A PAGE: read_url and browse cut long pages the
+   same way and carry the same key, and the notice tells you which numbered
+   items you actually got ("items 1-40 of the 250 numbered here"). If the user
+   asked about ALL of something, page to the end before answering — do NOT
+   re-open the page, do NOT write a scraper, and do NOT answer from the part
+   you were shown as though it were the whole.
 7d. THE SOURCE THE USER NAMED IS THE SOURCE. When they name a site, a shop, a
    document or an account, you MUST get the answer FROM IT. If you cannot —
    the page will not drive, the control does nothing, you are signed out — you
@@ -3930,7 +3935,7 @@ class Agent:
             url = str(args.get("url", ""))
             topic = str(args.get("topic", "") or "")
             label = f"→ browse: {url}" + (f" (topic: {topic})" if topic else "")
-            return label, lambda: web.browse(url, topic or None)
+            return label, lambda: web.browse(url, topic or None, stash=self._stash_page)
         if name == "browse_fill":
             steps = list(args.get("steps") or [])
             said = ", ".join(
@@ -3938,7 +3943,9 @@ class Agent:
             )
             label = f"→ browse: fill in {len(steps)} step(s) — {said}"
             return label, lambda: web.browse_fill(
-                steps, topic=str(args.get("topic", "") or "") or None
+                steps,
+                topic=str(args.get("topic", "") or "") or None,
+                stash=self._stash_page,
             )
         target = str(args.get("target", "") or "")
         action = str(args.get("action", "click") or "click")
@@ -3954,6 +3961,7 @@ class Agent:
             value=str(args.get("value", "") or ""),
             submit=bool(args.get("submit")),
             topic=str(args.get("topic", "") or "") or None,
+            stash=self._stash_page,
         )
 
     def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
@@ -3976,7 +3984,12 @@ class Agent:
             url = str(args.get("url", ""))
             topic = args.get("topic") or None
             label = f"→ read_url: {url}" + (f" (topic: {topic})" if topic else "")
-            return label, partial(web.read_url, url, topic=str(topic) if topic else None)
+            return label, partial(
+                web.read_url,
+                url,
+                topic=str(topic) if topic else None,
+                stash=self._stash_page,
+            )
         if name == "show_video":
             url = str(args.get("url", ""))
             return f"→ show_video: {url}", partial(
@@ -4118,6 +4131,19 @@ class Agent:
         constraint (#192)."""
         window, source = backends.context_window(self.provider, self.num_ctx)
         return tool_plugins.output_caps(window), source
+
+    def _stash_page(self, text: str, shown: int) -> str:
+        """Cache a page a cut could not fit, and return its continuation key.
+
+        `web` truncates at its own budget and knows nothing about this store, so
+        the two are joined here — the one place that knows where the cache lives
+        (#269). `shown` travels with the key because a browse cut is
+        `PAGE_MAX_CHARS` and this backend's `_output_caps` is something else
+        entirely; paging against the wrong anchor would put a silent hole in the
+        middle of an output the model was told it could read to the end."""
+        if not self.tool_output_dir:
+            return ""
+        return tool_plugins.store_continuation(text, self.tool_output_dir, shown=shown)
 
     def _read_tool_output(self, args: dict) -> str:
         """Page a cached tool output (#192). Served from the content-addressed
