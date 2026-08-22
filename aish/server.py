@@ -1780,6 +1780,10 @@ class WebServer:
         # default to_thread executor — see WORKER_POOL_SIZE.
         # The client currently driving the remote browser view, if any (#221).
         self._view_client: Client | None = None
+        # The watcher looking for late arrivals on the page they last acted on.
+        # ONE, globally, because there is one view: a second would race the
+        # first to capture the same page and send both frames.
+        self._view_watch: asyncio.Task | None = None
         self.worker_pool = ThreadPoolExecutor(
             max_workers=WORKER_POOL_SIZE, thread_name_prefix="aish-worker"
         )
@@ -1885,6 +1889,7 @@ class WebServer:
         # loop above already unblocked every held approval, and wait=False +
         # cancel_futures (3.9+) drops anything still queued instead of
         # deadlocking shutdown on a thread that never returns.
+        self._stop_watching()   # before the pool it polls through goes away
         self.worker_pool.shutdown(wait=False, cancel_futures=True)
         for client in list(self.clients):
             with contextlib.suppress(Exception):
@@ -2187,6 +2192,7 @@ class WebServer:
         self._leave(client)
 
     async def _close_orphan_view(self) -> None:
+        self._stop_watching()   # nobody is left to send the frame to
         try:
             await asyncio.get_running_loop().run_in_executor(
                 self.worker_pool, browser.view_close
@@ -4071,6 +4077,13 @@ class WebServer:
         """
         action = str(message.get("action", "")).strip()
         loop = asyncio.get_running_loop()
+        # A new interaction SUPERSEDES the watcher: whatever the old page was
+        # about to become, they have moved on, and a frame captured for the
+        # previous action would land on top of the new one. `detail` is exempt —
+        # a sharpening is not an interaction, and cancelling on it would stop
+        # the watch every time they pinched a still-loading page.
+        if action not in ("detail", "recent", "forget_recent"):
+            self._stop_watching()
         if action == "open":
             self._view_client = client
         elif action == "close":
@@ -4164,14 +4177,15 @@ class WebServer:
             )
             return
         await self._send_frame(client, result)
-        # ONE corrected frame, if the page moved after the quick one. Waiting
-        # for a page to go quiet BEFORE showing anything read as nothing
-        # happening, and still missed late repaints — the owner had to tap
-        # again to see the finished page. So: show now, correct once.
-        if action in ("open", "goto", "click", "fill", "choose", "back", "refresh"):
-            # Already on the loop here — guarding on self.loop meant the
-            # correction silently never ran when it was unset.
-            asyncio.ensure_future(self._correct_frame(client, result.jpeg))
+        # Then KEEP LOOKING, briefly. Showing the quick frame and correcting it
+        # once was already better than waiting for quiet before showing
+        # anything, but one correction is still a single bounded question
+        # standing in for an open-ended one — and a page goes on arriving after
+        # it. Every interaction gets a watcher, scrolls included: a lazily
+        # loaded image is the same late arrival as a spinner's contents.
+        # Already on the loop here — guarding on self.loop meant the correction
+        # silently never ran when it was unset.
+        self._view_watch = asyncio.ensure_future(self._watch_view(client, result))
         return
 
     async def _send_frame(self, client: Client, result) -> None:
@@ -4191,22 +4205,75 @@ class WebServer:
             }
         )
 
-    async def _correct_frame(self, client: Client, shown: bytes) -> None:
-        """Re-capture once the page has settled; forward only if it CHANGED.
+    def _stop_watching(self) -> None:
+        """Let go of the page. Safe to call when nothing is watching."""
+        task, self._view_watch = self._view_watch, None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _watch_view(self, client: Client, shown) -> None:
+        """Keep looking until the page stops changing, or the bounds run out.
 
         Sending an identical frame would repaint for nothing; sending none at
-        all was the bug — a page that finished rendering after the capture
-        stayed stale until the owner tapped again."""
+        all was the bug — a page that went on rendering after the capture stayed
+        stale until the owner tapped it. One correction fixed the common case
+        and missed the two that actually cost him: a SPINNER, whose DOM is
+        perfectly still while the page is plainly unfinished, and a SCROLL,
+        whose lazily loaded images arrive with no correction scheduled at all.
+
+        So: poll a probe that costs ~5 ms and no bytes, and pay for a capture
+        only when the page has actually moved. That inverts the economics of
+        #223 as well — the old correction paid for a second full capture on
+        every interaction and then threw it away if the bytes matched, while a
+        static page now costs one capture instead of two.
+
+        Bounded on every axis, because a carousel never stops moving:
+        `WATCH_MAX_CAPTURES` captures, `WATCH_MIN_GAP_MS` apart, within
+        `WATCH_MAX_MS`. The policy itself is `browser.watch_step`, which is pure
+        so that all of this is testable without a browser or a clock."""
+        loop = asyncio.get_running_loop()
+        started = last_capture = loop.time()
+        captured = 0
+        seen = (shown.nav, shown.gen)
+        on_screen = shown.jpeg
         try:
-            settled = await asyncio.get_running_loop().run_in_executor(
-                self.worker_pool, browser.view_settled_frame
-            )
-        except Exception:  # noqa: BLE001 — a correction that fails just does not arrive
+            while True:
+                await asyncio.sleep(browser.WATCH_POLL_MS / 1000)
+                activity = await loop.run_in_executor(
+                    self.worker_pool, browser.view_activity
+                )
+                now = loop.time()
+                verdict = browser.watch_step(
+                    moved=activity is not None
+                    and (activity.get("nav"), activity.get("gen")) != seen,
+                    quiet_ms=float(activity.get("quiet", 0)) if activity else 0.0,
+                    ready=bool(activity and activity.get("ready")),
+                    elapsed_ms=(now - started) * 1000,
+                    since_capture_ms=(now - last_capture) * 1000,
+                    captured=captured,
+                    unknown=activity is None,
+                )
+                if verdict == "wait":
+                    continue
+                if verdict == "stop":
+                    return
+                frame = await loop.run_in_executor(
+                    self.worker_pool, browser.view_settled_frame
+                )
+                captured += 1
+                last_capture = loop.time()
+                if frame is None:   # the view closed underneath; nothing to watch
+                    return
+                seen = (frame.nav, frame.gen)
+                if frame.jpeg != on_screen:
+                    on_screen = frame.jpeg
+                    await self._send_frame(client, frame)
+                if verdict == "last":
+                    return
+        except asyncio.CancelledError:   # superseded: the owner acted again
+            raise
+        except Exception:  # noqa: BLE001 — a watcher that fails just stops watching
             return
-        if settled is None or settled.jpeg == shown:
-            return
-        with contextlib.suppress(Exception):  # the socket may have gone
-            await self._send_frame(client, settled)
 
     async def _add_dir(self, client: Client, path: str) -> None:
         session = client.viewing
