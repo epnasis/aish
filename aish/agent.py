@@ -3771,7 +3771,18 @@ class Agent:
                 result.startswith("ERROR") or result.startswith("NOT EXECUTED")
             )
             status = tools.STATUS_OK if sniffed_ok else tools.STATUS_FAILED
-            envelope = {"status": status, "verdict_by": tools.VERDICT_PREFIX}
+            # MERGED, not replaced (#274). A native tool may carry EVIDENCE
+            # without claiming a verdict: a page read records that it was cut
+            # and where the rest went, and none of the contract's `verdict_by`
+            # rules describes "a page came back", so it states no status and
+            # this sniff still decides. Overwriting the envelope threw the
+            # evidence away and left the row looking like every other
+            # un-enveloped call.
+            envelope = {
+                **envelope,
+                "status": status,
+                "verdict_by": tools.VERDICT_PREFIX,
+            }
         ok = status == tools.STATUS_OK
         step: dict[str, Any] = {
             "kind": "tool",
@@ -3937,7 +3948,7 @@ class Agent:
             url = str(args.get("url", ""))
             topic = str(args.get("topic", "") or "")
             label = f"→ browse: {url}" + (f" (topic: {topic})" if topic else "")
-            return label, lambda: web.browse(url, topic or None, stash=self._stash_page)
+            return label, lambda: web.browse(url, topic or None, cut=self._page_cut())
         if name == "browse_fill":
             steps = list(args.get("steps") or [])
             said = ", ".join(
@@ -3947,7 +3958,7 @@ class Agent:
             return label, lambda: web.browse_fill(
                 steps,
                 topic=str(args.get("topic", "") or "") or None,
-                stash=self._stash_page,
+                cut=self._page_cut(),
             )
         target = str(args.get("target", "") or "")
         action = str(args.get("action", "click") or "click")
@@ -3963,7 +3974,7 @@ class Agent:
             value=str(args.get("value", "") or ""),
             submit=bool(args.get("submit")),
             topic=str(args.get("topic", "") or "") or None,
-            stash=self._stash_page,
+            cut=self._page_cut(),
         )
 
     def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
@@ -3990,7 +4001,7 @@ class Agent:
                 web.read_url,
                 url,
                 topic=str(topic) if topic else None,
-                stash=self._stash_page,
+                cut=self._page_cut(),
             )
         if name == "show_video":
             url = str(args.get("url", ""))
@@ -4147,6 +4158,16 @@ class Agent:
             return ""
         return tool_plugins.store_continuation(text, self.tool_output_dir, shown=shown)
 
+    def _page_cut(self) -> "web.PageCut":
+        """A fresh recorder for ONE page read (#274).
+
+        Per call and never shared: `read_url` runs on the parallel read path, so
+        a recorder on the agent would attribute one read's cut to another's
+        result. Handing it out here is also what makes the cut appear in the
+        trace at all — `web` cuts, this side knows where the cache is and what
+        the record is for."""
+        return web.PageCut(self._stash_page)
+
     def _read_tool_output(self, args: dict) -> str:
         """Page a cached tool output (#192). Served from the content-addressed
         store, so THE WRAPPER NEVER RE-RUNS — for a nondeterministic or
@@ -4177,6 +4198,7 @@ class Agent:
                 verdict_by=tools.VERDICT_EXIT_CODE,
                 page=page,
                 source="cache",
+                continuation=key,
             )
         more = (
             f"\n\n[aish: continue with read_tool_output(continuation=\"{key}\", "
@@ -4188,6 +4210,11 @@ class Agent:
             verdict_by=tools.VERDICT_EXIT_CODE,
             page=page,
             source="cache",
+            # WHICH cached output this read. Without it, joining a paging call
+            # to the cut it continues means parsing the summary string — and
+            # "was the continuation this call offered ever used?" is the whole
+            # question #274 exists to make answerable (#192, contract §3.4).
+            continuation=key,
             bytes=len(text),
         )
 

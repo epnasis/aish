@@ -26,7 +26,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 from . import browse as browse_mod
-from . import browser
+from . import browser, tools
 from .tools import DOCS_MAX_CHARS, _filter_topic, truncate
 
 SEARCH_MAX_RESULTS = 5
@@ -66,23 +66,93 @@ CUT_MARKER = "this text was CUT"
 Stash = Callable[[str, int], str]
 
 
-def _stash_key(text: str, shown: int, stash: Stash | None) -> str:
-    """The continuation key for `text`, or "" if there is nowhere to put it."""
-    if stash is None:
-        return ""
-    try:
-        return stash(text, shown) or ""
-    except Exception:  # noqa: BLE001 — an unwritable store is not a failed read
-        return ""
+# Where a page cut is recorded. Named for the trace contract's own vocabulary
+# (§3.4 `truncation.truncator`), which had three truncators and now has four:
+# naming the one that cut is the entire diagnosis, and a page cut used to name
+# nobody at all.
+TRUNCATOR = "web"
 
 
-def _capped(text: str, cap: int, stash: Stash | None, *, extra: str = "") -> str:
+class PageCut:
+    """What a read had to cut, where the rest went, and whether it said so.
+
+    ONE PER TOOL CALL, never module state. `read_url` runs on the parallel read
+    path with several calls in flight, so a shared attribute would be a race —
+    exactly the reasoning that puts a tool's verdict on the value
+    (`tools.ToolOutcome`) rather than on the agent.
+
+    It carries the stash rather than sitting beside it because the two are one
+    fact: a cut that could be cached and a cut that could not are different
+    incidents with different repairs, and whoever records the second must
+    record the first (#274)."""
+
+    __slots__ = ("stash", "record", "total")
+
+    def __init__(self, stash: Stash | None = None) -> None:
+        self.stash = stash
+        # The trace contract's `truncation` block, or None when nothing was cut.
+        self.record: dict | None = None
+        # The real size before the cut, which is what makes the truncation
+        # ratio measurable across the corpus (§3.4 `bytes`).
+        self.total = 0
+
+    def keep(self, whole: str, shown: int, cap_source: str) -> str:
+        """Cache what did not fit and write down that it happened. Returns the
+        continuation key, or "" when there was nowhere to put it — a missing
+        store degrades to the old dead end, and the RECORD is what says which
+        of the two this was."""
+        key = ""
+        if self.stash is not None:
+            try:
+                key = self.stash(whole, shown) or ""
+            except Exception:  # noqa: BLE001 — an unwritable store is not a failed read
+                key = ""
+        self.total = len(whole)
+        self.record = {
+            "kept": shown,
+            "omitted": len(whole) - shown,
+            "head": shown,
+            # A page is cut head-only: the tail of a listing is the site's own
+            # footer, and jumping to it would spend the budget on chrome.
+            "tail": 0,
+            "truncator": TRUNCATOR,
+            "cap_source": cap_source,
+            "continuation": key,
+            "offered": bool(key),
+        }
+        return key
+
+
+def sealed(text: str, cut: PageCut | None) -> str:
+    """The result, with the cut recorded on it — or unchanged when nothing was
+    cut.
+
+    Constructed LAST and nowhere else, because a string operation on a
+    `ToolOutcome` returns a plain `str` and silently drops the envelope
+    (`tools.py`), and everything above this composes banners, link notes and
+    control lists onto the body with `+`.
+
+    It carries EVIDENCE and no verdict. `status` stays absent on purpose: none
+    of the contract's `verdict_by` rules describes "a page that came back", and
+    inventing one to make the row look enveloped would be a claim the runtime
+    cannot support. The agent's prefix sniff still decides ok/failed and still
+    records itself as `verdict_by: "prefix"`, which is the honest measure of how
+    much of the tool surface remains un-enveloped (contract §3.4)."""
+    if cut is None or cut.record is None:
+        return text
+    return tools.ToolOutcome(text, bytes=cut.total, truncation=cut.record)
+
+
+def _capped(
+    text: str, cap: int, cut: PageCut | None, cap_source: str, *, extra: str = ""
+) -> str:
     """`text` cut to `cap`, carrying the note that says what went and how to get
     it back. Unchanged when it fits — a cut nobody made needs no sentence."""
     if len(text) <= cap:
         return text
     kept = text[:cap]
-    return kept + cut_note(kept, text, _stash_key(text, cap, stash), extra=extra)
+    key = cut.keep(text, cap, cap_source) if cut is not None else ""
+    return kept + cut_note(kept, text, key, extra=extra)
 
 
 def numbered_span(text: str) -> tuple[int, int] | None:
@@ -1453,19 +1523,27 @@ def _present_rendered(
     *,
     topic: str | None,
     login_host: str,
-    stash: Stash | None = None,
+    cut: PageCut | None = None,
 ) -> str:
     """A browser read, presented — with the provenance note when the site the
     owner is signed into answered with a password field anyway."""
     text, images, declared, signin = rendered
     note = STALE_SESSION_NOTE.format(host=login_host) if login_host and signin else ""
     return note + _present(
-        url, text, images, declared, topic=topic, via_browser=True, stash=stash
+        url, text, images, declared, topic=topic, via_browser=True, cut=cut
     )
 
 
 def read_url(
-    url: str, topic: str | None = None, *, stash: Stash | None = None
+    url: str, topic: str | None = None, *, cut: PageCut | None = None
+) -> str:
+    """Read a page. One seam, wrapping the body below, because the body returns
+    from a dozen places and the envelope has to be the last thing built."""
+    return sealed(_read_url(url, topic, cut=cut), cut)
+
+
+def _read_url(
+    url: str, topic: str | None = None, *, cut: PageCut | None = None
 ) -> str:
     url = url.strip()
     if not url.startswith(("http://", "https://")):
@@ -1498,7 +1576,7 @@ def read_url(
         rendered, why = _browser_read(url)
         if rendered is not None:
             return _present_rendered(
-                url, rendered, topic=topic, login_host=login_host, stash=stash
+                url, rendered, topic=topic, login_host=login_host, cut=cut
             )
         if why == WALLED:
             return f"ERROR: {url} — {WALLED}"
@@ -1527,7 +1605,7 @@ def read_url(
             rendered, why = _browser_read(url)
             if rendered is not None:
                 return _present_rendered(
-                url, rendered, topic=topic, login_host=login_host, stash=stash
+                url, rendered, topic=topic, login_host=login_host, cut=cut
             )
             if why == WALLED:
                 return f"ERROR: {url} — {WALLED}"
@@ -1544,7 +1622,7 @@ def read_url(
             rendered, why = _browser_read(url)
             if rendered is not None:
                 return _present_rendered(
-                url, rendered, topic=topic, login_host=login_host, stash=stash
+                url, rendered, topic=topic, login_host=login_host, cut=cut
             )
             if why == WALLED:
                 return f"ERROR: {url} — {WALLED}"
@@ -1591,7 +1669,7 @@ def read_url(
             rendered, why = _browser_read(url)
             if rendered is not None:
                 return _present_rendered(
-                url, rendered, topic=topic, login_host=login_host, stash=stash
+                url, rendered, topic=topic, login_host=login_host, cut=cut
             )
             if why == WALLED:
                 return f"ERROR: {url} — {WALLED}"
@@ -1607,8 +1685,8 @@ def read_url(
             host=login_host,
             why=anonymous_why or "the browser was not used",
             form=ANONYMOUS_READ_FORM if login_form else "",
-        ) + _present(url, text, images, declared, topic=topic, stash=stash)
-    return _present(url, text, images, declared, topic=topic, stash=stash)
+        ) + _present(url, text, images, declared, topic=topic, cut=cut)
+    return _present(url, text, images, declared, topic=topic, cut=cut)
 
 
 def _present(
@@ -1619,7 +1697,7 @@ def _present(
     *,
     topic: str | None = None,
     via_browser: bool = False,
-    stash: Stash | None = None,
+    cut: PageCut | None = None,
 ) -> str:
     """The read, as the model receives it. Shared by the fetch and the browser
     so a rendered page is filtered, truncated and image-noted identically."""
@@ -1640,7 +1718,11 @@ def _present(
         # A narrowed read is cut by the same one-way door as a whole one — and
         # the lines matching a topic on a long list are exactly the case where
         # the cut lands mid-answer.
-        return UNTRUSTED_NOTE + _capped(whole, DOCS_MAX_CHARS, stash) + image_note(images)
+        return (
+            UNTRUSTED_NOTE
+            + _capped(whole, DOCS_MAX_CHARS, cut, "constant:DOCS_MAX_CHARS")
+            + image_note(images)
+        )
 
     # The declaration goes ABOVE the body and inside the budget: it is a few
     # typed lines, and it is the one part of the read that cannot be recovered
@@ -1653,7 +1735,9 @@ def _present(
     # are the point of the read in exactly the same way, and the cap cuts them
     # in exactly the same place.
     if len(result) > PAGE_MAX_CHARS:
-        return (UNTRUSTED_NOTE + _capped(result, PAGE_MAX_CHARS, stash, extra=NARROW_ADVICE)
+        return (UNTRUSTED_NOTE
+                + _capped(result, PAGE_MAX_CHARS, cut, "constant:PAGE_MAX_CHARS",
+                          extra=NARROW_ADVICE)
                 + link_note(result[PAGE_MAX_CHARS:])
                 + image_note(images))
     return UNTRUSTED_NOTE + result + image_note(images)
@@ -1721,7 +1805,7 @@ def _present_snapshot(
     *,
     topic: str | None = None,
     acted: bool = False,
-    stash: Stash | None = None,
+    cut: PageCut | None = None,
 ) -> str:
     """A driven page, as the model receives it — the whole page, or only what
     an action changed about it.
@@ -1749,7 +1833,7 @@ def _present_snapshot(
             return _present_change(snapshot, delta)
     _LAST_SHOWN = snapshot
     _DELTA_RUN = 0
-    return _present_page(snapshot, topic=topic, stash=stash)
+    return _present_page(snapshot, topic=topic, cut=cut)
 
 
 def _submit_hint(snapshot) -> str:
@@ -1805,7 +1889,7 @@ def _snapshot_notes(snapshot) -> str:
 
 
 def _present_page(
-    snapshot, *, topic: str | None = None, stash: Stash | None = None
+    snapshot, *, topic: str | None = None, cut: PageCut | None = None
 ) -> str:
     """The whole page.
 
@@ -1832,7 +1916,7 @@ def _present_page(
         hint = cut_note(
             body,
             whole,
-            _stash_key(whole, PAGE_MAX_CHARS, stash),
+            cut.keep(whole, PAGE_MAX_CHARS, "constant:PAGE_MAX_CHARS") if cut else "",
             extra=CONTROLS_COMPLETE if complete else f"{CONTROLS_CUT} {NARROW_CONTROLS}",
         )
     lines = [c.line() for c in snapshot.controls]
@@ -1879,9 +1963,13 @@ def _present_page(
     )
 
 
-def browse(url: str, topic: str | None = None, *, stash: Stash | None = None) -> str:
+def browse(url: str, topic: str | None = None, *, cut: PageCut | None = None) -> str:
     """Open a page in the browser the owner is signed into, and describe what
     can be pressed on it."""
+    return sealed(_browse(url, topic, cut=cut), cut)
+
+
+def _browse(url: str, topic: str | None = None, *, cut: PageCut | None = None) -> str:
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
@@ -1895,7 +1983,7 @@ def browse(url: str, topic: str | None = None, *, stash: Stash | None = None) ->
         return f"ERROR: cannot browse {url} — {exc}"
     except Exception as exc:  # noqa: BLE001 — a nav failure reports, never crashes
         return f"ERROR: could not open {url}: {type(exc).__name__}: {exc}"
-    return _present_snapshot(snapshot, topic=topic, stash=stash)
+    return _present_snapshot(snapshot, topic=topic, cut=cut)
 
 
 def browse_act(
@@ -1905,9 +1993,23 @@ def browse_act(
     value: str = "",
     submit: bool = False,
     topic: str | None = None,
-    stash: Stash | None = None,
+    cut: PageCut | None = None,
 ) -> str:
     """Do one thing to the control the model named, and hand back what changed."""
+    return sealed(
+        _browse_act(target, action, text, value, submit, topic, cut), cut
+    )
+
+
+def _browse_act(
+    target: str,
+    action: str = "click",
+    text: str = "",
+    value: str = "",
+    submit: bool = False,
+    topic: str | None = None,
+    cut: PageCut | None = None,
+) -> str:
     # Read off the SNAPSHOT, not the live DOM: `_press` may fall back to a link's
     # own destination, and the thing the gate classified has to be the thing that
     # runs. A destination the SSRF guard would refuse is simply not offered as a
@@ -1946,15 +2048,21 @@ def browse_act(
             f"{type(exc).__name__}: {exc}"
         )
     return _present_snapshot(
-        snapshot, topic=topic, acted=action != "read", stash=stash
+        snapshot, topic=topic, acted=action != "read", cut=cut
     )
 
 
 def browse_fill(
-    steps: list[dict], topic: str | None = None, *, stash: Stash | None = None
+    steps: list[dict], topic: str | None = None, *, cut: PageCut | None = None
 ) -> str:
     """Fill in a form on the page browse opened — several controls, then at
     most one press — as one act."""
+    return sealed(_browse_fill(steps, topic, cut=cut), cut)
+
+
+def _browse_fill(
+    steps: list[dict], topic: str | None = None, *, cut: PageCut | None = None
+) -> str:
     current = browser.browse_current()
     if current is None:
         return "ERROR: nothing is open to fill in. Call browse(url) first."
@@ -1973,7 +2081,7 @@ def browse_fill(
         return f"ERROR: {exc}"
     except Exception as exc:  # noqa: BLE001
         return f"ERROR: could not fill this form: {type(exc).__name__}: {exc}"
-    return _present_snapshot(snapshot, topic=topic, acted=True, stash=stash)
+    return _present_snapshot(snapshot, topic=topic, acted=True, cut=cut)
 
 
 class BlockedURLError(Exception):
