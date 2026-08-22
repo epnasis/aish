@@ -31,6 +31,25 @@ def snapshot(url="https://eon.pl/mojeon", controls=(), **kw):
     )
 
 
+def shown(snap):
+    """The page a caller with no chat behind it was last handed.
+
+    `web.browse_*` reads the caller's own `BrowseView` and never the browser's
+    global (#272), so a test that used to stub `browser.browse_current` seeds
+    the view the module falls back to instead."""
+    web_module._DEFAULT_VIEW.remember(snap)
+    return snap
+
+
+@pytest.fixture(autouse=True)
+def _fresh_default_view():
+    """One test's page must not be the next test's. The view outlives a call
+    by design — it is what a change report is a change from."""
+    web_module._DEFAULT_VIEW.forget()
+    yield
+    web_module._DEFAULT_VIEW.forget()
+
+
 class TestWhatCountsAsMutating:
     """The label that decides whether a click gets its own approval card.
 
@@ -238,7 +257,7 @@ class TestBrowseGate:
             model="fake", approve=lambda _c: True,
             client_chat=lambda **kw: {}, approve_tool=approve_tool,
         )
-        monkeypatch.setattr(browser, "browse_current", lambda: snap)
+        agent._browse_view.remember(snap)
         return agent, asked
 
     def test_driving_a_host_asks_once_per_task(self, monkeypatch):
@@ -355,8 +374,8 @@ class TestBrowseDispatch:
         transcript line is his only running account of what aish is clicking
         inside his account."""
         snap = snapshot(controls=[control(n=4, name="Przełącz lokal")])
-        monkeypatch.setattr(browser, "browse_current", lambda: snap)
         agent = Agent(model="fake", approve=lambda _c: True, client_chat=lambda **kw: {})
+        agent._browse_view.remember(snap)
         label, _ = agent._browse_call("browse_act", {"target": 4})
         assert label == "→ browse: click button 'Przełącz lokal'"
 
@@ -737,10 +756,7 @@ class TestHidingAControlNeverRoutesAroundItsCard:
             seen.update(kw)
             return snapshot()
 
-        monkeypatch.setattr(
-            browser, "browse_current",
-            lambda: snapshot(controls=[control(n=2, name="Zapłać", kind=browse.LINK)]),
-        )
+        shown(snapshot(controls=[control(n=2, name="Zapłać", kind=browse.LINK)]))
         monkeypatch.setattr(browser, "browse_act", fake_act)
         web_module.browse_act(2, "click")
         assert seen["mutating"] is True
@@ -755,7 +771,7 @@ class TestHidingAControlNeverRoutesAroundItsCard:
             return snapshot()
 
         local = control(n=1, name="Panel", kind=browse.LINK, href="http://127.0.0.1/admin")
-        monkeypatch.setattr(browser, "browse_current", lambda: snapshot(controls=[local]))
+        shown(snapshot(controls=[local]))
         monkeypatch.setattr(browser, "browse_act", fake_act)
         web_module.browse_act(1, "click")
         assert seen["href"] == ""
@@ -1160,7 +1176,7 @@ class TestFillingAFormIsOneAct:
             model="fake", approve=lambda _c: True,
             client_chat=lambda **kw: {}, approve_tool=approve_tool,
         )
-        monkeypatch.setattr(browser, "browse_current", lambda: snap)
+        agent._browse_view.remember(snap)
         agent._approved_browsing.add("eon.pl")
         args = {"steps": [{"target": "Skąd", "value": "WAW"}]}
         assert agent._browse_gate("browse_fill", args) is None
@@ -1178,7 +1194,7 @@ class TestFillingAFormIsOneAct:
             model="fake", approve=lambda _c: True,
             client_chat=lambda **kw: {}, approve_tool=approve_tool,
         )
-        monkeypatch.setattr(browser, "browse_current", lambda: snap)
+        agent._browse_view.remember(snap)
         agent._approved_browsing.add("eon.pl")
         assert agent._browse_gate("browse_fill", {"steps": [
             {"target": "Skąd", "value": "WAW"},
@@ -1194,7 +1210,7 @@ class TestFillingAFormIsOneAct:
             model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
             approve_tool=lambda n, a, p: asked.append(p) or True,
         )
-        monkeypatch.setattr(browser, "browse_current", lambda: snap)
+        agent._browse_view.remember(snap)
         agent._approved_browsing.add("eon.pl")
         out = agent._browse_gate("browse_fill", {"steps": [
             {"target": "Szukaj", "do": "click"}, {"target": "Skąd", "value": "x"},
@@ -1361,7 +1377,7 @@ class TestATopicNarrowsTheControlList:
 
     def test_an_action_keeps_the_narrowing(self, monkeypatch):
         seen = {}
-        monkeypatch.setattr(browser, "browse_current", lambda: snapshot())
+        shown(snapshot())
         monkeypatch.setattr(
             browser, "browse_act",
             lambda n, action, **kw: seen.update(kw) or snapshot(),
@@ -1413,10 +1429,7 @@ class TestAnAsyncDownloadIsNotAFailedOne:
         self, monkeypatch
     ):
         seen = {}
-        monkeypatch.setattr(
-            browser, "browse_current",
-            lambda: snapshot(controls=[control(n=1, name="Export")]),
-        )
+        shown(snapshot(controls=[control(n=1, name="Export")]))
         monkeypatch.setattr(
             browser, "browse_act",
             lambda n, action, **kw: seen.update(kw) or snapshot(),
@@ -1426,10 +1439,7 @@ class TestAnAsyncDownloadIsNotAFailedOne:
 
     def test_an_ordinary_press_expects_nothing(self, monkeypatch):
         seen = {}
-        monkeypatch.setattr(
-            browser, "browse_current",
-            lambda: snapshot(controls=[control(n=1, name="Przełącz lokal")]),
-        )
+        shown(snapshot(controls=[control(n=1, name="Przełącz lokal")]))
         monkeypatch.setattr(
             browser, "browse_act",
             lambda n, action, **kw: seen.update(kw) or snapshot(),
@@ -1526,3 +1536,121 @@ class TestPickingADateFromACalendar:
     def test_the_month_arrow_is_looked_for_inside_the_picker_only(self):
         assert "box.querySelectorAll" in browse.CALENDAR_JS
         assert "submits" in browse.CALENDAR_JS
+
+
+class TestTwoChatsDoNotShareOnePageView:
+    """The interleaving that filed #272, as a test.
+
+    Two chats, one process, one browser page. On 2026-08-22 a chat asked to
+    find flights to the Maldives had its `browse_act` answered with another
+    chat's IMDb ratings page — twice — and the approval card it drew inside
+    the flights chat read `drive www.imdb.com in your signed-in browser`,
+    because the snapshot the gate reads was a module global.
+
+    The page is still one page. What is no longer shared is the PICTURE of it,
+    and that is what the gate reads."""
+
+    QATAR = "https://www.qatarairways.com/en-pl/homepage.html"
+    IMDB = "https://www.imdb.com/user/p.bj2tv2nup7cfwqzwbfdw6zqevi/ratings/"
+
+    def _chat(self, asked):
+        return Agent(
+            model="fake", approve=lambda _c: True, client_chat=lambda **kw: {},
+            approve_tool=lambda name, args, preview: asked.append(preview) or True,
+        )
+
+    def test_one_chat_s_browse_does_not_move_another_chat_s_view(self, monkeypatch):
+        flights, films = [], []
+        qatar = self._chat(flights)
+        imdb = self._chat(films)
+        qatar._browse_view.remember(
+            snapshot(url=self.QATAR, controls=[control(n=1, name="To")])
+        )
+        imdb._browse_view.remember(
+            snapshot(url=self.IMDB, controls=[control(n=1, name="Add to Watchlist")])
+        )
+        assert qatar._browse_host("browse_act", {}) == "qatarairways.com"
+        assert imdb._browse_host("browse_act", {}) == "imdb.com"
+
+    def test_the_card_never_names_the_other_chat_s_host(self, monkeypatch):
+        """The 01:09:59 → 01:10:01 gap, exactly. The films chat finishes a
+        browse two seconds before the flights chat's gate runs; the flights
+        chat must not be asked to drive imdb.com."""
+        flights = []
+        qatar = self._chat(flights)
+        qatar._browse_view.remember(
+            snapshot(url=self.QATAR, controls=[control(n=1, name="To", kind=browse.FIELD)])
+        )
+        films = self._chat([])
+        films._browse_view.remember(snapshot(url=self.IMDB))
+
+        assert qatar._browse_gate("browse_act", {"target": "To"}) is None
+        assert len(flights) == 1
+        assert "drive qatarairways.com" in flights[0]
+        assert "imdb" not in flights[0]
+
+    def test_the_other_chat_s_control_is_never_resolvable(self, monkeypatch):
+        """`'To'` matched 15 controls on the IMDb page and was refused for
+        ambiguity — luck, not design. A chat must not see those controls at
+        all."""
+        qatar = self._chat([])
+        qatar._browse_view.remember(snapshot(url=self.QATAR, controls=[]))
+        films = self._chat([])
+        films._browse_view.remember(
+            snapshot(url=self.IMDB, controls=[control(n=1, name="Go To IMDb Pro")])
+        )
+        assert qatar._browse_target({"target": "Go To IMDb Pro"}) is None
+
+    def test_a_chat_that_never_browsed_has_no_page_even_when_one_is_open(self):
+        """An empty view means no page — deliberately not a fall back to the
+        browser's global snapshot. A chat that never opened a page is told to
+        open one, never handed whatever document happens to be loaded."""
+        films = self._chat([])
+        films._browse_view.remember(snapshot(url=self.IMDB))
+        fresh = self._chat([])
+        out = fresh._browse_gate("browse_act", {"target": "Add to Watchlist"})
+        assert out is not None and "browse(url)" in out
+
+    def test_an_act_carries_the_epoch_of_the_page_the_chat_was_shown(
+        self, monkeypatch
+    ):
+        """The wiring the fence needs: what `browse_act` promises the browser
+        is the document THIS chat last saw, not the one that is loaded."""
+        seen = {}
+        monkeypatch.setattr(
+            browser, "browse_act",
+            lambda n, action, **kw: seen.update(kw) or snapshot(),
+        )
+        view = web_module.BrowseView()
+        view.remember(snapshot(url=self.QATAR, controls=[control(n=1, name="To")], epoch=4))
+        web_module.browse_act("To", "click", view=view)
+        assert seen["expect_epoch"] == 4
+
+    def test_a_page_taken_mid_flow_is_reported_and_nothing_is_pressed(
+        self, monkeypatch
+    ):
+        def taken(*a, **kw):
+            raise browser.BrowserUnavailable(browser.PAGE_TAKEN)
+
+        monkeypatch.setattr(browser, "browse_act", taken)
+        view = web_module.BrowseView()
+        view.remember(snapshot(url=self.QATAR, controls=[control(n=1, name="To")], epoch=4))
+        out = web_module.browse_act("To", "click", view=view)
+        assert "another chat navigated this browser" in out
+        assert "Nothing was pressed" in out
+        assert "Wyspowa" not in out, "the other chat's page must not come back"
+
+    def test_the_change_report_is_per_chat_too(self, monkeypatch):
+        """A delta is a change from what THIS chat was shown. Shared, one
+        chat's click was reported as a change from the other chat's page."""
+        qatar = web_module.BrowseView()
+        films = web_module.BrowseView()
+        first = snapshot(url=self.QATAR, text="Book a flight", controls=[])
+        web_module._present_snapshot(first, view=qatar)
+        web_module._present_snapshot(
+            snapshot(url=self.IMDB, text="Your ratings", controls=[]), view=films
+        )
+        again = snapshot(url=self.QATAR, text="Book a flight to Malé", controls=[])
+        out = web_module._present_snapshot(again, acted=True, view=qatar)
+        assert "Malé" in out
+        assert "Your ratings" not in out

@@ -1680,20 +1680,60 @@ BROWSE_CONTROLS_NOTE = (
 # change of page both send the page anyway.
 DELTA_RUN_MAX = 10
 
-# The page the MODEL was last shown, which is what a change report is a change
-# from. Not the page as it was a moment before the click: a page that moves on
-# its own — a price that updates, a session that expires — would fall into the
-# gap between the two reads and never be reported at all.
-_LAST_SHOWN: Any = None
-_DELTA_RUN = 0
+class BrowseView:
+    """ONE CHAT's view of the browsed page — what it was last shown, and which
+    document that was.
+
+    This used to be three module globals, which is a bug and not a tidiness
+    problem (#272). The browser holds ONE page for the whole process, so two
+    chats browsing at once drive the same document; with the view global too,
+    the second chat's snapshot became the first chat's *approval card*. On
+    2026-08-22 a chat about flights to the Maldives drew the card `drive
+    www.imdb.com in your signed-in browser — aish will open pages and click on
+    them AS YOU`, because another chat had read IMDb two seconds before the
+    gate ran. The page is still shared — that is slice 2 — but the picture the
+    gate reads is now the picture THIS chat was handed.
+
+    `shown` is the page the model was last shown, which is what a change report
+    is a change from. Deliberately not the page as it was a moment before the
+    click: a page that moves on its own — a price that updates, a session that
+    expires — would fall into the gap between the two reads and never be
+    reported at all.
+
+    An EMPTY view means this chat has no page, even when some other chat has
+    one. That is the point, and it is why there is no fall back to the
+    browser's global snapshot: a chat that never opened a page must be told to
+    open one, not handed whatever document happens to be loaded."""
+
+    def __init__(self) -> None:
+        self.shown: Any = None
+        self.runs = 0
+        # The document this chat's `shown` belongs to, as the browser counted
+        # it. Compared before an act so a page another chat drove is refused
+        # rather than acted on — see `browser.PAGE_TAKEN`.
+        self.epoch: int | None = None
+
+    def remember(self, snapshot: Any) -> None:
+        self.shown = snapshot
+        self.epoch = getattr(snapshot, "epoch", None)
+
+    def forget(self) -> None:
+        """Next page presented is presented in full."""
+        self.shown = None
+        self.runs = 0
+        self.epoch = None
+
+
+# For callers with no chat behind them — the CLI, a test, a plugin. Same
+# reasoning as `Stash`: `web` has to keep working with no agent, and a missing
+# one degrades to the old single-view behaviour rather than raising.
+_DEFAULT_VIEW = BrowseView()
 
 
 def forget_shown_page() -> None:
     """Next page presented is presented in full. For tests and for anything
     that ends a browsing session."""
-    global _LAST_SHOWN, _DELTA_RUN
-    _LAST_SHOWN = None
-    _DELTA_RUN = 0
+    _DEFAULT_VIEW.forget()
 
 # What the page text's cut has to say about the OTHER half of the answer.
 #
@@ -1722,6 +1762,7 @@ def _present_snapshot(
     topic: str | None = None,
     acted: bool = False,
     stash: Stash | None = None,
+    view: BrowseView | None = None,
 ) -> str:
     """A driven page, as the model receives it — the whole page, or only what
     an action changed about it.
@@ -1733,22 +1774,23 @@ def _present_snapshot(
     it is genuinely a different page, when the change is bigger than the page,
     when something went wrong, when the model asks, or every DELTA_RUN_MAX
     reports so its picture cannot drift for long."""
-    global _LAST_SHOWN, _DELTA_RUN
+    seen = view if view is not None else _DEFAULT_VIEW
     if (
         acted
-        and _LAST_SHOWN is not None
+        and seen.shown is not None
         and not topic
         and not snapshot.problem
-        and _LAST_SHOWN.url == snapshot.url
-        and _DELTA_RUN < DELTA_RUN_MAX
+        and seen.shown.url == snapshot.url
+        and seen.runs < DELTA_RUN_MAX
     ):
-        delta = browse_mod.diff_snapshots(_LAST_SHOWN, snapshot)
+        delta = browse_mod.diff_snapshots(seen.shown, snapshot)
         if delta.worth_sending():
-            _LAST_SHOWN = snapshot
-            _DELTA_RUN += 1
+            runs = seen.runs + 1
+            seen.remember(snapshot)
+            seen.runs = runs
             return _present_change(snapshot, delta)
-    _LAST_SHOWN = snapshot
-    _DELTA_RUN = 0
+    seen.remember(snapshot)
+    seen.runs = 0
     return _present_page(snapshot, topic=topic, stash=stash)
 
 
@@ -1879,7 +1921,13 @@ def _present_page(
     )
 
 
-def browse(url: str, topic: str | None = None, *, stash: Stash | None = None) -> str:
+def browse(
+    url: str,
+    topic: str | None = None,
+    *,
+    stash: Stash | None = None,
+    view: BrowseView | None = None,
+) -> str:
     """Open a page in the browser the owner is signed into, and describe what
     can be pressed on it."""
     url = url.strip()
@@ -1895,7 +1943,7 @@ def browse(url: str, topic: str | None = None, *, stash: Stash | None = None) ->
         return f"ERROR: cannot browse {url} — {exc}"
     except Exception as exc:  # noqa: BLE001 — a nav failure reports, never crashes
         return f"ERROR: could not open {url}: {type(exc).__name__}: {exc}"
-    return _present_snapshot(snapshot, topic=topic, stash=stash)
+    return _present_snapshot(snapshot, topic=topic, stash=stash, view=view)
 
 
 def browse_act(
@@ -1906,6 +1954,7 @@ def browse_act(
     submit: bool = False,
     topic: str | None = None,
     stash: Stash | None = None,
+    view: BrowseView | None = None,
 ) -> str:
     """Do one thing to the control the model named, and hand back what changed."""
     # Read off the SNAPSHOT, not the live DOM: `_press` may fall back to a link's
@@ -1913,7 +1962,8 @@ def browse_act(
     # runs. A destination the SSRF guard would refuse is simply not offered as a
     # fallback — the same fence `browse` itself applies to a model-chosen URL.
     href, mutating, expect_download = "", False, False
-    current = browser.browse_current()
+    seen = view if view is not None else _DEFAULT_VIEW
+    current = seen.shown
     control = (
         browse_mod.resolve(current.controls, target).control if current else None
     )
@@ -1936,7 +1986,7 @@ def browse_act(
         snapshot = browser.browse_act(
             str(target), action, text=text, value=value, submit=submit,
             href=href, mutating=mutating, topic=topic or "",
-            expect_download=expect_download,
+            expect_download=expect_download, expect_epoch=seen.epoch,
         )
     except browser.BrowserUnavailable as exc:
         return f"ERROR: {exc}"
@@ -1946,16 +1996,21 @@ def browse_act(
             f"{type(exc).__name__}: {exc}"
         )
     return _present_snapshot(
-        snapshot, topic=topic, acted=action != "read", stash=stash
+        snapshot, topic=topic, acted=action != "read", stash=stash, view=view
     )
 
 
 def browse_fill(
-    steps: list[dict], topic: str | None = None, *, stash: Stash | None = None
+    steps: list[dict],
+    topic: str | None = None,
+    *,
+    stash: Stash | None = None,
+    view: BrowseView | None = None,
 ) -> str:
     """Fill in a form on the page browse opened — several controls, then at
     most one press — as one act."""
-    current = browser.browse_current()
+    seen = view if view is not None else _DEFAULT_VIEW
+    current = seen.shown
     if current is None:
         return "ERROR: nothing is open to fill in. Call browse(url) first."
     plan = browse_mod.plan_batch(current.controls, steps or [])
@@ -1968,12 +2023,15 @@ def browse_fill(
             list(steps or []),
             mutating=browse_mod.batch_is_mutating(plan),
             topic=topic or "",
+            expect_epoch=seen.epoch,
         )
     except browser.BrowserUnavailable as exc:
         return f"ERROR: {exc}"
     except Exception as exc:  # noqa: BLE001
         return f"ERROR: could not fill this form: {type(exc).__name__}: {exc}"
-    return _present_snapshot(snapshot, topic=topic, acted=True, stash=stash)
+    return _present_snapshot(
+        snapshot, topic=topic, acted=True, stash=stash, view=view
+    )
 
 
 class BlockedURLError(Exception):

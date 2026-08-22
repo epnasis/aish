@@ -2130,3 +2130,102 @@ class TestALedgerNeverStatesWhatItDidNotRead:
         )
         assert browser._held(readable, "Dokąd") is None or browser._held(readable, "Dokąd") == ""
         assert browser._held(unreadable, "Dokąd") is None
+
+
+class TestAPageAnotherChatTookIsNotActedOn:
+    """One page, several chats, and the epoch is what tells them apart (#272).
+
+    aish-web runs every chat in one process and the browser holds ONE page, so
+    a second chat's `browse(url)` navigates the page the first is mid-flow on.
+    On 2026-08-22 a chat searching for flights to the Maldives spent 225
+    seconds typing into another chat's IMDb ratings page, and a `choose` four
+    calls later landed on that chat's search results."""
+
+    def _page(self):
+        class Page:
+            url = "https://www.qatarairways.com/en-pl/homepage.html"
+
+            def is_closed(self):
+                return False
+
+        return Page()
+
+    def _blank(self, monkeypatch):
+        """A page with no controls, so the act reaches its ordinary refusal."""
+        async def snapshot(owner, page, match="", **kw):
+            return browser.browse_mod.Snapshot(
+                url=page.url, title="", text="", **kw
+            )
+
+        async def nothing(page, match=""):
+            return [], 0, 0, 0
+
+        monkeypatch.setattr(browser, "_enumerate", nothing)
+        monkeypatch.setattr(browser, "_snapshot", snapshot)
+
+    def _owner(self, monkeypatch, *, epoch):
+        owner = browser._Owner()
+        owner.browse_page = self._page()
+        owner.browse_epoch = epoch
+        monkeypatch.setattr(browser, "_submit", run_job(owner))
+        return owner
+
+    def test_an_act_on_a_page_someone_else_drove_is_refused(self, monkeypatch):
+        """The chat carries the epoch of the page it was SHOWN. Another chat's
+        navigation moves the live one past it, and that gap is the bug."""
+        self._owner(monkeypatch, epoch=9)
+        with pytest.raises(browser.BrowserUnavailable) as caught:
+            browser.browse_act("To", "type", text="Maldives", expect_epoch=4)
+        assert "another chat navigated this browser" in str(caught.value)
+        assert "Nothing was pressed" in str(caught.value)
+
+    def test_filling_a_form_is_fenced_the_same_way(self, monkeypatch):
+        """A batch presses a control the owner approved. It must not carry that
+        yes onto a page that arrived after the card was drawn."""
+        self._owner(monkeypatch, epoch=9)
+        with pytest.raises(browser.BrowserUnavailable, match="another chat"):
+            browser.browse_fill([{"target": "To", "value": "MLE"}], expect_epoch=4)
+
+    def test_the_refusal_never_carries_the_other_chat_s_page(self, monkeypatch):
+        """Every other ending in browse_act is a snapshot, because a bare error
+        leaves the model holding no page. This one is deliberately not: the
+        page on the far side of the fence belongs to another chat and may be
+        any account the owner is signed into."""
+        self._owner(monkeypatch, epoch=9)
+        with pytest.raises(browser.BrowserUnavailable) as caught:
+            browser.browse_act("To", "type", text="Maldives", expect_epoch=4)
+        said = str(caught.value)
+        assert "imdb" not in said.lower()
+        assert "qatarairways" not in said.lower()
+
+    def test_the_fence_is_checked_before_the_page_is_read(self, monkeypatch):
+        """Inside the owner loop, before enumeration. The gate ran on another
+        thread; the page can move between the card and the press."""
+        owner = self._owner(monkeypatch, epoch=9)
+        looked = []
+
+        async def watched(page, match=""):
+            looked.append(page)
+            return [], 0, 0, 0
+
+        monkeypatch.setattr(browser, "_enumerate", watched)
+        with pytest.raises(browser.BrowserUnavailable):
+            browser.browse_act("To", "click", expect_epoch=4)
+        assert looked == [], "the page was enumerated before the fence ran"
+        assert owner.browse_epoch == 9, "a refused act must not count as a document"
+
+    def test_a_chat_still_on_its_own_page_acts_normally(self, monkeypatch):
+        """The fence must not cost the ordinary case anything — one chat
+        browsing alone is every session that has ever worked."""
+        self._owner(monkeypatch, epoch=4)
+        self._blank(monkeypatch)
+        snap = browser.browse_act("Nieznany", "click", expect_epoch=4)
+        assert "no controls listed" in snap.problem
+
+    def test_a_caller_that_names_no_epoch_is_not_fenced(self, monkeypatch):
+        """The CLI and the verify script drive the browser with no chat behind
+        them. They get the old single-view behaviour rather than a refusal."""
+        self._owner(monkeypatch, epoch=9)
+        self._blank(monkeypatch)
+        snap = browser.browse_act("Nieznany", "click")
+        assert "no controls listed" in snap.problem

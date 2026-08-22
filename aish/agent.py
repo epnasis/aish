@@ -1589,6 +1589,11 @@ class Agent:
         # you leave must not follow you into the one you land in.
         self._approved_logins: set[str] = set()
         self._approved_browsing: set[str] = set()
+        # THIS CHAT's view of the browsed page. Per-Agent for the same reason
+        # `_approved_browsing` is: the browser holds one page for the whole
+        # process, and while the view was a module global the gate could draw
+        # a card naming ANOTHER chat's host and control (#272).
+        self._browse_view = web.BrowseView()
         self.provider = "ollama"  # callers overwrite after construction (cli/server)
         self.task_sources: list[dict] = []  # pages read_url fetched for the current task
         self.approve = approve
@@ -3937,7 +3942,9 @@ class Agent:
             url = str(args.get("url", ""))
             topic = str(args.get("topic", "") or "")
             label = f"→ browse: {url}" + (f" (topic: {topic})" if topic else "")
-            return label, lambda: web.browse(url, topic or None, stash=self._stash_page)
+            return label, lambda: web.browse(
+                url, topic or None, stash=self._stash_page, view=self._browse_view
+            )
         if name == "browse_fill":
             steps = list(args.get("steps") or [])
             said = ", ".join(
@@ -3948,6 +3955,7 @@ class Agent:
                 steps,
                 topic=str(args.get("topic", "") or "") or None,
                 stash=self._stash_page,
+                view=self._browse_view,
             )
         target = str(args.get("target", "") or "")
         action = str(args.get("action", "click") or "click")
@@ -3964,6 +3972,7 @@ class Agent:
             submit=bool(args.get("submit")),
             topic=str(args.get("topic", "") or "") or None,
             stash=self._stash_page,
+            view=self._browse_view,
         )
 
     def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
@@ -5023,7 +5032,7 @@ class Agent:
         button, and the card has to say where the button is."""
         if name == "browse":
             return browser.host_of(str(args.get("url", "")))
-        current = browser.browse_current()
+        current = self._browse_view.shown
         return browser.host_of(current.url) if current is not None else ""
 
     def _browse_gate(self, name: str, args: dict) -> str | None:
@@ -5042,7 +5051,7 @@ class Agent:
         if name == "browse_fill":
             return self._browse_batch_gate(args, host)
         if name == "browse_act":
-            current = browser.browse_current()
+            current = self._browse_view.shown
             if current is None:
                 return _gate_outcome(BROWSE_NO_PAGE, decision="blocked")
             control = self._browse_target(args)
@@ -5090,7 +5099,7 @@ class Agent:
         refused outright, exactly as a single action is. Filling needs no card
         at all: typing has never been mutating, so a batch with no committing
         step rides the host grant like any other read."""
-        current = browser.browse_current()
+        current = self._browse_view.shown
         if current is None:
             return _gate_outcome(BROWSE_NO_PAGE, decision="blocked")
         plan = browse.plan_batch(current.controls, list(args.get("steps") or []))
@@ -5122,13 +5131,14 @@ class Agent:
             "browse_fill", args, what, BROWSE_ACTION_DENIED.format(what=what)
         )
 
-    @staticmethod
-    def _browse_target(args: dict):
-        """The control a browse_act names, off the snapshot the model was shown.
+    def _browse_target(self, args: dict):
+        """The control a browse_act names, off the snapshot THIS CHAT was shown.
 
         One resolver for the gate, the echo and the call, so the card can never
-        name one control while another is pressed."""
-        current = browser.browse_current()
+        name one control while another is pressed — and it reads this chat's
+        own view, so it can never name a control on another chat's page
+        (#272)."""
+        current = self._browse_view.shown
         if current is None:
             return None
         return browse.resolve(current.controls, args.get("target")).control

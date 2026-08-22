@@ -243,6 +243,28 @@ Every booking search stands behind two date fields, and they are not fields: the
 
 `TestPickingADateFromACalendar` pins the date reading, the month stems, the cell ladder and the arrow vocabulary; `scripts/verify_browse.py` drives three real picker shapes in Chrome — labelled cells, bare cells with a heading, and a month walk — plus a disabled date and a submit-shaped arrow, both refused.
 
+## One page, several chats (#272)
+
+**The browser holds ONE page for the whole process, and until now the PICTURE of it was global too.** aish-web runs every chat in one process; `_Owner` is a module-level singleton and `_submit` schedules every job on its loop concurrently — `busy` is the reaper's counter, not a lock. So a second chat's `browse(url)` does not take a different page: `_browse_page(opening=True)` returns the page that is already open and `goto`s it. It **navigates the page the first chat is standing on.**
+
+On 2026-08-22 two chats ran side by side. One was asked to find flights to the Maldives; the other was reading IMDb ratings. The flights chat spent **225 seconds** on a single `browse_act(type "Maldives" → "To")` and got back `imdb.com/user/…/ratings/?sort=user_rating,desc — you are driving this page`; four calls later a `choose From=WAW` came back on `imdb.com/find/?q=Mindhunter+2017`. It went both ways — the films chat's `read` returned the Qatar homepage, and its model said so out loud.
+
+**Both cross-page acts were refused, and that was luck.** `'To'` matched fifteen controls on the IMDb page (`'Go To IMDb Pro'`, `'Add to Watchlist'`…), so `resolve` returned nothing. The `data-aish-n` tag dies with the document, which is what safely refuses a stale *index* — but controls are addressed **by name** (#251), and a name carries no page binding at all. `'Continue'`, `'Accept'`, `'Search'` resolve perfectly well on a stranger's page.
+
+**The gate consequence was the serious half.** `_approved_browsing` is per-Agent — this chat's yes, to this host. `_browse_host` for `browse_act` read `browser.browse_current()`, the module-global `_LAST_SNAPSHOT`, shared by every chat. The films chat's browse completed at 01:09:59 and overwrote it; the flights chat's gate ran at 01:10:01, resolved the host to `imdb.com`, found it ungranted, and drew — *inside a chat about flights* — the card `drive www.imdb.com in your signed-in browser — aish will open pages and click on them AS YOU, and can see private account data`. Approving it added `imdb.com` to the **flights** chat's grant set. None of this is visible in the session log, because `approve_tool` records `f"tool {name}({shown})"` and drops the `preview` it showed the owner.
+
+**So the view is per-chat: `web.BrowseView`, owned by the Agent** beside `_approved_browsing` and passed down the same seam `Stash` already uses. It holds `shown` (what a change report is a change from), `runs`, and `epoch`. `_browse_host`, `_browse_target`, `_browse_batch_gate` and the delta all read it, so the card can only ever name a control on the page **this chat** was handed.
+
+**An empty view means no page — deliberately not a fall back to the global.** A chat that never opened a page is told to open one, never handed whatever document happens to be loaded. This is also the honest answer after a restart: the process's browse page is gone anyway, and a chat's remembered control names would be stale even if it were not.
+
+**`browse_epoch` stops being decoration.** It counts documents this session has driven, `_snapshot` stamps it, and the chat carries the epoch of the page it was **shown**; `browse_act` and `browse_fill` pass it back as `expect_epoch` and the check runs **inside the owner loop, before the page is read** — the gate ran on another thread, so the page can move between the card and the press. A mismatch means someone else drove it. `browse.py`'s standing objection to an epoch handshake still holds and is not contradicted: it argues against one the **model** has to echo. This one is held by the harness and the model never sees it. A caller with no chat behind it — the CLI, `verify_browse.py` — passes nothing and is not fenced.
+
+**`PAGE_TAKEN` is the one ending here that carries no page,** against the rule that every other one is a snapshot so the model is never left holding nothing. The page on the far side of this fence belongs to a **different chat** and may be any account the owner is signed into; handing it over to say "this is not yours" would be the disclosure the fence exists to prevent. It says nothing was pressed, because that is the fact the model needs to not retry blind.
+
+**What this does NOT fix:** the page is still shared, so `browse(url)` still takes it and the loser still has to reopen. That is the next slice — a page per chat, which is one more *tab* in the same Chrome rather than a second Chrome, and needs `held()`/`_reap` to carry per-page idle and downloads to be attributed per browse page. Serializing instead was rejected: it refuses what the owner demonstrably does, and `browse_close()` has no production caller, so a lease would be held until the ten-minute idle reap.
+
+`TestTwoChatsDoNotShareOnePageView` pins the interleaving and the card; `TestAPageAnotherChatTookIsNotActedOn` pins the fence — that it runs before enumeration, that a refused act does not count as a document, that it leaks no page, and that the ordinary single-chat case pays nothing.
+
 ## The browse gate — two questions, not one
 
 Reading a signed-in site carries the owner's session. Driving one carries it AND presses things with it, which is the largest blast radius aish has: a button can pay a bill, cancel a contract, or delete something. So the gate is part of the feature and not a follow-up.
