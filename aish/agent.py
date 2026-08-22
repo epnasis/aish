@@ -1102,6 +1102,27 @@ BROWSE_NO_PASSWORDS = (
     "persists, and this page will work afterwards."
 )
 
+# Consequences with no yes button (#278). Structural for the same reason
+# BROWSE_NO_PASSWORDS is, and reached the same way: the owner has said he will
+# not read a card per action, so a consequence that cannot be undone must not
+# depend on him reading one. Blocking it does not remove the capability from
+# HIM — it removes it from aish's hands, and hands him the door he already has.
+BROWSE_IRREVERSIBLE = (
+    "NOT EXECUTED: aish will never {what}, on any site, however it is asked — "
+    "that is one of a handful of acts with no approval that makes it "
+    "acceptable, because it cannot be undone and it is exactly what a page "
+    "carrying hidden instructions would want. The control {n} says it does. "
+    "Tell the user to run /browser {host} and do it themselves."
+)
+
+BROWSE_NO_BANK_DETAILS = (
+    "NOT EXECUTED: aish never types a bank account number into a form. Step "
+    "{n} does. Nothing in this batch was done. A payment is made by the user, "
+    "and a payout address is the thing a page carrying hidden instructions "
+    "would most want changed — tell them to run /browser {host} and do it "
+    "themselves."
+)
+
 # Origin-gated knowledge writes (#196). remember/forget_memory auto-approve, and
 # that is deliberate: capturing a fact must stay frictionless. The reasoning is
 # attended-only, though — unattended, the text proposing the write can be an
@@ -5199,6 +5220,35 @@ class Agent:
         current = self._browse_view.shown
         return browser.host_of(current.url) if current is not None else ""
 
+    def _irreversible_step(self, plan: "browse.Batch", host: str) -> str | None:
+        """Does any step of this batch produce a consequence with no yes?
+
+        Two different reads, and the second is the stronger one. A step is
+        refused when its CONTROL says it changes contact details, a payout
+        address, a credential, or closes the account — a label, which the page
+        writes and can therefore lie about. And a step is refused when its
+        VALUE is a bank account number, wherever it is being typed — which the
+        page cannot lie about, because it is what aish is about to send."""
+        for step in plan.steps:
+            said = step.control.address if step.control is not None else step.target
+            if step.do in ("fill", "date") and browse.types_a_bank_account(step.value):
+                return _gate_outcome(
+                    BROWSE_NO_BANK_DETAILS.format(
+                        n=repr(said), host=host or "the site"
+                    ),
+                    decision="blocked",
+                )
+            if claimed := browse.irreversible(said):
+                return _gate_outcome(
+                    BROWSE_IRREVERSIBLE.format(
+                        what=browse.IRREVERSIBLE[claimed],
+                        n=repr(said),
+                        host=host or "the site",
+                    ),
+                    decision="blocked",
+                )
+        return None
+
     def _browse_gate(self, name: str, args: dict) -> str | None:
         """Approval gate for driving a page (#237): None = proceed, else the
         refusal text.
@@ -5223,6 +5273,17 @@ class Agent:
                 return _gate_outcome(
                     BROWSE_NO_PASSWORDS.format(
                         n=repr(control.address), host=host or "the site"
+                    ),
+                    decision="blocked",
+                )
+            if control is not None and (
+                claimed := browse.irreversible(control.address or control.name)
+            ):
+                return _gate_outcome(
+                    BROWSE_IRREVERSIBLE.format(
+                        what=browse.IRREVERSIBLE[claimed],
+                        n=repr(control.address),
+                        host=host or "the site",
                     ),
                     decision="blocked",
                 )
@@ -5278,6 +5339,11 @@ class Agent:
             return _gate_outcome(
                 f"NOT EXECUTED: {plan.problem}", decision="blocked"
             )
+        # Checked on the WHOLE batch before any of it runs, and before the card
+        # is composed: the committing press is last by construction, so a batch
+        # refused here has typed nothing and left nothing half-sent.
+        if refusal := self._irreversible_step(plan, host):
+            return refusal
         if not host:
             return None
         if self.approve_tool is None:

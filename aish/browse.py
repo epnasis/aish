@@ -108,6 +108,129 @@ _MUTATING_WORDS = (
 )
 
 
+# --------------------------------------------- consequences with no yes button
+#
+# A short list of things aish may never do to one of his accounts, whoever
+# approves. It is NOT a bigger `_MUTATING_WORDS`: that list decides what draws a
+# CARD, and under the owner's own constraint — "there's this decision fatigue if
+# I have to please click approve for every action, it's not gonna happen" — a
+# card he taps through is worse than none, because it records a consent he never
+# gave. Moving a consequence from approvable to UNAPPROVABLE removes a decision
+# instead of adding one, which is the only kind of control that survives him not
+# reading cards.
+#
+# Where the word lists above are deliberately broad and dumb, these are
+# deliberately NARROW, and the asymmetry is the reason: a false positive on
+# `_MUTATING_WORDS` costs a prompt, and a false positive here removes the
+# capability outright with no way to grant it back in the moment. So a contact
+# or payout match needs a change VERB and the thing being changed, adjacent in
+# one label — never a bare noun, which would take "e-mail" in a nav bar.
+#
+# The escape hatch is the one `NO_PASSWORDS` already established and the reason
+# this is not a wall: he is handed `/browser <host>` and does it himself. The
+# capability is not removed from HIM, it is removed from aish's hands.
+
+_CHANGE_VERBS = (
+    "zmien", "zmiana", "edytuj", "edycja", "ustaw", "aktualizuj", "aktualizacja",
+    "popraw", "podmien", "dodaj", "change", "update", "edit", "set", "modify",
+    "replace", "add new",
+)
+_CONTACT_NOUNS = (
+    "e-mail", "email", "mail", "adres e", "telefon", "tel.", "numer telefonu",
+    "komork", "phone", "mobile", "contact detail", "dane kontaktowe",
+    "recovery", "odzyskiwan",
+)
+_PAYOUT_NOUNS = (
+    "konto bankow", "rachunek", "numer konta", "iban", "bank account",
+    "payout", "payment method", "metoda platnosci", "karta platnicz",
+    "billing address", "dane do przelewu",
+)
+# Some labels need no verb: the noun IS the act on these pages, and "nowe haslo"
+# carries no verb at all.
+_CONTACT_PHRASES = (
+    "nowy adres e-mail", "nowy e-mail", "nowy email", "nowy numer telefonu",
+    "nowy numer", "nowy telefon", "new e-mail address", "new email address",
+    "new email", "new phone number", "new phone", "new mobile number",
+    "zmien adres e-mail", "change email address", "change e-mail address",
+)
+_CREDENTIAL_PHRASES = (
+    "zmien haslo", "zmiana hasla", "nowe haslo", "ustaw haslo", "resetuj haslo",
+    "reset hasla", "przypomnij haslo", "change password", "new password",
+    "set password", "reset password", "update password", "change pin",
+    "zmien pin",
+)
+# Deliberately ACCOUNT-scoped, and this is the one place the plan was narrowed
+# on purpose. Blanket "delete" is already word-matched into a card; making every
+# delete unapprovable would stop aish throwing away a draft, a reminder or a
+# single message — far more capability than it protects, because a delete on a
+# page is nearly always a row and not an account. Blanket destruction is a
+# REVERSIBILITY problem (a trash that empties later, #177), not a consequence
+# class, and it wants that mechanism rather than this one.
+_CLOSE_ACCOUNT_PHRASES = (
+    "usun konto", "usuniecie konta", "skasuj konto", "zamknij konto",
+    "likwidacja konta", "zlikwiduj konto", "delete account", "close account",
+    "delete my account", "terminate account", "deactivate account",
+    "usun profil", "delete profile",
+)
+
+# What the owner is told, in his words, about what aish just refused to do.
+IRREVERSIBLE = {
+    "contact": "change the e-mail or phone number on your account",
+    "payout": "change where money is sent from your account",
+    "credential": "change a password or PIN on your account",
+    "account": "close or delete your account",
+}
+
+
+def _has(folded: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in folded for needle in needles)
+
+
+def irreversible(text: str) -> str:
+    """Which un-approvable consequence this text claims, or "".
+
+    Reads a control's own words, or a field's, the same way the owner would.
+    Order matters only in that the most specific phrases are tested first, so
+    the message names the narrowest true thing."""
+    folded = fold(text)
+    if not folded:
+        return ""
+    if _has(folded, _CLOSE_ACCOUNT_PHRASES):
+        return "account"
+    if _has(folded, _CREDENTIAL_PHRASES):
+        return "credential"
+    if _has(folded, _CONTACT_PHRASES):
+        return "contact"
+    if _has(folded, _CHANGE_VERBS):
+        if _has(folded, _PAYOUT_NOUNS):
+            return "payout"
+        if _has(folded, _CONTACT_NOUNS):
+            return "contact"
+    return ""
+
+
+# An IBAN as a person writes one: two country letters, two check digits, then
+# 11-30 more characters, spaced however the form allows. Anchored at word
+# boundaries so an ordinary long token cannot be one.
+_IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]){11,30}\b", re.I)
+
+
+def types_a_bank_account(value: str) -> bool:
+    """Is this value a bank account number?
+
+    The one value shape that is refused wherever it is typed, with no reference
+    to what the field is called. Every other check here reads a LABEL, which a
+    page writes and can therefore lie about; this one reads what aish is about
+    to SEND, which the page cannot. There is no task where aish typing an
+    account number into a form is the answer — a payment is made by him, and a
+    payout address is exactly the thing an injection would want changed.
+    """
+    stripped = re.sub(r"[ -]", "", value or "")
+    if not (15 <= len(stripped) <= 34):
+        return False
+    return bool(_IBAN_RE.fullmatch(stripped))
+
+
 @dataclass
 class Control:
     """One thing on the page the model can touch."""

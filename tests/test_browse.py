@@ -1786,3 +1786,117 @@ class TestASearchIsNotACommit:
         agent._approved_browsing.add("eon.pl")
         assert agent._browse_gate("browse_act", {"target": "Szukaj"}) is None
         assert asked == []
+
+
+class TestConsequencesWithNoYesButton:
+    """#278. A short list of acts aish will not do to one of his accounts,
+    whoever approves — because the owner has said he will not read a card per
+    action, and a card tapped blind is worse than none: it records a consent he
+    never gave. Unapprovable REMOVES a decision instead of adding one."""
+
+    def _agent(self, snap, approve=lambda *_a: True):
+        asked = []
+
+        def approve_tool(name, args, preview):
+            asked.append(preview)
+            return approve(name, args, preview)
+
+        agent = Agent(
+            model="fake", approve=lambda _c: True,
+            client_chat=lambda **kw: {}, approve_tool=approve_tool,
+        )
+        agent._browse_view.remember(snap)
+        agent._approved_browsing.add("eon.pl")  # the driving grant is not the point
+        return agent, asked
+
+    def test_the_labels_it_reads_and_the_ones_it_leaves_alone(self):
+        """Deliberately NARROW, unlike the mutating word list. A false positive
+        there costs a prompt; here it removes the capability outright."""
+        assert browse.irreversible("Zmień adres e-mail") == "contact"
+        assert browse.irreversible("Nowy numer telefonu") == "contact"
+        assert browse.irreversible("Change password") == "credential"
+        assert browse.irreversible("Zmień numer konta bankowego") == "payout"
+        assert browse.irreversible("Usuń konto") == "account"
+        assert browse.irreversible("Delete account") == "account"
+        # …and the ordinary web, which must keep working
+        for ordinary in (
+            "Zapłać", "Faktury i płatności", "Wybierz", "E-mail", "Zaloguj się",
+            "Przełącz lokal", "Usuń wiadomość", "Pobierz e-fakturę", "Dalej",
+        ):
+            assert browse.irreversible(ordinary) == "", ordinary
+
+    def test_a_bare_noun_is_never_enough(self):
+        """A contact match needs a change VERB and the thing changed in one
+        label — a bare 'e-mail' is half the nav bars on the Polish web."""
+        assert browse.irreversible("Kontakt") == ""
+        assert browse.irreversible("Telefon: 22 123 45 67") == ""
+        assert browse.irreversible("Adres e-mail") == ""
+
+    def test_pressing_one_is_refused_and_never_drawn_as_a_card(self):
+        snap = snapshot(controls=[control(n=4, name="Zmień adres e-mail")])
+        agent, asked = self._agent(snap)
+        out = agent._browse_gate("browse_act", {"target": "Zmień adres e-mail"})
+        assert "NOT EXECUTED" in out
+        assert "change the e-mail or phone number" in out
+        assert asked == []  # no card, ever — offering one would teach him there is
+        assert "/browser eon.pl" in out  # the door he already has
+
+    def test_an_ordinary_mutating_control_still_gets_its_card(self):
+        """The floor is unchanged: this list only promotes a handful of acts,
+        it does not replace the card for everything that spends money."""
+        snap = snapshot(controls=[control(n=4, name="Zapłać", mutating=True)])
+        agent, asked = self._agent(snap)
+        assert agent._browse_gate("browse_act", {"target": "Zapłać"}) is None
+        assert asked and "Zapłać" in asked[0]
+
+    def test_a_batch_that_closes_the_account_is_refused_whole(self):
+        snap = snapshot(controls=[
+            control(n=1, kind=browse.FIELD, name="Powód"),
+            control(n=2, name="Usuń konto", mutating=True, submits=True),
+        ])
+        agent, asked = self._agent(snap)
+        out = agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Powód", "value": "nie potrzebuję"},
+            {"target": "Usuń konto", "do": "click"},
+        ]})
+        assert "NOT EXECUTED" in out and "close or delete your account" in out
+        assert asked == []
+
+    def test_a_bank_account_number_is_refused_wherever_it_is_typed(self):
+        """The one value shape read instead of a label. A page writes its own
+        labels and can lie about them; it cannot lie about what aish is about
+        to send."""
+        snap = snapshot(controls=[
+            control(n=1, kind=browse.FIELD, name="Numer rachunku"),
+            control(n=2, name="Zapisz", mutating=True, submits=True),
+        ])
+        agent, asked = self._agent(snap)
+        out = agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Numer rachunku", "value": "PL61 1090 1014 0000 0712 1981 2874"},
+            {"target": "Zapisz", "do": "click"},
+        ]})
+        assert "NOT EXECUTED" in out and "bank account number" in out
+        assert asked == []
+
+    def test_an_iban_is_not_any_long_string(self):
+        assert browse.types_a_bank_account("PL61109010140000071219812874")
+        assert browse.types_a_bank_account("DE89 3704 0044 0532 0130 00")
+        for ordinary in (
+            "pawel@wenda.email", "Warszawa", "1234", "",
+            "ZAWIESIE CZARNE WEZOWE BEZKONCOWE 2T", "2026-08-22",
+        ):
+            assert not browse.types_a_bank_account(ordinary), ordinary
+
+    def test_an_ordinary_form_fill_is_completely_unaffected(self):
+        snap = snapshot(controls=[
+            control(n=1, kind=browse.FIELD, name="Skąd"),
+            control(n=2, kind=browse.FIELD, name="Dokąd"),
+            control(n=3, name="Szukaj", mutating=True, submits=True),
+        ])
+        agent, asked = self._agent(snap)
+        assert agent._browse_gate("browse_fill", {"steps": [
+            {"target": "Skąd", "value": "Warszawa"},
+            {"target": "Dokąd", "value": "Paryż"},
+            {"target": "Szukaj", "do": "click"},
+        ]}) is None
+        assert len(asked) == 1  # the ordinary batch card, unchanged
