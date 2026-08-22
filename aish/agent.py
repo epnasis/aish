@@ -943,6 +943,15 @@ READ_ONLY_TOOLS = frozenset(
 # own SSRF check lives in recordings.py rather than at this boundary.
 EGRESS_TOOLS = frozenset({"web_search", "read_url", "show_image", "read_pdf", "read_media"})
 
+# A tainted ATTENDED turn gates only an egress that CARRIES something. A plain
+# address is how reading the web works, and gating it would put a card in front
+# of ordinary research — the "gating everything makes the system unusable"
+# failure #198 names explicitly. These two bounds are what "plain" means: past
+# them, a path or a hostname label is a place to hide a payload rather than an
+# address anybody typed.
+PLAIN_PATH_MAX = 120
+HOST_LABEL_MAX = 40
+
 # URL or bare-domain-looking tokens in owner text. Deliberately generous
 # (matches "setup.py"-shaped tokens too): over-inclusion only ever widens
 # provenance with strings the owner literally typed, while under-inclusion
@@ -1066,6 +1075,18 @@ BROWSE_ACTION_DENIED = (
 # them. A new browsing tool that misses one is a tool outside the gate, so they
 # all read this.
 BROWSE_TOOLS = ("browse", "browse_act", "browse_fill")
+
+# Tools whose results carry bytes from OUTSIDE this machine. Once one has run,
+# everything the model proposes next may be an echo of text an attacker wrote,
+# so the turn is TAINTED and outbound calls stop being free (see
+# _egress_novel_hosts). Browse tools are in here twice over — a driven page is
+# untrusted content that the model then chooses its next click from.
+#
+# Plugin tools count, all of them, via _is_untrusted_source: a wrapper is
+# arbitrary code that may fetch anything and the manifest does not say. Over-
+# tainting costs a rare card on a turn that ALSO wants to carry data to a host
+# the owner never named; under-tainting costs the fence. The asymmetry decides.
+UNTRUSTED_SOURCE_TOOLS = frozenset(EGRESS_TOOLS | set(BROWSE_TOOLS))
 
 BROWSE_NO_PAGE = (
     "NOT EXECUTED: nothing is open to act on. Call browse(url) first, then act "
@@ -1587,10 +1608,18 @@ class Agent:
         self.caption_language = os.environ.get("AISH_CAPTION_LANG", "").strip()
         # Hosts the OWNER introduced: extracted from user-typed / trigger-
         # prompt text (never from tool results or fetched pages) plus hosts
-        # explicitly approved on an egress card this session. Only consulted
-        # when origin != "user".
+        # explicitly approved on an egress card this session. Recorded in EVERY
+        # session, attended included: an attended turn that has read the open
+        # web is gated too, and without provenance every host he named himself
+        # would come back novel.
         self._owner_hosts: set[str] = set()
         self._approved_hosts: set[str] = set()
+        # Has content from outside this machine entered the task? Set by
+        # _execute_tool_calls, reset per task. It is what replaces "who started
+        # the session?" as the question the egress and knowledge gates ask —
+        # the owner having pressed start says nothing about whether the model
+        # is currently echoing an instruction it read on a page.
+        self._tainted = False
         # Signed-in hosts vouched for on a login card this session (#221).
         # Session-scoped like every other grant (L4): a yes given in the chat
         # you leave must not follow you into the one you land in.
@@ -2308,6 +2337,9 @@ class Agent:
         # A new task starts un-gated: any pending comment belonged to the last
         # task and would otherwise stall the first tool call of this one.
         self._pending_comment_response = False
+        # Taint belongs to the task that acquired it. A page read while
+        # answering one question must not put a card in front of the next.
+        self._tainted = False
         # Which model call within this turn (#239). Distinct from `call`,
         # which numbers TOOL calls: one turn makes many model calls and the
         # brief can change between them.
@@ -3495,15 +3527,18 @@ class Agent:
             or self._pending_comment_response
             or gated_by_rule
         ):
-            return [
-                self._call_result(
-                    name,
-                    partial(self._timed, partial(self._dispatch, name, args)),
-                    args=args,
-                    model_call=model_call,
-                )
-                for name, args in calls
-            ]
+            try:
+                return [
+                    self._call_result(
+                        name,
+                        partial(self._timed, partial(self._dispatch, name, args)),
+                        args=args,
+                        model_call=model_call,
+                    )
+                    for name, args in calls
+                ]
+            finally:
+                self._note_taint(calls)
 
         results: list[str] = [""] * len(calls)
         with ThreadPoolExecutor(max_workers=min(len(concurrent), 8)) as pool:
@@ -3533,6 +3568,7 @@ class Agent:
                     )
             finally:
                 self.status.stop()
+                self._note_taint(calls)
             self._note(
                 f"✓ {len(futures)} parallel lookups "
                 f"{format_secs(time.perf_counter() - batch_start)}"
@@ -3546,6 +3582,36 @@ class Agent:
                         model_call=model_call,
                     )
         return results
+
+    def _note_taint(self, calls: list[tuple[str, dict]]) -> None:
+        """Did this batch bring in content from outside? Then the task is
+        tainted for the rest of its life.
+
+        Set AFTER the batch, deliberately, and that is not a race. Composing an
+        exfiltration URL requires having READ the thing being exfiltrated,
+        which means it came back on an earlier model call — the taint is always
+        in place before the model that saw the content gets to speak. Marking
+        mid-batch would buy nothing and would need locking against the worker
+        pool.
+
+        A source is untrusted when the tool fetches, drives or wraps something
+        this machine does not own — which includes every plugin tool, since a
+        wrapper is arbitrary code and the manifest never says where its bytes
+        came from."""
+        if self._tainted:
+            return
+        for name, args in calls:
+            if name in UNTRUSTED_SOURCE_TOOLS:
+                if name in ("show_image", "read_pdf", "read_media"):
+                    # These take a local path too, which fetches nothing.
+                    source = str(args.get("url") or args.get("source") or "")
+                    if not source.lower().startswith(("http://", "https://")):
+                        continue
+                self._tainted = True
+                return
+            if name in self._plugin_tools:
+                self._tainted = True
+                return
 
     @staticmethod
     def _timed(fn: Callable[[], str]) -> tuple[str, float]:
@@ -4941,13 +5007,25 @@ class Agent:
 
     def _egress_novel_hosts(self, name: str, args: dict) -> list[str] | None:
         """Hosts this call would reach that the owner never introduced, or
-        None when the call needs no gate (user-origin session, non-egress
-        tool, or every host already in provenance). Provenance = hosts from
-        owner-authored text (_owner_hosts) + hosts approved on an earlier
-        egress card (_approved_hosts) — hosts that first appeared in tool
-        results or fetched pages deliberately do NOT qualify, since those are
-        exactly what an injected instruction controls."""
-        if self.origin == "user" or name not in EGRESS_TOOLS:
+        None when the call needs no gate (an untainted attended turn, a
+        non-egress tool, a plain address, or every host already in provenance).
+        Provenance = hosts from owner-authored text (_owner_hosts) + hosts
+        approved on an earlier egress card (_approved_hosts) — hosts that first
+        appeared in tool results or fetched pages deliberately do NOT qualify,
+        since those are exactly what an injected instruction controls.
+
+        **The question is taint, not who pressed start.** This gate used to
+        return on its first line for every attended session, on the reasoning
+        that a watching owner can see the host for themselves. That argument
+        does not survive contact with either half of reality: the owner has
+        said plainly he will not read a card per action, and the risk here was
+        never the host anyway — it is that the URL may have been composed from
+        text on a page rather than by him. So an attended turn is free until
+        it has READ something from outside, and gated afterwards."""
+        if name not in EGRESS_TOOLS:
+            return None
+        attended = self.origin == "user"
+        if attended and not self._tainted:
             return None
         if name in ("read_url", "show_image", "read_pdf", "read_media"):
             url = str(args.get("url") or args.get("source") or "")
@@ -4970,7 +5048,56 @@ class Agent:
             hosts = _hosts_in_text(str(args.get("query", "")))
         known = self._owner_hosts | self._approved_hosts
         novel = sorted(h for h in hosts if h not in known)
+        if novel and attended and not self._carries_payload(name, args):
+            # A tainted attended turn gates the calls that CARRY something, not
+            # the ones that merely go somewhere. Reading an unfamiliar page is
+            # what research is; a triggered session keeps the stricter rule,
+            # since nobody is going to see the answer either way.
+            return None
         return novel or None
+
+    def _carries_payload(self, name: str, args: dict) -> bool:
+        """Would this outbound call take DATA with it, beyond an address?
+
+        Exfiltration needs a channel, and on a read there are only two: the
+        query the search engine is handed, or everything in a URL that is not
+        the bare address. A link the page offered aish itself is neither — it
+        was not composed, it was followed, which is the one case that
+        distinguishes ordinary reading from smuggling."""
+        if name == "web_search":
+            # The query IS the outbound payload, and `hosts` above only found
+            # anything because the query named a host — the exfil shape.
+            return True
+        url = str(args.get("url") or args.get("source") or "")
+        if self._url_was_offered(url):
+            return False
+        try:
+            parts = urllib.parse.urlsplit(url)
+        except ValueError:
+            return True  # unparseable → fail closed, as the host branch does
+        if parts.query or parts.fragment or parts.username or parts.password:
+            return True
+        if len(parts.path.strip("/")) > PLAIN_PATH_MAX:
+            return True
+        host = (parts.hostname or "").lower()
+        return any(len(label) > HOST_LABEL_MAX for label in host.split("."))
+
+    def _url_was_offered(self, url: str) -> bool:
+        """Did this exact URL come back in a tool result in this task?
+
+        A page's own links are how the web is walked, and one arrives verbatim.
+        A composed address does not: appending stolen data changes the string,
+        so a smuggling URL cannot match something already read. Substring, not
+        equality — a read result carries a URL inside prose and markdown."""
+        target = url.strip()
+        if len(target) < 12:  # too short to be distinctive; treat as composed
+            return False
+        return any(
+            isinstance(msg.get("content"), str)
+            and target in msg["content"]
+            for msg in self.messages
+            if msg.get("role") == "tool"
+        )
 
     def _egress_gate(self, name: str, args: dict) -> str | None:
         """Approval gate for outbound reads in a triggered session (#178
@@ -4986,7 +5113,10 @@ class Agent:
         if self.approve_tool is None:
             return _gate_outcome(EGRESS_NO_APPROVER.format(host=shown), decision="blocked")
         preview = (
-            f"automated session wants to reach {shown} — a host not "
+            f"this turn has read the open web, and now wants to send something "
+            f"to {shown} — a host you did not mention"
+            if self.origin == "user"
+            else f"automated session wants to reach {shown} — a host not "
             "mentioned by the owner in this conversation"
         )
         decision = self.approve_tool(name, args, preview)
@@ -5204,10 +5334,10 @@ class Agent:
         return None
 
     def _knowledge_gate(self, name: str, args: dict) -> str | None:
-        """Gate for remember/forget_memory in a triggered session (#196): None
-        = proceed, else the refusal/hold text for the model. An attended
-        session returns on the first line, so saving a fact there is
-        byte-identical to before — no new prompt, no new path.
+        """Gate for remember/forget_memory (#196): None = proceed, else the
+        refusal/hold text for the model. An UNTAINTED attended turn returns on
+        the first line, so saving a fact there is byte-identical to before —
+        no new prompt, no new path.
 
         Deletion is refused STRUCTURALLY rather than held on a card: there is
         no unattended case where autonomously deleting the owner's knowledge is
@@ -5215,19 +5345,36 @@ class Agent:
         decided (the curate pass's intended path is proposing retirement in its
         summary). Saving holds, because a triggered session does legitimately
         learn things and the owner should see what lands in the corpus. Verdict
-        semantics mirror _egress_gate / _dispatch_plugin_tool (#81) exactly."""
-        if self.origin == "user" or name not in KNOWLEDGE_WRITE_TOOLS:
+        semantics mirror _egress_gate / _dispatch_plugin_tool (#81) exactly.
+
+        **Taint reaches here too, and this is where an injection becomes
+        PERMANENT.** A memory is retrieved into every future session, so a fact
+        written while the model was echoing a page outlives the page, the task
+        and the session that read it. An attended turn that has read the open
+        web therefore holds a save on a card — one of the few places a card is
+        still worth spending, because it is rare and it is checkable at a
+        glance. Deletion holds there too rather than being refused outright:
+        attended, "forget that" is a thing the owner legitimately says."""
+        tainted_attended = self.origin == "user" and self._tainted
+        if (self.origin == "user" and not self._tainted) or (
+            name not in KNOWLEDGE_WRITE_TOOLS
+        ):
             return None
         slug = str(args.get("name", "") or "").strip() or "(unnamed)"
-        if name == "forget_memory":
+        if name == "forget_memory" and not tainted_attended:
             self._note(f"✋ forget_memory refused in a {self.origin} session: {slug}")
             return _gate_outcome(FORGET_PROHIBITED.format(slug=slug), decision="blocked")
         if self.approve_tool is None:
             return _gate_outcome(REMEMBER_NO_APPROVER, decision="blocked")
+        what = "save the memory" if name == "remember" else "delete the memory"
+        who = (
+            "this turn has read the open web, and now wants to"
+            if tainted_attended
+            else f"automated session ({self.origin}) wants to"
+        )
         preview = (
-            f"automated session ({self.origin}) wants to save the memory "
-            f"{slug} — a memory persists into every future session and is "
-            "retrieved automatically"
+            f"{who} {what} {slug} — a memory persists into every future "
+            "session and is retrieved automatically"
         )
         decision = self.approve_tool(name, args, preview)
         if isinstance(decision, Denied):
@@ -5247,9 +5394,13 @@ class Agent:
     def note_owner_hosts(self, text: str) -> None:
         """Fold hosts from owner-authored text into egress provenance. Called
         only for text the OWNER supplied (task prompts, mid-task steering,
-        shared context) — never for tool results or fetched content."""
-        if self.origin != "user":
-            self._owner_hosts |= _hosts_in_text(text)
+        shared context) — never for tool results or fetched content.
+
+        Recorded in every session. It used to skip attended ones, because the
+        gate returned on its first line there and provenance was dead weight;
+        once an attended turn that has read the open web is gated too, skipping
+        it would make every host the owner typed himself come back novel."""
+        self._owner_hosts |= _hosts_in_text(text)
 
     def _read_prompt_reason(self, path: str) -> str | None:
         """Why an otherwise auto-approved read_file must prompt, or None.
