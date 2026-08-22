@@ -59,6 +59,8 @@ from pathlib import Path
 from typing import Any
 
 from . import browse as browse_mod
+from . import notify
+from . import signin as signin_mod
 
 # A launch is ~2s, so the context is kept warm; an idle Chrome is ~400 MB, so
 # it does not stay warm for long. See the module docstring on the memory
@@ -1222,6 +1224,12 @@ class _Owner:
         # his zoom survive a Google logout because of exactly that.
         self.navigations = 0
         self.pending_signin = ""   # host a password was submitted to
+        # What the owner is part-way through typing into a login form, held so
+        # it can be SAVED if the sign-in works (#280). Never written anywhere
+        # until then, dropped when the view ends, and never logged or traced —
+        # the remote-view input path retains nothing by default and this is the
+        # one bounded exception, opened only by his own checkbox.
+        self.pending_credential: dict = {}
         self.pending_nav = -1      # the navigation count when that happened
         self.last_url = ""         # where the view was, so it can be reopened
         # The pages the MODEL is driving (#237, #272), ONE PER CHAT. Each is a
@@ -1463,6 +1471,324 @@ def _submit(job: Callable[[_Owner], Any], timeout: float) -> Any:
     return asyncio.run_coroutine_threadsafe(run(), owner.loop).result(timeout=timeout)
 
 
+# ------------------------------------------------- signing in as him (#280)
+#
+# The one place aish types a credential without his hands on the keys. Every
+# fence here is structural, because the model is not in this path at all: it
+# cannot ask for a sign-in, cannot name the host, cannot see the value, and
+# cannot see the fields. What it gets is a page that was already readable.
+#
+# The checks below are in the order that a mistake would be cheapest to make
+# and most expensive to have made:
+#
+#   1. the LIVE origin still equals the recorded one — a redirect to an
+#      identity provider is a different origin and stops here;
+#   2. exactly ONE password field in the document, in the main frame;
+#   3. the form POSTs, and posts to the SAME ORIGIN. This is the check whose
+#      absence made an earlier draft leak the credential outright: page origin
+#      says nothing about where the form SENDS, so any same-origin page that
+#      can render markup — a comment field, a user-content path, an open
+#      redirect landing back on the origin — could carry
+#      `<form action="https://evil/collect">` and be handed the live password.
+#      A GET form is refused for a second reason of its own: it puts the
+#      password in the query string, and `remember_page` then writes that URL
+#      to recent.json in cleartext, outside every scrubbing path there is.
+
+SIGNIN_FORM_JS = """
+() => {
+  const vis = (el) => {
+    if (!el || el.disabled) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 1 && r.height > 1 && el.checkVisibility?.({
+      checkOpacity: true, checkVisibilityCSS: true,
+    }) !== false;
+  };
+  const pw = [...document.querySelectorAll('input[type=password]')].filter(vis);
+  if (pw.length === 0) return {ok: false, why: 'no password field on the page'};
+  if (pw.length > 1) return {ok: false, why: 'more than one password field'};
+  const secret = pw[0];
+  const form = secret.form;
+  if (!form) return {ok: false, why: 'the password field is not in a form'};
+  const method = (form.getAttribute('method') || 'get').toLowerCase();
+  if (method !== 'post') return {ok: false, why: 'the form is not a POST'};
+  // form.action resolves to the document URL when the attribute is absent,
+  // which is the ordinary same-origin case and correct.
+  let target;
+  try { target = new URL(form.action, document.baseURI).origin; }
+  catch (e) { return {ok: false, why: 'the form has no readable destination'}; }
+  const TEXTY = ['text', 'email', 'tel', 'number', ''];
+  const ident = [...form.querySelectorAll('input')].filter(
+    (el) => TEXTY.includes((el.getAttribute('type') || '').toLowerCase()) && vis(el)
+  )[0];
+  secret.setAttribute('data-aish-signin', 'password');
+  if (ident) ident.setAttribute('data-aish-signin', 'identifier');
+  const submit = [...form.querySelectorAll(
+    'button, input[type=submit]'
+  )].filter((el) => {
+    const t = (el.getAttribute('type') || '').toLowerCase();
+    return vis(el) && t !== 'button' && t !== 'reset';
+  })[0];
+  if (submit) submit.setAttribute('data-aish-signin', 'submit');
+  return {
+    ok: true, posts_to: target, page_origin: location.origin,
+    identifier: !!ident, submit: !!submit,
+  };
+}
+"""
+
+# A second factor is not a failure, and telling them apart is the difference
+# between "sign in again" and "burn the one attempt on a good password".
+SECOND_FACTOR_JS = """
+() => [...document.querySelectorAll('input')].some((el) => {
+  const auto = (el.getAttribute('autocomplete') || '').toLowerCase();
+  const mode = (el.getAttribute('inputmode') || '').toLowerCase();
+  const len = parseInt(el.getAttribute('maxlength') || '0', 10);
+  return auto === 'one-time-code' || (mode === 'numeric' && len > 0 && len <= 8);
+})
+"""
+
+
+@dataclass
+class SignInResult:
+    """How an automatic sign-in went. Carries NO credential, by construction."""
+
+    ok: bool = False
+    # A reason the owner can act on, or "" — never the model's to interpret
+    # loosely: it is rendered verbatim above the untrusted-content banner.
+    why: str = ""
+    # The site asked for a code. Not a failure, and must never be recorded as
+    # one: the password was almost certainly right.
+    second_factor: bool = False
+    # Should the stored credential stop being spent? Only when the site
+    # actually refused it.
+    stale: bool = False
+    url: str = ""
+
+
+async def _sign_in_on(page: Any, record: Any, identifier: str, password: str) -> SignInResult:
+    """Fill and submit the recorded login form on an already-open page."""
+    live = signin_mod.origin_of(page.url or "")
+    if live != record.origin:
+        return SignInResult(
+            why=(
+                f"the sign-in page redirected to {live or 'somewhere else'}, which is "
+                f"not {record.origin} — aish only ever types a credential at the exact "
+                "origin it was saved for"
+            ),
+            url=page.url or "",
+        )
+    try:
+        found = await page.evaluate(SIGNIN_FORM_JS)
+    except Exception as exc:  # noqa: BLE001 — a page that will not answer
+        return SignInResult(why=f"could not read the sign-in form ({exc})", url=page.url)
+    if not found.get("ok"):
+        return SignInResult(why=str(found.get("why", "no usable sign-in form")), url=page.url)
+    if found.get("posts_to") != found.get("page_origin"):
+        return SignInResult(
+            why=(
+                f"that form sends to {found.get('posts_to')}, not to {record.origin} — "
+                "aish will not hand a credential to a third party"
+            ),
+            url=page.url,
+        )
+    if not found.get("identifier"):
+        return SignInResult(why="the form has no identifier field", url=page.url)
+
+    # REAL keystrokes, for the reason `view_act` uses them: a site that listens
+    # for key events (and a great many login forms do) sees nothing from fill().
+    for selector, value in (
+        ("[data-aish-signin='identifier']", identifier),
+        ("[data-aish-signin='password']", password),
+    ):
+        element = await page.query_selector(selector)
+        if element is None:
+            return SignInResult(why="the sign-in form changed while filling it", url=page.url)
+        await element.click(timeout=ACT_TIMEOUT_MS)
+        await page.keyboard.press("ControlOrMeta+a")
+        await page.keyboard.type(value, delay=12)
+
+    submit = await page.query_selector("[data-aish-signin='submit']")
+    if submit is not None:
+        await submit.click(timeout=ACT_TIMEOUT_MS)
+    else:
+        await page.keyboard.press("Enter")
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception:  # noqa: BLE001 — an SPA sign-in never navigates
+        pass
+    await page.wait_for_timeout(SETTLE_MS)
+
+    if await _has_password_field(page):
+        # The form came back. That is the site refusing the credential, and it
+        # is the ONLY outcome that may mark it stale — one attempt, never a
+        # retry, because retrying is how an account locks.
+        return SignInResult(
+            why="the site asked for the password again — the stored one looks stale",
+            stale=True,
+            url=page.url,
+        )
+    try:
+        wants_code = bool(await page.evaluate(SECOND_FACTOR_JS))
+    except Exception:  # noqa: BLE001
+        wants_code = False
+    if wants_code:
+        return SignInResult(second_factor=True, url=page.url)
+    return SignInResult(ok=True, url=page.url)
+
+
+def _signin_lines() -> list[str]:
+    """The sign-ins aish can re-establish, for `/browser`.
+
+    What it reports is what the store actually OWNS. It deliberately does not
+    claim whether he is signed in right NOW: cookie presence is not session
+    validity — eon.pl expires server-side in about fifteen minutes — and
+    actually proving it would cost a Chrome launch and a navigation per row on
+    a box that evicts the browser for memory. A row that lies is the failure
+    #236 was about; a row that says less is not."""
+    records = signin_mod.records()
+    if not records:
+        return []
+    lines = ["", "aish can sign in to:"]
+    for record in records:
+        host = host_of(record.origin)
+        used = (
+            f"used {record.used}x, last {record.last_used}"
+            if record.used
+            else "never used"
+        )
+        note = f" — NOT WORKING: {record.suspect}" if record.suspect else ""
+        lines.append(f"  {host}  saved {record.saved} - {used}{note}")
+    return lines
+
+
+def _hold_credential(owner: Any, url: str, password: str, remember: object) -> None:
+    """Hold what he just typed into a password field, if he asked us to.
+
+    **Consent is STICKY for the origin, for the life of this view**, and that
+    is not laziness — it is the retry. A first attempt with the box ticked
+    fails, the editor reopens with the box back at its default OFF, he types
+    the correct password, and it would be dropped: the one attempt that
+    actually worked is the one aish forgot to keep. Sticky consent makes the
+    checkbox a statement about this sign-in rather than about one keystroke.
+
+    Nothing is written here. `_save_held_credential` is the only writer, and it
+    runs only once the sign-in has been seen to work."""
+    origin = signin_mod.origin_of(url)
+    if not origin:
+        owner.pending_credential = {}
+        return
+    held = owner.pending_credential
+    if held.get("origin") != origin:
+        held = {"origin": origin, "identifier": "", "remember": False}
+    held["url"] = url
+    held["password"] = password
+    if remember:
+        held["remember"] = True
+    owner.pending_credential = held
+
+
+def _hold_identifier(owner: Any, url: str, value: str) -> None:
+    """Remember the last ordinary field he filled at this origin.
+
+    A password alone re-establishes nothing — the form wants an identifier, and
+    in a two-step flow it was typed on a page that no longer exists by the time
+    the password is. Reading it back is allowed where reading a password is
+    not: the frame already ships everything visible, so an ordinary field's
+    value is not new exposure."""
+    origin = signin_mod.origin_of(url)
+    if not origin or not value.strip():
+        return
+    held = owner.pending_credential
+    if held.get("origin") != origin:
+        held = {"origin": origin, "remember": False}
+    held["identifier"] = value
+    owner.pending_credential = held
+
+
+def _save_held_credential(owner: Any) -> str:
+    """Write the held sign-in, now that it has been seen to work. Returns the
+    origin saved, or "" — never raises into a frame."""
+    held, owner.pending_credential = owner.pending_credential, {}
+    if not held.get("remember") or not held.get("password"):
+        return ""
+    try:
+        record = signin_mod.save(
+            held.get("url", ""),
+            held.get("identifier", ""),
+            held["password"],
+            today=time.strftime("%Y-%m-%d"),
+        )
+    except Exception:  # noqa: BLE001 — a failed save must not cost him the frame
+        return ""
+    return record.origin
+
+
+def sign_in(url: str, *, timeout: float = 120.0) -> SignInResult | None:
+    """Re-establish the owner's session at this URL's origin, or None when
+    there is nothing stored for it.
+
+    Never called by the model, and it takes no model-supplied argument beyond
+    the URL that was already being read. The page it drives is the one the
+    OWNER recorded, not the one that was asked for."""
+    record = signin_mod.find(url)
+    if record is None:
+        return None
+    pair = signin_mod.credential(record.origin)
+    if pair is None:
+        return SignInResult(
+            why=(
+                f"the saved sign-in for {record.origin} was not accepted last time, so "
+                f"aish will not try it again — sign in at /browser {host_of(url)} and it "
+                "will be saved afresh"
+            )
+        )
+    identifier, password = pair
+
+    async def job(owner: _Owner) -> SignInResult:
+        if owner.view is not None:
+            return SignInResult(why=DRIVEN_BY_HAND)
+        context = await owner.context()
+        page = await context.new_page()
+        owner.read_pages.add(page)
+        try:
+            await page.goto(record.url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            await page.wait_for_timeout(SETTLE_MS)
+            await _dismiss_consent(page)
+            return await _sign_in_on(page, record, identifier, password)
+        finally:
+            owner.read_pages.discard(page)
+            with contextlib.suppress(Exception):
+                await page.close()
+
+    result = _submit(job, timeout)
+    when = time.strftime("%Y-%m-%dT%H:%M")
+    if result.ok:
+        signin_mod.note_used(record.origin, when=when)
+    elif result.stale:
+        signin_mod.note_failed(record.origin, why=result.why)
+    _announce(record, result)
+    return result
+
+
+def _announce(record: Any, result: SignInResult) -> None:
+    """Tell him aish used his credential — on the channel that needs no answer.
+
+    A NOTICE, not a card. He has said he will not read a card per action, and
+    he is right that a card tapped blind is worse than none; a push demands no
+    decision and cannot be tapped through by accident. It is also rare by
+    construction — once per lapse, not once per act. Never raises: a renewal
+    must not fail because a phone is unreachable."""
+    host = host_of(record.origin)
+    if result.ok:
+        title, body = f"aish signed in to {host}", "the session had lapsed"
+    elif result.second_factor:
+        title, body = f"{host} wants a code", "aish got as far as the second factor"
+    else:
+        title, body = f"aish could not sign in to {host}", result.why
+    with contextlib.suppress(Exception):
+        notify.pushover(title, body)
+
+
 # -------------------------------------------------------------- the reads
 
 def read_cold(url: str, *, timeout: float = 60.0) -> Page:
@@ -1635,13 +1961,33 @@ def command(arg: str) -> str:
     if verb in ("forget", "logout"):
         if not rest:
             return "usage: /browser forget <host>"
-        if forget_login(rest):
-            return (
+        # Forget takes EVERYTHING aish knows about the site, which is now three
+        # separate facts with three lifetimes: that he has an account there,
+        # that aish may sign in for him, and the live session. It can take the
+        # first two. It cannot take the third — the session is his to end, at
+        # the site — so it says so rather than implying otherwise.
+        dropped = forget_login(rest)
+        credential = signin_mod.forget(signin_mod.origin_of("https://" + rest)) or (
+            signin_mod.forget(signin_mod.origin_of("http://" + rest))
+        )
+        if not dropped and not credential:
+            return f"{rest} was not recorded as signed in."
+        lines = []
+        if dropped:
+            lines.append(
                 f"{rest} is no longer treated as signed in — reads of it stop "
-                "asking for approval. Its cookies are untouched; sign out at "
-                "the site itself in /browser if you meant to end the session."
+                "asking for approval."
             )
-        return f"{rest} was not recorded as signed in."
+        if credential:
+            lines.append(
+                f"the saved sign-in for {rest} is deleted — aish can no longer "
+                "sign in there for you."
+            )
+        lines.append(
+            "Its cookies are untouched; sign out at the site itself in "
+            "/browser if you meant to end the session."
+        )
+        return " ".join(lines)
 
     if verb == "close":
         shutdown()
@@ -1675,9 +2021,10 @@ def command(arg: str) -> str:
             f"status:  {reason or 'ready'}",
             f"stealth: {'on' if stealth() else 'off'}",
             "signed in: " + (", ".join(hosts) if hosts else "(nothing yet)"),
+            *_signin_lines(),
             "",
             "/browser <url>       open a real window there so you can sign in",
-            "/browser forget <host>  stop treating a site as signed in",
+            "/browser forget <host>  forget a site: the record AND any saved sign-in",
             "/browser anon        the separate profile searches are read with",
             "/browser close       shut the browser down now",
         ]
@@ -1873,6 +2220,7 @@ class Frame:
     focus: dict | None = None  # the field the page has focused, if any
     nav: int = 0     # documents loaded so far; a change means "reset the zoom"
     signin: str = ""  # a host a password was just submitted to
+    saved: str = ""   # an origin whose sign-in was just stored (#280)
     # The page's activity generation AT CAPTURE, so the watcher can ask "has
     # anything happened since this picture?" rather than "since I last looked".
     # Paired with `nav` because a navigation resets the counter to zero, which
@@ -2254,6 +2602,12 @@ def view_act(action: str, **kwargs: Any) -> Frame:
                     # sign-in question can name it, here and now.
                     owner.pending_signin = host_of(page.url)
                     owner.pending_nav = owner.navigations
+                    _hold_credential(owner, page.url, text, kwargs.get("remember"))
+                else:
+                    # The identifier is typed on a different keystroke, and in
+                    # a two-step form on a different PAGE. Whatever ordinary
+                    # field he filled last at this origin is the candidate.
+                    _hold_identifier(owner, page.url, text)
                 if kwargs.get("submit"):
                     await page.keyboard.press("Enter")
         elif action == "type":
@@ -2291,11 +2645,23 @@ def view_act(action: str, **kwargs: Any) -> Frame:
         owner.last_url = page.url or owner.last_url
         _note_visit(owner, page.url)
         frame = await _frame(owner, clicked, settle=False)
-        # The page MOVED after a password went in, which is what a successful
-        # sign-in looks like from out here. Ask now, about this host.
-        if owner.pending_signin and owner.navigations > owner.pending_nav:
+        # The page moved after a password went in AND is no longer asking for
+        # one. Both halves matter: navigation alone is nearly always true —
+        # a failed login redirects back to the form with ?error=1, and so does
+        # a reload, a Back, or him giving up and browsing somewhere else twenty
+        # minutes later, since nothing clears the flag until it fires. That was
+        # tolerable while this only ASKED a human a question they could
+        # dismiss; it is not tolerable now that it also decides whether a
+        # password is written to the Keychain, where a wrong one would burn the
+        # one permitted attempt at every lapse.
+        if (
+            owner.pending_signin
+            and owner.navigations > owner.pending_nav
+            and not await _has_password_field(page)
+        ):
             frame.signin = owner.pending_signin
             owner.pending_signin = ""
+            frame.saved = _save_held_credential(owner)
         if owner.notice:
             frame.error = owner.notice
             owner.notice = ""

@@ -3541,6 +3541,16 @@ body.console-open #backdrop { z-index: 63; }
 }
 .bv-recent-anon { font-size: 11px; color: var(--dim); }
 #bv-resume { max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bv-edit-remember {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 13px; color: var(--dim); line-height: 1.35;
+  /* A tap target for a phone, not a desktop checkbox: the label is the hit
+     area and it wraps, so the row grows rather than clipping the sentence. */
+  padding: 4px 2px; cursor: pointer;
+}
+.bv-edit-remember input { margin-top: 2px; width: 17px; height: 17px; flex: none; }
+.bv-edit-remember[hidden] { display: none; }
+
 .bv-edit-note { font-size: 12px; color: var(--dim); }
 .bv-edit-note:empty { display: none; }
 .bv-edit-actions { display: flex; gap: 8px; justify-content: flex-end; }
