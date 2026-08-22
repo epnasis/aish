@@ -221,17 +221,18 @@ class TestTheReplayItself:
     def _run(self, page, record=None, ident="him@x.pl", password="hunter2hunter2"):
         import asyncio
 
-        from aish import browser, signin as signin_mod
+        from aish import browser
+        from aish import signin as signin_mod
 
         record = record or signin_mod.Record(
             origin="https://eon.pl", url="https://eon.pl/login", saved="d"
         )
-        monkey = getattr(browser, "_has_password_field")
+        original = browser._has_password_field
         browser._has_password_field = _fake_has_password(page)
         try:
             return asyncio.run(browser._sign_in_on(page, record, ident, password))
         finally:
-            browser._has_password_field = monkey
+            browser._has_password_field = original
 
     OK_FORM = {
         "ok": True, "posts_to": "https://eon.pl", "page_origin": "https://eon.pl",
